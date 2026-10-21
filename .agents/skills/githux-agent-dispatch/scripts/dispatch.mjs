@@ -293,7 +293,8 @@ export function launchTask(mode, o, launch = visibleLaunch) {
     if (mode !== 'resume') fail('--provider override is supported only for explicit resume');
     c.provider = model(o.provider, 'provider');
   }
-  if (mode === 'resume' && o.model === undefined && (c.model !== s.configured_model || c.provider !== s.provider)) fail('Config provider/model changed; authorize explicitly with --model and, if needed, --provider on resume');
+  if (mode === 'resume' && o.model === undefined && c.model !== s.configured_model) fail('Model changed; authorize explicitly with --model on resume');
+  if (mode === 'resume' && o.provider === undefined && c.provider !== s.provider) fail('Provider changed; authorize explicitly with --provider on resume');
   if (mode === 'start' && (c.model !== s.configured_model || c.provider !== s.provider)) fail('Config model changed since create; restore it or use explicit resume once a session exists');
   if (launch === visibleLaunch && process.platform !== 'win32') fail('Visible launch requires Windows; no terminal or lock was created');
   if (exists(t.lock)) fail('Launch lock already exists; active or stale/ambiguous launches cannot be started again. Inspect status and recovery reference.');

@@ -183,7 +183,18 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   put(f.settings, { provider: 'fixture', model: 'new/model' });
   const followup = path.join(f.root, '补充 & % !.md');
   fs.writeFileSync(followup, 'Continue existing task, keep arbitration history.');
-  launchTask('resume', { config: f.config, worktree: s.worktree, followup, model: 'new/model' }, f.launch);
+  const configBeforeResume = json(f.config);
+  put(f.config, { ...configBeforeResume, provider: 'alternate' });
+  put(f.settings, { provider: 'alternate', model: 'new/model' });
+  let unexpectedLaunch = false;
+  assert.throws(
+    () => launchTask('resume', { config: f.config, worktree: s.worktree, followup, model: 'new/model' }, () => { unexpectedLaunch = true; }),
+    /Provider changed.*--provider/
+  );
+  assert.equal(unexpectedLaunch, false);
+  assert.equal(fs.existsSync(path.join(dir, 'launch.lock')), false);
+  assert.equal(json(stateFile).runtime.attempts.length, 1);
+  launchTask('resume', { config: f.config, worktree: s.worktree, followup, model: 'new/model', provider: 'alternate' }, f.launch);
   await until(() => fs.readFileSync(invocation, 'utf8').trim().split('\n').length === 2);
   const calls = fs.readFileSync(invocation, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls[1].session, calls[0].session);
@@ -200,6 +211,7 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.equal(exited.progress.task, 'awaiting-decision');
   assert.equal(exited.session_id, s.session_id);
   assert.deepEqual(exited.model_history.map(h => h.configured_model), ['group/exact&%!', 'new/model']);
+  assert.deepEqual(exited.model_history.map(h => h.provider), ['fixture', 'alternate']);
   const cfg = json(f.config); put(f.config, { ...cfg, model: 'new/model' });
   const savedSession = fs.readFileSync(exited.session_path);
   fs.writeFileSync(exited.session_path, `${JSON.stringify({ type: 'session', id: 'wrong-id', cwd: s.worktree })}\n`);

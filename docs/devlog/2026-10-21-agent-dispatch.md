@@ -36,3 +36,7 @@ skill-creator 的 `quick_validate.py` 经本机已有 uv 离线缓存提供 PyYA
 ## 首次云端 CI 修正
 
 首次 PR 检查在 Windows 编码桥测试失败：runner 的临时目录使用 `RUNNER~1` 短路径，而子进程 `cwd` 返回 `runneradmin` 长路径；两者指向同一目录，参数本身完整保留。修正测试以 `realpath` 比较工作目录身份，同时继续逐字核对传入参数，保留特殊字符往返约束。运行脚本无需改变；修正后重新运行派发测试，并对新提交重新触发 CI 和 Codex 审查。
+
+## 审查修正：恢复时显式选择 provider
+
+Codex 指出，配置中的 provider 已改变时，仅传 `--model` 会跳过原组合校验并隐式采用新 provider。现已将 model 与 provider 的变化独立核验，provider 变化必须有 `--provider`。生命周期回归用例验证：省略 provider 时不创建锁、不启动子进程、不增加启动记录；显式传入后恢复原会话并记录新的 provider，裁决历史继续保留。该问题按已有明确约定直接修复，不涉及产品裁决。
