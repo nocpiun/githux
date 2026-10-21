@@ -2,6 +2,8 @@
 
 基于 Rust、GPUI 与 Ely 的 GitHub 桌面客户端，Windows 优先，后续覆盖 macOS 和 Linux。当前正式工程只实现 **Hello, world!**：Ely 深色主题、真实 Button 和 FocusScope、可见点击计数及随 binary 注册的字体。登录、网络、数据库与业务页面尚未实现。
 
+首版功能取舍见 [产品约定](docs/product.md#首版范围)，后续开发顺序与验收讨论见 [开发路线图](docs/roadmap.md)。首版不做 macOS/Linux 产品适配或安装更新系统；已有跨平台 Debug CI 保留。
+
 ## Windows 安装与运行
 
 1. 安装 [Rust/rustup](https://rustup.rs/) 与 Visual Studio 2022 Build Tools 的 **Desktop development with C++**（MSVC x64、Windows SDK）。

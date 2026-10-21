@@ -28,6 +28,21 @@
 
 基层 Agent 使用 [githux-pr-review](../.agents/skills/githux-pr-review/SKILL.md) 以前台工具调用等待普通程序轮询；工具返回后原会话继续。等待期间无需反复调用模型。超时、Bot 额度失败、无回复或无法绑定提交均不能认定通过。
 
+### 首版 Milestone
+
+实现 [已确认首版功能](product.md#首版范围) 及其直接配套工作的 PR，**创建时必须关联 [First Release（milestone #1）](https://github.com/nocpiun/githux/milestone/1)**。应设置 GitHub PR 的 milestone 字段，只在标题或正文提到它不算关联。已排除的后续功能和无关工作不自动归入首版；仍待明确的功能先确认范围，再按任务归属关联。
+
+创建 PR 时在原有命令中加入 `--milestone "First Release"`；遗漏时补关联，并查询实际字段核验（将 `PR_NUMBER` 替换为编号）：
+
+```sh
+gh pr edit PR_NUMBER --repo nocpiun/githux --milestone "First Release"
+gh api repos/nocpiun/githux/issues/PR_NUMBER --jq .milestone.number
+```
+
+核验应返回 `1`。GitHub 的 PR 同时具有 issue 元数据，以上查询用于读取 milestone；关联对象以本仓库编号 `1` 为准，若标题改变，先查询其当前标题再传给 CLI。
+
+该 milestone 用于追踪首版范围与进度，不要求攒齐全部功能才能合并，不替代任务授权、最新提交的 CI 与审查门槛。[路线图](roadmap.md) 继续按依赖拆成小 PR 交付。
+
 ## 收到一批审查意见
 
 先读完正文和全部行内意见。“可以直接解决”意味着既有要求足以决定正确行为；能轻易写出代码不等于有权决定产品。可以采用不同于 Bot suggestion 的修法，但必须解决成立的问题。
@@ -78,7 +93,7 @@ merge_owner: coordinator
 
 无论由谁合并，都核验以下事实：
 
-1. PR 当前远端 head 为完整 SHA `H`，目标为 `main`，任务验收满足且没有遗漏的本地待提交修复。
+1. PR 当前远端 head 为完整 SHA `H`，目标为 `main`，任务验收满足且没有遗漏的本地待提交修复；属于首版范围时，确认已关联 milestone #1。
 2. **`H` 的 CI/CD 通过，且以 `H` 触发、针对 `H` 的 Codex 审查通过。** 检查缺失、失败、取消、尚未完成或未经约定的跳过不等于成功。`pull_request` CI 的临时 merge SHA 必须可对应当前 head 和测试基线。
 3. Review 身份、commit、触发轮次和意见处理有证据。脚本 `review_arrived`/退出 0 仅代表到达，`COMMENTED` 或没有行内问题不等于通过。无 commit 字段的普通 Bot 评论要核实关联，无法确认则停下。
 4. 没有未决裁决、冲突或仓库保护要求。并行任务先合入 main 后，后一个 PR 必须验证与新 main 的组合；需要更新分支时，新 head 重新满足 CI 与审查，不能沿用旧 head 的放行。
