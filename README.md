@@ -29,12 +29,14 @@ cargo test --locked
 git diff --check
 ```
 
-Windows CI 执行以上 Cargo 检查；`cargo test` 使用 GPUI 测试平台渲染实际 Hello 视图，覆盖 Tab / Shift+Tab、焦点保留与 Enter / Space 激活。测试平台不经过 Windows 原生输入分发，原实现也能通过该测试，不能据此认定用户反馈的键盘问题已经修复。真实窗口的渲染、字体与键盘操作仍需人工验收；本机键盘复测已由负责人确认通过，具体场景与限制见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。macOS/Linux 尚未构建或验收，也没有加入对应 CI。
+[CI 配置](.github/workflows/ci.yml) 将 Windows 代码与测试检查（fmt、check、clippy、test）和 Build 矩阵并行执行。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建 debug 可执行文件，并上传名为 `githux-<Rust target>-debug` 的 artifact。产物包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。多平台流水线尚待首次云端执行，配置存在不代表各平台已构建或运行通过，见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
+
+`cargo test` 使用 GPUI 测试平台渲染实际 Hello 视图，覆盖 Tab / Shift+Tab、焦点保留与 Enter / Space 激活。测试平台不经过 Windows 原生输入分发，原实现也能通过该测试，不能据此认定用户反馈的键盘问题已经修复。真实窗口的渲染、字体与键盘操作仍需人工验收；本机键盘复测已由负责人确认通过，具体场景与限制见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。macOS/Linux 原生运行与真实交互尚未进行人工验收。
 
 ## 依赖与字体
 
 - Rust edition 2024，工具链 1.98.1；单 Cargo package 与 binary，`Cargo.lock` 纳入版本控制。
-- `gpui-pre = 0.3.8`、`gpui-pre-platform = 0.3.8`，启用 `font-kit`。
+- `gpui-pre = 0.3.8`、`gpui-pre-platform = 0.3.8`，启用 `font-kit`；Linux 额外启用平台的 `x11` 与 `wayland` 窗口后端。
 - [Ely 上游](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git) 固定 revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，未应用原型的 IME/readonly 补丁。未来引入输入/只读编辑器时先重现相关问题，再评估上游修复或有针对性的补丁；Hello 不需要这些补丁。
 - UI 默认 Noto Sans，代码默认 Google Sans Code。固定官方字体文件与许可证见 [字体来源](assets/fonts/README.md)，编译进 binary。中文回退、复杂排版和 IME 尚未验收。
 

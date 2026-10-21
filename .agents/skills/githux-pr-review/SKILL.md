@@ -84,8 +84,8 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo "OWNER/REPO" --pr 123 
 若此前从未需裁决、当前 head 的门槛全部满足、任务验收完成且没有遗漏的本地修复，则基层 Agent 可直接执行合并，不需再次询问负责人。执行前：
 
 1. 确认 PR 目标 main、当前 head H、CI/审查与本轮 H 关联、无待处理意见；核验仓库保护和与当前 main 的组合。检查缺失、未完成、失败或未约定的跳过不能放行。
-2. 再查远端 head 和裁决历史；发生变化或不能确认时停止。使用 `gh pr merge PR --repo OWNER/REPO --match-head-commit H` 并显式选择仓库/任务已经确定的合并方式。此选项只保护 head，不代替其他门槛。
-3. 不使用 `--admin` 绕过保护，不用 `--auto` 提前放行，不擅改 merge queue。若仓库配置要求排队，核对实际最终状态，不能把入队当作已合并。
+2. 再查远端 head 和裁决历史；发生变化或不能确认时停止。必须使用 `gh pr merge PR --repo OWNER/REPO --squash --match-head-commit H`，保持 main 提交历史线性整洁。保留 GitHub 默认生成的 commit message（标题与正文），不传 `--subject`、`--body`、`--body-file`，不手动编辑或自行拼接提交信息；不得改用 `--merge`、`--rebase` 或本地 squash 后直推 main。`--match-head-commit` 只保护 head，不代替其他门槛。
+3. 不使用 `--admin` 绕过保护，不用 `--auto` 提前放行，不擅改 merge queue。若仓库配置要求排队，先确认队列使用 squash 和 GitHub 默认提交信息；CLI 的 `--squash` 不覆盖队列配置，冲突时交主 Agent 处理。核对实际最终状态，不能把入队当作已合并。
 4. 查询 PR 的实际 MERGED 状态与 merge commit 后再报告成功；保留有本地改动或仍在使用的 worktree，不附带自动删除。
 
 出现过待裁决或不能确认完整历史时，把同样的证据交给负责人或主 Agent 合并，不让原基层 Agent 代为执行。此处不是要求普通无争议 PR 人工审批。

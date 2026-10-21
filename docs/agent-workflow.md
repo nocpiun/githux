@@ -18,7 +18,7 @@
 
 派发包至少包含：任务 ID、目标与验收场景、范围/不做的内容、依赖和共享接口、相关文档版本、worktree/分支/base SHA、执行会话、所需检查。全体共识从 `docs/` 读取，任务专属上下文放该 worktree 的 `.agents/task/`。模型接入与私人调度配置留在本机，派发时明确提供，不要求云端 Bot 获取。
 
-基层 Agents 可见会话启动和上下文生成的 skill 仍待实现；审查等待 skill 已有脚本，真实闭环尚待验证。
+基层 Agents 可见会话启动和上下文生成的 skill 仍待实现；审查等待 skill 已有脚本，首个真实 PR 已完成实现、CI、审查与合并，后续仍需验证并行集成。
 
 ## 实现、文档和提交
 
@@ -82,9 +82,9 @@ merge_owner: coordinator
 2. **`H` 的 CI/CD 通过，且以 `H` 触发、针对 `H` 的 Codex 审查通过。** 检查缺失、失败、取消、尚未完成或未经约定的跳过不等于成功。`pull_request` CI 的临时 merge SHA 必须可对应当前 head 和测试基线。
 3. Review 身份、commit、触发轮次和意见处理有证据。脚本 `review_arrived`/退出 0 仅代表到达，`COMMENTED` 或没有行内问题不等于通过。无 commit 字段的普通 Bot 评论要核实关联，无法确认则停下。
 4. 没有未决裁决、冲突或仓库保护要求。并行任务先合入 main 后，后一个 PR 必须验证与新 main 的组合；需要更新分支时，新 head 重新满足 CI 与审查，不能沿用旧 head 的放行。
-5. 合并前再次读取 head、检查与合并权限历史。最终命令使用 `gh pr merge ... --match-head-commit H`，选择仓库已配置/任务已确定的合并方式；不使用 `--admin`，不靠 `--auto` 提前放行。不擅自修改仓库保护或 merge queue 配置。
+5. 合并前再次读取 head、检查与合并权限历史。按下节执行 squash merge，使用 GitHub 默认生成的提交信息并以 `--match-head-commit H` 锁定已核验的提交；不使用 `--admin`，不靠 `--auto` 提前放行。不擅自修改仓库保护或 merge queue 配置。
 
-`--match-head-commit` 只防止合并了另一 head，不替代 CI、review、基线或权限核验。仓库原生 merge queue 若已配置，则遵循其规则并核对最终结果；提交成功、排队成功不等于已合并。合并策略未配置且存在取舍时在首次设置流程时决定，不在每个 PR 临时猜测。实际保护设置和“无问题”Bot信号需首个真实 PR 校准。
+`--match-head-commit` 只防止合并了另一 head，不替代 CI、review、基线或权限核验。仓库原生 merge queue 若已配置，则遵循其规则并核对最终结果；提交成功、排队成功不等于已合并。实际保护设置和 Bot 信号以当前仓库状态及本轮证据核实，不能仅沿用旧 PR 的结果。
 
 若没有配置任何 CI，或预期任务根本没有运行，基层 Agent 报告具体缺项并暂停合并，交主 Agent 安排补齐流水线/必需任务后重新核验；不能以空检查列表或本地测试代替负责人要求的 CI/CD通过。
 
@@ -92,12 +92,26 @@ merge_owner: coordinator
 
 合并后查询实际 `MERGED` 状态和 merge commit，再报告结果。分支/worktree 清理是另一步，不在仍有本地改动或负责人使用该终端时直接删除；GitHub 合并也不自动代表产品发布。
 
+## 提交历史与合并方式
+
+**保持 Git 提交历史线性整洁。所有 PR 合入 `main` 时必须使用 squash merge，并保留 GitHub 默认生成的 commit message，包括标题与正文。** 此规则同时适用于负责人、主 Agent 和基层 Agent；每个 PR 在 `main` 上形成一个提交，分支中的实现、审查修复等中间提交由合并时统一压缩。
+
+在上述门槛全部满足后执行（替换 PR 编号、仓库与完整 head SHA）：
+
+```sh
+gh pr merge PR --repo OWNER/REPO --squash --match-head-commit H
+```
+
+不要传 `--subject`、`--body` 或 `--body-file`，也不要手动编辑合并提交信息。GitHub 按仓库当前配置生成默认标题与正文，Agent 不自行拼接 PR 标题、编号、提交列表或摘要来替代它。此命令显式选择 squash；已核对 gh 2.101.0 的实现，在省略这些消息参数时不会传入自定义标题/正文。依据：[GitHub 默认 squash 提交信息](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests)、[gh 合并请求实现](https://github.com/cli/cli/blob/v2.101.0/pkg/cmd/pr/merge/http.go)。
+
+不得改用 `--merge`、`--rebase` 或本地 squash 后直接推送 `main`。若仓库要求 merge queue，先确认队列最终使用 squash 且保留 GitHub 默认信息；CLI 的 `--squash` 不能覆盖队列配置，不满足时交主 Agent 处理配置冲突，不绕过保护。该约定用于后续合并，不要求重写既有 `main` 历史或为压缩中间提交而强推任务分支；任何新 head 仍须重新满足 CI 与 review 门槛。
+
 ## 交接与日志时机
 
 交接包含 PR URL、最终 head、CI 及对应 review 链接、裁决历史与最终合并执行者、剩余问题、本地改动和实际合并状态。负责人仍手动提醒主 Agent，当前不开发自动唤醒。
 
 开发日志随实现和修复提交，记录截至该轮已知的事实。审查/CI通过后的最终 SHA、链接、合并结果可留在 PR 评论或交接信息中，不为补写“已合并”再制造一笔未经检查的提交。若仍须改文档，正常提交并走新的 CI/review；不授予文档提交例外。
 
-尚待实际落地：基层 Agents 可见会话派发脚本、CI 必需任务与保护配置、合并策略、首个真实 PR 闭环及之后的并行集成验证。无需先建设常驻调度器、自动唤醒或大型 Agent 平台。
+尚待实际落地：基层 Agents 可见会话派发脚本、CI 必需任务与保护配置校准、后续并行集成验证。合并方式已确定为 squash merge + GitHub 默认提交信息。无需先建设常驻调度器、自动唤醒或大型 Agent 平台。
 
 参考：[gh pr merge](https://cli.github.com/manual/gh_pr_merge)、[GitHub review API](https://docs.github.com/en/rest/pulls/reviews)。首次/后续触发规则来自负责人对本仓库配置的说明。
