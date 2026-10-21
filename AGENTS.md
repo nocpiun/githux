@@ -6,6 +6,7 @@
 
 1. 阅读 [共享文档索引](docs/README.md)、[代码约定](docs/code-standards.md) 和 [LESSONS](LESSONS.md)。
 2. 根据任务阅读 [产品约定](docs/product.md)、[架构方案](docs/architecture.md)、[缓存策略](docs/cache-strategy.md)。核对实际代码，区分已确认、建议、待验证。
+   开发顺序参考 [路线图](docs/roadmap.md)；首版排除项以产品约定为准，不能将路线图讨论稿当作实现授权。
 3. 实现与交付遵循 [Agent 工作流](docs/agent-workflow.md)；需要等待 PR 审查时使用 [githux-pr-review](.agents/skills/githux-pr-review/SKILL.md)。
 4. 检查当前分支、worktree 和已有改动。不要覆盖其他人的工作，不假定本地忽略目录会出现在其他 worktree 或云端。
 
@@ -19,6 +20,7 @@
 ## PR 的关键约束
 
 - 分支为 `<type>/<branch-name>`，通过 PR 合入 `main`。
+- 已确认的首版功能及其直接配套工作，创建 PR 时必须关联 [First Release（milestone #1）](https://github.com/nocpiun/githux/milestone/1)；范围及核验方法见 [首版 Milestone](docs/agent-workflow.md#首版-milestone)。
 - **保持 Git 提交历史线性整洁：合并 PR 必须使用 squash merge，并保留 GitHub 默认生成的 commit message（标题与正文），不得自行改写。** 执行命令见 [Agent 工作流](docs/agent-workflow.md#提交历史与合并方式)。
 - 首次建 PR 自动触发 Codex review；以后每次 push 新提交都须通过 `gh` 评论 `@codex review`。
 - **只有当前最后一次提交的 CI/CD 和针对该提交触发的审查都通过，才可合并。** 收到审查、没有回复、检查缺失均不等于通过。

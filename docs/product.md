@@ -4,19 +4,46 @@
 
 ## 目标与技术方向
 
-Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI + Ely；先打磨 Windows，再覆盖 macOS/Linux。早期无框架 TypeScript 方案已被后续选型替代。现阶段聚焦远程 GitHub 内容，本地 Git 暂存、提交、复杂合并和 IDE 能力未纳入范围。
+Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI + Ely；首版只做 Windows，macOS/Linux 产品支持延后，已有跨平台编译 CI 保留。早期无框架 TypeScript 方案已被后续选型替代。现阶段聚焦远程 GitHub 内容，本地 Git 暂存、提交、复杂合并和 IDE 能力未纳入范围。
 
 可保存多个账户，同一时刻仅一个活动账户；离线可查看已缓存内容，联网后刷新。首次工作流验证只限制一个实现 Agent，不能由此推导产品或长期流程必须串行。
 
+## 首版范围
+
+以下依据负责人 2026-10-21 最后一次范围调整；编号沿用功能讨论清单。这里维护功能范围，[开发路线图](roadmap.md) 维护建议顺序、依赖与验收。排除项是首版延后项，不代表取消长期方向，也不因后续任务方便而自动恢复。
+
+| 分类 | 首版保留 |
+| --- | --- |
+| A1–A6 外壳 | 自定义标题栏、island、固定侧边栏、全部仓库的有界列表、基础多标签、command palette 入口 |
+| B1–B3 Home | 启动首页、最近参与且有更新的 Issues/PRs、关注动态 |
+| C1–C5、C8–C9 仓库 | 资料、分支与文件树、README、源码阅读；顶部信息栏展示 Releases、Contributors、Languages |
+| D1–D4 Profile | 基本资料和 Overview 结构、个人 README、Pinned/Popular Repos、贡献热力图 |
+| E1–E2 设置 | 全局与仓库设置；具体项目仍需确定 |
+| F1–F4 账户和数据 | 登录与安全凭据保存、多账户保存但单账户活动、离线阅读、联网刷新 |
+| G1–G2 体验 | Windows 原生交互与流畅度；Noto Sans / Google Sans Code 及字体回退 |
+
+| 编号 | 首版排除 |
+| --- | --- |
+| C6、C7 | Packages、Environments 的展示及相关功能 |
+| D5 | Profile 的 Contribution Activity 列表；D4 贡献热力图仍保留 |
+| H5 | Profile 的其他内容 Tabs，例如 Repositories、Stars |
+| H6 | 标签进阶操作：重排、专门的溢出交互、重复资源标签扩展、前进/后退历史、重启恢复等；A5 基础多标签保留 |
+| H8 | 安装包、应用签名、自动更新与正式分发渠道建设 |
+| G3、G4 | macOS/Linux 原生运行、交互适配及产品支持验收；不删除既有编译任务 |
+
+**H1 Notifications、H2 全局 Issues、H3 全局 PRs、H4 New、H7 远程写操作未被本轮排除，但内容与动作清单仍待确定。** 现有入口不等于完整功能设计，未排除也不等于批准所有可能的操作；相关任务先补最小规格，不擅自延后整项或扩张范围。
+
+首版仍可通过已有构建方式运行可执行文件；H8 延后不取消设置保存、内部数据迁移、凭据管理和运行诊断等应用基本职责。
+
 ## 外壳与导航
 
-- 自定义标题栏：Windows 左上 Githux 字样、右侧三个窗口按钮；macOS 左侧三个窗口按钮后接 Githux。实际拖动、缩放、贴靠与系统交互需验证。
+- 自定义标题栏：首版 Windows 左上 Githux 字样、右侧三个窗口按钮，验证拖动、缩放、贴靠等系统交互。macOS 左侧按钮后接 Githux 的既有设计留待后续平台支持。
 - 侧边栏直接从顶部导航开始，没有额外 Logo/品牌块。上方 Home、Settings，中间仓库列表，底部账户信息与快捷入口。
 - 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。具体账户/组织范围与排序待定。
 - 底部点击头像/名称进入 Profile；下方横向四等分图标入口为 Notifications、Issues、PRs、New。不放主题切换。
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。
 - 侧栏以外的页面主区域采用 island，与窗口边缘留微小距离，内外圆角协调。不是所有子面板都变成浮动卡片；精确间距、圆角和最大化行为待真实窗口确认。
-- island 顶部为应用级会话标签，可同时保留多个仓库、Issue/PR、个人主页等。仓库/Profile 页内横向内容 Tabs 是另一层导航，不能混用同一个状态。
+- island 顶部为应用级会话标签，可同时保留多个仓库、Issue/PR、个人主页等。首版保留打开、切换、关闭和各页面的独立状态；H6 进阶操作延后。仓库/Profile 页内横向内容 Tabs 是另一层导航，不能混用同一个状态；Profile 首版只实现 Overview。
 
 ## 页面
 
@@ -24,14 +51,14 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | --- | --- |
 | Home | 启动进入 Home；左侧“最近参与、有更新的 Issues/PRs”，由 GitHub API 获取，语义不是本地浏览历史；右侧关注动态 Feed |
 | Repository | 顶部仓库资料与横向内容 Tabs；下方左文件树、右文件查看器，默认 README，处理没有 README 的仓库 |
-| 仓库附加资料 | 覆盖 Releases、Packages、Environments、Contributors、Languages；顶部汇总或右侧纵栏仍未选定 |
-| Profile | 顶部头像、名字、ID 等资料和横向 Tabs；Overview 顺序为个人 README、Pinned Repos（没有则 Popular）、贡献热力图、Contribution Activity |
+| 仓库附加资料 | C5–C9 的布局位置统一确定为顶部信息栏，不另开右侧纵栏；首版仅实现 Releases、Contributors、Languages，Packages/Environments 延后 |
+| Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；不实现 Contribution Activity 和其他内容 Tabs |
 | Global Settings | 借鉴 Magpie 的分类与行式设置组织，具体分类布局与首批选项待定 |
 | Repository Settings | 首轮提供简单设置，风格与全局 Settings 一致，具体选项待定 |
 | Issue/PR 详情 | 原型旧设计弃用，首轮内容区直接留空 |
 | 仓库其他未设计 Tabs | 除仓库 Settings 外，首轮内容区直接留空，不添加“未实现”卡片 |
 
-留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 的首轮范围另行确定。
+留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 已排除出首版，不套用仓库的留空约定补出额外内容页。
 
 ## 视觉、字体与原生体验
 
@@ -39,14 +66,14 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 UI 默认 **Noto Sans**，代码默认 **Google Sans Code**。建议随包固定字体发行版及许可证；中文/其他语言、Emoji 回退和静态/可变字重仍需实测，不把默认字体选择误认为已解决所有字符覆盖。不要手工按字符猜字宽，测量、选区和绘制应使用一致的布局结果。
 
-真实窗口需要验证：Windows 多 DPI 和跨屏、缩放、文本混排、中文 IME 预编辑与候选确认、焦点和键盘操作、选取复制、长列表滚动、窗口状态变化、island 裁切和浮层。macOS/Linux 单独验收；截图不能证明帧率、内存或输入行为。
+首版真实窗口需要验证：Windows 多 DPI 和跨屏、缩放、文本混排、中文 IME 预编辑与候选确认、焦点和键盘操作、选取复制、长列表滚动、窗口状态变化、island 裁切和浮层。macOS/Linux 原生验收延后；截图不能证明帧率、内存或输入行为。
 
 ## 仍待决定
 
 - 侧边栏仓库范围/排序/局部筛选，command palette 搜索范围，Notifications/全局 Issues/PRs/New 的具体内容。
-- 仓库附加资料布局、无 README 的具体呈现、Popular 排序与 README 发现规则、Feed 实际覆盖及“参与”的精确范围。
-- 打开链接时新建还是复用标签、同资源重复标签、Home/Settings 是否单例、关闭最后标签、标签排序/溢出、会话历史与重启恢复。启动 Home 的决定不能被默认恢复旧活动页替换。
+- 顶部信息栏的密度和窄窗口呈现、无 README 的具体呈现、Popular 排序与 README 发现规则、Feed 实际覆盖及“参与”的精确范围。
+- 基础标签的打开/复用规则、Home/Settings 是否单例、关闭最后标签及可容纳数量的边界处理。H6 所列进阶交互本轮不设计实现，基础边界不能借机恢复它们。启动仍进入 Home，不恢复上次活动页。
 - 最小窗口、面板宽度与响应布局、设置项目、产品语言、本人/他人操作。
-- 登录方式、账户切换时标签/草稿处理、私有缓存授权失效与账户移除策略、发布和更新方式。
+- 登录方式、账户切换时标签处理、私有缓存授权失效与账户移除策略；若 H7 选定需要编辑内容的操作，再明确相应草稿规则。
 
 这些选择应在相关任务开始前补齐必要范围，其他无依赖工作可以继续，不要求先把所有问题一次定完。
