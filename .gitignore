@@ -1,2 +1,9 @@
 .agents/*
 !.agents/skills/
+
+# Cargo build output (each worktree owns its own target).
+/target/
+
+# Local temporary output.
+*.log
+*.tmp
