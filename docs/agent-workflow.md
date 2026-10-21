@@ -18,7 +18,7 @@
 
 派发包至少包含：任务 ID、目标与验收场景、范围/不做的内容、依赖和共享接口、相关文档版本、worktree/分支/base SHA、执行会话、所需检查。全体共识从 `docs/` 读取，任务专属上下文放该 worktree 的 `.agents/task/`。模型接入与私人调度配置留在本机，派发时明确提供，不要求云端 Bot 获取。
 
-基层 Agents 可见会话启动和上下文生成的 skill 仍待实现；审查等待 skill 已有脚本，首个真实 PR 已完成实现、CI、审查与合并，后续仍需验证并行集成。
+基层 Agents 的 worktree/上下文生成和可见会话启动使用 [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md)：create 不自动启动，start 在 Windows 可见 CMD 中运行配置的交互 CLI，status 只报告进程事实，resume 严格恢复原会话。负责人可在该终端阅读、补充和接管；本机真实 CLI 启动、键盘输入、正常退出及同会话恢复已验证，见 [开发日志](devlog/2026-10-21-agent-dispatch.md)。脚本没有自动唤醒、调度或自行合并。手工外部 attach 不受脚本锁保护，不能与已有 TUI/RPC 同时使用。后续多实现者并行集成仍待验证。
 
 ## 实现、文档和提交
 
@@ -127,6 +127,6 @@ gh pr merge PR --repo OWNER/REPO --squash --match-head-commit H
 
 开发日志随实现和修复提交，记录截至该轮已知的事实。审查/CI通过后的最终 SHA、链接、合并结果可留在 PR 评论或交接信息中，不为补写“已合并”再制造一笔未经检查的提交。若仍须改文档，正常提交并走新的 CI/review；不授予文档提交例外。
 
-尚待实际落地：基层 Agents 可见会话派发脚本、CI 必需任务与保护配置校准、后续并行集成验证。合并方式已确定为 squash merge + GitHub 默认提交信息。无需先建设常驻调度器、自动唤醒或大型 Agent 平台。
+可见会话派发脚本已通过离线测试和本机真实 CLI/终端接管、会话恢复验证；多实现者并行集成与 CI 必需任务和保护配置的持续校准仍需后续处理。合并方式已确定为 squash merge + GitHub 默认提交信息。无需先建设常驻调度器、自动唤醒或大型 Agent 平台。
 
 参考：[gh pr merge](https://cli.github.com/manual/gh_pr_merge)、[GitHub review API](https://docs.github.com/en/rest/pulls/reviews)。首次/后续触发规则来自负责人对本仓库配置的说明。
