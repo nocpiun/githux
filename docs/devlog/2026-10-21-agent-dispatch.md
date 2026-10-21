@@ -32,3 +32,7 @@ skill-creator 的 `quick_validate.py` 经本机已有 uv 离线缓存提供 PyYA
 ## 后续
 
 按共享工作流对本次提交运行云端 CI 与 Codex 审查；当前最新 head 的全部门槛通过后 squash merge，保留 GitHub 默认提交信息。未来升级执行工具时复核参数、会话格式与真实终端交互；不以模拟测试替代实际验收。
+
+## 首次云端 CI 修正
+
+首次 PR 检查在 Windows 编码桥测试失败：runner 的临时目录使用 `RUNNER~1` 短路径，而子进程 `cwd` 返回 `runneradmin` 长路径；两者指向同一目录，参数本身完整保留。修正测试以 `realpath` 比较工作目录身份，同时继续逐字核对传入参数，保留特殊字符往返约束。运行脚本无需改变；修正后重新运行派发测试，并对新提交重新触发 CI 和 Codex 审查。

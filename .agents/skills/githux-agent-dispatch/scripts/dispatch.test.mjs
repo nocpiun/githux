@@ -267,7 +267,10 @@ test('Windows process identity and encoded bridge preserve shell characters with
   // Execute the exact encoded inner bridge hidden, with a harmless recorder in place of the supervisor.
   const roundtrip = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-EncodedCommand', terminalCommand(bridgeArgs)], { encoding: 'utf8', windowsHide: true });
   assert.equal(roundtrip.status, 0, roundtrip.stderr);
-  assert.deepEqual(json(bridgeOut), { cwd: f.parent, args: ['__supervise', f.parent, 'fixture-token'] });
+  const recorded = json(bridgeOut);
+  // Runner TEMP may use an 8.3 alias; cwd can resolve to the same directory's long name.
+  assert.equal(fs.realpathSync.native(recorded.cwd), fs.realpathSync.native(f.parent));
+  assert.deepEqual(recorded.args, ['__supervise', f.parent, 'fixture-token']);
   assert.throws(() => terminalCommand({ ...bridgeArgs, script: 'x'.repeat(10000) }), /CMD length/);
   const input = "路径 with spaces & %TEMP% ! bang $(evil) '";
   const encoded = encodePS(`$s=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(input).toString('base64')}')); [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; [Console]::Write($s)`);
