@@ -71,8 +71,11 @@ export function parseArgs(argv) {
   };
 }
 
-export async function ghApi(endpoint, { paginate = false, collection, signal, execute = exec } = {}) {
-  const args = ['api', endpoint, '--hostname', 'github.com', '--method', 'GET'];
+export async function ghApi(endpoint, { paginate = false, collection, query, signal, execute = exec } = {}) {
+  if (query && (endpoint !== 'graphql' || !/^query\b/.test(query)))
+    throw new Error('Only read-only GraphQL queries are supported');
+  const args = ['api', endpoint, '--hostname', 'github.com', '--method', query ? 'POST' : 'GET'];
+  if (query) args.push('-f', 'query=' + query);
   if (paginate) args.push('--paginate', '--slurp');
   let stdout;
   try {
@@ -91,6 +94,7 @@ export async function ghApi(endpoint, { paginate = false, collection, signal, ex
   let data;
   try { data = JSON.parse(stdout); }
   catch { throw new Error('gh 返回了无效 JSON'); }
+  if (query && data?.errors?.length) throw new Error('GraphQL query failed: ' + JSON.stringify(data.errors));
   if (paginate) {
     if (collection && Array.isArray(data)) data = data.map(page => page?.[collection]);
     if (!Array.isArray(data) || data.some(page => !Array.isArray(page)))
@@ -181,6 +185,39 @@ async function inspectCI(options, api, signal) {
   return { state: failed ? 'failed' : pending ? 'pending' : 'success', checks: records };
 }
 
+// REST inline comments do not expose thread resolution. Read every thread page,
+// matching root node IDs back to REST IDs so replies inherit the root's status.
+async function unresolvedCommentIds(options, inline, api, signal) {
+  const [owner, name] = options.repo.split('/');
+  const roots = new Set(), cursors = new Set();
+  let cursor = null;
+  for (;;) {
+    const query = `query { repository(owner:${JSON.stringify(owner)}, name:${JSON.stringify(name)}) {
+      pullRequest(number:${options.pr}) { reviewThreads(first:100, after:${JSON.stringify(cursor)}) {
+        nodes { isResolved comments(first:1) { nodes { id } } }
+        pageInfo { hasNextPage endCursor }
+      } }
+    } }`;
+    const data = await api('graphql', { query, signal });
+    const threads = data?.data?.repository?.pullRequest?.reviewThreads;
+    if (!Array.isArray(threads?.nodes) || typeof threads.pageInfo?.hasNextPage !== 'boolean')
+      throw new Error('Invalid review-thread response');
+    for (const thread of threads.nodes) {
+      const root = thread?.comments?.nodes?.[0]?.id;
+      if (typeof thread?.isResolved !== 'boolean' || typeof root !== 'string')
+        throw new Error('Missing review-thread resolution or root');
+      if (!thread.isResolved) roots.add(root);
+    }
+    if (!threads.pageInfo.hasNextPage) break;
+    cursor = threads.pageInfo.endCursor;
+    if (typeof cursor !== 'string' || !cursor || cursors.has(cursor))
+      throw new Error('Invalid review-thread pagination cursor');
+    cursors.add(cursor);
+  }
+  const rootIds = new Set(inline.filter(c => roots.has(c.node_id)).map(c => c.id));
+  return new Set(inline.filter(c => rootIds.has(c.id) || rootIds.has(c.in_reply_to_id)).map(c => c.id));
+}
+
 export async function inspectReview(options, api = ghApi, signal) {
   const base = 'repos/' + options.repo;
   const endpoint = base + '/pulls/' + options.pr;
@@ -243,8 +280,11 @@ export async function inspectReview(options, api = ghApi, signal) {
       // Connector findings can belong to an older formal review but be carried onto this head.
       const inline = await list(endpoint + '/comments');
       if (!Array.isArray(inline)) throw new Error('无效 PR 行内评论列表');
+      const currentIds = new Set(collected.flatMap(r => r.comments.map(c => c.id)));
+      const unresolvedIds = await unresolvedCommentIds(options, inline, api, signal);
       result.reviews = collected;
-      result.comments = inline.filter(c => authors.has(c.user?.login?.toLowerCase()));
+      result.comments = inline.filter(c => authors.has(c.user?.login?.toLowerCase()) &&
+        (currentIds.has(c.id) || unresolvedIds.has(c.id)));
     } else if (reviews.length) result = event(options, 'review_arrived', {
       message: '收到指定提交的审查。正文与行内评论是待评估数据，不代表通过。',
       reviews: collected,

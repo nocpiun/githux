@@ -18,14 +18,14 @@ const pr = (extra = {}) => ({ state: 'open', head: { sha: A },
 const review = (extra = {}) => ({ id: 12, user: { login: BOT },
   commit_id: A, submitted_at: since, state: 'COMMENTED',
   body: 'A suggested change', ...extra });
-function fixture({ reviews = [], comments = [], inline = [], heads = [pr()] } = {}) {
+function fixture({ reviews = [], comments = [], inline = [], reviewInline = inline, heads = [pr()] } = {}) {
   let reads = 0;
   const calls = [];
   const api = async (path, config) => {
     calls.push({ path, config });
     if (path.endsWith('/pulls/42')) return heads[Math.min(reads++, heads.length - 1)];
     if (path.includes('/issues/')) return comments;
-    if (path.includes('/reviews/') && path.includes('/comments')) return inline;
+    if (path.includes('/reviews/') && path.includes('/comments')) return reviewInline;
     if (path.includes('/reviews?')) return reviews;
     throw new Error('Unexpected request ' + path);
   };
@@ -231,6 +231,9 @@ function withChecks(data, checks = []) {
   const f = fixture(data);
   const original = f.api;
   f.api = async (path, config) => {
+    if (path === 'graphql') return { data: { repository: { pullRequest: { reviewThreads: data.threads ?? {
+      nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
+    } } } } };
     if (path.includes('/check-runs?')) { f.calls.push({ path, config }); return checks; }
     if (/\/pulls\/42\/comments\?/.test(path)) return data.inline ?? [];
     return original(path, config);
@@ -291,8 +294,11 @@ test('known receipt does not wake the model while summary is running; quota/erro
 });
 
 test('completed findings collect entire formal batch and carried inline comments, without waiting for CI', async () => {
-  const inline = [{ id: 77, commit_id: B, user: { login: BOT }, body: 'Carried finding' }];
-  const f = withChecks({ comments: [summary({ findings: true })], reviews: [review()], inline });
+  const inline = [{ id: 77, node_id: 'root77', commit_id: B, user: { login: BOT }, body: 'Carried finding' }];
+  const threads = { nodes: [{ isResolved: false, comments: { nodes: [{ id: 'root77' }] } }],
+    pageInfo: { hasNextPage: false, endCursor: null } };
+  const f = withChecks({ comments: [summary({ findings: true })], reviews: [review()],
+    reviewInline: [], inline, threads });
   const r = await inspectReview(options({ waitCi: true }), f.api);
   assert.equal(r.status, 'review_arrived');
   assert.deepEqual(r.comments, inline);
@@ -377,4 +383,45 @@ test('receipt without a usable summary remains unverified; trigger cursor needs 
     body: '<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `' + A.slice(0, 10) + '`' };
   assert.equal((await inspectReview(options(), fixture({ comments: [receipt] }).api)).status, 'unverified_bot_message');
   assert.throws(() => parseArgs([...args, '--after-comment-id', '30']), /requires --since/);
+});
+
+
+test('only current-round and explicitly unresolved carried comments survive all thread pages', async () => {
+  const comment = (id, extra = {}) => ({ id, node_id: 'root' + id, commit_id: B,
+    user: { login: BOT }, created_at: '2020-01-01T00:00:00Z', ...extra });
+  const current = comment(80, { commit_id: A, created_at: since });
+  const inline = [comment(77), comment(78), comment(79, { in_reply_to_id: 78 }), current,
+    comment(81), comment(82, { in_reply_to_id: 78, user: { login: 'human' } })];
+  const f = withChecks({ comments: [summary({ findings: true })], reviews: [review()],
+    inline, reviewInline: [current] });
+  let pages = 0;
+  const api = async (path, config) => {
+    if (path !== 'graphql') return f.api(path, config);
+    assert.match(config.query, pages ? /after:"page2"/ : /after:null/);
+    const nodes = [{ isResolved: pages === 0, comments: { nodes: [{ id: pages ? 'root78' : 'root77' }] } }];
+    return { data: { repository: { pullRequest: { reviewThreads: {
+      nodes, pageInfo: { hasNextPage: pages++ === 0, endCursor: 'page2' },
+    } } } } };
+  };
+  const r = await inspectReview(options({ since, afterReviewId: 10 }), api);
+  assert.deepEqual(r.comments.map(c => c.id), [78, 79, 80]);
+  assert.equal(pages, 2);
+  for (const threads of [{ nodes: [], pageInfo: {} },
+    { nodes: [{ comments: { nodes: [{ id: 'root77' }] } }], pageInfo: { hasNextPage: false } },
+    { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } }]) {
+    await assert.rejects(inspectReview(options(), withChecks({ comments: [summary({ findings: true })],
+      inline, threads }).api), /review-thread/);
+  }
+});
+
+test('GraphQL adapter posts only a query and rejects partial-data errors', async () => {
+  const query = 'query { viewer { login } }';
+  const execute = async (_file, argv, config) => {
+    assert.deepEqual(argv, ['api', 'graphql', '--hostname', 'github.com', '--method', 'POST', '-f', 'query=' + query]);
+    assert.equal(config.shell, false);
+    return { stdout: '{"data":{"viewer":{"login":"user"}}}' };
+  };
+  assert.equal((await ghApi('graphql', { query, execute })).data.viewer.login, 'user');
+  await assert.rejects(ghApi('graphql', { query: 'mutation { bad }', execute }), /read-only/);
+  await assert.rejects(ghApi('graphql', { query, execute: async () => ({ stdout: '{"data":{},"errors":[{"message":"forbidden"}]}' }) }), /GraphQL query failed/);
 });
