@@ -276,7 +276,11 @@ export async function inspectReview(options, api = ghApi, signal) {
       if (!Array.isArray(inline)) throw new Error('无效行内评论列表');
       collected.push({ ...r, comments: inline });
     }
-    if (result?.status === 'review_arrived') {
+    if (result?.status === 'review_arrived' && !collected.some(r => r.comments.length)) {
+      // A completed summary can propagate ahead of the formal review and its
+      // inline findings. Old carried threads alone cannot complete this round.
+      result = null;
+    } else if (result?.status === 'review_arrived') {
       // Connector findings can belong to an older formal review but be carried onto this head.
       const inline = await list(endpoint + '/comments');
       if (!Array.isArray(inline)) throw new Error('无效 PR 行内评论列表');

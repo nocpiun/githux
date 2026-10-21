@@ -298,7 +298,7 @@ test('completed findings collect entire formal batch and carried inline comments
   const threads = { nodes: [{ isResolved: false, comments: { nodes: [{ id: 'root77' }] } }],
     pageInfo: { hasNextPage: false, endCursor: null } };
   const f = withChecks({ comments: [summary({ findings: true })], reviews: [review()],
-    reviewInline: [], inline, threads });
+    reviewInline: [inline[0]], inline, threads });
   const r = await inspectReview(options({ waitCi: true }), f.api);
   assert.equal(r.status, 'review_arrived');
   assert.deepEqual(r.comments, inline);
@@ -410,7 +410,7 @@ test('only current-round and explicitly unresolved carried comments survive all 
     { nodes: [{ comments: { nodes: [{ id: 'root77' }] } }], pageInfo: { hasNextPage: false } },
     { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } }]) {
     await assert.rejects(inspectReview(options(), withChecks({ comments: [summary({ findings: true })],
-      inline, threads }).api), /review-thread/);
+      inline, threads, reviews: [review()], reviewInline: [current] }).api), /review-thread/);
   }
 });
 
@@ -424,4 +424,23 @@ test('GraphQL adapter posts only a query and rejects partial-data errors', async
   assert.equal((await ghApi('graphql', { query, execute })).data.viewer.login, 'user');
   await assert.rejects(ghApi('graphql', { query: 'mutation { bad }', execute }), /read-only/);
   await assert.rejects(ghApi('graphql', { query, execute: async () => ({ stdout: '{"data":{},"errors":[{"message":"forbidden"}]}' }) }), /GraphQL query failed/);
+});
+
+
+test('a findings summary waits for current formal review and inline propagation despite old carried threads', async () => {
+  let round = 0, clock = 0;
+  const current = { id: 90, node_id: 'current90', user: { login: BOT }, commit_id: A, body: 'Current finding' };
+  const old = { id: 77, node_id: 'old77', user: { login: BOT }, commit_id: B, body: 'Old unresolved finding' };
+  const api = async (path, config) => withChecks({
+    comments: [summary({ findings: true })], reviews: round ? [review()] : [],
+    reviewInline: round > 1 ? [current] : [], inline: [old, ...(round > 1 ? [current] : [])],
+    threads: { nodes: [{ isResolved: false, comments: { nodes: [{ id: 'old77' }] } }],
+      pageInfo: { hasNextPage: false } },
+  }).api(path, config);
+  const r = await waitForReview(options({ timeoutMs: 5000, intervalMs: 1000 }), {
+    api, now: () => clock, sleep: async ms => { clock += ms; round++; },
+  });
+  assert.equal(round, 2);
+  assert.equal(r.status, 'review_arrived');
+  assert.deepEqual(r.comments.map(c => c.id), [77, 90]);
 });
