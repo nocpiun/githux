@@ -3,6 +3,7 @@
 
 # Cargo build output (each worktree owns its own target).
 /target/
+/dist/
 
 # Local temporary output.
 *.log

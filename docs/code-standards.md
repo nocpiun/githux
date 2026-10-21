@@ -16,7 +16,7 @@
 - 单元测试使用明确 fixture 或模拟外部服务，不依赖实时 GitHub；真正的集成验证单独说明账户、环境与影响。测试用临时目录，结束时清理所启动的任务，不改真实用户配置。
 - 运行与改动相称的检查，记录实际命令、结果和未覆盖部分。源码推断、模拟结果与真实 GUI/PR 验证分别说明。
 - UI 改动在真实 Ely 窗口核验，涉及字体、IME、滚动和窗口状态时包含对应交互；跨平台支持不能仅由 Windows 编译成功推断。
-- CI 配置落地后由仓库明确必需检查，不能将“没有检查”当作“全通过”。目前可运行的检查见下节。
+- CI 包含 Windows 代码检查（fmt、check、clippy、test）、四平台 Debug 构建，以及末尾显示名称为 `CI` 的汇总 job（ID 为 `ci`）。负责人将在分支规则中把 `CI` 设为 required check；配置存在不代表规则已经启用。汇总 job 要求所有上游均为 `success`，失败、取消、跳过或缺失均不通过。新增上游 job 时，必须同时加入 `ci.needs` 和结果判断，不能遗漏必需检查。Codex 审查仍按 [工作流](agent-workflow.md#合并前的门槛) 单独核验。
 
 ## 当前可运行检查
 
@@ -30,7 +30,7 @@ git diff --cached --check
 
 Node.js 20+；脚本使用本机 `gh`，测试本身不访问 GitHub。
 
-正式应用是单 Cargo package，固定 Rust 1.98.1。Windows 应用检查如下，CI 配置见 [windows.yml](../.github/workflows/windows.yml)：
+正式应用是单 Cargo package，固定 Rust 1.98.1。Windows 应用检查如下，CI 配置见 [ci.yml](../.github/workflows/ci.yml)：
 
 ```sh
 cargo fmt --all -- --check

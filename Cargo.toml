@@ -11,5 +11,8 @@ ely-gpui-component = { git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-G
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["x11", "wayland"] }
+
 [dev-dependencies]
 ely-gpui-component = { git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git", rev = "da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721", features = ["test-support"] }

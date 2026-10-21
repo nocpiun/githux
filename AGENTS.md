@@ -12,13 +12,14 @@
 ## 项目边界
 
 - Rust + GPUI + Ely；Windows 优先，之后 macOS/Linux。保持 Ely 原型画风，UI 字体 Noto Sans、代码字体 Google Sans Code。
-- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 GPUI + Ely Hello binary 和 Windows CI 配置。运行与检查命令见 [README](README.md)，实际验证边界见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。业务模块仍未实现，不将目录预留视为业务交付。
+- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 GPUI + Ely Hello binary 和跨平台 CI 配置。运行与检查命令见 [README](README.md)，实际验证边界见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。业务模块仍未实现，不将目录预留视为业务交付。
 - 主 Agent 协调方向、任务和例外；基层 Agents 使用本地任务上下文指定的执行工具。实现任务各用独立分支和 `D:\githux-<task>` worktree。首次试跑只用一个实现者，解除后按依赖、冲突和资源并行。
 - 共享事实写入受 Git 跟踪的 `docs/`。主 Agent 的私有交接记忆保存在 `.agents/` 下被 Git 忽略的专属目录；`.agents/task/` 是本任务临时状态。不得上传凭据、完整私人记忆或原始会话日志。
 
 ## PR 的关键约束
 
 - 分支为 `<type>/<branch-name>`，通过 PR 合入 `main`。
+- **保持 Git 提交历史线性整洁：合并 PR 必须使用 squash merge，并保留 GitHub 默认生成的 commit message（标题与正文），不得自行改写。** 执行命令见 [Agent 工作流](docs/agent-workflow.md#提交历史与合并方式)。
 - 首次建 PR 自动触发 Codex review；以后每次 push 新提交都须通过 `gh` 评论 `@codex review`。
 - **只有当前最后一次提交的 CI/CD 和针对该提交触发的审查都通过，才可合并。** 收到审查、没有回复、检查缺失均不等于通过。
 - **全程未出现待裁决事项的 PR，基层 Agent 可以自行合并。任何一轮出现待裁决事项，该 PR 此后只能由负责人或主 Agent 合并。** 处理完争议、换 Agent 或产生新提交不重置此记录。详细记录和核验方法见工作流。
