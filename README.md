@@ -14,6 +14,8 @@ cargo run --locked
 
 首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`；不要与其他项目/原型共享可写 target。Windows debug binary 为 `target/debug/githux.exe`。
 
+Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
+
 窗口标题为 Githux，正文为 Hello, world!。点击 Press 后计数递增；用 Tab / Shift+Tab 切换焦点，再按 Enter / Space，检查焦点环与计数重绘。关闭最后窗口退出应用。本轮使用临时系统标题栏；自定义标题栏、island 与应用级多标签留给下一轮外壳实现。
 
 ## 构建检查
@@ -27,7 +29,7 @@ cargo test --locked
 git diff --check
 ```
 
-Windows CI 执行以上 Cargo 检查；当前没有为目录占位或简单计数编写无意义测试，`cargo test` 用于保证测试配置可编译。真实窗口的渲染、字体与键盘操作仍需人工验收，CI 不替代 GUI 验收。macOS/Linux 尚未构建或验收，也没有加入对应 CI。
+Windows CI 执行以上 Cargo 检查；`cargo test` 使用 GPUI 测试平台渲染实际 Hello 视图，覆盖 Tab / Shift+Tab、焦点保留与 Enter / Space 激活。测试平台不经过 Windows 原生输入分发，原实现也能通过该测试，不能据此认定用户反馈的键盘问题已经修复。真实窗口的渲染、字体与键盘操作仍需人工验收；本机键盘复测已由负责人确认通过，具体场景与限制见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。macOS/Linux 尚未构建或验收，也没有加入对应 CI。
 
 ## 依赖与字体
 

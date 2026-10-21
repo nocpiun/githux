@@ -5,8 +5,12 @@ use gpui::{Context, FocusHandle, IntoElement, ParentElement, Render, Styled, Win
 
 use crate::platform::fonts;
 
+#[cfg(test)]
+mod tests;
+
 pub struct Hello {
     focus: FocusHandle,
+    press_focus: FocusHandle,
     presses: u64,
 }
 
@@ -14,7 +18,12 @@ impl Hello {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self { focus, presses: 0 }
+        Self {
+            focus,
+            // Keep the button's tab stop alive across renders and key events.
+            press_focus: cx.focus_handle().tab_stop(true),
+            presses: 0,
+        }
     }
 }
 
@@ -42,6 +51,7 @@ impl Render for Hello {
             )
             .child(
                 Button::new("hello-press", "Press")
+                    .focus_handle(&self.press_focus)
                     .primary()
                     .on_click(move |_, _, cx| {
                         this.update(cx, |hello, cx| {

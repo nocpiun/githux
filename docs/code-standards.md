@@ -40,7 +40,7 @@ cargo build --locked
 cargo test --locked
 ```
 
-`cargo test` 当前只验证测试配置可编译，没有为预留模块编写占位测试。依赖锁文件必须入 Git；每个 worktree 使用自己的 `target/`。运行步骤和 GUI 验收要求见 [README](../README.md)；CI 首次实际执行与 macOS/Linux 验证不能由本地 Windows 结果推断。
+`cargo test` 使用 GPUI 测试平台覆盖实际 Hello 视图的焦点导航、重绘后焦点保留和按键激活，没有为预留模块编写占位测试。该测试不经过 Windows 原生输入分发，不替代真实窗口复测；具体证据和限制见 [开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。依赖锁文件必须入 Git；每个 worktree 使用自己的 `target/`。运行步骤和 GUI 验收要求见 [README](../README.md)；CI 首次实际执行与 macOS/Linux 验证不能由本地 Windows 结果推断。
 
 ## 交付与文档
 
