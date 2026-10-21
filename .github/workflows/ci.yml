@@ -126,3 +126,24 @@ jobs:
           name: ${{ matrix.artifact-name }}
           path: ${{ env.PACKAGE_PATH }}
           if-no-files-found: error
+
+  ci:
+    name: CI
+    needs: [code-check, build]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify upstream checks
+        shell: bash
+        env:
+          CODE_CHECK_RESULT: ${{ needs.code-check.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          echo "code-check: ${CODE_CHECK_RESULT}"
+          echo "build: ${BUILD_RESULT}"
+          if [ "${CODE_CHECK_RESULT}" != "success" ] || [ "${BUILD_RESULT}" != "success" ]; then
+            echo "::error::Required upstream check(s) did not succeed."
+            exit 1
+          fi
+          echo "All required upstream checks succeeded."

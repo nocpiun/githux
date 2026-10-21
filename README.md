@@ -29,7 +29,9 @@ cargo test --locked
 git diff --check
 ```
 
-[CI 配置](.github/workflows/ci.yml) 将 Windows 代码与测试检查（fmt、check、clippy、test）和 Build 矩阵并行执行。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建 debug 可执行文件，并上传名为 `githux-<Rust target>-debug` 的 artifact。产物包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。多平台流水线尚待首次云端执行，配置存在不代表各平台已构建或运行通过，见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
+[CI 配置](.github/workflows/ci.yml) 将 Windows 代码检查（fmt、check、clippy、test）与四个平台的 Debug 构建并行执行。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建，并上传 `githux-<Rust target>-debug` artifact，包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。
+
+末尾的 `CI` job 汇总所有上游结果，可在分支规则中将名称为 `CI` 的检查设为 required check。只有代码检查和整个构建矩阵均成功时才通过；维护约定见 [代码约定](docs/code-standards.md#验证)。各提交的实际结果见 GitHub Actions，验证边界见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
 
 `cargo test` 使用 GPUI 测试平台渲染实际 Hello 视图，覆盖 Tab / Shift+Tab、焦点保留与 Enter / Space 激活。测试平台不经过 Windows 原生输入分发，原实现也能通过该测试，不能据此认定用户反馈的键盘问题已经修复。真实窗口的渲染、字体与键盘操作仍需人工验收；本机键盘复测已由负责人确认通过，具体场景与限制见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。macOS/Linux 原生运行与真实交互尚未进行人工验收。
 
