@@ -20,6 +20,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js for offline script tests
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Test review wait script
+        run: node --test .agents/skills/githux-pr-review/scripts/wait-review.test.mjs
+
+      - name: Test agent dispatch skill
+        run: node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
+
       - name: Install pinned Rust
         run: |
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy

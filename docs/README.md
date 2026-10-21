@@ -15,12 +15,13 @@
 | 实际教训 | [LESSONS.md](../LESSONS.md) |
 | 已做工作、证据与后续交接 | [开发日志](devlog/README.md) |
 | 等待审查的可执行步骤 | [githux-pr-review skill](../.agents/skills/githux-pr-review/SKILL.md) |
+| 建立任务 worktree、启动/恢复可见执行会话 | [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md) |
 
 ## 当前状态
 
 - Rust + GPUI + Ely 正式单 package 工程已建立，当前仅 Hello 窗口与计数交互，运行及源码入口见 [README](../README.md)。业务模块仅有边界说明，没有登录、网络或数据库实现；真实窗口验收状态见 [本轮开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。
 - `githux-pr-review` 的等待脚本有离线测试，跨平台 CI 配置已建立。具体PR的检查、审查和合并状态以GitHub记录为准，不由本地测试或规范文档推断。
-- 基层 Agents 可见会话的任务派发 skill、worktree/context 自动生成仍待落地；本目录不代表这些能力已经实现。
+- `githux-agent-dispatch` 提供 create/start/status/resume，生成独立 worktree 和任务上下文，在可见 Windows CMD 中启动配置的交互 CLI。离线测试以及本机真实启动、键盘接管、正常退出与同会话恢复已通过，见 [验证记录](devlog/2026-10-21-agent-dispatch.md)。手工 attach 不在单写入者锁保证内；多实现者并行集成仍待验证。
 - 模块拆分、认证类型、具体网络/数据库库和缓存参数中的提案仍需确认，不因出现在这里而自动定案。
 
 ## 文档怎样维护

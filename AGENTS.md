@@ -7,7 +7,7 @@
 1. 阅读 [共享文档索引](docs/README.md)、[代码约定](docs/code-standards.md) 和 [LESSONS](LESSONS.md)。
 2. 根据任务阅读 [产品约定](docs/product.md)、[架构方案](docs/architecture.md)、[缓存策略](docs/cache-strategy.md)。核对实际代码，区分已确认、建议、待验证。
    开发顺序参考 [路线图](docs/roadmap.md)；首版排除项以产品约定为准，不能将路线图讨论稿当作实现授权。
-3. 实现与交付遵循 [Agent 工作流](docs/agent-workflow.md)；需要等待 PR 审查时使用 [githux-pr-review](.agents/skills/githux-pr-review/SKILL.md)。
+3. 实现与交付遵循 [Agent 工作流](docs/agent-workflow.md)；需要等待 PR 审查时使用 [githux-pr-review](.agents/skills/githux-pr-review/SKILL.md)；准备任务 worktree 或恢复可见执行会话时使用 [githux-agent-dispatch](.agents/skills/githux-agent-dispatch/SKILL.md)（实际 CLI/窗口验证边界见其 reference）。
 4. 检查当前分支、worktree 和已有改动。不要覆盖其他人的工作，不假定本地忽略目录会出现在其他 worktree 或云端。
 
 ## 项目边界
