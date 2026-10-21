@@ -18,14 +18,14 @@ const pr = (extra = {}) => ({ state: 'open', head: { sha: A },
 const review = (extra = {}) => ({ id: 12, user: { login: BOT },
   commit_id: A, submitted_at: since, state: 'COMMENTED',
   body: 'A suggested change', ...extra });
-function fixture({ reviews = [], comments = [], inline = [], heads = [pr()] } = {}) {
+function fixture({ reviews = [], comments = [], inline = [], reviewInline = inline, heads = [pr()] } = {}) {
   let reads = 0;
   const calls = [];
   const api = async (path, config) => {
     calls.push({ path, config });
     if (path.endsWith('/pulls/42')) return heads[Math.min(reads++, heads.length - 1)];
     if (path.includes('/issues/')) return comments;
-    if (path.includes('/reviews/') && path.includes('/comments')) return inline;
+    if (path.includes('/reviews/') && path.includes('/comments')) return reviewInline;
     if (path.includes('/reviews?')) return reviews;
     throw new Error('Unexpected request ' + path);
   };
@@ -210,4 +210,237 @@ test('CLI help and invalid arguments finish offline with documented output', asy
     assert.equal(error.code, 1);
     assert.equal(JSON.parse(error.stdout).status, 'error');
   }
+});
+
+function summary({ head = A, status = 'completed', findings = false, unresolved = findings,
+  at = since, updated = '2026-10-21T10:00:01Z', trigger = 'Manual request', extra = {} } = {}) {
+  return { id: 5, created_at: '2026-10-20T01:00:00Z', updated_at: updated,
+    user: { login: BOT, type: 'Bot' }, performed_via_github_app: { id: 1144995 },
+    html_url: 'https://github.com/acme/githux/pull/42#issuecomment-5',
+    body: '<!-- codex-pull-request-review-summary -->\n' +
+      '<!-- codex-review-state:v1 ' + JSON.stringify({ code_review: {
+        commit_sha: head, status, has_any_findings: findings, has_unresolved_findings: unresolved,
+      } }) + ' -->\n' +
+      '| 📝 **Code Review** | ' + status + ' <relative-time datetime="' + at +
+      '">time</relative-time> | `' + head.slice(0, 7) + '` | ' + trigger + ' |',
+    ...extra };
+}
+const check = (extra = {}) => ({ id: 91, name: 'CI', head_sha: A, app: { id: 15368 },
+  status: 'completed', conclusion: 'success', details_url: 'https://example.invalid/ci', ...extra });
+function withChecks(data, checks = []) {
+  const f = fixture(data);
+  const original = f.api;
+  f.api = async (path, config) => {
+    if (path === 'graphql') return { data: { repository: { pullRequest: { reviewThreads: data.threads ?? {
+      nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
+    } } } } };
+    if (path.includes('/check-runs?')) { f.calls.push({ path, config }); return checks; }
+    if (/\/pulls\/42\/comments\?/.test(path)) return data.inline ?? [];
+    return original(path, config);
+  };
+  return f;
+}
+
+test('edited existing summary bypasses comment cursor but binds code SHA, time and explicit completion', async () => {
+  const opts = options({ since, afterCommentId: 20 });
+  const f = fixture({ comments: [summary()] });
+  const r = await inspectReview(opts, f.api);
+  assert.equal(r.status, 'review_completed');
+  assert.equal(r.summary.comment_id, 5);
+  assert.equal(r.summary.commit_sha, A);
+  assert.equal(r.review_passed, null);
+  assert.equal(r.verdict, 'not_evaluated');
+  for (const c of [summary({ head: B }), summary({ at: '2026-10-21T09:59:59Z' })])
+    assert.equal(await inspectReview(opts, fixture({ comments: [c] }).api), null);
+});
+
+test('security-only edit cannot refresh the code review round; malformed or ambiguous summaries fail closed', async () => {
+  const old = summary({ at: '2026-10-21T09:59:59Z', updated: '2026-10-21T12:00:00Z' });
+  assert.equal(await inspectReview(options({ since }), fixture({ comments: [old] }).api), null);
+  const invalid = [
+    summary({ extra: { performed_via_github_app: { id: 999 } } }),
+    summary({ extra: { user: { login: BOT, type: 'User' } } }),
+    summary({ status: 'new-format' }),
+    summary({ findings: null }),
+    summary({ findings: false, unresolved: true }),
+    summary({ at: '2026-10-21T12:00:00Z' }),
+    summary({ trigger: 'PR opened' }),
+    summary({ extra: { body: '<!-- codex-pull-request-review-summary --> unknown version' } }),
+  ];
+  for (const c of invalid) {
+    const r = await inspectReview(options({ since, afterCommentId: 20 }), fixture({ comments: [c] }).api);
+    assert.equal(r.status, 'unverified_bot_message');
+    assert.equal(r.review_passed, null);
+  }
+  const r = await inspectReview(options(), fixture({ comments: [summary(), summary({ extra: { id: 6 } })] }).api);
+  assert.equal(r.status, 'unverified_bot_message');
+});
+
+test('human copied summary is ignored; running summary waits for the complete batch, including early formal review', async () => {
+  const human = summary({ extra: { user: { login: 'human', type: 'User' } } });
+  assert.equal(await inspectReview(options(), fixture({ comments: [human] }).api), null);
+  const f = fixture({ comments: [summary({ status: 'running' })], reviews: [review()] });
+  assert.equal(await inspectReview(options(), f.api), null);
+  assert.equal(f.calls.some(c => c.path.includes('/reviews?')), false);
+});
+
+test('known receipt does not wake the model while summary is running; quota/errors still surface', async () => {
+  const receipt = { ...summary(), id: 30, created_at: since,
+    body: '<!-- codex-review-receipt:v1 -->\nNo major issues.\n**Reviewed commit:** `' + A.slice(0, 10) + '`' };
+  const running = summary({ status: 'running' });
+  assert.equal(await inspectReview(options(), fixture({ comments: [running, receipt] }).api), null);
+  const error = { ...receipt, body: 'Review failed: quota exhausted' };
+  assert.equal((await inspectReview(options(), fixture({ comments: [running, error] }).api)).status, 'unverified_bot_message');
+});
+
+test('completed findings collect entire formal batch and carried inline comments, without waiting for CI', async () => {
+  const inline = [{ id: 77, node_id: 'root77', commit_id: B, user: { login: BOT }, body: 'Carried finding' }];
+  const threads = { nodes: [{ isResolved: false, comments: { nodes: [{ id: 'root77' }] } }],
+    pageInfo: { hasNextPage: false, endCursor: null } };
+  const f = withChecks({ comments: [summary({ findings: true })], reviews: [review()],
+    reviewInline: [inline[0]], inline, threads });
+  const r = await inspectReview(options({ waitCi: true }), f.api);
+  assert.equal(r.status, 'review_arrived');
+  assert.deepEqual(r.comments, inline);
+  assert.equal(r.reviews.length, 1);
+  assert.equal(f.calls.some(c => c.path.includes('/check-runs?')), false);
+});
+
+test('failed review status surfaces without treating lack of findings as success', async () => {
+  const r = await inspectReview(options(), fixture({ comments: [summary({ status: 'failed' })] }).api);
+  assert.equal(r.status, 'review_failed');
+  assert.equal(r.review_passed, null);
+});
+
+test('CI wait needs exact-head trusted aggregate success; missing/pending/spoofed checks keep waiting', async () => {
+  for (const checks of [[], [check({ status: 'in_progress', conclusion: null })],
+    [check({ head_sha: B })], [check({ app: { id: 999 } })]]) {
+    const f = withChecks({ comments: [summary()] }, checks);
+    assert.equal(await inspectReview(options({ waitCi: true }), f.api), null);
+  }
+  const f = withChecks({ comments: [summary()] }, [check()]);
+  const r = await inspectReview(options({ waitCi: true }), f.api);
+  assert.equal(r.status, 'checks_ready');
+  assert.equal(r.review_passed, null);
+  assert.equal(r.ci.checks[0].id, 91);
+  assert.equal(f.calls.find(c => c.path.includes('/check-runs?')).config.collection, 'check_runs');
+});
+
+test('CI failure/cancellation/skipped result returns promptly even before review completes', async () => {
+  for (const conclusion of ['failure', 'cancelled', 'skipped', 'neutral', 'timed_out']) {
+    const f = withChecks({ comments: [summary({ status: 'running' })] }, [check({ conclusion })]);
+    assert.equal((await inspectReview(options({ waitCi: true }), f.api)).status, 'ci_failed');
+  }
+});
+
+test('duplicate required check names are ambiguous and extra required checks must all succeed', async () => {
+  await assert.rejects(inspectReview(options({ waitCi: true }), withChecks({ comments: [summary()] },
+    [check(), check({ id: 92 })]).api), /Ambiguous/);
+  const opts = options({ waitCi: true, checks: ['CI', 'Other'] });
+  assert.equal(await inspectReview(opts, withChecks({ comments: [summary()] }, [check()]).api), null);
+  const f = withChecks({ comments: [summary()] }, [check(), check({ id: 92, name: 'Other' })]);
+  assert.equal((await inspectReview(opts, f.api)).status, 'checks_ready');
+});
+
+test('push or closure while collecting summary/CI never releases stale evidence', async () => {
+  for (const next of [pr({ head: { sha: B } }), pr({ state: 'closed' })]) {
+    const f = withChecks({ comments: [summary()], heads: [pr(), next] }, [check()]);
+    const r = await inspectReview(options({ waitCi: true }), f.api);
+    assert.ok(['head_changed', 'pr_closed'].includes(r.status));
+    assert.equal(r.ci, undefined);
+  }
+});
+
+test('one foreground wait handles in-place running-to-complete then CI readiness without intermediate results', async () => {
+  let round = 0, clock = 0;
+  const api = async (path) => {
+    if (path.endsWith('/pulls/42')) return pr();
+    if (path.includes('/issues/')) return [summary({ status: round === 0 ? 'running' : 'completed' })];
+    if (path.includes('/check-runs?')) return [check({ status: round < 2 ? 'in_progress' : 'completed' })];
+    throw new Error(path);
+  };
+  const messages = [];
+  const r = await waitForReview(options({ waitCi: true, timeoutMs: 5000, intervalMs: 1000 }), {
+    api, now: () => clock, sleep: async ms => { clock += ms; round++; }, progress: m => messages.push(m),
+  });
+  assert.equal(r.status, 'checks_ready');
+  assert.equal(round, 2);
+  assert.equal(messages.length, 1);
+});
+
+test('paginated check-run object collections flatten every page and fail on missing collection', async () => {
+  const execute = async () => ({ stdout: JSON.stringify([{ check_runs: [check()] }, { check_runs: [check({ id: 92 })] }]) });
+  assert.deepEqual((await ghApi('checks', { paginate: true, collection: 'check_runs', execute })).map(c => c.id), [91, 92]);
+  await assert.rejects(ghApi('checks', { paginate: true, collection: 'wrong', execute }), /分页/);
+  assert.equal(parseArgs([...args, '--wait-ci', 'true']).waitCi, true);
+  assert.deepEqual(parseArgs([...args, '--wait-ci', 'true', '--check', 'CI', '--check', 'Other']).checks, ['CI', 'Other']);
+  assert.throws(() => parseArgs([...args, '--wait-ci', 'yes']));
+  assert.throws(() => parseArgs([...args, '--check', 'CI']));
+});
+
+test('receipt without a usable summary remains unverified; trigger cursor needs its server timestamp', async () => {
+  const receipt = { ...summary(), id: 30, created_at: since,
+    body: '<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `' + A.slice(0, 10) + '`' };
+  assert.equal((await inspectReview(options(), fixture({ comments: [receipt] }).api)).status, 'unverified_bot_message');
+  assert.throws(() => parseArgs([...args, '--after-comment-id', '30']), /requires --since/);
+});
+
+
+test('only current-round and explicitly unresolved carried comments survive all thread pages', async () => {
+  const comment = (id, extra = {}) => ({ id, node_id: 'root' + id, commit_id: B,
+    user: { login: BOT }, created_at: '2020-01-01T00:00:00Z', ...extra });
+  const current = comment(80, { commit_id: A, created_at: since });
+  const inline = [comment(77), comment(78), comment(79, { in_reply_to_id: 78 }), current,
+    comment(81), comment(82, { in_reply_to_id: 78, user: { login: 'human' } })];
+  const f = withChecks({ comments: [summary({ findings: true })], reviews: [review()],
+    inline, reviewInline: [current] });
+  let pages = 0;
+  const api = async (path, config) => {
+    if (path !== 'graphql') return f.api(path, config);
+    assert.match(config.query, pages ? /after:"page2"/ : /after:null/);
+    const nodes = [{ isResolved: pages === 0, comments: { nodes: [{ id: pages ? 'root78' : 'root77' }] } }];
+    return { data: { repository: { pullRequest: { reviewThreads: {
+      nodes, pageInfo: { hasNextPage: pages++ === 0, endCursor: 'page2' },
+    } } } } };
+  };
+  const r = await inspectReview(options({ since, afterReviewId: 10 }), api);
+  assert.deepEqual(r.comments.map(c => c.id), [78, 79, 80]);
+  assert.equal(pages, 2);
+  for (const threads of [{ nodes: [], pageInfo: {} },
+    { nodes: [{ comments: { nodes: [{ id: 'root77' }] } }], pageInfo: { hasNextPage: false } },
+    { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } }]) {
+    await assert.rejects(inspectReview(options(), withChecks({ comments: [summary({ findings: true })],
+      inline, threads, reviews: [review()], reviewInline: [current] }).api), /review-thread/);
+  }
+});
+
+test('GraphQL adapter posts only a query and rejects partial-data errors', async () => {
+  const query = 'query { viewer { login } }';
+  const execute = async (_file, argv, config) => {
+    assert.deepEqual(argv, ['api', 'graphql', '--hostname', 'github.com', '--method', 'POST', '-f', 'query=' + query]);
+    assert.equal(config.shell, false);
+    return { stdout: '{"data":{"viewer":{"login":"user"}}}' };
+  };
+  assert.equal((await ghApi('graphql', { query, execute })).data.viewer.login, 'user');
+  await assert.rejects(ghApi('graphql', { query: 'mutation { bad }', execute }), /read-only/);
+  await assert.rejects(ghApi('graphql', { query, execute: async () => ({ stdout: '{"data":{},"errors":[{"message":"forbidden"}]}' }) }), /GraphQL query failed/);
+});
+
+
+test('a findings summary waits for current formal review and inline propagation despite old carried threads', async () => {
+  let round = 0, clock = 0;
+  const current = { id: 90, node_id: 'current90', user: { login: BOT }, commit_id: A, body: 'Current finding' };
+  const old = { id: 77, node_id: 'old77', user: { login: BOT }, commit_id: B, body: 'Old unresolved finding' };
+  const api = async (path, config) => withChecks({
+    comments: [summary({ findings: true })], reviews: round ? [review()] : [],
+    reviewInline: round > 1 ? [current] : [], inline: [old, ...(round > 1 ? [current] : [])],
+    threads: { nodes: [{ isResolved: false, comments: { nodes: [{ id: 'old77' }] } }],
+      pageInfo: { hasNextPage: false } },
+  }).api(path, config);
+  const r = await waitForReview(options({ timeoutMs: 5000, intervalMs: 1000 }), {
+    api, now: () => clock, sleep: async ms => { clock += ms; round++; },
+  });
+  assert.equal(round, 2);
+  assert.equal(r.status, 'review_arrived');
+  assert.deepEqual(r.comments.map(c => c.id), [77, 90]);
 });
