@@ -12,7 +12,7 @@
 ## 项目边界
 
 - Rust + GPUI + Ely；Windows 优先，之后 macOS/Linux。保持 Ely 原型画风，UI 字体 Noto Sans、代码字体 Google Sans Code。
-- 仓库目前处于设计和工作流搭建阶段；没有正式应用构建配置时，不虚构 Cargo/CI 命令或声称应用已验证。
+- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 GPUI + Ely Hello binary 和 Windows CI 配置。运行与检查命令见 [README](README.md)，实际验证边界见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。业务模块仍未实现，不将目录预留视为业务交付。
 - 主 Agent 协调方向、任务和例外；基层 Agents 使用本地任务上下文指定的执行工具。实现任务各用独立分支和 `D:\githux-<task>` worktree。首次试跑只用一个实现者，解除后按依赖、冲突和资源并行。
 - 共享事实写入受 Git 跟踪的 `docs/`。主 Agent 的私有交接记忆保存在 `.agents/` 下被 Git 忽略的专属目录；`.agents/task/` 是本任务临时状态。不得上传凭据、完整私人记忆或原始会话日志。
 

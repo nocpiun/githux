@@ -28,7 +28,19 @@ git diff --check
 git diff --cached --check
 ```
 
-Node.js 20+；脚本使用本机 `gh`，测试本身不访问 GitHub。应用 Cargo 构建、测试与 CI 命令在正式代码建立后补充，不提前声称已存在。
+Node.js 20+；脚本使用本机 `gh`，测试本身不访问 GitHub。
+
+正式应用是单 Cargo package，固定 Rust 1.98.1。Windows 应用检查如下，CI 配置见 [windows.yml](../.github/workflows/windows.yml)：
+
+```sh
+cargo fmt --all -- --check
+cargo check --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked
+cargo test --locked
+```
+
+`cargo test` 使用 GPUI 测试平台覆盖实际 Hello 视图的焦点导航、重绘后焦点保留和按键激活，没有为预留模块编写占位测试。该测试不经过 Windows 原生输入分发，不替代真实窗口复测；具体证据和限制见 [开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。依赖锁文件必须入 Git；每个 worktree 使用自己的 `target/`。运行步骤和 GUI 验收要求见 [README](../README.md)；CI 首次实际执行与 macOS/Linux 验证不能由本地 Windows 结果推断。
 
 ## 交付与文档
 

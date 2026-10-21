@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-10-21。Rust + GPUI + Ely、多账户保存但单账户活动、离线阅读已确认。下述模块与技术依赖是讨论方案，尚未实现或整体定案；不要求首轮建成一组独立 crates。
+更新：2026-10-21。Rust + GPUI + Ely、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package，当前仅实现 Hello 桌面窗口；业务职责仍是扩展边界，不代表功能已实现。
 
 ## 建议的职责划分
 
@@ -50,4 +50,10 @@ PAT、OAuth App、GitHub App 尚未最终选择；原型假数据不代表认证
 
 数据类型矩阵、快照/当前值的区别见 [缓存策略](cache-strategy.md)，页面不自行决定 SQL 和 TTL。账户移除及权限失效后的私有缓存政策、重启恢复、数据库迁移机制、容量和网络调度预算仍待细化。
 
-实现模块时补充真实源码入口、类型与可运行验证命令。当前不要把本节的模块名称当作已经存在的目录或接口。
+## 已建立的工程边界
+
+[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，[`ui::Hello`](../src/ui/mod.rs) 持有局部计数和根焦点，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。本轮使用系统标题栏，未实现正式外壳、island 或标签。
+
+`workspace/domain/auth/data/github/network/storage/content/diagnostics` 各有 Rust 模块与简短边界说明，尚无业务实现，没有提前选择 HTTP、数据库或认证方案。现有依赖中出现的相关库是框架传递依赖，不代表 Githux 业务已采用它们。请求与状态约束仍用于后续实现。
+
+GPUI 基线为 `gpui-pre` / `gpui-pre-platform` 0.3.8（`font-kit`），Ely 固定 Git revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不引用原型 path 或共享 target。当前使用未打补丁的上游；以后接入输入/只读编辑器时，先验证原型 IME/readonly 问题是否仍可重现，再决定上游升级或最小补丁。构建命令见 [README](../README.md)，真实验收证据见 [开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。
