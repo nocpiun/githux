@@ -26,6 +26,7 @@
 - 第二轮审查指出：不应把“不能保密 `client_secret`”直接推导为“桌面方案应走 device flow”。官方 [OAuth App 最佳实践](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/best-practices-for-creating-an-oauth-app) 把桌面应用归为 public client，建议随包发行 secret 并用 PKCE 加固，且**优先 authorization code + PKCE 而非 device flow**（device flow 无回调 URI，更易被远程钓鱼滥用）。已改为两个流程均保留、默认候选是 web flow + PKCE + loopback，并补充了各自的 secret 与钓鱼风险。
 - 第三轮审查指出：`/user/orgs` 对细粒度 token 会返回 `200` + 空列表，不能与 `/user/memberships/orgs` 当作等价。已核实官方端点说明并修正：表格与要点里明确该差异，错误表新增一行，并建议组织枚举统一改用 memberships 端点。
 - 第四轮审查指出两处：GraphQL 主限流耗尽返回 HTTP `200` + `errors`（次级为 200 或 403），只看状态码会误判；issue 语义/混合搜索另限 10 次/分钟。两处均已核实（实测 `search_type=semantic|hybrid` 返回 `X-RateLimit-Resource: semantic_search`、`X-RateLimit-Limit: 10`）并在错误表与限流节补充。
+- 第五轮审查指出：`itemShowcase.hasPinnedItems` 计的是仓库**或 gist**，`items` 是 `PinnableItem` 联合，gist-only 用户无法从 `itemShowcase` 拿到仓库热门回退。已按 schema 文本修正 Pinned/Popular 条目与要点，并把它作为第四项候选问题（可延后到该功能实现时再定）。
 
 ## 后续
 

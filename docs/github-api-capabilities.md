@@ -177,14 +177,17 @@
 | 基本资料 | `GET /users/{username}`；GraphQL `user`（`name`、`bio`、`avatarUrl`、`company`、`location`、`websiteUrl`、`followers.totalCount`） | 细粒度：无需权限 | 单次 GraphQL 查询即可取全，REST 需要一次请求 |
 | 本人私有字段 | `GET /user` | classic：`read:user` 或 `user` | 私有字段（私有仓库数、磁盘用量等）仅本人可见 |
 | 个人 README | 无专用字段。按公开规则组合：仓库名 = 用户名、公开、根目录 `README.md`、内容非空 | 细粒度：`Metadata`/`Contents` 读 | 规则来自官方文档；API 不会告诉你“该仓库是否被分享到 Profile”。一个用户可能不存在同名仓库（实测 `torvalds/torvalds` 为 404） |
-| Pinned | GraphQL `user.pinnedItems(first:, types:[REPOSITORY])`、`pinnedItemsRemaining`、`anyPinnableItems` | 细粒度：无需权限 | **REST 无公开等价** |
-| Pinned → Popular 回退 | GraphQL `user.itemShowcase { hasPinnedItems items(first:) }` | 同上 | `hasPinnedItems=false` 时 `items` 返回按热度挑选的仓库（实测 octocat 返回 8 项热门仓库，而 `pinnedItems` 为空） |
+| Pinned | GraphQL `user.pinnedItems(first:, types:[REPOSITORY])`、`pinnedItemsRemaining`、`anyPinnableItems` | 细粒度：无需权限 | **REST 无公开等价**；`types:[REPOSITORY]` 能滤掉 gist 等非仓库 pin |
+| Pinned → Popular 回退 | GraphQL `user.itemShowcase { hasPinnedItems items(first:) }` | 同上 | `hasPinnedItems` 计算的是**仓库或 gist**，不是仓库；`items` 是 `PinnableItem` 联合，只有“一个 pin 都没有”时才返回热门仓库 |
 | 贡献热力图 | GraphQL `contributionsCollection(from:, to:).contributionCalendar`（`weeks[].contributionDays[]`：`date`、`contributionCount`、`contributionLevel`、`color`） | classic：`read:user` 才含私有/内部仓库贡献 | **REST 无公开等价**（`/users/{u}/contributions` 实测 404）；默认区间为最近一年，`contributionYears` 可枚举可选年份 |
 | Contribution Activity 列表 | 不实现（首版排除 D5） | — | 与热力图是不同的数据；不因包含在 `contributionsCollection` 就顺手接入 |
 
 要点：
 
-- `itemShowcase` 是“已 Pin 就返回 Pin，否则返回热门”的混合语义，因此它正是“Pinned，没有才 Popular”这一需求的数据源：一次查询 `itemShowcase { hasPinnedItems items(first: 6) }` 就能同时拿到回退内容与“当前是否为回退”的状态。只查 `pinnedItems` 时没有 Pin 的用户会得到空列表，无法实现 Popular 回退，所以不要用 `hasPinnedItems` + `pinnedItems` 组合去构造回退；只在需要区分“用户真实 Pin 列表”与“服务端热门选择”的细节时才额外取 `pinnedItems`。
+- `itemShowcase` 的语义是“已 Pin 任意项就返回 Pin，否则返回热门”，且 `hasPinnedItems` 统计的是**仓库或 gist**，`items` 是 `PinnableItem` 联合。这带来两个产品事实：
+  1. **gist-only 用户**：`hasPinnedItems=true` 但 `items` 返回的是 gist 而不是仓库，无法用 `itemShowcase` 拿到 Popular 仓库回退。
+  2. **混合 pin 用户**：`items` 返回的仓库数量可能少于请求数（被 gist 占位）。
+  首版只展示仓库，因此应以 `pinnedItems(types:[REPOSITORY])` 作为真实仓库 pin 列表；Popular 回退取 `itemShowcase`，但当 `itemShowcase` 里出现 gist（或仓库数不足）时，服务端不会提供“排除 gist 的仓库热门选择”，需要产品决定这类少见情况下的呈现（例如只展示仓库 pin、留空或标记部分）。实测 octocat 无 pin 时 `itemShowcase.items` 返回 8 项热门仓库、`pinnedItems` 为空，与“无 pin 则热门回退”一致。
 - 热力图等级是相对分位（`FIRST_QUARTILE`…`FOURTH_QUARTILE`），不是绝对阈值；`color` 由服务端给出，包含季节性主题（schema 里有 `isHalloween`），不应硬编码配色。
 - 私有贡献被计入时只显示数量，不显示仓库细节；打开私有贡献可见性属于用户设置，客户端无法探测“是否有被隐藏的贡献”，只能显示服务端返回的结果。
 
@@ -311,6 +314,7 @@
 1. **H1 Notifications 是否进入首版最小范围，以及为此接受哪种登录载体？** 事实是：Notifications REST 在 classic PAT 与 OAuth App token（`notifications`/`repo` scope）下可用，细粒度 PAT 与 GitHub App user token 不支持。选项：(a) 首版不做 H1，登录可用 GitHub App user token（最小权限）；(b) 做 H1，用 OAuth App（默认 web flow + PKCE + loopback，或 device flow），接受 `repo` 粗 scope、随包 secret 与组织限制风险；(c) 做 H1，要求用户提供 classic PAT，接受体验与组织禁用风险。
 2. **“全部仓库”的语义。** 是按 `/user/repos` 的可见集合（owner + collaborator + organization_member），还是限定本人/单组织？若选细粒度 PAT 作为任何长期方案，多组织必然要退化为多 token 或多账户，需要产品决定是否接受。
 3. **Home “最近参与且有更新”与“关注 Feed”的口径。** 是否接受用 `involves:@me` + `updated:` 作为“参与”，并在 UI 上明确它不等于网站首页？Feed 是否接受 Events API 事件流（延迟 30 秒–6 小时、300 条/30 天）而不是网站 Feed 镜像？
+4. **（可在 Pinned/Popular 实现任务开始时再定）gist-only 用户的仓库热门回退呈现。** `itemShowcase.hasPinnedItems` 计仓库或 gist，gist-only 用户拿不到服务端“仓库热门回退”，需要产品决定这种情况下的呈现（只展示仓库 pin / 留空 / 标记部分）。
 
 附带但不需要立刻裁决的观察（供后续任务参考，不作批准）：
 
