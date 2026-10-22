@@ -532,6 +532,40 @@ fn a_composing_input_method_keeps_up_down_and_escape_for_its_candidate_list(
 }
 
 #[gpui::test]
+fn the_wheel_keeps_the_user_position_until_the_cursor_moves(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("search-entry", cx);
+    let list = bounds("palette-list", cx);
+    cx.simulate_mouse_move(list.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: list.center(),
+        delta: ScrollDelta::Lines(gpui::point(0.0, -8.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    cx.run_until_parked();
+    let before = view.read_with(cx, |shell, _| shell.palette_scroll_offset());
+    assert!(before.y < px(0.0), "the wheel moves the list");
+
+    // A repaint must not snap the list back to the highlighted row.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.palette_scroll_offset()),
+        before,
+        "rendering alone must not request another scroll"
+    );
+
+    // Moving the highlight with the keyboard is allowed to bring its row into view once.
+    press("down", cx);
+    let after = view.read_with(cx, |shell, _| shell.palette_scroll_offset());
+    assert!(
+        after.y >= before.y,
+        "cursor movement may scroll, never fight the user"
+    );
+}
+
+#[gpui::test]
 fn escape_closes_the_palette_without_running_the_highlighted_row(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
     click("search-entry", cx);

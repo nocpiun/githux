@@ -39,14 +39,14 @@ cargo test --locked
 git diff --check
 ```
 
-`cargo test --locked` 共 24 项通过，其中 21 项在 GPUI 测试平台渲染真实 `Shell` 视图：
+`cargo test --locked` 共 27 项通过，其中 23 项在 GPUI 测试平台渲染真实 `Shell` 视图：
 
 - 启动 Home、fixture 至少 100 条仓库、侧栏与 island 关键节点已绘制；
 - 1400×900 → 900×600 缩放后 Home/Settings 位置与高度不变、只有仓库组变矮、底部入口贴住侧栏底部、island 不越界、侧栏宽度不变、Home 两列等宽且不越出 island；
 - 滚轮在侧栏只滚仓库组，island 页面偏移不变；
 - 点击 Home/Settings/四个底部入口/仓库行/账户行得到正确路由，New 禁用不改变路由；
 - 搜索入口打开浮层、过滤、Enter 运行、Esc 关闭不导航、关闭后仍有焦点目标；
-- 上下移动循环、Enter 运行的是高亮行而不是首行；
+- 上下移动循环、Enter 运行的是高亮行而不是首行；滚轮位置由用户保留，重绘不滚动，只有键盘移动高亮时才能把它的行带回视野；
 - 组合态（marked range）期间 Enter 不运行任何行，Up/Down 不移动高亮、Esc 不关闭浮层（这三者属于输入法候选）；
 - Ctrl+K 在任意页面打开浮层；Tab 能到侧栏行并用 Enter 激活；
 - 中文与超长仓库名保持在侧栏列内；
@@ -77,6 +77,10 @@ git diff --check
 2. **滚动索引与列表子项错位。** `scroll_to_item` 数的是滚动容器的子项，而分组标题也占一个子项；原来直接传结果序号，靠近底部时高亮会滚出视野。现在 `palette::layout` 同时给出标题与行的子项序列，`child_index` 把结果序号换算成子项序号，绘制与滚动共用同一份布局。测试新增 `the_scroll_child_index_counts_the_headings_in_between`，并在真实窗口用 Ctrl+K 加 40 次 Down 确认高亮仍在可视区内。
 
 两条都属于既有需求内的正确性修复，不涉及产品取舍，因此本 PR 全程无待裁决事项。
+
+## 二轮审查修复
+
+二轮 Codex 审查（review `5611298378`，针对 `acb876d`）提出一条 P2：渲染时每帧无条件 `scroll_to_item`，滚轮浏览未过滤列表时会被下一次重绘拉回高亮行，鼠标难以浏览下部结果。这也是既有需求内的正确性修复：渲染路径不再请求滚动，`Session::move_cursor` 只在键盘移动高亮时把它的行带进视野；新增 `the_wheel_keeps_the_user_position_until_the_cursor_moves` 固定该行为，并在真实窗口用滚轮加 30 次 Down 确认高亮与滚动一致。前两条 P2 的修复已在同一 head 上复核成立。
 
 ## 与 main 的 CI 变更组合
 

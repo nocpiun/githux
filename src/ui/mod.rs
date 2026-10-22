@@ -131,6 +131,13 @@ impl Shell {
             .is_some_and(|session| session.composing(window, cx))
     }
 
+    #[cfg(test)]
+    pub fn palette_scroll_offset(&self) -> Point<gpui::Pixels> {
+        self.palette
+            .as_ref()
+            .map_or(Point::default(), |session| session.scroll.offset())
+    }
+
     /// Moves to `route`, closing an open palette; true when the page changed.
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) -> bool {
         self.close_palette(cx);

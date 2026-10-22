@@ -302,8 +302,8 @@ pub(super) fn render(view: View, cx: &mut App) -> AnyElement {
         .filter(|entry| matches!(entry, Entry::Command(_)))
         .count();
     let cursor = view.cursor.min(count.saturating_sub(1));
-    // The list's scroll handle counts every child, headings included.
-    view.scroll.scroll_to_item(child_index(&entries, cursor));
+    // Scrolling belongs to the user: the highlight is brought into view when the cursor moves
+    // (`Session::move_cursor`), not on every render, or a wheel position would snap back.
 
     let mut rows: Vec<AnyElement> = Vec::with_capacity(entries.len() + 1);
     let mut position = 0;
@@ -419,6 +419,7 @@ pub(super) fn render(view: View, cx: &mut App) -> AnyElement {
         .child(
             div()
                 .id("palette-list")
+                .debug_selector(|| "palette-list".to_string())
                 .flex()
                 .flex_col()
                 .flex_1()
