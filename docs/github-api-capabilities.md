@@ -2,7 +2,7 @@
 
 核验日期：2026-10-22（Asia/Shanghai）。范围来自 [产品约定](product.md#首版范围) 与 [路线图 R2](roadmap.md#r2认证与最小数据通路)。
 
-**本文是研究交付，不是批准决定。** 表格中的“需选择”只说明存在必须由负责人或主 Agent 决定的取舍；推荐项写成候选，不表示已选定登录方式、HTTP 库、运行时、数据库或私有缓存保留政策。路线图 R2 的实现任务以本文事实为依据，仍需先补齐对应裁决。
+**本文区分 API 研究与已确认产品决定。** 2026-10-22 负责人已选 PAT 登录、`/user/repos` 可见集合及 Home/Feed 的标题和方向，权威约定见 [产品文档](product.md)。HTTP 库、运行时、数据库、私有缓存政策及下文标明的剩余细节仍未定；研究矩阵不是已实现或已验证的业务能力。
 
 ## 结论速览
 
@@ -16,7 +16,7 @@
 | Releases / Contributors / Languages | 可实现 | `…/releases`、`…/contributors`、`…/languages` | Contributors 结果可能滞后数小时、匿名化上限 500 个邮箱；Languages 可能为空对象 |
 | Packages / Environments | 已排除出首版 | 不请求 | 不因接口存在而纳入 |
 | Home 最近参与且有更新 | 受限 | `GET /user/issues` + `GET /search/issues`（`involves:`） | 没有与网站“Recent activity”完全等价的接口；参与语义需自行定义 |
-| Home 关注动态 Feed | 受限 / 需选择 | `GET /feeds` + Events API | 私有 Feed 只对旧式不可撤销 token 开放；Events 延迟 30 秒–6 小时、仅 300 条/30 天 |
+| Home 关注动态 Feed | 已选择受限事件流 | `GET /users/{u}/received_events` | 接受 Events 延迟 30 秒–6 小时、仅 300 条/30 天；不承诺网站 Feed 镜像 |
 | Profile 资料 | 可实现 | `GET /users/{username}`、GraphQL `user` | 私有字段需要 `read:user`/`user` |
 | 个人 README 发现 | 受限（无专用字段） | 仓库名=用户名的公开仓库 + README | 无公开等价字段，必须自行组合发现规则 |
 | Pinned / Popular | 可实现（仅 GraphQL） | `user.pinnedItems`、`user.itemShowcase` | REST 无公开等价；`itemShowcase` 会混入“热门回退” |
@@ -43,7 +43,7 @@
 | 方案 | 首版读取覆盖 | H1 Notifications | 权限粒度 | 多组织/账户 | 桌面 secret | SSO 与组织策略 | 主要限制 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Classic PAT | 覆盖，含私有 `repo` | 支持（`notifications` 或 `repo`） | 粗：`repo`、`read:user`、`notifications`、`read:org` | 单 token 覆盖用户可见的全部组织 | 用户手动生成、手动粘贴 | 建后需为该组织单独授权；未授权返回 403（含 `X-GitHub-SSO` URL，1 小时有效）或多组织 `partial-results` | 组织可禁用 classic PAT（`403`）；无法限制具体仓库；一年未用会被自动移除 |
-| Fine-grained PAT | 覆盖（`Metadata`/`Contents` 读），公开仓库无需权限 | **不支持**（文档明确） | 细：按仓库/权限 | **单 token 只能一个 resource owner**，多组织要多个 token | 用户手动生成、手动粘贴 | 创建时选定组织即完成 SSO；组织可要求审批，待审批时仅能读公共资源 | 不支持外部协作者/非成员公共仓库写入；组织可禁用；不适合作为产品登录 |
+| Fine-grained PAT | 覆盖（`Metadata`/`Contents` 读），公开仓库无需权限 | **不支持**（文档明确） | 细：按仓库/权限 | **单 token 只能一个 resource owner**，多组织要多个 token | 用户手动生成、手动粘贴 | 创建时选定组织即完成 SSO；组织可要求审批，待审批时仅能读公共资源 | 不支持外部协作者/非成员公共仓库写入；组织可禁用；首版未选用 |
 | OAuth App（web flow + PKCE） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | public client 无法保密 `client_secret`：官方建议随包发行并使用 PKCE 加固，或改由后端代换 token | **token 只对登录时已有活动 SSO 会话且允许该 App 的组织生效**；loopback `127.0.0.1`/`::1` 回调可用 | 组织可限制 OAuth App，成员无法授权；scope 无法细分；带发行 secret 属于已知风险。**若 App 启用 token 过期或请求 `offline_access`，access token 8 小时过期 + 可轮换 refresh token（6 个月）** |
 | OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down`；官方建议只在受限环境（CLI/IoT/无头）启用，因为无回调 URI 更容易被远程钓鱼滥用。**同样可能拿到 8 小时 access + 6 个月 refresh token** |
 | GitHub App user token | 覆盖 | **不支持**（Notifications REST 明确排除） | 细：按 App 注册权限 ∩ 用户权限 | 需逐组织安装 + 逐用户授权 | device flow 只需 `client_id`；web flow 换 token 需 `client_secret` | 需组织安装；SAML 场景需先建立活动 SSO 会话再授权 | token 生命周期**取决于 App 是否启用 expiring user tokens**（默认启用，可 opt-out）：启用则 8 小时过期 + 6 个月可轮换 refresh，opt-out 则长期且无 refresh；H1 因此不可用 |
@@ -55,17 +55,13 @@
 - 细粒度 PAT 每次只能选一个 resource owner，因此“侧边栏显示全部仓库”在细粒度 PAT 下需要多 token 或退化为单组织范围；这条直接影响仓库集合的可实现程度。
 - Notifications 的 token 支持差异（端点级“不支持细粒度 token” vs scope 级“OAuth 可用”）见下文 [H1](#h1-notifications)；它决定登录方案是否可行，必须作为裁决输入。
 
-### 推荐（候选，需负责人决定）
+### 首版认证决定（2026-10-22）
 
-推荐把 **OAuth App** 作为首版产品登录的候选方案（web flow + PKCE 与 device flow 两个候选流程都保留），理由是可覆盖全部首版读取能力，并以 `notifications` scope 满足 H1（scope 参考与 OAuth/GitHub App 对照页都有依据）；代价是 scope 较粗（`repo` 等于对该用户可见仓库的读写范围），且组织可以限制 OAuth App。
+负责人选择 PAT 作为正式产品登录方式，不建设服务器来托管 `client_secret`。结合保留的 Notifications，首版使用 Classic PAT；原研究中的 OAuth 优先建议已被该决定取代。产品边界见 [登录与未来写能力](product.md#登录与未来写能力)，未来写操作的权限与缓存边界见 [架构方案](architecture.md#认证与外部边界)。
 
-两个流程的取舍（官方 OAuth App 最佳实践）：官方把桌面应用归为 public client，明确建议“随包发行 `client_secret` 并用 PKCE 加固”，并且**建议优先选 authorization code + PKCE 而不是 device flow**，因为 device flow 不需要回调 URI，容易被远程钓鱼滥用。因此默认候选是 **web flow + PKCE + loopback 回调**（`http://127.0.0.1:<port>/…`，官方也提示 RFC 建议用 `127.0.0.1`/`::1` 而不是 `localhost`）；若产品不接受随包 secret，则退到 device flow，但需接受它本身更弱的钓鱼抵抗能力。若后端能保密 secret，则由后端代换 token 是最小风险选项，但会引入服务端依赖。
+Classic PAT 的 scope 和组织授权仍限制实际能力。读取私有仓库所需的 `repo` 同时包含写权限，不宣称 token 是只读，也不因未来要支持写操作就预先索取所有管理权限；创建引导的最小 scope 清单在认证任务前细化。过期或撤销时由用户替换 PAT。PAT 选择不表示 OAuth 必须部署后端：矩阵仍保留公开客户端 PKCE 和无 secret 的 device flow 的研究事实，但首版不接入这些流程。
 
-若负责人判定 H1 首版可以不做或允许没有 H1，则 **GitHub App + user token** 是更小权限面的候选（细粒度、8 小时 token、可 refresh），代价是每个组织都要安装、Notifications 完全不可用。
-
-**细粒度 PAT 建议只作验证手段，不作产品登录方案**：它适合在本地做最小权限读取验证，但需要用户手工建 token、单组织范围、无 Notifications，桌面产品无法给出可接受的初次体验。classic PAT 同样只作验证/诊断，因为组织策略和 scope 粗粒度都不适合作为产品入口。
-
-### 桌面 secret 边界
+### 其他认证方案的研究边界（首版未采用）
 
 - device flow 的客户端只需要 `client_id`，因此不需要随包分发 secret；web flow 换 token 需要 `client_secret`，官方对 public client 的结论是“无法保密，只能随包发行并用 PKCE 加固”，所以 web flow 方案必须同时接受这个已知风险，不能把它当作“安全完成”。
 - 两种流程都不会把 `client_secret` 变成可保密的对象，但**不想要 secret 时除了后端代换 token 和 GitHub App（device flow 只需 `client_id`），OAuth App 的 device flow 同样不需要 secret**，且仍然覆盖 H1；它的代价是官方更弱的安全评价（更易被远程钓鱼），且必须在 App 设置里启用。刷新 token 时，device flow 签发的 token 也不需要 `client_secret`。
@@ -90,7 +86,7 @@
 
 要点：
 
-- 三个 REST 列表来源含义不同：`/user/repos` 是“显式可用”集合（本人、协作者、组织成员），`/users/{u}/repos` 只有公共仓库，`/orgs/{o}/repos` 是单组织视图。首版若声称“全部仓库”，必须明确它是 `/user/repos` 的可见集合，不能混用后两者再声明完整。
+- 三个 REST 列表来源含义不同：`/user/repos` 是“显式可用”集合（本人、协作者、组织成员），`/users/{u}/repos` 只有公共仓库，`/orgs/{o}/repos` 是单组织视图。首版已确定使用 `/user/repos` 当前授权下的可见集合，完整读取分页；不能混用后两者再声明完整。
 - GraphQL `viewer.repositories(affiliations:)` 与 REST 等价，可与资料字段合并成一次查询，但受点数与节点上限约束。
 - 细粒度 PAT 的“一个 resource owner”不是分页问题，而是集合本身被截断；这是登录方案裁决的关键输入，不能靠翻页修补。
 - SSO 缺失时，多组织请求不报错而是缺失结果，并用 `X-GitHub-SSO: partial-results; organizations=…` 提示；单组织请求可能直接 403 并给出 1 小时有效的授权 URL。因此“组织仓库为空”必须区分未授权、无成员身份和真的没有仓库。
@@ -158,7 +154,7 @@
 要点与局限：
 
 - **没有与 github.com 首页 “Recent activity” 完全等价、且语义被文档保证的接口。** 网站该区只展示**最近两周、最多 4 条**更新，上榜条件是：本人打开、有人评论、被重新打开、被请求评审、被指派、被 commit 引用、本人评论过。REST 的 `filter` 参数没有“我评审过/我评论过/被 commit 引用”这些单选项，`involves:` 覆盖 author/assignee/mentions/commenter，但不等价于“我的评审”与“commit 引用”，也没有“最多 4 条”的同款裁剪规则。
-- 因此“参与”的精确范围必须由产品确定，可选实现为：`involves:@me` 搜索（可解释、可叠加 `updated:` 与 `sort=updated`），或 `filter=all&sort=updated`（覆盖订阅/可见但语义更宽）。两者都不能声称复刻网站首页。
+- 左栏标题已确定为 Home，内容为最近参与且有更新的 Issues/PRs；时间窗口与额外参与关系仍须在实现任务中明确。候选实现为：`involves:@me` 搜索（可解释、可叠加 `updated:` 与 `sort=updated`），或 `filter=all&sort=updated`（覆盖订阅/可见但语义更宽）。两者都不能声称复刻网站首页。
 - 排序不是“更新时间稳定流”：`sort=updated` 会让条目在刷新时移动，跨页拼接会重复或漏项；应保存查询、排序与页信息并按 ID 去重。
 - 空结果、权限不足与“确实没有更新”必须区分：搜索对无权限的 `repo:`/`org:` 会返回 422 或静默省略，而列表型端点会直接返回更少的条目。
 
@@ -170,7 +166,7 @@
 | 事件流 | `GET /users/{u}/received_events`、`/users/{u}/events` | 细粒度：无需权限（文档提到查看私有事件可选 “Events” 用户权限） | 事件数组 | **延迟 30 秒–6 小时**；最多 300 条、只含 30 天内事件；带 `X-Poll-Interval` 与 ETag，支持 304 |
 | GraphQL Feed | 无公开等价 | — | — | schema 中没有 feed/notification 查询字段 |
 
-结论：关注 Feed 属于**受限**能力。可行路径是 Events API 的 `received_events`（“关注的人 + 订阅仓库产生的事件”），它与网站首页的 Following feed 不是同一数据源：网站还包含 star、follow、建库、Release 等条目，API 事件流不保证覆盖同一集合，也不保证同样的顺序与新鲜度。首版若保留 Feed，需要在卡片上接受“这是 API 事件流，不是网站 Feed 镜像”。
+结论：关注 Feed 属于**受限**能力。可行路径是 Events API 的 `received_events`（“关注的人 + 订阅仓库产生的事件”），它与网站首页的 Following feed 不是同一数据源：网站还包含 star、follow、建库、Release 等条目，API 事件流不保证覆盖同一集合，也不保证同样的顺序与新鲜度。首版已接受此事件流及延迟，右栏标题为 Feed；不承诺与网站逐条一致，也不要求每张卡片显示技术性来源标签。
 
 ### Profile：资料、README、Pinned/Popular、热力图
 
@@ -304,32 +300,31 @@
 | --- | --- | --- |
 | 头像“无明确规则时可暂以 24 小时为验证间隔” | 实测头像响应带 `Cache-Control: max-age=300` 与 `ETag` | 优先遵循响应头与验证器；24 小时只能作为无头信息时的兜底，不应覆盖 `max-age` |
 | “条件请求返回 304 不消耗主限额”（已正确） | 实测确认 | 保持；但需绑定同一账户/端点/参数/媒体类型，GraphQL 无此机制 |
-| Home 列表“约 1–2 分钟后按需刷新”“支持手动刷新” | Feed 数据源本身延迟 30 秒–6 小时；搜索桶只有 30 次/分 | 刷新间隔不能承诺新鲜度；Feed 卡片需标注“API 事件流”，并把搜索类刷新纳入限流预算 |
-| Notifications “SQLite 保存最近内容、遵守 `X-Poll-Interval`”（已正确） | 接口只对 classic PAT / OAuth token 可用；细粒度 PAT 与 GitHub App token 不支持 | 若登录选 GitHub App user token，Notifications 缓存表与同步任务无法落地，需要与登录裁决一起决定 |
+| Home 列表“约 1–2 分钟后按需刷新”“支持手动刷新” | Feed 数据源本身延迟 30 秒–6 小时；搜索桶只有 30 次/分 | 刷新间隔不能承诺新鲜度；按已确认的 Feed 呈现说明来源限制，并把搜索类刷新纳入限流预算 |
+| Notifications “SQLite 保存最近内容、遵守 `X-Poll-Interval`”（已正确） | 接口只对 classic PAT / OAuth token 可用；细粒度 PAT 与 GitHub App token 不支持 | 首版已选 Classic PAT；Notifications 仍按实际 scope/组织访问能力处理，具体动作待定 |
 | “搜索 30 秒内复用、不落盘” | 搜索桶 30 次/分、结果上限 1,000、`incomplete_results` 存在 | 复用窗口与限流预算应一起核算；不完整结果不能作为可缓存完整集合 |
 | 贡献热力图“30–60 分钟按需刷新” | 仅 GraphQL，按点数计费 | 可保留建议，但需计入点预算；不要把 REST 条件请求当作省点手段 |
 | 仓库列表“5 分钟内可复用” | 细粒度 PAT 会截断集合；SSO 会造成部分结果 | 缓存键必须包含账户/授权上下文与“是否部分结果”，不能跨 token 复用 |
 | 固定 SHA 内容按 SHA 复用（已正确） | 409/404 语义、1,000 文件与 100 MB 上限已确认 | “没有 README”可随 SHA 缓存，但**只在已确认当前授权上下文能看到该仓库时**；403/SSO 缺失不可缓存为不存在，未授权导致的 404 与“真的无 README”共享同一状态码，不能直接写成 SHA 绑定的空结果 |
 
-## 需要主 Agent / 负责人裁决的问题
+## 裁决状态与剩余问题
 
-1. **H1 Notifications 是否进入首版最小范围，以及为此接受哪种登录载体？** 事实是：Notifications REST 在 classic PAT 与 OAuth App token（`notifications`/`repo` scope）下可用，细粒度 PAT 与 GitHub App user token 不支持。选项：(a) 首版不做 H1，登录可用 GitHub App user token（最小权限）；(b) 做 H1，用 OAuth App（默认 web flow + PKCE + loopback，或 device flow），接受 `repo` 粗 scope、随包 secret 与组织限制风险；(c) 做 H1，要求用户提供 classic PAT，接受体验与组织禁用风险。
-2. **“全部仓库”的语义。** 是按 `/user/repos` 的可见集合（owner + collaborator + organization_member），还是限定本人/单组织？若选细粒度 PAT 作为任何长期方案，多组织必然要退化为多 token 或多账户，需要产品决定是否接受。
-3. **Home “最近参与且有更新”与“关注 Feed”的口径。** 是否接受用 `involves:@me` + `updated:` 作为“参与”，并在 UI 上明确它不等于网站首页？Feed 是否接受 Events API 事件流（延迟 30 秒–6 小时、300 条/30 天）而不是网站 Feed 镜像？
-4. **（可在 Pinned/Popular 实现任务开始时再定）gist-only 用户的仓库热门回退呈现。** `itemShowcase.hasPinnedItems` 计仓库或 gist，gist-only 用户拿不到服务端“仓库热门回退”，需要产品决定这种情况下的呈现（只展示仓库 pin / 留空 / 标记部分）。
-5. **（可在 Profile 实现任务开始时再定）个人 README 的遗留规则。** 2020-07 前创建的同名仓库需要用户手动分享，且 API 无此标记，组合启发式无法区分“已分享”与“未分享”；产品需要决定是否接受可能把未发布内容当作个人 README 展示。
+负责人已确认的选择统一维护在 [产品约定](product.md)：PAT 产品登录（首版 Classic PAT）、`/user/repos` 可见集合、左栏 Home 与右栏 Feed，以及接受 Events 数据延迟。当前以阅读为先，但架构为后续写能力保留边界。
 
-附带但不需要立刻裁决的观察（供后续任务参考，不作批准）：
+仍需在相关任务前细化：
 
-- 若 H1 延后，GitHub App + user token 的权限面更小，但每条组织都要安装，初次体验更重。
-- 若选择 OAuth App，`repo` scope 会同时带来写能力；是否接受“读取为主但持有写权限”的授权文案，属于产品与安全取舍。
-- 仓库顶部信息栏与 Profile 若同页请求多类数据，GraphQL 合并查询可减少往返，但点数与节点上限需要实测标定。
+- PAT 创建引导的最小权限清单；Notifications/全局 Issues/PRs/New 和 H7 写操作的具体内容与动作，不由本次认证选择自动扩张。
+- Home 的时间窗口、额外参与关系和筛选；`involves:` + 更新时间排序是候选，不代表“未读”或与网站首页等价。Feed 卡片的事件类型和过滤仍待实现规格确认。
+- 账户切换时标签处理、凭据失效和移除账户后的私有内容策略。
+- 已明确延后的 Profile 边界：gist-only 的 Pinned→Popular 仓库回退；2020-07 前同名仓库个人 README 的遗留分享规则。执行者交接将这两项合并为第 4 项，待对应任务开始时再定。
+
+GraphQL 合并查询可能减少同页往返，但点数与节点上限仍需实测，不能把候选优化写成已采用的依赖或架构。
 
 ## 待集成验证清单
 
-以下必须在真实登录方案确定后补齐，不能由本文的文档证据替代：
+以下随已选 PAT 登录和相关功能补齐，不能由本文的文档证据替代：
 
-- 细粒度 PAT 与 GitHub App user token 在真实组织（含 SAML、审批、OAuth 限制）下的实际可见集合与错误形状。
+- Classic PAT 的身份、scope、过期/撤销/替换、真实组织（含 SAML 与禁止 classic PAT 策略）下的实际可见集合与错误形状；其他 token 类型不列为首版接入验收。
 - 私有仓库内容的 404/403/SSO 分支，以及“无权限”与“不存在”在 UI 上的区分方式。
 - 标记通知已读/完成的实际返回（202/205/204）、`X-Poll-Interval` 变化与未读数同步。
 - 1–100 MB 文件的 raw 读取、>100 MB 的失败呈现、目录 >1,000 文件与递归树 `truncated` 的真实体验。
