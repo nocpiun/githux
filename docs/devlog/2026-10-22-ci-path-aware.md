@@ -3,6 +3,7 @@
 - 日期：2026-10-22；任务：ci-path-aware；执行者：主 Agent 按负责人要求亲自实现。
 - 目标：纯文档改动不再重复编译 Githux，仍产生可作为 required check 的 CI 结果。
 - 改动：新增轻量范围检测；Rust code-check 改在 Ubuntu 24.04 执行，安装与 Linux build 相同的系统依赖；Rust 与四平台 Debug 构建按应用范围运行，Agent Node 测试独立按脚本范围运行。CI 配置变更完整验证，未知路径保守按应用处理。汇总只接受已确认不需要运行的 skipped，其余失败/取消/缺失均拒绝。
+- 追加优化：保留负责人删除 changes job 显示名称的提交；workflow 继续按 workflow/ref 分组，将 cancel-in-progress 改为 true，使 main 分支也与 PR 一样取消旧 CI。不同 PR/分支仍可并行。
 - 规则和源码见 [CI 改动范围](../code-standards.md#ci-改动范围)，不复制第二份路径清单。
 - 本地验证：6 项 Node 范围/门槛测试通过，含真实临时 Git 仓库的整个 PR、最后一次 push、base 前移、跨分类重命名/删除和首次 push；覆盖混合变更、超过 300 条文档后出现源码、缺失输出及意外跳过。初轮 actionlint 与 git diff --check 通过；按负责人要求改为 Ubuntu 后再次通过 actionlint 和 runner/依赖配置核验。Ubuntu 下实际 cargo test 等结果以新提交 CI 为准。
 - 边界：本任务不修改 Rust 源码，本地未全量重编译；该 PR 因修改 CI 配置将完整运行云端检查。纯文档路径已由真实 Git 差异及门槛回归验证，云端实际 job 运行证据以对应 Actions run 为准，不把模拟结果当成生产运行。

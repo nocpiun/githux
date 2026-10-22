@@ -20,6 +20,9 @@
 
 ## CI 改动范围
 
+CI 在 workflow 层按 workflow 名称与 github.ref 分组，并启用 cancel-in-progress。同一 PR 的引用或同一分支触发新运行时，取消旧运行和旧等待项，只保留新运行；不同 PR/分支互不取消。main 分支同样适用。
+
+
 路径策略和门槛实现见 [.github/scripts/ci-scope.mjs](../.github/scripts/ci-scope.mjs)，工作流见 [ci.yml](../.github/workflows/ci.yml)。负责人于 2026-10-22 授权非应用变更跳过 Rust 检查与构建；这是明确允许的条件跳过，不是 `[skip ci]`。
 
 | 改动范围 | Ubuntu Rust code-check / 四平台 Debug build | Windows Agent script-check |
