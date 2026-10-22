@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-10-21。Rust + GPUI + Ely、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package，当前仅实现 Hello 桌面窗口；业务职责仍是扩展边界，不代表功能已实现。
+更新：2026-10-22。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package，当前仅实现 Hello 桌面窗口；业务职责仍是扩展边界，不代表功能已实现。
 
 ## 建议的职责划分
 
@@ -40,7 +40,14 @@ flowchart LR
 
 ## 认证与外部边界
 
-PAT、OAuth App、GitHub App 尚未最终选择；原型假数据不代表认证完成。凭据应使用平台凭据设施，普通设置/SQLite 仅保存账户元数据或凭据引用。token 不进入日志、任务包、PR 或缓存键正文。
+首版正式登录采用 Classic PAT，产品选择与兼容性边界见 [登录与未来写能力](product.md#登录与未来写能力)。不建设认证后端；原型假数据不代表认证完成。凭据应使用平台凭据设施，普通设置/SQLite 仅保存账户元数据或凭据引用。token 不进入日志、任务包、PR 或缓存键正文。登录/替换时使用 `GET /user` 核对稳定账户身份；替换 PAT 推进授权代次，重新核验权限和资源可见性。PAT 过期/撤销走凭据替换流程，不套用 OAuth refresh token 流程。
+
+当前读取链路须保留后续写能力的边界，但不提前建设完整编辑器或写操作框架：
+
+- UI 通过业务动作调用服务；凭据取得和认证头由 auth/GitHub 层处理，不让页面绑定具体 token 格式。
+- 动作可用性结合 token scope、账户对资源的权限、组织策略和实际服务端结果判断，不能仅凭持有 `repo` 或一次 `/user` 成功就宣称任意资源可写。权限未知与已确认不可用分开；缺权限时说明需要更新/替换授权。
+- 读取可以合并在途请求和使用缓存；写操作有独立提交结果与失败处理，不复用读取缓存作为写入成功证据，也不合并语义不同的写请求。
+- 成功写入后推进资源代次并更新或失效关联快照，防止旧读取覆盖新值；具体规则随每个动作落地。现阶段不为了“未来可能用到”预先要求所有管理 scope。
 
 正式集成优先围绕公开、文档化 GitHub API 设计，具体权限、查询覆盖、分页和额度用实际账户验证。网页内部端点不是已确定的产品依赖；不要将浏览器 Cookie 方案或永久无限额度当作既定架构。
 
@@ -54,6 +61,6 @@ PAT、OAuth App、GitHub App 尚未最终选择；原型假数据不代表认证
 
 [`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，[`ui::Hello`](../src/ui/mod.rs) 持有局部计数和根焦点，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。本轮使用系统标题栏，未实现正式外壳、island 或标签。
 
-`workspace/domain/auth/data/github/network/storage/content/diagnostics` 各有 Rust 模块与简短边界说明，尚无业务实现，没有提前选择 HTTP、数据库或认证方案。现有依赖中出现的相关库是框架传递依赖，不代表 Githux 业务已采用它们。请求与状态约束仍用于后续实现。
+`workspace/domain/auth/data/github/network/storage/content/diagnostics` 各有 Rust 模块与简短边界说明，尚无业务实现，HTTP 和数据库库仍未选择；PAT 认证方向已确认，尚未接入。现有依赖中出现的相关库是框架传递依赖，不代表 Githux 业务已采用它们。请求与状态约束仍用于后续实现。
 
 GPUI 基线为 `gpui-pre` / `gpui-pre-platform` 0.3.8（`font-kit`），Ely 固定 Git revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不引用原型 path 或共享 target。当前使用未打补丁的上游；以后接入输入/只读编辑器时，先验证原型 IME/readonly 问题是否仍可重现，再决定上游升级或最小补丁。构建命令见 [README](../README.md)，真实验收证据见 [开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。
