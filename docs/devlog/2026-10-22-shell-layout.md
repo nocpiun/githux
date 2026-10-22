@@ -94,6 +94,17 @@ PR #10 确认 Home 左栏标题严格为 **Home**、右栏严格为 **Feed**，�
 
 合并后本地 fmt/check/clippy/build/test（27 passed）全部通过。
 
+## 三轮审查修复
+
+三轮 Codex 审查（review `5612313240`，讨论 `r4346875902`，针对 `55f32f7`）提出一条 P2：仓库行都是 tab stop，但键盘焦点越过可见范围时没有代码更新 `repo_scroll`，焦点环与 Enter 的目标会落在屏外。这是任务验收要求（“键盘焦点正常”）内的缺陷，直接修复。
+
+- 每行改为持有自己的显式 `FocusHandle`（`track_focus`），外壳在渲染时找出获得焦点的那一行；
+- 发现新聚焦行后，用该行上一帧已测量的 `bounds_for_item` 加上列表视口做最小位移滚动（`sidebar::reveal_row`），同一帧内完成滚动与焦点绘制；稳定焦点不会每帧重复滚动；
+- 仓库组改为直接以行为子项，使 `child_bounds` 的索引就是 fixture 索引；
+- 新增 `tabbing_to_a_clipped_repository_row_scrolls_it_into_view`：在 900×560 下聚焦最后一行，断言列表滚动、该行落在列表可视范围内、island 页面偏移不变；真实窗口在 1400×620 下连按 18 次 Tab，确认屏外的 `studio/sidebar-experiments…` 被滚入视野并显示焦点环，Home/Settings 与底部入口保持固定。
+
+本地 fmt/check/clippy/build/test（28 passed）全部通过。
+
 ## 后续
 
 1. 负责人/主 Agent 在真实窗口用微软拼音验证：输入候选期间按 Enter 只确认候选、不导航；随后确认 Esc 关闭浮层并把焦点还给搜索入口。

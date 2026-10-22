@@ -40,6 +40,10 @@ pub struct Shell {
     repositories: Vec<fixtures::RepoFixture>,
     root_focus: FocusHandle,
     repo_scroll: ScrollHandle,
+    /// One tab stop per repository row.
+    repo_focus: Vec<FocusHandle>,
+    /// The repository row last scrolled into view, so a still focus does not scroll every frame.
+    revealed_row: Option<usize>,
     page_scroll: ScrollHandle,
     palette: Option<palette::Session>,
     restore_focus: bool,
@@ -61,11 +65,17 @@ impl Shell {
         let root_focus = cx.focus_handle();
         window.focus(&root_focus, cx);
         let search_focus = cx.focus_handle().tab_stop(true);
+        let repositories = fixtures::repositories();
+        let repo_focus = (0..repositories.len())
+            .map(|_| cx.focus_handle().tab_stop(true))
+            .collect::<Vec<_>>();
         Self {
             workspace: Workspace::new(),
-            repositories: fixtures::repositories(),
+            repositories,
             root_focus,
             repo_scroll: ScrollHandle::new(),
+            repo_focus,
+            revealed_row: None,
             page_scroll: ScrollHandle::new(),
             palette: None,
             restore_focus: false,
@@ -86,6 +96,12 @@ impl Shell {
     }
 
     /// The repository group's scroll offset, for the bounded-scroll test.
+    /// The repository rows' tab stops, inspected by the keyboard-scroll test.
+    #[cfg(test)]
+    pub fn repo_focus(&self) -> &[FocusHandle] {
+        &self.repo_focus
+    }
+
     #[cfg(test)]
     pub fn repo_offset(&self) -> Point<gpui::Pixels> {
         self.repo_scroll.offset()
@@ -276,7 +292,7 @@ impl Shell {
         }
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let this = cx.entity();
         let route = self.workspace.route().clone();
 
@@ -318,6 +334,24 @@ impl Shell {
 
         let heading =
             sidebar::group_heading(format!("Repositories · {}", self.repositories.len()), cx);
+        // A row reached with Tab must be visible: otherwise its focus ring and Enter's target sit
+        // outside the viewport. Done in render, before this frame's prepaint, so the scroll and the
+        // focused row land in the same frame; the stored index keeps a still focus from re-scrolling.
+        let focused_row = self
+            .repo_focus
+            .iter()
+            .position(|handle| handle.is_focused(window));
+        match focused_row {
+            Some(index) if self.revealed_row != Some(index) => {
+                if let Some(row) = self.repo_scroll.bounds_for_item(index) {
+                    sidebar::reveal_row(&self.repo_scroll, row);
+                }
+                self.revealed_row = Some(index);
+            }
+            None => self.revealed_row = None,
+            Some(_) => {}
+        }
+
         let rows = self
             .repositories
             .iter()
@@ -326,9 +360,11 @@ impl Shell {
                 let this = this.clone();
                 let target = Route::repository(repo);
                 let active = route.is_repository(repo);
+                let focus = self.repo_focus[index].clone();
                 sidebar::repo_row(
                     index,
                     repo,
+                    &focus,
                     active,
                     move |_, cx| {
                         let target = target.clone();
@@ -340,14 +376,7 @@ impl Shell {
                 )
             })
             .collect::<Vec<_>>();
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .w_full()
-            .children(rows)
-            .into_any_element();
-        let repositories = sidebar::repository_group(body, &self.repo_scroll);
+        let repositories = sidebar::repository_group(rows, &self.repo_scroll, cx);
 
         let account = {
             let this = this.clone();
@@ -539,7 +568,7 @@ impl Render for Shell {
             this.update(cx, |shell, cx| shell.open_palette(window, cx));
         };
         let titlebar = chrome::titlebar(self.search_focus.clone(), open_search, window, cx);
-        let sidebar = self.sidebar(cx);
+        let sidebar = self.sidebar(window, cx);
         let island = self.island(cx);
         let palette = self.palette(cx);
 

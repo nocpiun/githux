@@ -14,8 +14,8 @@ use ely_gpui_component::{
     typography::Ellipsis,
 };
 use gpui::{
-    AnyElement, App, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Role,
-    ScrollHandle, Styled, Window, div, prelude::*, px, transparent_black,
+    AnyElement, App, FocusHandle, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Role, ScrollHandle, Styled, Window, div, prelude::*, px, transparent_black,
 };
 
 use super::{
@@ -46,9 +46,13 @@ pub(super) fn nav_row(
 }
 
 /// One `namespace/repo` row: the namespace's avatar, then the full identifier.
+///
+/// `focus` is the row's own tab stop. The shell subscribes to it so a row reached with Tab is
+/// scrolled into view; a row that is merely clipped would otherwise take focus invisibly.
 pub(super) fn repo_row(
     index: usize,
     repo: &RepoFixture,
+    focus: &FocusHandle,
     active: bool,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
@@ -56,7 +60,7 @@ pub(super) fn repo_row(
     let theme = cx.theme();
     let colors = &theme.colors;
     let (radius, text) = (theme.radius(Radius::Md), theme.text_size(TextSize::Sm));
-    let (fg, muted, hover, active_bg, focus) = (
+    let (fg, muted, hover, active_bg, focus_color) = (
         colors.fg,
         colors.fg_muted,
         colors.hover,
@@ -89,8 +93,8 @@ pub(super) fn repo_row(
         .role(Role::Button)
         .aria_label(full_name.clone())
         .cursor_pointer()
-        .tab_index(0)
-        .focus(move |style| style.border_color(focus))
+        .track_focus(focus)
+        .focus(move |style| style.border_color(focus_color))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
         .child(Avatar::new(("repo-avatar", index), avatar_name).size(AvatarSize::Xs))
@@ -249,17 +253,51 @@ pub(super) fn group_heading(text: String, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// Scrolls `row` into the list's viewport with the least movement, leaving a row that already fits
+/// alone. The row's painted bounds and the list's viewport are in the same space, so this needs no
+/// second layout pass.
+pub(super) fn reveal_row(scroll: &ScrollHandle, row: gpui::Bounds<gpui::Pixels>) {
+    let view = scroll.bounds();
+    if view.size.height <= gpui::Pixels::ZERO {
+        return;
+    }
+    let offset = scroll.offset();
+    let top = row.top() + offset.y;
+    let bottom = row.bottom() + offset.y;
+    let shift = if top < view.top() {
+        view.top() - top
+    } else if bottom > view.bottom() {
+        (view.bottom() - bottom).max(view.top() - top)
+    } else {
+        gpui::Pixels::ZERO
+    };
+    if shift != gpui::Pixels::ZERO {
+        scroll.set_offset(gpui::Point::new(offset.x, offset.y + shift));
+    }
+}
+
 /// The repository scroll group: the only part of the sidebar that scrolls.
-pub(super) fn repository_group(body: AnyElement, scroll: &ScrollHandle) -> AnyElement {
+pub(super) fn repository_group(
+    rows: Vec<AnyElement>,
+    scroll: &ScrollHandle,
+    cx: &App,
+) -> AnyElement {
+    let gap = cx
+        .theme()
+        .control_height(ely_gpui_component::theme::ControlSize::Sm)
+        / 12.0;
     div()
         .id("repo-scroll-list")
         .debug_selector(|| "repo-scroll".to_string())
+        .flex()
+        .flex_col()
+        .gap(gap)
         .flex_1()
         .min_h_0()
         .w_full()
         .overflow_y_scroll()
         .track_scroll(scroll)
-        .child(body)
+        .children(rows)
         .into_any_element()
 }
 

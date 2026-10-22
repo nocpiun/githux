@@ -373,6 +373,51 @@ fn tab_reaches_a_sidebar_row_that_enter_then_navigates(cx: &mut TestAppContext) 
     );
 }
 
+/// Tab reaches repository rows far below the visible part of the bounded list; focusing one must
+/// scroll it into view, or the focus ring and Enter's target would sit offscreen.
+#[gpui::test]
+fn tabbing_to_a_clipped_repository_row_scrolls_it_into_view(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(900.0), px(560.0)));
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repo_offset()),
+        Point::default(),
+        "the list starts at the top"
+    );
+
+    // Focus a row that cannot be visible in a 560px-tall window, the way Tab eventually would.
+    let deep = view.read_with(cx, |shell, _| shell.repositories().len() - 1);
+    let handle = view.read_with(cx, |shell, _| shell.repo_focus()[deep].clone());
+    cx.update(|window, cx| handle.focus(window, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(
+            window.focused(cx).is_some_and(|focused| focused == handle),
+            "the deep row took focus"
+        );
+    });
+
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let after_refresh = view.read_with(cx, |shell, _| shell.repo_offset());
+    assert!(
+        after_refresh.y < px(0.0),
+        "focusing a clipped row scrolls the repository group, offset {after_refresh:?}"
+    );
+    let row = bounds(Box::leak(format!("repo-row-{deep}").into_boxed_str()), cx);
+    let list = bounds("repo-scroll", cx);
+    assert!(
+        row.top() >= list.top() - px(1.0) && row.bottom() <= list.bottom() + px(1.0),
+        "the focused row must be inside the list: {row:?} in {list:?}"
+    );
+    // The rest of the shell stays put: only the repository group scrolls.
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.page_offset()),
+        Point::default()
+    );
+}
+
 #[gpui::test]
 fn a_chinese_and_a_long_repository_name_stay_inside_the_sidebar(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
