@@ -8,7 +8,7 @@
 
 - 新增 `docs/github-api-capabilities.md`：按产品保留范围给出接口/认证/权限/分页/限流/错误与空数据/缓存标识矩阵，并标注“可实现 / 受限 / 需选择 / 无公开等价”。
 - 认证部分把 classic PAT、fine-grained PAT、OAuth App（web 与 device flow）、GitHub App user token 分开，说明各自对保留功能（尤其 H1 Notifications）的覆盖差异与桌面 secret 边界。
-- 提出的待裁决问题只有三项：H1 是否进首版及对应登录载体、“全部仓库”的语义、Home 参与与 Feed 的口径。均为选项陈述，不是选定结论。
+- 提出的待裁决问题有三项本轮必须决定（H1 是否进首版及对应登录载体、“全部仓库”的语义、Home 参与与 Feed 的口径），另有第四项可在 Pinned/Popular 实现时再定（gist-only 用户的仓库热门回退）。均为选项陈述，不是选定结论。
 - 与 [缓存策略](../cache-strategy.md) 的差异只列依据与建议，未修改该文档或其他主题文档；跨领域更改留给主 Agent 汇总。
 - `docs/README.md` 只增加一行能力表索引链接，未改动其他条目。
 
@@ -27,9 +27,10 @@
 - 第三轮审查指出：`/user/orgs` 对细粒度 token 会返回 `200` + 空列表，不能与 `/user/memberships/orgs` 当作等价。已核实官方端点说明并修正：表格与要点里明确该差异，错误表新增一行，并建议组织枚举统一改用 memberships 端点。
 - 第四轮审查指出两处：GraphQL 主限流耗尽返回 HTTP `200` + `errors`（次级为 200 或 403），只看状态码会误判；issue 语义/混合搜索另限 10 次/分钟。两处均已核实（实测 `search_type=semantic|hybrid` 返回 `X-RateLimit-Resource: semantic_search`、`X-RateLimit-Limit: 10`）并在错误表与限流节补充。
 - 第五轮审查指出：`itemShowcase.hasPinnedItems` 计的是仓库**或 gist**，`items` 是 `PinnableItem` 联合，gist-only 用户无法从 `itemShowcase` 拿到仓库热门回退。已按 schema 文本修正 Pinned/Popular 条目与要点，并把它作为第四项候选问题（可延后到该功能实现时再定）。
+- 第六轮审查指出：交接里仍写“三项”，与能力表已列四项不一致。已把开发日志里两处“三项”更新为四项并注明各自时点。
 
 ## 后续
 
-- 需要主 Agent/负责人裁决的三项问题见能力表末节；其中 Notifications 的 token 支持差异会直接改变登录方案可行性。
+- 需要主 Agent/负责人裁决的问题共四项（见能力表末节，其中三项本轮必须决定，Pinned/Popular 的 gist-only 回退可在实现时再定）；其中 Notifications 的 token 支持差异会直接改变登录方案可行性。
 - 待登录方案确定后，按“待集成验证清单”补齐私有资源、SSO、通知状态与写操作的真实验证。
 - 若裁决要求调整登录方式或仓库集合语义，需要另开实现任务，不在本文范围内直接实施。
