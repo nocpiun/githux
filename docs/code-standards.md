@@ -22,14 +22,14 @@
 
 路径策略和门槛实现见 [.github/scripts/ci-scope.mjs](../.github/scripts/ci-scope.mjs)，工作流见 [ci.yml](../.github/workflows/ci.yml)。负责人于 2026-10-22 授权非应用变更跳过 Rust 检查与构建；这是明确允许的条件跳过，不是 `[skip ci]`。
 
-| 改动范围 | Rust code-check / 四平台 Debug build | Windows Agent script-check |
+| 改动范围 | Ubuntu Rust code-check / 四平台 Debug build | Windows Agent script-check |
 | --- | --- | --- |
 | 仅 `docs/**`、根目录 Markdown、skills 内 Markdown | 跳过 | 跳过 |
 | `.agents/skills/**` 非 Markdown 脚本或资料 | 跳过（无其他应用变更时） | 运行 |
 | 应用源码、资源、Cargo/工具链/构建配置，以及未明确排除的新路径 | 运行 | 按脚本范围判断 |
 | `.github/**`，包括工作流与范围/门槛脚本 | 运行 | 运行 |
 
-混合变更取并集；`src/` 与 `assets/` 内的 Markdown 也可能是构建输入，不归入文档跳过。CI 自身变更完整运行各分支以验证检查配置。每次先运行轻量 `Detect changes`（含范围/门槛离线测试），然后始终执行 `CI` 汇总；纯文档不会启动 Windows Rust 检查或四平台构建，也不上传构建 artifact。
+混合变更取并集；`src/` 与 `assets/` 内的 Markdown 也可能是构建输入，不归入文档跳过。CI 自身变更完整运行各分支以验证检查配置。Rust `code-check` 在 Ubuntu 24.04 安装 Linux 构建依赖后执行 fmt/check/clippy/test；Windows 专项脚本测试仍由 `script-check` 负责，四平台 Debug 构建各用原生 runner。每次先运行轻量 `Detect changes`（含范围/门槛离线测试），然后始终执行 `CI` 汇总；纯文档不会启动 Ubuntu Rust 检查或四平台构建，也不上传构建 artifact。
 
 PR 使用 base 与 head 的 merge-base 三点差异，覆盖整个 PR；后续只追加文档不能遮住之前的源码变更。main push 使用 before/after 两点差异，首次零 before 用完整树。checkout 获取完整历史，Git NUL 文件名列表不依赖 API 的文件数量上限，重命名按删除和新增共同分类。引用不可读取或范围判断出错时 CI 失败，不能当作文档变更。规则不是依赖扫描器：若未来将 docs/ 或根 Markdown 作为运行时/构建输入，须先调整策略。
 
