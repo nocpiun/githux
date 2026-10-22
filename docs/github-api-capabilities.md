@@ -21,7 +21,7 @@
 | 个人 README 发现 | 受限（无专用字段） | 仓库名=用户名的公开仓库 + README | 无公开等价字段，必须自行组合发现规则 |
 | Pinned / Popular | 可实现（仅 GraphQL） | `user.pinnedItems`、`user.itemShowcase` | REST 无公开等价；`itemShowcase` 会混入“热门回退” |
 | 贡献热力图 | 可实现（仅 GraphQL） | `contributionsCollection.contributionCalendar` | REST 无公开等价；私有贡献需要 `read:user` |
-| H1 Notifications | 受限 | `GET /notifications` | 文档标注仅支持 classic PAT；细粒度 PAT 与 GitHub App token 明确不支持 |
+| H1 Notifications | 受限 | `GET /notifications` | 只支持 classic PAT 与 OAuth token（`notifications`/`repo` scope）；细粒度 PAT 与 GitHub App token 明确不支持 |
 | H2/H3 全局 Issues/PRs | 可实现 | `GET /user/issues`、`/search/issues` | 只是候选数据源，默认查询范围仍需产品决定 |
 | H4 New / H7 写操作 | 需选择 | 按动作逐个列权限 | 本文不批准任何创建/编辑/管理动作 |
 | Command palette 搜索 | 受限 | `/search/*`、GraphQL `search` | 最多 1,000 条结果、搜索桶独立限流、类别未定 |
@@ -42,9 +42,9 @@
 
 | 方案 | 首版读取覆盖 | H1 Notifications | 权限粒度 | 多组织/账户 | 桌面 secret | SSO 与组织策略 | 主要限制 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Classic PAT | 覆盖，含私有 `repo` | 支持（文档指定方式） | 粗：`repo`、`read:user`、`notifications`、`read:org` | 单 token 覆盖用户可见的全部组织 | 用户手动生成、手动粘贴 | 建后需为该组织单独授权；未授权返回 403（含 `X-GitHub-SSO` URL，1 小时有效）或多组织 `partial-results` | 组织可禁用 classic PAT（`403`）；无法限制具体仓库；一年未用会被自动移除 |
+| Classic PAT | 覆盖，含私有 `repo` | 支持（`notifications` 或 `repo`） | 粗：`repo`、`read:user`、`notifications`、`read:org` | 单 token 覆盖用户可见的全部组织 | 用户手动生成、手动粘贴 | 建后需为该组织单独授权；未授权返回 403（含 `X-GitHub-SSO` URL，1 小时有效）或多组织 `partial-results` | 组织可禁用 classic PAT（`403`）；无法限制具体仓库；一年未用会被自动移除 |
 | Fine-grained PAT | 覆盖（`Metadata`/`Contents` 读），公开仓库无需权限 | **不支持**（文档明确） | 细：按仓库/权限 | **单 token 只能一个 resource owner**，多组织要多个 token | 用户手动生成、手动粘贴 | 创建时选定组织即完成 SSO；组织可要求审批，待审批时仅能读公共资源 | 不支持外部协作者/非成员公共仓库写入；组织可禁用；不适合作为产品登录 |
-| OAuth App（web flow） | 覆盖 | 支持（`notifications` 或 `repo` scope） | 粗 scope | 单 token 覆盖用户全部可见资源 | 换 token 需要 `client_secret`，桌面端无法保密 | token 自动完成 SSO 授权 | 组织可限制 OAuth App，成员无法授权；scope 无法细分 |
+| OAuth App（web flow） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | 换 token 需要 `client_secret`，桌面端无法保密 | token 自动完成 SSO 授权 | 组织可限制 OAuth App，成员无法授权；scope 无法细分 |
 | OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down` |
 | GitHub App user token | 覆盖 | **不支持**（Notifications REST 明确排除） | 细：按 App 注册权限 ∩ 用户权限 | 需逐组织安装 + 逐用户授权 | device flow 只需 `client_id`；web flow 换 token 需 `client_secret` | 需组织安装；SAML 场景需先建立活动 SSO 会话再授权 | 8 小时过期 + 6 个月 refresh；H1 因此不可用 |
 
@@ -53,11 +53,11 @@
 - 细粒度 PAT 的权限/支持矩阵按端点查询官方文档；`X-Accepted-GitHub-Permissions` 头用于诊断缺权限（实测对 classic/OAuth token 为空，这是预期行为，不是缺失信息）。
 - OAuth App 每个用户/应用/scope 组合最多 10 个 token、每小时最多创建 10 个；超出会回收旧 token 或触发重新授权。
 - 细粒度 PAT 每次只能选一个 resource owner，因此“侧边栏显示全部仓库”在细粒度 PAT 下需要多 token 或退化为单组织范围；这条直接影响仓库集合的可实现程度。
-- Notifications 的文档声明与实测存在差异，见下文 [H1](#h1-notifications)；它决定登录方案是否可行，必须作为裁决输入。
+- Notifications 的 token 支持差异（端点级“不支持细粒度 token” vs scope 级“OAuth 可用”）见下文 [H1](#h1-notifications)；它决定登录方案是否可行，必须作为裁决输入。
 
 ### 推荐（候选，需负责人决定）
 
-推荐把 **OAuth App + device flow** 作为首版产品登录的候选方案，理由是可覆盖全部首版读取能力并以 `notifications` scope 满足 H1；代价是 scope 较粗（`repo` 等于对该用户可见仓库的读写范围），且组织可以限制 OAuth App。
+推荐把 **OAuth App + device flow** 作为首版产品登录的候选方案，理由是可覆盖全部首版读取能力，并以 `notifications` scope 满足 H1（scope 参考与 OAuth/GitHub App 对照页都有依据）；代价是 scope 较粗（`repo` 等于对该用户可见仓库的读写范围），且组织可以限制 OAuth App。
 
 若负责人判定 H1 首版可以不做或允许没有 H1，则 **GitHub App + user token** 是更小权限面的候选（细粒度、8 小时 token、可 refresh），代价是每个组织都要安装、Notifications 完全不可用。
 
@@ -180,7 +180,7 @@
 
 要点：
 
-- `itemShowcase` 是“已 Pin 就返回 Pin，否则返回热门”的混合语义。产品要求是“Pinned，没有才 Popular”，正好对应 `hasPinnedItems` + `pinnedItems`；直接用 `itemShowcase` 会丢掉“当前展示的是回退内容”这一状态，UI 无法区分。
+- `itemShowcase` 是“已 Pin 就返回 Pin，否则返回热门”的混合语义，因此它正是“Pinned，没有才 Popular”这一需求的数据源：一次查询 `itemShowcase { hasPinnedItems items(first: 6) }` 就能同时拿到回退内容与“当前是否为回退”的状态。只查 `pinnedItems` 时没有 Pin 的用户会得到空列表，无法实现 Popular 回退，所以不要用 `hasPinnedItems` + `pinnedItems` 组合去构造回退；只在需要区分“用户真实 Pin 列表”与“服务端热门选择”的细节时才额外取 `pinnedItems`。
 - 热力图等级是相对分位（`FIRST_QUARTILE`…`FOURTH_QUARTILE`），不是绝对阈值；`color` 由服务端给出，包含季节性主题（schema 里有 `isHalloween`），不应硬编码配色。
 - 私有贡献被计入时只显示数量，不显示仓库细节；打开私有贡献可见性属于用户设置，客户端无法探测“是否有被隐藏的贡献”，只能显示服务端返回的结果。
 
@@ -188,21 +188,21 @@
 
 | 能力 | 接口 | 认证/权限 | 说明 |
 | --- | --- | --- | --- |
-| 通知列表 | `GET /notifications`（`all`、`participating`、`since`、`before`） | **文档：仅 classic PAT**；classic scope：`notifications` 或 `repo` | `per_page` 最大 **50**；`Last-Modified` 条件请求；`X-Poll-Interval` 必须遵守 |
+| 通知列表 | `GET /notifications`（`all`、`participating`、`since`、`before`） | classic PAT 或 OAuth token：`notifications` 或 `repo` scope；**fine-grained PAT 与 GitHub App token 不支持** | `per_page` 最大 **50**；`Last-Modified` 条件请求；`X-Poll-Interval` 必须遵守 |
 | 单条线程 | `GET /notifications/threads/{id}` | 同上 | 返回 `reason`、`unread`、`updated_at`、`last_read_at` |
 | 标记已读/完成 | `PATCH /notifications/threads/{id}`、`DELETE /notifications/threads/{id}`、`PUT /notifications` | 同上 | 全部已读可能返回 202 异步处理 |
 | 仓库通知 | `GET /repos/{o}/{r}/notifications` | 同上 | 首版是否需要尚未定 |
 | GraphQL 通知 | 无公开等价 | — | schema 无 notification 查询字段 |
 
-**这条决定登录方案可行性，需要如实记录两组证据的差异：**
+**这条决定登录方案可行性，证据分两层：**
 
-- 官方每个通知端点的 *Fine-grained access tokens* 段落写明：**不支持** GitHub App user token、installation token 与 fine-grained PAT。通知文档顶部另有说明：这些端点仅支持 classic PAT。
-- 实测在已有 `gh` OAuth app token（scope 含 `repo`）下 `GET /notifications` 返回 `200`、空数组、`X-Poll-Interval: 60`、`X-Accepted-OAuth-Scopes: notifications, repo`。也就是说 OAuth app token 在文档未明确背书的情况下被服务端接受。
+- 端点级：每个通知端点的 *Fine-grained access tokens* 段落写明**不支持** GitHub App user token、installation token 与 fine-grained PAT；页面顶部另有一则说明：这些端点仅支持 classic PAT。这层说明的是“细粒度 token 不支持”，不是“只有 classic PAT 能用”。
+- scope 级：OAuth App 的 scope 参考明确 `notifications` scope 授予“读取用户通知、将 thread 标记为已读、订阅管理”，GitHub Apps 与 OAuth Apps 对照页也直接以“为已登录用户查找全部通知”作为 OAuth App 的示例。实测在 OAuth app token（scope 含 `repo`）下 `GET /notifications` 返回 `200`、空数组、`X-Poll-Interval: 60`、`X-Accepted-OAuth-Scopes: notifications, repo`，与上述 scope 说明一致。
 
-结论与风险：文档承诺的支持范围只有 classic PAT；OAuth token 可用属于实测观察，缺少官方保证，可能随策略变化。因此：
+结论：H1 在 **classic PAT 或 OAuth App token**（`notifications` 或 `repo` scope）下可用；**fine-grained PAT 与 GitHub App user token 不可用**。因此：
 
-- 若首版要做 H1，登录方案必须包含 classic PAT 或 OAuth App 之一；**细粒度 PAT 与 GitHub App user token 都无法满足 H1**。
-- 若负责人希望避免 classic PAT 的粗 scope 与组织禁用风险，则 H1 要么依赖未经文档背书的 OAuth 行为（需明确接受风险并做降级），要么延后。
+- 若首版要做 H1，登录载体必须是 classic PAT 或 OAuth App；OAuth App 是两者中唯一不需要用户手工建 token 的方案。“细粒度 token 不支持”这条要从“全部认证方式都不支持”中区分开，不要因为它而把 H1 推向 classic PAT。
+- 若负责人选 GitHub App user token（权限面最小），H1 必须延后或改用它处获取通知；这不是文档模糊，而是端点不支持。
 - Notifications 的 `per_page` 上限是 50（不是 100），且必须尊重 `X-Poll-Interval`；把“未读数”当成可高频轮询的计数会触发次级限流，也违反约定。
 
 ### H2/H3 全局 Issues/PRs、H4 New、H7 写操作（仅列候选与约束）
@@ -292,7 +292,7 @@
 | 头像“无明确规则时可暂以 24 小时为验证间隔” | 实测头像响应带 `Cache-Control: max-age=300` 与 `ETag` | 优先遵循响应头与验证器；24 小时只能作为无头信息时的兜底，不应覆盖 `max-age` |
 | “条件请求返回 304 不消耗主限额”（已正确） | 实测确认 | 保持；但需绑定同一账户/端点/参数/媒体类型，GraphQL 无此机制 |
 | Home 列表“约 1–2 分钟后按需刷新”“支持手动刷新” | Feed 数据源本身延迟 30 秒–6 小时；搜索桶只有 30 次/分 | 刷新间隔不能承诺新鲜度；Feed 卡片需标注“API 事件流”，并把搜索类刷新纳入限流预算 |
-| Notifications “SQLite 保存最近内容、遵守 `X-Poll-Interval`”（已正确） | 但接口只对 classic PAT（及实测 OAuth token）可用 | 若登录方案不含 classic PAT/OAuth，Notifications 缓存表与同步任务无法落地，需要与登录裁决一起决定 |
+| Notifications “SQLite 保存最近内容、遵守 `X-Poll-Interval`”（已正确） | 接口只对 classic PAT / OAuth token 可用；细粒度 PAT 与 GitHub App token 不支持 | 若登录选 GitHub App user token，Notifications 缓存表与同步任务无法落地，需要与登录裁决一起决定 |
 | “搜索 30 秒内复用、不落盘” | 搜索桶 30 次/分、结果上限 1,000、`incomplete_results` 存在 | 复用窗口与限流预算应一起核算；不完整结果不能作为可缓存完整集合 |
 | 贡献热力图“30–60 分钟按需刷新” | 仅 GraphQL，按点数计费 | 可保留建议，但需计入点预算；不要把 REST 条件请求当作省点手段 |
 | 仓库列表“5 分钟内可复用” | 细粒度 PAT 会截断集合；SSO 会造成部分结果 | 缓存键必须包含账户/授权上下文与“是否部分结果”，不能跨 token 复用 |
@@ -300,7 +300,7 @@
 
 ## 需要主 Agent / 负责人裁决的问题
 
-1. **H1 Notifications 是否进入首版最小范围，以及为此接受哪种登录载体？** 事实是：Notifications REST 只被文档承诺支持 classic PAT，细粒度 PAT 与 GitHub App user token 都不支持；OAuth app token 实测可用但无文档保证。选项：(a) 首版不做 H1，登录可用 GitHub App user token（最小权限）；(b) 做 H1，用 OAuth App + device flow，接受 `repo` 粗 scope 与组织限制风险；(c) 做 H1，要求用户提供 classic PAT，接受体验与组织禁用风险。
+1. **H1 Notifications 是否进入首版最小范围，以及为此接受哪种登录载体？** 事实是：Notifications REST 在 classic PAT 与 OAuth App token（`notifications`/`repo` scope）下可用，细粒度 PAT 与 GitHub App user token 不支持。选项：(a) 首版不做 H1，登录可用 GitHub App user token（最小权限）；(b) 做 H1，用 OAuth App + device flow，接受 `repo` 粗 scope 与组织限制风险；(c) 做 H1，要求用户提供 classic PAT，接受体验与组织禁用风险。
 2. **“全部仓库”的语义。** 是按 `/user/repos` 的可见集合（owner + collaborator + organization_member），还是限定本人/单组织？若选细粒度 PAT 作为任何长期方案，多组织必然要退化为多 token 或多账户，需要产品决定是否接受。
 3. **Home “最近参与且有更新”与“关注 Feed”的口径。** 是否接受用 `involves:@me` + `updated:` 作为“参与”，并在 UI 上明确它不等于网站首页？Feed 是否接受 Events API 事件流（延迟 30 秒–6 小时、300 条/30 天）而不是网站 Feed 镜像？
 
