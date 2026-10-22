@@ -13,9 +13,9 @@
 ## 项目边界
 
 - Rust + GPUI + Ely；Windows 优先，之后 macOS/Linux。保持 Ely 原型画风，UI 字体 Noto Sans、代码字体 Google Sans Code。
-- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 GPUI + Ely Hello binary 和跨平台 CI 配置。运行与检查命令见 [README](README.md)，实际验证边界见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。业务模块仍未实现，不将目录预留视为业务交付。
+- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 GPUI + Ely 外壳（自定义标题栏、固定侧边栏、island、本地导航搜索浮层）和跨平台 CI 配置。运行与检查命令见 [README](README.md)，外壳实现与验证边界见 [开发日志](docs/devlog/2026-10-22-shell-layout.md)。登录、网络、数据库与业务页面仍未实现，不将目录预留视为业务交付。
 - 普通任务由原执行者完成实现至 PR 交付；主 Agent 确认派发成功后可以结束当前轮次，按需处理裁决，不持续盯日志或重复全量审查。细则见工作流。
-- 主 Agent 协调方向、任务和例外；基层 Agents 使用本地任务上下文指定的执行工具。实现任务各用独立分支和 `D:\githux-<task>` worktree。首次试跑只用一个实现者，解除后按依赖、冲突和资源并行。
+- 主 Agent 协调方向、任务和例外；基层 Agents 使用本地任务上下文指定的执行工具。实现任务各用独立分支和 `D:\githux-<task>` worktree。并发限制已于 2026-10-22 解除，现按依赖、冲突和资源并行；同一任务仍只有一个有效写入者。
 - 共享事实写入受 Git 跟踪的 `docs/`。主 Agent 的私有交接记忆保存在 `.agents/` 下被 Git 忽略的专属目录；`.agents/task/` 是本任务临时状态。不得上传凭据、完整私人记忆或原始会话日志。
 
 ## PR 的关键约束

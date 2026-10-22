@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-10-22。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package，当前仅实现 Hello 桌面窗口；业务职责仍是扩展边界，不代表功能已实现。
+更新：2026-10-22。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package，当前实现 R1 的外壳布局（自定义标题栏、固定侧边栏、island、本地导航与搜索浮层），仍无登录、网络、数据库与业务页面；业务职责仍是扩展边界，不代表功能已实现。
 
 ## 建议的职责划分
 
@@ -59,8 +59,12 @@ flowchart LR
 
 ## 已建立的工程边界
 
-[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，[`ui::Hello`](../src/ui/mod.rs) 持有局部计数和根焦点，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。本轮使用系统标题栏，未实现正式外壳、island 或标签。
+[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，并在启动时绑定外壳快捷键；[`workspace::Route`](../src/workspace/mod.rs) 是唯一地址模型，[`ui::Shell`](../src/ui/mod.rs) 持有当前路由、两条滚动句柄与搜索浮层状态，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。
+
+外壳按职责拆开，避免所有布局挤在一个视图里：`src/ui/chrome.rs` 画标题栏与搜索入口，`src/ui/sidebar.rs` 画固定列与有界的仓库组，`src/ui/page.rs` 画岛内页面，`src/ui/palette.rs` 是本地导航浮层，`src/ui/geometry.rs` 集中放间距、宽度与圆角，`src/ui/fixtures.rs` 是确定性的本地面板数据。标题栏在所有平台绘制同一条品牌 + 搜索入口，只有 Windows 的三个窗口按钮由 `cfg!(target_os = "windows")` 控制；已确认行为（搜索入口固定在标题栏）不能挂在平台分支上。窗口拖动、双击最大化和边缘缩放使用 GPUI 的 `WindowControlArea` / `start_window_move`，由平台上已有的非客户区命中测试驱动，没有新增平台补丁。
 
 `workspace/domain/auth/data/github/network/storage/content/diagnostics` 各有 Rust 模块与简短边界说明，尚无业务实现，HTTP 和数据库库仍未选择；PAT 认证方向已确认，尚未接入。现有依赖中出现的相关库是框架传递依赖，不代表 Githux 业务已采用它们。请求与状态约束仍用于后续实现。
 
-GPUI 基线为 `gpui-pre` / `gpui-pre-platform` 0.3.8（`font-kit`），Ely 固定 Git revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不引用原型 path 或共享 target。当前使用未打补丁的上游；以后接入输入/只读编辑器时，先验证原型 IME/readonly 问题是否仍可重现，再决定上游升级或最小补丁。构建命令见 [README](../README.md)，真实验收证据见 [开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。
+本轮状态归属：窗口只有一个活动页，`Workspace` 只保存当前 `Route`；`TabId`、页面会话集合与各自的分支/文件/滚动/焦点状态仍属于下一份 R1 任务。`Shell` 的滚动、浮层与焦点是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。
+
+GPUI 基线为 `gpui-pre` / `gpui-pre-platform` 0.3.8（`font-kit`），Ely 固定 Git revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不引用原型 path 或共享 target。当前使用未打补丁的上游；以后接入输入/只读编辑器时，先验证原型 IME/readonly 问题是否仍可重现，再决定上游升级或最小补丁。搜索浮层没有直接复用 Ely 的 `CommandPalette`：后者在任何 Enter 上运行高亮行，而输入法候选确认也可能是 Enter，因此浮层自绘卡片并在按键绑定前拦截按键、检查查询框的 marked 区间。构建命令见 [README](../README.md)，真实验收证据见 [本轮开发日志](devlog/2026-10-22-shell-layout.md)。
