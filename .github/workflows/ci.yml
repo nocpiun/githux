@@ -13,10 +13,33 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  code-check:
-    name: Code check (fmt, check, clippy, test)
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.scope.outputs.app }}
+      scripts: ${{ steps.scope.outputs.scripts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Test CI scope and aggregate policy
+        run: node --test .github/scripts/ci-scope.test.mjs
+      - name: Classify changed files
+        id: scope
+        run: node .github/scripts/ci-scope.mjs detect
+
+  script-check:
+    name: Agent script checks
+    needs: changes
+    if: ${{ needs.changes.outputs.scripts == 'true' }}
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +54,15 @@ jobs:
 
       - name: Test agent dispatch skill
         run: node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
+
+  code-check:
+    needs: changes
+    if: ${{ needs.changes.outputs.app == 'true' }}
+    name: Code check (fmt, check, clippy, test)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install pinned Rust
         run: |
@@ -55,6 +87,8 @@ jobs:
         run: cargo test --locked
 
   build:
+    needs: changes
+    if: ${{ needs.changes.outputs.app == 'true' }}
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -141,21 +175,17 @@ jobs:
 
   ci:
     name: CI
-    needs: [code-check, build]
+    needs: [changes, script-check, code-check, build]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Verify upstream checks
-        shell: bash
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify required checks and intentional skips
         env:
-          CODE_CHECK_RESULT: ${{ needs.code-check.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-        run: |
-          echo "code-check: ${CODE_CHECK_RESULT}"
-          echo "build: ${BUILD_RESULT}"
-          if [ "${CODE_CHECK_RESULT}" != "success" ] || [ "${BUILD_RESULT}" != "success" ]; then
-            echo "::error::Required upstream check(s) did not succeed."
-            exit 1
-          fi
-          echo "All required upstream checks succeeded."
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node .github/scripts/ci-scope.mjs verify
