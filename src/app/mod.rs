@@ -6,7 +6,7 @@ use ely_gpui_component::{
 };
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
-use crate::{platform, ui::Hello};
+use crate::{platform, ui::Shell};
 
 pub fn run() {
     gpui_platform::application()
@@ -19,19 +19,23 @@ pub fn run() {
                 theme.font_family = platform::fonts::UI_FAMILY.into();
                 theme.mono_family = platform::fonts::CODE_FAMILY.into();
             });
+            Shell::bind_keys(cx);
 
-            let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
+            let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(420.0), px(300.0))),
+                    window_min_size: Some(size(px(880.0), px(560.0))),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Githux".into()),
+                        // Windows draws the custom bar in the client area; the other platforms keep
+                        // their system frame, matching the fact that only Windows is accepted here.
+                        appears_transparent: cfg!(target_os = "windows"),
                         ..Default::default()
                     }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Hello::new(window, cx)),
+                |window, cx| cx.new(|cx| Shell::new(window, cx)),
             )
             .expect("failed to open Githux window");
             cx.on_window_closed(|cx, _| {

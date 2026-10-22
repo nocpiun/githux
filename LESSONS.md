@@ -16,3 +16,10 @@
 - **证据**：2026-10-21 的 [等待脚本测试](.agents/skills/githux-pr-review/scripts/wait-review.test.mjs) 已有 17 项离线用例；真实 PR 验证尚未执行。属于本次搭建中确认的验证边界，不是线上事故记录。
 - **补充证据**：Hello 的真实 Windows 窗口收到“鼠标可用、Tab/Enter/Space 无反应”的反馈，但原实现与显式焦点候选修复都能通过 GPUI 测试平台的导航/激活测试。测试没有经过 Windows 原生输入分发，不能将其当作缺陷已复现或已修复的证据，见 [键盘修复记录](docs/devlog/2026-10-21-bootstrap-gpui-ely.md#键盘反馈与本地候选修复)。
 - **范围**：PR 流程、UI 测试与其他外部集成。后续真实验证通过后补充证据，不改写之前的验证事实。
+
+## L003：按键归属要在按键绑定之前决定
+
+- **规则**：浮层里需要与文本输入共存的按键（Enter、方向键、Esc），用 `intercept_keystrokes` 在绑定匹配之前拦截，并显式检查是否需要放行；不要依赖卡片上的冒泡监听。
+- **原因**：Ely 文本输入的 `Enter` 绑定会发出提交事件并停止传播，卡片上的 `on_key_down` 收不到它；不检查组合态又会把输入法候选确认的 Enter 当成“运行高亮项”。
+- **证据**：2026-10-22 外壳布局任务中，自绘 command palette 第一版把 Enter 放在卡片冒泡监听里，测试显示高亮行不执行；改为拦截器后通过。组合态分支用 `EntityInputHandler::replace_and_mark_text_in_range` 构造 marked range 验证，真实 Windows IME 消息顺序仍未验证，见 [开发日志](docs/devlog/2026-10-22-shell-layout.md#验证)。
+- **范围**：任何把按键同时分配给文本输入和命令的浮层、菜单或编辑器外壳。测试平台上的组合态用例不能替代真实输入法验收。

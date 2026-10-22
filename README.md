@@ -1,6 +1,6 @@
 # Githux
 
-基于 Rust、GPUI 与 Ely 的 GitHub 桌面客户端，Windows 优先，后续覆盖 macOS 和 Linux。当前正式工程只实现 **Hello, world!**：Ely 深色主题、真实 Button 和 FocusScope、可见点击计数及随 binary 注册的字体。登录、网络、数据库与业务页面尚未实现。
+基于 Rust、GPUI 与 Ely 的 GitHub 桌面客户端，Windows 优先，后续覆盖 macOS 和 Linux。当前正式工程实现 R1 的外壳布局：Windows 自定义标题栏、固定侧边栏与有界仓库列表、Ely island、Home 双列假数据、本地导航搜索浮层，以及随 binary 注册的字体。登录、网络、数据库与业务页面（仓库阅读器、Profile Overview、设置选项等）尚未实现。
 
 首版功能取舍见 [产品约定](docs/product.md#首版范围)，后续开发顺序与验收讨论见 [开发路线图](docs/roadmap.md)。首版不做 macOS/Linux 产品适配或安装更新系统；已有跨平台 Debug CI 保留。
 
@@ -18,7 +18,9 @@ cargo run --locked
 
 Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
 
-窗口标题为 Githux，正文为 Hello, world!。点击 Press 后计数递增；用 Tab / Shift+Tab 切换焦点，再按 Enter / Space，检查焦点环与计数重绘。关闭最后窗口退出应用。本轮使用临时系统标题栏；自定义标题栏、island 与应用级多标签留给下一轮外壳实现。
+启动进入 Home：左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果只有本地导航命令（各页面与当前假数据仓库）：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Notifications、Issues、PRs、New；New 尚未确定创建范围，因此保持禁用。
+
+页面内容：Home 用少量固定假数据展示最近参与与关注动态的密度；Repository 与 Profile 只显示最小资源标识以核验路由；Settings 与 Issue/PR 等未设计页面内容区按约定留空，不添加“未实现”卡片。关闭最后窗口退出应用。应用级多标签、仓库阅读器与真实数据属于后续任务。字体、中文回退、输入法、多 DPI 与窗口按钮的真实窗口验收状态见 [外壳布局开发日志](docs/devlog/2026-10-22-shell-layout.md)；macOS/Linux 仍保留系统标题栏，未做产品适配。
 
 ## 构建检查
 
@@ -35,13 +37,13 @@ git diff --check
 
 末尾的 `CI` job 汇总所有上游结果，可在分支规则中将名称为 `CI` 的检查设为 required check。只有代码检查和整个构建矩阵均成功时才通过；维护约定见 [代码约定](docs/code-standards.md#验证)。各提交的实际结果见 GitHub Actions，验证边界见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
 
-`cargo test` 使用 GPUI 测试平台渲染实际 Hello 视图，覆盖 Tab / Shift+Tab、焦点保留与 Enter / Space 激活。测试平台不经过 Windows 原生输入分发，原实现也能通过该测试，不能据此认定用户反馈的键盘问题已经修复。真实窗口的渲染、字体与键盘操作仍需人工验收；本机键盘复测已由负责人确认通过，具体场景与限制见 [开发日志](docs/devlog/2026-10-21-bootstrap-gpui-ely.md)。macOS/Linux 原生运行与真实交互尚未进行人工验收。
+`cargo test` 使用 GPUI 测试平台渲染实际外壳视图，覆盖启动 Home、缩放时只有仓库组让出高度、侧栏独立滚动、各入口路由与选中态、搜索浮层的打开/过滤/高亮移动/Enter/Esc/组合态 Enter、焦点返回、中文与超长名称保持在列内，以及未设计页面的留空行为。测试平台不经过 Windows 原生输入分发，也不驱动真实的非客户区命中测试，因此不能替代真实窗口验收；本机窗口的拖动、双击最大化、贴靠、搜索入口不误拖动与进程退出已核验，IME 与多 DPI 仍待人工确认，详见 [开发日志](docs/devlog/2026-10-22-shell-layout.md)。
 
 ## 依赖与字体
 
 - Rust edition 2024，工具链 1.98.1；单 Cargo package 与 binary，`Cargo.lock` 纳入版本控制。
 - `gpui-pre = 0.3.8`、`gpui-pre-platform = 0.3.8`，启用 `font-kit`；Linux 额外启用平台的 `x11` 与 `wayland` 窗口后端。
-- [Ely 上游](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git) 固定 revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，未应用原型的 IME/readonly 补丁。未来引入输入/只读编辑器时先重现相关问题，再评估上游修复或有针对性的补丁；Hello 不需要这些补丁。
+- [Ely 上游](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git) 固定 revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，未应用原型的 IME/readonly 补丁。搜索浮层没有复用 Ely 的 `CommandPalette`（它在任何 Enter 上运行高亮行），改用自绘卡片并在按键绑定前拦截 Enter、检查查询框的 marked 区间；未来引入只读编辑器时仍先重现相关问题再决定补丁。
 - UI 默认 Noto Sans，代码默认 Google Sans Code。固定官方字体文件与许可证见 [字体来源](assets/fonts/README.md)，编译进 binary。中文回退、复杂排版和 IME 尚未验收。
 
 ## 源码目录
@@ -50,9 +52,9 @@ git diff --check
 | --- | --- |
 | `src/main.rs` | binary 入口 |
 | `src/app/` | 应用启动、依赖组合和框架初始化 |
-| `src/ui/` | Ely 组件与视图局部状态；当前只有 Hello |
+| `src/ui/` | Ely 组件与视图局部状态：外壳、标题栏、侧边栏、页面、搜索浮层、几何参数与布局 fixture |
 | `src/platform/` | 字体注册；未来系统凭据、IME 与 OS 集成 |
-| `src/workspace/` | 预留窗口、路由、标签、页面会话与焦点归属 |
+| `src/workspace/` | 路由与当前页面；会话集合、标签与焦点归属留给后续任务 |
 | `src/domain/` | 预留不依赖 UI 框架的业务类型与规则 |
 | `src/auth/` | 预留账户与授权上下文 |
 | `src/data/` | 预留业务入口、缓存策略、请求合并与通知 |

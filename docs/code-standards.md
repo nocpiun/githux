@@ -1,6 +1,6 @@
 # 共同代码与验证约定
 
-更新：2026-10-21。只维护当前项目有用的稳定规则；具体业务要求链接到 [产品](product.md)、[架构](architecture.md)、[缓存](cache-strategy.md) 和 [工作流](agent-workflow.md)。
+更新：2026-10-22。只维护当前项目有用的稳定规则；具体业务要求链接到 [产品](product.md)、[架构](architecture.md)、[缓存](cache-strategy.md) 和 [工作流](agent-workflow.md)。
 
 ## 改动与并行
 
@@ -41,7 +41,7 @@ cargo build --locked
 cargo test --locked
 ```
 
-`cargo test` 使用 GPUI 测试平台覆盖实际 Hello 视图的焦点导航、重绘后焦点保留和按键激活，没有为预留模块编写占位测试。该测试不经过 Windows 原生输入分发，不替代真实窗口复测；具体证据和限制见 [开发日志](devlog/2026-10-21-bootstrap-gpui-ely.md)。依赖锁文件必须入 Git；每个 worktree 使用自己的 `target/`。运行步骤和 GUI 验收要求见 [README](../README.md)；CI 首次实际执行与 macOS/Linux 验证不能由本地 Windows 结果推断。
+`cargo test` 使用 GPUI 测试平台渲染实际外壳视图，覆盖路由、缩放时的有界滚动、侧栏独立滚动、搜索浮层的打开/过滤/选择/关闭/组合态 Enter、焦点返回与未设计页面留空；fixture 与命令排序另有用例。该测试不经过 Windows 原生输入分发，也不驱动真实非客户区命中测试，不替代真实窗口复测；具体证据和限制见 [外壳布局开发日志](devlog/2026-10-22-shell-layout.md)。依赖锁文件必须入 Git；每个 worktree 使用自己的 `target/`。运行步骤和 GUI 验收要求见 [README](../README.md)；CI 首次实际执行与 macOS/Linux 验证不能由本地 Windows 结果推断。
 
 ## 交付与文档
 
