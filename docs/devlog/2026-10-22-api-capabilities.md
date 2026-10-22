@@ -34,6 +34,7 @@
 - 第九轮审查指出三处：OAuth 授权只覆盖登录时已有活动 SSO 会话且允许该 App 的组织，不是自动覆盖所有组织；REST 的 `open_issues_count` 包含 PR，不能标成“Open issues”；2020-07 前创建的同名仓库需手动分享且 API 无此标记。均已核实并在矩阵、错误/缓存节与待裁决清单补充。
 - 第十轮审查指出：GitHub App user token 的过期是可选的（默认启用、可 opt-out），不能写成无条件 8 小时。已按刷新文档改为“取决于 App 设置，opt-out 则长期且无 refresh”。
 - 第十一轮审查指出：搜索的 `sort` 白名单按端点不同，不能笼统写 `updated`/`created`/`comments`。已按 OpenAPI 描述把每个搜索类别的 sort 枚举写入。
+- 第十二轮审查指出：issue/PR 搜索没有 `reactions*` 通配值。已改为逐个枚举；同时实测发现越界/未知 `sort` 是被静默忽略而不是 422，已把这一实际行为写入（原稿的“会 422”是错的）。
 
 ## 后续
 
