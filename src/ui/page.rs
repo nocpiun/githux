@@ -81,7 +81,9 @@ fn column_heading(text: &str, detail: Option<String>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Home: recently involved issues/PRs on the left, following feed on the right.
+/// Home: the left column is titled exactly "Home" and holds recently involved issues/PRs; the
+/// right column is titled exactly "Feed" and holds following activity. Those two names are the
+/// confirmed product labels (2026-10-22), not working titles.
 fn home(cx: &App) -> AnyElement {
     let involved = div()
         .debug_selector(|| "home-involved".to_string())
@@ -93,7 +95,7 @@ fn home(cx: &App) -> AnyElement {
         .overflow_hidden()
         .gap_1()
         .child(column_heading(
-            "Recently involved",
+            "Home",
             Some(format!("{}", fixtures::INVOLVED.len())),
             cx,
         ))
@@ -107,7 +109,7 @@ fn home(cx: &App) -> AnyElement {
         .min_w_0()
         .overflow_hidden()
         .gap_1()
-        .child(column_heading("Following feed", None, cx))
+        .child(column_heading("Feed", None, cx))
         .children(fixtures::FEED.iter().map(|row| feed_row(row, cx)));
     div()
         .debug_selector(|| "page-home".to_string())

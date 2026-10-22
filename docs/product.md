@@ -8,6 +8,14 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 可保存多个账户，同一时刻仅一个活动账户；离线可查看已缓存内容，联网后刷新。首次工作流验证曾只限制一个实现 Agent；该限制已解除，不能由此推导产品或长期流程必须串行。
 
+## 登录与未来写能力
+
+负责人于 2026-10-22 确认 PAT 为首版正式登录方式。用户自行创建并输入 token，应用直接访问 GitHub，凭据进入系统凭据设施；本项目不建设认证后端或托管 `client_secret`。
+
+为覆盖保留的 Notifications 和跨组织仓库读取，首版接入 **Classic PAT**（细粒度 PAT 目前不支持 Notifications，依据见 [能力表](github-api-capabilities.md#认证方式矩阵)）。登录后验证账户身份、实际授权及受限功能，过期或撤销时引导替换 PAT；组织策略/SSO 仍可能限制访问，不能保证用户网页中可见的所有资源都对当前 token 可见。
+
+当前先实现阅读链路，架构须为未来远程写操作保留权限检查、提交结果及缓存失效边界，见 [架构约定](architecture.md#认证与外部边界)。`repo` scope 本身包含私有仓库的读写权限；不把当前阅读 UI 描述成只读 token，也不为了未来操作预先要求所有管理权限。H7 的具体动作仍待逐项确定，预留能力不等于现在实现全部写功能。
+
 ## 首版范围
 
 以下依据负责人 2026-10-21 最后一次范围调整；编号沿用功能讨论清单。这里维护功能范围，[开发路线图](roadmap.md) 维护建议顺序、依赖与验收。排除项是首版延后项，不代表取消长期方向，也不因后续任务方便而自动恢复。
@@ -39,7 +47,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 - 自定义标题栏：首版 Windows 左上 Githux 字样、右侧三个窗口按钮，验证拖动、缩放、贴靠等系统交互。macOS 左侧按钮后接 Githux 的既有设计留待后续平台支持。
 - 侧边栏直接从顶部导航开始，没有额外 Logo/品牌块。上方 Home、Settings，中间仓库列表，底部账户信息与快捷入口。
-- 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。具体账户/组织范围与排序待定。
+- 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。范围确定为 `GET /user/repos` 在当前活动账户、token 与组织授权下返回的集合（owner、collaborator、organization_member），不限定单个组织；排序与局部筛选待定。
 - 底部点击头像/名称进入 Profile；下方横向四等分图标入口为 Notifications、Issues、PRs、New。不放主题切换。
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。R1 首份外壳交付只提供本地导航命令（各页与当前仓库列表），不调用 GitHub，也不据此确定未来全局搜索范围。
 - 侧栏以外的页面主区域采用 island，与窗口边缘留微小距离，内外圆角协调。不是所有子面板都变成浮动卡片；精确间距、圆角和最大化行为待真实窗口确认。
@@ -49,7 +57,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 | 页面 | 已确认内容 |
 | --- | --- |
-| Home | 启动进入 Home；左侧“最近参与、有更新的 Issues/PRs”，由 GitHub API 获取，语义不是本地浏览历史；右侧关注动态 Feed |
+| Home | 启动进入首页；左栏标题严格为 **Home**，展示最近参与且有更新的 Issues/PRs；右栏标题严格为 **Feed**，展示关注动态 |
 | Repository | 顶部仓库资料与横向内容 Tabs；下方左文件树、右文件查看器，默认 README，处理没有 README 的仓库 |
 | 仓库附加资料 | C5–C9 的布局位置统一确定为顶部信息栏，不另开右侧纵栏；首版仅实现 Releases、Contributors、Languages，Packages/Environments 延后 |
 | Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；不实现 Contribution Activity 和其他内容 Tabs |
@@ -59,6 +67,12 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | 仓库其他未设计 Tabs | 除仓库 Settings 外，首轮内容区直接留空，不添加“未实现”卡片 |
 
 留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 已排除出首版，不套用仓库的留空约定补出额外内容页。
+
+### Home 与 Feed 的数据范围
+
+左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。候选查询是 `involves:当前用户名` 与条目更新时间排序；是否设时间窗口、是否额外包含仅被请求评审等关系，在 Home 实现任务中明确。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
+
+右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。刷新遵守服务端限制；展示名称为 Feed，不要求每张卡片标注“API 事件流”。来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
 
 ## 视觉、字体与原生体验
 
@@ -70,10 +84,10 @@ UI 默认 **Noto Sans**，代码默认 **Google Sans Code**。建议随包固定
 
 ## 仍待决定
 
-- 侧边栏仓库范围/排序/局部筛选，command palette 搜索范围，Notifications/全局 Issues/PRs/New 的具体内容。
-- 顶部信息栏的密度和窄窗口呈现、无 README 的具体呈现、Popular 排序与 README 发现规则、Feed 实际覆盖及“参与”的精确范围。
+- 侧边栏仓库排序/局部筛选，command palette 搜索范围，Notifications/全局 Issues/PRs/New 的具体内容。
+- 顶部信息栏的密度和窄窗口呈现、无 README 的具体呈现、Popular 排序与 README 发现规则、Home 的时间窗口与额外参与关系、Feed 卡片类型/过滤。gist-only 的热门回退和旧版个人 README 规则已明确延后到相应 Profile 任务前讨论。
 - 基础标签的打开/复用规则、Home/Settings 是否单例、关闭最后标签及可容纳数量的边界处理。H6 所列进阶交互本轮不设计实现，基础边界不能借机恢复它们。启动仍进入 Home，不恢复上次活动页。
 - 最小窗口、面板宽度与响应布局、设置项目、产品语言、本人/他人操作。
-- 登录方式、账户切换时标签处理、私有缓存授权失效与账户移除策略；若 H7 选定需要编辑内容的操作，再明确相应草稿规则。
+- PAT 创建引导的最小权限清单、账户切换时标签处理、私有缓存授权失效与账户移除策略；若 H7 选定需要编辑内容的操作，再明确相应草稿规则。
 
 这些选择应在相关任务开始前补齐必要范围，其他无依赖工作可以继续，不要求先把所有问题一次定完。

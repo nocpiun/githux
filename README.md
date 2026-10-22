@@ -20,7 +20,7 @@ Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接�
 
 启动进入 Home：左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果只有本地导航命令（各页面与当前假数据仓库）：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Notifications、Issues、PRs、New；New 尚未确定创建范围，因此保持禁用。
 
-页面内容：Home 用少量固定假数据展示最近参与与关注动态的密度；Repository 与 Profile 只显示最小资源标识以核验路由；Settings 与 Issue/PR 等未设计页面内容区按约定留空，不添加“未实现”卡片。关闭最后窗口退出应用。应用级多标签、仓库阅读器与真实数据属于后续任务。字体、中文回退、输入法、多 DPI 与窗口按钮的真实窗口验收状态见 [外壳布局开发日志](docs/devlog/2026-10-22-shell-layout.md)；macOS/Linux 仍保留系统标题栏，未做产品适配。
+页面内容：Home 用少量固定假数据展示左栏 Home（最近参与）与右栏 Feed（关注动态）的密度；Repository 与 Profile 只显示最小资源标识以核验路由；Settings 与 Issue/PR 等未设计页面内容区按约定留空，不添加“未实现”卡片。关闭最后窗口退出应用。应用级多标签、仓库阅读器与真实数据属于后续任务。字体、中文回退、输入法、多 DPI 与窗口按钮的真实窗口验收状态见 [外壳布局开发日志](docs/devlog/2026-10-22-shell-layout.md)；macOS/Linux 仍保留系统标题栏，未做产品适配。
 
 ## 构建检查
 

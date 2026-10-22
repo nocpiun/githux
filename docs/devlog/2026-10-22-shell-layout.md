@@ -22,7 +22,7 @@
 
 没有直接用 Ely 的 `CommandPalette`，原因只有一个：它在任何 Enter 上运行高亮行，包括输入法候选确认的 Enter。这里用 `intercept_keystrokes` 在按键绑定之前接管 Up/Down/Enter/Escape，并在 Enter 时先查询查询框的 marked（composing）区间；组合中存在候选时放行该 Enter，不执行导航。测试通过 `EntityInputHandler::replace_and_mark_text_in_range` 构造组合状态验证这条分支，但**这不等于验证了 Windows 原生 IME 消息顺序**，见“后续”。
 
-**页面内容。** 只有 Home 画真实内容：左侧最近参与（类型、标题、仓库/编号、更新时间），右侧关注动态。Repository 与 Profile 只显示最小资源标识（全名/描述、头像/名称/ID）以核验路由。Settings、Notifications、Issues、Pull requests 内容区按产品约定留空，不加“未实现”卡片；没有仓库阅读器、设置选项、Issue 详情。
+**页面内容。** 只有 Home 画真实内容：左栏标题严格为 **Home**，展示最近参与（类型、标题、仓库/编号、更新时间）；右栏标题严格为 **Feed**，展示关注动态。这两个标题取自 2026-10-22 负责人确认的名称，不是工作标题。Repository 与 Profile 只显示最小资源标识（全名/描述、头像/名称/ID）以核验路由。Settings、Notifications、Issues、Pull requests 内容区按产品约定留空，不加“未实现”卡片；没有仓库阅读器、设置选项、Issue 详情。
 
 **测试数据。** `src/ui/fixtures.rs` 提供 124 条稳定仓库（含中文名、超长名、长 namespace）与两组 Home fixture。没有网络、凭据或缓存路径读取它；生成部分用索引派生，保证跨进程稳定且唯一。
 
@@ -87,6 +87,12 @@ git diff --check
 推送修复后，api-capabilities 的 PR #6、#7 和 #9 先合入 main，其中 #7 将 `code-check` 从 `windows-2022` 移到 Ubuntu 24.04。本分支此前的 `search-entry` 选择器只在 `Platform::Windows` 下绘制，导致 #7 之后合入的基线上 10 项测试在 Linux 上失败；这不是 Linux 原生验收问题，而是外壳把“搜索入口必须在标题栏”这个已确认行为绑在了错误的平台分支上。
 
 已按任务要求与 main 组合核验：合并 `origin/main`（合并基线提交见 PR 历史），同时把标题栏改为所有平台绘制同一条品牌 + 搜索入口，只有窗口按钮保留 Windows 专属的 `cfg!` 分支（其他平台继续用系统标题栏）。新增两项用例固定这条边界：`the_title_bar_always_offers_the_search_entry_and_brand`（品牌与搜索入口始终绘制，Windows 额外验证三个 caption 按钮）与 `the_shell_body_sits_below_the_title_bar_on_every_platform`（外壳主体不受平台分支影响）。合并后的本地检查与 26 项测试全部通过，并在真实窗口确认搜索入口与布局与合并前一致。
+
+## 与 main 的第二次组合（Home/Feed 命名）
+
+PR #10 确认 Home 左栏标题严格为 **Home**、右栏严格为 **Feed**，并接受 Events API 的延迟。合并该基线后，本轮把 Home 两栏标题从实现期的 “Recently involved / Following feed” 改为确认名称，`src/ui/fixtures.rs` 的注释与根 README 一并同步；`docs/roadmap.md` 的 R1 描述保留本任务实际交付与未交付项。改动只涉及标签与注释，测试仍以 `home-involved`/`home-feed` 选择器验证两栏存在与等宽，不依赖标题文字。
+
+合并后本地 fmt/check/clippy/build/test（27 passed）全部通过。
 
 ## 后续
 

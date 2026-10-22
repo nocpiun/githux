@@ -65,7 +65,7 @@ impl ActivityKind {
     }
 }
 
-/// One entry under Home's "Recently involved" column.
+/// One entry under Home's left column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvolvedFixture {
     pub kind: ActivityKind,
@@ -75,7 +75,7 @@ pub struct InvolvedFixture {
     pub updated: &'static str,
 }
 
-/// One event under Home's "Following feed" column.
+/// One event under Home's right "Feed" column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FeedFixture {
     pub actor: &'static str,
