@@ -10,7 +10,15 @@
 - 已知 running 摘要优先于提前可见的正式 review：等待整批完成。完成且有未解决 findings（has_unresolved_findings=true）时，须等到本轮对应 head 的正式 review 及行内意见到达；仅摘要、仅收据或旧线程不足以完成本轮等待。收集本轮正式 review 及其评论，另用只读 GraphQL 分页核验线程状态，仅携带明确未解决的历史 Bot 行内意见（含回复），已解决旧意见不再混入本批。线程状态缺失或查询失败明确报错，不猜测；这些意见仍是待分类数据。
 - 完成且 has_unresolved_findings=false 时返回 review_completed；has_any_findings=true 可以只是已解决历史，不再要求本轮存在正式 review 或行内意见。真实例子见 [PR #6 摘要](https://github.com/nocpiun/githux/pull/6#issuecomment-6331406055) 与[本轮收据](https://github.com/nocpiun/githux/pull/6#issuecomment-6335038750)。摘要仍须通过身份、完整 SHA 和轮次校验；独立 receipt 或仅线程被标记 resolved 都不能替代有效的完成摘要。启用 wait-ci 后继续核验 CI，返回状态不是合并授权。
 - 可信且绑定当前 SHA 的 review receipt 不单独唤醒执行者；普通错误/额度消息仍返回待核实。没有可用摘要时保留原正式 review 到达行为，不擅自把 APPROVED 或无行内意见升级为检查通过。
-- 结果返回前重新读取 PR，head 改变或 PR 关闭就废弃本批结果。合并前执行者仍需再次核验。
+- 结果返回前重新读取 PR，head 改变、PR 关闭或确认合并冲突就废弃本批结果。合并前执行者仍需再次核验。
+
+## 合并冲突
+
+每轮首先读取 PR，并在交回审查/CI 证据前再次核验；无论是否启用 `--wait-ci`，当前 head 的 `mergeable === false` 都返回 `merge_conflict`、退出码 8，附目标分支 ref/SHA、GitHub 状态和处理提示。此结果优先于审查或 CI 结果；PR 关闭及 head 改变仍优先，不能把其他提交的冲突归到当前轮次。
+
+[REST API](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request) 的 `mergeable` 是 true/false/null：null 表示仍在计算，不当作冲突；不凭 `mergeable_state` 的 blocked、behind、unstable、draft 等状态判断冲突。未知合并状态不额外阻止审查证据交回，但不能用脚本结果替代合并前核验。
+
+[GitHub 不运行有合并冲突的 pull_request 工作流](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)。收到冲突结果后应同步目标分支、解决冲突并推送，随后对新 head 触发审查并重新等待，不重复启动同一 head 的等待器。脚本只报告事实，不自动改代码、触发审查或解除人工审查/Draft；有语义取舍按共享裁决流程处理。
 
 ## CI
 

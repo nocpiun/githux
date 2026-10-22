@@ -507,3 +507,81 @@ test('a push or closure invalidates completed evidence even when historical find
     assert.equal(result.ci, undefined);
   }
 });
+
+test('merge conflict stops review and CI waiting immediately without reading evidence or sleeping', async () => {
+  for (const waitCi of [false, true]) {
+    const f = withChecks({ heads: [pr({ mergeable: false, mergeable_state: 'dirty',
+      base: { ref: 'main', sha: B } })], comments: [summary()] });
+    const r = await waitForReview(options({ waitCi }), {
+      api: f.api, sleep: async () => assert.fail('conflicts cannot be resolved by waiting'),
+    });
+    assert.equal(r.status, 'merge_conflict');
+    assert.equal(r.head, A);
+    assert.equal(r.base_ref, 'main');
+    assert.equal(r.base_sha, B);
+    assert.equal(r.mergeable, false);
+    assert.equal(r.mergeable_state, 'dirty');
+    assert.equal(r.review_passed, null);
+    assert.equal(r.verdict, 'not_evaluated');
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('mergeability computation can become a conflict on the next poll', async () => {
+  let clock = 0;
+  const sleeps = [];
+  const f = withChecks({ comments: [summary()], heads: [
+    pr({ mergeable: null, mergeable_state: 'unknown' }),
+    pr({ mergeable: false, mergeable_state: 'dirty' }),
+  ] });
+  const r = await waitForReview(options({ waitCi: true, intervalMs: 1000, timeoutMs: 5000 }), {
+    api: f.api, now: () => clock,
+    sleep: async ms => { sleeps.push(ms); clock += ms; },
+  });
+  assert.equal(r.status, 'merge_conflict');
+  assert.deepEqual(sleeps, [1000]);
+});
+
+test('unknown mergeability and protection or draft states are not reported as conflicts', async () => {
+  for (const extra of [
+    {}, { mergeable: null, mergeable_state: 'unknown' },
+    { mergeable: null, mergeable_state: 'dirty' },
+    { mergeable: true, mergeable_state: 'blocked' },
+    { mergeable: true, mergeable_state: 'behind' },
+    { mergeable: true, mergeable_state: 'unstable' },
+    { mergeable: true, mergeable_state: 'draft', draft: true },
+  ]) {
+    const f = withChecks({ heads: [pr(extra)], comments: [summary()] });
+    assert.equal(await inspectReview(options({ waitCi: true }), f.api), null);
+  }
+  const f = withChecks({ heads: [pr({ mergeable: true, draft: true, mergeable_state: 'draft' })],
+    comments: [summary()] }, [check()]);
+  assert.equal((await inspectReview(options({ waitCi: true }), f.api)).status, 'checks_ready');
+});
+
+test('a merge conflict found at the final PR read invalidates collected review and CI readiness', async () => {
+  for (const waitCi of [false, true]) {
+    const f = withChecks({ heads: [pr({ mergeable: true }), pr({ mergeable: false })],
+      comments: [summary()] }, [check()]);
+    const r = await inspectReview(options({ waitCi }), f.api);
+    assert.equal(r.status, 'merge_conflict');
+    assert.equal(r.summary, undefined);
+    assert.equal(r.ci, undefined);
+  }
+});
+
+test('closure and changed head take precedence over merge conflicts before and after collection', async () => {
+  for (const [extra, expected] of [
+    [{ state: 'closed', merged: true }, 'pr_closed'],
+    [{ head: { sha: B } }, 'head_changed'],
+  ]) {
+    const next = pr({ mergeable: false, mergeable_state: 'dirty', ...extra });
+    for (const heads of [[next], [pr(), next]]) {
+      const f = withChecks({ heads, comments: [summary()] }, [check()]);
+      const r = await inspectReview(options({ waitCi: true }), f.api);
+      assert.equal(r.status, expected);
+      assert.equal(r.summary, undefined);
+      assert.equal(r.ci, undefined);
+    }
+  }
+});

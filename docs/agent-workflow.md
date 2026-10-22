@@ -36,7 +36,7 @@
 
 首次创建 PR 由本仓库设置自动触发 Codex review。每次后续 push 新提交，无论是代码、文档、修复还是合并基线，都必须通过 `gh` 评论精确的 `@codex review`。先确认远端 head，记录触发评论 ID/时间；不要每次轮询重复评论。
 
-基层 Agent 使用 [githux-pr-review](../.agents/skills/githux-pr-review/SKILL.md) 以前台工具调用等待普通程序轮询；工具返回后原会话继续。等待期间无需反复调用模型。超时、Bot 额度失败、无回复或无法绑定提交均不能认定通过。
+基层 Agent 使用 [githux-pr-review](../.agents/skills/githux-pr-review/SKILL.md) 以前台工具调用等待普通程序轮询；工具返回后原会话继续。等待期间无需反复调用模型。超时、Bot 额度失败、无回复或无法绑定提交均不能认定通过。等待器发现合并冲突会返回 `merge_conflict`（退出码 8）；执行者先同步目标分支并解决冲突，推送后对新 head 触发审查再等待，不原样重启等待器。冲突中的语义取舍按裁决流程处理，已有人工 review / Draft 限制不变。
 
 ### 首版 Milestone
 
