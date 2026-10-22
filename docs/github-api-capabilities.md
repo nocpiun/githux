@@ -232,7 +232,7 @@
 | Issues/PRs | `GET /search/issues`；GraphQL `search(type:ISSUE)` | 同上 | 同上；`incomplete_results` 表示超时截断 |
 | 用户 | `GET /search/users`；GraphQL `search(type:USER)` | 同上 | 同上 |
 | 代码 | `GET /search/code` | **必须认证**；细粒度：无需权限 | 10 次/分钟（独立于 30 次/分）；需要能读到目标仓库 |
-| 语义/混合搜索 | GraphQL `ISSUE_SEMANTIC`、`ISSUE_HYBRID` 等枚举 | — | 能力存在但产品未定类别，不因枚举存在而扩张范围 |
+| 语义/混合 issue 搜索 | `GET /search/issues` 带 `search_type=semantic` 或 `hybrid`；GraphQL `ISSUE_SEMANTIC`、`ISSUE_HYBRID` | **必须认证**；细粒度：无需权限 | 10 次/分钟（独立 `semantic_search` 桶，低于普通搜索的 30 次/分）；能力存在但产品未定类别，不因枚举存在而扩张范围 |
 
 搜索的通用限制：查询去操作符后 >256 字符、或 >5 个 AND/OR/NOT 会返回 422；单次查询最多扫描 4,000 个仓库；认证后仍需对目标资源有权限，否则 422 或静默省略。结果默认按 best match，`sort` 可选 `updated`、`created`、`comments` 等。首版类别未定，本文只说明“能搜什么、代价多大”，不预设 palette 内容。
 
@@ -252,6 +252,8 @@
 | 429（commit 端点） | 服务端负载，不一定是限流 | 按 `retry-after`/退避处理，不误报“额度用尽” |
 | 301（仓库端点） | 仓库改名/转移 | 跟随并更新本地稳定 ID 映射 |
 | `incomplete_results: true` | 搜索超时，结果不完整 | 明确标注不完整，不做“已全部加载” |
+| **HTTP 200 + `errors` 字段**（GraphQL 主限流耗尽） | GraphQL 主限流超限仍返回 `200`，错误在响应体 `errors` 里，`x-ratelimit-remaining` 为 0 | **不能只看状态码**；`data` 与 `errors` 同时存在时按错误处理，不把部分数据当成功写入 |
+| HTTP 200 或 403 + 次级限流错误（GraphQL） | 次级限流在 GraphQL 下可能是 200 也可能是 403 | 同样要解析错误体；不根据 200 就重试 |
 
 ## 分页与限流（区分维度）
 
@@ -268,7 +270,8 @@
 
 其他事实：
 
-- 搜索使用独立的 `search` 桶：认证 30 次/分钟、代码搜索 10 次/分钟（且必须认证）、未认证 10 次/分钟。GraphQL 有独立的 `graphql` 桶。实测响应头 `X-RateLimit-Resource` 分别为 `search`、`graphql`、`core`，可据此分桶计数。
+- 搜索使用独立的 `search` 桶：认证 30 次/分钟、代码搜索 10 次/分钟（且必须认证）、未认证 10 次/分钟。**issue 搜索的 `search_type=semantic` 与 `hybrid` 走另一个 `semantic_search` 桶，10 次/分钟且必须认证**（实测响应头 `X-RateLimit-Resource: semantic_search`、`X-RateLimit-Limit: 10`），不能按 30 次/分调度。GraphQL 有独立的 `graphql` 桶。实测响应头 `X-RateLimit-Resource` 可为 `search`、`semantic_search`、`graphql`、`core`，可据此分桶计数。
+- **GraphQL 的限流信号不只靠状态码**：主限流耗尽时官方描述为 HTTP 200 + 错误信息 + `x-ratelimit-remaining: 0`；次级限流可能是 200 或 403。因此 GraphQL 必须同时解析响应体 `errors` 与 `x-ratelimit-*` 头，不能把 200 一律当成功。REST 主限流则是 403/429 + `remaining: 0`。
 - 条件请求：正确授权且返回 `304` 的请求不消耗主限额。实测连续 3 次带 `If-None-Match` 的 304 只让 `core` 已用数增加 1（来自那次 200 请求），验证了文档描述。
 - `GET /rate_limit` 不计入主限额，但可能计入次级限流；它是总览，响应头才是权威值，两者不一致时以响应头为准。
 - GraphQL 点数按连接数估算：把各连接需要的请求数相加、除以 100 取整，最小 1 点；单次查询节点上限 500,000，`first`/`last` 必须在 1–100 之间；超过 10 秒会返回 502/504 并额外扣点。
