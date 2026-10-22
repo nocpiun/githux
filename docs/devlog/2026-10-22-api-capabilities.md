@@ -31,6 +31,7 @@
 - 第七轮审查指出：OAuth App 也支持 expiring tokens（8 小时 access + 6 个月可轮换 refresh，`expires_in` 等响应字段有条件出现），不能只在 GitHub App 行里写这个生命周期。已核实授权文档并在两个 OAuth 流程行与桌面 secret 边界里补充。
 - 第八轮审查指出：不想要 `client_secret` 时，除了后端与 GitHub App，OAuth App 的 device flow 同样只需 `client_id` 且刷新也不需要 secret。已纠正桌面 secret 边界的表述，把 device flow 列入无 secret 路径并保留其安全代价。
 - 第九轮审查指出三处：OAuth 授权只覆盖登录时已有活动 SSO 会话且允许该 App 的组织，不是自动覆盖所有组织；REST 的 `open_issues_count` 包含 PR，不能标成“Open issues”；2020-07 前创建的同名仓库需手动分享且 API 无此标记。均已核实并在矩阵、错误/缓存节与待裁决清单补充。
+- 第十轮审查指出：GitHub App user token 的过期是可选的（默认启用、可 opt-out），不能写成无条件 8 小时。已按刷新文档改为“取决于 App 设置，opt-out 则长期且无 refresh”。
 
 ## 后续
 
