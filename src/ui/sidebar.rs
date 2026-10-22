@@ -171,6 +171,7 @@ pub(super) fn quarter_button(
     name: &'static str,
     icon: IconName,
     label: &'static str,
+    active: bool,
     disabled: bool,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
@@ -180,7 +181,7 @@ pub(super) fn quarter_button(
     let (radius, hover, muted, focus) = (
         theme.radius(Radius::Md),
         colors.hover,
-        colors.fg_muted,
+        if active { colors.fg } else { colors.fg_muted },
         colors.focus,
     );
     let run: Run = Box::new(run);
@@ -198,6 +199,9 @@ pub(super) fn quarter_button(
         .hover(move |style| style.bg(hover))
         .role(Role::Button)
         .aria_label(label)
+        .when(active, |button| {
+            button.bg(hover).font_weight(FontWeight::MEDIUM)
+        })
         .map(|button| {
             if disabled {
                 return button

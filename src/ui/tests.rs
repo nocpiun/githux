@@ -214,9 +214,15 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
     assert_eq!(route(&view, cx), Route::Profile);
     assert!(cx.debug_bounds("page-profile").is_some());
 
+    // The quarter entries keep a persistent selected state for their blank destinations, as the
+    // product requires selected-state verification. Go back to Issues first, then prove New's
+    // disabled entry never changes the route.
+    click("quarter-issues", cx);
+    assert_eq!(route(&view, cx), Route::Issues);
+
     // New is disabled this round: pressing it changes nothing.
     click("quarter-new", cx);
-    assert_eq!(route(&view, cx), Route::Profile);
+    assert_eq!(route(&view, cx), Route::Issues);
 
     click("nav-home", cx);
     assert_eq!(route(&view, cx), Route::Home);

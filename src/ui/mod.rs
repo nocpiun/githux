@@ -367,11 +367,13 @@ impl Shell {
                        icon: IconName,
                        label: &'static str,
                        target: Option<Route>,
+                       active: bool,
                        this: gpui::Entity<Self>| {
             sidebar::quarter_button(
                 name,
                 icon,
                 label,
+                active,
                 target.is_none(),
                 move |_, cx| {
                     let Some(target) = target.clone() else {
@@ -390,6 +392,7 @@ impl Shell {
                 IconName::Bell,
                 "Notifications",
                 Some(Route::Notifications),
+                route == Route::Notifications,
                 this.clone(),
             ),
             quarter(
@@ -397,6 +400,7 @@ impl Shell {
                 IconName::CircleDot,
                 "Issues",
                 Some(Route::Issues),
+                route == Route::Issues,
                 this.clone(),
             ),
             quarter(
@@ -404,10 +408,11 @@ impl Shell {
                 IconName::GitPullRequest,
                 "Pull requests",
                 Some(Route::PullRequests),
+                route == Route::PullRequests,
                 this.clone(),
             ),
             // New has no approved resource list this round: named, disabled, does nothing.
-            quarter("new", IconName::Plus, "New", None, this.clone()),
+            quarter("new", IconName::Plus, "New", None, false, this.clone()),
         ]);
 
         sidebar::sidebar(nav, heading, repositories, account, quarters)
