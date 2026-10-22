@@ -19,7 +19,7 @@
 - 未实测并标为待集成验证：私有仓库内容、空仓库 409 / Contributors 204、组织 SSO 与细粒度 PAT 审批、标记通知已读/完成、任何写操作、真实的 fine-grained PAT 与 GitHub App token。
 - 未创建 token、未注册 App、未修改远端资源；未输出或记录凭据值。
 - 未运行 Rust 编译与 GUI 验证：本任务只改 Markdown，与该检查无关；PR 仍按仓库最新 head 的 CI 与代码审查门槛执行。
-- 基线已更新：审查期间 `main` 合入了按改动范围选择 CI 的任务（PR #7），本分支已 rebase 到该含该提交的基线。纯 `docs/**` 变更按 [CI 改动范围](code-standards.md#ci-改动范围) 跳过 Rust 检查与四平台构建、也没跑 Agent 脚本检查，汇总 job `CI` 仍必须 success；这是负责人已授权的条件跳过，不是 `[skip ci]`。
+- 基线已更新：审查期间 `main` 合入了按改动范围选择 CI 的任务（PR #7），本分支已 rebase 到该含该提交的基线。纯 `docs/**` 变更按 [CI 改动范围](../code-standards.md#ci-改动范围) 跳过 Rust 检查与四平台构建、也没跑 Agent 脚本检查，汇总 job `CI` 仍必须 success；这是负责人已授权的条件跳过，不是 `[skip ci]`。
 
 ## 修复轮次（审查反馈）
 
