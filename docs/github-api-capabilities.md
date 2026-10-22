@@ -44,8 +44,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Classic PAT | 覆盖，含私有 `repo` | 支持（`notifications` 或 `repo`） | 粗：`repo`、`read:user`、`notifications`、`read:org` | 单 token 覆盖用户可见的全部组织 | 用户手动生成、手动粘贴 | 建后需为该组织单独授权；未授权返回 403（含 `X-GitHub-SSO` URL，1 小时有效）或多组织 `partial-results` | 组织可禁用 classic PAT（`403`）；无法限制具体仓库；一年未用会被自动移除 |
 | Fine-grained PAT | 覆盖（`Metadata`/`Contents` 读），公开仓库无需权限 | **不支持**（文档明确） | 细：按仓库/权限 | **单 token 只能一个 resource owner**，多组织要多个 token | 用户手动生成、手动粘贴 | 创建时选定组织即完成 SSO；组织可要求审批，待审批时仅能读公共资源 | 不支持外部协作者/非成员公共仓库写入；组织可禁用；不适合作为产品登录 |
-| OAuth App（web flow） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | 换 token 需要 `client_secret`，桌面端无法保密 | token 自动完成 SSO 授权 | 组织可限制 OAuth App，成员无法授权；scope 无法细分 |
-| OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down` |
+| OAuth App（web flow + PKCE） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | public client 无法保密 `client_secret`：官方建议随包发行并使用 PKCE 加固，或改由后端代换 token | token 自动完成 SSO 授权；loopback `127.0.0.1`/`::1` 回调可用 | 组织可限制 OAuth App，成员无法授权；scope 无法细分；带发行 secret 属于已知风险 |
+| OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down`；官方建议只在受限环境（CLI/IoT/无头）启用，因为无回调 URI 更容易被远程钓鱼滥用 |
 | GitHub App user token | 覆盖 | **不支持**（Notifications REST 明确排除） | 细：按 App 注册权限 ∩ 用户权限 | 需逐组织安装 + 逐用户授权 | device flow 只需 `client_id`；web flow 换 token 需 `client_secret` | 需组织安装；SAML 场景需先建立活动 SSO 会话再授权 | 8 小时过期 + 6 个月 refresh；H1 因此不可用 |
 
 补充事实：
@@ -57,7 +57,9 @@
 
 ### 推荐（候选，需负责人决定）
 
-推荐把 **OAuth App + device flow** 作为首版产品登录的候选方案，理由是可覆盖全部首版读取能力，并以 `notifications` scope 满足 H1（scope 参考与 OAuth/GitHub App 对照页都有依据）；代价是 scope 较粗（`repo` 等于对该用户可见仓库的读写范围），且组织可以限制 OAuth App。
+推荐把 **OAuth App** 作为首版产品登录的候选方案（web flow + PKCE 与 device flow 两个候选流程都保留），理由是可覆盖全部首版读取能力，并以 `notifications` scope 满足 H1（scope 参考与 OAuth/GitHub App 对照页都有依据）；代价是 scope 较粗（`repo` 等于对该用户可见仓库的读写范围），且组织可以限制 OAuth App。
+
+两个流程的取舍（官方 OAuth App 最佳实践）：官方把桌面应用归为 public client，明确建议“随包发行 `client_secret` 并用 PKCE 加固”，并且**建议优先选 authorization code + PKCE 而不是 device flow**，因为 device flow 不需要回调 URI，容易被远程钓鱼滥用。因此默认候选是 **web flow + PKCE + loopback 回调**（`http://127.0.0.1:<port>/…`，官方也提示 RFC 建议用 `127.0.0.1`/`::1` 而不是 `localhost`）；若产品不接受随包 secret，则退到 device flow，但需接受它本身更弱的钓鱼抵抗能力。若后端能保密 secret，则由后端代换 token 是最小风险选项，但会引入服务端依赖。
 
 若负责人判定 H1 首版可以不做或允许没有 H1，则 **GitHub App + user token** 是更小权限面的候选（细粒度、8 小时 token、可 refresh），代价是每个组织都要安装、Notifications 完全不可用。
 
@@ -65,7 +67,8 @@
 
 ### 桌面 secret 边界
 
-- device flow 的客户端只需要 `client_id`；`client_secret` 不参与，因此不需要随包分发，也不会出现在用户机器上。web flow 换 token 需要 `client_secret`（官方文档写明），桌面 public client 无法保密，所以首版若选 OAuth 系列应走 device flow。
+- device flow 的客户端只需要 `client_id`，因此不需要随包分发 secret；web flow 换 token 需要 `client_secret`，官方对 public client 的结论是“无法保密，只能随包发行并用 PKCE 加固”，所以 web flow 方案必须同时接受这个已知风险，不能把它当作“安全完成”。
+- 两种流程都不会把 `client_secret` 变成可保密的对象：若要求 secret 不外泄，只有后端代换 token 或改用 GitHub App（device flow 只需 `client_id`）两种路径。
 - access token、refresh token 属于凭据，按既有约定只进系统凭据设施，不进普通数据库、缓存表、日志或崩溃报告；账户表只保存平台凭据引用与稳定账户 ID。
 - 授权后必须立刻用 `GET /user` 重新确认身份，避免用户在中途切换账号造成“token 属于 A、界面显示 B”。
 
@@ -300,7 +303,7 @@
 
 ## 需要主 Agent / 负责人裁决的问题
 
-1. **H1 Notifications 是否进入首版最小范围，以及为此接受哪种登录载体？** 事实是：Notifications REST 在 classic PAT 与 OAuth App token（`notifications`/`repo` scope）下可用，细粒度 PAT 与 GitHub App user token 不支持。选项：(a) 首版不做 H1，登录可用 GitHub App user token（最小权限）；(b) 做 H1，用 OAuth App + device flow，接受 `repo` 粗 scope 与组织限制风险；(c) 做 H1，要求用户提供 classic PAT，接受体验与组织禁用风险。
+1. **H1 Notifications 是否进入首版最小范围，以及为此接受哪种登录载体？** 事实是：Notifications REST 在 classic PAT 与 OAuth App token（`notifications`/`repo` scope）下可用，细粒度 PAT 与 GitHub App user token 不支持。选项：(a) 首版不做 H1，登录可用 GitHub App user token（最小权限）；(b) 做 H1，用 OAuth App（默认 web flow + PKCE + loopback，或 device flow），接受 `repo` 粗 scope、随包 secret 与组织限制风险；(c) 做 H1，要求用户提供 classic PAT，接受体验与组织禁用风险。
 2. **“全部仓库”的语义。** 是按 `/user/repos` 的可见集合（owner + collaborator + organization_member），还是限定本人/单组织？若选细粒度 PAT 作为任何长期方案，多组织必然要退化为多 token 或多账户，需要产品决定是否接受。
 3. **Home “最近参与且有更新”与“关注 Feed”的口径。** 是否接受用 `involves:@me` + `updated:` 作为“参与”，并在 UI 上明确它不等于网站首页？Feed 是否接受 Events API 事件流（延迟 30 秒–6 小时、300 条/30 天）而不是网站 Feed 镜像？
 
@@ -341,7 +344,7 @@ GraphQL 与账户/Profile：
 
 认证与授权：
 
-- [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)、[Authorizing OAuth apps（web/device flow）](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[Scopes for OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)、[GitHub Apps vs OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps)
+- [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)、[Authorizing OAuth apps（web/device flow、PKCE、loopback 回调）](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[Best practices for OAuth apps（public client、PKCE 优于 device flow）](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/best-practices-for-creating-an-oauth-app)、[Scopes for OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)、[GitHub Apps vs OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps)
 - [Generating a user access token for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)、[Refreshing user access tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)、[Authenticating on behalf of a user](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-with-a-github-app-on-behalf-of-a-user)
 - [Authorizing a PAT for SAML SSO](https://docs.github.com/en/authentication/authenticating-with-single-sign-on/authorizing-a-personal-access-token-for-use-with-single-sign-on)
 
