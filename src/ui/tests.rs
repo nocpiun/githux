@@ -454,6 +454,44 @@ fn a_composing_input_method_keeps_enter_and_does_not_run_a_row(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_composing_input_method_keeps_up_down_and_escape_for_its_candidate_list(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = shell(cx);
+    click("search-entry", cx);
+    let input = view.read_with(cx, |shell, _| shell.palette_input());
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            use gpui::EntityInputHandler;
+            input.replace_and_mark_text_in_range(None, "she", None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let composing = cx.update_window_entity(&view, |shell, window, cx| {
+        shell.palette_composing(window, cx)
+    });
+    assert!(composing);
+
+    let before = view.read_with(cx, |shell, _| shell.palette_cursor());
+    press("down", cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.palette_cursor()),
+        before,
+        "Down belongs to the IME candidate list while composing"
+    );
+    press("up", cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.palette_cursor()),
+        before
+    );
+    press("escape", cx);
+    assert!(
+        view.read_with(cx, |shell, _| shell.palette_open()),
+        "Escape cancels the composition instead of closing the palette"
+    );
+}
+
+#[gpui::test]
 fn escape_closes_the_palette_without_running_the_highlighted_row(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
     click("search-entry", cx);

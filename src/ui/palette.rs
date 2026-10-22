@@ -152,6 +152,41 @@ pub(super) fn results(commands: &[Command], query: &str) -> Vec<usize> {
     shown
 }
 
+/// One child of the palette's scroll list: a group heading or a result row.
+///
+/// The list's scroll handle counts *children*, headings included, while the highlight counts
+/// results. Keeping both in one layout prevents the two indexes from drifting apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Entry {
+    Heading(&'static str),
+    Command(usize),
+}
+
+/// Every child the card draws for `commands` under `query`, headings in place.
+pub(super) fn layout(commands: &[Command], query: &str) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    let mut group: Option<&'static str> = None;
+    for index in results(commands, query) {
+        let name = commands[index].group;
+        if group != Some(name) {
+            group = Some(name);
+            entries.push(Entry::Heading(name));
+        }
+        entries.push(Entry::Command(index));
+    }
+    entries
+}
+
+/// The child index to scroll to for the `cursor`th result in `entries`.
+pub(super) fn child_index(entries: &[Entry], cursor: usize) -> usize {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, Entry::Command(_)))
+        .nth(cursor)
+        .map_or(0, |(child, _)| child)
+}
+
 /// The palette's live state while it is open.
 pub(super) struct Session {
     pub input: Entity<TextInput>,
@@ -215,13 +250,17 @@ impl Session {
     }
 
     /// Wraps the highlight by `by` inside `count` and keeps it in view.
-    pub(super) fn move_cursor(&mut self, by: isize, count: usize) {
+    ///
+    /// `count` is the number of results; the scroll handle wants the child index in the list that
+    /// also holds the group headings, so the caller passes the layout it is drawing.
+    pub(super) fn move_cursor(&mut self, by: isize, count: usize, entries: &[Entry]) {
         if count == 0 {
             return;
         }
         let at = self.cursor.min(count - 1) as isize;
         self.cursor = (at + by).rem_euclid(count as isize) as usize;
-        self.scroll.scroll_to_item(self.cursor);
+        let child = child_index(entries, self.cursor);
+        self.scroll.scroll_to_item(child);
     }
 }
 
@@ -257,69 +296,75 @@ pub(super) fn render(view: View, cx: &mut App) -> AnyElement {
         theme.control_height(ControlSize::Lg),
     );
     let query = view.input.read(cx).text().to_string();
-    let shown = results(&view.commands, &query);
-    let count = shown.len();
+    let entries = layout(&view.commands, &query);
+    let count = entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Command(_)))
+        .count();
     let cursor = view.cursor.min(count.saturating_sub(1));
-    view.scroll.scroll_to_item(cursor);
+    // The list's scroll handle counts every child, headings included.
+    view.scroll.scroll_to_item(child_index(&entries, cursor));
 
-    let mut rows: Vec<AnyElement> = Vec::with_capacity(count + 4);
-    let mut group: Option<&'static str> = None;
-    for (position, index) in shown.iter().copied().enumerate() {
-        let command = &view.commands[index];
-        if group != Some(command.group) {
-            group = Some(command.group);
-            rows.push(
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(entries.len() + 1);
+    let mut position = 0;
+    for entry in &entries {
+        match entry {
+            Entry::Heading(group) => rows.push(
                 div()
                     .px_2()
                     .pt_2()
                     .pb_1()
                     .text_size(tiny)
                     .text_color(subtle)
-                    .child(command.group)
+                    .child(*group)
                     .into_any_element(),
-            );
-        }
-        let selected = position == cursor;
-        let on_pick = view.on_pick.clone();
-        let on_move = view.on_move.clone();
-        rows.push(
-            div()
-                .id(("palette-row", position))
-                .role(Role::ListBoxOption)
-                .aria_selected(selected)
-                .aria_label(command.label.clone())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .h(row_height)
-                .px_2()
-                .rounded(theme.radius(Radius::Md))
-                .when(selected, |row| row.bg(active))
-                .when(!selected, move |row| {
-                    row.hover(move |style| style.bg(hover))
-                })
-                .cursor_pointer()
-                .on_mouse_move(move |_, window, cx| {
-                    if position != cursor {
-                        on_move(position as isize - cursor as isize, window, cx);
-                    }
-                })
-                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                    window.prevent_default();
-                })
-                .on_click(move |_, window, cx| on_pick(position, window, cx))
-                .child(Icon::new(command.icon).size(IconSize::Sm).color(subtle))
-                .child(
+            ),
+            Entry::Command(index) => {
+                let command = &view.commands[*index];
+                let selected = position == cursor;
+                let on_pick = view.on_pick.clone();
+                let on_move = view.on_move.clone();
+                rows.push(
                     div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_color(fg)
-                        .child(command.label.clone()),
-                )
-                .into_any_element(),
-        );
+                        .id(("palette-row", position))
+                        .role(Role::ListBoxOption)
+                        .aria_selected(selected)
+                        .aria_label(command.label.clone())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .h(row_height)
+                        .px_2()
+                        .rounded(theme.radius(Radius::Md))
+                        .when(selected, |row| row.bg(active))
+                        .when(!selected, move |row| {
+                            row.hover(move |style| style.bg(hover))
+                        })
+                        .cursor_pointer()
+                        .on_mouse_move(move |_, window, cx| {
+                            if position != cursor {
+                                on_move(position as isize - cursor as isize, window, cx);
+                            }
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.prevent_default();
+                        })
+                        .on_click(move |_, window, cx| on_pick(position, window, cx))
+                        .child(Icon::new(command.icon).size(IconSize::Sm).color(subtle))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_color(fg)
+                                .child(command.label.clone()),
+                        )
+                        .into_any_element(),
+                );
+                position += 1;
+            }
+        }
     }
     if count == 0 {
         rows.push(
@@ -461,6 +506,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_scroll_child_index_counts_the_headings_in_between() {
+        let all = fixture();
+        // Headings are inserted above each group, so a result's child index is larger than its
+        // position in the result list as soon as a second group starts.
+        let entries = layout(&all, "");
+        let commands: Vec<usize> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Command(index) => Some(*index),
+                Entry::Heading(_) => None,
+            })
+            .collect();
+        assert_eq!(commands, results(&all, ""));
+        for cursor in 0..commands.len() {
+            let child = child_index(&entries, cursor);
+            assert!(child >= cursor, "child {child} before result {cursor}");
+            assert!(
+                matches!(entries[child], Entry::Command(_)),
+                "child {child} must be a row"
+            );
+        }
+        let headings = entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Heading(_)))
+            .count();
+        let last = child_index(&entries, commands.len() - 1);
+        assert_eq!(last, entries.len() - 1);
+        assert!(headings >= 2);
     }
 
     #[test]

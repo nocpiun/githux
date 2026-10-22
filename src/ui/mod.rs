@@ -179,9 +179,13 @@ impl Shell {
         let Some(session) = self.palette.as_ref() else {
             return;
         };
-        let count = session.shown(cx).len();
         let cursor = session.cursor;
+        let composing = session.composing(window, cx);
         match event.keystroke.key.as_str() {
+            // While an input method composes, Enter confirms its candidate, Up/Down walk the
+            // candidate list and Escape cancels the composition. Those keys belong to the input
+            // method then, so the palette lets them through instead of acting on its own list.
+            _ if composing => {}
             "escape" => {
                 cx.stop_propagation();
                 self.close_palette(cx);
@@ -189,15 +193,9 @@ impl Shell {
             "up" | "down" => {
                 cx.stop_propagation();
                 let by = if event.keystroke.key == "up" { -1 } else { 1 };
-                let _ = (count, cursor);
                 self.move_palette_cursor(by, cx);
             }
             "enter" => {
-                // An Enter that confirms an input-method candidate belongs to the compose session.
-                if session.composing(window, cx) {
-                    // Enter confirms the IME candidate; do not run the highlighted row.
-                    return;
-                }
                 cx.stop_propagation();
                 self.pick_palette(cursor, cx);
             }
@@ -208,8 +206,13 @@ impl Shell {
     /// Wraps the highlight by `by` and keeps it in view.
     fn move_palette_cursor(&mut self, by: isize, cx: &mut Context<Self>) {
         if let Some(session) = self.palette.as_mut() {
-            let count = session.shown(cx).len();
-            session.move_cursor(by, count);
+            let query = session.query(cx);
+            let entries = palette::layout(&session.commands, &query);
+            let count = entries
+                .iter()
+                .filter(|entry| matches!(entry, palette::Entry::Command(_)))
+                .count();
+            session.move_cursor(by, count, &entries);
         }
         cx.notify();
     }

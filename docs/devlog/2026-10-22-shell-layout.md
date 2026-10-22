@@ -1,7 +1,7 @@
 # 外壳布局：自定义标题栏、island 与固定侧边栏
 
 - 日期：2026-10-22；任务 ID：shell-layout；执行者：基层 Agent。
-- 状态：实现与本地检查完成，真实 Windows Debug 窗口的布局、拖动、搜索入口与窗口状态已在本机核验；PR、最新 head 的 CI 与 Codex 审查、以及 IME/多 DPI 等剩余人工验收仍待完成。
+- 状态：实现与本地检查完成，真实 Windows Debug 窗口的布局、拖动、搜索入口与窗口状态已在本机核验；[PR #8](https://github.com/nocpiun/githux/pull/8) 已创建并收到首轮审查，修复后待最新 head 的 CI 与审查；IME/多 DPI 等剩余人工验收仍待完成。
 - 交付范围：[路线图](../roadmap.md) R1 的第一份可运行交付（外壳、固定导航、有界仓库列表、搜索入口、Home 双栏 fixture）。R1 整体未完成：多页面会话与标签仍未实现。
 
 ## 改动与决定
@@ -39,7 +39,7 @@ cargo test --locked
 git diff --check
 ```
 
-`cargo test --locked` 共 22 项通过，其中 19 项在 GPUI 测试平台渲染真实 `Shell` 视图：
+`cargo test --locked` 共 24 项通过，其中 21 项在 GPUI 测试平台渲染真实 `Shell` 视图：
 
 - 启动 Home、fixture 至少 100 条仓库、侧栏与 island 关键节点已绘制；
 - 1400×900 → 900×600 缩放后 Home/Settings 位置与高度不变、只有仓库组变矮、底部入口贴住侧栏底部、island 不越界、侧栏宽度不变、Home 两列等宽且不越出 island；
@@ -47,12 +47,12 @@ git diff --check
 - 点击 Home/Settings/四个底部入口/仓库行/账户行得到正确路由，New 禁用不改变路由；
 - 搜索入口打开浮层、过滤、Enter 运行、Esc 关闭不导航、关闭后仍有焦点目标；
 - 上下移动循环、Enter 运行的是高亮行而不是首行；
-- 组合态（marked range）期间 Enter 不运行任何行；
+- 组合态（marked range）期间 Enter 不运行任何行，Up/Down 不移动高亮、Esc 不关闭浮层（这三者属于输入法候选）；
 - Ctrl+K 在任意页面打开浮层；Tab 能到侧栏行并用 Enter 激活；
 - 中文与超长仓库名保持在侧栏列内；
 - 空白页面只保留 island 与会话条，不画占位卡片。
 
-另有 3 项 fixture/排序单元测试（稳定性、分组连续不分叉、空查询覆盖全部命令）。
+另有 5 项 fixture / 排序 / 列表布局单元测试：fixture 稳定且覆盖中文与超长名、分组连续不分叉、空查询覆盖全部命令、评分大小写与间隙规则、以及滚动子项索引包含分组标题。
 
 **真实 Windows 窗口（本机 3840×2160，Windows 缩放 150%）已核验：**
 
@@ -68,6 +68,15 @@ git diff --check
 - **多 DPI 跨屏**：仅在本机 150% 缩放下观察，未在 100/125/175/200% 与跨屏移动时逐项核对。
 - **按钮逐个真实验收**：最大化与贴靠已实测，最小化与关闭按钮只通过代码路径与进程退出间接确认，未逐个点击核对恢复后的状态。
 - 截图不能证明帧率、内存或输入行为；macOS/Linux 未做任何原生验收，仍使用系统标题栏。
+
+## 首轮审查修复
+
+首轮 Codex 审查（review `5610488856`，针对 `e236997`）提出两条 P2，均可直接修复：
+
+1. **组合态只保护了 Enter。** 原实现只在 Enter 时检查 marked 区间，Up/Down 与 Esc 仍会移动高亮或关闭浮层，从而抢走输入法的候选导航与取消。现在拦截器在这些按键前统一判断组合态：存在 marked 区间时全部放行。测试新增 `a_composing_input_method_keeps_up_down_and_escape_for_its_candidate_list`。
+2. **滚动索引与列表子项错位。** `scroll_to_item` 数的是滚动容器的子项，而分组标题也占一个子项；原来直接传结果序号，靠近底部时高亮会滚出视野。现在 `palette::layout` 同时给出标题与行的子项序列，`child_index` 把结果序号换算成子项序号，绘制与滚动共用同一份布局。测试新增 `the_scroll_child_index_counts_the_headings_in_between`，并在真实窗口用 Ctrl+K 加 40 次 Down 确认高亮仍在可视区内。
+
+两条都属于既有需求内的正确性修复，不涉及产品取舍，因此本 PR 全程无待裁决事项。
 
 ## 后续
 
