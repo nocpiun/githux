@@ -51,6 +51,32 @@ fn route(view: &gpui::Entity<Shell>, cx: &mut VisualTestContext) -> Route {
     view.read_with(cx, |shell, _| shell.route())
 }
 
+/// The title bar is drawn the same way on every platform, so this must hold where `code-check`
+/// runs as well as on Windows: the fixed search entry and the brand are always present, while the
+/// three caption buttons are a Windows-only addition.
+#[gpui::test]
+fn the_title_bar_always_offers_the_search_entry_and_brand(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    assert!(cx.debug_bounds("titlebar").is_some());
+    assert!(cx.debug_bounds("titlebar-brand").is_some());
+    assert!(
+        cx.debug_bounds("search-entry").is_some(),
+        "the search entry is part of the title bar on every platform"
+    );
+    #[cfg(target_os = "windows")]
+    for selector in ["caption-Minimize", "caption-Maximize", "caption-Close"] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} is drawn on Windows"
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    assert!(
+        cx.debug_bounds("caption-Close").is_none(),
+        "other platforms keep their system frame, so the bar draws no second set of buttons"
+    );
+}
+
 #[gpui::test]
 fn the_shell_starts_on_home_with_a_bounded_repository_list(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
@@ -68,6 +94,20 @@ fn the_shell_starts_on_home_with_a_bounded_repository_list(cx: &mut TestAppConte
     assert!(cx.debug_bounds("repo-scroll").is_some());
     assert!(cx.debug_bounds("repo-row-0").is_some());
     assert!(cx.debug_bounds("search-entry").is_some());
+}
+
+/// The island and sidebar must not depend on the title bar's platform branch: the shell body
+/// takes whatever height the bar leaves.
+#[gpui::test]
+fn the_shell_body_sits_below_the_title_bar_on_every_platform(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let bar = bounds("titlebar", cx);
+    let body = bounds("shell-body", cx);
+    let island = bounds("island", cx);
+    assert_eq!(body.top(), bar.bottom());
+    assert!(island.top() >= body.top());
+    assert!(island.bottom() <= body.bottom());
+    assert_eq!(bar.size.height, px(super::geometry::TITLEBAR_HEIGHT));
 }
 
 #[gpui::test]

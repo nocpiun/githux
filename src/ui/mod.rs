@@ -11,7 +11,7 @@ use std::rc::Rc;
 use ely_gpui_component::{
     forms::InputEvent,
     primitives::{FocusScope, IconName},
-    theme::{ActiveTheme, Platform, TextSize},
+    theme::{ActiveTheme, TextSize},
 };
 use gpui::{
     App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Point, Render,
@@ -521,18 +521,12 @@ impl Render for Shell {
         let theme = cx.theme();
         let colors = &theme.colors;
         let (bg, fg, border) = (colors.bg, colors.fg, colors.border);
-        let platform = theme.platform;
         let this = cx.entity();
         let search_focus = self.search_focus.clone();
         let open_search = move |window: &mut Window, cx: &mut App| {
             this.update(cx, |shell, cx| shell.open_palette(window, cx));
         };
-        let titlebar = match platform {
-            Platform::Windows => {
-                chrome::titlebar(self.search_focus.clone(), open_search, window, cx)
-            }
-            _ => chrome::plain_titlebar(cx),
-        };
+        let titlebar = chrome::titlebar(self.search_focus.clone(), open_search, window, cx);
         let sidebar = self.sidebar(cx);
         let island = self.island(cx);
         let palette = self.palette(cx);

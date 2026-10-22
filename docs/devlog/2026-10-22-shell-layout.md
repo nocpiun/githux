@@ -54,7 +54,7 @@ git diff --check
 
 另有 5 项 fixture / 排序 / 列表布局单元测试：fixture 稳定且覆盖中文与超长名、分组连续不分叉、空查询覆盖全部命令、评分大小写与间隙规则、以及滚动子项索引包含分组标题。
 
-**真实 Windows 窗口（本机 3840×2160，Windows 缩放 150%）已核验：**
+**真实 Windows 窗口（本机 3840×2160，Windows 缩放 150%）已核验（合并 main 前后的同一代码路径均确认搜索入口与布局一致）：**
 
 - 启动即 Home，无多余控制台；标题栏显示 Githux、搜索入口与三个窗口按钮；
 - 拖动标题栏空白移动窗口（40,40 → 160,122 物理像素）；按在搜索入口上拖 120px 窗口不动；
@@ -77,6 +77,12 @@ git diff --check
 2. **滚动索引与列表子项错位。** `scroll_to_item` 数的是滚动容器的子项，而分组标题也占一个子项；原来直接传结果序号，靠近底部时高亮会滚出视野。现在 `palette::layout` 同时给出标题与行的子项序列，`child_index` 把结果序号换算成子项序号，绘制与滚动共用同一份布局。测试新增 `the_scroll_child_index_counts_the_headings_in_between`，并在真实窗口用 Ctrl+K 加 40 次 Down 确认高亮仍在可视区内。
 
 两条都属于既有需求内的正确性修复，不涉及产品取舍，因此本 PR 全程无待裁决事项。
+
+## 与 main 的 CI 变更组合
+
+推送修复后，api-capabilities 的 PR #6、#7 和 #9 先合入 main，其中 #7 将 `code-check` 从 `windows-2022` 移到 Ubuntu 24.04。本分支此前的 `search-entry` 选择器只在 `Platform::Windows` 下绘制，导致 #7 之后合入的基线上 10 项测试在 Linux 上失败；这不是 Linux 原生验收问题，而是外壳把“搜索入口必须在标题栏”这个已确认行为绑在了错误的平台分支上。
+
+已按任务要求与 main 组合核验：合并 `origin/main`（合并基线提交见 PR 历史），同时把标题栏改为所有平台绘制同一条品牌 + 搜索入口，只有窗口按钮保留 Windows 专属的 `cfg!` 分支（其他平台继续用系统标题栏）。新增两项用例固定这条边界：`the_title_bar_always_offers_the_search_entry_and_brand`（品牌与搜索入口始终绘制，Windows 额外验证三个 caption 按钮）与 `the_shell_body_sits_below_the_title_bar_on_every_platform`（外壳主体不受平台分支影响）。合并后的本地检查与 26 项测试全部通过，并在真实窗口确认搜索入口与布局与合并前一致。
 
 ## 后续
 

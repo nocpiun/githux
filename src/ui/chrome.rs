@@ -1,8 +1,11 @@
-//! Custom title bar and the brand strip used where the platform keeps its own frame.
+//! The custom title bar.
 //!
-//! The Windows bar draws Githux on the left, then the fixed search entry and the three window
-//! buttons. Empty space is the drag area: the brand, the search entry and the buttons sit on their
-//! own occluding layers, so a press there never reaches the drag handlers and never starts a window
+//! Every platform draws the same bar: Githux on the left, the fixed search entry on the right and
+//! empty space between them. Only Windows adds its three window buttons, because the other
+//! platforms keep their system frame this round and would otherwise show two sets of controls.
+//!
+//! Empty space is the drag area: the brand, the search entry and the buttons sit on their own
+//! occluding layers, so a press there never reaches the drag handlers and never starts a window
 //! move. Dragging, double-press maximize and edge resizing are left to the platform's non-client
 //! hit testing through GPUI's `WindowControlArea` support, so this module adds no Windows API calls.
 
@@ -102,7 +105,10 @@ impl RenderOnce for SearchEntry {
     }
 }
 
-/// The Windows title bar: brand, drag space, search entry, window buttons.
+/// The title bar: brand, drag space, search entry and, on Windows, the window buttons.
+///
+/// Whether the bar draws caption buttons is a compile-time choice, not a theme value: the system
+/// frame is dropped on Windows only, so that is the only platform where the bar owns them.
 pub(super) fn titlebar(
     search_focus: gpui::FocusHandle,
     on_search: impl Fn(&mut Window, &mut App) + 'static,
@@ -117,7 +123,12 @@ pub(super) fn titlebar(
     // caption does; the state is keyed so it survives a repaint during the press.
     let pressed = window.use_keyed_state("githux-titlebar-pressed", cx, |_, _| false);
     let (down, moved, up, out) = (pressed.clone(), pressed.clone(), pressed.clone(), pressed);
-    let controls = WindowControls::new("githux-window-controls").platform(Platform::Windows);
+    let caption = cfg!(target_os = "windows");
+    let controls = caption.then(|| {
+        WindowControls::new("githux-window-controls")
+            .platform(Platform::Windows)
+            .into_any_element()
+    });
     div()
         .id("githux-titlebar")
         .debug_selector(|| "titlebar".to_string())
@@ -130,6 +141,7 @@ pub(super) fn titlebar(
         .border_b_1()
         .border_color(border)
         .text_color(fg)
+        // Empty space drags the window; the platform turns this into the caption hit test.
         .window_control_area(WindowControlArea::Drag)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             if !window.default_prevented() {
@@ -170,26 +182,6 @@ pub(super) fn titlebar(
                 .occlude()
                 .child(SearchEntry::new(search_focus, on_search)),
         )
-        .child(div().flex_none().h_full().child(controls))
-        .into_any_element()
-}
-
-/// Brand strip drawn above the shell where the system title bar stays.
-pub(super) fn plain_titlebar(cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    div()
-        .debug_selector(|| "titlebar".to_string())
-        .flex()
-        .flex_none()
-        .items_center()
-        .h(px(TITLEBAR_HEIGHT))
-        .px_3()
-        .border_b_1()
-        .border_color(theme.colors.border)
-        .bg(theme.colors.bg)
-        .text_size(theme.text_size(TextSize::Sm))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.colors.fg)
-        .child("Githux")
+        .children(controls.map(|controls| div().flex_none().h_full().child(controls)))
         .into_any_element()
 }

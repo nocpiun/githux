@@ -21,7 +21,7 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 | 正式 Rust / GPUI / Ely 工程 | 单 Cargo package、固定依赖；[启动入口](../src/app/mod.rs) 与 [外壳视图](../src/ui/mod.rs) 已实现 |
 | Windows 外壳与基础交互 | 自定义标题栏、island、固定侧边栏与有界仓库组、本地导航搜索浮层已实现；拖动、双击最大化、贴靠与窗口按钮在本机真实窗口核验，见 [开发日志](devlog/2026-10-22-shell-layout.md)。中文 IME、多 DPI 跨屏与逐个窗口按钮验收仍待完成 |
 | Windows 字体 | 字体随 binary 注册、启动不再分配控制台；中文回退与 IME 尚未验收 |
-| CI 与交付流程 | [PR #1](https://github.com/nocpiun/githux/pull/1)、[PR #2](https://github.com/nocpiun/githux/pull/2) 已交付；代码检查、四平台 Debug Build、最终 `CI` 汇总 job 已建立 |
+| CI 与交付流程 | [PR #1](https://github.com/nocpiun/githux/pull/1)、[PR #2](https://github.com/nocpiun/githux/pull/2) 已交付；PR #7 起代码检查在 Ubuntu 24.04 运行（fmt/check/clippy/test），四平台 Debug Build 与最终 `CI` 汇总 job 不变 |
 | 业务架构 | `workspace/auth/data/github/network/storage/content` 等仅预留职责，不能算已有账户、API、缓存或阅读器实现 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用；派发 skill 和完整并行调度尚未产品化 |
 
