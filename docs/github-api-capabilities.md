@@ -239,7 +239,7 @@
 | 代码 | `GET /search/code` | **必须认证**；细粒度：无需权限 | 10 次/分钟（独立于 30 次/分）；需要能读到目标仓库 |
 | 语义/混合 issue 搜索 | `GET /search/issues` 带 `search_type=semantic` 或 `hybrid`；GraphQL `ISSUE_SEMANTIC`、`ISSUE_HYBRID` | **必须认证**；细粒度：无需权限 | 10 次/分钟（独立 `semantic_search` 桶，低于普通搜索的 30 次/分）；能力存在但产品未定类别，不因枚举存在而扩张范围 |
 
-搜索的通用限制：查询去操作符后 >256 字符、或 >5 个 AND/OR/NOT 会返回 422；单次查询最多扫描 4,000 个仓库；认证后仍需对目标资源有权限，否则 422 或静默省略。结果默认按 best match，`sort` 可选 `updated`、`created`、`comments` 等。首版类别未定，本文只说明“能搜什么、代价多大”，不预设 palette 内容。
+搜索的通用限制：查询去操作符后 >256 字符、或 >5 个 AND/OR/NOT 会返回 422；单次查询最多扫描 4,000 个仓库；认证后仍需对目标资源有权限，否则 422 或静默省略。结果默认按 best match，`sort` 按端点各有白名单：仓库 `stars`/`forks`/`help-wanted-issues`/`updated`，issue/PR `comments`/`reactions*`/`interactions`/`created`/`updated`，用户 `followers`/`repositories`/`joined`，代码仅 `indexed`，commit `author-date`/`committer-date`。跨类别混用（如对 `/search/repositories` 传 `sort=comments`）会 422，应作为请求参数错误而不是用户查询错误处理。首版类别未定，本文只说明“能搜什么、代价多大”，不预设 palette 内容。
 
 ## 错误、空数据与“看不见”的区分
 
