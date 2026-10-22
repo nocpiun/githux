@@ -28,6 +28,7 @@
 - 第四轮审查指出两处：GraphQL 主限流耗尽返回 HTTP `200` + `errors`（次级为 200 或 403），只看状态码会误判；issue 语义/混合搜索另限 10 次/分钟。两处均已核实（实测 `search_type=semantic|hybrid` 返回 `X-RateLimit-Resource: semantic_search`、`X-RateLimit-Limit: 10`）并在错误表与限流节补充。
 - 第五轮审查指出：`itemShowcase.hasPinnedItems` 计的是仓库**或 gist**，`items` 是 `PinnableItem` 联合，gist-only 用户无法从 `itemShowcase` 拿到仓库热门回退。已按 schema 文本修正 Pinned/Popular 条目与要点，并把它作为第四项候选问题（可延后到该功能实现时再定）。
 - 第六轮审查指出：交接里仍写“三项”，与能力表已列四项不一致。已把开发日志里两处“三项”更新为四项并注明各自时点。
+- 第七轮审查指出：OAuth App 也支持 expiring tokens（8 小时 access + 6 个月可轮换 refresh，`expires_in` 等响应字段有条件出现），不能只在 GitHub App 行里写这个生命周期。已核实授权文档并在两个 OAuth 流程行与桌面 secret 边界里补充。
 
 ## 后续
 

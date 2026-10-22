@@ -44,8 +44,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Classic PAT | 覆盖，含私有 `repo` | 支持（`notifications` 或 `repo`） | 粗：`repo`、`read:user`、`notifications`、`read:org` | 单 token 覆盖用户可见的全部组织 | 用户手动生成、手动粘贴 | 建后需为该组织单独授权；未授权返回 403（含 `X-GitHub-SSO` URL，1 小时有效）或多组织 `partial-results` | 组织可禁用 classic PAT（`403`）；无法限制具体仓库；一年未用会被自动移除 |
 | Fine-grained PAT | 覆盖（`Metadata`/`Contents` 读），公开仓库无需权限 | **不支持**（文档明确） | 细：按仓库/权限 | **单 token 只能一个 resource owner**，多组织要多个 token | 用户手动生成、手动粘贴 | 创建时选定组织即完成 SSO；组织可要求审批，待审批时仅能读公共资源 | 不支持外部协作者/非成员公共仓库写入；组织可禁用；不适合作为产品登录 |
-| OAuth App（web flow + PKCE） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | public client 无法保密 `client_secret`：官方建议随包发行并使用 PKCE 加固，或改由后端代换 token | token 自动完成 SSO 授权；loopback `127.0.0.1`/`::1` 回调可用 | 组织可限制 OAuth App，成员无法授权；scope 无法细分；带发行 secret 属于已知风险 |
-| OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down`；官方建议只在受限环境（CLI/IoT/无头）启用，因为无回调 URI 更容易被远程钓鱼滥用 |
+| OAuth App（web flow + PKCE） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | public client 无法保密 `client_secret`：官方建议随包发行并使用 PKCE 加固，或改由后端代换 token | token 自动完成 SSO 授权；loopback `127.0.0.1`/`::1` 回调可用 | 组织可限制 OAuth App，成员无法授权；scope 无法细分；带发行 secret 属于已知风险。**若 App 启用 token 过期或请求 `offline_access`，access token 8 小时过期 + 可轮换 refresh token（6 个月）** |
+| OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down`；官方建议只在受限环境（CLI/IoT/无头）启用，因为无回调 URI 更容易被远程钓鱼滥用。**同样可能拿到 8 小时 access + 6 个月 refresh token** |
 | GitHub App user token | 覆盖 | **不支持**（Notifications REST 明确排除） | 细：按 App 注册权限 ∩ 用户权限 | 需逐组织安装 + 逐用户授权 | device flow 只需 `client_id`；web flow 换 token 需 `client_secret` | 需组织安装；SAML 场景需先建立活动 SSO 会话再授权 | 8 小时过期 + 6 个月 refresh；H1 因此不可用 |
 
 补充事实：
@@ -70,6 +70,7 @@
 - device flow 的客户端只需要 `client_id`，因此不需要随包分发 secret；web flow 换 token 需要 `client_secret`，官方对 public client 的结论是“无法保密，只能随包发行并用 PKCE 加固”，所以 web flow 方案必须同时接受这个已知风险，不能把它当作“安全完成”。
 - 两种流程都不会把 `client_secret` 变成可保密的对象：若要求 secret 不外泄，只有后端代换 token 或改用 GitHub App（device flow 只需 `client_id`）两种路径。
 - access token、refresh token 属于凭据，按既有约定只进系统凭据设施，不进普通数据库、缓存表、日志或崩溃报告；账户表只保存平台凭据引用与稳定账户 ID。
+- OAuth App 的 token 生命周期不是固定长命：若 App 启用 expiring tokens 或请求了 `offline_access`，access token 8 小时过期、refresh token 6 个月且**每次刷新后旧 token 与旧 refresh 同时失效**（轮换）。响应里的 `expires_in`、`refresh_token`、`refresh_token_expires_in` 是有条件出现的字段，客户端不能假设一定没有 refresh，也不能假设一定存在；不实现刷新会在 8 小时后丢登录态。
 - 授权后必须立刻用 `GET /user` 重新确认身份，避免用户在中途切换账号造成“token 属于 A、界面显示 B”。
 
 ## 资源能力矩阵
