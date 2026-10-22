@@ -29,6 +29,7 @@
 - 第五轮审查指出：`itemShowcase.hasPinnedItems` 计的是仓库**或 gist**，`items` 是 `PinnableItem` 联合，gist-only 用户无法从 `itemShowcase` 拿到仓库热门回退。已按 schema 文本修正 Pinned/Popular 条目与要点，并把它作为第四项候选问题（可延后到该功能实现时再定）。
 - 第六轮审查指出：交接里仍写“三项”，与能力表已列四项不一致。已把开发日志里两处“三项”更新为四项并注明各自时点。
 - 第七轮审查指出：OAuth App 也支持 expiring tokens（8 小时 access + 6 个月可轮换 refresh，`expires_in` 等响应字段有条件出现），不能只在 GitHub App 行里写这个生命周期。已核实授权文档并在两个 OAuth 流程行与桌面 secret 边界里补充。
+- 第八轮审查指出：不想要 `client_secret` 时，除了后端与 GitHub App，OAuth App 的 device flow 同样只需 `client_id` 且刷新也不需要 secret。已纠正桌面 secret 边界的表述，把 device flow 列入无 secret 路径并保留其安全代价。
 
 ## 后续
 

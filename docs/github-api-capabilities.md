@@ -68,7 +68,7 @@
 ### 桌面 secret 边界
 
 - device flow 的客户端只需要 `client_id`，因此不需要随包分发 secret；web flow 换 token 需要 `client_secret`，官方对 public client 的结论是“无法保密，只能随包发行并用 PKCE 加固”，所以 web flow 方案必须同时接受这个已知风险，不能把它当作“安全完成”。
-- 两种流程都不会把 `client_secret` 变成可保密的对象：若要求 secret 不外泄，只有后端代换 token 或改用 GitHub App（device flow 只需 `client_id`）两种路径。
+- 两种流程都不会把 `client_secret` 变成可保密的对象，但**不想要 secret 时除了后端代换 token 和 GitHub App（device flow 只需 `client_id`），OAuth App 的 device flow 同样不需要 secret**，且仍然覆盖 H1；它的代价是官方更弱的安全评价（更易被远程钓鱼），且必须在 App 设置里启用。刷新 token 时，device flow 签发的 token 也不需要 `client_secret`。
 - access token、refresh token 属于凭据，按既有约定只进系统凭据设施，不进普通数据库、缓存表、日志或崩溃报告；账户表只保存平台凭据引用与稳定账户 ID。
 - OAuth App 的 token 生命周期不是固定长命：若 App 启用 expiring tokens 或请求了 `offline_access`，access token 8 小时过期、refresh token 6 个月且**每次刷新后旧 token 与旧 refresh 同时失效**（轮换）。响应里的 `expires_in`、`refresh_token`、`refresh_token_expires_in` 是有条件出现的字段，客户端不能假设一定没有 refresh，也不能假设一定存在；不实现刷新会在 8 小时后丢登录态。
 - 授权后必须立刻用 `GET /user` 重新确认身份，避免用户在中途切换账号造成“token 属于 A、界面显示 B”。
