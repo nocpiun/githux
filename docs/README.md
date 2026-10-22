@@ -10,6 +10,7 @@
 | 首版开发顺序、依赖与验收讨论稿 | [开发路线图](roadmap.md) |
 | 模块职责、状态归属与实现提案 | [架构方案](architecture.md) |
 | 各类数据如何存储、刷新、失效 | [缓存策略](cache-strategy.md) |
+| 首版功能对应的 REST/GraphQL 接口、token 权限与限流边界 | [GitHub API 能力核验](github-api-capabilities.md) |
 | 派发、并行、审查循环与合并权限 | [Agent 工作流](agent-workflow.md) |
 | 实现和验证的共同要求 | [代码约定](code-standards.md) |
 | 实际教训 | [LESSONS.md](../LESSONS.md) |
