@@ -44,7 +44,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Classic PAT | 覆盖，含私有 `repo` | 支持（`notifications` 或 `repo`） | 粗：`repo`、`read:user`、`notifications`、`read:org` | 单 token 覆盖用户可见的全部组织 | 用户手动生成、手动粘贴 | 建后需为该组织单独授权；未授权返回 403（含 `X-GitHub-SSO` URL，1 小时有效）或多组织 `partial-results` | 组织可禁用 classic PAT（`403`）；无法限制具体仓库；一年未用会被自动移除 |
 | Fine-grained PAT | 覆盖（`Metadata`/`Contents` 读），公开仓库无需权限 | **不支持**（文档明确） | 细：按仓库/权限 | **单 token 只能一个 resource owner**，多组织要多个 token | 用户手动生成、手动粘贴 | 创建时选定组织即完成 SSO；组织可要求审批，待审批时仅能读公共资源 | 不支持外部协作者/非成员公共仓库写入；组织可禁用；不适合作为产品登录 |
-| OAuth App（web flow + PKCE） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | public client 无法保密 `client_secret`：官方建议随包发行并使用 PKCE 加固，或改由后端代换 token | token 自动完成 SSO 授权；loopback `127.0.0.1`/`::1` 回调可用 | 组织可限制 OAuth App，成员无法授权；scope 无法细分；带发行 secret 属于已知风险。**若 App 启用 token 过期或请求 `offline_access`，access token 8 小时过期 + 可轮换 refresh token（6 个月）** |
+| OAuth App（web flow + PKCE） | 覆盖 | 支持（`notifications` 或 `repo` scope，scope 参考与官方对照页均有说明） | 粗 scope | 单 token 覆盖用户全部可见资源 | public client 无法保密 `client_secret`：官方建议随包发行并使用 PKCE 加固，或改由后端代换 token | **token 只对登录时已有活动 SSO 会话且允许该 App 的组织生效**；loopback `127.0.0.1`/`::1` 回调可用 | 组织可限制 OAuth App，成员无法授权；scope 无法细分；带发行 secret 属于已知风险。**若 App 启用 token 过期或请求 `offline_access`，access token 8 小时过期 + 可轮换 refresh token（6 个月）** |
 | OAuth App（device flow） | 覆盖 | 支持（同上） | 粗 scope | 同上 | **只需 `client_id`**，不需要 `client_secret` | 同上 | 需在 App 设置里启用 device flow；必须遵守 `interval`，否则 `slow_down`；官方建议只在受限环境（CLI/IoT/无头）启用，因为无回调 URI 更容易被远程钓鱼滥用。**同样可能拿到 8 小时 access + 6 个月 refresh token** |
 | GitHub App user token | 覆盖 | **不支持**（Notifications REST 明确排除） | 细：按 App 注册权限 ∩ 用户权限 | 需逐组织安装 + 逐用户授权 | device flow 只需 `client_id`；web flow 换 token 需 `client_secret` | 需组织安装；SAML 场景需先建立活动 SSO 会话再授权 | 8 小时过期 + 6 个月 refresh；H1 因此不可用 |
 
@@ -101,7 +101,8 @@
 | 能力 | 接口 | 认证/权限 | 空/错误 | 缓存标识 |
 | --- | --- | --- | --- | --- |
 | 仓库资料（描述、Topics、默认分支、可见性、`pushed_at`） | `GET /repos/{owner}/{repo}`；GraphQL `repository` | 细粒度：`Metadata` 读；classic：`repo` 才含私有 | 改名/转移返回 301；无权限的私有仓库返回 404 | 仓库 `id` |
-| Stars / Forks / Watchers / Open issues | 同上的 `stargazers_count`、`forks_count`、`subscribers_count`、`open_issues_count`；GraphQL `stargazerCount`、`forkCount` | 同上 | 计数可能滞后；`watchers_count` 不是订阅数语义 | 随仓库摘要一起存，不单独设高频刷新 |
+| Stars / Forks / Watchers | 同上的 `stargazers_count`、`forks_count`、`subscribers_count`；GraphQL `stargazerCount`、`forkCount` | 同上 | 计数可能滞后；`watchers_count` 不是订阅数语义 | 随仓库摘要一起存，不单独设高频刷新 |
+| Open issues 计数 | REST `open_issues_count`（含 PR）；纯 issue 计数用 GraphQL `repository.issues(states:OPEN).totalCount` | 同上 | REST 的“每个 PR 也是 issue”，所以 `open_issues_count` 是 issue + PR 的合计数；不能直接标成“Open issues” | 需要纯 issue 计数时以 GraphQL 为准或自行减 PR |
 | 仓库体积 | 同上 `size`（KB，按小时计算，新建为 0） | 同上 | 0 不代表空仓库 | 仅作提示，不作内容边界 |
 | namespace 头像 | `owner.avatar_url`；GraphQL `owner.avatarUrl(size:)` | 同上 | — | URL 含用户 ID 与版本参数；实测头像响应有 `Cache-Control: max-age=300` 与 `ETag` |
 | 用户/组织资料 | `GET /users/{username}`、`GET /orgs/{org}`；GraphQL `user`/`organization` | 细粒度：无需权限；私有字段需 `read:user` | 404 表示不可见或不存在 | 用户 `id` |
@@ -177,7 +178,7 @@
 | --- | --- | --- | --- |
 | 基本资料 | `GET /users/{username}`；GraphQL `user`（`name`、`bio`、`avatarUrl`、`company`、`location`、`websiteUrl`、`followers.totalCount`） | 细粒度：无需权限 | 单次 GraphQL 查询即可取全，REST 需要一次请求 |
 | 本人私有字段 | `GET /user` | classic：`read:user` 或 `user` | 私有字段（私有仓库数、磁盘用量等）仅本人可见 |
-| 个人 README | 无专用字段。按公开规则组合：仓库名 = 用户名、公开、根目录 `README.md`、内容非空 | 细粒度：`Metadata`/`Contents` 读 | 规则来自官方文档；API 不会告诉你“该仓库是否被分享到 Profile”。一个用户可能不存在同名仓库（实测 `torvalds/torvalds` 为 404） |
+| 个人 README | 无专用字段。按公开规则组合：仓库名 = 用户名、公开、根目录 `README.md`、内容非空 | 细粒度：`Metadata`/`Contents` 读 | 规则来自官方文档；API 不会告诉你“该仓库是否被分享到 Profile”。一个用户可能不存在同名仓库（实测 `torvalds/torvalds` 为 404）。**2020-07 前创建的同名仓库不会自动展示，需要用户手动“Share to profile”，且 API 不暴露这个分享标记**，因此这套组合只能作为“大概率是个人 README”的启发式，不能保证与网站 Profile 一致 |
 | Pinned | GraphQL `user.pinnedItems(first:, types:[REPOSITORY])`、`pinnedItemsRemaining`、`anyPinnableItems` | 细粒度：无需权限 | **REST 无公开等价**；`types:[REPOSITORY]` 能滤掉 gist 等非仓库 pin |
 | Pinned → Popular 回退 | GraphQL `user.itemShowcase { hasPinnedItems items(first:) }` | 同上 | `hasPinnedItems` 计算的是**仓库或 gist**，不是仓库；`items` 是 `PinnableItem` 联合，只有“一个 pin 都没有”时才返回热门仓库 |
 | 贡献热力图 | GraphQL `contributionsCollection(from:, to:).contributionCalendar`（`weeks[].contributionDays[]`：`date`、`contributionCount`、`contributionLevel`、`color`） | classic：`read:user` 才含私有/内部仓库贡献 | **REST 无公开等价**（`/users/{u}/contributions` 实测 404）；默认区间为最近一年，`contributionYears` 可枚举可选年份 |
@@ -316,6 +317,7 @@
 2. **“全部仓库”的语义。** 是按 `/user/repos` 的可见集合（owner + collaborator + organization_member），还是限定本人/单组织？若选细粒度 PAT 作为任何长期方案，多组织必然要退化为多 token 或多账户，需要产品决定是否接受。
 3. **Home “最近参与且有更新”与“关注 Feed”的口径。** 是否接受用 `involves:@me` + `updated:` 作为“参与”，并在 UI 上明确它不等于网站首页？Feed 是否接受 Events API 事件流（延迟 30 秒–6 小时、300 条/30 天）而不是网站 Feed 镜像？
 4. **（可在 Pinned/Popular 实现任务开始时再定）gist-only 用户的仓库热门回退呈现。** `itemShowcase.hasPinnedItems` 计仓库或 gist，gist-only 用户拿不到服务端“仓库热门回退”，需要产品决定这种情况下的呈现（只展示仓库 pin / 留空 / 标记部分）。
+5. **（可在 Profile 实现任务开始时再定）个人 README 的遗留规则。** 2020-07 前创建的同名仓库需要用户手动分享，且 API 无此标记，组合启发式无法区分“已分享”与“未分享”；产品需要决定是否接受可能把未发布内容当作个人 README 展示。
 
 附带但不需要立刻裁决的观察（供后续任务参考，不作批准）：
 

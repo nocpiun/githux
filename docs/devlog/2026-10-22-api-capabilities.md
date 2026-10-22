@@ -8,7 +8,7 @@
 
 - 新增 `docs/github-api-capabilities.md`：按产品保留范围给出接口/认证/权限/分页/限流/错误与空数据/缓存标识矩阵，并标注“可实现 / 受限 / 需选择 / 无公开等价”。
 - 认证部分把 classic PAT、fine-grained PAT、OAuth App（web 与 device flow）、GitHub App user token 分开，说明各自对保留功能（尤其 H1 Notifications）的覆盖差异与桌面 secret 边界。
-- 提出的待裁决问题有三项本轮必须决定（H1 是否进首版及对应登录载体、“全部仓库”的语义、Home 参与与 Feed 的口径），另有第四项可在 Pinned/Popular 实现时再定（gist-only 用户的仓库热门回退）。均为选项陈述，不是选定结论。
+- 提出的待裁决问题有三项本轮必须决定（H1 是否进首版及对应登录载体、“全部仓库”的语义、Home 参与与 Feed 的口径），另有可延后到对应功能实现时再定的 Pinned/Popular gist-only 回退与个人 README 遗留规则。均为选项陈述，不是选定结论。
 - 与 [缓存策略](../cache-strategy.md) 的差异只列依据与建议，未修改该文档或其他主题文档；跨领域更改留给主 Agent 汇总。
 - `docs/README.md` 只增加一行能力表索引链接，未改动其他条目。
 
@@ -30,9 +30,10 @@
 - 第六轮审查指出：交接里仍写“三项”，与能力表已列四项不一致。已把开发日志里两处“三项”更新为四项并注明各自时点。
 - 第七轮审查指出：OAuth App 也支持 expiring tokens（8 小时 access + 6 个月可轮换 refresh，`expires_in` 等响应字段有条件出现），不能只在 GitHub App 行里写这个生命周期。已核实授权文档并在两个 OAuth 流程行与桌面 secret 边界里补充。
 - 第八轮审查指出：不想要 `client_secret` 时，除了后端与 GitHub App，OAuth App 的 device flow 同样只需 `client_id` 且刷新也不需要 secret。已纠正桌面 secret 边界的表述，把 device flow 列入无 secret 路径并保留其安全代价。
+- 第九轮审查指出三处：OAuth 授权只覆盖登录时已有活动 SSO 会话且允许该 App 的组织，不是自动覆盖所有组织；REST 的 `open_issues_count` 包含 PR，不能标成“Open issues”；2020-07 前创建的同名仓库需手动分享且 API 无此标记。均已核实并在矩阵、错误/缓存节与待裁决清单补充。
 
 ## 后续
 
-- 需要主 Agent/负责人裁决的问题共四项（见能力表末节，其中三项本轮必须决定，Pinned/Popular 的 gist-only 回退可在实现时再定）；其中 Notifications 的 token 支持差异会直接改变登录方案可行性。
+- 需要主 Agent/负责人裁决的问题见能力表末节（三项本轮必须决定，Pinned/Popular gist-only 回退与个人 README 遗留规则可延后）；其中 Notifications 的 token 支持差异会直接改变登录方案可行性。
 - 待登录方案确定后，按“待集成验证清单”补齐私有资源、SSO、通知状态与写操作的真实验证。
 - 若裁决要求调整登录方式或仓库集合语义，需要另开实现任务，不在本文范围内直接实施。
