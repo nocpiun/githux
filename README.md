@@ -33,9 +33,9 @@ cargo test --locked
 git diff --check
 ```
 
-[CI 配置](.github/workflows/ci.yml) 将 Windows 代码检查（fmt、check、clippy、test）与四个平台的 Debug 构建并行执行。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建，并上传 `githux-<Rust target>-debug` artifact，包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。
+[CI 配置](.github/workflows/ci.yml) 按改动范围运行：应用或构建配置改动触发 Ubuntu Rust 检查（fmt、check、clippy、test）及四平台 Debug 构建；纯文档跳过两者，Agent 脚本变更单独运行 Node 测试。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建，并上传 `githux-<Rust target>-debug` artifact，包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。
 
-末尾的 `CI` job 汇总所有上游结果，可在分支规则中将名称为 `CI` 的检查设为 required check。只有代码检查和整个构建矩阵均成功时才通过；维护约定见 [代码约定](docs/code-standards.md#验证)。各提交的实际结果见 GitHub Actions，验证边界见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
+末尾的 `CI` job 汇总所有上游结果，可在分支规则中将名称为 `CI` 的检查设为 required check。范围判断成功、所需任务均成功、其余任务按规则跳过时通过；失败或意外跳过不能放行。范围及门槛见 [代码约定](docs/code-standards.md#ci-改动范围)。各提交的实际结果见 GitHub Actions，验证边界见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
 
 `cargo test` 使用 GPUI 测试平台渲染实际外壳视图，覆盖启动 Home、缩放时只有仓库组让出高度、侧栏独立滚动、各入口路由与选中态、搜索浮层的打开/过滤/高亮移动/Enter/Esc/组合态 Enter、焦点返回、中文与超长名称保持在列内，以及未设计页面的留空行为。测试平台不经过 Windows 原生输入分发，也不驱动真实的非客户区命中测试，因此不能替代真实窗口验收；本机窗口的拖动、双击最大化、贴靠、搜索入口不误拖动与进程退出已核验，IME 与多 DPI 仍待人工确认，详见 [开发日志](docs/devlog/2026-10-22-shell-layout.md)。
 

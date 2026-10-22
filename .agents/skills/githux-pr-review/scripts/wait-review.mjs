@@ -261,7 +261,9 @@ export async function inspectReview(options, api = ghApi, signal) {
     if (['failed', 'cancelled', 'error'].includes(summary.status))
       result = event(options, 'review_failed', { summary });
     else if (summary.status === 'completed')
-      result = event(options, summary.has_any_findings ? 'review_arrived' : 'review_completed', { summary });
+      // has_any_findings includes resolved history; only outstanding findings
+      // require a formal batch. A clean rerun may have no new inline comments.
+      result = event(options, summary.has_unresolved_findings ? 'review_arrived' : 'review_completed', { summary });
     // A known running summary owns batch completion, even if a formal review is already visible.
   }
   if ((!result && !summary) || result?.status === 'review_arrived') {

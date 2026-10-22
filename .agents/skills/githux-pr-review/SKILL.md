@@ -35,8 +35,8 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --
 | 状态 / 退出码 | 执行者处理 |
 | --- | --- |
 | review_arrived / 0 | 整批阅读审查正文与行内意见；到达不代表通过 |
-| review_completed / 0 | 可信摘要明确完成且无 findings；未等待 CI，继续核验其他门槛 |
-| checks_ready / 0 | 可信摘要无 findings，所选 CI 全成功；按共享工作流核验最终 head、权限历史、基线及任务验收后再合并 |
+| review_completed / 0 | 可信摘要明确完成且无未解决 findings（可有已解决历史）；未等待 CI，继续核验其他门槛 |
+| checks_ready / 0 | 可信摘要已完成且无未解决 findings，所选 CI 全成功；按共享工作流核验最终 head、权限历史、基线及任务验收后再合并 |
 | ci_failed / 6 | CI 失败、取消、跳过或其他非成功结论；定位并修复，不认定通过 |
 | review_failed / 7 | 摘要报告审查失败/取消；排查原因，不当作无问题 |
 | unverified_bot_message / 5 | 身份、摘要格式、轮次或普通评论无法验证；阅读证据，不放行 |
