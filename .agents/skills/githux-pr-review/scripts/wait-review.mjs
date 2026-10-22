@@ -12,7 +12,7 @@ const BOT = 'chatgpt-codex-connector[bot]';
 const SHA = /^[0-9a-f]{40}$/i;
 const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/;
 const codes = { review_arrived: 0, error: 1, timeout: 2, head_changed: 3,
-  pr_closed: 4, unverified_bot_message: 5, ci_failed: 6, review_failed: 7,
+  pr_closed: 4, unverified_bot_message: 5, ci_failed: 6, review_failed: 7, merge_conflict: 8,
   review_completed: 0, checks_ready: 0, interrupted: 130 };
 export const HELP = [
   '通过 gh CLI 等待 Codex 审查；只检测到达，不判定通过。',
@@ -23,7 +23,7 @@ export const HELP = [
   '  [--out 文件]',
   'timeout=0 查询一次。默认作者：' + BOT,
   '退出码：0 审查到达/完成或检查齐备；1 错误；2 超时；3 head改变；4 PR关闭；',
-  '5 Bot消息需核实；6 CI失败；7 审查失败；130 中断。退出0不等于允许合并。',
+  '5 Bot消息需核实；6 CI失败；7 审查失败；8 合并冲突；130 中断。退出0不等于允许合并。',
 ].join('\n');
 
 export function parseArgs(argv) {
@@ -115,6 +115,13 @@ function inspectHead(options, pr) {
   if (pr.state !== 'open') return event(options, 'pr_closed', { merged: Boolean(pr.merged) });
   if (pr.head.sha.toLowerCase() !== options.head)
     return event(options, 'head_changed', { current_head: pr.head.sha });
+  // REST mergeable is tri-state: null means GitHub is still computing it.
+  // Protection, draft and failing checks are not merge conflicts.
+  if (pr.mergeable === false) return event(options, 'merge_conflict', {
+    mergeable: false, mergeable_state: pr.mergeable_state ?? null,
+    base_ref: pr.base?.ref ?? null, base_sha: pr.base?.sha ?? null,
+    message: 'PR 存在合并冲突，pull_request CI 无法启动。同步目标分支并解决冲突，推送后针对新 head 重新触发审查；继续轮询无法解决冲突。',
+  });
   return null;
 }
 
@@ -302,7 +309,7 @@ export async function inspectReview(options, api = ghApi, signal) {
     else if (result?.status === 'review_completed')
       result = ci.state === 'success' ? event(options, 'checks_ready', { ci, summary }) : null;
   }
-  // Recheck after every batch of evidence; no stale result is delivered across a push/closure.
+  // Recheck after every batch of evidence, including conflicts introduced by a base update.
   if (result) return inspectHead(options, await get(endpoint)) ?? result;
   return null;
 }
