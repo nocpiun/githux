@@ -24,6 +24,7 @@
 
 - 第一轮审查指出三处：能力表误把 Notifications 写成“仅 classic PAT”（端点段落说的是“不支持细粒度 token”，OAuth scope 参考与官方对照页都明确 `notifications` scope 可读通知）；Pinned/Popular 回退的数据源写错（应查 `itemShowcase`，只查 `pinnedItems` 无法得到 Popular）；开发日志的相对链接缺 `../`。三处均已核实并修正。
 - 第二轮审查指出：不应把“不能保密 `client_secret`”直接推导为“桌面方案应走 device flow”。官方 [OAuth App 最佳实践](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/best-practices-for-creating-an-oauth-app) 把桌面应用归为 public client，建议随包发行 secret 并用 PKCE 加固，且**优先 authorization code + PKCE 而非 device flow**（device flow 无回调 URI，更易被远程钓鱼滥用）。已改为两个流程均保留、默认候选是 web flow + PKCE + loopback，并补充了各自的 secret 与钓鱼风险。
+- 第三轮审查指出：`/user/orgs` 对细粒度 token 会返回 `200` + 空列表，不能与 `/user/memberships/orgs` 当作等价。已核实官方端点说明并修正：表格与要点里明确该差异，错误表新增一行，并建议组织枚举统一改用 memberships 端点。
 
 ## 后续
 

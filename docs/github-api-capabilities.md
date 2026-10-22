@@ -84,7 +84,7 @@
 | 全部可见仓库 | `GET /user/repos`（`affiliation=owner,collaborator,organization_member`，`visibility`，`sort`，`direction`） | 细粒度：`Metadata` 读；不适用于 installation token；classic：`repo` 才有私有 | `per_page` ≤ 100，`Link` 分页 | 401/403/422；空数组≠无仓库 | 仓库 `id`/`node_id` |
 | 某用户公开仓库 | `GET /users/{username}/repos` | 细粒度：`Metadata` 读（公共资源可匿名） | 同上 | — | 仓库 `id` |
 | 组织仓库 | `GET /orgs/{org}/repos` | 细粒度：`Metadata` 读 | 同上 | 私有不可见时只返回可见集合 | 仓库 `id` |
-| 组织枚举 | `GET /user/orgs`、`GET /user/memberships/orgs` | 细粒度：无需权限；classic：`read:org` 影响可见范围 | 同上 | 组织策略/SSO 会造成静默缺失 | 组织 `id` |
+| 组织枚举 | `GET /user/orgs`（OAuth/classic，需 `user` 或 `read:org`）；**细粒度 token 请用 `GET /user/memberships/orgs`**（`state` 可选 `active`/`pending`） | 细粒度：`/user/orgs` 无需权限但**总返回 200 + 空列表**；`/user/memberships/orgs` 无需权限；classic：`user`/`read:org` | 同上 | `/user/orgs` 对细粒度 token 返回 **200 空数组**（不是 403）；classic scope 不足为 403 | 组织 `id` |
 | 仓库范围差异 | — | — | — | 侧栏“全部仓库”在细粒度 PAT 下按 resource owner 分裂；GitHub App 按安装范围收敛 | — |
 
 要点：
@@ -93,6 +93,7 @@
 - GraphQL `viewer.repositories(affiliations:)` 与 REST 等价，可与资料字段合并成一次查询，但受点数与节点上限约束。
 - 细粒度 PAT 的“一个 resource owner”不是分页问题，而是集合本身被截断；这是登录方案裁决的关键输入，不能靠翻页修补。
 - SSO 缺失时，多组织请求不报错而是缺失结果，并用 `X-GitHub-SSO: partial-results; organizations=…` 提示；单组织请求可能直接 403 并给出 1 小时有效的授权 URL。因此“组织仓库为空”必须区分未授权、无成员身份和真的没有仓库。
+- `/user/orgs` 对细粒度 token 的官方描述是“返回 200 与空列表”，这是端点级行为而非权限错误；用它枚举组织会在细粒度 token 下静默得到“没有任何组织”。需要枚举组织时应统一改用 `/user/memberships/orgs`，并把“空列表”当作可疑状态而不是权威结果。
 
 ### 仓库资料与统计
 
@@ -247,6 +248,7 @@
 | 200 `{}`（Languages） | 无语言统计 | 显示空态，不显示 0% |
 | 404（`releases/latest`） | 没有已发布 Release | 与“Releases 列表为空”合并为空态，但不要伪造版本号 |
 | 422（搜索） | 查询语法或权限问题 | 不重试同一查询；提示修改而不是“无结果” |
+| 200 + 空组织列表（`/user/orgs`） | 细粒度 token 下固定行为，不代表无组织 | 改用 `/user/memberships/orgs`，不要缓存为“无组织” |
 | 429（commit 端点） | 服务端负载，不一定是限流 | 按 `retry-after`/退避处理，不误报“额度用尽” |
 | 301（仓库端点） | 仓库改名/转移 | 跟随并更新本地稳定 ID 映射 |
 | `incomplete_results: true` | 搜索超时，结果不完整 | 明确标注不完整，不做“已全部加载” |
@@ -331,7 +333,7 @@ REST 端点（每项的 “Fine-grained access tokens” 段与参数/响应说�
 
 - [Repositories](https://docs.github.com/en/rest/repos/repos)、[Contents](https://docs.github.com/en/rest/repos/contents)、[Branches](https://docs.github.com/en/rest/branches/branches)、[Commits](https://docs.github.com/en/rest/commits/commits)、[Git trees](https://docs.github.com/en/rest/git/trees)、[Git blobs](https://docs.github.com/en/rest/git/blobs)、[Releases](https://docs.github.com/en/rest/releases/releases)
 - [Events](https://docs.github.com/en/rest/activity/events)、[Feeds](https://docs.github.com/en/rest/activity/feeds)、[Notifications](https://docs.github.com/en/rest/activity/notifications)、[Starring](https://docs.github.com/en/rest/activity/starring)
-- [Issues](https://docs.github.com/en/rest/issues/issues)、[Pull requests](https://docs.github.com/en/rest/pulls/pulls)、[Search](https://docs.github.com/en/rest/search/search)、[Users](https://docs.github.com/en/rest/users/users)、[Organizations](https://docs.github.com/en/rest/orgs/orgs)
+- [Issues](https://docs.github.com/en/rest/issues/issues)、[Pull requests](https://docs.github.com/en/rest/pulls/pulls)、[Search](https://docs.github.com/en/rest/search/search)、[Users](https://docs.github.com/en/rest/users/users)、[Organizations](https://docs.github.com/en/rest/orgs/orgs)、[Organization memberships](https://docs.github.com/en/rest/orgs/members#list-organization-memberships-for-the-authenticated-user)
 - [Rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)、[Best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)、[Pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)、[Troubleshooting](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api)、[API versions](https://docs.github.com/en/rest/about-the-rest-api/api-versions)
 - [Git database guide（409 语义）](https://docs.github.com/en/rest/guides/using-the-rest-api-to-interact-with-your-git-database)
 - [Authenticating to the REST API（含 `X-GitHub-SSO`）](https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api)、[Fine-grained PAT permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
