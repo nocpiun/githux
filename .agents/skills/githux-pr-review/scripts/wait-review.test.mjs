@@ -444,3 +444,66 @@ test('a findings summary waits for current formal review and inline propagation 
   assert.equal(r.status, 'review_arrived');
   assert.deepEqual(r.comments.map(c => c.id), [77, 90]);
 });
+
+test('resolved historical findings complete without a current formal review or inline comments', async () => {
+  const receipt = { ...summary(), id: 30, created_at: since,
+    body: '<!-- codex-review-receipt:v1 -->\nNo major issues.\n**Reviewed commit:** `' + A.slice(0, 10) + '`' };
+  for (const receipts of [[], [receipt]]) {
+    const f = fixture({ comments: [summary({ findings: true, unresolved: false }), ...receipts],
+      reviews: [review({ commit_id: B, submitted_at: '2026-10-21T09:59:59Z' })] });
+    const result = await waitForReview(options({ since, afterCommentId: 20, timeoutMs: 0 }), { api: f.api });
+    assert.equal(result.status, 'review_completed');
+    assert.equal(result.summary.has_any_findings, true);
+    assert.equal(result.summary.has_unresolved_findings, false);
+    assert.equal(result.review_passed, null);
+    assert.equal(result.verdict, 'not_evaluated');
+  }
+});
+
+test('resolved historical findings still wait for current-head CI and surface failures', async () => {
+  const comments = [summary({ findings: true, unresolved: false })];
+  for (const [checks, expected] of [
+    [[], 'timeout'],
+    [[check({ status: 'in_progress', conclusion: null })], 'timeout'],
+    [[check({ head_sha: B })], 'timeout'],
+    [[check({ app: { id: 999 } })], 'timeout'],
+    [[check({ conclusion: 'failure' })], 'ci_failed'],
+    [[check()], 'checks_ready'],
+  ]) {
+    const result = await waitForReview(options({ waitCi: true, timeoutMs: 0 }), {
+      api: withChecks({ comments }, checks).api,
+    });
+    assert.equal(result.status, expected);
+    assert.equal(result.review_passed, null);
+  }
+});
+
+test('resolved findings do not bypass completion, head, round or summary identity checks', async () => {
+  for (const [extra, expected] of [
+    [{ status: 'running' }, 'timeout'],
+    [{ status: 'failed' }, 'review_failed'],
+    [{ head: B }, 'timeout'],
+    [{ at: '2026-10-21T09:59:59Z' }, 'timeout'],
+    [{ extra: { performed_via_github_app: { id: 999 } } }, 'unverified_bot_message'],
+    [{ unresolved: null }, 'unverified_bot_message'],
+  ]) {
+    const result = await waitForReview(options({ since, afterCommentId: 20, waitCi: true, timeoutMs: 0 }), {
+      api: withChecks({ comments: [summary({ findings: true, unresolved: false, ...extra })] }, [check()]).api,
+    });
+    assert.equal(result.status, expected);
+    assert.equal(result.review_passed, null);
+  }
+});
+
+test('a push or closure invalidates completed evidence even when historical findings are resolved', async () => {
+  for (const [next, expected] of [
+    [pr({ head: { sha: B } }), 'head_changed'],
+    [pr({ state: 'closed' }), 'pr_closed'],
+  ]) {
+    const f = withChecks({ comments: [summary({ findings: true, unresolved: false })],
+      heads: [pr(), next] }, [check()]);
+    const result = await waitForReview(options({ waitCi: true, timeoutMs: 0 }), { api: f.api });
+    assert.equal(result.status, expected);
+    assert.equal(result.ci, undefined);
+  }
+});

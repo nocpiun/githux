@@ -7,7 +7,8 @@
 - 从 Code Review 表格行读取独立 datetime，联合 updated_at 校验时间边界；手动触发轮次须显示 Manual request。摘要创建日期和 comment ID 可以早于触发评论，因为 Bot 会原地更新它。
 - 单独更新安全审查、摘要属于旧 SHA、代码审查时间早于触发均不释放新一轮结果。缺少时间、未知状态、身份不匹配或多份可用摘要返回待核实，不猜测。
 - 本工作流每个新 head 触发一次审查，不支持靠重复请求相同 head 来区分并发审查轮次。摘要未提供唯一 run ID；遇到同 SHA 多轮重叠须人工核验，不凭最后更新时间认定特定轮次通过。
-- 已知 running 摘要优先于提前可见的正式 review：等待整批完成。完成且有 findings 时，须等到本轮对应 head 的正式 review 及行内意见到达；仅摘要、仅收据或旧线程不足以完成本轮等待。收集本轮正式 review 及其评论，另用只读 GraphQL 分页核验线程状态，仅携带明确未解决的历史 Bot 行内意见（含回复），已解决旧意见不再混入本批。线程状态缺失或查询失败明确报错，不猜测；这些意见仍是待分类数据。
+- 已知 running 摘要优先于提前可见的正式 review：等待整批完成。完成且有未解决 findings（has_unresolved_findings=true）时，须等到本轮对应 head 的正式 review 及行内意见到达；仅摘要、仅收据或旧线程不足以完成本轮等待。收集本轮正式 review 及其评论，另用只读 GraphQL 分页核验线程状态，仅携带明确未解决的历史 Bot 行内意见（含回复），已解决旧意见不再混入本批。线程状态缺失或查询失败明确报错，不猜测；这些意见仍是待分类数据。
+- 完成且 has_unresolved_findings=false 时返回 review_completed；has_any_findings=true 可以只是已解决历史，不再要求本轮存在正式 review 或行内意见。真实例子见 [PR #6 摘要](https://github.com/nocpiun/githux/pull/6#issuecomment-6331406055) 与[本轮收据](https://github.com/nocpiun/githux/pull/6#issuecomment-6335038750)。摘要仍须通过身份、完整 SHA 和轮次校验；独立 receipt 或仅线程被标记 resolved 都不能替代有效的完成摘要。启用 wait-ci 后继续核验 CI，返回状态不是合并授权。
 - 可信且绑定当前 SHA 的 review receipt 不单独唤醒执行者；普通错误/额度消息仍返回待核实。没有可用摘要时保留原正式 review 到达行为，不擅自把 APPROVED 或无行内意见升级为检查通过。
 - 结果返回前重新读取 PR，head 改变或 PR 关闭就废弃本批结果。合并前执行者仍需再次核验。
 
@@ -15,7 +16,7 @@
 
 `--wait-ci true` 查询当前完整 head 的 check-runs，分页读取 `check_runs` 集合。默认检查名 CI，来源必须是 GitHub Actions App ID 15368、head_sha 一致。同名多个可信检查是歧义错误；缺失、pending/in_progress 持续等待。
 
-仅 completed + success 成功；failure/cancelled/skipped/neutral/timed_out 等均返回 ci_failed。CI 可在代码审查仍运行时报告失败，让执行者处理；有完整审查意见时先交回整批反馈。只有明确无 findings 的完整摘要加全部所选检查成功才返回 checks_ready。
+仅 completed + success 成功；failure/cancelled/skipped/neutral/timed_out 等均返回 ci_failed。CI 可在代码审查仍运行时报告失败，让执行者处理；有完整审查意见时先交回整批反馈。只有明确无未解决 findings 的完整摘要加全部所选检查成功才返回 checks_ready。
 
 本仓库 CI 是汇总 job，要求所有必需上游成功；脚本不绕过汇总、不推断未知 workflow 的门槛，也不自动改变 required checks。部署或额外检查须显式加入 `--check`，最终核对仓库保护和与 main 的组合仍由执行者承担。
 
