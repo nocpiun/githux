@@ -16,20 +16,41 @@
 - 单元测试使用明确 fixture 或模拟外部服务，不依赖实时 GitHub；真正的集成验证单独说明账户、环境与影响。测试用临时目录，结束时清理所启动的任务，不改真实用户配置。
 - 运行与改动相称的检查，记录实际命令、结果和未覆盖部分。源码推断、模拟结果与真实 GUI/PR 验证分别说明。
 - UI 改动在真实 Ely 窗口核验，涉及字体、IME、滚动和窗口状态时包含对应交互；跨平台支持不能仅由 Windows 编译成功推断。
-- CI 包含 Windows 代码检查（Node 脚本离线测试、fmt、check、clippy、test）、四平台 Debug 构建，以及末尾显示名称为 `CI` 的汇总 job（ID 为 `ci`）。负责人将在分支规则中把 `CI` 设为 required check；配置存在不代表规则已经启用。汇总 job 要求所有上游均为 `success`，失败、取消、跳过或缺失均不通过。新增上游 job 时，必须同时加入 `ci.needs` 和结果判断，不能遗漏必需检查。Codex 审查仍按 [工作流](agent-workflow.md#合并前的门槛) 单独核验。
+- CI 根据变更范围选择任务，末尾显示名称仍为 `CI`（job ID `ci`），作为分支规则的 required check。范围判断必须成功；需要运行的任务必须成功，仅允许由范围策略明确排除的任务为 skipped。失败、取消、意外跳过、缺失输出均不通过。新增上游同时更新 `ci.needs` 和汇总校验，详见下方范围约定。Codex 审查独立按 [工作流](agent-workflow.md#合并前的门槛) 核验。
+
+## CI 改动范围
+
+CI 在 workflow 层按 workflow 名称与 github.ref 分组，并启用 cancel-in-progress。同一 PR 的引用或同一分支触发新运行时，取消旧运行和旧等待项，只保留新运行；不同 PR/分支互不取消。main 分支同样适用。
+
+
+路径策略和门槛实现见 [.github/scripts/ci-scope.mjs](../.github/scripts/ci-scope.mjs)，工作流见 [ci.yml](../.github/workflows/ci.yml)。负责人于 2026-10-22 授权非应用变更跳过 Rust 检查与构建；这是明确允许的条件跳过，不是 `[skip ci]`。
+
+| 改动范围 | Ubuntu Rust code-check / 四平台 Debug build | Windows Agent script-check |
+| --- | --- | --- |
+| 仅 `docs/**`、根目录 Markdown、skills 内 Markdown | 跳过 | 跳过 |
+| `.agents/skills/**` 非 Markdown 脚本或资料 | 跳过（无其他应用变更时） | 运行 |
+| 应用源码、资源、Cargo/工具链/构建配置，以及未明确排除的新路径 | 运行 | 按脚本范围判断 |
+| `.github/**`，包括工作流与范围/门槛脚本 | 运行 | 运行 |
+
+混合变更取并集；`src/` 与 `assets/` 内的 Markdown 也可能是构建输入，不归入文档跳过。CI 自身变更完整运行各分支以验证检查配置。Rust `code-check` 在 Ubuntu 24.04 安装 Linux 构建依赖后执行 fmt/check/clippy/test；Windows 专项脚本测试仍由 `script-check` 负责，四平台 Debug 构建各用原生 runner。每次先运行轻量 `Detect changes`（含范围/门槛离线测试），然后始终执行 `CI` 汇总；纯文档不会启动 Ubuntu Rust 检查或四平台构建，也不上传构建 artifact。
+
+PR 使用 base 与 head 的 merge-base 三点差异，覆盖整个 PR；后续只追加文档不能遮住之前的源码变更。main push 使用 before/after 两点差异，首次零 before 用完整树。checkout 获取完整历史，Git NUL 文件名列表不依赖 API 的文件数量上限，重命名按删除和新增共同分类。引用不可读取或范围判断出错时 CI 失败，不能当作文档变更。规则不是依赖扫描器：若未来将 docs/ 或根 Markdown 作为运行时/构建输入，须先调整策略。
+
+不对整个 workflow 使用 `paths-ignore`，避免 required check 一直 Pending；只对 job 使用条件。GitHub 的 [路径过滤与必需检查说明](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpushpull_requestpull_request_targetpathspaths-ignore) 和 [checkout 完整历史](https://github.com/actions/checkout#fetch-all-history-for-all-tags-and-branches) 说明相关行为。
 
 ## 当前可运行检查
 
-本仓库有审查等待和任务派发脚本的 Node 离线测试；Windows `code-check` 会在 Rust 步骤前实际运行前两条（Node 24，无依赖缓存）：
+CI 范围策略、审查等待和任务派发脚本均有 Node 离线测试。范围策略在 Linux `changes` 中验证，后两项按需在 Windows `script-check` 中运行（Node 24，无依赖缓存）：
 
 ```sh
+node --test .github/scripts/ci-scope.test.mjs
 node --test .agents/skills/githux-pr-review/scripts/wait-review.test.mjs
 node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
 git diff --check
 git diff --cached --check
 ```
 
-Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发测试在系统临时目录建立一次性 Git 仓库和假 CLI，不访问模型、不打开可见窗口；Windows 进程身份与编码桥有专项覆盖。两项测试已接入 `CI` 的 Windows `code-check`（setup-node 24，无依赖缓存），Rust 步骤和矩阵/汇总逻辑不变。涉及真实 CLI、可见 CMD/TTY 接管或会话恢复的改动仍需相应真实验证，模拟测试不能替代；当前实现的本机实测证据见 [派发开发日志](devlog/2026-10-21-agent-dispatch.md)。
+Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发测试在系统临时目录建立一次性 Git 仓库和假 CLI，不访问模型、不打开可见窗口；Windows 进程身份与编码桥有专项覆盖。这两项 Agent 测试已从 Rust 检查拆为独立 Windows `script-check`；纯文档不触发。涉及真实 CLI、可见 CMD/TTY 接管或会话恢复的改动仍需相应真实验证，模拟测试不能替代；当前实现的本机实测证据见 [派发开发日志](devlog/2026-10-21-agent-dispatch.md)。
 
 正式应用是单 Cargo package，固定 Rust 1.98.1。Windows 应用检查如下，CI 配置见 [ci.yml](../.github/workflows/ci.yml)：
 
