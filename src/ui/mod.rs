@@ -2,8 +2,8 @@
 //!
 //! The window is a custom title bar over a fixed sidebar and one island. Only the sidebar's
 //! repository group scrolls: the fixed rows and the island keep their places when the window is
-//! resized. Routes live in [`crate::workspace`]; this round has one active page, with no placeholder
-//! session strip above its content. Multi-session tabs belong to the next R1 task.
+//! resized. The island's top holds the application session tab strip, then the active page.
+//! Sessions, their routes and their page-local state live in [`crate::workspace`].
 
 use std::rc::Rc;
 
@@ -12,14 +12,16 @@ use ely_gpui_component::{
     primitives::{FocusScope, IconName},
     theme::ActiveTheme,
 };
+#[cfg(test)]
+use gpui::Point;
 use gpui::{
-    App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Point, Render,
+    App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
     ScrollHandle, Styled, Window, actions, div, prelude::*, px,
 };
 
 use crate::{
     platform::fonts,
-    workspace::{Route, Workspace},
+    workspace::{MAX_OPEN_TABS, OpenResult, Route, TabId, Workspace},
 };
 
 mod chrome;
@@ -28,11 +30,21 @@ pub(crate) mod geometry;
 mod page;
 mod palette;
 mod sidebar;
+mod tabs;
 
 #[cfg(test)]
 mod tests;
 
-actions!(githux, [OpenCommandPalette]);
+actions!(
+    githux,
+    [OpenCommandPalette, CloseActiveTab, NextTab, PreviousTab]
+);
+
+/// The short notice shown when a new page cannot open at [`MAX_OPEN_TABS`]. It is cleared by the
+/// next successful tab action, so it never becomes a permanent banner.
+fn tab_limit_hint() -> String {
+    format!("Tab limit reached ({MAX_OPEN_TABS}); close a tab to open another")
+}
 
 pub struct Shell {
     workspace: Workspace,
@@ -43,42 +55,48 @@ pub struct Shell {
     repo_focus: Vec<FocusHandle>,
     /// The repository row last scrolled into view, so a still focus does not scroll every frame.
     revealed_row: Option<usize>,
-    page_scroll: ScrollHandle,
     palette: Option<palette::Session>,
     restore_focus: bool,
     search_focus: FocusHandle,
+    /// The tab-limit notice, cleared by the next successful tab action.
+    hint: Option<String>,
 }
 
 impl Shell {
     /// Binds the shell's own shortcuts once per application. `secondary` is Ctrl on Windows and
-    /// Linux and Cmd on macOS, the same chord the title bar's search entry prints.
+    /// Linux and Cmd on macOS, the same chord the title bar's search entry prints. The tab chords
+    /// avoid Enter/Escape/arrows, so they never race input-method candidate confirmation or text
+    /// entry; while the palette is open the shell leaves the keyboard to it.
     pub fn bind_keys(cx: &mut App) {
-        cx.bind_keys([gpui::KeyBinding::new(
-            "secondary-k",
-            OpenCommandPalette,
-            None,
-        )]);
+        cx.bind_keys([
+            gpui::KeyBinding::new("secondary-k", OpenCommandPalette, None),
+            gpui::KeyBinding::new("secondary-w", CloseActiveTab, None),
+            gpui::KeyBinding::new("ctrl-tab", NextTab, None),
+            gpui::KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+        ]);
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let root_focus = cx.focus_handle();
+        let root_focus = cx.focus_handle().tab_index(-2);
         window.focus(&root_focus, cx);
-        let search_focus = cx.focus_handle().tab_stop(true);
+        // The search entry and the session tabs sit at the front of the tab order (index -1),
+        // ahead of the long repository list, so keyboard navigation reaches them directly.
+        let search_focus = cx.focus_handle().tab_stop(true).tab_index(-1);
         let repositories = fixtures::repositories();
         let repo_focus = (0..repositories.len())
             .map(|_| cx.focus_handle().tab_stop(true))
             .collect::<Vec<_>>();
         Self {
-            workspace: Workspace::new(),
+            workspace: Workspace::new(cx),
             repositories,
             root_focus,
             repo_scroll: ScrollHandle::new(),
             repo_focus,
             revealed_row: None,
-            page_scroll: ScrollHandle::new(),
             palette: None,
             restore_focus: false,
             search_focus,
+            hint: None,
         }
     }
 
@@ -106,12 +124,179 @@ impl Shell {
         self.repo_scroll.offset()
     }
 
-    /// The island page's scroll offset, for the bounded-scroll test.
+    /// The active page's scroll offset, for the bounded-scroll test.
     #[cfg(test)]
     pub fn page_offset(&self) -> Point<gpui::Pixels> {
-        self.page_scroll.offset()
+        self.workspace.active().state().scroll.offset()
     }
 
+    /// The scroll offset of one session's page.
+    #[cfg(test)]
+    pub fn tab_page_offset(&self, id: TabId) -> Option<Point<gpui::Pixels>> {
+        self.workspace
+            .session(id)
+            .map(|session| session.state().scroll.offset())
+    }
+
+    /// The page focus handle of one session.
+    #[cfg(test)]
+    pub fn tab_page_focus(&self, id: TabId) -> Option<FocusHandle> {
+        self.workspace
+            .session(id)
+            .map(|session| session.state().focus.clone())
+    }
+
+    /// The strip focus handle of one session.
+    #[cfg(test)]
+    pub fn tab_strip_focus(&self, id: TabId) -> Option<FocusHandle> {
+        self.workspace
+            .session(id)
+            .map(|session| session.state().strip_focus.clone())
+    }
+
+    /// The open session ids, in strip order.
+    #[cfg(test)]
+    pub fn tab_ids(&self) -> Vec<TabId> {
+        self.workspace.sessions().iter().map(|s| s.id()).collect()
+    }
+
+    /// The open routes, in strip order.
+    #[cfg(test)]
+    pub fn tab_routes(&self) -> Vec<Route> {
+        self.workspace
+            .sessions()
+            .iter()
+            .map(|session| session.route().clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn tab_count(&self) -> usize {
+        self.workspace.sessions().len()
+    }
+
+    #[cfg(test)]
+    pub fn active_tab_id(&self) -> TabId {
+        self.workspace.active_id()
+    }
+
+    /// One session's repository browsing state, when the session is a repository page.
+    #[cfg(test)]
+    pub fn repository_state(&self, id: TabId) -> Option<&crate::workspace::RepositorySession> {
+        self.workspace
+            .session(id)
+            .and_then(|session| session.state().repository.as_ref())
+    }
+
+    /// Drives one repository session's browsing selection, the way the R3 reader will.
+    #[cfg(test)]
+    pub fn select_repository(&mut self, id: TabId, branch: &str, file: Option<&str>) {
+        if let Some(session) = self.workspace.session_mut(id)
+            && let Some(repository) = session.state_mut().repository.as_mut()
+        {
+            repository.branch = Some(branch.to_string());
+            repository.file = file.map(str::to_string);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn tab_limit_hint(&self) -> Option<String> {
+        self.hint.clone()
+    }
+
+    /// Opens or activates the session for `route`, closing an open palette; true when the active
+    /// page changed. Every entry point (sidebar, quick entries, command palette) goes through
+    /// here, so reuse rules live in one place. At the session limit the current page stays put and
+    /// a short notice is shown instead.
+    pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.close_palette(cx);
+        let previous = self.workspace.active_id();
+        match self.workspace.open(route, cx) {
+            OpenResult::LimitReached => {
+                self.hint = Some(tab_limit_hint());
+                cx.notify();
+                false
+            }
+            OpenResult::Opened(id) | OpenResult::Activated(id) => {
+                self.hint = None;
+                self.follow_page_focus(previous, id, window, cx);
+                cx.notify();
+                previous != id
+            }
+        }
+    }
+
+    /// Closes `id`. Closing the active session moves to its neighbour; the current page is kept
+    /// when a non-active session closes. Focus follows only when it lived in the closed page.
+    pub fn close_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let focused_in_closed = self.workspace.session(id).is_some_and(|session| {
+            let focused = window.focused(cx);
+            focused.as_ref() == Some(&session.state().focus)
+                || session.state().focus.contains_focused(window, cx)
+        });
+        let was_active = self.workspace.active_id() == id;
+        let Some(result) = self.workspace.close(id, cx) else {
+            return;
+        };
+        self.hint = None;
+        if was_active && focused_in_closed {
+            self.focus_page(result.active, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// `Ctrl+W`: closes the active session unless the palette owns the keyboard.
+    fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        let active = self.workspace.active_id();
+        self.close_tab(active, window, cx);
+    }
+
+    /// `Ctrl+Tab` / `Shift+Ctrl+Tab`: cycles the active session, wrapping around.
+    fn cycle_tab(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        let previous = self.workspace.active_id();
+        if let Some(next) = self.workspace.cycle(by) {
+            self.hint = None;
+            self.follow_page_focus(previous, next, window, cx);
+            cx.notify();
+        }
+    }
+
+    fn focus_page(&self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.workspace.session(id) {
+            let focus = session.state().focus.clone();
+            window.focus(&focus, cx);
+        }
+    }
+
+    /// Moves focus into the incoming page only when it lived in the page that is being left, so
+    /// clicking a sidebar row or a tab keeps its own focus. Each session's handle is distinct, so
+    /// focus never leaks between pages.
+    fn follow_page_focus(
+        &self,
+        previous: TabId,
+        next: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if previous == next {
+            return;
+        }
+        let Some(previous) = self.workspace.session(previous) else {
+            return;
+        };
+        let focused = window.focused(cx);
+        let in_previous_page = focused.as_ref() == Some(&previous.state().focus)
+            || previous.state().focus.contains_focused(window, cx);
+        if in_previous_page {
+            self.focus_page(next, window, cx);
+        }
+    }
     /// Whether the palette is open, inspected by the palette tests.
     #[cfg(test)]
     pub fn palette_open(&self) -> bool {
@@ -151,17 +336,6 @@ impl Shell {
         self.palette
             .as_ref()
             .map_or(Point::default(), |session| session.scroll.offset())
-    }
-
-    /// Moves to `route`, closing an open palette; true when the page changed.
-    pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) -> bool {
-        self.close_palette(cx);
-        let changed = self.workspace.navigate(route);
-        if changed {
-            self.page_scroll.set_offset(Point::default());
-        }
-        cx.notify();
-        changed
     }
 
     /// Opens the palette over the shell. Closing gives focus back to the search entry.
@@ -219,7 +393,7 @@ impl Shell {
             }
             "enter" => {
                 cx.stop_propagation();
-                self.pick_palette(cursor, cx);
+                self.pick_palette(cursor, window, cx);
             }
             _ => {}
         }
@@ -240,7 +414,7 @@ impl Shell {
     }
 
     /// Runs the result at `position` in the current query's order, then closes the palette.
-    fn pick_palette(&mut self, position: usize, cx: &mut Context<Self>) {
+    fn pick_palette(&mut self, position: usize, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.palette.as_ref().and_then(|session| {
             session
                 .shown(cx)
@@ -249,7 +423,7 @@ impl Shell {
                 .map(|command| command.value.clone())
         });
         match value {
-            Some(value) => self.run_command(&value, cx),
+            Some(value) => self.run_command(&value, window, cx),
             None => self.close_palette(cx),
         }
     }
@@ -264,9 +438,10 @@ impl Shell {
         cx.notify();
     }
 
-    /// Runs one palette destination. Only local navigation is reachable: no network call is made
-    /// and the future search scope is not decided here.
-    pub fn run_command(&mut self, value: &str, cx: &mut Context<Self>) {
+    /// Runs one palette destination through the same open-or-activate path as every other entry.
+    /// Only local navigation is reachable: no network call is made and the future search scope is
+    /// not decided here.
+    pub fn run_command(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         let route = match value {
             "nav:home" => Some(Route::Home),
             "nav:settings" => Some(Route::Settings),
@@ -285,7 +460,7 @@ impl Shell {
         };
         match route {
             Some(route) => {
-                self.navigate(route, cx);
+                self.navigate(route, window, cx);
             }
             None => { /* Not reachable: the card only offers known values. */ }
         }
@@ -302,9 +477,9 @@ impl Shell {
                 IconName::House,
                 "Home",
                 route == Route::Home,
-                move |_, cx| {
+                move |window, cx| {
                     this.update(cx, |shell, cx| {
-                        shell.navigate(Route::Home, cx);
+                        shell.navigate(Route::Home, window, cx);
                     });
                 },
             )
@@ -316,9 +491,9 @@ impl Shell {
                 IconName::Settings,
                 "Settings",
                 route == Route::Settings,
-                move |_, cx| {
+                move |window, cx| {
                     this.update(cx, |shell, cx| {
-                        shell.navigate(Route::Settings, cx);
+                        shell.navigate(Route::Settings, window, cx);
                     });
                 },
             )
@@ -365,10 +540,10 @@ impl Shell {
                     repo,
                     &focus,
                     active,
-                    move |_, cx| {
+                    move |window, cx| {
                         let target = target.clone();
                         this.update(cx, |shell, cx| {
-                            shell.navigate(target, cx);
+                            shell.navigate(target, window, cx);
                         });
                     },
                     cx,
@@ -382,9 +557,9 @@ impl Shell {
             sidebar::account_row(
                 fixtures::ACCOUNT,
                 route == Route::Profile,
-                move |_, cx| {
+                move |window, cx| {
                     this.update(cx, |shell, cx| {
-                        shell.navigate(Route::Profile, cx);
+                        shell.navigate(Route::Profile, window, cx);
                     });
                 },
                 cx,
@@ -403,12 +578,12 @@ impl Shell {
                 label,
                 active,
                 target.is_none(),
-                move |_, cx| {
+                move |window, cx| {
                     let Some(target) = target.clone() else {
                         return;
                     };
                     this.update(cx, |shell, cx| {
-                        shell.navigate(target, cx);
+                        shell.navigate(target, window, cx);
                     });
                 },
                 cx,
@@ -446,11 +621,16 @@ impl Shell {
         sidebar::sidebar(nav, heading, repositories, account, quarters)
     }
 
+    /// The island: the session tab strip, then the active page's own scroll area.
     fn island(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let colors = &theme.colors;
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
-        let body = page::page(self.workspace.route(), &self.repositories, cx);
+        let strip = self.tab_strip(cx);
+        let session = self.workspace.active();
+        let body = page::page(session, &self.repositories, cx);
+        let scroll = session.state().scroll.clone();
+        let focus = session.state().focus.clone();
 
         div()
             .debug_selector(|| "island".to_string())
@@ -466,19 +646,68 @@ impl Shell {
             .bg(surface)
             .text_color(fg)
             .overflow_hidden()
+            .child(strip)
             .child(
+                // One element per session id, so element state never carries over between pages.
                 div()
-                    .id("island-page")
+                    .id(("island-page", session.id().get()))
+                    .debug_selector(|| "island-page".to_string())
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
                     // Content never paints past the island's right edge; wide text is cut inside.
                     .overflow_x_hidden()
-                    .track_scroll(&self.page_scroll)
+                    .track_scroll(&scroll)
+                    .track_focus(&focus)
                     .child(body),
             )
             .into_any_element()
+    }
+
+    /// The application session strip. Each tab activates its session on click or Enter/Space; the
+    /// close affordance closes that session and stops the click from also activating it.
+    fn tab_strip(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let this = cx.entity();
+        let entries = self
+            .workspace
+            .sessions()
+            .iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let id = session.id();
+                let select_this = this.clone();
+                let select = Rc::new(move |window: &mut Window, cx: &mut App| {
+                    select_this.update(cx, |shell, cx| shell.activate_tab(id, window, cx));
+                });
+                let close_this = this.clone();
+                let close = Rc::new(move |window: &mut Window, cx: &mut App| {
+                    close_this.update(cx, |shell, cx| shell.close_tab(id, window, cx));
+                });
+                tabs::Entry {
+                    id,
+                    index,
+                    title: session.route().title(),
+                    icon: tabs::route_icon(session.route()),
+                    active: id == self.workspace.active_id(),
+                    focus: session.state().strip_focus.clone(),
+                    select,
+                    close,
+                }
+            })
+            .collect::<Vec<_>>();
+        tabs::strip(entries, self.hint.clone(), cx)
+    }
+
+    /// Makes an already open session active, following focus that lived in the previous page.
+    fn activate_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let previous = self.workspace.active_id();
+        if !self.workspace.activate(id) {
+            return;
+        }
+        self.hint = None;
+        self.follow_page_focus(previous, id, window, cx);
+        cx.notify();
     }
 
     fn palette(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -499,8 +728,8 @@ impl Shell {
         };
         let picked = {
             let this = this.clone();
-            Rc::new(move |position: usize, _: &mut Window, cx: &mut App| {
-                this.update(cx, |shell, cx| shell.pick_palette(position, cx));
+            Rc::new(move |position: usize, window: &mut Window, cx: &mut App| {
+                this.update(cx, |shell, cx| shell.pick_palette(position, window, cx));
             })
         };
         let view = palette::View {
@@ -555,6 +784,15 @@ impl Render for Shell {
             .pt(px(content_top))
             .on_action(cx.listener(|shell, _: &OpenCommandPalette, window, cx| {
                 shell.open_palette(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &CloseActiveTab, window, cx| {
+                shell.close_active_tab(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &NextTab, window, cx| {
+                shell.cycle_tab(1, window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| {
+                shell.cycle_tab(-1, window, cx);
             }))
             .child(
                 FocusScope::new(&self.root_focus)
