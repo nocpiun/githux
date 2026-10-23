@@ -11,11 +11,12 @@
 3. 运行：
 
 ```powershell
-./scripts/prepare-windows-runtime.ps1
 cargo run --locked
 ```
 
-首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`；不要与其他项目/原型共享可写 target。Windows debug binary 为 `target/debug/githux.exe`。首次运行前，准备脚本下载并校验固定哈希的 Windows App SDK 运行时，放在 exe 同目录；没有系统级安装。分发 Windows 构建时须保留同目录 DLL、PRI、`githux-wasdk.manifest` 与 SDK 许可证，不能只复制 exe。未准备运行时会回退到标准高度的 DWM 按钮。
+首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`；不要与其他项目/原型共享可写 target。Windows debug binary 为 `target/debug/githux.exe`。
+
+`cargo run` 会自动把固定版本、经 SHA256 校验的 app-local Windows App SDK 运行时放到实际被启动的 exe 旁边：首次缺缓存时下载，之后复用本地缓存并离线运行；`--release`、显式 `--target`、自定义 `--target-dir` 以及新 worktree、`cargo clean` 后都无需手动准备。`cargo test`/`cargo bench` 等其他 Cargo 运行不经此准备。这是开发启动准备，不是系统安装，但也**不等于没有运行时依赖**：`cargo build` 不准备运行时，手动双击裸 exe 或分发给他人时仍须执行 `./scripts/prepare-windows-runtime.ps1 -Destination <exe 所在目录>`，并保留同目录 DLL、PRI、`githux-wasdk.manifest` 与 SDK 许可证，不能只复制 exe。CI 的 Windows artifact 已在打包步骤中包含这些文件。未准备运行时会回退到标准高度的 DWM 按钮。细节、缓存位置与 `--manifest-path` 等边界见 [Windows 运行时](docs/windows-runtime.md)。
 
 Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
 
@@ -32,6 +33,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 cargo test --locked
 git diff --check
+
+# Windows 运行时准备与 Cargo runner 的离线回归测试（Windows）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/windows-runtime.test.ps1
 ```
 
 [CI 配置](.github/workflows/ci.yml) 按改动范围运行：应用或构建配置改动触发 Ubuntu Rust 检查（fmt、check、clippy、test）及四平台 Debug 构建；纯文档跳过两者，Agent 脚本变更单独运行 Node 测试。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建，并上传 `githux-<Rust target>-debug` artifact，包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。
