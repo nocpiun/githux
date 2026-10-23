@@ -64,3 +64,8 @@ WM_ACTIVATE/WM_SIZE 也更新扩展框架。WM_NCHITTEST 优先 DWM，未接管�
 ## 本次提交范围
 
 按负责人要求合并此前外壳视觉调整一并提交：island 圆角 6px、右/下边缘间距 7px、侧栏间距 8px，移除顶栏分隔线及 island 重复小标题，原生标题按钮和最终上下 8px 间距。此前主工作区暂存内容与创建任务时的基线核对一致，没有遗漏额外修改。Windows App SDK Tall 标题栏仅讨论可行性，未纳入本次实现；原生按钮保留当前系统高度。
+
+
+## PR #12 首轮 CI 修复
+
+首轮四平台 Debug build 全部成功，Ubuntu code-check 在 Clippy 阶段因非 Windows 分支的固定 None.unwrap_or(0.0) 触发 unnecessary_literal_unwrap。改为 cfg 分支直接确定背景右侧留白的 f32 值，保留 Windows 原生区域查询逻辑，不压制 lint、不改变布局行为。修复后本机 fmt/Clippy/31 tests 通过；Linux 结果由新提交 CI 核验。

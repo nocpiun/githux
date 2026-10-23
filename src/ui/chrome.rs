@@ -126,8 +126,10 @@ pub(super) fn titlebar(
     let native_area = crate::platform::caption::area(window);
     #[cfg(target_os = "windows")]
     let native_width = native_area.map(|area| area.width);
+    #[cfg(target_os = "windows")]
+    let background_right = native_width.unwrap_or(0.0);
     #[cfg(not(target_os = "windows"))]
-    let native_width: Option<f32> = None;
+    let background_right = 0.0;
     let caption = cfg!(target_os = "windows");
     let controls = caption.then(|| {
         #[cfg(target_os = "windows")]
@@ -206,7 +208,7 @@ pub(super) fn titlebar(
                 .top_0()
                 .bottom_0()
                 .left_0()
-                .right(px(native_width.unwrap_or(0.0)))
+                .right(px(background_right))
                 .bg(bg),
         )
         .child(
