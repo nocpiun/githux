@@ -23,9 +23,14 @@
 
 | 操作 | 代次变化 |
 | --- | --- |
-| 首次验证通过 | 初始为 1 |
-| 替换 PAT（同一账户重新验证） | `bump()` |
-| 移除账户 | 账户删除，活动指针修正 |
+| 首次验证通过 | 从注册表的单调序列取值 |
+| 替换 PAT（`AccountService::replace`，同一账户重新验证） | 重新分配，必然大于旧值 |
+| 重复验证同一账户（`login`/`upsert_verified`） | 重新分配，必然大于旧值 |
+| 移除账户 | 账户删除，活动指针修正；**不移交也不复用**旧代次 |
+
+代次来自注册表级别的单调分配器（`AccountRegistry::next_epoch`），不是每账户计数器。这样“移除 A → 重新加入 A”不会回到旧值：ABA 场景下旧的 `{account, epoch}` 捕获永远无法再匹配活动上下文。
+
+`AccountService::replace(expected, pat)` 是更换已有账户 PAT 的**唯一**入口：先 `GET /user` 验证，再比对 `expected`；token 属于别的账户时返回 `IdentityMismatch`，两个账户都不会被保存或改动。`login()` 是“添加账户”路径，不承担替换语义。
 
 读取请求前捕获 `AuthContext { account, epoch }`，返回后再次比对；不一致返回 `GitHubError::StaleContext`，数据被丢弃，不进入新账户。
 
@@ -72,6 +77,10 @@ executor.shutdown(); // 停止接收、宽限期内排空、否则取消并 join
 
 **重定向与凭据保护**（`ReqwestTransport`）：reqwest 配置 `Policy::none()`，由我们自己跟随；只用同样的 scheme+host+port 才继续，跨源、降级到 HTTP 或超过 5 跳都**不跟随**，直接把 3xx 交给上层判定。`GitHubClient::url_is_trusted` 再检查分页 `Link` 的 host，不受信的 next 链接返回部分结果而不是继续请求。
 
+host 判定是**结构化解析**：只从 URL 的 authority 部分取 scheme 与 host，userinfo 只在该 authority 内按最后一个 `@` 截断。因此 `https://attacker.example/https://api.github.com/user`、`https://attacker.example/?next=https://api.github.com/user` 或 `https://api.github.com.evil.example/user` 都不会被当成受信 host，PAT 不会被注入。回归测试为 `github::client::tests::path_content_does_not_make_a_host_trusted`。
+
+`ReqwestTransport` 的取消覆盖**整个请求生命周期**：`tokio::select!` 同时作用于 header 阶段和 body 读取阶段，因此大响应或停滞响应在取消后不会继续读到请求超时。回归测试为 `network::transport::tests::cancellation_stops_a_stalled_body_read`。
+
 ## 5. GitHub 读取
 
 **固定请求头**：`User-Agent: githux/0.1 (+https://github.com/nocpiun/githux)`、`Accept: application/vnd.github+json`、`X-GitHub-Api-Version: 2022-11-28`。
@@ -91,8 +100,14 @@ executor.shutdown(); // 停止接收、宽限期内排空、否则取消并 join
 | 后续页失败（已有数据） | `Partial { reason: PageFailed }` |
 | `X-GitHub-SSO: partial-results` | `Partial { reason: SsoPartial { organizations } }` |
 | next 指向不受信 host | `Partial { reason: PageFailed }` |
+| 第 2 页起传输失败（超时/断网） | `Partial { reason: PageFailed }`，保留已解析页 |
+| 第 2 页起 JSON 解析失败 | `Partial { reason: PageFailed }`，保留已解析页 |
 
-因此“中途失败”和“授权不全”不会被伪装成完整空列表。
+因此“中途失败”“授权不全”和“解析失败”都不会被伪装成完整空列表；只有第一页失败才是硬错误。
+
+**过期错误也按代次处理**：`RepoService` 在请求结束后对**成功和失败**都重新核对 `AuthContext`。旧 PAT 返回的 `Unauthorized` 会被转换成 `StaleContext`，不会被当成“新凭据失效”，从而不会误触发替换提示。
+
+**移除账户的凭据删除失败会上报**：`AccountService::remove` 仍会移除注册表条目（不让陈旧引用保持活动），但把删除失败作为 `CredentialStore` 错误返回，避免声称“已成功移除”而实际仍留有持久化秘密。
 
 **错误分类**（`github::error::classify_status`）：
 
@@ -153,6 +168,15 @@ match accounts.login(Pat::from_str(user_input)).await {
     Err(err) => { /* 其他类型化错误 */ }
 }
 
+// 更换已有账户的 PAT：显式给出期望账户；token 属于别的账户时返回 IdentityMismatch
+match accounts.replace(existing_account_key, Pat::from_str(new_input)).await {
+    Ok(LoginOutcome::Replaced(summary)) => { /* 新 epoch 生效，旧响应会被判定为过期 */ }
+    Err(LoginError::IdentityMismatch { expected_account, actual_account }) => {
+        // 拒绝把账户 A 静默换成账户 B
+    }
+    Err(err) => { /* 类型化错误 */ }
+}
+
 // 读取仓库
 let repos = accounts.repo_service();
 match repos.list_repos().await {
@@ -196,12 +220,20 @@ git diff --check
 | 超时 | `network::transport::tests::timeout_is_classified` | 真实 socket 不响应 |
 | 取消 | `network::cancel::tests`、`network::transport::tests::cancelled_request_does_not_affect_independent_request` | 已取消 token 不建连接 |
 | 换账户/PAT 后丢弃旧响应 | `data::tests::stale_response_after_account_replacement_is_discarded`、`stale_response_after_removal_is_discarded` | 请求进行中推进代次 |
+| 旧 PAT 的过期错误不误判新凭据 | `data::tests::stale_error_after_replacement_becomes_stale_context` | 传输层在返回 401 前替换 PAT |
+| 替换入口拒绝别的账户 token | `data::tests::replace_rejects_a_token_for_a_different_account`、`replace_unknown_account_is_not_found` | 两账户都不被改动 |
+| 代次不复用（ABA） | `auth::tests::epochs_are_registry_wide_monotonic_across_removal_and_readd`、`repeated_verification_never_reuses_an_epoch` | 移除后重加 |
+| 凭据删除失败上报 | `data::tests::remove_reports_credential_deletion_failure` | 注入 delete 失败 |
+| URL authority 结构化解析 | `github::client::tests::path_content_does_not_make_a_host_trusted` | 路径/查询中的 host 无法冒充受信 |
+| 第 2 页起传输/解析失败保留已取数据 | `github::repos::tests::transport_failure_on_later_page_keeps_earlier_pages`、`parse_failure_on_later_page_keeps_earlier_pages` | |
+| 取消覆盖 body 读取阶段 | `network::transport::tests::cancellation_stops_a_stalled_body_read` | header 已到、body 停滞时取消 |
 | 取消一个请求不影响另一个 | `data::tests::cancelling_one_read_does_not_affect_another`、`network::executor::tests` | |
 | 后台执行器收敛 | `network::executor::tests::shutdown_converges_without_orphaned_work`、`concurrency_is_bounded_by_the_semaphore` | 长任务被取消、短任务完成、峰值并发受限 |
 | 凭据保存失败不宣称持久化 | `data::tests::credential_save_failure_does_not_persist` | 注入失败 |
 | 令牌不泄露 | `auth::token::tests`、`diagnostics::tests` | Debug/URL 脱敏 |
 | 真实 Credential Manager | `auth::windows::tests::windows_credential_roundtrip` | 本机真实 Windows 项，自清理 |
 | 跨源重定向不转发凭据 | `network::transport::tests::cross_origin_redirect_is_not_followed` | 真实 socket |
+| 移除活动账户 / 活动前账户 | `auth::tests::remove_active_account_activates_previous`、`remove_before_active_keeps_the_same_active_account`、`removing_every_account_leaves_no_active_context` | |
 | 多账户与代次 | `auth::tests` | |
 | 最小 scope 建议 | `auth::capability::tests` | 不含管理 scope |
 

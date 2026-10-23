@@ -103,22 +103,15 @@ impl AccountService {
         }
     }
 
-    /// Verify a PAT via `GET /user`, then persist the credential. If credential
-    /// storage fails, login is **not** reported as persisted.
+    /// Sign in: verify a PAT via `GET /user`, then persist the credential. If
+    /// credential storage fails, login is **not** reported as persisted.
+    ///
+    /// The account is keyed by the identity the token actually belongs to. This
+    /// is the *add account* path. To change the PAT of an existing account, use
+    /// [`AccountService::replace`] so a token for a different account cannot
+    /// silently swap identities.
     pub async fn login(&self, pat: Pat) -> Result<LoginOutcome, LoginError> {
-        let cancel = CancellationToken::default();
-        let _permit = self
-            .executor
-            .semaphore()
-            .acquire_owned()
-            .await
-            .map_err(|_| {
-                LoginError::GitHub(GitHubError::CredentialStore {
-                    message: "request scheduler closed".to_string(),
-                })
-            })?;
-        let verified: AuthenticatedUser =
-            fetch_authenticated_user(&self.client, &pat, cancel).await?;
+        let verified = self.verify(&pat).await?;
         let credential =
             CredentialRef::new(verified.identity.key.host.clone(), verified.identity.key.id);
 
@@ -148,27 +141,111 @@ impl AccountService {
         Ok(outcome)
     }
 
+    /// Replace the PAT of an **existing** account.
+    ///
+    /// The token is verified first, then its identity is compared with
+    /// `expected`. A token that belongs to a different account yields
+    /// [`LoginError::IdentityMismatch`] and neither account is saved or mutated,
+    /// so "replace account A" can never silently become "add/replace B".
+    pub async fn replace(
+        &self,
+        expected: crate::domain::AccountKey,
+        pat: Pat,
+    ) -> Result<LoginOutcome, LoginError> {
+        let verified = self.verify(&pat).await?;
+        if verified.identity.key != expected {
+            return Err(LoginError::IdentityMismatch {
+                expected_account: expected.id,
+                actual_account: verified.identity.key.id,
+            });
+        }
+
+        // Replacement is not an add path: the account must already exist.
+        let already_registered = {
+            let reg = self.registry.lock().expect("registry lock");
+            reg.credential_ref(expected.clone()).is_some()
+        };
+        if !already_registered {
+            return Err(LoginError::NotFound);
+        }
+
+        let credential =
+            CredentialRef::new(verified.identity.key.host.clone(), verified.identity.key.id);
+        // Save first: a storage failure must not advance the epoch or replace
+        // the registry record while claiming the new token is persisted.
+        self.store
+            .save(&credential, &pat)
+            .map_err(LoginError::from)?;
+
+        let summary = {
+            let mut reg = self.registry.lock().expect("registry lock");
+            reg.replace(expected, verified.identity, credential)
+                .map_err(|e| match e {
+                    RegistryError::AccountIdentityMismatch { expected, actual } => {
+                        LoginError::IdentityMismatch {
+                            expected_account: expected.id,
+                            actual_account: actual.id,
+                        }
+                    }
+                    _ => LoginError::NotFound,
+                })?
+        };
+        Ok(LoginOutcome::Replaced(summary))
+    }
+
+    async fn verify(&self, pat: &Pat) -> Result<AuthenticatedUser, LoginError> {
+        let cancel = CancellationToken::default();
+        let _permit = self
+            .executor
+            .semaphore()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                LoginError::GitHub(GitHubError::CredentialStore {
+                    message: "request scheduler closed".to_string(),
+                })
+            })?;
+        Ok(fetch_authenticated_user(&self.client, pat, cancel).await?)
+    }
+
+    /// Remove an account and delete its credential.
+    ///
+    /// A credential deletion failure is reported instead of silently claiming a
+    /// successful removal. The registry entry is still dropped so no stale
+    /// reference remains active, and the returned error tells the caller that a
+    /// stored secret may linger and needs retrying.
     pub async fn remove(&self, account: crate::domain::AccountKey) -> Result<(), GitHubError> {
         let credential = {
             let reg = self.registry.lock().expect("registry lock");
             reg.credential_ref(account.clone())
         };
-        if let Some(cred) = credential {
-            let _ = self.store.delete(&cred);
-        }
-        let result = {
+
+        let delete_result = match &credential {
+            Some(cred) => self.store.delete(cred),
+            None => Ok(()),
+        };
+
+        let removed = {
             let mut reg = self.registry.lock().expect("registry lock");
             reg.remove(account)
         };
-        match result {
-            Ok(()) => Ok(()),
-            Err(RegistryError::NotFound) => Err(GitHubError::CredentialStore {
-                message: "account not found".to_string(),
-            }),
-            Err(_) => Err(GitHubError::CredentialStore {
-                message: "registry error".to_string(),
-            }),
+        match removed {
+            Ok(()) => {}
+            Err(RegistryError::NotFound) => {
+                return Err(GitHubError::CredentialStore {
+                    message: "account not found".to_string(),
+                });
+            }
+            Err(_) => {
+                return Err(GitHubError::CredentialStore {
+                    message: "registry error".to_string(),
+                });
+            }
         }
+
+        delete_result.map_err(|e| GitHubError::CredentialStore {
+            message: format!("account removed but credential deletion failed: {e}"),
+        })
     }
 
     pub fn summaries(&self) -> Vec<AccountSummary> {
@@ -231,10 +308,14 @@ impl RepoService {
                 message: "request scheduler closed".to_string(),
             })?;
 
-        let outcome = fetch_user_repos(&self.client, &token, cancel).await?;
+        let result = fetch_user_repos(&self.client, &token, cancel).await;
 
-        // Re-check the context: if the account was switched/replaced/removed
-        // during the request, discard the result.
+        // Re-check the context *for every outcome*, including errors. If the
+        // account was switched, the PAT replaced or the account removed while
+        // the request was in flight, the result belongs to a stale
+        // authorization: a stale `Unauthorized` must not invalidate or prompt
+        // replacement of the *new* credential, so it is converted to
+        // `StaleContext` just like a stale success.
         let current = {
             let reg = self.registry.lock().expect("registry lock");
             reg.active_context()
@@ -243,7 +324,7 @@ impl RepoService {
             return Err(GitHubError::StaleContext);
         }
 
-        Ok(outcome)
+        result
     }
 
     /// Explicitly select the active account (future multi-account UI hook).
@@ -382,6 +463,263 @@ mod tests {
         let repo_svc = svc.repo_service();
         let outcome = repo_svc.list_repos().await.expect("repos");
         assert_eq!(outcome.repositories.len(), 3);
+    }
+
+    /// The dedicated replacement entry point rejects a PAT that belongs to a
+    /// different account instead of silently swapping identities.
+    #[tokio::test]
+    async fn replace_rejects_a_token_for_a_different_account() {
+        let store = Arc::new(InMemoryCredentialStore::new()) as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        // login as account 1
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(1, "account_one"),
+        }))
+        .await;
+        // the "replacement" token verifies as account 2
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(2, "account_two"),
+        }))
+        .await;
+
+        let (svc, _exec) = build_service(store.clone(), mock);
+        svc.login(Pat::from_str("ghp_one")).await.expect("login");
+
+        let result = svc
+            .replace(
+                crate::domain::AccountKey::new(1, crate::domain::HostId::github()),
+                Pat::from_str("ghp_two"),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(LoginError::IdentityMismatch {
+                    expected_account: 1,
+                    actual_account: 2
+                })
+            ),
+            "expected IdentityMismatch, got {result:?}"
+        );
+
+        // Neither account was added or mutated.
+        let summaries = svc.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].identity.key.id, 1);
+        // The stale account-2 credential was never saved.
+        let cred_two = crate::auth::CredentialRef::new(crate::domain::HostId::github(), 2);
+        assert!(store.load(&cred_two).expect("load").is_none());
+    }
+
+    /// Replacing an unknown account is not an implicit add.
+    #[tokio::test]
+    async fn replace_unknown_account_is_not_found() {
+        let store = Arc::new(InMemoryCredentialStore::new()) as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(77, "ghost"),
+        }))
+        .await;
+
+        let (svc, _exec) = build_service(store.clone(), mock);
+        let result = svc
+            .replace(
+                crate::domain::AccountKey::new(77, crate::domain::HostId::github()),
+                Pat::from_str("ghp_ghost"),
+            )
+            .await;
+        assert!(matches!(result, Err(LoginError::NotFound)));
+        assert!(svc.summaries().is_empty());
+    }
+
+    /// The explicit replacement path advances the epoch on success.
+    #[tokio::test]
+    async fn replace_advances_the_epoch() {
+        let store = Arc::new(InMemoryCredentialStore::new()) as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(11, "dev"),
+        }))
+        .await;
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(11, "dev"),
+        }))
+        .await;
+
+        let (svc, _exec) = build_service(store, mock);
+        let first = svc.login(Pat::from_str("ghp_a")).await.expect("login");
+        let first_epoch = match first {
+            LoginOutcome::SignedIn(s) => s.epoch,
+            _ => panic!("expected SignedIn"),
+        };
+
+        let replaced = svc
+            .replace(
+                crate::domain::AccountKey::new(11, crate::domain::HostId::github()),
+                Pat::from_str("ghp_b"),
+            )
+            .await
+            .expect("replace");
+        let second_epoch = match replaced {
+            LoginOutcome::Replaced(s) => s.epoch,
+            _ => panic!("expected Replaced"),
+        };
+        assert!(second_epoch.value() > first_epoch.value());
+    }
+
+    /// A stale `Unauthorized` from an old PAT must be converted to
+    /// `StaleContext`, not surfaced as a failure of the new credential.
+    #[tokio::test]
+    async fn stale_error_after_replacement_becomes_stale_context() {
+        use crate::network::transport::{HttpRequest, Transport, TransportError};
+        use std::pin::Pin;
+
+        struct ReplaceDuringReposThen401 {
+            mock: Arc<MockTransport>,
+            registry: Arc<std::sync::Mutex<crate::auth::AccountRegistry>>,
+            store: Arc<dyn CredentialStore>,
+        }
+
+        impl Transport for ReplaceDuringReposThen401 {
+            fn execute<'a>(
+                &'a self,
+                request: HttpRequest,
+                cancel: CancellationToken,
+            ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    let is_repos = request.url.contains("/user/repos");
+                    let response = self.mock.execute(request, cancel).await;
+                    if is_repos {
+                        let key =
+                            crate::domain::AccountKey::new(321, crate::domain::HostId::github());
+                        let identity = crate::domain::AccountIdentity {
+                            key: key.clone(),
+                            login: "dev".to_string(),
+                            display_name: None,
+                            avatar_url: None,
+                            html_url: None,
+                        };
+                        let credential =
+                            crate::auth::CredentialRef::new(crate::domain::HostId::github(), 321);
+                        let fresh = Pat::from_str("ghp_fresh");
+                        self.store.save(&credential, &fresh).expect("save");
+                        self.registry
+                            .lock()
+                            .expect("registry")
+                            .replace(key, identity, credential)
+                            .expect("replace");
+                    }
+                    response
+                })
+            }
+        }
+
+        let store = Arc::new(InMemoryCredentialStore::new()) as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(321, "dev"),
+        }))
+        .await;
+        // The in-flight read fails with 401 under the *old* PAT.
+        mock.enqueue(Ok(HttpResponse {
+            status: 401,
+            headers: vec![],
+            body: r#"{"message":"Bad credentials"}"#.to_string(),
+        }))
+        .await;
+
+        let registry = Arc::new(std::sync::Mutex::new(
+            crate::auth::AccountRegistry::default(),
+        ));
+        let transport = Arc::new(ReplaceDuringReposThen401 {
+            mock: mock.clone(),
+            registry: registry.clone(),
+            store: store.clone(),
+        });
+        let client = Arc::new(GitHubClient::new(GitHubConfig::default(), transport));
+        let exec = Arc::new(BackgroundExecutor::new(2));
+        let svc = AccountService {
+            registry: registry.clone(),
+            store: store.clone(),
+            client,
+            executor: exec.clone(),
+        };
+
+        svc.login(Pat::from_str("ghp_old")).await.expect("login");
+        let result = svc.repo_service().list_repos().await;
+        assert!(
+            matches!(result, Err(GitHubError::StaleContext)),
+            "stale 401 must become StaleContext, got {result:?}"
+        );
+        // The account is still present (the 401 did not remove it).
+        assert_eq!(svc.summaries().len(), 1);
+    }
+
+    /// Removing an account whose credential deletion fails reports the failure
+    /// instead of silently claiming a clean removal.
+    #[tokio::test]
+    async fn remove_reports_credential_deletion_failure() {
+        #[derive(Default)]
+        struct FailingDeleteStore {
+            inner: InMemoryCredentialStore,
+        }
+        impl CredentialStore for FailingDeleteStore {
+            fn save(
+                &self,
+                r#ref: &crate::auth::CredentialRef,
+                token: &Pat,
+            ) -> Result<(), CredentialError> {
+                self.inner.save(r#ref, token)
+            }
+            fn load(
+                &self,
+                r#ref: &crate::auth::CredentialRef,
+            ) -> Result<Option<Pat>, CredentialError> {
+                self.inner.load(r#ref)
+            }
+            fn delete(&self, _: &crate::auth::CredentialRef) -> Result<(), CredentialError> {
+                Err(CredentialError::Platform {
+                    message: "injected delete failure".to_string(),
+                })
+            }
+            fn describe(&self) -> &'static str {
+                "failing-delete (test)"
+            }
+        }
+
+        let store = Arc::new(FailingDeleteStore::default()) as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(55, "dev"),
+        }))
+        .await;
+
+        let (svc, _exec) = build_service(store, mock);
+        svc.login(Pat::from_str("ghp_x")).await.expect("login");
+        let account = svc.active_context().expect("ctx").account;
+
+        let result = svc.remove(account).await;
+        assert!(
+            matches!(result, Err(GitHubError::CredentialStore { .. })),
+            "expected a reported deletion failure, got {result:?}"
+        );
+        // The registry entry is still dropped so nothing stale stays active.
+        assert!(svc.summaries().is_empty());
     }
 
     #[tokio::test]

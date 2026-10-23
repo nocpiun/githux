@@ -164,10 +164,17 @@ impl Transport for ReqwestTransport {
 
                 let send = builder.send();
                 let response = tokio::select! {
-                    r = send => r.map_err(|e| if e.is_timeout() {
-                        TransportError::Timeout
-                    } else {
-                        TransportError::Network { message: e.to_string() }
+                    r = send => r.map_err(|e| {
+                        // Cancellation is reported as `Cancelled` even if tearing
+                        // the request down also surfaces a connect/IO error. The
+                        // caller asked to stop, so that is the meaningful result.
+                        if cancel.is_cancelled() {
+                            TransportError::Cancelled
+                        } else if e.is_timeout() {
+                            TransportError::Timeout
+                        } else {
+                            TransportError::Network { message: e.to_string() }
+                        }
                     })?,
                     _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
                 };
@@ -212,9 +219,20 @@ impl Transport for ReqwestTransport {
                     }
                 }
 
-                let body = response.text().await.map_err(|e| TransportError::Network {
-                    message: e.to_string(),
-                })?;
+                // Cancellation must cover the body read too, not just the
+                // header phase: a large or stalled body would otherwise keep
+                // running until the request timeout even after the caller
+                // cancelled.
+                let body = tokio::select! {
+                    body = response.text() => body.map_err(|e| {
+                        if cancel.is_cancelled() {
+                            TransportError::Cancelled
+                        } else {
+                            TransportError::Network { message: e.to_string() }
+                        }
+                    })?,
+                    _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
+                };
                 return Ok(HttpResponse {
                     status,
                     headers,
@@ -571,5 +589,76 @@ mod tests {
             .await;
         assert_eq!(response, Err(TransportError::Timeout));
         let _ = handle.join();
+    }
+
+    /// Regression: cancelling after the headers arrive but *while the body is
+    /// still streaming* must stop the read. A server that sends headers with a
+    /// large `Content-Length` and then stalls drives this path.
+    ///
+    /// Deterministic: the server signals over a channel once the headers are on
+    /// the wire, and only then does the test cancel, so the cancel lands in the
+    /// body-read phase rather than racing the connect.
+    #[tokio::test]
+    async fn cancellation_stops_a_stalled_body_read() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (headers_sent_tx, headers_sent_rx) = std::sync::mpsc::channel::<()>();
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read the request head first, like a real HTTP/1.1 server, so
+                // the client is not racing a response that arrives before it has
+                // finished writing the request.
+                let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut request_head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let done = line == "\r\n" || line == "\n";
+                    request_head.push_str(&line);
+                    if done {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n[",
+                );
+                let _ = stream.flush();
+                // Tell the test the headers are on the wire and the body is
+                // stalled, then hold the connection open.
+                let _ = headers_sent_tx.send(());
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+
+        let transport = ReqwestTransport::new(Duration::from_secs(30)).expect("client");
+        let (cancel, source) = CancellationToken::new();
+
+        let request = tokio::spawn(async move {
+            transport
+                .execute(HttpRequest::get(format!("http://{addr}/user")), cancel)
+                .await
+        });
+
+        // Wait until the server has actually written the headers, so the client
+        // is blocked on the body, then cancel.
+        tokio::task::spawn_blocking(move || headers_sent_rx.recv())
+            .await
+            .expect("join")
+            .expect("headers sent signal");
+        source.cancel();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .expect("cancellation must resolve well before the request timeout")
+            .expect("join request task");
+        assert_eq!(outcome, Err(TransportError::Cancelled));
+
+        // The server thread sleeps for 10s; detach it (it holds no shared state).
+        drop(handle);
     }
 }

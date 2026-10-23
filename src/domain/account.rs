@@ -76,25 +76,20 @@ pub struct AccountSummary {
     pub epoch: AuthEpoch,
 }
 
-/// Monotonically increasing authorization generation for one account.
+/// Monotonically increasing authorization generation.
 ///
-/// Replacing a PAT or removing an account advances the epoch so that responses
+/// Values are allocated from a registry-wide sequence rather than a per-account
+/// counter. That prevents an ABA match when an account is removed and re-added:
+/// a response captured for the old `{account, epoch}` pair can never coincide
+/// with a newly issued epoch, so it is always rejected as stale.
+///
+/// Replacing a PAT or re-verifying an account advances the epoch; responses
 /// produced under an older authorization context are discarded rather than
 /// written into the new account's data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct AuthEpoch(pub u64);
 
 impl AuthEpoch {
-    pub fn initial() -> Self {
-        Self(1)
-    }
-
-    /// Advance to the next generation. Used when credentials are replaced or an
-    /// account is removed.
-    pub fn bump(&mut self) {
-        self.0 = self.0.saturating_add(1);
-    }
-
     pub fn value(self) -> u64 {
         self.0
     }

@@ -52,6 +52,11 @@ use crate::domain::{AccountIdentity, AccountKey, AccountSummary, AuthEpoch};
 pub struct AccountRegistry {
     accounts: Vec<AccountRecord>,
     active: Option<usize>,
+    /// Registry-wide monotonic epoch allocator. Epochs come from here rather
+    /// than per-account counters so that removing and re-adding the same
+    /// account cannot reuse an epoch (ABA): a response captured for an old
+    /// `{account, epoch}` pair can never match a newly issued epoch again.
+    next_epoch: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +84,13 @@ pub enum RegistryError {
 }
 
 impl AccountRegistry {
+    /// Allocate the next registry-wide authorization epoch. Monotonic for the
+    /// lifetime of the registry; never reuses a value after removal.
+    fn allocate_epoch(&mut self) -> AuthEpoch {
+        self.next_epoch = self.next_epoch.saturating_add(1);
+        AuthEpoch(self.next_epoch)
+    }
+
     /// Register a freshly verified account, replacing any prior record with the
     /// same identity and advancing its epoch. Returns the resulting summary.
     pub fn upsert_verified(
@@ -86,6 +98,7 @@ impl AccountRegistry {
         identity: AccountIdentity,
         credential: CredentialRef,
     ) -> AccountSummary {
+        let epoch = self.allocate_epoch();
         if let Some(slot) = self
             .accounts
             .iter_mut()
@@ -93,13 +106,12 @@ impl AccountRegistry {
         {
             slot.identity = identity;
             slot.credential = credential;
-            slot.epoch.bump();
+            slot.epoch = epoch;
             return AccountSummary {
                 identity: slot.identity.clone(),
                 epoch: slot.epoch,
             };
         }
-        let epoch = AuthEpoch::initial();
         let record = AccountRecord {
             identity,
             credential,
@@ -128,6 +140,8 @@ impl AccountRegistry {
                 actual: identity.key,
             });
         }
+        // Allocate before taking the mutable borrow of the account slot.
+        let epoch = self.allocate_epoch();
         let slot = self
             .accounts
             .iter_mut()
@@ -135,7 +149,7 @@ impl AccountRegistry {
             .ok_or(RegistryError::NotFound)?;
         slot.identity = identity;
         slot.credential = credential;
-        slot.epoch.bump();
+        slot.epoch = epoch;
         Ok(AccountSummary {
             identity: slot.identity.clone(),
             epoch: slot.epoch,
@@ -337,6 +351,53 @@ mod tests {
             reg.remove(AccountKey::new(99, crate::domain::HostId::github())),
             Err(RegistryError::NotFound)
         ));
+    }
+
+    /// Regression (ABA): removing an account and re-adding it must not reuse an
+    /// epoch, otherwise an in-flight response captured before the removal would
+    /// match the re-added account's context and be wrongly accepted.
+    #[test]
+    fn epochs_are_registry_wide_monotonic_across_removal_and_readd() {
+        let mut reg = AccountRegistry::default();
+        let key = AccountKey::new(7, crate::domain::HostId::github());
+
+        let first = reg.upsert_verified(identity(7, "dev"), cred(7));
+        reg.remove(key.clone()).expect("remove");
+        let readded = reg.upsert_verified(identity(7, "dev"), cred(7));
+
+        assert!(
+            readded.epoch.value() > first.epoch.value(),
+            "re-added account reused epoch {} (first {})",
+            readded.epoch.value(),
+            first.epoch.value()
+        );
+
+        // The stale captured context can never equal the new active context.
+        let stale = AuthContext {
+            account: key.clone(),
+            epoch: first.epoch,
+        };
+        assert_ne!(reg.active_context().as_ref(), Some(&stale));
+
+        // A second account does not collide either.
+        let other = reg.upsert_verified(identity(8, "other"), cred(8));
+        assert!(other.epoch.value() > readded.epoch.value());
+    }
+
+    /// Repeated re-verification keeps increasing the epoch even within one
+    /// account, so an older in-flight read can never be revalidated.
+    #[test]
+    fn repeated_verification_never_reuses_an_epoch() {
+        let mut reg = AccountRegistry::default();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..5 {
+            let summary = reg.upsert_verified(identity(3, "dev"), cred(3));
+            assert!(
+                seen.insert(summary.epoch.value()),
+                "epoch {} was reused",
+                summary.epoch.value()
+            );
+        }
     }
 
     #[test]

@@ -73,11 +73,24 @@ pub async fn fetch_user_repos(
         }
 
         let request = client.build_get(&url, token);
-        let response = client
-            .transport()
-            .execute(request, cancel.clone())
-            .await
-            .map_err(classify_transport)?;
+        let response = match client.transport().execute(request, cancel.clone()).await {
+            Ok(response) => response,
+            Err(transport_error) => {
+                let err = classify_transport(transport_error);
+                if all_repos.is_empty() {
+                    return Err(err);
+                }
+                // A transport failure on page 2+ must not throw away the pages
+                // already parsed; it is a partial result like a later HTTP
+                // failure, never a completed empty list.
+                if partial_reason.is_none() {
+                    partial_reason = Some(PartialReason::PageFailed {
+                        message: err.to_string(),
+                    });
+                }
+                break;
+            }
+        };
 
         // Check SSO partial-results on any page.
         if let Some(orgs) = parse_sso_header(response.header("x-github-sso"))
@@ -101,10 +114,24 @@ pub async fn fetch_user_repos(
             break;
         }
 
-        let page_repos: Vec<RepoResponse> =
-            serde_json::from_str(&response.body).map_err(|e| GitHubError::Parse {
-                message: e.to_string(),
-            })?;
+        let page_repos: Vec<RepoResponse> = match serde_json::from_str(&response.body) {
+            Ok(page_repos) => page_repos,
+            Err(e) => {
+                // A parse failure on page 2+ keeps earlier pages as partial data;
+                // only a first-page parse failure is a hard error.
+                if all_repos.is_empty() {
+                    return Err(GitHubError::Parse {
+                        message: e.to_string(),
+                    });
+                }
+                if partial_reason.is_none() {
+                    partial_reason = Some(PartialReason::PageFailed {
+                        message: format!("failed to parse page {page}: {e}"),
+                    });
+                }
+                break;
+            }
+        };
 
         for r in page_repos {
             all_repos.push(RepoSummary {
@@ -287,6 +314,81 @@ mod tests {
         let token = Pat::from_str("ghp_test");
         let result = fetch_user_repos(&client, &token, CancellationToken::default()).await;
         assert!(matches!(result, Err(GitHubError::Unauthorized)));
+    }
+
+    /// Regression: a transport failure on page 2+ keeps the pages already
+    /// parsed and reports a partial result instead of discarding them.
+    #[tokio::test]
+    async fn transport_failure_on_later_page_keeps_earlier_pages() {
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![(
+                "link".to_string(),
+                r#"<https://api.github.com/user/repos?page=2>; rel="next""#.to_string(),
+            )],
+            body: page_body(&[(1, "alpha"), (2, "beta")]),
+        }))
+        .await;
+        mock.enqueue(Err(crate::network::transport::MockFailure::Timeout))
+            .await;
+
+        let client = GitHubClient::new(Default::default(), mock.clone());
+        let token = Pat::from_str("ghp_test");
+        let outcome = fetch_user_repos(&client, &token, CancellationToken::default())
+            .await
+            .expect("partial outcome");
+        assert_eq!(outcome.repositories.len(), 2);
+        assert!(matches!(
+            outcome.readiness,
+            ReposReadiness::Partial {
+                reason: PartialReason::PageFailed { .. }
+            }
+        ));
+    }
+
+    /// A parse failure on page 2+ also keeps earlier pages.
+    #[tokio::test]
+    async fn parse_failure_on_later_page_keeps_earlier_pages() {
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![(
+                "link".to_string(),
+                r#"<https://api.github.com/user/repos?page=2>; rel="next""#.to_string(),
+            )],
+            body: page_body(&[(1, "alpha")]),
+        }))
+        .await;
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: "not json".to_string(),
+        }))
+        .await;
+
+        let client = GitHubClient::new(Default::default(), mock.clone());
+        let token = Pat::from_str("ghp_test");
+        let outcome = fetch_user_repos(&client, &token, CancellationToken::default())
+            .await
+            .expect("partial outcome");
+        assert_eq!(outcome.repositories.len(), 1);
+        assert!(matches!(outcome.readiness, ReposReadiness::Partial { .. }));
+    }
+
+    /// A first-page transport failure is still a hard error, not an empty list.
+    #[tokio::test]
+    async fn transport_failure_on_first_page_is_an_error() {
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Err(crate::network::transport::MockFailure::Network(
+            "offline".to_string(),
+        )))
+        .await;
+
+        let client = GitHubClient::new(Default::default(), mock.clone());
+        let token = Pat::from_str("ghp_test");
+        let result = fetch_user_repos(&client, &token, CancellationToken::default()).await;
+        assert!(matches!(result, Err(GitHubError::Network { .. })));
     }
 
     #[tokio::test]

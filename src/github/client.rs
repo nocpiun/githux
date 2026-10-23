@@ -71,15 +71,19 @@ impl GitHubClient {
     /// A URL is trusted for credential injection iff it is HTTPS on the same
     /// host as the configured base URL. Localhost HTTP is trusted only when the
     /// base URL itself is a localhost mock (test mode).
+    ///
+    /// The URL is parsed structurally: scheme, optional userinfo, host and port
+    /// are taken from the authority component only, so a path or query that
+    /// happens to contain `@` or a host-looking string can never make an
+    /// unrelated host look trusted.
     pub fn url_is_trusted(&self, url: &str) -> bool {
-        let base_host = extract_host(&self.config.base_url);
-        let base_scheme = extract_scheme(&self.config.base_url);
-        let host = extract_host(url);
-        let scheme = extract_scheme(url);
-        if host.is_empty() || host != base_host {
+        let Some(candidate) = Authority::parse(url) else {
             return false;
-        }
-        scheme == base_scheme && !scheme.is_empty()
+        };
+        let Some(base) = Authority::parse(&self.config.base_url) else {
+            return false;
+        };
+        candidate.scheme == base.scheme && candidate.host == base.host
     }
 
     pub fn transport(&self) -> &Arc<dyn Transport> {
@@ -87,28 +91,57 @@ impl GitHubClient {
     }
 }
 
-fn extract_scheme(url: &str) -> &str {
-    if let Some(end) = url.find("://") {
-        &url[..end]
-    } else {
-        ""
-    }
+/// Structural URL authority: scheme and host (port excluded from trust
+/// comparison because the configured base URL determines the endpoint, while a
+/// differing port on the same host is still the same origin family for GitHub's
+/// purposes only if the base URL itself uses it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Authority {
+    scheme: String,
+    host: String,
 }
 
-fn extract_host(url: &str) -> &str {
-    let after_scheme = if let Some(idx) = url.find("://") {
-        &url[idx + 3..]
-    } else {
-        url
-    };
-    let after_userinfo = after_scheme
-        .find('@')
-        .map(|i| &after_scheme[i + 1..])
-        .unwrap_or(after_scheme);
-    after_userinfo
-        .find(['/', ':', '?', '#'])
-        .map(|i| &after_userinfo[..i])
-        .unwrap_or(after_userinfo)
+impl Authority {
+    /// Parse `<scheme>://[userinfo@]host[:port][/path][?query][#fragment]`.
+    /// Returns `None` for input without a scheme, so relative or malformed URLs
+    /// are never considered trusted.
+    fn parse(url: &str) -> Option<Self> {
+        let (scheme, rest) = url.split_once("://")?;
+        if scheme.is_empty() {
+            return None;
+        }
+
+        // The authority ends at the first '/', '?' or '#'.
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+
+        // Userinfo is terminated by the *last* '@' inside the authority. This is
+        // bounded to the authority, so an '@' in the path cannot affect it.
+        let host_port = match authority.rsplit_once('@') {
+            Some((_userinfo, host_port)) => host_port,
+            None => authority,
+        };
+        if host_port.is_empty() {
+            return None;
+        }
+
+        // Strip a port. Handle bracketed IPv6 literals defensively: they contain
+        // ':' but the closing ']' delimits the host.
+        let host = if let Some(close) = host_port.strip_prefix('[') {
+            let end = close.find(']')?;
+            &close[..end]
+        } else {
+            host_port.split(':').next().unwrap_or(host_port)
+        };
+        if host.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            scheme: scheme.to_ascii_lowercase(),
+            host: host.to_ascii_lowercase(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -147,6 +180,43 @@ mod tests {
         // A non-trusted absolute URL must not carry Authorization.
         let untrusted = client.build_get("https://evil.com/steal", &pat);
         assert!(!untrusted.headers.iter().any(|(k, _)| k == "Authorization"));
+    }
+
+    /// Regression: an `@` or host-looking text in the *path* must not make an
+    /// attacker host look trusted. The earlier implementation searched for
+    /// userinfo across the whole URL remainder, so
+    /// `https://attacker.example/https://api.github.com/user` was mis-parsed and
+    /// the PAT was injected toward `attacker.example`.
+    #[test]
+    fn path_content_does_not_make_a_host_trusted() {
+        let cfg = GitHubConfig::default();
+        let client = GitHubClient::new(
+            cfg,
+            Arc::new(crate::network::transport::MockTransport::new()),
+        );
+        let pat = Pat::from_str("ghp_secret123");
+        for hostile in [
+            "https://attacker.example/https://api.github.com/user",
+            "https://attacker.example/api.github.com/user",
+            "https://attacker.example/?next=https://api.github.com/user",
+            "https://someuser@attacker.example/user",
+            "https://attacker.example#@api.github.com/user",
+            "https://api.github.com.evil.example/user",
+            "http://api.github.com/user",
+        ] {
+            assert!(
+                !client.url_is_trusted(hostile),
+                "{hostile} must not be trusted"
+            );
+            let request = client.build_get(hostile, &pat);
+            assert!(
+                !request.headers.iter().any(|(k, _)| k == "Authorization"),
+                "{hostile} must not receive Authorization"
+            );
+        }
+
+        // Real userinfo on the real host is still the real host.
+        assert!(client.url_is_trusted("https://someone@api.github.com/user"));
     }
 
     #[test]

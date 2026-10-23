@@ -36,7 +36,7 @@
 cargo fmt --all -- --check                  # 通过
 cargo check --locked --all-targets          # 通过
 cargo clippy --locked --all-targets -- -D warnings   # 通过，无警告
-cargo test --locked                         # 107 passed / 0 failed
+cargo test --locked                         # 122 passed / 0 failed（首轮 110，审查修复后 122）
 cargo build --locked                        # 通过
 git diff --check                            # 通过
 ```
@@ -44,6 +44,24 @@ git diff --check                            # 通过
 新增用例覆盖：Authorization 构造与固定头、`GET /user` 身份与 401、两页合并、部分分页失败、SSO 部分结果、限流/Retry-After/不同 403、超时、取消不影响独立请求、换账户/换 PAT/移除账户后丢弃旧响应、后台执行器收敛与并发上限、凭据保存失败不宣称持久化、token 不泄露、真实 Windows Credential Manager 读写删、跨源重定向不转发凭据、多账户与代次、最小 scope 建议。
 
 其中真实 socket 用例通过仓库内的最小 localhost HTTP/1.1 mock 服务（`src/network/test_server.rs`，仅测试编译）驱动生产 `ReqwestTransport`，检查实际收到的请求头；不是只测 mock trait。
+
+## 首轮审查的 7 个缺陷与修复
+
+Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属可直接修复的实现缺陷（不涉及产品取舍），因此按工作流整批修复并重新送审：
+
+| 意见 | 实际缺陷 | 修复 |
+| --- | --- | --- |
+| P1 `extract_host` 把路径里的 `@` 当 userinfo | `https://attacker.example/https://api.github.com/user` 会被判定为受信，PAT 会发往攻击者 host | 改为结构化 `Authority` 解析，只取 authority 内的 scheme/host；新增回归测试覆盖 7 种 hostile URL |
+| P1 替换 PAT 未校验期望账户 | `login()` 对已有账户走 replace，但只按 token 自身身份匹配，账户 A 的“替换”可以被账户 B 的 token 变成新增/替换 B | 新增 `AccountService::replace(expected, pat)`：验证后比对 `expected`，不符返回 `IdentityMismatch` 且不改动任何账户；未知账户返回 `NotFound` |
+| P1 重新加入账户复用代次（ABA） | 新记录从 1 开始，移除后用不同 PAT 重新加入，旧的 epoch 捕获又能匹配 | 改为注册表级单调分配器 `next_epoch`，删除 `AuthEpoch::bump/initial`；新增 ABA 与重复验证不重用的测试 |
+| P1 过期错误未按代次处理 | `?` 在核对上下文前就把旧 PAT 的 `Unauthorized` 返回给调用方，可能误提示替换新凭据 | 请求结束后对成功与失败都核对 `AuthContext`，过期一律转 `StaleContext` |
+| P2 凭据删除失败被吞掉 | `remove()` 忽略 delete 错误仍报告成功，秘密可能残留且失去重试引用 | 改为移除注册表条目后把删除失败作为 `CredentialStore` 错误返回 |
+| P2 第 2 页起传输失败丢弃已取数据 | 与“部分结果”契约矛盾 | 传输/解析失败在已有数据时转为 `Partial { PageFailed }`；仅第一页失败是硬错误 |
+| P2 取消不覆盖 body 读取 | header 到达后 `response.text().await` 无条件执行，停滞大响应要等到超时 | body 读取也放进 `tokio::select!` 与取消竞争；新增“header 已到、body 停滞时取消”的真实 socket 测试 |
+
+修复后 `cargo test --locked` 为 122 项全绿，并新增 16 个回归用例。连续 8 次全量运行与 20 次单测重复运行结果一致。
+
+“取消覆盖 body”这个新用例调了两轮才稳定：第一版用固定延时取消，并行负载下偶尔先撞上连接错误；第二版改成服务端写完后用 channel 通知再取消，仍偶发 `Network` 而不是 `Cancelled`，根因是 mock 服务端在**读取请求之前**就写响应，客户端还没写完请求头，取消时 teardown 产生 IO 错误。最终让服务端先读完请求头再写 header + 停住 body，并且传输层在被取消时把 teardown 造成的 IO 错误统一报告为 `Cancelled`（调用方要求停止，这才是有意义的结果）。
 
 ## 验证边界（不得省略）
 
