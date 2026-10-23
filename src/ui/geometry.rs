@@ -38,3 +38,11 @@ pub const ACCOUNT_ROW_HEIGHT: f32 = 40.0;
 
 /// Height of a Home activity row.
 pub const ACTIVITY_ROW_HEIGHT: f32 = 52.0;
+
+/// The application session tab strip at the top of the island. The strip never widens the
+/// island: it clips, and each tab shrinks between the two width bounds below.
+pub const TAB_STRIP_HEIGHT: f32 = 38.0;
+pub const TAB_HEIGHT: f32 = 26.0;
+pub const TAB_MIN_WIDTH: f32 = 56.0;
+pub const TAB_MAX_WIDTH: f32 = 180.0;
+pub const TAB_CLOSE_SIZE: f32 = 16.0;

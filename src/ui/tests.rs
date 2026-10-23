@@ -1,10 +1,11 @@
 //! Tests over the real shell view on GPUI's test platform.
 //!
-//! These cover what the test platform can actually check: routing, the palette's open, filter,
-//! select and Escape paths, focus after closing, the bounded sidebar (only the repository group
-//! gives up height when the window shrinks), and that the island stays inside the window. They do
-//! not exercise Windows non-client hit testing, real dragging/snapping, or native IME delivery;
-//! those remain pending manual checks and are recorded as such.
+//! These cover what the test platform can actually check: routing, the application session strip
+//! (open-or-activate, close, the preview limit, keyboard chords, per-session scroll/focus/state),
+//! the palette's open, filter, select and Escape paths, focus after closing, the bounded sidebar
+//! (only the repository group gives up height when the window shrinks), and that the island stays
+//! inside the window. They do not exercise Windows non-client hit testing, real dragging/snapping,
+//! or native IME delivery; those remain pending manual checks and are recorded as such.
 
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent,
@@ -12,7 +13,12 @@ use gpui::{
 };
 
 use super::Shell;
-use crate::workspace::Route;
+use crate::workspace::{MAX_OPEN_TABS, RepositorySession, Route};
+
+/// A `debug_selector` string built at runtime for the tests that index rows.
+fn selector(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
+}
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -290,21 +296,30 @@ fn closing_the_palette_leaves_a_live_focus_target(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn pages_do_not_draw_a_placeholder_session_strip(cx: &mut TestAppContext) {
+fn the_island_draws_real_session_tabs_and_no_placeholder_title(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
     assert!(cx.debug_bounds("page-home").is_some());
+    // The real strip replaces the removed page-name placeholder: the old selectors stay gone.
+    assert!(cx.debug_bounds("tab-strip").is_some());
+    assert!(cx.debug_bounds("tab-0").is_some());
     assert!(cx.debug_bounds("session-strip").is_none());
     assert!(cx.debug_bounds("session-title").is_none());
+    assert!(cx.debug_bounds("session-add").is_none());
+
     let repo = view.read_with(cx, |shell, _| shell.repositories()[0].clone());
-    view.update(cx, |shell, cx| {
-        shell.navigate(Route::repository(&repo), cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::repository(&repo), window, cx);
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("page-repository").is_some());
+    assert!(cx.debug_bounds("tab-0").is_some(), "Home keeps its tab");
+    assert!(
+        cx.debug_bounds("tab-1").is_some(),
+        "the repository opened one"
+    );
+    assert!(cx.debug_bounds("tab-close-0").is_some());
     assert!(cx.debug_bounds("session-strip").is_none());
-    // No add or close control is drawn: multi-session tabs belong to the next R1 task.
-    assert!(cx.debug_bounds("session-add").is_none());
-    assert!(cx.debug_bounds("session-close").is_none());
+    assert!(cx.debug_bounds("session-title").is_none());
 }
 
 #[gpui::test]
@@ -467,8 +482,8 @@ fn the_blank_pages_draw_no_placeholder_card(cx: &mut TestAppContext) {
         Route::PullRequests,
         Route::Notifications,
     ] {
-        view.update(cx, |shell, cx| {
-            shell.navigate(target.clone(), cx);
+        cx.update_window_entity(&view, |shell, window, cx| {
+            shell.navigate(target.clone(), window, cx);
         });
         cx.run_until_parked();
         // The island keeps its shell; the content area stays empty with no title strip.
@@ -625,4 +640,342 @@ fn escape_closes_the_palette_without_running_the_highlighted_row(cx: &mut TestAp
     press("escape", cx);
     assert!(!view.read_with(cx, |shell, _| shell.palette_open()));
     assert_eq!(route(&view, cx), Route::Home, "Escape never navigates");
+}
+
+/// The strip lists every open session and each entry reuses its tab instead of duplicating it.
+#[gpui::test]
+fn opening_the_same_page_reuses_its_tab(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let repo = view.read_with(cx, |shell, _| shell.repositories()[0].clone());
+
+    click("repo-row-0", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+    let repository_tab = view.read_with(cx, |shell, _| shell.tab_ids()[1]);
+    assert_eq!(route(&view, cx), Route::repository(&repo));
+
+    // Clicking Home and the same repository again switches tabs instead of duplicating them.
+    click("nav-home", cx);
+    assert_eq!(route(&view, cx), Route::Home);
+    click("repo-row-0", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        repository_tab
+    );
+
+    // The command palette uses the same open-or-activate path.
+    click("search-entry", cx);
+    cx.simulate_input(repo.name.as_str());
+    cx.run_until_parked();
+    press("enter", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        repository_tab
+    );
+}
+
+/// Repository A/B and Profile keep their own scroll offset, focus and browsing selection.
+#[gpui::test]
+fn repositories_and_profile_keep_separate_scroll_focus_and_selection(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(900.0), px(560.0)));
+    cx.run_until_parked();
+
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("account-row", cx);
+    let profile = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(a, b);
+    assert_ne!(b, profile);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 4);
+
+    // The reader's browsing selection stays per session.
+    view.update(cx, |shell, _| {
+        shell.select_repository(a, "main", Some("README.md"));
+        shell.select_repository(b, "release", Some("src/lib.rs"));
+    });
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell
+            .repository_state(a)
+            .and_then(|state| state.branch.clone())),
+        Some("main".to_string())
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell
+            .repository_state(b)
+            .and_then(|state| state.file.clone())),
+        Some("src/lib.rs".to_string())
+    );
+
+    // Home scrolls for real; switching away leaves the other sessions at their own offset.
+    click("tab-0", cx);
+    assert_eq!(route(&view, cx), Route::Home);
+    let page = bounds("island-page", cx);
+    cx.simulate_mouse_move(page.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: page.center(),
+        delta: ScrollDelta::Lines(gpui::point(0.0, -12.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    cx.run_until_parked();
+    let home_offset = view.read_with(cx, |shell, _| shell.page_offset());
+    assert!(home_offset.y < px(0.0), "Home scrolled: {home_offset:?}");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_page_offset(a)),
+        Some(Point::default())
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_page_offset(profile)),
+        Some(Point::default())
+    );
+
+    // Focus that lives in a page follows the switch into the incoming page's own handle.
+    cx.update_window_entity(&view, |shell, window, cx| shell.activate_tab(a, window, cx));
+    let a_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(a).unwrap());
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&a_focus, cx));
+    cx.run_until_parked();
+    press("ctrl-tab", cx);
+    let b_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(b).unwrap());
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(
+        focused.as_ref(),
+        Some(&b_focus),
+        "focus moves into the next page"
+    );
+    press("ctrl-shift-tab", cx);
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(
+        focused.as_ref(),
+        Some(&a_focus),
+        "and back into the first one"
+    );
+
+    // Home's own scroll offset is still where the user left it.
+    click("tab-0", cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.page_offset()),
+        home_offset
+    );
+}
+
+/// Closing keeps the current page unless the active tab itself closes, then picks the neighbour.
+#[gpui::test]
+fn closing_tabs_keeps_the_active_page_and_picks_a_neighbour(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-2", cx);
+    let c = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 4);
+
+    // Closing a non-active tab keeps the active page.
+    click("tab-close-1", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), c);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 3);
+
+    // Ctrl+W closes the active tab and moves to its left neighbour.
+    press("ctrl-w", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+
+    // Closing the last session opens a fresh Home with a new id.
+    press("ctrl-w", cx);
+    press("ctrl-w", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 1);
+    assert_eq!(route(&view, cx), Route::Home);
+    let fresh_home = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert!(fresh_home > c, "a closed id is never reused");
+}
+
+/// The preview limit refuses a new page without touching the sessions that are already open.
+#[gpui::test]
+fn the_tab_limit_keeps_existing_sessions_and_shows_a_hint(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    for index in 0..(MAX_OPEN_TABS - 1) {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        MAX_OPEN_TABS
+    );
+    let active = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let ids = view.read_with(cx, |shell, _| shell.tab_ids());
+    let routes = view.read_with(cx, |shell, _| shell.tab_routes());
+
+    click(selector(format!("repo-row-{}", MAX_OPEN_TABS - 1)), cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        MAX_OPEN_TABS
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), active);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_routes()), routes);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), ids);
+    assert!(
+        view.read_with(cx, |shell, _| shell.tab_limit_hint())
+            .is_some(),
+        "the shell shows a short notice"
+    );
+    assert!(cx.debug_bounds("tab-limit-hint").is_some());
+
+    // Switching to an already open page still works at the limit and clears the notice.
+    click("repo-row-0", cx);
+    assert!(
+        view.read_with(cx, |shell, _| shell.tab_limit_hint())
+            .is_none()
+    );
+    assert!(cx.debug_bounds("tab-limit-hint").is_none());
+}
+
+/// At the minimum window the strip clips instead of widening the island, and every tab stays
+/// inside it with a usable width.
+#[gpui::test]
+fn the_tab_strip_stays_bounded_at_the_minimum_window(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    for index in 0..(MAX_OPEN_TABS - 1) {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        MAX_OPEN_TABS
+    );
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+
+    let island = bounds("island", cx);
+    let strip = bounds("tab-strip", cx);
+    assert!(strip.left() >= island.left() - px(1.0));
+    assert!(strip.right() <= island.right() + px(1.0));
+    assert!(strip.top() >= island.top());
+    assert!(
+        strip.top() <= island.top() + px(2.0),
+        "the strip sits at the island's top"
+    );
+    for index in 0..MAX_OPEN_TABS {
+        let tab = bounds(selector(format!("tab-{index}")), cx);
+        assert!(
+            tab.left() >= strip.left() - px(1.0),
+            "tab {index} starts inside the strip: {tab:?} in {strip:?}"
+        );
+        assert!(
+            tab.right() <= strip.right() + px(1.0),
+            "tab {index} ends inside the strip: {tab:?} in {strip:?}"
+        );
+        assert!(
+            tab.size.width >= px(super::geometry::TAB_MIN_WIDTH - 1.0),
+            "tab {index} stays usable: {:?}",
+            tab.size.width
+        );
+    }
+    // The page keeps its own space below the strip.
+    let page = bounds("island-page", cx);
+    assert!(page.top() >= strip.bottom() - px(1.0));
+    assert!(page.bottom() <= island.bottom() + px(1.0));
+    assert!(page.size.height > px(0.0));
+}
+
+/// Ctrl+W and Ctrl+Tab drive the strip; while the palette is open it owns those keys.
+#[gpui::test]
+fn keyboard_closes_and_cycles_tabs_and_the_palette_keeps_its_keys(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+
+    press("ctrl-w", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&b)));
+
+    press("ctrl-tab", cx);
+    let next = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(next, a);
+    press("ctrl-shift-tab", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
+
+    // The palette owns the keyboard while it is open.
+    click("search-entry", cx);
+    let count = view.read_with(cx, |shell, _| shell.tab_count());
+    let active = view.read_with(cx, |shell, _| shell.active_tab_id());
+    press("ctrl-w", cx);
+    press("ctrl-tab", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), count);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), active);
+    assert!(view.read_with(cx, |shell, _| shell.palette_open()));
+    press("escape", cx);
+    assert!(!view.read_with(cx, |shell, _| shell.palette_open()));
+}
+
+/// Closing a tab drops its scroll/focus/state; reopening the resource starts clean.
+#[gpui::test]
+fn closing_a_tab_releases_its_state_and_focus(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    view.update(cx, |shell, cx| {
+        shell.select_repository(a, "main", Some("README.md"));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("repository-session").is_some());
+
+    // Focus the page, then close it with Ctrl+W: focus moves to a live target.
+    let a_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(a).unwrap());
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&a_focus, cx));
+    cx.run_until_parked();
+    press("ctrl-w", cx);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
+    let home = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(home).unwrap());
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(
+        focused.as_ref(),
+        Some(&home_focus),
+        "focus leaves the closed page"
+    );
+
+    // Reopening the resource creates a fresh session with fresh state.
+    click("repo-row-0", cx);
+    let reopened = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(reopened, a);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repository_state(reopened).cloned()),
+        Some(RepositorySession::default())
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.page_offset()),
+        Point::default()
+    );
+}
+
+/// Tab reaches the strip right after the search entry, and Enter activates the focused tab.
+#[gpui::test]
+fn tab_reaches_the_session_strip_and_enter_activates(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("nav-home", cx);
+    assert_eq!(route(&view, cx), Route::Home);
+
+    // From the root, Tab walks: search entry, then the session tabs.
+    press("tab", cx);
+    press("tab", cx);
+    let home_strip = view.read_with(cx, |shell, _| {
+        shell.tab_strip_focus(shell.tab_ids()[0]).unwrap()
+    });
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(focused.as_ref(), Some(&home_strip));
+
+    press("tab", cx);
+    let repo_strip = view.read_with(cx, |shell, _| shell.tab_strip_focus(a).unwrap());
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(focused.as_ref(), Some(&repo_strip));
+    press("enter", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
 }
