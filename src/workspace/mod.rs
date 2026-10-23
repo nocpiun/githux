@@ -2,8 +2,7 @@
 //!
 //! This round has one active page per window and no page-session collection yet: opening,
 //! reusing and closing application sessions belong to the next R1 task. The route type is the
-//! stable boundary those sessions will point at, so the island's session strip can be filled
-//! with a current title without pretending multi-tab support already exists.
+//! stable boundary those sessions will point at. No placeholder session strip is drawn.
 
 use crate::ui::fixtures::RepoFixture;
 
@@ -32,19 +31,6 @@ impl Route {
         Self::Repository {
             namespace: repo.namespace.to_string(),
             name: repo.name.to_string(),
-        }
-    }
-
-    /// The title the session strip shows for this page.
-    pub fn title(&self) -> String {
-        match self {
-            Self::Home => "Home".to_string(),
-            Self::Settings => "Settings".to_string(),
-            Self::Profile => "Profile".to_string(),
-            Self::Notifications => "Notifications".to_string(),
-            Self::Issues => "Issues".to_string(),
-            Self::PullRequests => "Pull requests".to_string(),
-            Self::Repository { namespace, name } => format!("{namespace}/{name}"),
         }
     }
 

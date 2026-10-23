@@ -6,6 +6,9 @@ use ely_gpui_component::{
 };
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
+#[cfg(target_os = "windows")]
+use ely_gpui_component::theme::ActiveTheme;
+
 use crate::{platform, ui::Shell};
 
 pub fn run() {
@@ -35,7 +38,17 @@ pub fn run() {
                     }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Shell::new(window, cx)),
+                |window, cx| {
+                    #[cfg(target_os = "windows")]
+                    if let Err(error) = platform::caption::install(
+                        window,
+                        cx.theme().colors.bg,
+                        cx.theme().colors.fg,
+                    ) {
+                        eprintln!("Native caption unavailable; using custom controls: {error}");
+                    }
+                    cx.new(|cx| Shell::new(window, cx))
+                },
             )
             .expect("failed to open Githux window");
             cx.on_window_closed(|cx, _| {

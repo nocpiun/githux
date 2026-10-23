@@ -290,17 +290,18 @@ fn closing_the_palette_leaves_a_live_focus_target(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_session_strip_shows_the_current_title_and_no_tab_controls(cx: &mut TestAppContext) {
+fn pages_do_not_draw_a_placeholder_session_strip(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
-    assert!(cx.debug_bounds("session-strip").is_some());
-    assert!(cx.debug_bounds("session-title").is_some());
+    assert!(cx.debug_bounds("page-home").is_some());
+    assert!(cx.debug_bounds("session-strip").is_none());
+    assert!(cx.debug_bounds("session-title").is_none());
     let repo = view.read_with(cx, |shell, _| shell.repositories()[0].clone());
     view.update(cx, |shell, cx| {
         shell.navigate(Route::repository(&repo), cx);
     });
     cx.run_until_parked();
-    let strip = bounds("session-strip", cx);
-    assert!(strip.size.height > px(0.0));
+    assert!(cx.debug_bounds("page-repository").is_some());
+    assert!(cx.debug_bounds("session-strip").is_none());
     // No add or close control is drawn: multi-session tabs belong to the next R1 task.
     assert!(cx.debug_bounds("session-add").is_none());
     assert!(cx.debug_bounds("session-close").is_none());
@@ -470,9 +471,9 @@ fn the_blank_pages_draw_no_placeholder_card(cx: &mut TestAppContext) {
             shell.navigate(target.clone(), cx);
         });
         cx.run_until_parked();
-        // The island keeps its shell and session strip; the content area stays empty.
+        // The island keeps its shell; the content area stays empty with no title strip.
         assert!(cx.debug_bounds("island").is_some());
-        assert!(cx.debug_bounds("session-strip").is_some());
+        assert!(cx.debug_bounds("session-strip").is_none());
         assert!(cx.debug_bounds("page-home").is_none());
         assert!(cx.debug_bounds("page-repository").is_none());
         assert!(cx.debug_bounds("page-profile").is_none());

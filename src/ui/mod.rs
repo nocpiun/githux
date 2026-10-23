@@ -2,16 +2,15 @@
 //!
 //! The window is a custom title bar over a fixed sidebar and one island. Only the sidebar's
 //! repository group scrolls: the fixed rows and the island keep their places when the window is
-//! resized. Routes live in [`crate::workspace`]; this round has one active page, so the island's
-//! session strip only shows the current page title and reserves the space for the session tabs of
-//! the next R1 task.
+//! resized. Routes live in [`crate::workspace`]; this round has one active page, with no placeholder
+//! session strip above its content. Multi-session tabs belong to the next R1 task.
 
 use std::rc::Rc;
 
 use ely_gpui_component::{
     forms::InputEvent,
     primitives::{FocusScope, IconName},
-    theme::{ActiveTheme, TextSize},
+    theme::ActiveTheme,
 };
 use gpui::{
     App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Point, Render,
@@ -25,7 +24,7 @@ use crate::{
 
 mod chrome;
 pub mod fixtures;
-mod geometry;
+pub(crate) mod geometry;
 mod page;
 mod palette;
 mod sidebar;
@@ -450,44 +449,8 @@ impl Shell {
     fn island(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let colors = &theme.colors;
-        let (surface, border, fg, muted) =
-            (colors.surface, colors.border, colors.fg, colors.fg_muted);
-        let title_size = theme.text_size(TextSize::Sm);
-        let title = self.workspace.route().title();
+        let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
         let body = page::page(self.workspace.route(), &self.repositories, cx);
-
-        let strip = div()
-            .debug_selector(|| "session-strip".to_string())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_2()
-            .h(px(36.0))
-            .px_3()
-            .border_b_1()
-            .border_color(border)
-            .text_size(title_size)
-            .text_color(muted)
-            .child(
-                div()
-                    .debug_selector(|| "session-title".to_string())
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(2.0))
-                            .h(px(12.0))
-                            .rounded_full()
-                            .bg(colors.accent),
-                    )
-                    .child(div().min_w_0().truncate().text_color(fg).child(title)),
-            )
-            // Reserved for the next R1 task's session tabs. No add or close control is drawn,
-            // because opening, reusing and closing sessions are not implemented yet.
-            .child(div().flex_1().h_full());
 
         div()
             .debug_selector(|| "island".to_string())
@@ -503,7 +466,6 @@ impl Shell {
             .bg(surface)
             .text_color(fg)
             .overflow_hidden()
-            .child(strip)
             .child(
                 div()
                     .id("island-page")
@@ -561,7 +523,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = &theme.colors;
-        let (bg, fg, border) = (colors.bg, colors.fg, colors.border);
+        let (bg, fg) = (colors.bg, colors.fg);
         let this = cx.entity();
         let search_focus = self.search_focus.clone();
         let open_search = move |window: &mut Window, cx: &mut App| {
@@ -584,8 +546,13 @@ impl Render for Shell {
         if restore {
             window.focus(&search_focus, cx);
         }
+        #[cfg(target_os = "windows")]
+        let content_top = crate::platform::caption::content_top_inset(window);
+        #[cfg(not(target_os = "windows"))]
+        let content_top = 0.0;
         div()
             .size_full()
+            .pt(px(content_top))
             .on_action(cx.listener(|shell, _: &OpenCommandPalette, window, cx| {
                 shell.open_palette(window, cx);
             }))
@@ -595,19 +562,17 @@ impl Render for Shell {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .bg(bg)
                     .text_color(fg)
                     .font_family(fonts::UI_FAMILY)
                     .child(titlebar)
                     .child(
                         div()
                             .debug_selector(|| "shell-body".to_string())
+                            .bg(bg)
                             .flex()
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .border_t_1()
-                            .border_color(border)
                             .child(sidebar)
                             .child(
                                 // The island keeps a restrained gap from the sidebar and the
@@ -617,7 +582,7 @@ impl Render for Shell {
                                     .flex_1()
                                     .min_w_0()
                                     .min_h_0()
-                                    .pt(px(geometry::ISLAND_INSET))
+                                    // The title bar already supplies the island's top gap.
                                     .pr(px(geometry::ISLAND_INSET))
                                     .pb(px(geometry::ISLAND_INSET))
                                     .pl(px(geometry::ISLAND_GAP))
