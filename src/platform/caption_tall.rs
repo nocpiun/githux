@@ -11,7 +11,11 @@ use crate::platform::wasdk_bindings::Microsoft::UI::{
 };
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 use windows::{
     Graphics::RectInt32,
     Win32::{
@@ -40,6 +44,34 @@ struct State {
     _window: AppWindow,
     bar: AppWindowTitleBar,
     input: InputNonClientPointerSource,
+    metrics: Rc<Cell<CaptionMetrics>>,
+}
+/// Logical-pixel metrics survive transient COM failures, including a DPI transition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaptionMetrics {
+    height: f32,
+    width: f32,
+}
+
+impl CaptionMetrics {
+    fn read(height: Result<i32>, width: Result<i32>, dpi: u32) -> Result<Self> {
+        let (height, width) = (height?, width?);
+        if height <= 0 || width <= 0 || dpi == 0 {
+            return Err(Error::new(
+                HRESULT(0x80004005u32 as i32),
+                "Invalid caption metrics",
+            ));
+        }
+        let scale = dpi as f32 / 96.0;
+        Ok(Self {
+            height: height as f32 / scale,
+            width: width as f32 / scale,
+        })
+    }
+
+    fn refresh(self, height: Result<i32>, width: Result<i32>, dpi: u32) -> Self {
+        Self::read(height, width, dpi).unwrap_or(self)
+    }
 }
 thread_local! {
     static WINDOWS: RefCell<HashMap<usize, State>> = RefCell::new(HashMap::new());
@@ -167,15 +199,20 @@ pub fn install(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla) 
         bar.SetButtonInactiveBackgroundColor(&background)?;
         bar.SetForegroundColor(&foreground)?;
         bar.SetButtonForegroundColor(&foreground)?;
-        Ok(())
+        CaptionMetrics::read(bar.Height(), bar.RightInset(), unsafe {
+            GetDpiForWindow(handle)
+        })
     })();
-    if let Err(error) = configured {
-        let _ = bar.ResetToDefault();
-        unsafe {
-            SetWindowLongPtrW(handle, GWL_STYLE, original);
+    let metrics = match configured {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            let _ = bar.ResetToDefault();
+            unsafe {
+                SetWindowLongPtrW(handle, GWL_STYLE, original);
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
     WINDOWS.with_borrow_mut(|windows| {
         windows.insert(
@@ -184,6 +221,7 @@ pub fn install(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla) 
                 _window: app,
                 bar,
                 input,
+                metrics: Rc::new(Cell::new(metrics)),
             },
         );
     });
@@ -208,14 +246,17 @@ pub fn area(window: &Window) -> Option<CaptionArea> {
     let handle = hwnd(window)?;
     let state = WINDOWS.with_borrow(|windows| windows.get(&(handle.0 as usize)).cloned())?;
     let dpi = unsafe { GetDpiForWindow(handle) };
-    let scale = dpi as f32 / 96.0;
-    let height = state.bar.Height().ok()?;
-    let width = state.bar.RightInset().ok()?;
-    if height <= 0 || width <= 0 {
-        return None;
-    }
+    let metrics = state
+        .metrics
+        .get()
+        .refresh(state.bar.Height(), state.bar.RightInset(), dpi);
+    state.metrics.set(metrics);
+    // A valid HWND normally reports DPI >= 96; keep the cached logical layout if it does not.
+    let scale = dpi.max(96) as f32 / 96.0;
+    let height = (metrics.height * scale).round() as i32;
+    let width = (metrics.width * scale).round() as i32;
     let mut client = RECT::default();
-    if unsafe { GetClientRect(handle, &mut client) }.is_ok() {
+    if dpi > 0 && unsafe { GetClientRect(handle, &mut client) }.is_ok() {
         let rect = (client.right, height, width, dpi);
         let changed = LAST_REGION.with_borrow(|last| last.get(&(handle.0 as usize)) != Some(&rect));
         if changed {
@@ -248,9 +289,46 @@ pub fn area(window: &Window) -> Option<CaptionArea> {
         }
     }
     Some(CaptionArea {
-        width: width as f32 / scale,
+        width: metrics.width,
         top: 0.0,
-        bottom: height as f32 / scale,
+        bottom: metrics.height,
         right: 0.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_metric_failures_keep_the_last_native_area() {
+        let previous = CaptionMetrics::read(Ok(72), Ok(216), 144).unwrap();
+        let failure = || Error::from_hresult(HRESULT(0x80004005u32 as i32));
+        assert_eq!(previous.refresh(Err(failure()), Ok(288), 192), previous);
+        assert_eq!(previous.refresh(Ok(96), Err(failure()), 192), previous);
+        assert_eq!(previous.refresh(Ok(0), Ok(288), 192), previous);
+        assert_eq!(previous.refresh(Ok(96), Ok(-1), 192), previous);
+        assert_eq!(previous.refresh(Ok(96), Ok(288), 0), previous);
+        assert!(CaptionMetrics::read(Err(failure()), Ok(216), 144).is_err());
+    }
+
+    #[test]
+    fn cached_metrics_are_logical_and_update_after_recovery() {
+        let previous = CaptionMetrics::read(Ok(72), Ok(216), 144).unwrap();
+        assert_eq!(
+            previous,
+            CaptionMetrics {
+                height: 48.0,
+                width: 144.0
+            }
+        );
+        assert_eq!(previous.refresh(Ok(96), Ok(288), 192), previous);
+        assert_eq!(
+            previous.refresh(Ok(100), Ok(300), 192),
+            CaptionMetrics {
+                height: 50.0,
+                width: 150.0
+            }
+        );
+    }
 }
