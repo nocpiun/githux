@@ -57,6 +57,10 @@ pub struct AccountRegistry {
     /// account cannot reuse an epoch (ABA): a response captured for an old
     /// `{account, epoch}` pair can never match a newly issued epoch again.
     next_epoch: u64,
+    /// Monotonic generation bumped on every actual change of the active
+    /// account. Part of [`AuthContext`] so that A → B → A still invalidates
+    /// in-flight responses started before the first switch.
+    selection_epoch: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -67,10 +71,17 @@ struct AccountRecord {
 }
 
 /// Snapshot captured before a request so late results can be rejected.
+///
+/// `selection` is a registry-wide generation that advances on **every** actual
+/// change of the active account. Without it, switching A → B → A would restore
+/// the same `{account, epoch}` pair and an in-flight response from before the
+/// switch would be accepted, contradicting the guarantee that a switch makes
+/// in-flight results stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
     pub account: AccountKey,
     pub epoch: AuthEpoch,
+    pub selection: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +100,12 @@ impl AccountRegistry {
     fn allocate_epoch(&mut self) -> AuthEpoch {
         self.next_epoch = self.next_epoch.saturating_add(1);
         AuthEpoch(self.next_epoch)
+    }
+
+    /// Advance the selection generation. Called whenever the active account
+    /// actually changes (switch, add-that-activates, remove-that-reactivates).
+    fn bump_selection(&mut self) {
+        self.selection_epoch = self.selection_epoch.saturating_add(1);
     }
 
     /// Register a freshly verified account, replacing any prior record with the
@@ -118,7 +135,11 @@ impl AccountRegistry {
             epoch,
         };
         self.accounts.push(record);
-        self.active = Some(self.accounts.len() - 1);
+        let new_active = self.accounts.len() - 1;
+        if self.active != Some(new_active) {
+            self.active = Some(new_active);
+            self.bump_selection();
+        }
         let slot = self.accounts.last().expect("just pushed");
         AccountSummary {
             identity: slot.identity.clone(),
@@ -172,6 +193,7 @@ impl AccountRegistry {
 
         self.accounts.remove(idx);
         let len = self.accounts.len();
+        let previous_active = self.active;
         self.active = match self.active {
             None => None,
             Some(_) if len == 0 => None,
@@ -179,6 +201,13 @@ impl AccountRegistry {
             Some(active) if active > idx => Some(active - 1),
             Some(active) => Some(active),
         };
+        // Any removal can change which account is active (removing the active
+        // one selects another; removing one below shifts the index). Treat any
+        // removal as a selection change so in-flight results for the old
+        // selection are rejected.
+        if self.active != previous_active || self.active.is_some() {
+            self.bump_selection();
+        }
         Ok(())
     }
 
@@ -188,7 +217,10 @@ impl AccountRegistry {
             .iter()
             .position(|r| r.identity.key == account)
             .ok_or(RegistryError::NotFound)?;
-        self.active = Some(idx);
+        if self.active != Some(idx) {
+            self.active = Some(idx);
+            self.bump_selection();
+        }
         Ok(())
     }
 
@@ -206,6 +238,7 @@ impl AccountRegistry {
         Some(AuthContext {
             account: self.accounts[idx].identity.key.clone(),
             epoch: self.accounts[idx].epoch,
+            selection: self.selection_epoch,
         })
     }
 
@@ -376,6 +409,7 @@ mod tests {
         let stale = AuthContext {
             account: key.clone(),
             epoch: first.epoch,
+            selection: 0,
         };
         assert_ne!(reg.active_context().as_ref(), Some(&stale));
 
@@ -398,6 +432,47 @@ mod tests {
                 summary.epoch.value()
             );
         }
+    }
+
+    /// Regression: switching A → B → A must still invalidate responses started
+    /// before the first switch. Without a selection generation, the restored
+    /// `{account, epoch}` pair would compare equal and the stale result would be
+    /// accepted.
+    #[test]
+    fn switching_away_and_back_invalidates_in_flight_context() {
+        let mut reg = AccountRegistry::default();
+        let a = AccountKey::new(1, crate::domain::HostId::github());
+        let b = AccountKey::new(2, crate::domain::HostId::github());
+        reg.upsert_verified(identity(1, "a"), cred(1));
+        reg.set_active(a.clone()).expect("activate a");
+        reg.upsert_verified(identity(2, "b"), cred(2));
+
+        // Capture the context for account A, then switch A -> B -> A.
+        reg.set_active(a.clone()).expect("activate a");
+        let captured = reg.active_context().expect("ctx");
+
+        reg.set_active(b).expect("activate b");
+        reg.set_active(a).expect("activate a again");
+
+        let now = reg.active_context().expect("ctx");
+        assert_eq!(now.account, captured.account, "same account");
+        assert_eq!(now.epoch, captured.epoch, "same epoch (no PAT change)");
+        assert_ne!(
+            now, captured,
+            "switching away and back must still invalidate the captured context"
+        );
+    }
+
+    /// Re-selecting the account that is already active is not a switch and must
+    /// not churn the selection generation.
+    #[test]
+    fn selecting_the_already_active_account_does_not_bump_selection() {
+        let mut reg = AccountRegistry::default();
+        let a = AccountKey::new(1, crate::domain::HostId::github());
+        reg.upsert_verified(identity(1, "a"), cred(1));
+        let before = reg.active_context().expect("ctx");
+        reg.set_active(a).expect("set active");
+        assert_eq!(reg.active_context().expect("ctx"), before);
     }
 
     #[test]

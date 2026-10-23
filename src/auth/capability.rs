@@ -63,7 +63,10 @@ impl Capability {
             Capability::PrivateRepoRead => ScopeRequirement::AnyOf(&["repo"]),
             Capability::PrivateProfileRead => ScopeRequirement::AnyOf(&["read:user", "user"]),
             Capability::Notifications => ScopeRequirement::AnyOf(&["notifications", "repo"]),
-            Capability::OrganizationRead => ScopeRequirement::AnyOf(&["read:org", "user"]),
+            // Organization membership, projects and team data need `read:org`.
+            // `user` only covers profile data, so listing it here would tell the
+            // user a token that cannot read organizations is sufficient.
+            Capability::OrganizationRead => ScopeRequirement::AnyOf(&["read:org"]),
         }
     }
 
@@ -85,8 +88,9 @@ impl Capability {
                  supported for this endpoint."
             }
             Capability::OrganizationRead => {
-                "Organization membership detail needs `read:org`; public organization data \
-                 works without it."
+                "Organization membership, projects and team detail need `read:org`; public \
+                 organization data works without it. The `user` scope is profile-only and does \
+                 not grant organization reads."
             }
         }
     }
@@ -183,6 +187,32 @@ mod tests {
             Capability::Notifications.requirement(),
             ScopeRequirement::AnyOf(&["notifications", "repo"])
         );
+    }
+
+    /// Regression: `user` is profile-only. It must not be offered as an
+    /// alternative for organization reads, or onboarding would produce a token
+    /// that cannot see organization membership at all.
+    #[test]
+    fn organization_read_does_not_accept_profile_only_scope() {
+        assert_eq!(
+            Capability::OrganizationRead.requirement(),
+            ScopeRequirement::AnyOf(&["read:org"])
+        );
+        assert!(
+            !Capability::OrganizationRead
+                .explanation()
+                .contains("`user`;"),
+            "explanation must not suggest `user` grants organization reads"
+        );
+        // `read:user` is likewise profile-only.
+        for capability in [Capability::OrganizationRead, Capability::PrivateRepoRead] {
+            if let ScopeRequirement::AnyOf(scopes) = capability.requirement() {
+                assert!(
+                    !scopes.contains(&"user") && !scopes.contains(&"read:user"),
+                    "{capability:?} must not accept a profile-only scope"
+                );
+            }
+        }
     }
 
     #[test]

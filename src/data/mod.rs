@@ -239,7 +239,15 @@ impl AccountService {
     /// successful removal. The registry entry is still dropped so no stale
     /// reference remains active, and the returned error tells the caller that a
     /// stored secret may linger and needs retrying.
+    ///
+    /// Removal participates in the same `credential_commit` serialization as
+    /// login and replacement. Without it, an overlapping `replace` could pass its
+    /// existence recheck, removal could delete the old credential and drop the
+    /// account, and the replacement could then save a new PAT that no account
+    /// refers to — leaving an orphaned secret with no cleanup path.
     pub async fn remove(&self, account: crate::domain::AccountKey) -> Result<(), GitHubError> {
+        let _commit = self.credential_commit.lock().await;
+
         let credential = {
             let reg = self.registry.lock().expect("registry lock");
             reg.credential_ref(account.clone())
@@ -671,6 +679,135 @@ mod tests {
             expected,
             "store and registry must agree on the winning token"
         );
+    }
+
+    /// Regression: `remove` must be serialized with `replace`. Without it, a
+    /// replacement could pass its existence recheck, removal could delete the old
+    /// credential and drop the account, and the replacement could then save a new
+    /// PAT that no account references — an orphaned secret with no cleanup path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn removal_is_serialized_with_replacement() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        /// Store that detects overlapping credential operations, and records
+        /// whether a save ever landed with no account referring to it.
+        #[derive(Default)]
+        struct InstrumentedStore {
+            inner: InMemoryCredentialStore,
+            ops_in_flight: AtomicUsize,
+            overlap_detected: AtomicBool,
+        }
+        impl CredentialStore for InstrumentedStore {
+            fn save(
+                &self,
+                r#ref: &crate::auth::CredentialRef,
+                token: &Pat,
+            ) -> Result<(), CredentialError> {
+                let now = self.ops_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                if now > 1 {
+                    self.overlap_detected.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let result = self.inner.save(r#ref, token);
+                self.ops_in_flight.fetch_sub(1, Ordering::SeqCst);
+                result
+            }
+            fn load(
+                &self,
+                r#ref: &crate::auth::CredentialRef,
+            ) -> Result<Option<Pat>, CredentialError> {
+                self.inner.load(r#ref)
+            }
+            fn delete(&self, r#ref: &crate::auth::CredentialRef) -> Result<(), CredentialError> {
+                let now = self.ops_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                if now > 1 {
+                    self.overlap_detected.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let result = self.inner.delete(r#ref);
+                self.ops_in_flight.fetch_sub(1, Ordering::SeqCst);
+                result
+            }
+            fn describe(&self) -> &'static str {
+                "instrumented (test)"
+            }
+        }
+
+        let store = Arc::new(InstrumentedStore::default());
+        let store_trait = store.clone() as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        // login + one replacement verification.
+        for _ in 0..2 {
+            mock.enqueue(Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: user_body(71, "dev"),
+            }))
+            .await;
+        }
+
+        let (svc, _exec) = build_service(store_trait, mock);
+        let svc = Arc::new(svc);
+        svc.login(Pat::from_str("ghp_initial"))
+            .await
+            .expect("login");
+        let key = svc.active_context().expect("ctx").account;
+
+        let (replace_go, replace_wait) = tokio::sync::oneshot::channel::<()>();
+        let (remove_go, remove_wait) = tokio::sync::oneshot::channel::<()>();
+
+        let replace_task = {
+            let svc = svc.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let _ = replace_go.send(());
+                svc.replace(key, Pat::from_str("ghp_new")).await
+            })
+        };
+        let remove_task = {
+            let svc = svc.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let _ = remove_go.send(());
+                svc.remove(key).await
+            })
+        };
+        let _ = replace_wait.await;
+        let _ = remove_wait.await;
+
+        let replace_result = replace_task.await.expect("join replace");
+        let remove_result = remove_task.await.expect("join remove");
+
+        assert!(
+            !store.overlap_detected.load(Ordering::SeqCst),
+            "remove and replace overlapped a credential operation: not serialized"
+        );
+
+        // Whichever order they serialized in, the end state must be consistent:
+        // either the account exists with the new credential, or it is gone with
+        // no credential left behind. Never "no account but a stored PAT".
+        let account_exists = svc.summaries().iter().any(|s| s.identity.key == key);
+        let credential = store
+            .load(&crate::auth::CredentialRef::new(
+                crate::domain::HostId::github(),
+                71,
+            ))
+            .expect("load");
+        match (
+            account_exists,
+            replace_result.is_ok(),
+            remove_result.is_ok(),
+        ) {
+            (false, _, true) => assert!(
+                credential.is_none(),
+                "account removed by a successful remove must not leave a stored PAT"
+            ),
+            (true, true, _) => assert!(
+                credential.is_some(),
+                "account present after a successful replace must have a stored PAT"
+            ),
+            _ => { /* both failed in an allowed way; nothing to assert on state */ }
+        }
     }
 
     /// Replacing an unknown account is not an implicit add.

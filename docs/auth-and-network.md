@@ -30,6 +30,8 @@
 
 代次来自注册表级别的单调分配器（`AccountRegistry::next_epoch`），不是每账户计数器。这样“移除 A → 重新加入 A”不会回到旧值：ABA 场景下旧的 `{account, epoch}` 捕获永远无法再匹配活动上下文。
 
+`AuthContext` 还带一个 `selection` 也即“活动账户选择代次”，在**每次活动账户真正变化**时推进（切换、新增后自动激活、移除后重新选择）。只靠 `{account, epoch}` 不够：A → B → A 会恢复同一对值，切换前发出的响应就会被误接受。回归测试为 `auth::tests::switching_away_and_back_invalidates_in_flight_context`，另有 `selecting_the_already_active_account_does_not_bump_selection` 确认重复选中同一账户不算切换。
+
 `AccountService::replace(expected, pat)` 是更换已有账户 PAT 的**唯一**入口：先 `GET /user` 验证，再比对 `expected`；token 属于别的账户时返回 `IdentityMismatch`，两个账户都不会被保存或改动。`login()` 是“添加账户”路径，不承担替换语义。
 
 读取请求前捕获 `AuthContext { account, epoch }`，返回后再次比对；不一致返回 `GitHubError::StaleContext`，数据被丢弃，不进入新账户。
@@ -73,7 +75,9 @@ executor.shutdown(); // 停止接收、宽限期内排空、否则取消并 join
 - `BackgroundExecutor` 在专用线程上建 current-thread runtime；`handle()` 返回标准 `tokio::runtime::Handle`。
 - `semaphore()` 暴露共享信号量，`AccountService`/`RepoService` 在发起请求前 `acquire_owned()`，把并发限制在构造时给的额度。
 - `CancellationToken` 基于 `watch`，自带 keepalive，**丢弃 source 不等于取消**；只有显式 `cancel()` 才触发。已取消的 token 在传输层直接返回 `Cancelled`，不建连接。
-- 关闭：`shutdown()` 先拒绝新工作，再给 `DEFAULT_SHUTDOWN_GRACE`（5s）排空，仍运行的任务随 runtime 取消；不会留下没有归属的无限重试。
+- 关闭：`shutdown()` 先拒绝新工作，然后**继续驱动 runtime** 直到被跟踪的任务全部完成或宽限期（默认 5s，可用 `set_grace` 覆盖）到期，之后才开始 runtime 关闭。这一步很关键：直接调用 `Runtime::shutdown_timeout` 并不是宽限期——Tokio 文档明确说明 shutdown 开始后，spawned task 只在让出之前继续运行、一旦 yield 就被丢弃，所以先 `shutdown_timeout` 会立刻杀掉在途请求而不是给它收尾机会。
+- 只有经 `BackgroundExecutorHandle::spawn` 派发的任务会被计数并纳入排空；`raw_handle()` / `handle.raw()` 提供未经跟踪的原始 `Handle` 给不得不自行 spawn 的代码，这类任务不享受宽限。
+- **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 - **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 
 **重定向与凭据保护**（`ReqwestTransport`）：reqwest 配置 `Policy::none()`，由我们自己跟随；只用同样的 scheme+host+port 才继续，跨源、降级到 HTTP 或超过 5 跳都**不跟随**，直接把 3xx 交给上层判定。`GitHubClient::url_is_trusted` 再检查分页 `Link` 的 host，不受信的 next 链接返回部分结果而不是继续请求。
@@ -83,6 +87,8 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 信任要求 scheme、host **和 port** 都一致（端口缺失时用该 scheme 的默认端口比较）：`https://api.github.com:8443/user`、`HTTP` 降级、`//api.github.com/user`、`ftp://…` 都不受信。回归测试为 `github::client::tests::path_content_does_not_make_a_host_trusted` 与 `localhost_mock_is_trusted_only_on_the_configured_origin`（含反斜杠、查询串、`@`、不同端口等用例）。
 
 `ReqwestTransport` 的取消覆盖**整个请求生命周期**：`tokio::select!` 同时作用于 header 阶段和 body 读取阶段，因此大响应或停滞响应在取消后不会继续读到请求超时。回归测试为 `network::transport::tests::cancellation_stops_a_stalled_body_read`。
+
+**重定向的 origin 判定同样使用 `reqwest::Url`**，且 `Location` 用标准的 URL join 解析：`https://evil.example\@api.github.com/steal` 在 WHATWG 规则下宿主是 `evil.example`（反斜杠是特殊 scheme 的路径分隔符），手写解析器会误判为 `api.github.com` 并把 Authorization 重新发给外域。回归测试为 `network::transport::tests::origin_comparison_uses_reqwest_url_semantics` 与 `redirect_with_backslash_does_not_forward_credentials`（后者用真实 socket 确认攻击目标从未被连接）。
 
 ## 5. GitHub 读取
 
@@ -112,7 +118,7 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 
 **分页中途取消仍是硬取消**：即使在获取第 2 页及以后时取消，也返回 `Cancelled` 而不是 `Partial`——调用方已经要求停止，就不应拿到那次请求的数据。
 
-**替换是序列化提交的**：`AccountService` 用一把 `credential_commit` 互斥锁把“写凭据 + 提交注册表记录”包成一个临界区。否则两个并发 `replace` 可能 A 写 token A、B 写 token B 并提交、A 再提交，最终存储在 B、注册表却报 A 的 epoch，后续读取会在 A 的 epoch 下使用 B 的 token。回归测试用真正的多线程 runtime 与一个会在两次 `save` 重叠时报警的 store 验证。
+**替换、登录与移除都序列化提交**：`AccountService` 用一把 `credential_commit` 互斥锁把“写/删凭据 + 提交注册表记录”包成一个临界区。移除也必须参与，否则并发的 `remove` 与 `replace` 可能在 replace 通过存在性复查后：remove 删掉旧凭据并移除账户，replace 再把新 PAT 写进存储并返回 `NotFound`，留下没有任何账户引用、也没有清理路径的孤儿秘密。回归测试为 `data::tests::removal_is_serialized_with_replacement`。否则两个并发 `replace` 可能 A 写 token A、B 写 token B 并提交、A 再提交，最终存储在 B、注册表却报 A 的 epoch，后续读取会在 A 的 epoch 下使用 B 的 token。回归测试用真正的多线程 runtime 与一个会在凭据操作重叠时报警的 store 验证（去掉锁会稳定失败）。
 
 **移除账户的凭据删除失败会上报**：`AccountService::remove` 仍会移除注册表条目（不让陈旧引用保持活动），但把删除失败作为 `CredentialStore` 错误返回，避免声称“已成功移除”而实际仍留有持久化秘密。
 
@@ -145,7 +151,7 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 | 私有仓库读取 | `repo` | `repo` **同时含写权限**，因此不把 token 描述成只读 |
 | 私有 profile 字段 | `read:user` | |
 | Notifications | `notifications` 或 `repo` | 细粒度 PAT 不支持该端点 |
-| 组织信息 | `read:org` | |
+| 组织信息 | `read:org` | `user` 只覆盖 profile，**不能**替代 `read:org` |
 
 `report_after_identity_check()` 只把“公开读取”标为 `Available`，其余为 `Unknown`：`/user` 成功不能证明具体 scope 存在，也不能证明组织策略允许。UI 不应把 `Unknown` 渲染成“不可用”。创建引导 UI 与最终 scope 选择仍留待 UI 接入讨论。
 
@@ -245,6 +251,11 @@ git diff --check
 | 分页中途取消仍是 `Cancelled` | `github::repos::tests::cancellation_on_later_page_is_not_a_partial_result` | 取消先于第 2 页 |
 | 并发替换被序列化 | `data::tests::overlapping_replacements_are_serialized` | 多线程 runtime + 重叠检测 store |
 | 执行器自线程 drop 不死锁 | `network::executor::tests::dropping_from_its_own_network_thread_does_not_deadlock` | 弱引用确认最终释放 |
+| 关闭真的排空（不是立刻杀任务） | `network::executor::tests::shutdown_drains_a_task_that_finishes_within_the_grace_window`、`shutdown_does_not_wait_forever_for_a_task_beyond_the_grace_window` | 多次 yield 的任务能跑完 |
+| 重定向 origin 用标准 URL 语义 | `network::transport::tests::origin_comparison_uses_reqwest_url_semantics`、`redirect_with_backslash_does_not_forward_credentials` | 反斜杠、默认端口、真实 socket |
+| A→B→A 切换使旧响应过期 | `auth::tests::switching_away_and_back_invalidates_in_flight_context` | selection 代次 |
+| 移除与替换互斥 | `data::tests::removal_is_serialized_with_replacement` | 多线程 + 重叠检测 store |
+| 组织 scope 不接受 profile-only | `auth::capability::tests::organization_read_does_not_accept_profile_only_scope` | 仅 `read:org` |
 | 多账户与代次 | `auth::tests` | |
 | 最小 scope 建议 | `auth::capability::tests` | 不含管理 scope |
 

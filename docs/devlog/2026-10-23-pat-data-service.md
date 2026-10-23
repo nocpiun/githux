@@ -36,7 +36,7 @@
 cargo fmt --all -- --check                  # 通过
 cargo check --locked --all-targets          # 通过
 cargo clippy --locked --all-targets -- -D warnings   # 通过，无警告
-cargo test --locked                         # 125 passed / 0 failed（首轮 110 → 一轮修复 122 → 二轮修复 125）
+cargo test --locked                         # 133 passed / 0 failed（110 → 122 → 125 → 133）
 cargo build --locked                        # 通过
 git diff --check                            # 通过
 ```
@@ -75,6 +75,20 @@ Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属
 | P2 `Drop` 可能 join 自己的线程 | 最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上结束的任务释放，`Drop` 里 `join()` 自己会死锁 | 网络线程用 thread-local 标记身份；`Drop` 检测到同线程时只发关闭信号并分离 handle，不 join 自身 |
 
 新增 4 个回归测试。其中“并发替换”最初写成单线程 `join!`，即使去掉锁也能通过（current-thread runtime 不会在临界区内交错），改为 `#[tokio::test(flavor = "multi_thread")]` + 双 spawn + 会在两次 `save` 重叠时报警的 instrumented store 后，去掉锁会稳定失败、保留锁稳定通过，已在本地双向验证。为此在 `[dev-dependencies]` 增加 `tokio` 的 `rt-multi-thread` 特性，生产 runtime 仍是 current-thread。
+
+## 第三轮审查的 5 个新缺陷与修复
+
+第三轮（head `27fc0cd`）确认上两轮意见已解决，新提 5 条，全部成立：
+
+| 意见 | 实际缺陷 | 修复 |
+| --- | --- | --- |
+| P1 重定向 origin 仍用手写解析器 | `Location: https://evil.example\@api.github.com/steal` 被自己的解析器判为同源，随后把原始 Authorization 重新发给 `evil.example` | `Origin::parse` 改用 `reqwest::Url`，`Location` 用标准 `Url::join` 解析；端口比较用 `port_or_known_default`（`:443` 与无端口等价）。上一轮只修了 `GitHubClient`，漏了 `ReqwestTransport` 内部的同一类解析 |
+| P2 `remove` 未与 `replace` 串行 | replace 通过存在性复查后，remove 删旧凭据并移除账户，replace 再写入新 PAT 并返回 `NotFound`，留下无账户引用的孤儿秘密 | `remove` 也取 `credential_commit` 锁，把删除凭据与移除注册表记录纳入同一临界区 |
+| P2 切换账户未使旧响应过期 | A → B → A 恢复同一 `{account, epoch}`，切换前发出的请求返回后仍被接受 | `AuthContext` 增加 `selection`（活动账户选择代次），在活动账户真正变化时推进；重复选中同一账户不推进 |
+| P2 `shutdown_timeout` 不是宽限期 | Tokio 文档说明 shutdown 开始后 spawned task 一旦 yield 就被丢弃，所谓“5 秒排空”实际立刻杀任务，且 `set_grace` 未被使用 | 改为先拒绝新工作、**继续驱动 runtime** 直到跟踪任务清零或宽限期到期，之后才 `shutdown_timeout`；引入 `BackgroundExecutorHandle` 对派发任务计数，`set_grace` 通过共享值真正生效 |
+| P2 组织 scope 把 `user` 当替代 | `user` 只覆盖 profile，仅带 `user` 的 token 拿不到组织成员/项目/团队数据，等于给出错误的最小权限建议 | 组织读取只接受 `read:org`，文案明确 `user` 不能替代 |
+
+新增 8 个回归测试。其中三处做了反向验证（去掉修复后测试必须失败）：重定向 origin 比较（旧手写解析器在 `https://api.github.com:443/login` 上就失败）、`remove`/`replace` 串行化（去掉锁稳定报告 overlap）、以及执行器排空（多次 yield 的短任务能跑完、超出宽限的长任务被丢弃且 shutdown 不等待）。
 
 ## 验证边界（不得省略）
 

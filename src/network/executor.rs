@@ -7,20 +7,23 @@
 //! - A current-thread Tokio runtime is created on a dedicated OS thread. Work is
 //!   scheduled through [`BackgroundExecutor::handle`], which returns a
 //!   [`tokio::runtime::Handle`].
-//! - [`BackgroundExecutor::shutdown`] stops accepting new work, waits a bounded
-//!   amount of time for in-flight tasks, then drops the runtime. Any task still
-//!   running is cancelled rather than left as an orphaned infinite retry.
+//! - [`BackgroundExecutor::shutdown`] stops accepting new work, then **keeps
+//!   driving the runtime** until either every tracked task finished or the grace
+//!   period elapsed; only then does it begin runtime shutdown. Calling
+//!   `Runtime::shutdown_timeout` first would *not* be a grace period: Tokio
+//!   drops spawned tasks as soon as they yield, so an in-flight request would be
+//!   killed immediately instead of being allowed to finish.
 //!
 //! Concurrency is bounded by callers holding a permit from a shared
 //! [`tokio::sync::Semaphore`]; see the data layer for the single owner.
 
 use std::cell::Cell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{JoinHandle, ThreadId};
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::Semaphore;
 
 /// Default grace period given to in-flight tasks on shutdown.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -39,15 +42,61 @@ thread_local! {
 /// Monotonic id source used to give each network thread a distinct name.
 static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Cloneable handle that spawns tracked tasks onto the background runtime.
+#[derive(Clone)]
+pub struct BackgroundExecutorHandle {
+    handle: Handle,
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl BackgroundExecutorHandle {
+    /// Spawn a task and count it as in-flight until it finishes.
+    ///
+    /// The returned `JoinHandle` resolves when the task completes; dropping it
+    /// detaches the task (which still counts until it finishes).
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.in_flight.fetch_add(1, Ordering::Release);
+        let in_flight = self.in_flight.clone();
+        self.handle.spawn(async move {
+            // Decrement even if the task panics or is cancelled.
+            let _guard = InFlightGuard { in_flight };
+            future.await
+        })
+    }
+
+    /// Raw Tokio handle for untracked spawning.
+    pub fn raw(&self) -> Handle {
+        self.handle.clone()
+    }
+}
+
+/// Decrements the in-flight counter when the tracked task ends.
+struct InFlightGuard {
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::Release);
+    }
+}
+
 /// Owner of the background runtime. Dropping it triggers graceful shutdown.
 pub struct BackgroundExecutor {
     handle: Handle,
-    shutdown_tx: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
     network_thread_id: ThreadId,
     accepting: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
-    grace: Duration,
+    /// Number of tracked tasks that have been spawned but not yet finished.
+    in_flight: Arc<AtomicUsize>,
+    /// Drain grace period, shared with the network thread so `set_grace` takes
+    /// effect even after the thread has started.
+    grace: Arc<std::sync::Mutex<Duration>>,
 }
 
 impl BackgroundExecutor {
@@ -59,9 +108,14 @@ impl BackgroundExecutor {
             .build()
             .expect("failed to build network runtime");
         let handle = runtime.handle().clone();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let accepting = Arc::new(AtomicBool::new(true));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let grace = Arc::new(std::sync::Mutex::new(DEFAULT_SHUTDOWN_GRACE));
+        let grace_for_thread = grace.clone();
+
         let accepting_thread = accepting.clone();
+        let in_flight_thread = in_flight.clone();
+        let grace_thread = grace_for_thread.clone();
 
         let executor_id = NEXT_EXECUTOR_ID.fetch_add(1, Ordering::Relaxed);
         let thread = std::thread::Builder::new()
@@ -70,15 +124,31 @@ impl BackgroundExecutor {
                 // Mark this thread so `Drop` can avoid joining itself.
                 ON_NETWORK_THREAD.with(|flag| flag.set(true));
                 NETWORK_THREAD_ID.with(|id| id.set(Some(std::thread::current().id())));
-                // Park the runtime until shutdown is requested; it continues to
-                // drive spawned tasks in the background meanwhile.
-                runtime.block_on(async move {
-                    let _ = shutdown_rx.await;
+
+                // Drive the runtime until shutdown is requested. Spawned tasks
+                // run normally in the meantime.
+                runtime.block_on(async {
+                    // Poll the `accepting` flag rather than awaiting a channel so
+                    // shutdown never needs a sender kept alive by the owner.
+                    while accepting_thread.load(Ordering::Acquire) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+
+                    // Drain: keep driving the runtime until all tracked tasks
+                    // finish or the grace period expires. This is the real grace
+                    // period — runtime shutdown is deferred until after it.
+                    let grace = *grace_thread.lock().expect("grace lock");
+                    let deadline = tokio::time::Instant::now() + grace;
+                    while in_flight_thread.load(Ordering::Acquire) > 0
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
                 });
-                accepting_thread.store(false, Ordering::Release);
-                // Give in-flight tasks a bounded window to finish, then cancel
-                // whatever remains instead of orphaning it.
-                runtime.shutdown_timeout(DEFAULT_SHUTDOWN_GRACE);
+
+                // Only now stop the runtime. Anything still running is cancelled
+                // rather than orphaned.
+                runtime.shutdown_timeout(Duration::from_millis(50));
             })
             .expect("failed to spawn network thread");
 
@@ -86,17 +156,30 @@ impl BackgroundExecutor {
 
         Self {
             handle,
-            shutdown_tx: Some(shutdown_tx),
             thread: Some(thread),
             network_thread_id,
             accepting,
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
-            grace: DEFAULT_SHUTDOWN_GRACE,
+            in_flight,
+            grace,
         }
     }
 
     /// Cloneable handle used to spawn tasks onto the background runtime.
-    pub fn handle(&self) -> Handle {
+    ///
+    /// Tasks spawned through this handle are counted so shutdown can drain them
+    /// for the configured grace period.
+    pub fn handle(&self) -> BackgroundExecutorHandle {
+        BackgroundExecutorHandle {
+            handle: self.handle.clone(),
+            in_flight: self.in_flight.clone(),
+        }
+    }
+
+    /// Raw Tokio handle, for callers that must hand the runtime to code that
+    /// spawns internally. Tasks spawned this way are **not** tracked, so they are
+    /// not covered by the shutdown drain.
+    pub fn raw_handle(&self) -> Handle {
         self.handle.clone()
     }
 
@@ -110,9 +193,15 @@ impl BackgroundExecutor {
         !self.accepting.load(Ordering::Acquire)
     }
 
-    /// Override the drain grace period (tests use a short value).
+    /// Number of tracked tasks that have been spawned but not finished.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    /// Override the drain grace period (tests use a short value). Applies to the
+    /// running network thread as well as any later shutdown.
     pub fn set_grace(&mut self, grace: Duration) {
-        self.grace = grace;
+        *self.grace.lock().expect("grace lock") = grace;
     }
 
     /// Graceful shutdown: stop accepting work, drain in-flight tasks, join.
@@ -132,11 +221,10 @@ impl BackgroundExecutor {
     }
 
     fn do_shutdown(&mut self) {
-        // Reject new work first so a racing caller cannot add more.
+        // Reject new work first so a racing caller cannot add more. The network
+        // thread observes this and then drains in-flight tasks for the grace
+        // period before stopping the runtime.
         self.accepting.store(false, Ordering::Release);
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
 
         if self.running_on_network_thread() {
             // Self-drop: signal, then detach instead of joining ourselves.
@@ -276,6 +364,69 @@ mod tests {
         assert!(
             !completed.load(Ordering::SeqCst),
             "long task must be cancelled, not left orphaned"
+        );
+    }
+
+    /// Regression: shutdown must genuinely drain in-flight tasks for the grace
+    /// period. Tokio's `shutdown_timeout` alone is not a grace period — spawned
+    /// tasks are dropped as soon as they yield — so a request shorter than the
+    /// grace window must be allowed to finish.
+    #[test]
+    fn shutdown_drains_a_task_that_finishes_within_the_grace_window() {
+        let mut exec = BackgroundExecutor::new(2);
+        exec.set_grace(Duration::from_secs(2));
+        let handle = exec.handle();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        // Sleeps several times (yields repeatedly) and then completes. With
+        // `shutdown_timeout` semantics this would be dropped at the first yield.
+        let _task = handle.spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            flag.store(true, Ordering::SeqCst);
+            7
+        });
+
+        // Let it start.
+        std::thread::sleep(Duration::from_millis(30));
+        exec.shutdown();
+
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "a task finishing inside the grace window must be drained, not dropped at its first yield"
+        );
+    }
+
+    /// A task that outlives the grace window is dropped rather than orphaned, and
+    /// shutdown still returns.
+    #[test]
+    fn shutdown_does_not_wait_forever_for_a_task_beyond_the_grace_window() {
+        let mut exec = BackgroundExecutor::new(1);
+        exec.set_grace(Duration::from_millis(120));
+        let handle = exec.handle();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let _task = handle.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            flag.store(true, Ordering::SeqCst);
+            1
+        });
+
+        std::thread::sleep(Duration::from_millis(30));
+        let started = std::time::Instant::now();
+        exec.shutdown();
+        let elapsed = started.elapsed();
+
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "a task beyond the grace window must not have completed"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "shutdown must not wait for the 30s task (took {elapsed:?})"
         );
     }
 

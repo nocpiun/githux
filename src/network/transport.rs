@@ -245,6 +245,15 @@ impl Transport for ReqwestTransport {
 
 /// Scheme + host + port tuple used to decide whether a redirect stays on the
 /// same origin.
+///
+/// Both the current URL and the `Location` target are parsed with
+/// [`reqwest::Url`] — the same standards-compliant parser reqwest uses to make
+/// the actual connection — and `Location` is resolved against the current URL
+/// with the standard join algorithm. A hand-rolled parser disagrees with reqwest
+/// on inputs such as `https://evil.example\@api.github.com/steal` (WHATWG treats
+/// `\` as a path separator for special schemes, so the real host is
+/// `evil.example`), which would let the Authorization header be re-applied to a
+/// foreign host on redirect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Origin {
     scheme: String,
@@ -254,35 +263,24 @@ struct Origin {
 
 impl Origin {
     fn parse(url: &str) -> Option<Self> {
-        let (scheme, rest) = url.split_once("://")?;
-        let authority = rest.split(['/', '?', '#']).next()?;
-        let authority = authority.rsplit('@').next()?;
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => {
-                (h.to_string(), p.parse().ok())
-            }
-            _ => (authority.to_string(), None),
-        };
+        Self::from_url(&reqwest::Url::parse(url).ok()?)
+    }
+
+    fn from_url(url: &reqwest::Url) -> Option<Self> {
         Some(Self {
-            scheme: scheme.to_lowercase(),
-            host: host.to_lowercase(),
-            port,
+            scheme: url.scheme().to_string(),
+            host: url.host_str()?.to_string(),
+            port: url.port_or_known_default(),
         })
     }
 
-    /// Resolve a `Location` header against the current URL. Supports absolute
-    /// URLs and absolute paths; rejects other relative forms. Returns `None`
-    /// when the location cannot be safely resolved.
+    /// Resolve a `Location` header against the current URL using the standard
+    /// URL join algorithm. Returns `None` when the location cannot be parsed,
+    /// in which case the redirect is not followed.
     fn resolve(current: &str, location: &str) -> Option<String> {
-        if location.starts_with("https://") || location.starts_with("http://") {
-            return Some(location.to_string());
-        }
-        if let Some(path) = location.strip_prefix('/') {
-            let (scheme, rest) = current.split_once("://")?;
-            let authority = rest.split(['/', '?', '#']).next()?;
-            return Some(format!("{scheme}://{authority}/{path}"));
-        }
-        None
+        let base = reqwest::Url::parse(current).ok()?;
+        let joined = base.join(location).ok()?;
+        Some(joined.to_string())
     }
 }
 
@@ -496,6 +494,118 @@ mod tests {
         assert_eq!(response.status, 302);
         // Only the original request was made; we never hit the redirect target.
         assert_eq!(server.recorded().len(), 1);
+    }
+
+    /// Regression: a crafted absolute `Location` must not be able to smuggle the
+    /// credential to another host. WHATWG parses
+    /// `https://evil.example\\@api.github.com/steal` with host `evil.example`
+    /// (the backslash is a path separator for special schemes), while a naive
+    /// "host is after the last @" split reads `api.github.com`. Because the
+    /// origin comparison now uses `reqwest::Url`, this redirect is not followed
+    /// and the PAT is not re-sent.
+    #[tokio::test]
+    async fn redirect_with_backslash_does_not_forward_credentials() {
+        // A first "server" on a trusted-looking origin that answers with a
+        // hostile Location header. The redirect target is never contacted.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (hits_tx, hits_rx) = std::sync::mpsc::channel::<usize>();
+
+        let handle = std::thread::spawn(move || {
+            let mut hits = 0usize;
+            // Only accept the first connection; nothing may follow.
+            if let Ok((mut stream, _)) = listener.accept() {
+                hits += 1;
+                use std::io::Write;
+                let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
+                loop {
+                    let mut line = String::new();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let done = line == "\r\n" || line == "\n";
+                    if done {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: https://evil.example\\@api.github.com/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                let _ = stream.flush();
+                // Detect whether anything connects again in the next moment.
+                listener.set_nonblocking(true).ok();
+                let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                while std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(_) => hits += 1,
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            }
+            let _ = hits_tx.send(hits);
+        });
+
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let base = format!("http://{addr}/");
+        let client = crate::github::client::GitHubClient::new(
+            crate::github::client::GitHubConfig {
+                base_url: base,
+                ..Default::default()
+            },
+            Arc::new(MockTransport::new()),
+        );
+        let pat = crate::auth::token::Pat::from_str("ghp_redirect_secret");
+        let request = client.build_get("user", &pat);
+
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("transport returns the 3xx");
+        // The 3xx is surfaced rather than followed.
+        assert_eq!(response.status, 302);
+        // Only the original request was made; the hostile host was never hit.
+        let hits = hits_rx.recv_timeout(Duration::from_secs(5)).expect("hits");
+        assert_eq!(hits, 1, "redirect must not be followed to a foreign host");
+        let _ = handle.join();
+    }
+
+    /// Unit-level guard for the same rule: origin comparison uses the same URL
+    /// parser as reqwest, including backslash normalization and default ports.
+    #[test]
+    fn origin_comparison_uses_reqwest_url_semantics() {
+        let current = "https://api.github.com/user";
+        let origin = Origin::parse(current).expect("origin");
+
+        // Same origin: relative and absolute forms that truly stay on the host.
+        for same in [
+            "https://api.github.com/login",
+            "https://api.github.com:443/login",
+            "/user/repos",
+            "repos?page=2",
+        ] {
+            let next = Origin::resolve(current, same).expect("resolve");
+            assert_eq!(
+                Origin::parse(&next),
+                Some(origin.clone()),
+                "{same} should stay on the same origin (resolved {next})"
+            );
+        }
+
+        // Hostile or genuinely different origins.
+        for hostile in [
+            "https://evil.example\\@api.github.com/steal",
+            "https://evil.example/steal",
+            "http://api.github.com/user",
+            "https://api.github.com:8443/user",
+            "https://api.github.com.evil.example/user",
+        ] {
+            let resolved = Origin::resolve(current, hostile).expect("resolve");
+            assert_ne!(
+                Origin::parse(&resolved),
+                Some(origin.clone()),
+                "{hostile} must not compare equal to the original origin (resolved {resolved})"
+            );
+        }
     }
 
     /// Real socket round-trip: server-side failure is classified from headers.
