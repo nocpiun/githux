@@ -68,79 +68,40 @@ impl GitHubClient {
         req
     }
 
-    /// A URL is trusted for credential injection iff it is HTTPS on the same
+    /// A URL is trusted for credential injection iff it has the same scheme and
     /// host as the configured base URL. Localhost HTTP is trusted only when the
     /// base URL itself is a localhost mock (test mode).
     ///
-    /// The URL is parsed structurally: scheme, optional userinfo, host and port
-    /// are taken from the authority component only, so a path or query that
-    /// happens to contain `@` or a host-looking string can never make an
-    /// unrelated host look trusted.
+    /// Parsing deliberately uses the **same** standards-compliant URL parser that
+    /// reqwest uses ([`reqwest::Url`]), not a hand-rolled one. A custom parser
+    /// inevitably disagrees somewhere (for example, WHATWG treats `\` as a path
+    /// separator for special schemes, so `https://evil.example\@api.github.com/x`
+    /// resolves to host `evil.example` while a naive split on `@` would say
+    /// `api.github.com`). Using one parser for both the trust decision and the
+    /// actual connection removes that class of mismatch.
     pub fn url_is_trusted(&self, url: &str) -> bool {
-        let Some(candidate) = Authority::parse(url) else {
+        let Ok(candidate) = reqwest::Url::parse(url) else {
             return false;
         };
-        let Some(base) = Authority::parse(&self.config.base_url) else {
+        let Ok(base) = reqwest::Url::parse(&self.config.base_url) else {
             return false;
         };
-        candidate.scheme == base.scheme && candidate.host == base.host
+        // `host_str` is `None` for hosts that cannot be compared (e.g. `file:`),
+        // which must never count as trusted. The port must also match (using the
+        // scheme's default when absent) so a `:8443` variant on the same host is
+        // treated as a different origin rather than receiving the credential.
+        match (candidate.host_str(), base.host_str()) {
+            (Some(candidate_host), Some(base_host)) => {
+                candidate.scheme() == base.scheme()
+                    && candidate_host == base_host
+                    && candidate.port_or_known_default() == base.port_or_known_default()
+            }
+            _ => false,
+        }
     }
 
     pub fn transport(&self) -> &Arc<dyn Transport> {
         &self.transport
-    }
-}
-
-/// Structural URL authority: scheme and host (port excluded from trust
-/// comparison because the configured base URL determines the endpoint, while a
-/// differing port on the same host is still the same origin family for GitHub's
-/// purposes only if the base URL itself uses it).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Authority {
-    scheme: String,
-    host: String,
-}
-
-impl Authority {
-    /// Parse `<scheme>://[userinfo@]host[:port][/path][?query][#fragment]`.
-    /// Returns `None` for input without a scheme, so relative or malformed URLs
-    /// are never considered trusted.
-    fn parse(url: &str) -> Option<Self> {
-        let (scheme, rest) = url.split_once("://")?;
-        if scheme.is_empty() {
-            return None;
-        }
-
-        // The authority ends at the first '/', '?' or '#'.
-        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-
-        // Userinfo is terminated by the *last* '@' inside the authority. This is
-        // bounded to the authority, so an '@' in the path cannot affect it.
-        let host_port = match authority.rsplit_once('@') {
-            Some((_userinfo, host_port)) => host_port,
-            None => authority,
-        };
-        if host_port.is_empty() {
-            return None;
-        }
-
-        // Strip a port. Handle bracketed IPv6 literals defensively: they contain
-        // ':' but the closing ']' delimits the host.
-        let host = if let Some(close) = host_port.strip_prefix('[') {
-            let end = close.find(']')?;
-            &close[..end]
-        } else {
-            host_port.split(':').next().unwrap_or(host_port)
-        };
-        if host.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            scheme: scheme.to_ascii_lowercase(),
-            host: host.to_ascii_lowercase(),
-        })
     }
 }
 
@@ -203,16 +164,30 @@ mod tests {
             "https://attacker.example#@api.github.com/user",
             "https://api.github.com.evil.example/user",
             "http://api.github.com/user",
+            // WHATWG URL parsing treats `\\` as a path separator for special
+            // schemes, so this connects to evil.example even though it contains
+            // `@api.github.com`.
+            "https://evil.example\\@api.github.com/user",
+            "https://evil.example\\\\api.github.com/user",
+            // Scheme-relative and non-http forms must not be trusted either.
+            "//api.github.com/user",
+            "ftp://api.github.com/user",
+            "https://api.github.com:8443/user",
         ] {
             assert!(
                 !client.url_is_trusted(hostile),
                 "{hostile} must not be trusted"
             );
-            let request = client.build_get(hostile, &pat);
-            assert!(
-                !request.headers.iter().any(|(k, _)| k == "Authorization"),
-                "{hostile} must not receive Authorization"
-            );
+            // An absolute URL is used verbatim, so it must never carry the
+            // credential. A non-absolute string is treated as a path relative to
+            // the trusted base, which is safe by construction.
+            if hostile.starts_with("http://") || hostile.starts_with("https://") {
+                let request = client.build_get(hostile, &pat);
+                assert!(
+                    !request.headers.iter().any(|(k, _)| k == "Authorization"),
+                    "{hostile} must not receive Authorization"
+                );
+            }
         }
 
         // Real userinfo on the real host is still the real host.
@@ -220,15 +195,20 @@ mod tests {
     }
 
     #[test]
-    fn localhost_mock_is_trusted_only_when_base_is_localhost() {
+    fn localhost_mock_is_trusted_only_on_the_configured_origin() {
         let cfg = GitHubConfig {
-            base_url: "http://127.0.0.1:0/".to_string(),
+            base_url: "http://127.0.0.1:54321/".to_string(),
             ..GitHubConfig::default()
         };
         let client = GitHubClient::new(
             cfg,
             Arc::new(crate::network::transport::MockTransport::new()),
         );
-        assert!(client.url_is_trusted("http://127.0.0.1:12345/user"));
+        // Same scheme, host and port as the configured mock base.
+        assert!(client.url_is_trusted("http://127.0.0.1:54321/user"));
+        // A different port is a different origin and must not receive the PAT.
+        assert!(!client.url_is_trusted("http://127.0.0.1:12345/user"));
+        // HTTPS on the localhost mock port is a scheme mismatch.
+        assert!(!client.url_is_trusted("https://127.0.0.1:54321/user"));
     }
 }

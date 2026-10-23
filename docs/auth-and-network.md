@@ -74,10 +74,13 @@ executor.shutdown(); // 停止接收、宽限期内排空、否则取消并 join
 - `semaphore()` 暴露共享信号量，`AccountService`/`RepoService` 在发起请求前 `acquire_owned()`，把并发限制在构造时给的额度。
 - `CancellationToken` 基于 `watch`，自带 keepalive，**丢弃 source 不等于取消**；只有显式 `cancel()` 才触发。已取消的 token 在传输层直接返回 `Cancelled`，不建连接。
 - 关闭：`shutdown()` 先拒绝新工作，再给 `DEFAULT_SHUTDOWN_GRACE`（5s）排空，仍运行的任务随 runtime 取消；不会留下没有归属的无限重试。
+- **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 
 **重定向与凭据保护**（`ReqwestTransport`）：reqwest 配置 `Policy::none()`，由我们自己跟随；只用同样的 scheme+host+port 才继续，跨源、降级到 HTTP 或超过 5 跳都**不跟随**，直接把 3xx 交给上层判定。`GitHubClient::url_is_trusted` 再检查分页 `Link` 的 host，不受信的 next 链接返回部分结果而不是继续请求。
 
-host 判定是**结构化解析**：只从 URL 的 authority 部分取 scheme 与 host，userinfo 只在该 authority 内按最后一个 `@` 截断。因此 `https://attacker.example/https://api.github.com/user`、`https://attacker.example/?next=https://api.github.com/user` 或 `https://api.github.com.evil.example/user` 都不会被当成受信 host，PAT 不会被注入。回归测试为 `github::client::tests::path_content_does_not_make_a_host_trusted`。
+host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`），不再自己写拆分逻辑。原因是自写的解析器必然在某处与真正的连接方不一致：WHATWG 对特殊 scheme 把 `\` 当作路径分隔符，所以 `https://evil.example\@api.github.com/user` 实际连到 `evil.example`，而按最后一个 `@` 手拆会得出 `api.github.com`。用同一个解析器做“是否受信”的判断和真正发起连接，才能消除这类不一致。
+
+信任要求 scheme、host **和 port** 都一致（端口缺失时用该 scheme 的默认端口比较）：`https://api.github.com:8443/user`、`HTTP` 降级、`//api.github.com/user`、`ftp://…` 都不受信。回归测试为 `github::client::tests::path_content_does_not_make_a_host_trusted` 与 `localhost_mock_is_trusted_only_on_the_configured_origin`（含反斜杠、查询串、`@`、不同端口等用例）。
 
 `ReqwestTransport` 的取消覆盖**整个请求生命周期**：`tokio::select!` 同时作用于 header 阶段和 body 读取阶段，因此大响应或停滞响应在取消后不会继续读到请求超时。回归测试为 `network::transport::tests::cancellation_stops_a_stalled_body_read`。
 
@@ -106,6 +109,10 @@ host 判定是**结构化解析**：只从 URL 的 authority 部分取 scheme �
 因此“中途失败”“授权不全”和“解析失败”都不会被伪装成完整空列表；只有第一页失败才是硬错误。
 
 **过期错误也按代次处理**：`RepoService` 在请求结束后对**成功和失败**都重新核对 `AuthContext`。旧 PAT 返回的 `Unauthorized` 会被转换成 `StaleContext`，不会被当成“新凭据失效”，从而不会误触发替换提示。
+
+**分页中途取消仍是硬取消**：即使在获取第 2 页及以后时取消，也返回 `Cancelled` 而不是 `Partial`——调用方已经要求停止，就不应拿到那次请求的数据。
+
+**替换是序列化提交的**：`AccountService` 用一把 `credential_commit` 互斥锁把“写凭据 + 提交注册表记录”包成一个临界区。否则两个并发 `replace` 可能 A 写 token A、B 写 token B 并提交、A 再提交，最终存储在 B、注册表却报 A 的 epoch，后续读取会在 A 的 epoch 下使用 B 的 token。回归测试用真正的多线程 runtime 与一个会在两次 `save` 重叠时报警的 store 验证。
 
 **移除账户的凭据删除失败会上报**：`AccountService::remove` 仍会移除注册表条目（不让陈旧引用保持活动），但把删除失败作为 `CredentialStore` 错误返回，避免声称“已成功移除”而实际仍留有持久化秘密。
 
@@ -234,6 +241,10 @@ git diff --check
 | 真实 Credential Manager | `auth::windows::tests::windows_credential_roundtrip` | 本机真实 Windows 项，自清理 |
 | 跨源重定向不转发凭据 | `network::transport::tests::cross_origin_redirect_is_not_followed` | 真实 socket |
 | 移除活动账户 / 活动前账户 | `auth::tests::remove_active_account_activates_previous`、`remove_before_active_keeps_the_same_active_account`、`removing_every_account_leaves_no_active_context` | |
+| 反斜杠/端口/相对形式不走信 | `github::client::tests::path_content_does_not_make_a_host_trusted`、`localhost_mock_is_trusted_only_on_the_configured_origin` | 与 reqwest 同一解析器 |
+| 分页中途取消仍是 `Cancelled` | `github::repos::tests::cancellation_on_later_page_is_not_a_partial_result` | 取消先于第 2 页 |
+| 并发替换被序列化 | `data::tests::overlapping_replacements_are_serialized` | 多线程 runtime + 重叠检测 store |
+| 执行器自线程 drop 不死锁 | `network::executor::tests::dropping_from_its_own_network_thread_does_not_deadlock` | 弱引用确认最终释放 |
 | 多账户与代次 | `auth::tests` | |
 | 最小 scope 建议 | `auth::capability::tests` | 不含管理 scope |
 

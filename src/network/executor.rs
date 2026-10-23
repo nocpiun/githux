@@ -14,9 +14,10 @@
 //! Concurrency is bounded by callers holding a permit from a shared
 //! [`tokio::sync::Semaphore`]; see the data layer for the single owner.
 
+use std::cell::Cell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::{JoinHandle, ThreadId};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{Semaphore, oneshot};
@@ -24,11 +25,26 @@ use tokio::sync::{Semaphore, oneshot};
 /// Default grace period given to in-flight tasks on shutdown.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
+thread_local! {
+    /// Set on the executor's own network thread so `Drop` can tell it is running
+    /// on the thread it would otherwise join.
+    static ON_NETWORK_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+thread_local! {
+    /// Identifies which executor's network thread is currently executing.
+    static NETWORK_THREAD_ID: Cell<Option<ThreadId>> = const { Cell::new(None) };
+}
+
+/// Monotonic id source used to give each network thread a distinct name.
+static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Owner of the background runtime. Dropping it triggers graceful shutdown.
 pub struct BackgroundExecutor {
     handle: Handle,
     shutdown_tx: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
+    network_thread_id: ThreadId,
     accepting: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
     grace: Duration,
@@ -47,9 +63,13 @@ impl BackgroundExecutor {
         let accepting = Arc::new(AtomicBool::new(true));
         let accepting_thread = accepting.clone();
 
+        let executor_id = NEXT_EXECUTOR_ID.fetch_add(1, Ordering::Relaxed);
         let thread = std::thread::Builder::new()
-            .name("githux-network".into())
+            .name(format!("githux-network-{executor_id}"))
             .spawn(move || {
+                // Mark this thread so `Drop` can avoid joining itself.
+                ON_NETWORK_THREAD.with(|flag| flag.set(true));
+                NETWORK_THREAD_ID.with(|id| id.set(Some(std::thread::current().id())));
                 // Park the runtime until shutdown is requested; it continues to
                 // drive spawned tasks in the background meanwhile.
                 runtime.block_on(async move {
@@ -62,10 +82,13 @@ impl BackgroundExecutor {
             })
             .expect("failed to spawn network thread");
 
+        let network_thread_id = thread.thread().id();
+
         Self {
             handle,
             shutdown_tx: Some(shutdown_tx),
             thread: Some(thread),
+            network_thread_id,
             accepting,
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             grace: DEFAULT_SHUTDOWN_GRACE,
@@ -97,12 +120,32 @@ impl BackgroundExecutor {
         self.do_shutdown();
     }
 
+    /// Whether the current thread is this executor's own network thread.
+    ///
+    /// If it is, joining is impossible: the last `Arc<BackgroundExecutor>` can be
+    /// released by a task finishing on that very thread, and joining it would
+    /// deadlock. In that case we only signal shutdown and detach the join handle;
+    /// the runtime shuts itself down when the parked future ends.
+    fn running_on_network_thread(&self) -> bool {
+        ON_NETWORK_THREAD.with(|flag| flag.get())
+            && NETWORK_THREAD_ID.with(|id| id.get() == Some(self.network_thread_id))
+    }
+
     fn do_shutdown(&mut self) {
         // Reject new work first so a racing caller cannot add more.
         self.accepting.store(false, Ordering::Release);
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+
+        if self.running_on_network_thread() {
+            // Self-drop: signal, then detach instead of joining ourselves.
+            if let Some(thread) = self.thread.take() {
+                drop(thread);
+            }
+            return;
+        }
+
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -233,6 +276,43 @@ mod tests {
         assert!(
             !completed.load(Ordering::SeqCst),
             "long task must be cancelled, not left orphaned"
+        );
+    }
+
+    /// Regression: dropping the last `Arc<BackgroundExecutor>` *from a task
+    /// running on the network thread* must not deadlock by joining itself.
+    #[test]
+    fn dropping_from_its_own_network_thread_does_not_deadlock() {
+        let exec = Arc::new(BackgroundExecutor::new(2));
+        let weak = Arc::downgrade(&exec);
+        let handle = exec.handle();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Move the last strong reference into the task; when this task finishes
+        // it runs on the network thread and drops the executor there.
+        let exec_for_task = exec.clone();
+        let _spawned = handle.spawn(async move {
+            drop(exec_for_task);
+            let _ = done_tx.send(());
+            1
+        });
+        drop(exec);
+
+        // The task must complete, and the executor must be fully dropped.
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("task must run and drop the executor without deadlocking");
+
+        // Give the detached thread a moment to tear down.
+        for _ in 0..200 {
+            if weak.upgrade().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "executor should be dropped after the self-drop shutdown"
         );
     }
 

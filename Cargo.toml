@@ -27,3 +27,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = 
 
 [dev-dependencies]
 ely-gpui-component = { git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git", rev = "da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721", features = ["test-support"] }
+# Tests need a real multi-thread runtime to prove overlapping credential
+# replacements are serialized: a current-thread runtime cannot interleave two
+# tasks inside the critical section, so the test would pass even without a lock.
+# The production runtime stays current-thread.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }

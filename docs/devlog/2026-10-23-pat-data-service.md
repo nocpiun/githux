@@ -36,7 +36,7 @@
 cargo fmt --all -- --check                  # 通过
 cargo check --locked --all-targets          # 通过
 cargo clippy --locked --all-targets -- -D warnings   # 通过，无警告
-cargo test --locked                         # 122 passed / 0 failed（首轮 110，审查修复后 122）
+cargo test --locked                         # 125 passed / 0 failed（首轮 110 → 一轮修复 122 → 二轮修复 125）
 cargo build --locked                        # 通过
 git diff --check                            # 通过
 ```
@@ -59,9 +59,22 @@ Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属
 | P2 第 2 页起传输失败丢弃已取数据 | 与“部分结果”契约矛盾 | 传输/解析失败在已有数据时转为 `Partial { PageFailed }`；仅第一页失败是硬错误 |
 | P2 取消不覆盖 body 读取 | header 到达后 `response.text().await` 无条件执行，停滞大响应要等到超时 | body 读取也放进 `tokio::select!` 与取消竞争；新增“header 已到、body 停滞时取消”的真实 socket 测试 |
 
-修复后 `cargo test --locked` 为 122 项全绿，并新增 16 个回归用例。连续 8 次全量运行与 20 次单测重复运行结果一致。
+修复后 `cargo test --locked` 全绿，并新增 16 个回归用例。连续 8 次全量运行与 20 次单测重复运行结果一致。
 
 “取消覆盖 body”这个新用例调了两轮才稳定：第一版用固定延时取消，并行负载下偶尔先撞上连接错误；第二版改成服务端写完后用 channel 通知再取消，仍偶发 `Network` 而不是 `Cancelled`，根因是 mock 服务端在**读取请求之前**就写响应，客户端还没写完请求头，取消时 teardown 产生 IO 错误。最终让服务端先读完请求头再写 header + 停住 body，并且传输层在被取消时把 teardown 造成的 IO 错误统一报告为 `Cancelled`（调用方要求停止，这才是有意义的结果）。
+
+## 第二轮审查的 4 个新缺陷与修复
+
+第二轮（head `3594699`）确认上一轮 7 条已解决，同时提出 4 条新意见，全部成立：
+
+| 意见 | 实际缺陷 | 修复 |
+| --- | --- | --- |
+| P1 自写 URL 解析器与 reqwest 不一致 | `https://evil.example\@api.github.com/user` 被自己的解析器判为受信，但 WHATWG 把 `\` 当路径分隔符，reqwest 实际连 `evil.example` | 直接用 `reqwest::Url` 做信任判定，与真正连接方同一套解析规则；同时要求 scheme/host/port 三者一致（`:8443`、`HTTP`、`//host`、`ftp://` 均不受信） |
+| P2 替换的保存与注册表提交未序列化 | 两个并发 `replace` 可交错：存储最终是 B 的 token，注册表却报告 A 的 epoch，之后读取会在 A 的 epoch 下用 B 的 token | `AccountService` 增加 `credential_commit` 互斥锁，把“写凭据 + 提交注册表”作为单个临界区；提交前在锁内重新确认账户仍存在 |
+| P2 分页中途取消被降级为部分结果 | 第 2 页取消时若已有数据，被转成 `Ok(Partial)`，调用方会渲染自己已取消的请求结果 | `Cancelled` 保持硬取消，不因已有页而变成 `Partial` |
+| P2 `Drop` 可能 join 自己的线程 | 最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上结束的任务释放，`Drop` 里 `join()` 自己会死锁 | 网络线程用 thread-local 标记身份；`Drop` 检测到同线程时只发关闭信号并分离 handle，不 join 自身 |
+
+新增 4 个回归测试。其中“并发替换”最初写成单线程 `join!`，即使去掉锁也能通过（current-thread runtime 不会在临界区内交错），改为 `#[tokio::test(flavor = "multi_thread")]` + 双 spawn + 会在两次 `save` 重叠时报警的 instrumented store 后，去掉锁会稳定失败、保留锁稳定通过，已在本地双向验证。为此在 `[dev-dependencies]` 增加 `tokio` 的 `rt-multi-thread` 特性，生产 runtime 仍是 current-thread。
 
 ## 验证边界（不得省略）
 
@@ -83,6 +96,8 @@ Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属
 
 实现中真实踩到两个问题，已写入 [LESSONS](../../LESSONS.md)：
 
+- **L007 URL 解析**：安全判定与真正连接方必须用同一个解析器；自写解析器在两轮审查里各暴露一个绕过。
+- **L008 并发测试**：并发正确性测试必须真的并发，且反向验证“去掉修复就会失败”。
 - **L005 取消令牌**：第一版 `CancellationToken::default()` 只留 receiver，sender 被丢弃后 `changed()` 立刻返回 `Err(Closed)`，被当成“已取消”，导致所有正常请求都报 `Cancelled`（12 个用例失败）。修复是 token 内持有 keepalive sender，并补“未取消时不解析”的超时断言。
 - **L006 模块级 allowance**：服务层先于 UI 落地，用写在最内层并注明原因的 `#![allow(dead_code)]`，而不是 crate 级屏蔽。
 

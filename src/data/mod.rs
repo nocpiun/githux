@@ -35,6 +35,12 @@ pub struct AccountService {
     store: Arc<dyn CredentialStore>,
     client: Arc<GitHubClient>,
     executor: Arc<BackgroundExecutor>,
+    /// Serializes "save credential + commit registry record" so two overlapping
+    /// `replace` calls cannot interleave: without it, A could save token A, B
+    /// could save token B and commit, and then A could commit and report success
+    /// while the store actually holds token B. The epoch alone does not protect
+    /// this because the store write happens outside the registry lock.
+    credential_commit: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Repository read service scoped to the active account.
@@ -87,6 +93,7 @@ impl AccountService {
             store,
             client,
             executor,
+            credential_commit: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -114,6 +121,9 @@ impl AccountService {
         let verified = self.verify(&pat).await?;
         let credential =
             CredentialRef::new(verified.identity.key.host.clone(), verified.identity.key.id);
+
+        // Serialize save + registry commit (see `credential_commit`).
+        let _commit = self.credential_commit.lock().await;
 
         // Save credential before registering the account so a storage failure
         // never leaves a registry entry claiming persistence.
@@ -171,6 +181,21 @@ impl AccountService {
 
         let credential =
             CredentialRef::new(verified.identity.key.host.clone(), verified.identity.key.id);
+
+        // Serialize save + registry commit so overlapping replacements cannot
+        // leave the store holding one token while the registry reports another.
+        let _commit = self.credential_commit.lock().await;
+
+        // Re-validate existence under the commit lock: the account may have been
+        // removed between verification and this point.
+        let still_registered = {
+            let reg = self.registry.lock().expect("registry lock");
+            reg.credential_ref(expected.clone()).is_some()
+        };
+        if !still_registered {
+            return Err(LoginError::NotFound);
+        }
+
         // Save first: a storage failure must not advance the epoch or replace
         // the registry record while claiming the new token is persisted.
         self.store
@@ -515,6 +540,140 @@ mod tests {
         assert!(store.load(&cred_two).expect("load").is_none());
     }
 
+    /// Regression: two replacements running on **different worker threads** must
+    /// not interleave their credential write with the registry commit.
+    ///
+    /// Without the commit lock, A could save token A, B could save token B and
+    /// commit, and then A could commit — leaving the store holding B while the
+    /// registry reports A's epoch. It uses a real multi-thread runtime with two
+    /// spawned tasks so the critical section is genuinely concurrent, and an
+    /// instrumented store that flags any overlap of two `save` calls.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overlapping_replacements_are_serialized() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct InstrumentedStore {
+            inner: InMemoryCredentialStore,
+            saves_in_flight: AtomicUsize,
+            overlap_detected: AtomicBool,
+        }
+        impl CredentialStore for InstrumentedStore {
+            fn save(
+                &self,
+                r#ref: &crate::auth::CredentialRef,
+                token: &Pat,
+            ) -> Result<(), CredentialError> {
+                let now = self.saves_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                if now > 1 {
+                    self.overlap_detected.store(true, Ordering::SeqCst);
+                }
+                // Widen the window: a real credential write is not instantaneous.
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                let result = self.inner.save(r#ref, token);
+                self.saves_in_flight.fetch_sub(1, Ordering::SeqCst);
+                result
+            }
+            fn load(
+                &self,
+                r#ref: &crate::auth::CredentialRef,
+            ) -> Result<Option<Pat>, CredentialError> {
+                self.inner.load(r#ref)
+            }
+            fn delete(&self, r#ref: &crate::auth::CredentialRef) -> Result<(), CredentialError> {
+                self.inner.delete(r#ref)
+            }
+            fn describe(&self) -> &'static str {
+                "instrumented (test)"
+            }
+        }
+
+        // The transport uses a short-lived current-thread runtime internally, so
+        // the mock responses are scripted up front and consumed in order.
+        let store = Arc::new(InstrumentedStore::default());
+        let store_trait = store.clone() as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        for _ in 0..3 {
+            mock.enqueue(Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: user_body(61, "dev"),
+            }))
+            .await;
+        }
+
+        let (svc, _exec) = build_service(store_trait, mock);
+        let svc = Arc::new(svc);
+        svc.login(Pat::from_str("ghp_initial"))
+            .await
+            .expect("login");
+        let key = svc.active_context().expect("ctx").account;
+
+        // Two truly concurrent replacements on different worker threads.
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+        let (tx_b, rx_b) = tokio::sync::oneshot::channel();
+        let a = {
+            let svc = svc.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let _ = tx_a.send(());
+                svc.replace(key, Pat::from_str("ghp_alpha")).await
+            })
+        };
+        let b = {
+            let svc = svc.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let _ = tx_b.send(());
+                svc.replace(key, Pat::from_str("ghp_beta")).await
+            })
+        };
+        // Reduce start skew so both enter the critical section as close as
+        // possible; the mutex is what must keep them apart.
+        let _ = rx_a.await;
+        let _ = rx_b.await;
+        let ra = a.await.expect("join a");
+        let rb = b.await.expect("join b");
+
+        assert!(
+            !store.overlap_detected.load(Ordering::SeqCst),
+            "two credential saves overlapped: the commit critical section is not serialized"
+        );
+        assert!(
+            ra.is_ok() && rb.is_ok(),
+            "both serialized replacements should succeed: {ra:?} {rb:?}"
+        );
+
+        let a_epoch = match &ra {
+            Ok(LoginOutcome::Replaced(s)) => s.epoch.value(),
+            _ => 0,
+        };
+        let b_epoch = match &rb {
+            Ok(LoginOutcome::Replaced(s)) => s.epoch.value(),
+            _ => 0,
+        };
+        let expected = if a_epoch > b_epoch {
+            "ghp_alpha"
+        } else {
+            "ghp_beta"
+        };
+        let current = svc.active_context().expect("ctx");
+        assert_eq!(current.epoch.value(), a_epoch.max(b_epoch));
+        let stored = store
+            .load(&crate::auth::CredentialRef::new(
+                crate::domain::HostId::github(),
+                61,
+            ))
+            .expect("load")
+            .expect("credential present");
+        assert_eq!(
+            stored.expose(),
+            expected,
+            "store and registry must agree on the winning token"
+        );
+    }
+
+    /// Replacing an unknown account is not an implicit add.
     /// Replacing an unknown account is not an implicit add.
     #[tokio::test]
     async fn replace_unknown_account_is_not_found() {
@@ -656,6 +815,7 @@ mod tests {
             store: store.clone(),
             client,
             executor: exec.clone(),
+            credential_commit: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         svc.login(Pat::from_str("ghp_old")).await.expect("login");
@@ -828,6 +988,7 @@ mod tests {
             store: store.clone(),
             client,
             executor: exec.clone(),
+            credential_commit: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         svc.login(Pat::from_str("ghp_a1")).await.expect("login A");

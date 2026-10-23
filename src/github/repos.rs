@@ -77,6 +77,12 @@ pub async fn fetch_user_repos(
             Ok(response) => response,
             Err(transport_error) => {
                 let err = classify_transport(transport_error);
+                // Cancellation is always a hard cancellation, regardless of how
+                // many pages were already parsed: the caller explicitly asked to
+                // stop, so it must not receive data from a cancelled request.
+                if matches!(err, GitHubError::Cancelled) {
+                    return Err(err);
+                }
                 if all_repos.is_empty() {
                     return Err(err);
                 }
@@ -374,6 +380,64 @@ mod tests {
             .expect("partial outcome");
         assert_eq!(outcome.repositories.len(), 1);
         assert!(matches!(outcome.readiness, ReposReadiness::Partial { .. }));
+    }
+
+    /// Regression: cancelling while fetching page 2+ must stay a hard
+    /// cancellation even though earlier pages were parsed. The caller asked to
+    /// stop, so it must not receive a `Partial` result from that request.
+    #[tokio::test]
+    async fn cancellation_on_later_page_is_not_a_partial_result() {
+        use crate::network::transport::{HttpRequest, Transport, TransportError};
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Serves page 1, then cancels the token and reports `Cancelled` for the
+        /// next request, modelling a cancel that lands between pages.
+        struct CancelAfterFirstPage {
+            cancel_source: crate::network::cancel::CancellationTokenSource,
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl Transport for CancelAfterFirstPage {
+            fn execute<'a>(
+                &'a self,
+                _request: HttpRequest,
+                _cancel: CancellationToken,
+            ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        Ok(HttpResponse {
+                            status: 200,
+                            headers: vec![(
+                                "link".to_string(),
+                                r#"<https://api.github.com/user/repos?page=2>; rel="next""#
+                                    .to_string(),
+                            )],
+                            body: page_body(&[(1, "alpha"), (2, "beta")]),
+                        })
+                    } else {
+                        // The user cancelled while page 1 was being processed.
+                        self.cancel_source.cancel();
+                        Err(TransportError::Cancelled)
+                    }
+                })
+            }
+        }
+
+        let (cancel, source) = CancellationToken::new();
+        let transport = Arc::new(CancelAfterFirstPage {
+            cancel_source: source,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let client = GitHubClient::new(Default::default(), transport);
+        let token = Pat::from_str("ghp_test");
+        let result = fetch_user_repos(&client, &token, cancel).await;
+        assert!(
+            matches!(result, Err(GitHubError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
     }
 
     /// A first-page transport failure is still a hard error, not an empty list.

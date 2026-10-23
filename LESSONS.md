@@ -44,3 +44,17 @@
 - **原因**：R2 切片先实现 `auth/network/github/data/domain/diagnostics`，UI 任务才接入。crate 级 `#![allow]` 会连同将来真实的死代码、未使用导入一起闭嘴；模块级允许把“尚未接入”这个已知边界限制在明确范围内，接入后直接删掉即可。
 - **证据**：2026-10-23 `pat-data-service` 的模块注释与 allowance；同期用 `cargo clippy -D warnings` 确认其余代码没有隐藏警告。
 - **范围**：分层交付、服务层先于 UI 落地的情形。允许本身不能替代对代码是否真的被调用的判断，也不能用来掩盖本应删除的实现。
+
+## L007：安全判定与真正的连接方必须用同一个 URL 解析器
+
+- **规则**：判断“这个 URL 是否可以去凭据”时，不要自己拆 scheme/host/userinfo。用与 HTTP 客户端**完全相同**的解析器（这里就是 `reqwest::Url`），并比较 scheme、host 与 port；解析失败一律视为不可信。
+- **原因**：自写解析器必然与连接方在某处不一致。WHATWG 对特殊 scheme 把 `\` 当作路径分隔符，所以 `https://evil.example\@api.github.com/user` 实际连到 `evil.example`；按“最后一个 `@` 之后是 host”的手写规则却会得出 `api.github.com`，于是把 PAT 发给了攻击者。第一版修掉“路径里的 `@`”后仍然复现，说明逐条补特例不可收敛。另外同 host 不同端口也是不同源，不能因为 host 相同就放行。
+- **证据**：2026-10-23 `pat-data-service` 的第二轮审查发现 `extract_host`/`Authority` 两版手写解析器都有缺陷；改为 `reqwest::Url` 后，`github::client::tests::path_content_does_not_make_a_host_trusted` 覆盖 12 种畸形/敌意 URL 全部通过。测试同时断言“绝对 URL 不带 Authorization”，而不只看布尔判断。
+- **范围**：任何把秘密注入请求的安全判定——认证头、cookie、签名参数、webhook 回调校验。也提醒：安全相关的测试要覆盖“真正发出的请求”，不只是被测函数的返回值。
+
+## L008：并发正确性测试必须真的能并发
+
+- **规则**：验证“临界区是否被序列化”时，测试必须提供真实的并发交错（多线程 runtime、两个独立任务），并让被测组件在交错发生时可观测（例如统计同时进入临界区的次数）。单线程 `join!` 或顺序 `await` 无法暴露缺失的锁。
+- **原因**：为“两个并发 replace 不会让存储与注册表不一致”写的第一个测试用 `tokio::join!` 跑在 current-thread runtime 上，两个 future 实际上不会在阻塞的临界区内交错；把提交锁**删掉**测试依然通过，等于没有验证任何东西。改成 `flavor = "multi_thread"` + 双 `spawn` + 记录 `save` 并发数的 store 后，删锁稳定失败、留锁稳定通过。
+- **证据**：2026-10-23 `pat-data-service` 第二轮审查修复中的实际反复；测试 `data::tests::overlapping_replacements_are_serialized`。为此在 `[dev-dependencies]` 增加 `tokio` 的 `rt-multi-thread`，生产 runtime 保持 current-thread。
+- **范围**：锁、原子状态机、单写入者约束、请求合并/去重等一切“同时发生才出错”的逻辑。写完测试要反向验证：去掉修复后测试必须失败。
