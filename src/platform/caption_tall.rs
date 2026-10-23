@@ -177,12 +177,6 @@ pub fn install(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla) 
         return Err(error);
     }
     window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
-    eprintln!(
-        "AppWindow Tall initialized: height={}, right={}, dpi={}",
-        bar.Height()?,
-        bar.RightInset()?,
-        unsafe { GetDpiForWindow(handle) }
-    );
     WINDOWS.with_borrow_mut(|windows| {
         windows.insert(
             handle.0 as usize,

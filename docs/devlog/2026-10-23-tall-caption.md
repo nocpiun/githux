@@ -30,3 +30,7 @@
 来源：[高度选项](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.windowing.titlebarheightoption?view=windows-app-sdk-1.8)、[只读高度](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.windowing.appwindowtitlebar.height?view=windows-app-sdk-1.8)。
 
 最终验收：负责人确认保留系统按钮高度，采用 Githux 默认14px字号、搜索框28px高度；背景、悬停及点击、窗口化/最大化对齐通过。本机32项测试不代替跨平台真实窗口验证。
+
+## PR 审查修复
+
+首轮审查指出：完成 Tall 配置后，诊断日志中的 Height/RightInset 读取仍使用 `?`，读取失败会在未回滚 Tall 的情况下触发旧 DWM 适配。移除这段启动尺寸日志，配置成功后直接保存 Tall 状态并返回成功；必需的配置失败仍走已有 ResetToDefault/样式恢复路径。正常外观和交互不变，本地 fmt、Clippy 与32项测试通过。初次预览日志中的尺寸证据仍是历史实测记录。
