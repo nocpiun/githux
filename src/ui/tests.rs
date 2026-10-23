@@ -979,3 +979,25 @@ fn tab_reaches_the_session_strip_and_enter_activates(cx: &mut TestAppContext) {
     press("enter", cx);
     assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
 }
+
+/// Closing the active tab while its strip entry holds focus still leaves a live focus target.
+#[gpui::test]
+fn closing_a_focused_tab_moves_focus_to_a_live_page(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let strip_focus = view.read_with(cx, |shell, _| shell.tab_strip_focus(a).unwrap());
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&strip_focus, cx));
+    cx.run_until_parked();
+
+    press("ctrl-w", cx);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
+    let home = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(home).unwrap());
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(
+        focused.as_ref(),
+        Some(&home_focus),
+        "focus leaves the closed tab entry"
+    );
+}

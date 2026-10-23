@@ -63,6 +63,15 @@ git diff --check
 
 **预览：** 已在本 worktree 执行 `scripts/prepare-windows-runtime.ps1`（x64，写入 `target/debug`）。负责人可在该终端运行 `cargo run --locked` 后按上述检查项验收。
 
+## 首轮审查（head `1f76b37`）与待裁决事项
+
+首轮 Codex review `5627818142` 提出两条：
+
+1. **P2（`src/ui/mod.rs`）：`close_tab` 只检查页面焦点，忽略标签条焦点。** 用户 Tab 到活动标签后按 `Ctrl+W` 时，被关闭的标签条句柄仍持有焦点，焦点可能悬空。属于既有验收（“关闭标签释放专属滚动/焦点/状态”）内的正确性修复：现在同时检查被关闭会话的页面焦点与标签条焦点，焦点在两者任一处时都把焦点移到新的活动页。新增回归测试 `closing_a_focused_tab_moves_focus_to_a_live_page`。该修复已在本地完成并通过 fmt/clippy/test（51 项），按混合批次默认暂不 push。
+2. **P1（`docs/devlog/...` 行内意见 `4359204869`）：要求本 PR 更新 `docs/architecture.md`。** 该文件“本轮状态归属”确实已过时，但本任务派发明确禁止修改 `docs/architecture.md`，属于任务边界与审查意见的取舍，已按流程永久记录为待裁决（PR 评论 `6364717050`），`merge_owner=coordinator`。
+
+在裁决前不再 push 新 head，也不进入下一轮审查。
+
 ## 交接与后续
 
 1. 负责人/主 Agent 在真实窗口验收多标签交互与中文候选确认后，再按门槛合并；`human_review_required=true`。

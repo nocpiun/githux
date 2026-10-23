@@ -227,12 +227,16 @@ impl Shell {
     }
 
     /// Closes `id`. Closing the active session moves to its neighbour; the current page is kept
-    /// when a non-active session closes. Focus follows only when it lived in the closed page.
+    /// when a non-active session closes. Focus follows only when it lived in the closed session,
+    /// whether on its page or on its own tab-strip entry.
     pub fn close_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         let focused_in_closed = self.workspace.session(id).is_some_and(|session| {
             let focused = window.focused(cx);
-            focused.as_ref() == Some(&session.state().focus)
-                || session.state().focus.contains_focused(window, cx)
+            let state = session.state();
+            focused.as_ref() == Some(&state.focus)
+                || focused.as_ref() == Some(&state.strip_focus)
+                || state.focus.contains_focused(window, cx)
+                || state.strip_focus.contains_focused(window, cx)
         });
         let was_active = self.workspace.active_id() == id;
         let Some(result) = self.workspace.close(id, cx) else {
