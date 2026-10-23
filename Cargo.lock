@@ -2304,6 +2304,8 @@ dependencies = [
  "ely-gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
+ "raw-window-handle",
+ "windows 0.62.2",
 ]
 
 [[package]]

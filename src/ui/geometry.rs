@@ -11,17 +11,18 @@ pub const SIDEBAR_WIDTH: f32 = 232.0;
 pub const SIDEBAR_PADDING: f32 = 10.0;
 
 /// Gap between the window edge and the island.
-pub const ISLAND_INSET: f32 = 8.0;
+pub const ISLAND_INSET: f32 = 7.0;
 
 /// Gap between the sidebar and the island.
 pub const ISLAND_GAP: f32 = 8.0;
 
 /// The island's own corner radius.
-pub const ISLAND_RADIUS: f32 = 12.0;
+pub const ISLAND_RADIUS: f32 = 6.0;
 
-/// Height of the custom title bar. Ely's `titlebar_height()` token is consulted too; this keeps
-/// the shell's own rows in step with it.
-pub const TITLEBAR_HEIGHT: f32 = 38.0;
+/// Content row and symmetric vertical inset (spacing 2 / 0.5rem).
+pub const TITLEBAR_CONTENT_HEIGHT: f32 = 28.0;
+pub const TITLEBAR_PADDING: f32 = 8.0;
+pub const TITLEBAR_HEIGHT: f32 = TITLEBAR_CONTENT_HEIGHT + 2.0 * TITLEBAR_PADDING;
 
 /// Width of the title bar's search entry.
 pub const SEARCH_WIDTH: f32 = 300.0;
