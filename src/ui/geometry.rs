@@ -20,9 +20,12 @@ pub const ISLAND_GAP: f32 = 8.0;
 pub const ISLAND_RADIUS: f32 = 6.0;
 
 /// Content row and symmetric vertical inset (spacing 2 / 0.5rem).
-pub const TITLEBAR_CONTENT_HEIGHT: f32 = 28.0;
+pub const TITLEBAR_CONTENT_HEIGHT: f32 = 32.0;
 pub const TITLEBAR_PADDING: f32 = 8.0;
 pub const TITLEBAR_HEIGHT: f32 = TITLEBAR_CONTENT_HEIGHT + 2.0 * TITLEBAR_PADDING;
+
+/// Search-entry height, independent of the title bar and native caption buttons.
+pub const SEARCH_HEIGHT: f32 = 28.0;
 
 /// Width of the title bar's search entry.
 pub const SEARCH_WIDTH: f32 = 300.0;

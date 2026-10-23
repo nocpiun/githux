@@ -46,7 +46,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 ## 外壳与导航
 
 - 自定义标题栏：首版 Windows 左上 Githux 字样、右侧三个窗口按钮，验证拖动、缩放、贴靠等系统交互。顶栏下方不画分隔边框。macOS 左侧按钮后接 Githux 的既有设计留待后续平台支持。
-- Windows 三个窗口按钮优先由系统 DWM 绘制和处理，品牌/搜索框使用 28px 内容行，上下各留 8px，顶栏总高 44px；island 顶部不叠加额外空隙。原生按钮不添加布局 padding，其实际尺寸仍由 Windows 决定，标题栏保持 Ely 配色。应用层适配与本机验收见 [原生按钮记录](devlog/2026-10-23-native-caption.md)。初始化失败或无原生 HWND 的测试平台保留自绘回退（直角单框/重叠框）；macOS/Linux 暂不安装此适配。
+- Windows 三个窗口按钮使用 Windows App SDK 的系统绘制 Tall 模式：品牌/搜索区保留 32px 内容行，上下各留 8px，典型顶栏高 48px；Githux 使用 Ely 的 Md 字号（默认 14px），搜索框自身高 28px、在内容行内垂直居中；实际行高读取系统 Height 并按窗口 DPI 换算，island 从该行下缘开始。按钮区域不加 padding。SDK 初始化失败回退到原有标准高度 DWM 适配；DWM 也不可用或无原生 HWND 的测试平台保留自绘回退（直角单框/重叠框）。macOS/Linux 不安装此适配。Tall 按钮的背景、交互、高度与对齐，以及最终品牌字号/搜索框高度均已获负责人真实预览验收，证据见 [Tall 标题栏记录](devlog/2026-10-23-tall-caption.md)，原有 DWM 验收见 [原生按钮记录](devlog/2026-10-23-native-caption.md)。
 - 侧边栏直接从顶部导航开始，没有额外 Logo/品牌块。上方 Home、Settings，中间仓库列表，底部账户信息与快捷入口。
 - 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。范围确定为 `GET /user/repos` 在当前活动账户、token 与组织授权下返回的集合（owner、collaborator、organization_member），不限定单个组织；排序与局部筛选待定。
 - 底部点击头像/名称进入 Profile；下方横向四等分图标入口为 Notifications、Issues、PRs、New。不放主题切换。

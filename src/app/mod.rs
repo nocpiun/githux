@@ -53,6 +53,8 @@ pub fn run() {
             .expect("failed to open Githux window");
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
+                    #[cfg(target_os = "windows")]
+                    platform::caption::shutdown();
                     cx.quit();
                 }
             })

@@ -4,3 +4,6 @@ pub mod fonts;
 
 #[cfg(target_os = "windows")]
 pub mod caption;
+
+#[cfg(target_os = "windows")]
+mod wasdk_bindings;

@@ -1,0 +1,6 @@
+[package]
+name = "githux-wasdk-bindgen"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+windows-bindgen = "=0.65.0"

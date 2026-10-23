@@ -20,7 +20,7 @@ use gpui::{
     RenderOnce, Role, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
 };
 
-use super::geometry::{SEARCH_WIDTH, TITLEBAR_CONTENT_HEIGHT, TITLEBAR_HEIGHT, TITLEBAR_PADDING};
+use super::geometry::{SEARCH_HEIGHT, SEARCH_WIDTH, TITLEBAR_CONTENT_HEIGHT, TITLEBAR_PADDING};
 
 /// The fixed search entry. It is an ordinary button, not a text field: pressing it opens the
 /// command palette, which owns the only text input in the shell.
@@ -69,7 +69,7 @@ impl RenderOnce for SearchEntry {
             .flex_none()
             .items_center()
             .gap_2()
-            .h(px(TITLEBAR_CONTENT_HEIGHT))
+            .h(px(SEARCH_HEIGHT))
             .w(px(SEARCH_WIDTH))
             .px_2()
             .rounded(radius)
@@ -117,7 +117,7 @@ pub(super) fn titlebar(
     let theme = cx.theme();
     let colors = &theme.colors;
     let (bg, fg) = (colors.bg, colors.fg);
-    let brand_size = theme.text_size(TextSize::Sm);
+    let brand_size = theme.text_size(TextSize::Md);
     // A press that leaves the drag area before releasing cancels the move, as the platform's own
     // caption does; the state is keyed so it survives a repaint during the press.
     let pressed = window.use_keyed_state("githux-titlebar-pressed", cx, |_, _| false);
@@ -130,6 +130,10 @@ pub(super) fn titlebar(
     let background_right = native_width.unwrap_or(0.0);
     #[cfg(not(target_os = "windows"))]
     let background_right = 0.0;
+    #[cfg(target_os = "windows")]
+    let titlebar_height = crate::platform::caption::height(window);
+    #[cfg(not(target_os = "windows"))]
+    let titlebar_height = super::geometry::TITLEBAR_HEIGHT;
     let caption = cfg!(target_os = "windows");
     let controls = caption.then(|| {
         #[cfg(target_os = "windows")]
@@ -156,7 +160,7 @@ pub(super) fn titlebar(
                         .bottom_0()
                         .left_0()
                         .right_0()
-                        .h(px(TITLEBAR_HEIGHT - area.bottom))
+                        .h(px(titlebar_height - area.bottom))
                         .bg(bg)
                 }))
                 .children(native_area.map(|area| {
@@ -178,7 +182,7 @@ pub(super) fn titlebar(
         .relative()
         .flex()
         .flex_none()
-        .h(px(TITLEBAR_HEIGHT))
+        .h(px(titlebar_height))
         .items_start()
         .w_full()
         .text_color(fg)
