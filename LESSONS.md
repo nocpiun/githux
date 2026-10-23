@@ -30,3 +30,17 @@
 - **原因**：`code-check` 在 Windows 运行时，把搜索入口画在 `Platform::Windows` 分支下的外壳在 CI 上看似通过；main 将该检查移到 Ubuntu 后，Linux 上同一选择器消失，14 项外壳测试里 10 项失败。
 - **证据**：2026-10-22 外壳布局 PR #8 同步 main（含 PR #7 的 CI 迁移）时实际发生；修复为所有平台绘制同一条品牌 + 搜索入口、仅窗口按钮保留 `cfg!` 分支，见 [开发日志](docs/devlog/2026-10-22-shell-layout.md#与-main-的-ci-变更组合)。
 - **范围**：任何 `code-check` 会跨平台运行的工程，以及“只有某个平台提供”的能力。先做真实行为归属判断，再决定条件编译。
+
+## L005：取消令牌的“默认未取消”不能靠丢弃 sender 表达
+
+- **规则**：判断“请求是否被取消”时，不要让“所有 sender 被丢弃”等同于“已取消”。用一个长期存活的 keepalive sender，或显式区分 `Closed` 与 `Cancelled`；并给“永不应解析”的路径写一条超时断言测试。
+- **原因**：`CancellationToken::default()` 第一版只保留 `watch::Receiver`，sender 在返回时就被丢弃。`Receiver::changed()` 立即返回 `Err(Closed)`，实现把它当作取消信号，于是**每一个未显式取消的请求都被判成 `Cancelled`**：12 个真实用例全部失败，包括 `GET /user` 登录。这个缺陷在只测“显式 cancel”的用例里完全看不出来。
+- **证据**：2026-10-23 `pat-data-service` 实现中实际发生，`cargo test` 报 `GitHub(Cancelled)`；修复为 token 内持有 `Arc<watch::Sender<bool>>` 保持通道打开，并新增 `default_never_cancels_and_dropped_source_does_not_cancel` 用例（用 `timeout` 断言不解析）。
+- **范围**：任何基于 channel 关闭语义实现取消/关闭状态的异步组件，包括网络层、后台执行器与后续的写队列。测试必须覆盖“没有取消时不会误取消”这一侧，而不只覆盖“取消会生效”。
+
+## L006：模块级 `dead_code` 允许要写在最内层、并写明原因
+
+- **规则**：为“已实现但调用方尚未接入”的模块屏蔽未使用警告时，把 `#![allow(dead_code)]` 放在该模块的 `mod.rs` 顶部并附一句原因，不要放在 crate 根；同时仍要让真正的未使用 import/变量警告保持可见。
+- **原因**：R2 切片先实现 `auth/network/github/data/domain/diagnostics`，UI 任务才接入。crate 级 `#![allow]` 会连同将来真实的死代码、未使用导入一起闭嘴；模块级允许把“尚未接入”这个已知边界限制在明确范围内，接入后直接删掉即可。
+- **证据**：2026-10-23 `pat-data-service` 的模块注释与 allowance；同期用 `cargo clippy -D warnings` 确认其余代码没有隐藏警告。
+- **范围**：分层交付、服务层先于 UI 落地的情形。允许本身不能替代对代码是否真的被调用的判断，也不能用来掩盖本应删除的实现。

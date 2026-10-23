@@ -38,7 +38,9 @@ git diff --check
 
 末尾的 `CI` job 汇总所有上游结果，可在分支规则中将名称为 `CI` 的检查设为 required check。范围判断成功、所需任务均成功、其余任务按规则跳过时通过；失败或意外跳过不能放行。范围及门槛见 [代码约定](docs/code-standards.md#ci-改动范围)。各提交的实际结果见 GitHub Actions，验证边界见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
 
-`cargo test` 使用 GPUI 测试平台渲染实际外壳视图，覆盖启动 Home、缩放时只有仓库组让出高度、侧栏独立滚动、各入口路由与选中态、搜索浮层的打开/过滤/高亮移动/Enter/Esc/组合态 Enter、焦点返回、中文与超长名称保持在列内，以及未设计页面的留空行为。测试平台不经过 Windows 原生输入分发，也不驱动真实的非客户区命中测试，因此不能替代真实窗口验收；本机窗口的拖动、双击最大化、贴靠、搜索入口不误拖动与进程退出已核验，IME 与多 DPI 仍待人工确认，详见 [开发日志](docs/devlog/2026-10-22-shell-layout.md)。
+`cargo test` 有两部分证据。外壳部分使用 GPUI 测试平台渲染实际视图，覆盖启动 Home、缩放时只有仓库组让出高度、侧栏独立滚动、各入口路由与选中态、搜索浮层的打开/过滤/高亮移动/Enter/Esc/组合态 Enter、焦点返回、中文与超长名称保持在列内，以及未设计页面的留空行为；测试平台不经过 Windows 原生输入分发，也不驱动真实的非客户区命中测试，因此不能替代真实窗口验收，本机窗口验收见 [外壳日志](docs/devlog/2026-10-22-shell-layout.md)。
+
+服务层部分覆盖 PAT 身份验证、凭据存取、授权代次、`/user` 与 `/user/repos` 分页/部分结果、限流与超时/取消分类、后台执行器收敛。其中若干用例通过仓库内的最小 localhost HTTP/1.1 mock 服务驱动真实 `reqwest` 客户端并检查实际请求头；不访问 GitHub、不使用真实凭据，唯一真实系统集成是自清理的 Windows Credential Manager 测试项。范围、命令与未覆盖部分（真实 GitHub 联调、HTTPS、重启恢复、UI 接入）见 [认证与网络](docs/auth-and-network.md#9-验证证据)。
 
 ## 依赖与字体
 
@@ -46,6 +48,7 @@ git diff --check
 - `gpui-pre = 0.3.8`、`gpui-pre-platform = 0.3.8`，启用 `font-kit`；Linux 额外启用平台的 `x11` 与 `wayland` 窗口后端。
 - [Ely 上游](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git) 固定 revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，未应用原型的 IME/readonly 补丁。搜索浮层没有复用 Ely 的 `CommandPalette`（它在任何 Enter 上运行高亮行），改用自绘卡片并在按键绑定前拦截 Enter、检查查询框的 marked 区间；未来引入只读编辑器时仍先重现相关问题再决定补丁。
 - UI 默认 Noto Sans，代码默认 Google Sans Code。固定官方字体文件与许可证见 [字体来源](assets/fonts/README.md)，编译进 binary。中文回退、复杂排版和 IME 尚未验收。
+- 网络与服务层：`reqwest = 0.13.5`（`default-features = false`，启用 `native-tls`、`http2`、`charset`、`system-proxy`）与 `tokio`（`rt`/`sync`/`time`/`macros`/`net`）；另有 `serde`/`serde_json`/`thiserror`。选型理由、取消与关闭模型见 [认证与网络](docs/auth-and-network.md#4-网络与执行模型)。
 
 ## 源码目录
 

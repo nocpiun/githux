@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-10-22。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package，当前实现 R1 的外壳布局（自定义标题栏、固定侧边栏、island、本地导航与搜索浮层），仍无登录、网络、数据库与业务页面；业务职责仍是扩展边界，不代表功能已实现。
+更新：2026-10-23。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package；UI 侧仍是 R1 的外壳布局（自定义标题栏、固定侧边栏、island、本地导航与搜索浮层），没有登录页面、账户切换界面或业务页面。R2 的服务切片已实现但**尚未接入 UI**：认证、凭据、账户代次与两个 GitHub 读取接口真实存在，具体接口与边界见 [认证与网络](auth-and-network.md)。数据库、缓存与私有内容保留政策仍未定。
 
 ## 建议的职责划分
 
@@ -36,7 +36,9 @@ flowchart LR
 
 请求开始时固定 host、稳定账户 ID 与授权代次。返回时先校验数据上下文，再更新缓存；通知页面时再核对 `TabId` 和当前资源。切账户、关标签、切分支后，旧响应不得覆盖新视图。写入/失效推进资源代次，防止早发晚到的读取盖掉新值。关闭一个页面不取消其他订阅仍需要的请求。
 
-建议 UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 执行器天然等于 Tokio。reqwest/Tokio、SQLite/rusqlite 和具体凭据库仍是候选，桥接、取消、关闭应用和平台支持需要最小实验。
+UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 执行器天然等于 Tokio。**已实现并验证的最小切片**：`network::BackgroundExecutor` 在独立线程上运行 Tokio current-thread runtime，`reqwest` 只在该 runtime 上执行，取消用 watch token，关闭时先拒绝新工作、宽限期内排空再取消；SQLite 与具体缓存参数仍是候选。实现与证据见 [认证与网络](auth-and-network.md#4-网络与执行模型)。
+
+账户与授权的实现状态：`domain::AccountKey`（host + 数字 id）是稳定隔离身份，`login` 仅显示；`auth::AuthEpoch` 在替换 PAT 或移除账户时推进，数据层在请求前捕获 `AuthContext` 并在返回时比对，不一致返回 `StaleContext` 且丢弃结果。凭据只经 `auth::CredentialStore` 进入 Windows Credential Manager，其他平台明确不支持且无明文回退；普通账户记录只持有 `CredentialRef`。GitHub 读取已实现 `GET /user` 与 `GET /user/repos`（完整 `Link` 分页、`Complete`/`Partial` 区分、SSO 部分结果、401/403/限流/超时/取消/解析失败分类），写权限只有 `Unknown` 占位。
 
 ## 认证与外部边界
 
@@ -63,7 +65,7 @@ flowchart LR
 
 外壳按职责拆开，避免所有布局挤在一个视图里：`src/ui/chrome.rs` 画标题栏与搜索入口，`src/ui/sidebar.rs` 画固定列与有界的仓库组，`src/ui/page.rs` 画岛内页面，`src/ui/palette.rs` 是本地导航浮层，`src/ui/geometry.rs` 集中放间距、宽度与圆角，`src/ui/fixtures.rs` 是确定性的本地面板数据。标题栏在所有平台绘制同一条品牌 + 搜索入口，只有 Windows 的三个窗口按钮由 `cfg!(target_os = "windows")` 控制；已确认行为（搜索入口固定在标题栏）不能挂在平台分支上。窗口拖动、双击最大化和边缘缩放使用 GPUI 的 `WindowControlArea` / `start_window_move`，由平台上已有的非客户区命中测试驱动，没有新增平台补丁。
 
-`workspace/domain/auth/data/github/network/storage/content/diagnostics` 各有 Rust 模块与简短边界说明，尚无业务实现，HTTP 和数据库库仍未选择；PAT 认证方向已确认，尚未接入。现有依赖中出现的相关库是框架传递依赖，不代表 Githux 业务已采用它们。请求与状态约束仍用于后续实现。
+`storage/content` 仍是边界说明，无业务实现。`domain/auth/network/github/data/diagnostics` 已有本切片的真实实现（见 [认证与网络](auth-and-network.md)），但**UI 与 app 入口尚未调用**，binary 里这些模块暂时是未使用代码，各自带一个写明原因的模块级 `dead_code` 允许，不是 crate 级屏蔽；接入 UI 后应移除。HTTP 与运行时已选定 `reqwest` + `tokio`（理由见同文）；数据库仍未选择。现有依赖中曾出现的相关库是框架传递依赖，不作为采用依据。
 
 本轮状态归属：窗口只有一个活动页，`Workspace` 只保存当前 `Route`；`TabId`、页面会话集合与各自的分支/文件/滚动/焦点状态仍属于下一份 R1 任务。`Shell` 的滚动、浮层与焦点是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。
 
