@@ -332,14 +332,19 @@ impl RepoService {
 
         // Bound simultaneous GitHub reads through the executor's shared
         // semaphore so a burst of pages/accounts cannot open unbounded sockets.
-        let _permit = self
-            .executor
-            .semaphore()
-            .acquire_owned()
-            .await
-            .map_err(|_| GitHubError::CredentialStore {
-                message: "request scheduler closed".to_string(),
-            })?;
+        //
+        // Waiting for a permit races against cancellation: if every permit is
+        // taken, a cancelled read must stop queuing immediately instead of
+        // waiting through an unrelated request's full timeout and redirect chain
+        // before the transport finally notices the cancelled token.
+        let _permit = tokio::select! {
+            permit = self.executor.semaphore().acquire_owned() => {
+                permit.map_err(|_| GitHubError::CredentialStore {
+                    message: "request scheduler closed".to_string(),
+                })?
+            }
+            _ = cancel.clone().cancelled() => return Err(GitHubError::Cancelled),
+        };
 
         let result = fetch_user_repos(&self.client, &token, cancel).await;
 
@@ -1038,6 +1043,56 @@ mod tests {
         ));
     }
 
+    /// Regression: cancelling a read that is *waiting for a concurrency permit*
+    /// must return promptly instead of waiting for the in-flight request to
+    /// release the semaphore.
+    #[tokio::test]
+    async fn cancelling_a_queued_read_returns_without_waiting_for_a_permit() {
+        let store = Arc::new(InMemoryCredentialStore::new()) as Arc<dyn CredentialStore>;
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: user_body(401, "dev"),
+        }))
+        .await;
+
+        // A 1-permit executor: the first read holds the only permit.
+        let client = Arc::new(GitHubClient::new(GitHubConfig::default(), mock.clone()));
+        let exec = Arc::new(BackgroundExecutor::new(1));
+        let svc = AccountService::new(store, client, exec.clone());
+        svc.login(Pat::from_str("ghp_q")).await.expect("login");
+        let repo_svc = Arc::new(svc.repo_service());
+
+        // Occupy the only permit for a while.
+        let hold = exec.semaphore().acquire_owned().await.expect("permit");
+
+        let (cancel, source) = CancellationToken::new();
+        let queued = {
+            let repo_svc = repo_svc.clone();
+            tokio::spawn(async move { repo_svc.list_repos_cancellable(cancel).await })
+        };
+
+        // Give the queued read time to reach (and block on) the semaphore.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(
+            !queued.is_finished(),
+            "read should be queued on the semaphore"
+        );
+
+        source.cancel();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+            .await
+            .expect("a cancelled queued read must not wait for the permit")
+            .expect("join");
+        assert!(
+            matches!(outcome, Err(GitHubError::Cancelled)),
+            "expected Cancelled, got {outcome:?}"
+        );
+        drop(hold);
+    }
+
     /// A response that arrives after the active account was replaced must be
     /// discarded, not written into the new account's data.
     ///
@@ -1187,14 +1242,8 @@ mod tests {
             body: user_body(800, "dev"),
         }))
         .await;
-        // First repos read (will be cancelled before its response is consumed).
-        mock.enqueue(Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: repos_body(&[1]),
-        }))
-        .await;
-        // Second repos read (independent, must succeed).
+        // The cancelled read returns before it reaches the transport, so it
+        // consumes no scripted response. Only the independent read is served.
         mock.enqueue(Ok(HttpResponse {
             status: 200,
             headers: vec![],

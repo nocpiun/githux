@@ -77,6 +77,7 @@ executor.shutdown(); // 停止接收、宽限期内排空、否则取消并 join
 - `CancellationToken` 基于 `watch`，自带 keepalive，**丢弃 source 不等于取消**；只有显式 `cancel()` 才触发。已取消的 token 在传输层直接返回 `Cancelled`，不建连接。
 - 关闭：`shutdown()` 先拒绝新工作，然后**继续驱动 runtime** 直到被跟踪的任务全部完成或宽限期（默认 5s，可用 `set_grace` 覆盖）到期，之后才开始 runtime 关闭。这一步很关键：直接调用 `Runtime::shutdown_timeout` 并不是宽限期——Tokio 文档明确说明 shutdown 开始后，spawned task 只在让出之前继续运行、一旦 yield 就被丢弃，所以先 `shutdown_timeout` 会立刻杀掉在途请求而不是给它收尾机会。
 - 只有经 `BackgroundExecutorHandle::spawn` 派发的任务会被计数并纳入排空；`raw_handle()` / `handle.raw()` 提供未经跟踪的原始 `Handle` 给不得不自行 spawn 的代码，这类任务不享受宽限。
+- `spawn` 在关闭开始后返回 `SpawnError`。接受标志与 owner 共享，因此存活到关闭之后的 handle 不会再把任务投递给正在销毁的 runtime（`spawn_is_rejected_after_shutdown_begins`）。
 - **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 - **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 
@@ -86,7 +87,13 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 
 信任要求 scheme、host **和 port** 都一致（端口缺失时用该 scheme 的默认端口比较）：`https://api.github.com:8443/user`、`HTTP` 降级、`//api.github.com/user`、`ftp://…` 都不受信。回归测试为 `github::client::tests::path_content_does_not_make_a_host_trusted` 与 `localhost_mock_is_trusted_only_on_the_configured_origin`（含反斜杠、查询串、`@`、不同端口等用例）。
 
-`ReqwestTransport` 的取消覆盖**整个请求生命周期**：`tokio::select!` 同时作用于 header 阶段和 body 读取阶段，因此大响应或停滞响应在取消后不会继续读到请求超时。回归测试为 `network::transport::tests::cancellation_stops_a_stalled_body_read`。
+`ReqwestTransport` 的取消与超时覆盖**整个请求生命周期**：
+
+- header 阶段和 body 读取阶段都在 `tokio::select!` 里与取消竞争，因此大响应或停滞响应在取消后不会继续读到请求超时（`cancellation_stops_a_stalled_body_read`）。
+- **body 阶段的超时同样是 `Timeout` 而不是网络错误**，并且两个阶段都报告**实际配置的**时长（向上取整，所以 600ms 报 1s 而不是 0s），避免 UI/重试文案出现“0 秒超时”（`body_phase_timeout_is_typed_and_reports_the_configured_duration`、`timeout_is_classified`）。
+- 等待并发信号量许可时也参与取消竞争：所有许可被占时，已取消的读取立即返回 `Cancelled`，不会排队等到别的请求走完整个超时与重定向链（`data::tests::cancelling_a_queued_read_returns_without_waiting_for_a_permit`）。
+
+`HttpRequest` 的 `Debug` 是手写的，会脱敏 `Authorization`/`Proxy-Authorization`/`Cookie`（`request_debug_redacts_credentials`）。Authorization 在请求里是普通头字符串，派生 `Debug` 会绕过 `Pat` 的脱敏把 token 打进日志或 panic 信息。
 
 **重定向的 origin 判定同样使用 `reqwest::Url`**，且 `Location` 用标准的 URL join 解析：`https://evil.example\@api.github.com/steal` 在 WHATWG 规则下宿主是 `evil.example`（反斜杠是特殊 scheme 的路径分隔符），手写解析器会误判为 `api.github.com` 并把 Authorization 重新发给外域。回归测试为 `network::transport::tests::origin_comparison_uses_reqwest_url_semantics` 与 `redirect_with_backslash_does_not_forward_credentials`（后者用真实 socket 确认攻击目标从未被连接）。
 
@@ -256,6 +263,10 @@ git diff --check
 | A→B→A 切换使旧响应过期 | `auth::tests::switching_away_and_back_invalidates_in_flight_context` | selection 代次 |
 | 移除与替换互斥 | `data::tests::removal_is_serialized_with_replacement` | 多线程 + 重叠检测 store |
 | 组织 scope 不接受 profile-only | `auth::capability::tests::organization_read_does_not_accept_profile_only_scope` | 仅 `read:org` |
+| body 阶段超时保持类型化并报告配置时长 | `network::transport::tests::body_phase_timeout_is_typed_and_reports_the_configured_duration` | 1s 配置 → `Timeout{seconds:1}` |
+| 排队等许可时可被取消 | `data::tests::cancelling_a_queued_read_returns_without_waiting_for_a_permit` | 单许可 executor |
+| 关闭后拒绝 spawn | `network::executor::tests::spawn_is_rejected_after_shutdown_begins` | 存活 handle |
+| 请求 Debug 脱敏凭据 | `network::transport::tests::request_debug_redacts_credentials` | Authorization/Cookie |
 | 多账户与代次 | `auth::tests` | |
 | 最小 scope 建议 | `auth::capability::tests` | 不含管理 scope |
 

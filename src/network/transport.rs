@@ -16,11 +16,45 @@ pub enum HttpMethod {
 
 /// A prepared outbound request. Headers are owned strings; the GitHub layer is
 /// responsible for injecting Authorization only for trusted hosts.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written and redacts credential-bearing headers. The
+/// `Authorization` value is stored as a plain header string, so the redaction in
+/// [`crate::auth::token::Pat`] alone would not stop it leaking through a derived
+/// `Debug` in a log line, panic message or test assertion.
+#[derive(Clone)]
 pub struct HttpRequest {
     pub method: HttpMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
+}
+
+/// Headers whose values must never appear in diagnostics.
+const SENSITIVE_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+
+fn redact_header_value(name: &str, value: &str) -> String {
+    if SENSITIVE_HEADERS
+        .iter()
+        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+    {
+        "<redacted>".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, String)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), redact_header_value(name, value)))
+            .collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .finish()
+    }
 }
 
 impl HttpRequest {
@@ -85,8 +119,10 @@ impl HttpResponse {
 pub enum TransportError {
     #[error("network error: {message}")]
     Network { message: String },
-    #[error("request timed out")]
-    Timeout,
+    /// The request exceeded the configured timeout. Carries the duration that
+    /// was actually configured so callers/UI do not have to report "0s".
+    #[error("request timed out after {seconds}s")]
+    Timeout { seconds: u32 },
     #[error("request cancelled")]
     Cancelled,
 }
@@ -137,6 +173,19 @@ impl ReqwestTransport {
     }
 }
 
+impl ReqwestTransport {
+    /// The configured timeout expressed in whole seconds, rounded **up**.
+    ///
+    /// Rounding up guarantees a configured timeout never surfaces as `0s`: a
+    /// 600 ms timeout reports 1 s rather than claiming the request timed out
+    /// "after 0s".
+    fn timeout_seconds(&self) -> u32 {
+        let millis = self.timeout.as_millis();
+        let seconds = millis.div_ceil(1000);
+        u32::try_from(seconds).unwrap_or(u32::MAX)
+    }
+}
+
 impl Transport for ReqwestTransport {
     fn execute<'a>(
         &'a self,
@@ -171,7 +220,9 @@ impl Transport for ReqwestTransport {
                         if cancel.is_cancelled() {
                             TransportError::Cancelled
                         } else if e.is_timeout() {
-                            TransportError::Timeout
+                            TransportError::Timeout {
+                                seconds: self.timeout_seconds(),
+                            }
                         } else {
                             TransportError::Network { message: e.to_string() }
                         }
@@ -227,6 +278,13 @@ impl Transport for ReqwestTransport {
                     body = response.text() => body.map_err(|e| {
                         if cancel.is_cancelled() {
                             TransportError::Cancelled
+                        } else if e.is_timeout() {
+                            // Body-phase timeouts must stay typed: the header
+                            // phase already reports `Timeout`, and callers must
+                            // not see a body stall as a generic network error.
+                            TransportError::Timeout {
+                                seconds: self.timeout_seconds(),
+                            }
                         } else {
                             TransportError::Network { message: e.to_string() }
                         }
@@ -350,15 +408,25 @@ impl Transport for MockTransport {
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
+            // Deterministic: an already-cancelled request fails without
+            // consuming a scripted response, matching the real transport (which
+            // returns before opening a connection). This also keeps scripted
+            // response ordering stable across runs.
+            if cancel.is_cancelled() {
+                self.recorded.lock().await.push(request);
+                return Err(TransportError::Cancelled);
+            }
+
             self.recorded.lock().await.push(request.clone());
             let programmed = self.next_response_fifo().await;
             tokio::select! {
+                biased;
                 _ = cancel.clone().cancelled() => Err(TransportError::Cancelled),
                 _ = tokio::time::sleep(Duration::from_millis(0)) => {
                     match programmed {
                         None => Err(TransportError::Network { message: "no mock response queued".to_string() }),
                         Some(Ok(resp)) => Ok(resp),
-                        Some(Err(MockFailure::Timeout)) => Err(TransportError::Timeout),
+                        Some(Err(MockFailure::Timeout)) => Err(TransportError::Timeout { seconds: 0 }),
                         Some(Err(MockFailure::Network(m))) => Err(TransportError::Network { message: m }),
                     }
                 }
@@ -447,6 +515,31 @@ mod tests {
             recorded[0].header("accept"),
             Some("application/vnd.github+json")
         );
+    }
+
+    /// Regression: `HttpRequest`'s Debug must redact credential headers. The
+    /// Authorization value is a plain header string, so a derived Debug would
+    /// print the PAT in logs, panics and test assertions.
+    #[test]
+    fn request_debug_redacts_credentials() {
+        let request = HttpRequest::get("https://api.github.com/user")
+            .with_header("Authorization", "Bearer ghp_debug_leak_canary")
+            .with_header("User-Agent", "githux/test")
+            .with_header("Cookie", "session=secret-cookie-value");
+
+        let rendered = format!("{request:?}");
+        assert!(
+            !rendered.contains("ghp_debug_leak_canary"),
+            "Debug must not print the Authorization value: {rendered}"
+        );
+        assert!(
+            !rendered.contains("secret-cookie-value"),
+            "Debug must not print cookie values: {rendered}"
+        );
+        // Non-sensitive headers stay visible for debugging.
+        assert!(rendered.contains("githux/test"));
+        assert!(rendered.contains("api.github.com"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     /// Real socket round-trip: a same-origin redirect is followed and the
@@ -687,18 +780,71 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let handle = std::thread::spawn(move || {
             let _keep = listener.accept();
-            std::thread::sleep(Duration::from_millis(500));
+            // Hold the connection well past the client timeout so the failure is
+            // a timeout rather than a dropped connection.
+            std::thread::sleep(Duration::from_secs(3));
         });
 
-        let transport = ReqwestTransport::new(Duration::from_millis(60)).expect("client");
+        let transport = ReqwestTransport::new(Duration::from_millis(600)).expect("client");
         let response = transport
             .execute(
                 HttpRequest::get(format!("http://{addr}/user")),
                 CancellationToken::default(),
             )
             .await;
-        assert_eq!(response, Err(TransportError::Timeout));
+        assert_eq!(
+            response,
+            Err(TransportError::Timeout { seconds: 1 }),
+            "a 600ms timeout must be reported as at least 1s, never 0s"
+        );
         let _ = handle.join();
+    }
+
+    /// Regression: a timeout that expires while reading the body must stay a
+    /// typed `Timeout`, and must report the **configured** duration rather than
+    /// zero.
+    #[tokio::test]
+    async fn body_phase_timeout_is_typed_and_reports_the_configured_duration() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
+                loop {
+                    let mut line = String::new();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let done = line == "\r\n" || line == "\n";
+                    if done {
+                        break;
+                    }
+                }
+                // Headers promise a body, then the body stalls forever.
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n[",
+                );
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+
+        // 1 second so the reported value is a real, non-zero duration.
+        let transport = ReqwestTransport::new(Duration::from_secs(1)).expect("client");
+        let outcome = transport
+            .execute(
+                HttpRequest::get(format!("http://{addr}/user")),
+                CancellationToken::default(),
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            Err(TransportError::Timeout { seconds: 1 }),
+            "body-phase timeout must be Timeout with the configured duration"
+        );
+        drop(handle);
     }
 
     /// Regression: cancelling after the headers arrive but *while the body is

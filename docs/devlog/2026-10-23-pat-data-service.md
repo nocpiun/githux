@@ -36,7 +36,7 @@
 cargo fmt --all -- --check                  # 通过
 cargo check --locked --all-targets          # 通过
 cargo clippy --locked --all-targets -- -D warnings   # 通过，无警告
-cargo test --locked                         # 133 passed / 0 failed（110 → 122 → 125 → 133）
+cargo test --locked                         # 137 passed / 0 failed（110 → 122 → 125 → 133 → 137）
 cargo build --locked                        # 通过
 git diff --check                            # 通过
 ```
@@ -89,6 +89,20 @@ Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属
 | P2 组织 scope 把 `user` 当替代 | `user` 只覆盖 profile，仅带 `user` 的 token 拿不到组织成员/项目/团队数据，等于给出错误的最小权限建议 | 组织读取只接受 `read:org`，文案明确 `user` 不能替代 |
 
 新增 8 个回归测试。其中三处做了反向验证（去掉修复后测试必须失败）：重定向 origin 比较（旧手写解析器在 `https://api.github.com:443/login` 上就失败）、`remove`/`replace` 串行化（去掉锁稳定报告 overlap）、以及执行器排空（多次 yield 的短任务能跑完、超出宽限的长任务被丢弃且 shutdown 不等待）。
+
+## 第四轮审查的 5 个新缺陷与修复
+
+第四轮（head `c3d097b`）确认前三轮意见已解决，新提 5 条，全部成立（均为 P2 级细节）：
+
+| 意见 | 实际缺陷 | 修复 |
+| --- | --- | --- |
+| body 阶段超时被降级为网络错误 | `response.text()` 的错误分支把所有非取消错误都转成 `Network`，body 停滞超时时调用方拿不到 `Timeout` | body 分支也检查 `e.is_timeout()` 并保持 `Timeout` |
+| 超时永远报告 0 秒 | `classify_transport` 把 `TransportError::Timeout`（单元变体）固定映射成 `seconds: 0`，而实际配置是 30s | `TransportError::Timeout` 携带配置时长；向上取整到整秒，600ms 报 1s 而不是 0s |
+| 等并发许可时不可取消 | `acquire_owned().await` 不参与取消竞争，许可耗尽时已取消的读取会一直排队 | `tokio::select!` 让许可获取也参与取消 |
+| 关闭后仍接受 spawn | `BackgroundExecutorHandle::spawn` 不检查 `accepting`，存活到关闭后的 handle 会把任务投给正在销毁的 runtime | 共享接受标志，关闭后 `spawn` 返回 `SpawnError` |
+| `HttpRequest` 的 Debug 泄露凭据 | 派生 `Debug` 会把 `Authorization: Bearer <PAT>` 原样打印，绕过 `Pat` 的脱敏 | 手写 `Debug`，脱敏 Authorization / Proxy-Authorization / Cookie |
+
+新增 5 个回归测试。另外发现并修掉一个测试基础设施缺陷：`MockTransport` 在已取消时仍会消费一个脚本响应，导致 `cancelling_one_read_does_not_affect_another` 在并行负载下偶发失败；改为“已取消则不消耗脚本响应 + `select! biased`”，与真实 transport 的行为一致，之后连续 8 次全量运行稳定通过。
 
 ## 验证边界（不得省略）
 

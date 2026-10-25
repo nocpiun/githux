@@ -6,7 +6,7 @@ use crate::network::transport::{HttpResponse, RateLimitHeaders, TransportError};
 /// Convert a transport-layer error into a typed GitHub error.
 pub fn classify_transport(err: TransportError) -> GitHubError {
     match err {
-        TransportError::Timeout => GitHubError::Timeout { seconds: 0 },
+        TransportError::Timeout { seconds } => GitHubError::Timeout { seconds },
         TransportError::Cancelled => GitHubError::Cancelled,
         TransportError::Network { message } => GitHubError::Network { message },
     }
@@ -183,8 +183,8 @@ mod tests {
     #[test]
     fn transport_errors_map_to_typed_errors() {
         assert_eq!(
-            classify_transport(TransportError::Timeout),
-            GitHubError::Timeout { seconds: 0 }
+            classify_transport(TransportError::Timeout { seconds: 30 }),
+            GitHubError::Timeout { seconds: 30 }
         );
         assert_eq!(
             classify_transport(TransportError::Cancelled),

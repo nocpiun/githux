@@ -42,30 +42,47 @@ thread_local! {
 /// Monotonic id source used to give each network thread a distinct name.
 static NEXT_EXECUTOR_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Error returned when spawning on an executor whose shutdown has begun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("background executor is shutting down; refusing to spawn")]
+pub struct SpawnError;
+
 /// Cloneable handle that spawns tracked tasks onto the background runtime.
 #[derive(Clone)]
 pub struct BackgroundExecutorHandle {
     handle: Handle,
     in_flight: Arc<AtomicUsize>,
+    accepting: Arc<AtomicBool>,
 }
 
 impl BackgroundExecutorHandle {
     /// Spawn a task and count it as in-flight until it finishes.
     ///
-    /// The returned `JoinHandle` resolves when the task completes; dropping it
-    /// detaches the task (which still counts until it finishes).
-    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    /// Returns [`SpawnError`] if shutdown has already begun. The acceptance flag
+    /// is shared with the owner, so a handle that races with (or outlives)
+    /// shutdown cannot add work after the drain loop has observed zero in-flight
+    /// tasks — that would hand a task to a runtime already being destroyed.
+    pub fn spawn<F>(&self, future: F) -> Result<tokio::task::JoinHandle<F::Output>, SpawnError>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(SpawnError);
+        }
+        // Count before releasing the check so the drain loop cannot observe zero
+        // in between. A shutdown racing past the check above and this increment
+        // is still safe: once shutdown begins the drain loop waits for the
+        // counter to fall back to zero, so this task is either drained or the
+        // runtime outlives it.
         self.in_flight.fetch_add(1, Ordering::Release);
         let in_flight = self.in_flight.clone();
-        self.handle.spawn(async move {
+        let handle = self.handle.spawn(async move {
             // Decrement even if the task panics or is cancelled.
             let _guard = InFlightGuard { in_flight };
             future.await
-        })
+        });
+        Ok(handle)
     }
 
     /// Raw Tokio handle for untracked spawning.
@@ -173,6 +190,7 @@ impl BackgroundExecutor {
         BackgroundExecutorHandle {
             handle: self.handle.clone(),
             in_flight: self.in_flight.clone(),
+            accepting: self.accepting.clone(),
         }
     }
 
@@ -265,7 +283,8 @@ mod tests {
         let exec = BackgroundExecutor::new(4);
         let handle = exec.handle();
         let rt = host_runtime();
-        let result = rt.block_on(async move { handle.spawn(async { 42 }).await });
+        let result =
+            rt.block_on(async move { handle.spawn(async { 42 }).expect("spawn accepted").await });
         assert_eq!(result.expect("task ok"), 42);
         exec.shutdown();
     }
@@ -275,11 +294,13 @@ mod tests {
         let exec = BackgroundExecutor::new(4);
         let handle = exec.handle();
         let rt = host_runtime();
-        let join = handle.spawn(async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            "slow-independent"
-        });
-        let fast = rt.block_on(async { handle.spawn(async { "fast" }).await });
+        let join = handle
+            .spawn(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                "slow-independent"
+            })
+            .expect("spawn accepted");
+        let fast = rt.block_on(async { handle.spawn(async { "fast" }).expect("spawn").await });
         assert_eq!(fast.expect("fast ok"), "fast");
         let slow = rt.block_on(join);
         assert_eq!(slow.expect("slow ok"), "slow-independent");
@@ -299,14 +320,16 @@ mod tests {
                 let semaphore = semaphore.clone();
                 let peak = peak.clone();
                 let current = current.clone();
-                exec.handle().spawn(async move {
-                    let _permit = semaphore.acquire_owned().await.expect("permit");
-                    let now = current.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                    current.fetch_sub(1, Ordering::SeqCst);
-                    1
-                })
+                exec.handle()
+                    .spawn(async move {
+                        let _permit = semaphore.acquire_owned().await.expect("permit");
+                        let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        current.fetch_sub(1, Ordering::SeqCst);
+                        1
+                    })
+                    .expect("spawn accepted")
             })
             .collect();
 
@@ -332,19 +355,23 @@ mod tests {
         // A long-running task that would only end after the grace window.
         let completed = Arc::new(AtomicBool::new(false));
         let flag = completed.clone();
-        let _detached = handle.spawn(async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            flag.store(true, Ordering::SeqCst);
-            1
-        });
+        let _detached = handle
+            .spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                flag.store(true, Ordering::SeqCst);
+                1
+            })
+            .expect("spawn accepted");
 
         // A short task that must still finish inside the grace window.
         let short_done = Arc::new(AtomicBool::new(false));
         let short_flag = short_done.clone();
-        let _short = handle.spawn(async move {
-            short_flag.store(true, Ordering::SeqCst);
-            2
-        });
+        let _short = handle
+            .spawn(async move {
+                short_flag.store(true, Ordering::SeqCst);
+                2
+            })
+            .expect("spawn accepted");
 
         // Let the runtime poll both tasks once so they are genuinely running
         // before shutdown (avoids a race where shutdown fires first).
@@ -381,13 +408,15 @@ mod tests {
         let flag = finished.clone();
         // Sleeps several times (yields repeatedly) and then completes. With
         // `shutdown_timeout` semantics this would be dropped at the first yield.
-        let _task = handle.spawn(async move {
-            for _ in 0..8 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            flag.store(true, Ordering::SeqCst);
-            7
-        });
+        let _task = handle
+            .spawn(async move {
+                for _ in 0..8 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                flag.store(true, Ordering::SeqCst);
+                7
+            })
+            .expect("spawn accepted");
 
         // Let it start.
         std::thread::sleep(Duration::from_millis(30));
@@ -409,11 +438,13 @@ mod tests {
 
         let finished = Arc::new(AtomicBool::new(false));
         let flag = finished.clone();
-        let _task = handle.spawn(async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            flag.store(true, Ordering::SeqCst);
-            1
-        });
+        let _task = handle
+            .spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                flag.store(true, Ordering::SeqCst);
+                1
+            })
+            .expect("spawn accepted");
 
         std::thread::sleep(Duration::from_millis(30));
         let started = std::time::Instant::now();
@@ -442,11 +473,13 @@ mod tests {
         // Move the last strong reference into the task; when this task finishes
         // it runs on the network thread and drops the executor there.
         let exec_for_task = exec.clone();
-        let _spawned = handle.spawn(async move {
-            drop(exec_for_task);
-            let _ = done_tx.send(());
-            1
-        });
+        let _spawned = handle
+            .spawn(async move {
+                drop(exec_for_task);
+                let _ = done_tx.send(());
+                1
+            })
+            .expect("spawn accepted");
         drop(exec);
 
         // The task must complete, and the executor must be fully dropped.
@@ -464,6 +497,28 @@ mod tests {
         assert!(
             weak.upgrade().is_none(),
             "executor should be dropped after the self-drop shutdown"
+        );
+    }
+
+    /// Regression: a handle that outlives (or races with) shutdown must be
+    /// rejected instead of submitting work to a runtime that is being destroyed.
+    #[test]
+    fn spawn_is_rejected_after_shutdown_begins() {
+        let exec = BackgroundExecutor::new(1);
+        let handle = exec.handle();
+        // A clone kept by a caller that outlives the owner's shutdown call.
+        let stale_handle = handle.clone();
+
+        // Before shutdown, spawning works.
+        assert!(handle.spawn(async { 1 }).is_ok());
+
+        exec.shutdown();
+
+        // After shutdown begins, the retained handle must refuse.
+        let rejected = stale_handle.spawn(async { 2 });
+        assert!(
+            matches!(rejected, Err(SpawnError)),
+            "spawn after shutdown must be rejected"
         );
     }
 
