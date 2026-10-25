@@ -1714,10 +1714,11 @@ fn dragging_a_tab_reorders_it_without_touching_its_state(cx: &mut TestAppContext
         shell.drag_tab(a, window, cx);
         shell.drag_tab_to(a, gpui::point(row.right() - px(2.0), start.y), window, cx);
     });
-    // The slot is "after the last tab"; `Workspace::reorder` clamps it to the last index.
+    // After converting the insertion slot to an index in the collection with A removed, the drop
+    // lands on the last index.
     assert_eq!(
         view.read_with(cx, |shell, _| shell.tab_drag_target()),
-        Some(4),
+        Some(3),
         "dropping past the last tab asks for the end"
     );
     view.update(cx, |shell, cx| {
@@ -2028,4 +2029,108 @@ fn the_drop_marker_does_not_shift_any_tab(cx: &mut TestAppContext) {
     cx.update_window_entity(&view, |shell, window, cx| {
         shell.cancel_tab_drag(window, cx);
     });
+}
+
+/// A rightward drop into an interior gap lands between those two tabs, not past the next one.
+#[gpui::test]
+fn a_rightward_drop_lands_between_the_tabs_the_marker_names(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-2", cx);
+    let c = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    // Drag A (index 1) into the gap after B (index 2): the landing index must be 2 after removing A.
+    let row = bounds("tab-scroll", cx);
+    let between_b_and_c = gpui::point(
+        bounds("tab-2", cx).right() + px(super::geometry::TAB_GAP / 2.0),
+        row.center().y,
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(a, window, cx);
+        shell.drag_tab_to(a, between_b_and_c, window, cx);
+    });
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_target()),
+        Some(2)
+    );
+    view.update(cx, |shell, cx| {
+        shell.drop_dragged_tab(a, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b, a, c],
+        "A lands between B and C"
+    );
+
+    // And back to its original place, between Home and B.
+    let row = bounds("tab-scroll", cx);
+    let before_b = gpui::point(bounds("tab-1", cx).left() - px(1.0), row.center().y);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(a, window, cx);
+        shell.drag_tab_to(a, before_b, window, cx);
+    });
+    view.update(cx, |shell, cx| {
+        shell.drop_dragged_tab(a, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, a, b, c]
+    );
+}
+
+/// Holding the pointer still in an edge zone keeps scrolling, instead of advancing only on
+/// mouse-move events.
+#[gpui::test]
+fn edge_scrolling_continues_while_the_pointer_is_stationary(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    view.update(cx, |shell, _| {
+        let offset = shell.tab_scroll_offset();
+        shell.scroll_tabs_by(-offset.x);
+    });
+    pump(cx);
+    let first = view.read_with(cx, |shell, _| shell.tab_ids()[1]);
+    let row = bounds("tab-scroll", cx);
+    let grab = bounds("tab-1", cx).center();
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(first, window, cx);
+        shell.drag_tab_to(
+            first,
+            gpui::point(row.right() - px(4.0), grab.y),
+            window,
+            cx,
+        );
+    });
+    let first_step = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    // No further mouse events: rendering alone advances the auto-scroll.
+    pump(cx);
+    pump(cx);
+    let later = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    assert!(
+        later.x < first_step.x,
+        "a stationary pointer keeps the row scrolling: {first_step:?} -> {later:?}"
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.cancel_tab_drag(window, cx);
+    });
+    pump(cx);
+    let stopped = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    pump(cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()),
+        stopped,
+        "releasing the drag stops the auto-scroll"
+    );
 }

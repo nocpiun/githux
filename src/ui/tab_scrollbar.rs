@@ -15,10 +15,14 @@
 
 use ely_gpui_component::theme::ActiveTheme;
 use gpui::{
-    AnyElement, App, EmptyView, IntoElement, ScrollHandle, Styled, div, point, prelude::*, px,
+    AnyElement, App, EmptyView, IntoElement, ScrollHandle, Styled, Window, div, point, prelude::*,
+    px,
 };
 
 use super::geometry::{TAB_SCROLLBAR_FADE_MS, TAB_SCROLLBAR_THICKNESS};
+
+/// A callback that reports whether a thumb drag is in progress.
+pub type OnDragging = std::rc::Rc<dyn Fn(bool, &mut Window, &mut App) + 'static>;
 
 /// The strip's scrollbar visibility state. Owned by the shell so it survives a frame; the opacity
 /// it last painted is what a reversal continues from.
@@ -131,6 +135,7 @@ pub fn render(
     opacity: f32,
     owner: gpui::EntityId,
     min_thumb: f32,
+    on_dragging: OnDragging,
     cx: &mut App,
 ) -> AnyElement {
     if opacity <= 0.0 {
@@ -172,8 +177,14 @@ pub fn render(
                 .rounded_full()
                 .bg(idle)
                 .hover(move |style| style.bg(busy))
-                .on_drag(ThumbDrag::new(owner, start), |_, _, _, cx| {
-                    cx.new(|_| EmptyView)
+                .on_drag(ThumbDrag::new(owner, start), {
+                    let on_dragging = on_dragging.clone();
+                    move |_, _, window, cx| {
+                        // A thumb drag pins the bar on, so leaving the strip mid-drag cannot fade
+                        // the thumb (and its handler) out of the tree.
+                        on_dragging(true, window, cx);
+                        cx.new(|_| EmptyView)
+                    }
                 }),
         )
         .on_drag_move(move |event: &gpui::DragMoveEvent<ThumbDrag>, window, cx| {

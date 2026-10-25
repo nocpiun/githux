@@ -86,13 +86,18 @@ pub struct Shell {
     /// check does not cancel it before the test can drop it.
     #[cfg(test)]
     tab_drag_pinned: bool,
+    /// Whether the scrollbar's thumb is the drag currently in progress.
+    thumb_dragging: bool,
 }
 
 /// One in-flight tab drag.
 struct TabDragState {
     id: TabId,
-    /// Where the dragged tab would land, as an index into the current visual order.
+    /// Where the dragged tab would land, as an insertion slot between the tabs it sits beside.
     target: usize,
+    /// The pointer's position over the window, retained so edge auto-scroll can keep advancing on
+    /// later frames while the pointer itself is stationary.
+    position: gpui::Point<gpui::Pixels>,
 }
 
 impl Shell {
@@ -144,6 +149,7 @@ impl Shell {
             tab_strip_owner: cx.entity_id(),
             #[cfg(test)]
             tab_drag_pinned: false,
+            thumb_dragging: false,
         }
     }
 
@@ -889,7 +895,20 @@ impl Shell {
             .scrollbar_min_thumb()
             .to_pixels(window.rem_size())
             .into();
-        let scrollbar = tab_scrollbar::render(&self.tab_scroll, opacity, owner, min_thumb, cx);
+        let on_thumb_drag = {
+            let this = cx.entity();
+            std::rc::Rc::new(move |dragging: bool, _window: &mut Window, cx: &mut App| {
+                this.update(cx, |shell, cx| shell.set_thumb_dragging(dragging, cx));
+            })
+        };
+        let scrollbar = tab_scrollbar::render(
+            &self.tab_scroll,
+            opacity,
+            owner,
+            min_thumb,
+            on_thumb_drag,
+            cx,
+        );
         let view = tabs::View {
             entries,
             scroll: self.tab_scroll.clone(),
@@ -997,11 +1016,25 @@ impl Shell {
         }
     }
 
+    /// The scrollbar thumb being dragged pins the bar on. The render loop clears it once the
+    /// platform drag is over, so a drag that ends anywhere (including outside the strip) hands
+    /// visibility back to the hover state.
+    fn set_thumb_dragging(&mut self, dragging: bool, cx: &mut Context<Self>) {
+        self.thumb_dragging = dragging;
+        if self.tab_fade.set_dragging(dragging, self.tab_now_ms()) {
+            cx.notify();
+        }
+    }
+
     fn start_tab_drag(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.workspace.position(id) else {
             return;
         };
-        self.tab_drag = Some(TabDragState { id, target: index });
+        self.tab_drag = Some(TabDragState {
+            id,
+            target: index,
+            position: gpui::Point::default(),
+        });
         // A drag keeps the scrollbar visible and stops a pending reveal from pulling the row back
         // under the pointer.
         self.revealed_tab = None;
@@ -1033,19 +1066,28 @@ impl Shell {
             self.finish_tab_drag(window, cx);
             return;
         }
+        if let Some(drag) = self.tab_drag.as_mut() {
+            drag.position = position;
+        }
+        self.advance_tab_drag();
+    }
+
+    /// Advances the drag's edge auto-scroll and landing slot from the retained pointer position.
+    /// Called both from `move_tab_drag` (a mouse move) and from the render loop, so holding the
+    /// pointer still in an edge zone keeps scrolling toward tabs outside the viewport.
+    fn advance_tab_drag(&mut self) {
+        let Some(drag) = self.tab_drag.as_ref() else {
+            return;
+        };
+        let Some(from) = self.workspace.position(drag.id) else {
+            return;
+        };
+        let position = drag.position;
         let view = self.tab_scroll.bounds();
         let width: f32 = view.size.width.into();
         if width <= 0.0 {
             return;
         }
-        let mut target = tabs::landing_slot(
-            position.x - view.left(),
-            self.tab_scroll.offset().x,
-            self.workspace.sessions().len(),
-        );
-
-        // Bounded edge auto-scroll: a short, fixed step per frame while the pointer stays in an
-        // edge zone, so it neither stalls nor runs away.
         let local: f32 = (position.x - view.left()).into();
         let zone = tabs::EDGE_ZONE;
         let step = if local < zone {
@@ -1062,20 +1104,21 @@ impl Shell {
             if next != offset {
                 self.tab_scroll
                     .set_offset(gpui::point(gpui::px(next), gpui::Pixels::ZERO));
-                // The pointer's row position moved with the scroll, so recompute the slot.
-                target = tabs::landing_slot(
-                    position.x - view.left(),
-                    self.tab_scroll.offset().x,
-                    self.workspace.sessions().len(),
-                );
             }
         }
-
+        // The slot is computed after the step, against the offset the pointer now sees.
+        let target = tabs::landing_slot(
+            position.x - view.left(),
+            self.tab_scroll.offset().x,
+            self.workspace.sessions().len(),
+        );
+        // `landing_slot` is an insertion slot in the collection as it is now; `reorder` removes the
+        // dragged tab before inserting, so a slot past its original place shifts left by one.
+        let target = if target > from { target - 1 } else { target };
         if let Some(drag) = self.tab_drag.as_mut()
             && drag.target != target
         {
             drag.target = target;
-            cx.notify();
         }
     }
 
@@ -1182,6 +1225,16 @@ impl Render for Shell {
         let drag_ended = self.tab_drag.is_some() && !cx.has_active_drag();
         if drag_ended {
             self.finish_tab_drag(window, cx);
+        }
+        // A thumb drag ends wherever the pointer is released; visibility then follows hover again.
+        if self.thumb_dragging && !cx.has_active_drag() {
+            self.set_thumb_dragging(false, cx);
+        }
+        // Keep edge auto-scroll advancing while the pointer is held still in an edge zone, and
+        // repaint so the moved row and its landing marker are drawn.
+        if self.tab_drag.is_some() {
+            self.advance_tab_drag();
+            window.request_animation_frame();
         }
         // The strip's measurement lands at the end of a frame, so a reveal and a scrollbar that
         // just became necessary (or unnecessary) both need exactly one more frame to apply.
