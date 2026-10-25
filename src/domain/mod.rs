@@ -18,6 +18,7 @@ pub mod account;
 pub mod blob;
 pub mod error;
 pub mod home;
+pub mod profile;
 pub mod repo;
 pub mod repository;
 pub mod repository_extras;
@@ -34,6 +35,12 @@ pub use home::{
     FeedPayload, FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind,
     HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
     UpdatedWindow,
+};
+#[allow(unused_imports)]
+pub use profile::{
+    ContributionCalendar, ContributionDay, ContributionMonth, ContributionRange, ContributionWeek,
+    GraphqlErrorKind, ProfileBasic, ProfileError, ProfileGraphqlError, ProfilePinned, ProfileRepo,
+    Showcase,
 };
 #[allow(unused_imports)]
 pub use repo::{RepoOwner, RepoSummary, RepoVisibility, ReposOutcome, ReposReadiness};

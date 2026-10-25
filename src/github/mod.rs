@@ -25,6 +25,7 @@ pub mod error;
 pub mod headers;
 pub mod home;
 pub mod permission;
+pub mod profile;
 pub mod readme;
 pub mod repos;
 pub mod repository;
@@ -43,6 +44,10 @@ pub use headers::{parse_link_next, parse_sso_authorization_url, parse_sso_header
 pub use home::{FeedLimits, HomeSearchLimits, fetch_received_events, search_involving};
 #[allow(unused_imports)]
 pub use permission::{WriteAction, WritePermission, is_write_confirmed_allowed, write_permission};
+#[allow(unused_imports)]
+pub use profile::{
+    ProfileLimits, fetch_contribution_calendar, fetch_profile, fetch_profile_pinned,
+};
 #[allow(unused_imports)]
 pub use readme::discover_readme;
 #[allow(unused_imports)]
