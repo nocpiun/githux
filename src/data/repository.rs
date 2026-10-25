@@ -166,15 +166,33 @@ impl RepoService {
 }
 
 /// Test-only evidence about the preparation boundary: which thread ran it and
-/// a controllable pause between the completed read and publication.
+/// a controllable pause between the completed read and publication. The pause
+/// is keyed by the exact BlobIdentity so a concurrently running test cannot
+/// consume another read's gate.
 #[cfg(test)]
 pub(super) mod test_hooks {
+    use crate::domain::blob::BlobIdentity;
+    use std::collections::HashMap;
     use std::sync::{Mutex, mpsc};
     static LAST: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
-    static GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
-    pub fn before_prepare() {
+    type Gates = HashMap<String, (mpsc::Sender<()>, mpsc::Receiver<()>)>;
+    static GATES: std::sync::LazyLock<Mutex<Gates>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    /// Value key: fetch_blob clones the identity, so a pointer key would miss.
+    fn key(identity: &BlobIdentity) -> String {
+        format!(
+            "{}:{}:{}:{}:{:?}",
+            identity.repository().id(),
+            identity.commit().as_str(),
+            identity.blob().as_str(),
+            identity.path().as_str(),
+            identity.size()
+        )
+    }
+    pub fn before_prepare(identity: &BlobIdentity) {
         *LAST.lock().unwrap() = Some(std::thread::current().id());
-        if let Some((entered, resume)) = GATE.lock().unwrap().take() {
+        let gate = GATES.lock().unwrap().remove(&key(identity));
+        if let Some((entered, resume)) = gate {
             let _ = entered.send(());
             let _ = resume.recv_timeout(std::time::Duration::from_secs(5));
         }
@@ -182,10 +200,13 @@ pub(super) mod test_hooks {
     pub fn last_prepare_thread() -> Option<std::thread::ThreadId> {
         *LAST.lock().unwrap()
     }
-    pub fn pause_next_prepare() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    pub fn pause_prepare_of(identity: &BlobIdentity) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
         let (entered, ready) = mpsc::channel();
         let (release, resume) = mpsc::channel();
-        *GATE.lock().unwrap() = Some((entered, resume));
+        GATES
+            .lock()
+            .unwrap()
+            .insert(key(identity), (entered, resume));
         (ready, release)
     }
 }
@@ -331,24 +352,25 @@ impl RepositorySession {
         let context = self.context.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
-            test_hooks::before_prepare();
+            test_hooks::before_prepare(&blob.value.identity);
             prepare_content(blob.value, budget)
         });
-        let prepared = tokio::select! {
+        let outcome = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Err(GitHubError::Cancelled.into()),
+            _ = cancel.cancelled() => Err(GitHubError::Cancelled.into()),
             prepared = prepared => prepared.map_err(|_| RepositoryError::GitHub(
                 GitHubError::CredentialStore { message: "content preparation worker closed".into() },
-            ))?,
+            )),
         };
-        // Preparation is another await boundary: a switch, replacement or
-        // close during it discards both the text and the identity snapshot.
+        // Preparation is another await boundary: staleness outranks the
+        // prepared text, cancellation and worker failure, exactly as in
+        // read_authenticated. Check before propagating any of them.
         if !service.is_current(&context) {
             return Err(GitHubError::StaleContext.into());
         }
         Ok(Scoped {
             context,
-            value: prepared,
+            value: outcome?,
         })
     }
 }

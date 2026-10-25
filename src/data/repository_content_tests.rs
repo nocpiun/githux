@@ -590,6 +590,8 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
         ("aba", 1),
         ("close", 1),
         ("cancel", 1),
+        // Cancellation and a lost context together: staleness still wins.
+        ("switch-then-cancel", 1),
         // A purely local TooLarge outcome is gated at the same boundary.
         ("switch", 4096),
     ] {
@@ -605,6 +607,7 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
         login(&svc, &transport, 2).await;
         login(&svc, &transport, 1).await;
         let session = svc.repo_service().session().unwrap();
+        let session_context = session.context().clone();
         let tree = DirectoryTree {
             directory: SnapshotDirectory::root(&snapshot()),
             entries: vec![TreeEntry {
@@ -625,7 +628,7 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
             transport.push(200, text_blob_json(BLOB, "a"));
         }
         let count = transport.count();
-        let (entered, release) = crate::data::repository::test_hooks::pause_next_prepare();
+        let (entered, release) = crate::data::repository::test_hooks::pause_prepare_of(&identity);
         let (cancel, source) = CancellationToken::new();
         let task = tokio::spawn(async move { session.content(&identity, &limits, cancel).await });
         // The blocking prepare thread signals over std mpsc; keep this async
@@ -643,6 +646,10 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
             }
             "close" => svc.close().await.unwrap(),
             "cancel" => source.cancel(),
+            "switch-then-cancel" => {
+                svc.set_active(key(2)).await.unwrap();
+                source.cancel();
+            }
             _ => unreachable!(),
         }
         release.send(()).unwrap();
@@ -660,6 +667,13 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
             },
             "{change}, size={size}"
         );
+        assert!(
+            !matches!(change, "cancel") || svc.repo_service().is_current(&session_context),
+            "{change}"
+        );
+        if change != "cancel" {
+            assert!(!svc.repo_service().is_current(&session_context));
+        }
         // No extra request was issued to recover or revalidate the old content.
         assert_eq!(transport.count(), count + usize::from(size == 1));
     }

@@ -31,7 +31,7 @@
 3. 等待 executor 共享 semaphore，与取消竞争。取得许可后再次复查上下文；排队期间失效的读取不发网络请求。持有许可至本次适配器完成/取消，覆盖分支分页和 README 404 的同快照树验证。
 4. GitHub 适配器执行，与调用取消竞争。各内部 HTTP await 继续使用同一 token、固定 snapshot 和 cancel；data 不在分页之间重新取活动账户。
 5. 所有异步出口统一再次检查上下文，包括成功、Partial、Unauthorized、缺凭据、worker/scheduler 失败和取消。若已过期则 StaleContext 优先，旧结果不发布。服务关闭也使所有旧捕获失效。
-6. 仅 `content`：把已取得的 `BlobRead` 移到 `spawn_blocking` 调用 `prepare_content`，准备预算取同一个 `BlobLimits.decoded_bytes`。等待准备与调用取消竞争（取消优先）；准备完成后再做一次 `is_current`，通过才以 `Scoped<PreparedContent>` 返回。准备 worker 失败为 `GitHub(CredentialStore { message: "content preparation worker closed" })`，沿用现有 worker 失败分类，不新增错误类型。
+6. 仅 `content`：把已取得的 `BlobRead` 移到 `spawn_blocking` 调用 `prepare_content`，准备预算取同一个 `BlobLimits.decoded_bytes`。等待准备与调用取消竞争（取消优先）；准备结束后先收集成功/取消/worker 失败结果，再做一次 `is_current` 并优先返回 StaleContext，通过才传播原结果，与 `read_authenticated` 的过期优先一致。准备 worker 失败为 `GitHub(CredentialStore { message: "content preparation worker closed" })`，沿用现有 worker 失败分类，不新增错误类型。
 
 账户变化不会主动终止所有旧 socket；已经开始的操作可在原凭据下完成，但其成功和错误都会被丢弃。排队等待也可由调用方取消。`close().await` 继续承担账户服务关闭，网络 executor 生命周期沿用已有契约，调用方应取消/等待自己的读取任务再关闭 executor。系统凭据 API 本身不可中断：取消等待后已提交的 blocking load 仍会结束并释放 PAT，不会继续发网络；本层不承诺取消 OS 调用。
 
@@ -84,6 +84,6 @@ if repos.is_current(&publication_context) {
 
 [`src/data/repository_tests.rs`](../src/data/repository_tests.rs) 使用合成 PAT、临时 SQLite 和可控 transport / blocking load gate，覆盖完整资料→分支→revision→根/子目录→README 链路、分支移动后固定 A、Partial/409/README 不确定状态、每个接口调用前过期、在途成功与错误的 A→B/A→B→A/replace/remove-readd/revalidate/close、退休 slot 缺失/读取错误/worker 失败、凭据等待取消、排队取消与排队失效不发送、在途取消不影响独立调用、跨实例归属和 Debug 不泄露 token。
 
-本轮没有读取真实 PAT 或访问真实账户 GitHub。数据层新链路为可控 mock 证据；已有 github/network 的 localhost socket 和 Credential Manager 自清理测试仍保留。完整检查与实际结果见 [开发日志](devlog/2026-10-25-repository-data-service.md)。正文接线另有 [`src/data/repository_content_tests.rs`](../src/data/repository_content_tests.rs)：repository/revision/tree 与 README 描述符到 PreparedContent 的固定身份链路、分支移动不漂移、原始 blob、已知 TooLarge 无网络但仍过门槛、每个正文接口调用前过期、在途成功/Unauthorized 的 A→B/A→B→A/replace/remove-readd/close、准备门控下的切换与取消、空/非 UTF-8/控制字符/准备预算、排队取消与失效不发送、独立读取取消隔离、凭据加载取消与替换、准备线程非调用线程。fixture transport 的 `execute_bounded` 只检查已给定字节数，真实接收时限流仍由 PR21 的 socket 测试证明。
+本轮没有读取真实 PAT 或访问真实账户 GitHub。数据层新链路为可控 mock 证据；已有 github/network 的 localhost socket 和 Credential Manager 自清理测试仍保留。完整检查与实际结果见 [开发日志](devlog/2026-10-25-repository-data-service.md)。正文接线另有 [`src/data/repository_content_tests.rs`](../src/data/repository_content_tests.rs)：repository/revision/tree 与 README 描述符到 PreparedContent 的固定身份链路、分支移动不漂移、原始 blob、已知 TooLarge 无网络但仍过门槛、每个正文接口调用前过期、在途成功/Unauthorized 的 A→B/A→B→A/replace/remove-readd/close、按 BlobIdentity 值键控的准备门控下的切换与取消（含切换后再取消仍 StaleContext 优先）、空/非 UTF-8/控制字符/准备预算、排队取消与失效不发送、独立读取取消隔离、凭据加载取消与替换、准备线程非调用线程。fixture transport 的 `execute_bounded` 只检查已给定字节数，真实接收时限流仍由 PR21 的 socket 测试证明。
 
 这些证据不代表 UI 或真实 GitHub 联调已完成。正文检查与实际结果见 [开发日志](devlog/2026-10-25-repository-content.md)。

@@ -1,7 +1,7 @@
 # R3 正文数据层接线（RepositorySession blob/content）
 
 - 日期：2026-10-25；任务 ID：repository-content；执行者：基层 Agent。
-- PR：待创建；目标 main，milestone First Release (#1)。
+- PR：https://github.com/nocpiun/githux/pull/23 ；目标 main，milestone First Release (#1) 已核验为 1。
 - 目标与状态：实现完成、本地检查通过，待 PR 审查。基于已合并 PR21（blob/prepare_content）与 PR22（RepositorySession），base 42291f79bbe73188852bb375fd296623885ce9b8。
 
 ## 改动与决定
@@ -11,7 +11,12 @@
 - `content` 先 `blob`，再把 `BlobRead` 移到 `spawn_blocking` 执行 `prepare_content`，预算取同一 `BlobLimits.decoded_bytes`；等待与取消竞争（biased 取消优先），准备完成后再次 `is_current` 才返回。准备 worker 失败沿用现有 `GitHub(CredentialStore { message: "content preparation worker closed" })` 分类，未新增错误类型。
 - 已知 size 的本地 TooLarge 不是授权成功证据：仍走全部上下文门槛，准备阶段也不例外；过期/取消优先于 TooLarge 发布。
 - 调用方仍持 `session.context().clone()`，在 UI 应用成功或错误前用同一 RepoService 的 `is_current` 二次检查，另核对自己的页面代次和选中资源。契约更新在 [仓库账户数据服务](../repository-data-service.md)。
-- 仅 `#[cfg(test)]` 的 `repository::test_hooks` 记录准备线程并允许暂停下一次准备，用于确定性地验证“准备后、发布前”的交错；非测试构建不含该代码。
+- 仅 `#[cfg(test)]` 的 `repository::test_hooks` 记录准备线程并允许按 BlobIdentity 值键暂停指定准备，用于确定性地验证“准备后、发布前”的交错；非测试构建不含该代码。值键是因为 `fetch_blob` 返回的是克隆身份，指针键会失效。
+
+## 审查修复（第一轮）
+
+- Codex P1：准备阶段取消/worker 失败原先提前 return，绕过最终 `is_current`。改为先收集 outcome、统一复查上下文后再传播，StaleContext 优先；新增“切换后再取消”用例。
+- Codex P2：全局单槽准备门控可能被并行测试抢走。改为按 BlobIdentity 值键的 map，只暂停目标读取，其他并行 `content()` 不受影响。
 
 ## 验证
 
