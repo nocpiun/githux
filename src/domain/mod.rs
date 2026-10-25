@@ -17,6 +17,7 @@
 pub mod account;
 pub mod blob;
 pub mod error;
+pub mod home;
 pub mod repo;
 pub mod repository;
 
@@ -26,5 +27,12 @@ pub mod repository;
 pub use account::{AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId};
 #[allow(unused_imports)]
 pub use error::GitHubError;
+#[allow(unused_imports)]
+pub use home::{
+    DateBound, FeedActor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason,
+    FeedPayload, FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind,
+    HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
+    UpdatedWindow,
+};
 #[allow(unused_imports)]
 pub use repo::{RepoOwner, RepoSummary, RepoVisibility, ReposOutcome, ReposReadiness};
