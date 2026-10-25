@@ -36,7 +36,7 @@
 cargo fmt --all -- --check                  # 通过
 cargo check --locked --all-targets          # 通过
 cargo clippy --locked --all-targets -- -D warnings   # 通过，无警告
-cargo test --locked                         # 138 passed / 0 failed（110 → 122 → 125 → 133 → 137 → 138）
+cargo test --locked                         # 144 passed / 0 failed（110 → 122 → 125 → 133 → 137 → 138 → 144）
 cargo build --locked                        # 通过
 git diff --check                            # 通过
 ```
@@ -117,6 +117,18 @@ Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属
 ### 关于“审查已通过”的判断
 
 本轮我先核对了证据而不是直接采信：审查摘要评论当时仍写着 `has_unresolved_findings: true`，`6238329` 上没有新的 review 记录，但 `c3d097b` 的审查线程在 02:23 追加了上述意见，且它指向的代码在当前 head 仍然存在。其余 5 条旧意见是 `isOutdated=true` 的历史项。因此按“当前 head 的对应审查已闭环”这个门槛，这条必须修完才算通过。
+
+## 第六轮审查的 1 个新缺陷与修复
+
+`3a39276` 之后，Codex 又提了一条 P2，指出的问题直接影响分页完整性：
+
+| 意见 | 实际缺陷 | 修复 |
+| --- | --- | --- |
+| P2 `Link` 目标里的逗号会破坏分页 | `parse_link_next` 无条件按逗号切分头部。GitHub 的分页 URL 本身可能含逗号（本客户端首请求就带 `affiliation=owner,collaborator,organization_member`），切分后第二段不以 `<` 开头，`?` 直接返回 `None`，`fetch_user_repos` 停在第一页并报告 `Complete`，**静默漏掉后续仓库** | 改为按 RFC 8288 形状解析：只在 `<...>` 目标外、且不在引号参数值内处分段；`rel` 同时接受带引号与不带引号，并按空白分隔的多值判定 `next` |
+
+顺带修掉同一个函数里的相邻缺陷：旧实现用 `strip_prefix('<')?`，任意一段不以 `<` 开头就整体提前返回 `None`；现在非 next 段会被跳过而不是中止扫描。
+
+新增 6 个用例（含 `Link` 解析单测与一条走 `fetch_user_repos` 的端到端用例）。已反向验证：换回旧实现时 `next_link_with_commas_inside_the_target` 与 `pagination_follows_a_next_link_with_commas_in_its_query` 都会失败。
 
 ## 验证边界（不得省略）
 

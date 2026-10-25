@@ -108,6 +108,7 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 
 - 参数 `affiliation=owner,collaborator,organization_member&per_page=100&sort=pushed`。
 - 沿 `Link: rel="next"` 读完全部分页；上限 50 页（防御性，不是正常路径）。
+- `Link` 按 RFC 8288 形状解析：只在 `<...>` 目标**之外**、且不在带引号参数值内部的逗号处分段。GitHub 的分页链接本身就可能包含逗号（本客户端首请求就带 `affiliation=owner,collaborator,organization_member`），按逗号无条件切分会把 URL 劈成两半、取不到 next，于是停在第一页并错误地报告 `Complete`。回归测试为 `github::headers::tests::next_link_with_commas_inside_the_target` 与 `github::repos::tests::pagination_follows_a_next_link_with_commas_in_its_query`。
 - 结果类型同时携带数据与完整性：
 
 | 情形 | 结果 |
@@ -247,6 +248,7 @@ git diff --check
 | 凭据删除失败上报 | `data::tests::remove_reports_credential_deletion_failure` | 注入 delete 失败 |
 | URL authority 结构化解析 | `github::client::tests::path_content_does_not_make_a_host_trusted` | 路径/查询中的 host 无法冒充受信 |
 | 第 2 页起传输/解析失败保留已取数据 | `github::repos::tests::transport_failure_on_later_page_keeps_earlier_pages`、`parse_failure_on_later_page_keeps_earlier_pages` | |
+| 带逗号的 next 链接仍翻页 | `github::repos::tests::pagination_follows_a_next_link_with_commas_in_its_query`、`github::headers::tests::next_link_with_commas_inside_the_target` | affiliation 含逗号 |
 | 取消覆盖 body 读取阶段 | `network::transport::tests::cancellation_stops_a_stalled_body_read` | header 已到、body 停滞时取消 |
 | 取消一个请求不影响另一个 | `data::tests::cancelling_one_read_does_not_affect_another`、`network::executor::tests` | |
 | 后台执行器收敛 | `network::executor::tests::shutdown_converges_without_orphaned_work`、`concurrency_is_bounded_by_the_semaphore` | 长任务被取消、短任务完成、峰值并发受限 |

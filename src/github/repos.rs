@@ -322,6 +322,50 @@ mod tests {
         assert!(matches!(result, Err(GitHubError::Unauthorized)));
     }
 
+    /// End-to-end regression: a `Link: rel="next"` whose own URL contains the
+    /// comma-separated `affiliation` filter (exactly what this client sends) must
+    /// still be followed. The old comma-splitting parser returned `None`, stopped
+    /// after page 1, and reported `Complete` — silently dropping repositories.
+    #[tokio::test]
+    async fn pagination_follows_a_next_link_with_commas_in_its_query() {
+        let mock = Arc::new(MockTransport::new());
+        let page2 = "https://api.github.com/user/repos?affiliation=owner,collaborator,organization_member&page=2";
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![("link".to_string(), format!(r#"<{page2}>; rel="next""#))],
+            body: page_body(&[(1, "alpha"), (2, "beta")]),
+        }))
+        .await;
+        mock.enqueue(Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: page_body(&[(3, "gamma")]),
+        }))
+        .await;
+
+        let client = GitHubClient::new(Default::default(), mock.clone());
+        let token = Pat::from_str("ghp_test");
+        let outcome = fetch_user_repos(&client, &token, CancellationToken::default())
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            outcome.repositories.len(),
+            3,
+            "page 2 must be fetched, not silently skipped"
+        );
+        assert_eq!(outcome.readiness, ReposReadiness::Complete);
+
+        // The second request really hit the page-2 URL.
+        let recorded = mock.recorded().await;
+        assert_eq!(recorded.len(), 2);
+        assert!(
+            recorded[1].0.contains("page=2"),
+            "second request should be page 2, got {}",
+            recorded[1].0
+        );
+    }
+
     /// Regression: a transport failure on page 2+ keeps the pages already
     /// parsed and reports a partial result instead of discarding them.
     #[tokio::test]
