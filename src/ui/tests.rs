@@ -53,6 +53,13 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Moves the pointer onto an element, so hover-only affordances become live.
+fn hover(selector: &'static str, cx: &mut VisualTestContext) {
+    let target = bounds(selector, cx).center();
+    cx.simulate_mouse_move(target, None, Modifiers::none());
+    cx.run_until_parked();
+}
+
 fn route(view: &gpui::Entity<Shell>, cx: &mut VisualTestContext) -> Route {
     view.read_with(cx, |shell, _| shell.route())
 }
@@ -774,7 +781,9 @@ fn closing_tabs_keeps_the_active_page_and_picks_a_neighbour(cx: &mut TestAppCont
     let c = view.read_with(cx, |shell, _| shell.active_tab_id());
     assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 4);
 
-    // Closing a non-active tab keeps the active page.
+    // Closing a non-active tab keeps the active page. The close button only exists while the tab
+    // is hovered or active, so the pointer has to be over it.
+    hover("tab-1", cx);
     click("tab-close-1", cx);
     assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), c);
     assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
@@ -960,6 +969,154 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
         max.0,
         max.1
     );
+}
+
+#[gpui::test]
+fn the_strip_scrollbar_appears_on_hover_and_can_be_dragged(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    // Back to the row start so the thumb sits at the track's left end.
+    view.update(cx, |shell, _| {
+        let offset = shell.tab_scroll_offset();
+        shell.scroll_tabs_by(-offset.x);
+    });
+    pump(cx);
+    let reach = view.read_with(cx, |shell, _| shell.tab_scroll_max());
+    assert!(reach.x > px(0.0));
+
+    // Nothing is drawn while the pointer is elsewhere.
+    cx.simulate_mouse_move(gpui::point(px(40.0), px(300.0)), None, Modifiers::none());
+    pump(cx);
+    assert_eq!(
+        view.update(cx, |shell, _| shell.tab_scrollbar_opacity()),
+        0.0
+    );
+    assert!(cx.debug_bounds("tab-scrollbar").is_none());
+
+    // Hovering the strip fades the bar in; once the fade has finished it is painted.
+    hover("tab-scroll", cx);
+    view.update(cx, |shell, _| shell.show_tab_scrollbar());
+    pump(cx);
+    let band = bounds("tab-scrollbar-band", cx);
+    let track = bounds("tab-scrollbar", cx);
+    assert_eq!(
+        track.size.height,
+        px(super::geometry::TAB_SCROLLBAR_THICKNESS),
+        "the thumb is a hairline, not the theme's thickness"
+    );
+    assert_eq!(track.left(), band.left());
+    assert_eq!(track.right(), band.right());
+
+    // A real drag along the track scrolls the row.
+    let thumb_start = gpui::point(band.left() + px(6.0), band.top() + px(1.0));
+    cx.simulate_mouse_move(thumb_start, None, Modifiers::none());
+    cx.simulate_mouse_down(thumb_start, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(thumb_start.x + px(8.0 * step as f32), thumb_start.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(
+        gpui::point(thumb_start.x + px(64.0), thumb_start.y),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+
+    let dragged = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    assert!(
+        dragged.x < px(0.0),
+        "dragging the thumb scrolled the strip: {dragged:?}"
+    );
+    assert_eq!(dragged.y, px(0.0), "the strip never scrolls vertically");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.page_offset()),
+        Point::default(),
+        "dragging the strip scrollbar never scrolls the page"
+    );
+}
+
+/// The strip scrollbar's fade: in and out, reversal from the painted value, drag pinning, and no
+/// standing animation once it settles.
+#[gpui::test]
+fn the_strip_scrollbar_fades_in_out_and_pins_while_dragged(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+
+    let fade = |view: &gpui::Entity<Shell>, cx: &mut VisualTestContext, at: u64| {
+        view.update(cx, |shell, _| {
+            shell.pin_tab_clock(at);
+            shell.tab_scrollbar_opacity()
+        })
+    };
+
+    // Enter: it climbs rather than snapping.
+    cx.update_window_entity(&view, |shell, _, _| {
+        shell.pin_tab_clock(0);
+        shell.tab_scrollbar_hover(true, 0);
+    });
+    let quarter = super::geometry::TAB_SCROLLBAR_FADE_MS / 4;
+    let mid = fade(&view, cx, quarter);
+    assert!(mid > 0.0 && mid < 1.0, "mid fade in: {mid}");
+    assert_eq!(fade(&view, cx, super::geometry::TAB_SCROLLBAR_FADE_MS), 1.0);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
+
+    // Reverse half way: it continues from where it was painted, not from 1.
+    cx.update_window_entity(&view, |shell, _, _| {
+        shell.tab_scrollbar_hover(true, 3_000);
+    });
+    fade(&view, cx, 3_000);
+    cx.update_window_entity(&view, |shell, _, _| {
+        shell.tab_scrollbar_hover(false, 3_000);
+    });
+    let turned = fade(&view, cx, 3_000);
+    assert_eq!(turned, 1.0, "the reversal starts at the painted value");
+
+    let falling = fade(&view, cx, 3_000 + quarter);
+    assert!(falling > 0.0 && falling < 1.0, "fading out: {falling}");
+    // Leaving again reverses in the other direction from the painted value.
+    cx.update_window_entity(&view, |shell, _, _| {
+        shell.tab_scrollbar_hover(true, 3_000 + quarter);
+    });
+    let back = fade(&view, cx, 3_000 + quarter);
+    assert!(
+        (back - falling).abs() < 0.001,
+        "a second reversal continues from {falling}, got {back}"
+    );
+    // The second reversal began at 3_000 + quarter, so it finishes a quarter later again.
+    assert_eq!(
+        fade(
+            &view,
+            cx,
+            3_000 + quarter + super::geometry::TAB_SCROLLBAR_FADE_MS
+        ),
+        1.0
+    );
+    assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
+
+    // Leaving for good fades it fully out, and a hidden bar is not drawn at all.
+    cx.update_window_entity(&view, |shell, _, _| {
+        shell.tab_scrollbar_hover(false, 9_000);
+    });
+    assert_eq!(
+        fade(&view, cx, 9_000 + super::geometry::TAB_SCROLLBAR_FADE_MS),
+        0.0
+    );
+    pump(cx);
+    assert!(cx.debug_bounds("tab-scrollbar").is_none());
+    assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
 }
 
 /// Opening, activating and cycling bring the target tab into view, once, without pinning it there.
@@ -1149,6 +1306,7 @@ fn closing_a_focused_inactive_tab_keeps_the_page_and_restores_focus(cx: &mut Tes
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
 
+    hover("tab-1", cx);
     click("tab-close-1", cx);
     assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
     assert_eq!(
@@ -1344,58 +1502,530 @@ fn tabbing_to_an_offscreen_tab_reveals_it(cx: &mut TestAppContext) {
     );
 }
 
-/// Ely's overlay horizontal scrollbar is real and draggable: dragging its thumb moves the strip.
+/// The strip's inset matches the island's own gap to the window, and both top and left agree.
 #[gpui::test]
-fn the_strip_scrollbar_can_be_dragged(cx: &mut TestAppContext) {
+fn the_strip_inset_matches_the_island_gap(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+
+    let island = bounds("island", cx);
+    let strip = bounds("tab-strip", cx);
+    let tab = bounds("tab-0", cx);
+    let shell_body = bounds("shell-body", cx);
+    let inset = px(super::geometry::TAB_STRIP_INSET);
+
+    // The island's gap to the window's right/bottom edge is the same value the strip uses inside.
+    assert_eq!(
+        shell_body.right() - island.right(),
+        px(super::geometry::ISLAND_INSET)
+    );
+    assert_eq!(
+        shell_body.bottom() - island.bottom(),
+        px(super::geometry::ISLAND_INSET)
+    );
+    assert_eq!(inset, px(super::geometry::ISLAND_INSET));
+
+    // Inside the island: one 1px border, then the inset, on both axes.
+    let inner_left = island.left() + px(1.0);
+    let inner_top = island.top() + px(1.0);
+    assert_eq!(strip.left(), inner_left);
+    assert_eq!(strip.top(), inner_top);
+    assert!(
+        (tab.left() - inner_left - inset).abs() <= px(1.0),
+        "left inset measured {:?}",
+        tab.left() - inner_left
+    );
+    assert!(
+        (tab.top() - inner_top - inset).abs() <= px(1.0),
+        "top inset measured {:?}",
+        tab.top() - inner_top
+    );
+    assert!(
+        (tab.left() - inner_left - (tab.top() - inner_top)).abs() <= px(1.0),
+        "the two gaps must match"
+    );
+}
+
+/// The toolbar is pinned outside the scrolling viewport: it never scrolls, never shrinks, and the
+/// last tab scrolls under the viewport's edge rather than behind the toolbar.
+#[gpui::test]
+fn the_strip_toolbar_is_pinned_and_shrinks_the_viewport(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+
+    let strip = bounds("tab-strip", cx);
+    let toolbar = bounds("tab-toolbar", cx);
+    let viewport = bounds("tab-scroll", cx);
+    // The toolbar reaches the strip's right inner edge and sits beside the viewport.
+    assert!(toolbar.right() <= strip.right() + px(1.0));
+    assert!(toolbar.left() >= viewport.right() - px(1.0));
+    assert_eq!(
+        toolbar.size.width,
+        px(super::geometry::TAB_TOOLBAR_WIDTH),
+        "the toolbar keeps its width"
+    );
+    // The viewport gives the toolbar its space instead of widening the island.
+    assert!(viewport.right() <= toolbar.left() + px(1.0));
+    assert!(strip.right() <= bounds("island", cx).right());
+
+    // The refresh entry is present, named, and inert: no refresh logic arrives this round.
+    assert!(cx.debug_bounds("tab-refresh").is_some());
+    let before = view.read_with(cx, |shell, _| shell.tab_count());
+    click("tab-refresh", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), before);
+    assert_eq!(
+        route(&view, cx),
+        Route::Home,
+        "the placeholder does nothing"
+    );
+
+    // Overflowing leaves the toolbar where it was and keeps it out of the scrolling row.
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    let scrolled_toolbar = bounds("tab-toolbar", cx);
+    assert_eq!(scrolled_toolbar, toolbar, "the toolbar never scrolls");
+    let viewport = bounds("tab-scroll", cx);
+    assert!(viewport.right() <= scrolled_toolbar.left() + px(1.0));
+    assert!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_max()).x > px(0.0),
+        "the tabs scroll inside the reduced viewport"
+    );
+}
+
+/// A tab's close button only accepts a press while that tab is hovered or active; showing it never
+/// moves the label or the neighbouring tabs.
+#[gpui::test]
+fn the_close_button_answers_only_on_hover_or_active_without_moving_anything(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+    let repository = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+
+    // Idle: pressing where the hidden close button sits on an inactive tab must not close it. The
+    // press lands on the tab itself, which simply activates it.
+    cx.simulate_mouse_move(gpui::point(px(40.0), px(400.0)), None, Modifiers::none());
+    pump(cx);
+    let idle_boxes = (bounds("tab-0", cx), bounds("tab-1", cx));
+    let close_slot = bounds("tab-close-0", cx);
+    cx.simulate_click(close_slot.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        2,
+        "an idle inactive tab is not closed by its hidden button"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        home,
+        "and the press activates that tab instead"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, repository],
+        "no tab was reordered or recreated"
+    );
+
+    // Hovering that tab reveals the button, and it now closes exactly that tab.
+    hover("tab-0", cx);
+    let hover_boxes = (bounds("tab-0", cx), bounds("tab-1", cx));
+    assert_eq!(
+        idle_boxes, hover_boxes,
+        "showing the button never moves the tab or its neighbour"
+    );
+    let close_slot = bounds("tab-close-0", cx);
+    cx.simulate_click(close_slot.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![repository],
+        "the hovered tab's button closes it"
+    );
+
+    // The active tab keeps its button available without being hovered.
+    cx.simulate_mouse_move(gpui::point(px(40.0), px(400.0)), None, Modifiers::none());
+    pump(cx);
+    let active_close = bounds("tab-close-0", cx);
+    cx.simulate_click(active_close.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        1,
+        "the active tab's button is always live"
+    );
+    assert_eq!(route(&view, cx), Route::Home);
+}
+
+/// The landing-slot arithmetic is what the drag and drop rely on, so it is pinned directly.
+#[test]
+fn landing_slots_follow_the_tab_middles_and_the_current_offset() {
+    use super::tabs::landing_slot;
+    let (width, gap) = (super::geometry::TAB_WIDTH, super::geometry::TAB_GAP);
+    let step = width + gap;
+
+    // Nothing scrolled: the first half-tab is slot 0, then each middle adds one slot.
+    assert_eq!(landing_slot(px(0.0), px(0.0), 3), 0);
+    assert_eq!(landing_slot(px(width / 2.0 - 1.0), px(0.0), 3), 0);
+    assert_eq!(landing_slot(px(width / 2.0 + 1.0), px(0.0), 3), 1);
+    assert_eq!(landing_slot(px(step + width / 2.0 + 1.0), px(0.0), 3), 2);
+    assert_eq!(landing_slot(px(step * 2.0 + width), px(0.0), 3), 3);
+
+    // Scrolled by one step: the pointer over the viewport's left edge is over tab 1's middle.
+    assert_eq!(landing_slot(px(0.0), px(-step), 3), 1);
+    // A tab cannot land past the last slot, even far beyond the row.
+    assert_eq!(landing_slot(px(step * 10.0), px(0.0), 3), 3);
+    // No tabs at all: only "before everything" exists.
+    assert_eq!(landing_slot(px(100.0), px(0.0), 0), 0);
+}
+
+/// Dragging a tab moves it in the visual order by id: nothing closes, nothing is recreated, and
+/// its page state travels with it.
+#[gpui::test]
+fn dragging_a_tab_reorders_it_without_touching_its_state(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-2", cx);
+    let c = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, a, b, c]
+    );
+
+    // Give `a` some page state so it is visibly carried, not rebuilt.
+    view.update(cx, |shell, _| {
+        shell.select_repository(a, "main", Some("README.md"));
+    });
+
+    // Drag `a` past the last tab: it lands at the end.
+    let row = bounds("tab-scroll", cx);
+    let start = bounds("tab-1", cx).center();
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(a, window, cx);
+        shell.drag_tab_to(a, gpui::point(row.right() - px(2.0), start.y), window, cx);
+    });
+    // The slot is "after the last tab"; `Workspace::reorder` clamps it to the last index.
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_target()),
+        Some(4),
+        "dropping past the last tab asks for the end"
+    );
+    view.update(cx, |shell, cx| {
+        shell.drop_dragged_tab(a, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b, c, a]
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        4,
+        "no tab was closed or duplicated"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repository_state(a).cloned()),
+        Some(RepositorySession {
+            branch: Some("main".to_string()),
+            file: Some("README.md".to_string()),
+        }),
+        "the dragged tab keeps its own page state"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        None,
+        "the drag is released"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        c,
+        "reordering does not change the active page"
+    );
+
+    // Drag it back to the front.
+    let row = bounds("tab-scroll", cx);
+    let start = bounds("tab-3", cx).center();
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(a, window, cx);
+        shell.drag_tab_to(a, gpui::point(row.left() + px(2.0), start.y), window, cx);
+    });
+    view.update(cx, |shell, cx| {
+        shell.drop_dragged_tab(a, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![a, home, b, c]
+    );
+}
+
+/// A cancelled drag, a closed tab and a stale drop all leave the order alone.
+#[gpui::test]
+fn cancelling_or_losing_a_drag_keeps_the_order(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let original = view.read_with(cx, |shell, _| shell.tab_ids());
+
+    // A cancel drops the drag without moving anything.
+    let row = bounds("tab-scroll", cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(a, window, cx);
+        shell.drag_tab_to(
+            a,
+            gpui::point(row.left() + px(2.0), row.center().y),
+            window,
+            cx,
+        );
+    });
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.cancel_tab_drag(window, cx);
+    });
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), original);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+
+    // A drag whose tab is closed underneath it is dropped, not applied to another index.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(a, window, cx);
+        shell.drag_tab_to(
+            a,
+            gpui::point(row.right() - px(2.0), row.center().y),
+            window,
+            cx,
+        );
+    });
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.close_tab(a, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![original[0], b],
+        "the close wins and no stale index moves another tab"
+    );
+
+    // Dropping after the drag ended is a no-op.
+    view.update(cx, |shell, cx| {
+        shell.drop_dragged_tab(b, cx);
+    });
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![original[0], b]
+    );
+}
+
+/// Dragging toward an edge scrolls the row so tabs outside the viewport can be reached, and a drag
+/// never scrolls the page or reaches into the toolbar.
+#[gpui::test]
+fn dragging_near_an_edge_scrolls_the_row_not_the_page(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
         click(selector(format!("repo-row-{index}")), cx);
     }
-    // Back to the row start so the thumb sits at the track's left end.
+    // Start from the row's beginning so there is somewhere to auto-scroll to.
     view.update(cx, |shell, _| {
         let offset = shell.tab_scroll_offset();
         shell.scroll_tabs_by(-offset.x);
     });
     pump(cx);
-    let reach = view.read_with(cx, |shell, _| shell.tab_scroll_max());
-    assert!(reach.x > px(0.0));
+    let first = view.read_with(cx, |shell, _| shell.tab_ids()[1]);
 
-    let band = bounds("tab-scrollbar-band", cx);
-    // Ely draws the horizontal thumb inside the track's half-thickness top padding, so the thumb
-    // occupies the band's lower half.
-    // Ely's horizontal thumb occupies the track's top thickness (6px) inside the band.
-    let thumb_y = band.top() + px(3.0);
-    let thumb_start = gpui::point(band.left() + px(6.0), thumb_y);
-    cx.simulate_mouse_move(thumb_start, None, Modifiers::none());
-    cx.simulate_mouse_down(thumb_start, gpui::MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    // A real drag: exceed the drag threshold, then move along the track.
-    for step in 1..=8 {
-        cx.simulate_mouse_move(
-            gpui::point(thumb_start.x + px(8.0 * step as f32), thumb_start.y),
-            gpui::MouseButton::Left,
-            Modifiers::none(),
+    let row = bounds("tab-scroll", cx);
+    let toolbar = bounds("tab-toolbar", cx);
+    let grab = bounds("tab-1", cx).center();
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(first, window, cx);
+        // Hold the pointer just inside the right edge: the row scrolls itself.
+        shell.drag_tab_to(
+            first,
+            gpui::point(row.right() - px(4.0), grab.y),
+            window,
+            cx,
         );
-        cx.run_until_parked();
-    }
-    cx.simulate_mouse_up(
-        gpui::point(thumb_start.x + px(64.0), thumb_start.y),
-        gpui::MouseButton::Left,
-        Modifiers::none(),
-    );
-    cx.run_until_parked();
-
-    let dragged = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    });
+    pump(cx);
+    let scrolled = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
     assert!(
-        dragged.x < px(0.0),
-        "dragging the thumb scrolled the strip: {dragged:?}"
+        scrolled.x < px(0.0),
+        "holding at the edge auto-scrolled the row: {scrolled:?}"
     );
-    assert_eq!(dragged.y, px(0.0), "the strip never scrolls vertically");
+    assert_eq!(scrolled.y, px(0.0));
+    assert!(
+        row.right() <= toolbar.left() + px(1.0),
+        "the scrollable viewport stops before the toolbar"
+    );
+    let target = view
+        .read_with(cx, |shell, _| shell.tab_drag_target())
+        .unwrap();
+    assert!(
+        target <= view.read_with(cx, |shell, _| shell.tab_count()),
+        "the slot stays within the tab order"
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.cancel_tab_drag(window, cx);
+    });
     assert_eq!(
         view.read_with(cx, |shell, _| shell.page_offset()),
         Point::default(),
-        "dragging the strip scrollbar never scrolls the page"
+        "a drag never scrolls the page"
     );
+}
+
+/// After a reorder the tab shortcuts follow the new visual order.
+#[gpui::test]
+fn cycling_and_closing_follow_the_reordered_strip(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    // Move Home to the end: the order becomes a, b, Home.
+    let row = bounds("tab-scroll", cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(home, window, cx);
+        shell.drag_tab_to(
+            home,
+            gpui::point(row.right() - px(2.0), row.center().y),
+            window,
+            cx,
+        );
+    });
+    view.update(cx, |shell, cx| {
+        shell.drop_dragged_tab(home, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![a, b, home]
+    );
+
+    // Ctrl+Tab walks the new order, not the creation order.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.activate_tab(a, window, cx);
+    });
+    press("ctrl-tab", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
+    press("ctrl-tab", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), home);
+
+    // Closing the active tab picks its new left neighbour.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.activate_tab(b, window, cx);
+    });
+    press("ctrl-w", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
+}
+
+/// Escape cancels a tab drag through the real key path, and the strip's hover-driven scrollbar
+/// stays visible while a tab is carried even after the pointer leaves the strip.
+#[gpui::test]
+fn escape_cancels_a_tab_drag_and_dragging_keeps_the_scrollbar_up(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..3 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    let original = view.read_with(cx, |shell, _| shell.tab_ids());
+    let dragged = original[1];
+
+    // Hover the strip so its scrollbar is at full opacity, then start a drag and leave the strip.
+    hover("tab-scroll", cx);
+    view.update(cx, |shell, _| shell.show_tab_scrollbar());
+    let row = bounds("tab-scroll", cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(dragged, window, cx);
+        shell.drag_tab_to(
+            dragged,
+            gpui::point(row.left() + px(4.0), row.center().y),
+            window,
+            cx,
+        );
+    });
+    // The pointer leaving the strip does not hide the bar while the drag is live.
+    cx.simulate_mouse_move(gpui::point(px(40.0), px(400.0)), None, Modifiers::none());
+    pump(cx);
+    assert_eq!(
+        view.update(cx, |shell, _| shell.tab_scrollbar_opacity()),
+        1.0,
+        "a drag pins the scrollbar"
+    );
+
+    // Escape reaches the same action the key binding dispatches, through the window.
+    cx.dispatch_action(super::CancelTabDrag);
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), original);
+}
+
+/// The drop marker is an overlay in the gap the drop would use, and showing it never shifts a tab.
+#[gpui::test]
+fn the_drop_marker_does_not_shift_any_tab(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let idle = (
+        bounds("tab-0", cx),
+        bounds("tab-1", cx),
+        bounds("tab-2", cx),
+    );
+
+    let row = bounds("tab-scroll", cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(b, window, cx);
+        shell.drag_tab_to(
+            b,
+            gpui::point(row.left() + px(4.0), row.center().y),
+            window,
+            cx,
+        );
+    });
+    pump(cx);
+
+    let live = (
+        bounds("tab-0", cx),
+        bounds("tab-1", cx),
+        bounds("tab-2", cx),
+    );
+    assert_eq!(idle, live, "the marker is an overlay, not a layout child");
+    // The pointer is at the row's left edge, so the slot is the very first one.
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_target()),
+        Some(0)
+    );
+    let marker = bounds("tab-drop-0", cx);
+    let first = bounds("tab-0", cx);
+    assert!(
+        marker.right() <= first.left() + px(1.0),
+        "the marker sits before the first tab, in its gap: {marker:?} vs {first:?}"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        Some(b),
+        "a drag is still in flight"
+    );
+    assert_ne!(a, b);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.cancel_tab_drag(window, cx);
+    });
 }

@@ -110,6 +110,26 @@ git diff --check
 
 **仍需负责人真实窗口验收（自动测试不能替代）：** 上下左右间距在实际 DPI 下的观感、滚轮与 `Shift`+滚轮以及触控板横向手势、拖动滚动条、中键关闭、中键在关闭按钮上、标签颜色与焦点提示、900/1200 宽窗口下的标签可读性。
 
+## 第四轮：负责人真实预览的六项修订（2026-10-25）
+
+负责人查看真实预览后提出六点，均已实现；这同样不是验收通过，`human_review_approved` 仍为 `false`。
+
+**1. 标签与 island 的内边距缩小。** `TAB_STRIP_INSET` 现在直接取 `ISLAND_INSET`（7），上/左/右同一个值，不再是独立写的 8。`TAB_STRIP_HEIGHT` 改为 `inset + TAB_HEIGHT + TAB_SCROLLBAR_BAND`（7+26+5=38），滚动条带随细滚动条收窄（`TAB_SCROLLBAR_THICKNESS + 2`），不再留出 12px 的空条。测试核对：`shell-body` 到 island 右/下的距离等于 `ISLAND_INSET`，标签条内边距也等于它，并且首标签相对 island 内边界（计入 1px 边框）的上/左间距相等。island 圆角/外边距、侧栏与原生标题栏未动。
+
+**2. 滚动条更细、更轻、只在 hover 时淡入。** 新增 `src/ui/tab_scrollbar.rs`：仍用 Ely 的交互模型（覆盖式 thumb 绑同一个 `ScrollHandle`、拖动时按比例改偏移），但视觉是 3px 细圆角、`fg` 20% 透明度（hover 时 38%），不画实心轨道；不再用 Ely `Scrollbar` 的 12px 粗 thumb 和常显行为。`Fade` 是纯状态：进入/离开各 140ms，反向从"当前已绘制的不透明度"继续（不是跳回 0/1），拖动期间 pin 到 1，释放后回到 hover 状态；动画结束后 `run = None`，没有常驻 timer；完全隐藏时不构建元素，所以不存在"透明但仍能点击的轨道"。共享 Ely 主题与依赖未改。
+
+**3. 图标与标题间距。** 标签内容间距改为 `TAB_ICON_GAP = 7`，但左内边距（8）与图标本身宽度保持不变，close 槽位（16）也不放大，所以标题可用宽度没有被挤掉。
+
+**4. 标签拖拽排序。** `Workspace::reorder(id, target)` 按稳定 `TabId` 移动 `Session`，不关闭/重建会话、不改 id、不改活动标签。`Shell` 侧有 `TabDragState { id, target }`：`start_tab_drag` 记录起点并停掉未完成的 reveal，`move_tab_drag` 用 `tabs::landing_slot(viewport_x, offset, count)` 算插入槽（以滚动视口的实际偏移与宽度为基准，因此工具栏不可能是目标），靠近左右边缘（`EDGE_ZONE = 24`）时每帧固定移动 `EDGE_STEP = 12` 做有界自动滚动，`drop_tab_drag` 落地一次，`finish_tab_drag` 用于取消/Esc/失焦/无效投放/被拖标签关闭。渲染时被拖标签降到 45% 不透明度、目标槽画 2px 强调色细线。普通点击仍激活；close 按钮与中键关闭走各自路径，不经过 `on_drag`，所以不会误触发排序。`Ctrl+Tab` 与关闭邻居按新顺序（`Workspace::cycle`/`close` 本来就用集合顺序）。
+
+**5. close 只在 hover 或 active 时出现。** 每个标签的 close 槽位始终保留宽度（`TAB_CLOSE_SIZE`），非活动且未 hover 时用 GPUI 的 `Visibility::Hidden`（不绘制、不参与命中测试，但仍占布局），并通过 `group_hover` 在 hover 时立即 `visible()`；没有渐变动画，也没有第三条件（键盘聚焦不显示）。因此隐藏时点不到、也不会留下不可见的 focus target，显示/隐藏不移动标题或相邻标签。
+
+**6. 右侧固定工具栏。** 标签条改为"内边距盒子 = 滚动视口 + 工具栏"：toolbar 在视口之外（`TAB_TOOLBAR_WIDTH = TAB_HEIGHT - 2`），不参与横向滚动、不被挤出、不遮最后一个标签；视口因此变窄，reveal/overflow/拖拽坐标全部基于新的视口宽度。里面先放一个 Ely `IconButton`（Ghost、Sm、`RotateCw`、tooltip Refresh），处于 `disabled` 状态，不接任何刷新逻辑、请求或导航。
+
+**验证：** 本机 `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（185 项）与 `git diff --check` 全部通过。新增测试覆盖：inset 与 island 间距一致；工具栏固定且缩小视口、其占位按钮不改变状态；close 只在 hover/active 时响应且不移动布局；拖拽前后顺序、状态跟随、取消/被关闭/无效投放、边缘自动滚动不滚动页面、排序后的 cycle 与 close 邻居；滚动条只在 hover 时出现、可拖动、淡入淡出与反向连续、拖动 pin 与隐藏后不可点击。动画用固定时钟值驱动，没有随机 sleep。拖拽的落地槽位另有一条纯函数单元测试（`landing_slots_follow_the_tab_middles_and_the_current_offset`），投放位置指示线是覆盖层，因此显示它不会移动任何标签（`the_drop_marker_does_not_shift_any_tab`）。
+
+**仍需负责人真实窗口验收：** 缩小后的内边距观感、细滚动条的可见度与淡入淡出是否顺滑、图标与标题间距、拖拽手感与自动滚动速度、close 出现时机、右侧工具栏位置；性能与动画流畅度只能由实际窗口确认。
+
 ## 交接与后续
 
 1. 负责人/主 Agent 在真实窗口验收多标签交互与中文候选确认；`human_review_required=true`、`human_review_approved=false`，PR 保持 open，等待验收后才由 coordinator 合并。

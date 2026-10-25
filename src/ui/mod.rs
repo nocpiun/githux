@@ -30,6 +30,7 @@ pub(crate) mod geometry;
 mod page;
 mod palette;
 mod sidebar;
+mod tab_scrollbar;
 mod tabs;
 
 #[cfg(test)]
@@ -37,7 +38,13 @@ mod tests;
 
 actions!(
     githux,
-    [OpenCommandPalette, CloseActiveTab, NextTab, PreviousTab]
+    [
+        OpenCommandPalette,
+        CloseActiveTab,
+        NextTab,
+        PreviousTab,
+        CancelTabDrag
+    ]
 );
 
 pub struct Shell {
@@ -63,6 +70,29 @@ pub struct Shell {
     /// The strip's scrollable reach as of the last frame, so a newly overflowing (or no longer
     /// overflowing) strip repaints once to show or hide the scrollbar.
     tab_reach: gpui::Pixels,
+    /// The strip scrollbar's hover/drag fade.
+    tab_fade: tab_scrollbar::Fade,
+    /// A tab drag in progress: the session being carried and the slot it would land on.
+    tab_drag: Option<TabDragState>,
+    /// Monotonic start for the strip fade's clock. Read once per frame; the fade itself takes an
+    /// explicit millisecond value so it can be driven deterministically in tests.
+    tab_clock: std::time::Instant,
+    /// A fixed clock for tests, so a fade can be stepped without sleeping.
+    #[cfg(test)]
+    tab_clock_pinned: Option<u64>,
+    /// Identity stamped into tab drag payloads, so another strip's drag is ignored.
+    tab_strip_owner: gpui::EntityId,
+    /// Set while a test drives a tab drag directly, so the render loop's "the platform drag ended"
+    /// check does not cancel it before the test can drop it.
+    #[cfg(test)]
+    tab_drag_pinned: bool,
+}
+
+/// One in-flight tab drag.
+struct TabDragState {
+    id: TabId,
+    /// Where the dragged tab would land, as an index into the current visual order.
+    target: usize,
 }
 
 impl Shell {
@@ -76,6 +106,9 @@ impl Shell {
             gpui::KeyBinding::new("secondary-w", CloseActiveTab, None),
             gpui::KeyBinding::new("ctrl-tab", NextTab, None),
             gpui::KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+            // Escape only does something while a tab is being carried; the palette intercepts
+            // its own Escape before bindings are matched, so this cannot close an overlay.
+            gpui::KeyBinding::new("escape", CancelTabDrag, None),
         ]);
     }
 
@@ -103,6 +136,14 @@ impl Shell {
             revealed_tab: None,
             focused_tab: None,
             tab_reach: gpui::Pixels::ZERO,
+            tab_fade: tab_scrollbar::Fade::default(),
+            tab_drag: None,
+            tab_clock: std::time::Instant::now(),
+            #[cfg(test)]
+            tab_clock_pinned: None,
+            tab_strip_owner: cx.entity_id(),
+            #[cfg(test)]
+            tab_drag_pinned: false,
         }
     }
 
@@ -248,6 +289,16 @@ impl Shell {
         let Some(result) = self.workspace.close(id, cx) else {
             return;
         };
+        // A drag of the tab that just closed is over: keeping it would let a stale slot move
+        // whichever tab now sits at that index.
+        if self.tab_drag.as_ref().is_some_and(|drag| drag.id == id) {
+            self.tab_drag = None;
+            self.tab_fade.set_dragging(false, self.tab_now_ms());
+            #[cfg(test)]
+            {
+                self.tab_drag_pinned = false;
+            }
+        }
         // The strip got shorter: drop the remembered tab so the next frame reveals the survivor
         // and the offset clamps to the new content instead of leaving empty space at the end.
         self.revealed_tab = None;
@@ -723,11 +774,11 @@ impl Shell {
     }
 
     /// The island: the session tab strip, then the active page's own scroll area.
-    fn island(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn island(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let colors = &theme.colors;
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
-        let strip = self.tab_strip(cx);
+        let strip = self.tab_strip(window, cx);
         let session = self.workspace.active();
         let body = page::page(session, &self.repositories, cx);
         let scroll = session.state().scroll.clone();
@@ -766,9 +817,10 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The application session strip. Each tab activates its session on click or Enter/Space; the
-    /// close affordance closes that session and stops the click from also activating it.
-    fn tab_strip(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The application session strip. Each tab activates its session on click or Enter/Space, its
+    /// close affordance closes that session, and a horizontal drag reorders it.
+    fn tab_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let _ = window;
         let this = cx.entity();
         let entries = self
             .workspace
@@ -797,7 +849,263 @@ impl Shell {
                 }
             })
             .collect::<Vec<_>>();
-        tabs::strip(entries, &self.tab_scroll, cx)
+
+        let on_hover = {
+            let this = this.clone();
+            Rc::new(move |hovered: bool, _window: &mut Window, cx: &mut App| {
+                this.update(cx, |shell, cx| shell.set_tab_hovered(hovered, cx));
+            })
+        };
+        let on_drag_start = {
+            let this = this.clone();
+            Rc::new(move |id: TabId, window: &mut Window, cx: &mut App| {
+                this.update(cx, |shell, cx| shell.start_tab_drag(id, window, cx));
+            })
+        };
+        let on_drag_move = {
+            let this = this.clone();
+            Rc::new(
+                move |id: TabId,
+                      position: gpui::Point<gpui::Pixels>,
+                      window: &mut Window,
+                      cx: &mut App| {
+                    this.update(cx, |shell, cx| {
+                        shell.move_tab_drag(id, position, window, cx)
+                    });
+                },
+            )
+        };
+
+        let on_drop = {
+            let this = this.clone();
+            Rc::new(move |id: TabId, _window: &mut Window, cx: &mut App| {
+                this.update(cx, |shell, cx| shell.drop_tab_drag(id, cx));
+            })
+        };
+        let owner = self.tab_strip_owner;
+        let opacity = self.tab_fade.opacity(self.tab_now_ms());
+        let min_thumb: f32 = cx
+            .theme()
+            .scrollbar_min_thumb()
+            .to_pixels(window.rem_size())
+            .into();
+        let scrollbar = tab_scrollbar::render(&self.tab_scroll, opacity, owner, min_thumb, cx);
+        let view = tabs::View {
+            entries,
+            scroll: self.tab_scroll.clone(),
+            dragging: self.tab_drag.as_ref().map(|drag| drag.id),
+            drop_at: self.tab_drag.as_ref().map(|drag| drag.target),
+            reorder: self.tab_drag.is_some(),
+            toolbar: tabs::toolbar(),
+            on_hover,
+            on_drag_start,
+            on_drag_move,
+            on_drop,
+        };
+        tabs::strip(view, owner, scrollbar, cx)
+    }
+
+    /// Milliseconds since the shell started, the clock the strip's scrollbar fade runs on.
+    fn tab_now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(pinned) = self.tab_clock_pinned {
+            return pinned;
+        }
+        self.tab_clock.elapsed().as_millis() as u64
+    }
+
+    /// Pins the strip's fade clock, so tests can step a fade without sleeping.
+    #[cfg(test)]
+    pub fn pin_tab_clock(&mut self, ms: u64) {
+        self.tab_clock_pinned = Some(ms);
+    }
+
+    /// The strip scrollbar's painted opacity, for the fade tests.
+    #[cfg(test)]
+    pub fn tab_scrollbar_opacity(&mut self) -> f32 {
+        self.tab_fade.opacity(self.tab_now_ms())
+    }
+
+    /// Drives the strip scrollbar's hover state at an explicit clock value, so the fade can be
+    /// stepped without sleeping.
+    #[cfg(test)]
+    pub fn tab_scrollbar_hover(&mut self, hovered: bool, now: u64) -> bool {
+        self.tab_fade.set_hovered(hovered, now)
+    }
+
+    /// Makes the strip scrollbar fully visible at once, for tests that only need it to exist.
+    /// The fade itself is covered by its own test and by the module's unit tests.
+    #[cfg(test)]
+    pub fn show_tab_scrollbar(&mut self) {
+        self.tab_fade.snap(true);
+    }
+
+    #[cfg(test)]
+    pub fn tab_scrollbar_animating(&self) -> bool {
+        self.tab_fade.is_animating()
+    }
+
+    /// The tab being dragged, if any.
+    #[cfg(test)]
+    pub fn tab_drag_id(&self) -> Option<TabId> {
+        self.tab_drag.as_ref().map(|drag| drag.id)
+    }
+
+    /// The landing slot of the drag in progress.
+    #[cfg(test)]
+    pub fn tab_drag_target(&self) -> Option<usize> {
+        self.tab_drag.as_ref().map(|drag| drag.target)
+    }
+
+    /// Starts a tab drag the way the strip's handlers do. The pin keeps the render loop from
+    /// treating the absent platform drag as an ended one, so a test can move and drop it itself.
+    #[cfg(test)]
+    pub fn drag_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_tab_drag(id, window, cx);
+        self.tab_drag_pinned = true;
+    }
+
+    #[cfg(test)]
+    pub fn drag_tab_to(
+        &mut self,
+        id: TabId,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_tab_drag(id, position, window, cx);
+    }
+
+    #[cfg(test)]
+    pub fn drop_dragged_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+        self.drop_tab_drag(id, cx);
+        self.tab_drag_pinned = false;
+        self.tab_drag = None;
+    }
+
+    #[cfg(test)]
+    pub fn cancel_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_drag_pinned = false;
+        self.finish_tab_drag(window, cx);
+    }
+
+    /// Records whether the pointer is over the strip, which is the only thing that shows the
+    /// strip's scrollbar.
+    pub(crate) fn set_tab_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.tab_fade.set_hovered(hovered, self.tab_now_ms()) {
+            cx.notify();
+        }
+    }
+
+    fn start_tab_drag(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.workspace.position(id) else {
+            return;
+        };
+        self.tab_drag = Some(TabDragState { id, target: index });
+        // A drag keeps the scrollbar visible and stops a pending reveal from pulling the row back
+        // under the pointer.
+        self.revealed_tab = None;
+        self.focused_tab = None;
+        if self.tab_fade.set_dragging(true, self.tab_now_ms()) {
+            cx.notify();
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    /// Tracks a dragging tab: recomputes the landing slot from the real viewport and offset, and
+    /// scrolls the row when the pointer is held near an edge so tabs beyond the viewport can be
+    /// reached. The slot is orientation-only — the tab can never be dropped into the toolbar,
+    /// because the viewport is what the arithmetic is measured against.
+    fn move_tab_drag(
+        &mut self,
+        id: TabId,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.tab_drag.as_ref() else {
+            return;
+        };
+        // The payload's id is authoritative: an id that no longer exists (its tab was closed) ends
+        // the drag instead of moving whatever now sits at its old index.
+        if drag.id != id || self.workspace.position(id).is_none() {
+            self.finish_tab_drag(window, cx);
+            return;
+        }
+        let view = self.tab_scroll.bounds();
+        let width: f32 = view.size.width.into();
+        if width <= 0.0 {
+            return;
+        }
+        let mut target = tabs::landing_slot(
+            position.x - view.left(),
+            self.tab_scroll.offset().x,
+            self.workspace.sessions().len(),
+        );
+
+        // Bounded edge auto-scroll: a short, fixed step per frame while the pointer stays in an
+        // edge zone, so it neither stalls nor runs away.
+        let local: f32 = (position.x - view.left()).into();
+        let zone = tabs::EDGE_ZONE;
+        let step = if local < zone {
+            tabs::EDGE_STEP
+        } else if local > width - zone {
+            -tabs::EDGE_STEP
+        } else {
+            0.0
+        };
+        if step != 0.0 {
+            let offset: f32 = self.tab_scroll.offset().x.into();
+            let max: f32 = self.tab_scroll.max_offset().x.into();
+            let next = (offset + step).clamp(-max, 0.0);
+            if next != offset {
+                self.tab_scroll
+                    .set_offset(gpui::point(gpui::px(next), gpui::Pixels::ZERO));
+                // The pointer's row position moved with the scroll, so recompute the slot.
+                target = tabs::landing_slot(
+                    position.x - view.left(),
+                    self.tab_scroll.offset().x,
+                    self.workspace.sessions().len(),
+                );
+            }
+        }
+
+        if let Some(drag) = self.tab_drag.as_mut()
+            && drag.target != target
+        {
+            drag.target = target;
+            cx.notify();
+        }
+    }
+
+    /// Commits a drop: the dragged session moves to its landing slot by id, once.
+    fn drop_tab_drag(&mut self, id: TabId, cx: &mut Context<Self>) {
+        let Some(drag) = self.tab_drag.as_ref() else {
+            return;
+        };
+        if drag.id != id {
+            return;
+        }
+        let target = drag.target;
+        // Re-checked here rather than trusting the slot: a closed tab is ignored, and the session
+        // keeps its own id, state and route either way.
+        if self.workspace.reorder(id, target) {
+            self.revealed_tab = None;
+            self.reveal_tab(id);
+            cx.notify();
+        }
+    }
+
+    /// Ends a drag without moving anything: the original order and the active session stay as they
+    /// were. Also the path for Escape, a lost window focus and a drop outside a valid target.
+    fn finish_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        if self.tab_drag.take().is_none() {
+            return;
+        }
+        self.tab_fade.set_dragging(false, self.tab_now_ms());
+        cx.notify();
     }
 
     /// Makes an already open session active, following focus that lived in the previous page and
@@ -861,6 +1169,20 @@ impl Render for Shell {
             this.update(cx, |shell, cx| shell.open_palette(window, cx));
         };
         let titlebar = chrome::titlebar(self.search_focus.clone(), open_search, window, cx);
+        // One clock read per frame: the strip's fade and a scrollbar that just became necessary
+        // (or unnecessary) both advance from it, so no timer of their own is needed.
+        if self.tab_fade.is_animating() {
+            window.request_animation_frame();
+        }
+        // A drag that ended without a drop (released outside, window focus lost, or the tab was
+        // closed underneath it) leaves no half-finished state behind.
+        #[cfg(test)]
+        let drag_ended = self.tab_drag.is_some() && !self.tab_drag_pinned && !cx.has_active_drag();
+        #[cfg(not(test))]
+        let drag_ended = self.tab_drag.is_some() && !cx.has_active_drag();
+        if drag_ended {
+            self.finish_tab_drag(window, cx);
+        }
         // The strip's measurement lands at the end of a frame, so a reveal and a scrollbar that
         // just became necessary (or unnecessary) both need exactly one more frame to apply.
         let reach = self.tab_scroll.max_offset().x;
@@ -873,7 +1195,7 @@ impl Render for Shell {
             window.request_animation_frame();
         }
         let sidebar = self.sidebar(window, cx);
-        let island = self.island(cx);
+        let island = self.island(window, cx);
         let palette = self.palette(cx);
 
         // Closing the palette puts focus back on the search entry, never on a card that left the
@@ -906,6 +1228,12 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| {
                 shell.cycle_tab(-1, window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &CancelTabDrag, window, cx| {
+                // Escape while a tab is being carried: keep the original order and drop the drag.
+                if shell.tab_drag.is_some() {
+                    shell.finish_tab_drag(window, cx);
+                }
             }))
             .child(
                 FocusScope::new(&self.root_focus)

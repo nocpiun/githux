@@ -269,6 +269,22 @@ impl Workspace {
         true
     }
 
+    /// Moves the session `id` to `target`, an index into the visual order. Nothing is closed or
+    /// recreated: the same [`TabId`] keeps its route, scroll, focus and repository selection, and
+    /// the active session does not change. `false` when `id` is unknown or already in place.
+    pub fn reorder(&mut self, id: TabId, target: usize) -> bool {
+        let Some(from) = self.position(id) else {
+            return false;
+        };
+        let target = target.min(self.sessions.len().saturating_sub(1));
+        if from == target {
+            return false;
+        }
+        let session = self.sessions.remove(from);
+        self.sessions.insert(target, session);
+        true
+    }
+
     /// Moves the active session by `by` positions, wrapping around; `None` when there is nothing
     /// to switch to.
     pub fn cycle(&mut self, by: isize) -> Option<TabId> {
@@ -414,6 +430,98 @@ mod tests {
             assert_ne!(closed.active, b, "Home gets a fresh id");
             assert_eq!(workspace.sessions().len(), 1);
             assert_eq!(workspace.route(), &Route::Home);
+        });
+    }
+
+    #[gpui::test]
+    fn reordering_keeps_every_tab_identity_and_the_active_session(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut workspace = Workspace::new(cx);
+            let ids: Vec<TabId> = ["a", "b", "c"]
+                .into_iter()
+                .map(|name| match workspace.open(repo("owner", name), cx) {
+                    OpenResult::Opened(id) => id,
+                    other => panic!("expected a new session, got {other:?}"),
+                })
+                .collect();
+            let active = workspace.active_id();
+            let routes: Vec<Route> = workspace
+                .sessions()
+                .iter()
+                .map(|session| session.route().clone())
+                .collect();
+
+            let home = workspace.sessions()[0].id();
+            let order = |workspace: &Workspace| {
+                workspace
+                    .sessions()
+                    .iter()
+                    .map(Session::id)
+                    .collect::<Vec<_>>()
+            };
+
+            // Forward: the first repository tab goes last.
+            assert!(workspace.reorder(ids[0], 3));
+            assert_eq!(order(&workspace), vec![home, ids[1], ids[2], ids[0]]);
+
+            // Backward: the last tab goes first.
+            assert!(workspace.reorder(ids[0], 0));
+            assert_eq!(order(&workspace), vec![ids[0], home, ids[1], ids[2]]);
+
+            // No-op targets and an unknown id change nothing.
+            assert!(!workspace.reorder(ids[1], 2));
+            assert!(!workspace.reorder(TabId(9_999), 0));
+            assert_eq!(order(&workspace), vec![ids[0], home, ids[1], ids[2]]);
+
+            // The active session and every route follow their own id, not the position.
+            assert_eq!(workspace.active_id(), active);
+            let mut by_id: Vec<Route> = workspace
+                .sessions()
+                .iter()
+                .map(|session| session.route().clone())
+                .collect();
+            let mut expected = routes;
+            by_id.sort_by_key(|route| route.title());
+            expected.sort_by_key(|route| route.title());
+            assert_eq!(by_id, expected);
+        });
+    }
+
+    #[gpui::test]
+    fn reordering_changes_the_cycle_and_close_neighbours(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut workspace = Workspace::new(cx);
+            let home = workspace.active_id();
+            let ids: Vec<TabId> = ["a", "b"]
+                .into_iter()
+                .map(|name| match workspace.open(repo("owner", name), cx) {
+                    OpenResult::Opened(id) => id,
+                    other => panic!("expected a new session, got {other:?}"),
+                })
+                .collect();
+
+            // Home, a, b -> b, a, Home: the visual order is now what cycling follows.
+            assert!(workspace.reorder(home, 2));
+            assert_eq!(
+                workspace
+                    .sessions()
+                    .iter()
+                    .map(Session::id)
+                    .collect::<Vec<_>>(),
+                vec![ids[0], ids[1], home]
+            );
+            assert!(workspace.activate(ids[0]));
+            assert_eq!(workspace.cycle(1), Some(ids[1]));
+            assert_eq!(workspace.cycle(1), Some(home), "cycles after the reorder");
+            assert_eq!(workspace.cycle(1), Some(ids[0]));
+
+            // Closing the active tab now picks its visual left neighbour.
+            assert!(workspace.activate(ids[1]));
+            let closed = workspace.close(ids[1], cx).expect("b is open");
+            assert_eq!(closed.active, ids[0], "left neighbour after reordering");
+
+            // A bare reorder never closes, recreates or re-ids anything.
+            assert_eq!(workspace.sessions().len(), 2);
         });
     }
 
