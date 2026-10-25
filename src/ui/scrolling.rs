@@ -11,8 +11,8 @@ use std::{cell::Cell, rc::Rc, time::Instant};
 
 use ely_gpui_component::theme::ActiveTheme;
 use gpui::{
-    AnyElement, DispatchPhase, IntoElement, Point, ScrollHandle, ScrollWheelEvent, Styled, canvas,
-    div, prelude::*, px,
+    AnyElement, DispatchPhase, HitboxBehavior, IntoElement, Point, ScrollHandle, ScrollWheelEvent,
+    Styled, canvas, div, prelude::*, px,
 };
 
 /// How long one wheel notch takes to ease into place.
@@ -158,9 +158,10 @@ impl SmoothScroll {
     }
 }
 
-/// Covers its parent with a transparent capture-phase wheel listener. It paints nothing and has
-/// no hitbox, so it never blocks clicks; it only routes wheel deltas into `smooth`. Put it in a
-/// `relative` parent as a sibling of the scrolling element.
+/// Covers its parent with a transparent capture-phase wheel listener. It paints nothing; its
+/// hitbox only feeds hit testing, so it never blocks clicks. Put it in a `relative` parent as a
+/// sibling of the scrolling element. Consumption is gated on `should_handle_scroll`, so a modal
+/// (the command palette, an Ely menu) in front suppresses this region instead of scrolling it.
 pub(super) fn wheel_overlay(id: &'static str, smooth: SmoothScroll) -> AnyElement {
     let smooth = smooth.clone();
     div()
@@ -171,11 +172,16 @@ pub(super) fn wheel_overlay(id: &'static str, smooth: SmoothScroll) -> AnyElemen
         .size_full()
         .child(
             canvas(
-                |_, _, _| (),
-                move |bounds, (), window, _cx| {
+                |bounds, window, _cx| {
+                    // A plain hitbox lets hit testing tell whether this region is really under the
+                    // pointer: a modal in front occludes it, so background regions do not steal
+                    // the wheel. `should_handle_scroll` is the same check GPUI's built-in uses.
+                    window.insert_hitbox(bounds, HitboxBehavior::Normal)
+                },
+                move |_bounds, hitbox, window, _cx| {
                     let smooth = smooth.clone();
                     window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                        if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
+                        if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                             return;
                         }
                         let delta = event.delta.pixel_delta(window.line_height());

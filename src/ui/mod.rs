@@ -168,6 +168,12 @@ impl Shell {
         self.page_scroll.offset()
     }
 
+    /// The island page's maximum scroll offset, for the wheel-occlusion test.
+    #[cfg(test)]
+    pub fn page_max_offset(&self) -> Point<gpui::Pixels> {
+        self.page_scroll.max_offset()
+    }
+
     /// Whether the palette is open, inspected by the palette tests.
     #[cfg(test)]
     pub fn palette_open(&self) -> bool {

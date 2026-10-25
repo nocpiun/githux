@@ -616,3 +616,39 @@ fn one_wheel_notch_is_consumed_once_and_settles_at_that_delta(cx: &mut TestAppCo
         "the built-in jump must not double the delta: offset={offset:?} expected={expected:?}"
     );
 }
+
+#[gpui::test]
+fn wheel_over_the_palette_scrolls_the_palette_not_the_page(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    // A short window makes the Home page scrollable behind the palette.
+    cx.simulate_resize(size(px(900.0), px(500.0)));
+    cx.run_until_parked();
+    assert!(
+        f32::from(view.read_with(cx, |s, _| s.page_max_offset().y)) > 0.0,
+        "the Home page must be scrollable for this regression"
+    );
+    click("search-entry", cx);
+    let list = bounds("palette-list", cx);
+    let page_before = view.read_with(cx, |s, _| s.page_offset());
+    cx.simulate_mouse_move(list.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: list.center(),
+        delta: ScrollDelta::Lines(point(0.0, -8.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        view.read_with(cx, |s, _| s.page_offset()),
+        page_before,
+        "the page must not scroll under the open palette"
+    );
+    assert!(
+        view.read_with(cx, |s, _| s.palette_scroll_offset()).y < px(0.0),
+        "the palette itself must scroll"
+    );
+}

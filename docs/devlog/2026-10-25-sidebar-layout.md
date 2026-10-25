@@ -71,3 +71,7 @@
 `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（187 passed）、`cargo build --locked`、`git diff --check` 通过。新增覆盖：footer 分割线位置且不随仓库滚动、身份区导航而空白/状态不导航、状态按钮展开存在/收起隐藏、indicator 宽度/高度/贴左、平滑滚动纯状态（缓动/反向/边界/精确/内容变短/停止）、overlay 覆盖 viewport、单次滚轮不被内建跳变加倍；并更新了因新几何/行为而过时的既有断言。
 
 真实 Windows debug 预览（150% DPI，本 worktree）确认展开态：`Repositories (124)`、footer 分割线、身份区 + 💻 状态按钮、四个带边框底部入口、贴左且左直右圆的 indicator，以及 toggle 落在 island 边框上。**收起态的合成点击未能送达**：该窗口在本会话不是前台且无法抢占前台，`PostMessage`/真实鼠标事件均未被处理，所以收起/展开的逐帧观感仍只由 GPUI 测试平台覆盖，不写成已真实验收；平滑滚动的实际手感（触控板/连续滚轮）也需负责人真机确认。
+
+### 审查修复：滚轮捕获尊重遮挡
+
+Codex 首轮审查（针对 `4b92c0b`，P2）指出：palette 打开并覆盖在可滚动的 Home 页面之上时，页面 overlay 只按矩形范围判断，会在捕获阶段抢先消费属于 palette 的滚轮事件，导致滚动穿透到背景。已修复：`wheel_overlay` 在 prepaint 插入一个普通 hitbox，并在监听器里用 `hitbox.should_handle_scroll(window)`（GPUI 内建的同款检查）代替矩形判断。palette 的 `Backdrop` 与其子层已有 `occlude`，被遮挡的背景区域因此不再消费滚轮。新增回归 `wheel_over_the_palette_scrolls_the_palette_not_the_page`：短窗口下同时让 Home 页面与 palette 列表可滚动，验证滚轮只滚 palette、页面偏移不变。该检查同样覆盖 Ely 菜单等前置浮层，不针对单个 palette 特判。
