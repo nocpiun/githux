@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
-/// HTTP method. Only reads (`GET`) are exercised by the first-release GitHub
-/// layer; future write actions remain a boundary, not an implementation.
+/// HTTP method. Reads are `GET`; `POST` exists solely for read-only GraphQL
+/// queries (the transport has no mutation entry point and never replays one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
+    Post,
 }
 
 /// A prepared outbound request. Headers are owned strings; the GitHub layer is
@@ -26,6 +27,10 @@ pub struct HttpRequest {
     pub method: HttpMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// Optional request body. Used only by read-only GraphQL POST queries. It is
+    /// never printed by `Debug`: variables may carry data that must not reach
+    /// logs.
+    pub body: Option<String>,
 }
 
 /// Headers whose values must never appear in diagnostics.
@@ -53,6 +58,9 @@ impl std::fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("headers", &headers)
+            // Presence only: the body may embed GraphQL variables with data
+            // that should not appear in logs, panics or test output.
+            .field("body", &self.body.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -63,6 +71,19 @@ impl HttpRequest {
             method: HttpMethod::Get,
             url: url.into(),
             headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// A read-only POST (GraphQL query). There is deliberately no way to build
+    /// a mutation: this layer only ever sends a caller-supplied body to the
+    /// GraphQL endpoint, and the transport never auto-replays it.
+    pub fn post(url: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Post,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Some(body.into()),
         }
     }
 
@@ -228,12 +249,19 @@ impl ReqwestTransport {
             let mut redirects = 0usize;
 
             loop {
-                let mut builder = self
-                    .client
-                    .request(reqwest::Method::GET, &url)
-                    .timeout(self.timeout);
+                let method = match request.method {
+                    HttpMethod::Get => reqwest::Method::GET,
+                    HttpMethod::Post => reqwest::Method::POST,
+                };
+                let mut builder = self.client.request(method, &url).timeout(self.timeout);
                 for (name, value) in &request.headers {
                     builder = builder.header(name.as_str(), value.as_str());
+                }
+                // Re-attach the body on every hop so the method/body semantics
+                // are preserved. POST redirects are never followed (below), so
+                // this body only ever goes to the original trusted origin.
+                if let Some(body) = &request.body {
+                    builder = builder.body(body.clone());
                 }
 
                 let send = builder.send();
@@ -264,6 +292,20 @@ impl ReqwestTransport {
                 }
 
                 if (300..400).contains(&status) {
+                    // Conservative GraphQL rule: never follow a redirect for a
+                    // POST. A 301/302/303 would silently turn the method into
+                    // GET and drop the query body, while 307/308 would re-send
+                    // the body — neither is safe to automate for a query whose
+                    // variables may carry user data. Surface the 3xx so the
+                    // GraphQL layer rejects it as an error. GET keeps the
+                    // existing same-origin follow behaviour.
+                    if request.method == HttpMethod::Post {
+                        return Ok(HttpResponse {
+                            status,
+                            headers,
+                            body: String::new(),
+                        });
+                    }
                     let location = headers
                         .iter()
                         .find(|(k, _)| k == "location")
@@ -473,6 +515,12 @@ impl MockTransport {
             .collect()
     }
 
+    /// Full recorded requests, including method and body, for tests that verify
+    /// the exact GraphQL POST encoding.
+    pub async fn recorded_requests(&self) -> Vec<HttpRequest> {
+        self.recorded.lock().await.clone()
+    }
+
     async fn next_response(&self) -> Option<MockResponse> {
         self.responses.lock().await.pop()
     }
@@ -673,6 +721,130 @@ mod tests {
             recorded[1].header("authorization"),
             Some("Bearer ghp_local_mock_token")
         );
+    }
+
+    /// Real socket round-trip: a POST is sent with its method and JSON body.
+    #[tokio::test]
+    async fn post_request_carries_method_and_body() {
+        let server = LocalHttpServer::start(vec![ScriptedResponse::json(200, "{}")]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(
+            format!("{}graphql", server.base_url()),
+            r#"{"query":"{viewer{login}}"}"#,
+        )
+        .with_header("Content-Type", "application/json")
+        .with_header("Authorization", "Bearer ghp_local_mock_token");
+
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("request");
+        assert_eq!(response.status, 200);
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].request_line.starts_with("POST /graphql"));
+        assert_eq!(recorded[0].body, r#"{"query":"{viewer{login}}"}"#);
+        assert_eq!(recorded[0].header("content-type"), Some("application/json"));
+        assert_eq!(
+            recorded[0].header("authorization"),
+            Some("Bearer ghp_local_mock_token")
+        );
+    }
+
+    /// A bounded POST response is rejected at receive time, before the body is
+    /// buffered.
+    #[tokio::test]
+    async fn bounded_post_response_is_rejected_over_the_limit() {
+        let server = LocalHttpServer::start(vec![ScriptedResponse::json(200, "0123456789")]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(format!("{}graphql", server.base_url()), "{}");
+        let result = transport
+            .execute_bounded(request, CancellationToken::default(), 4)
+            .await;
+        assert_eq!(result, Err(TransportError::ResponseTooLarge { limit: 4 }));
+    }
+
+    /// A POST that never receives a response is classified as a timeout with
+    /// the configured duration.
+    #[tokio::test]
+    async fn post_timeout_is_classified() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let _keep = listener.accept();
+            std::thread::sleep(Duration::from_secs(3));
+        });
+
+        let transport = ReqwestTransport::new(Duration::from_millis(600)).expect("client");
+        let result = transport
+            .execute(
+                HttpRequest::post(format!("http://{addr}/graphql"), "{}"),
+                CancellationToken::default(),
+            )
+            .await;
+        assert_eq!(result, Err(TransportError::Timeout { seconds: 1 }));
+        let _ = handle.join();
+    }
+
+    /// Conservative GraphQL rule: a POST redirect is never followed, even on
+    /// the same origin, so the query body cannot be re-sent.
+    #[tokio::test]
+    async fn post_redirect_is_not_followed_even_same_origin() {
+        let server = LocalHttpServer::start(vec![
+            ScriptedResponse::json(307, "").with_header("Location", "/graphql-elsewhere"),
+        ]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(
+            format!("{}graphql", server.base_url()),
+            r#"{"query":"{viewer{login}}"}"#,
+        );
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("transport returns the 3xx");
+        assert_eq!(response.status, 307);
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1, "the redirect must not be followed");
+        assert!(recorded[0].request_line.starts_with("POST /graphql"));
+    }
+
+    /// A cross-origin POST redirect target is never contacted, so neither the
+    /// credential nor the query body can leak.
+    #[tokio::test]
+    async fn cross_origin_post_redirect_is_not_followed() {
+        let target = LocalHttpServer::start(vec![ScriptedResponse::json(200, "stolen")]);
+        let server = LocalHttpServer::start(vec![
+            ScriptedResponse::json(302, "").with_header("Location", target.base_url()),
+        ]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(format!("{}graphql", server.base_url()), "{}")
+            .with_header("Authorization", "Bearer ghp_post_secret");
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("transport returns the 3xx");
+        assert_eq!(response.status, 302);
+        assert_eq!(server.recorded().len(), 1);
+        assert!(target.recorded().is_empty());
+        // Let the target's drop wake-up exit without consuming a fixture.
+        target.script(vec![]);
+    }
+
+    /// A cancelled POST does not open a connection at all.
+    #[tokio::test]
+    async fn cancelled_post_does_not_open_a_connection() {
+        let server = LocalHttpServer::start(vec![]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let (cancel, source) = CancellationToken::new();
+        source.cancel();
+        let result = transport
+            .execute(
+                HttpRequest::post(format!("{}graphql", server.base_url()), "{}"),
+                cancel,
+            )
+            .await;
+        assert_eq!(result, Err(TransportError::Cancelled));
+        assert!(server.recorded().is_empty());
     }
 
     /// Real socket round-trip: a cross-origin redirect is NOT followed. The 3xx
