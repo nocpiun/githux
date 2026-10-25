@@ -17,6 +17,7 @@
 pub mod account;
 pub mod error;
 pub mod repo;
+pub mod repository;
 
 // Re-exported surface for the pending UI integration; see docs/auth-and-network.md
 // for the minimal call example. Nothing in the current binary consumes it yet.
