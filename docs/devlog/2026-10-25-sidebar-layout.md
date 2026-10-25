@@ -35,4 +35,22 @@
 
 本轮截图诊断曾因 PowerShell 未启用 DPI awareness 导致 GetWindowRect 与 CopyFromScreen 坐标不一致，只截到左上部分，误以为 footer 越界。修正截图工具 DPI awareness 后完整窗口证明 footer 正常；相关临时根容器实验和诊断 I/O 已移除，没有以该误判修改原生 caption。
 
+## 修订：统一收起尺度、动画、More 与贴边 indicator
+
+负责人查看真实预览后提出四项修订，本轮已处理；这不是验收通过，最终观感仍待其真实窗口确认。
+
+收起栏由一个共享 28px 方形控件尺度导出宽度：56px = 28px 控件 + 8px 左内缩（右侧由 island gap 补齐）。Home/Settings、repo、account、More 的命中背景都是同尺寸正方形并水平居中；account avatar 在收起时与 repo 的 Ely Xs 同为 20px，向上展开时连续插值到 32px Md，文字同时淡入。展开仍保留大 avatar + 姓名/ID，Profile 页面内的 Ely avatar 不受影响。共同尺度集中在 `SIDEBAR_RAIL_ITEM_SIZE / SIDEBAR_COLLAPSED_WIDTH`，避免账号内容反向撑宽。
+
+展开/收起用约 200ms 的 Ely `ease_out_cubic` 按呈现时间插值宽度与展开比例；sidebar、island 左边、resize 命中带、圆按钮和行高共享同一帧值。动画由渲染采样驱动，只在过渡未完成时请求下一帧，结束即清空状态，不使用空转 timer 或保留回调。快速再次点击先采样当前呈现值再反向；手动拖动和窗口尺寸变化会终止动画并限制到合法宽度，展开仍恢复本次运行的原 `expanded_width`。遵循 Ely `Theme::reduced_motion` 与 `App::reduce_motion`，不增加新设置。标签点击与路由、两条滚动状态不受影响。
+
+收起底部入口的 tooltip 与可访问名称均为精确的“More”；菜单内容仍为 Notifications/Issues/PRs/New，New 继续禁用。展开模式四个图标保留各自 tooltip。
+
+活动 indicator 从可绘制左边界 x=0 开始，宽 2px，左上/左下圆角为 0，右上/右下 2px；上下各内缩 2px，因此高度随当前行（含动画中间高度）变化。仓库行和 indicator 仍一起被独立 viewport 裁剪，滚动出屏后不侵入 footer；indicator 无鼠标命中，不影响窗口 resize 或行点击。
+
+## 验证（修订）
+
+`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（182 passed）、`cargo build --locked`、`git diff --check` 通过。本轮新增覆盖：收起行/More 实际正方形与共同宽度、account 与 repo avatar 实际尺寸相等、展开恢复 32px、indicator 分角绘制与 1.5 倍缩放/滚出裁剪、动画中间帧与侧栏/island/divider/按钮同宽、连续反向、结束后不再请求帧、拖动/窗口 resize 中断和 reduced-motion。
+
+真实 debug 预览确认展开态 layout 正常，收起后的 account avatar、行背景、贴边 indicator 与 More 行为可用；完全动画流畅度、四项视觉与手感仍由负责人确认，不把测试或构建结果写成已验收。
+
 最终真实窗口视觉和全部手感由负责人验收。重点：外 inset 与 Profile 两侧留白是否舒适、repo/avatar 左移量、圆按钮位置/命中、边缘窗口 resize 不受活动线影响、菜单焦点与中文 palette 组合输入。PR 与 CI/Codex 最新提交结果只记在 PR/交接，避免为后补结果制造额外未经审查提交。

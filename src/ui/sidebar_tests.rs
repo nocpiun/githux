@@ -9,6 +9,8 @@ use gpui::{
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
     cx.update(|cx| {
         ely_gpui_component::init_for_tests(cx);
+        // Existing event tests inspect settled geometry; motion has separate controlled-time tests.
+        ely_gpui_component::theme::Theme::update(cx, |theme| theme.reduced_motion = true);
         Shell::bind_keys(cx);
     });
     let (view, cx) = cx.add_window_view(Shell::new);
@@ -64,15 +66,13 @@ fn release(p: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
 
 #[test]
 fn window_budget_and_remembered_width_are_independent() {
-    let mut state = SidebarState {
-        dragging: true,
-        ..Default::default()
-    };
+    let mut state = SidebarState::default();
+    state.begin_resize();
     state.resize(900.0, 1200.0);
     assert_eq!(state.width(1200.0), 360.0);
     assert_eq!(state.width(880.0), 265.0);
     state.collapsed = true;
-    assert_eq!(state.width(880.0), 56.0);
+    assert_eq!(state.width(880.0), SIDEBAR_COLLAPSED_WIDTH);
     state.collapsed = false;
     assert_eq!(state.width(1200.0), 360.0);
     state.resize(-100.0, 880.0);
@@ -281,4 +281,196 @@ fn menu_dismissal_shield_leaves_and_window_resize_keeps_normal_focus(cx: &mut Te
     cx.update(|window, _| assert!(repo_focus.is_focused(window)));
     click("nav-settings", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Settings);
+}
+
+#[gpui::test]
+fn rail_rows_share_square_hitboxes_and_avatar_diameter(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    click("sidebar-toggle", cx);
+    let home = bounds("nav-home", cx);
+    for selector in ["nav-settings", "repo-row-0", "account-row"] {
+        let row = bounds(selector, cx);
+        assert_eq!(row.size, home.size, "{selector}");
+        assert_eq!(row.size.width, row.size.height, "{selector} must be square");
+        assert_eq!(row.center().x, home.center().x);
+    }
+    let more = bounds("sidebar-more-button", cx);
+    assert_eq!(more.size, home.size);
+    assert_eq!(more.center().x, home.center().x);
+    assert_eq!(
+        bounds("sidebar-account-avatar", cx).size,
+        bounds("sidebar-repo-avatar-0", cx).size
+    );
+    for selector in ["nav-home", "repo-row-0", "account-row"] {
+        click(selector, cx);
+        let marker = bounds("sidebar-indicator", cx);
+        let row = bounds(selector, cx);
+        assert_eq!(marker.left(), bounds("shell-body", cx).left());
+        assert_eq!(marker.top(), row.top() + px(SIDEBAR_INDICATOR_INSET));
+        assert_eq!(marker.bottom(), row.bottom() - px(SIDEBAR_INDICATOR_INSET));
+    }
+    click("sidebar-toggle", cx);
+    assert_eq!(bounds("sidebar-account-avatar", cx).size.width, px(32.0));
+    assert_eq!(
+        bounds("account-row", cx).size.height,
+        px(ACCOUNT_ROW_HEIGHT)
+    );
+}
+
+#[test]
+fn motion_reverses_from_presented_value_and_resize_ends_it() {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.toggle(start, 1200.0, false);
+    assert!(state.sample(start + Duration::from_millis(80), 1200.0, false));
+    let middle = state.frame;
+    assert!(middle.width > SIDEBAR_COLLAPSED_WIDTH && middle.width < SIDEBAR_WIDTH);
+    assert!(middle.expansion > 0.0 && middle.expansion < 1.0);
+    state.toggle(start + Duration::from_millis(80), 1200.0, false);
+    assert_eq!(state.frame.width, middle.width);
+    assert!(state.sample(start + Duration::from_millis(120), 1200.0, false));
+    assert!(state.frame.width > middle.width);
+    assert!(!state.sample(start + Duration::from_millis(280), 1200.0, false));
+    assert_eq!(state.frame.width, SIDEBAR_WIDTH);
+    assert!(!state.sample(start + Duration::from_secs(10), 1200.0, false));
+    state.toggle(start + Duration::from_secs(11), 1200.0, false);
+    state.sample(start + Duration::from_millis(11050), 1200.0, false);
+    state.begin_resize();
+    state.resize(340.0, 880.0);
+    assert_eq!(state.frame.width, 265.0);
+    assert!(!state.sample(start + Duration::from_secs(12), 880.0, false));
+    state.toggle(start + Duration::from_secs(13), 880.0, true);
+    assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
+    assert!(!state.sample(start + Duration::from_secs(13), 880.0, true));
+}
+
+#[gpui::test]
+fn animated_layout_uses_one_width_for_sidebar_island_and_divider(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let (view, cx) = shell(cx);
+    cx.update(|_, cx| {
+        ely_gpui_component::theme::Theme::update(cx, |theme| theme.reduced_motion = false)
+    });
+    click("sidebar-toggle", cx);
+    cx.update(|_, cx| {
+        cx.background_executor()
+            .advance_clock(Duration::from_millis(80))
+    });
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let width = bounds("sidebar", cx).size.width;
+    assert!(width > px(SIDEBAR_COLLAPSED_WIDTH) && width < px(SIDEBAR_WIDTH));
+    assert_eq!(bounds("island", cx).left(), width + px(ISLAND_GAP));
+    assert_eq!(bounds("sidebar-resize", cx).left(), width);
+    assert_eq!(
+        bounds("sidebar-toggle", cx).center().x,
+        width + px(ISLAND_GAP / 2.0)
+    );
+    click("sidebar-toggle", cx);
+    assert_eq!(bounds("sidebar", cx).size.width, width);
+    cx.update(|_, cx| {
+        cx.background_executor()
+            .advance_clock(Duration::from_millis(SIDEBAR_ANIMATION_MS))
+    });
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(bounds("sidebar", cx).size.width, px(SIDEBAR_WIDTH));
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
+    // Drain the one callback already requested by the preceding frame. Settled renders
+    // must not install another callback; there is no perpetual animation timer.
+    cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| assert_eq!(window.simulate_next_frame(cx), 0));
+    click("sidebar-toggle", cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    assert_eq!(
+        bounds("sidebar", cx).size.width,
+        px(SIDEBAR_COLLAPSED_WIDTH)
+    );
+}
+
+#[gpui::test]
+fn indicator_paint_has_square_left_corners_and_clips_scrolled_repo(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_scale_factor_change(1.5);
+    cx.run_until_parked();
+    for selector in ["nav-home", "repo-row-0", "account-row"] {
+        click(selector, cx);
+        let marker = bounds("sidebar-indicator", cx);
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let painted = window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| quad.bounds == marker.scale(scale))
+                .expect("indicator painted");
+            assert_eq!(painted.corner_radii.top_left, gpui::ScaledPixels(0.0));
+            assert_eq!(painted.corner_radii.bottom_left, gpui::ScaledPixels(0.0));
+            assert!(painted.corner_radii.top_right > gpui::ScaledPixels(0.0));
+            assert!(painted.corner_radii.bottom_right > gpui::ScaledPixels(0.0));
+        });
+    }
+    click("repo-row-0", cx);
+    view.update(cx, |s, cx| {
+        s.repo_scroll.set_offset(point(px(0.0), px(-500.0)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let marker = bounds("sidebar-indicator", cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .painted_quads()
+                .iter()
+                .all(|quad| quad.bounds != marker.scale(window.scale_factor()))
+        )
+    });
+}
+
+#[gpui::test]
+fn resizing_interrupts_animation_and_restores_clamped_user_width(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let (view, cx) = shell(cx);
+    view.update(cx, |s, cx| {
+        s.sidebar_state.expanded_width = 340.0;
+        cx.notify();
+    });
+    cx.update(|_, cx| {
+        ely_gpui_component::theme::Theme::update(cx, |theme| theme.reduced_motion = false)
+    });
+    click("sidebar-toggle", cx);
+    cx.update(|_, cx| {
+        cx.background_executor()
+            .advance_clock(Duration::from_millis(70))
+    });
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let during = bounds("sidebar", cx).size.width;
+    // The resize hitband belongs to expanded mode, so leave the collapsing transition through
+    // the user's own toggle first, then drag from the presented expanded width.
+    click("sidebar-toggle", cx);
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    let start = drag_start(cx);
+    assert!(during < px(340.0));
+    // begin_resize starts the manual drag from the currently presented width, clamped to the
+    // minimum while it is still below it, rather than jumping to the stale target width.
+    assert_eq!(bounds("sidebar", cx).size.width, px(SIDEBAR_MIN_WIDTH));
+    cx.simulate_mouse_move(
+        start + point(px(30.0), px(0.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let released = start + point(px(30.0), px(0.0));
+    release(released, cx);
+    let width = bounds("sidebar", cx).size.width;
+    assert!(width > during);
+    click("sidebar-toggle", cx);
+    click("sidebar-toggle", cx);
+    assert_eq!(bounds("sidebar", cx).size.width, width);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
 }

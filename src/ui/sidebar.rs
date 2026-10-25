@@ -20,8 +20,10 @@ use gpui::{
 use super::{
     fixtures::{AccountFixture, RepoFixture},
     geometry::{
-        ACCOUNT_ROW_HEIGHT, REPO_ACCOUNT_GAP, REPO_LEFT_PADDING, REPO_ROW_HEIGHT, SIDEBAR_PADDING,
+        ACCOUNT_ROW_HEIGHT, REPO_ACCOUNT_GAP, REPO_LEFT_PADDING, REPO_ROW_HEIGHT,
+        SIDEBAR_INDICATOR_INSET, SIDEBAR_INDICATOR_RADIUS, SIDEBAR_PADDING, SIDEBAR_RAIL_ITEM_SIZE,
     },
+    sidebar_state::SidebarFrame,
 };
 
 type Run = Box<dyn Fn(&mut Window, &mut App) + 'static>;
@@ -29,13 +31,11 @@ type Run = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 impl super::Shell {
     pub(super) fn sidebar_divider(
         &self,
-        window: &Window,
+        _window: &Window,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         use super::{geometry::*, sidebar_state::SidebarDrag};
-        let width = self
-            .sidebar_state
-            .width(window.viewport_size().width.into());
+        let width = self.sidebar_state.frame.width;
         let collapsed = self.sidebar_state.collapsed;
         let (bg, hover, fg) = (
             cx.theme().colors.bg,
@@ -52,17 +52,17 @@ impl super::Shell {
             .left(px(width))
             .w(px(SIDEBAR_RESIZE_HIT_WIDTH))
             .cursor(gpui::CursorStyle::ResizeLeftRight)
-            .when(!collapsed, |handle| {
+            .when(!self.sidebar_state.collapsed, |handle| {
                 handle.on_drag(
                     SidebarDrag {
                         owner: cx.entity_id(),
                         start_width: width,
-                        start_x: std::cell::Cell::new(window.mouse_position().x),
+                        start_x: std::cell::Cell::new(_window.mouse_position().x),
                     },
                     move |drag, _, window, cx| {
                         drag.start_x.set(window.mouse_position().x);
                         this.update(cx, |shell, cx| {
-                            shell.sidebar_state.dragging = true;
+                            shell.sidebar_state.begin_resize();
                             cx.notify();
                         });
                         cx.set_active_drag_cursor_style(gpui::CursorStyle::ResizeLeftRight, window);
@@ -104,9 +104,12 @@ impl super::Shell {
             })
             .on_click(cx.listener(|shell, _, window, cx| {
                 window.focus(&shell.root_focus, cx);
-                shell.sidebar_state.dragging = false;
-                shell.sidebar_state.collapsed = !shell.sidebar_state.collapsed;
-                shell.sidebar_state.menu_open.set(false);
+                let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                shell.sidebar_state.toggle(
+                    cx.background_executor().now(),
+                    window.viewport_size().width.into(),
+                    reduced,
+                );
                 cx.stop_active_drag(window);
                 cx.stop_propagation();
                 cx.notify();
@@ -137,19 +140,22 @@ pub(super) fn nav_row(
     icon: IconName,
     label: &'static str,
     active: bool,
-    collapsed: bool,
+    frame: SidebarFrame,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
     let (fg, hover, muted) = (theme.colors.fg, theme.colors.hover, theme.colors.fg_muted);
-    let height = theme.control_height(ely_gpui_component::theme::ControlSize::Md);
+    let expanded_height = theme.control_height(ely_gpui_component::theme::ControlSize::Md);
+    let height = gpui::rems(SIDEBAR_RAIL_ITEM_SIZE / 16.0) * (1.0 - frame.expansion)
+        + expanded_height * frame.expansion;
+    let collapsed = frame.expansion == 0.0;
     let row = div()
         .id(selector)
         .debug_selector(move || selector.to_string())
         .flex()
         .items_center()
-        .gap_2()
+        .gap(px(8.0 * frame.expansion))
         .h(height)
         .w_full()
         .min_w_0()
@@ -172,8 +178,15 @@ pub(super) fn nav_row(
             if collapsed {
                 row.justify_center()
             } else {
-                row.px_2()
-                    .child(div().flex_1().min_w_0().child(Ellipsis::new(label)))
+                row.px(px(6.0 + 2.0 * frame.expansion))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .opacity(frame.expansion)
+                            .child(Ellipsis::new(label)),
+                    )
             }
         })
         .tooltip(Tooltip::text(label));
@@ -196,12 +209,14 @@ fn marked(row: AnyElement, active: bool, height: gpui::Length, cx: &App) -> AnyE
                 div()
                     .debug_selector(|| "sidebar-indicator".to_string())
                     .absolute()
-                    .left(px(1.0))
-                    .top(gpui::relative(0.5))
-                    .mt(px(-8.0))
+                    .left_0()
+                    .top(px(SIDEBAR_INDICATOR_INSET))
+                    .bottom(px(SIDEBAR_INDICATOR_INSET))
                     .w(px(2.0))
-                    .h(px(16.0))
-                    .rounded_full()
+                    .rounded_tl(px(0.0))
+                    .rounded_bl(px(0.0))
+                    .rounded_tr(px(SIDEBAR_INDICATOR_RADIUS))
+                    .rounded_br(px(SIDEBAR_INDICATOR_RADIUS))
                     .bg(cx.theme().colors.fg_muted),
             )
         })
@@ -217,7 +232,7 @@ pub(super) fn repo_row(
     repo: &RepoFixture,
     focus: &FocusHandle,
     active: bool,
-    collapsed: bool,
+    frame: SidebarFrame,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -231,6 +246,9 @@ pub(super) fn repo_row(
         colors.active,
         colors.fg_muted,
     );
+    let collapsed = frame.expansion == 0.0;
+    let height =
+        SIDEBAR_RAIL_ITEM_SIZE + (REPO_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
     let full_name = repo.full_name();
     let avatar_name = repo.namespace.clone();
     let run: Run = Box::new(run);
@@ -240,12 +258,16 @@ pub(super) fn repo_row(
         .flex()
         .flex_none()
         .items_center()
-        .gap_2()
-        .h(px(REPO_ROW_HEIGHT))
+        .gap(px(8.0 * frame.expansion))
+        .h(px(height))
+        .overflow_hidden()
         .w_full()
         .min_w_0()
         .when(collapsed, |row| row.justify_center())
-        .when(!collapsed, |row| row.pl(px(REPO_LEFT_PADDING)).pr_2())
+        .when(!collapsed, |row| {
+            row.pl(px(3.0 + (REPO_LEFT_PADDING - 3.0) * frame.expansion))
+                .pr(px(8.0 * frame.expansion))
+        })
         .rounded(radius)
         .border_1()
         .border_color(transparent_black())
@@ -264,25 +286,31 @@ pub(super) fn repo_row(
         .focus(move |style| style.border_color(focus_color))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
-        .child(Avatar::new(("repo-avatar", index), avatar_name).size(AvatarSize::Xs))
+        .child(
+            div()
+                .debug_selector(move || format!("sidebar-repo-avatar-{index}"))
+                .flex_none()
+                .child(Avatar::new(("repo-avatar", index), avatar_name).size(AvatarSize::Xs)),
+        )
         .when(!collapsed, |row| {
             row.child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .opacity(frame.expansion)
                     .child(Ellipsis::new(full_name.clone())),
             )
         })
         .tooltip(Tooltip::text(full_name))
         .into_any_element();
-    marked(row, active, px(REPO_ROW_HEIGHT).into(), cx)
+    marked(row, active, px(height).into(), cx)
 }
 
 /// The signed-in account; pressing it opens the profile.
 pub(super) fn account_row(
     account: AccountFixture,
     active: bool,
-    collapsed: bool,
+    frame: SidebarFrame,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -294,6 +322,9 @@ pub(super) fn account_row(
         theme.text_size(TextSize::Xs),
     );
     let (hover, fg, subtle, focus) = (colors.hover, colors.fg, colors.fg_subtle, colors.fg_muted);
+    let collapsed = frame.expansion == 0.0;
+    let height =
+        SIDEBAR_RAIL_ITEM_SIZE + (ACCOUNT_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
     let label = format!("Profile: {} (@{})", account.name, account.login);
     let run: Run = Box::new(run);
     let row = div()
@@ -302,12 +333,13 @@ pub(super) fn account_row(
         .flex()
         .flex_none()
         .items_center()
-        .gap_2()
-        .h(px(ACCOUNT_ROW_HEIGHT))
+        .gap(px(8.0 * frame.expansion))
+        .h(px(height))
+        .overflow_hidden()
         .w_full()
         .min_w_0()
         .when(collapsed, |row| row.justify_center())
-        .when(!collapsed, |row| row.px_2())
+        .when(!collapsed, |row| row.px(px(3.0 + 5.0 * frame.expansion)))
         .rounded(radius)
         .border_1()
         .border_color(transparent_black())
@@ -321,12 +353,16 @@ pub(super) fn account_row(
         .focus(move |style| style.border_color(focus))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
-        .child(Avatar::new("account-avatar", account.name).size(AvatarSize::Md))
+        .child(SidebarAvatar {
+            name: account.name.into(),
+            expansion: frame.expansion,
+        })
         .when(!collapsed, |row| {
             row.child(
                 div()
                     .flex()
                     .flex_col()
+                    .opacity(frame.expansion)
                     .flex_1()
                     .min_w_0()
                     .child(
@@ -345,7 +381,54 @@ pub(super) fn account_row(
         })
         .tooltip(Tooltip::text(label))
         .into_any_element();
-    marked(row, active, px(ACCOUNT_ROW_HEIGHT).into(), cx)
+    marked(row, active, px(height).into(), cx)
+}
+
+/// Account-only interpolated avatar. Ely Avatar exposes enum sizes, so use its initials/tint
+/// convention here with a continuous diameter; Profile's own Ely avatar is untouched.
+#[derive(IntoElement)]
+struct SidebarAvatar {
+    name: gpui::SharedString,
+    expansion: f32,
+}
+impl gpui::RenderOnce for SidebarAvatar {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let small = theme.avatar_size(AvatarSize::Xs);
+        let large = theme.avatar_size(AvatarSize::Md);
+        let side = small + (large - small) * self.expansion;
+        let hash = self.name.bytes().fold(0u32, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+        });
+        let tint = theme.colors.chart[hash as usize % theme.colors.chart.len()];
+        let words = self.name.split_whitespace().collect::<Vec<_>>();
+        let mut initials = words
+            .first()
+            .and_then(|s| s.chars().next())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default();
+        if words.len() > 1
+            && let Some(last) = words.last().and_then(|s| s.chars().next())
+        {
+            initials.extend(last.to_uppercase());
+        }
+        div()
+            .debug_selector(|| "sidebar-account-avatar".to_string())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(side)
+            .rounded_full()
+            .bg(tint.opacity(0.16))
+            .text_color(tint)
+            .text_size(
+                theme.text_size(TextSize::Xs) * (1.0 - self.expansion)
+                    + theme.text_size(TextSize::Sm) * self.expansion,
+            )
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(initials)
+    }
 }
 
 /// One of the four equal-width quick entries. New stays unavailable this round: its resource list
@@ -470,12 +553,17 @@ pub(super) fn overflow(
         .justify_center()
         .pl(px(SIDEBAR_PADDING))
         .w_full()
-        .child(SidebarOverflow {
-            menu: OverflowMenu::new("sidebar-overflow", menu)
-                .tooltip("Notifications, Issues, PRs, New"),
-            restore: focus.clone(),
-            open,
-        })
+        .child(
+            div()
+                .debug_selector(|| "sidebar-more-button".to_string())
+                .size(px(SIDEBAR_RAIL_ITEM_SIZE))
+                .flex_none()
+                .child(SidebarOverflow {
+                    menu: OverflowMenu::new("sidebar-overflow", menu).tooltip("More"),
+                    restore: focus.clone(),
+                    open,
+                }),
+        )
         .text_color(cx.theme().colors.fg_muted)
         .into_any_element()
 }
@@ -583,22 +671,31 @@ pub(super) fn sidebar(
     repositories: AnyElement,
     account: AnyElement,
     quarters: AnyElement,
-    width: f32,
-    collapsed: bool,
+    frame: SidebarFrame,
 ) -> AnyElement {
     div()
         .debug_selector(|| "sidebar".to_string())
         .flex()
         .flex_col()
         .flex_none()
-        .w(px(width))
+        .w(px(frame.width))
         .h_full()
         .min_h_0()
+        .overflow_x_hidden()
         .gap_1()
         .pt(px(SIDEBAR_PADDING))
         .pb(px(SIDEBAR_PADDING))
         .child(nav)
-        .when(!collapsed, |sidebar| sidebar.child(heading))
+        .when(frame.expansion > 0.0, |sidebar| {
+            sidebar.child(
+                div()
+                    .flex_none()
+                    .h(px(24.0 * frame.expansion))
+                    .overflow_hidden()
+                    .opacity(frame.expansion)
+                    .child(heading),
+            )
+        })
         .child(repositories)
         .child(div().flex_none().h(px(REPO_ACCOUNT_GAP - 8.0)))
         .child(account)

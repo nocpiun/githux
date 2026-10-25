@@ -11,7 +11,12 @@ pub const SIDEBAR_WIDTH: f32 = 232.0;
 pub const SIDEBAR_PADDING: f32 = 8.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
 pub const SIDEBAR_MAX_WIDTH: f32 = 360.0;
-pub const SIDEBAR_COLLAPSED_WIDTH: f32 = 56.0;
+/// The rail owns the left inset; ISLAND_GAP supplies the matching right inset.
+pub const SIDEBAR_RAIL_ITEM_SIZE: f32 = 28.0;
+pub const SIDEBAR_COLLAPSED_WIDTH: f32 = SIDEBAR_RAIL_ITEM_SIZE + SIDEBAR_PADDING;
+pub const SIDEBAR_ANIMATION_MS: u64 = 200;
+pub const SIDEBAR_INDICATOR_INSET: f32 = 2.0;
+pub const SIDEBAR_INDICATOR_RADIUS: f32 = 2.0;
 pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
 pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;

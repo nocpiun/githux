@@ -96,6 +96,9 @@ impl Shell {
             if shell.sidebar_state.menu_open.get() && shell.palette.is_none() {
                 window.focus(&shell.sidebar_more_focus, cx);
             }
+            shell
+                .sidebar_state
+                .settle(window.viewport_size().width.into());
             cx.notify();
         });
         let this = cx.entity();
@@ -341,6 +344,7 @@ impl Shell {
         let this = cx.entity();
         let route = self.workspace.route().clone();
         let collapsed = self.sidebar_state.collapsed;
+        let frame = self.sidebar_state.frame;
 
         let home = {
             let this = this.clone();
@@ -349,7 +353,7 @@ impl Shell {
                 IconName::House,
                 "Home",
                 route == Route::Home,
-                collapsed,
+                frame,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Home, cx);
@@ -365,7 +369,7 @@ impl Shell {
                 IconName::Settings,
                 "Settings",
                 route == Route::Settings,
-                collapsed,
+                frame,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Settings, cx);
@@ -416,7 +420,7 @@ impl Shell {
                     repo,
                     &focus,
                     active,
-                    collapsed,
+                    frame,
                     move |_, cx| {
                         let target = target.clone();
                         this.update(cx, |shell, cx| {
@@ -434,7 +438,7 @@ impl Shell {
             sidebar::account_row(
                 fixtures::ACCOUNT,
                 route == Route::Profile,
-                collapsed,
+                frame,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Profile, cx);
@@ -506,16 +510,7 @@ impl Shell {
             ])
         };
 
-        sidebar::sidebar(
-            nav,
-            heading,
-            repositories,
-            account,
-            quarters,
-            self.sidebar_state
-                .width(window.viewport_size().width.into()),
-            collapsed,
-        )
+        sidebar::sidebar(nav, heading, repositories, account, quarters, frame)
     }
 
     fn island(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -593,6 +588,14 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+        if self.sidebar_state.sample(
+            cx.background_executor().now(),
+            window.viewport_size().width.into(),
+            reduced,
+        ) {
+            window.request_animation_frame();
+        }
         let theme = cx.theme();
         let colors = &theme.colors;
         let (bg, fg) = (colors.bg, colors.fg);
