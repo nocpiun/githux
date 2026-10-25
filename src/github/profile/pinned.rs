@@ -24,6 +24,7 @@ query ProfilePinned($login: String!, $pinnedFirst: Int!, $showcaseFirst: Int!) {
   user(login: $login) {
     pinnedItems(first: $pinnedFirst, types: [REPOSITORY]) {
       totalCount
+      pageInfo { hasNextPage }
       nodes {
         __typename
         ... on Repository {
@@ -44,6 +45,7 @@ query ProfilePinned($login: String!, $pinnedFirst: Int!, $showcaseFirst: Int!) {
     itemShowcase {
       hasPinnedItems
       items(first: $showcaseFirst) {
+        pageInfo { hasNextPage }
         nodes {
           __typename
           ... on Repository {
@@ -81,7 +83,16 @@ struct PinnedItemsConnection {
     #[serde(default)]
     total_count: u32,
     #[serde(default)]
+    page_info: Option<PageInfo>,
+    #[serde(default)]
     nodes: Vec<Value>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    #[serde(default)]
+    has_next_page: bool,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +107,8 @@ struct ItemShowcase {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ShowcaseItemsConnection {
+    #[serde(default)]
+    page_info: Option<PageInfo>,
     #[serde(default)]
     nodes: Vec<Value>,
 }
@@ -170,6 +183,7 @@ fn build_pinned(
 
     let mut repos = Vec::new();
     let mut total_repos = 0u32;
+    let mut pinned_truncated = false;
     if let Some(connection) = user.pinned_items {
         total_repos = connection.total_count;
         if connection.nodes.len() > limits.pinned_items as usize {
@@ -183,25 +197,41 @@ fn build_pinned(
                 repos.push(repo);
             }
         }
+        // The node list may be a prefix of the real pins: keep that fact so a
+        // caller never reads a truncated list as the complete pin set.
+        pinned_truncated = connection
+            .page_info
+            .map(|page| page.has_next_page)
+            .unwrap_or(false)
+            || total_repos as usize > repos.len();
     }
 
-    let (has_pinned_items, showcase) = match user.item_showcase {
+    let (has_pinned_items, showcase_truncated, showcase) = match user.item_showcase {
         Some(showcase) => match showcase.items {
-            Some(items) => (
-                showcase.has_pinned_items,
-                classify_showcase(showcase.has_pinned_items, &items.nodes),
-            ),
+            Some(items) => {
+                let truncated = items
+                    .page_info
+                    .map(|page| page.has_next_page)
+                    .unwrap_or(false);
+                (
+                    showcase.has_pinned_items,
+                    truncated,
+                    classify_showcase(showcase.has_pinned_items, truncated, &items.nodes),
+                )
+            }
             // The connection itself failed or was absent: keep it explicitly
             // unknown rather than claiming the user has no pins/repos.
-            None => (showcase.has_pinned_items, Showcase::Unclassified),
+            None => (showcase.has_pinned_items, true, Showcase::Unclassified),
         },
-        None => (false, Showcase::Unclassified),
+        None => (false, true, Showcase::Unclassified),
     };
 
     Ok(ProfilePinned {
         repos,
         total_repos,
+        pinned_truncated,
         has_pinned_items,
+        showcase_truncated,
         showcase,
         errors,
     })
@@ -242,7 +272,7 @@ fn parse_showcase_node(node: &Value) -> ShowcaseNode {
     }
 }
 
-fn classify_showcase(has_pinned_items: bool, nodes: &[Value]) -> Showcase {
+fn classify_showcase(has_pinned_items: bool, truncated: bool, nodes: &[Value]) -> Showcase {
     let mut repositories = Vec::new();
     let mut gists = 0usize;
     let mut unknown = false;
@@ -262,6 +292,14 @@ fn classify_showcase(has_pinned_items: bool, nodes: &[Value]) -> Showcase {
             return Showcase::Unclassified;
         }
         return Showcase::PopularRepositories(repositories);
+    }
+    // A partial prefix cannot decide gist-only vs mixed: preserve the observed
+    // prefix, but do not classify the whole pin set from it.
+    if truncated {
+        return Showcase::Truncated {
+            repositories,
+            gists,
+        };
     }
     match (repositories.is_empty(), gists) {
         (true, 0) => Showcase::Unclassified,
@@ -350,6 +388,156 @@ mod tests {
         assert_eq!(result.total_repos, 3);
         assert!(result.has_pinned_items);
         assert!(matches!(result.showcase, Showcase::PinnedRepositories(_)));
+    }
+
+    /// Regression (review finding): with `showcase_items = 1` and a gist
+    /// followed by a repository, the observed prefix is a gist while
+    /// `repos` legitimately contains a repository. A truncated showcase must
+    /// not be classified as `PinnedGistsOnly`; it must stay explicitly
+    /// truncated so a caller cannot pick the wrong presentation policy.
+    #[tokio::test]
+    async fn truncated_showcase_is_not_classified_as_gist_only() {
+        let mock = Arc::new(MockTransport::new());
+        enqueue(
+            &mock,
+            serde_json::json!({ "data": { "user": {
+                "pinnedItems": {
+                    "totalCount": 2,
+                    "pageInfo": {"hasNextPage": true},
+                    "nodes": [repo_node("alpha", 10)]
+                },
+                "itemShowcase": {
+                    "hasPinnedItems": true,
+                    "items": {
+                        "pageInfo": {"hasNextPage": true},
+                        "nodes": [gist_node("notes")]
+                    }
+                }
+            }}}),
+        )
+        .await;
+        let result = fetch_profile_pinned(
+            &client(mock),
+            &Pat::from_str("ghp_test"),
+            "octocat",
+            &ProfileLimits {
+                showcase_items: 1,
+                ..ProfileLimits::default()
+            },
+            CancellationToken::default(),
+        )
+        .await
+        .expect("pinned");
+        // The repository pin is still reported...
+        assert_eq!(result.repos.len(), 1);
+        assert!(result.pinned_truncated);
+        assert!(result.showcase_truncated);
+        // ...and the prefix is NOT claimed to be gist-only.
+        assert!(matches!(
+            result.showcase,
+            Showcase::Truncated { gists: 1, .. }
+        ));
+        assert_ne!(result.showcase, Showcase::PinnedGistsOnly { gists: 1 });
+    }
+
+    /// A complete list with no `hasNextPage` classifies normally; truncation
+    /// must not be inferred when the server says the list is complete.
+    #[tokio::test]
+    async fn complete_showcase_without_next_page_is_classified() {
+        let mock = Arc::new(MockTransport::new());
+        enqueue(
+            &mock,
+            serde_json::json!({ "data": { "user": {
+                "pinnedItems": {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": [repo_node("alpha", 10)]
+                },
+                "itemShowcase": {
+                    "hasPinnedItems": true,
+                    "items": {
+                        "pageInfo": {"hasNextPage": false},
+                        "nodes": [repo_node("alpha", 10)]
+                    }
+                }
+            }}}),
+        )
+        .await;
+        let result = fetch_profile_pinned(
+            &client(mock),
+            &Pat::from_str("ghp_test"),
+            "octocat",
+            &ProfileLimits::default(),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("pinned");
+        assert!(!result.pinned_truncated);
+        assert!(!result.showcase_truncated);
+        assert!(matches!(result.showcase, Showcase::PinnedRepositories(_)));
+    }
+
+    /// `totalCount` exceeding the observed repository pins marks the pin list
+    /// truncated even if `pageInfo` is missing.
+    #[tokio::test]
+    async fn higher_total_count_marks_pins_truncated() {
+        let mock = Arc::new(MockTransport::new());
+        enqueue(
+            &mock,
+            serde_json::json!({ "data": { "user": {
+                "pinnedItems": {
+                    "totalCount": 4,
+                    "nodes": [repo_node("alpha", 10)]
+                },
+                "itemShowcase": {
+                    "hasPinnedItems": false,
+                    "items": {"pageInfo": {"hasNextPage": false}, "nodes": []}
+                }
+            }}}),
+        )
+        .await;
+        let result = fetch_profile_pinned(
+            &client(mock),
+            &Pat::from_str("ghp_test"),
+            "octocat",
+            &ProfileLimits::default(),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("pinned");
+        assert_eq!(result.total_repos, 4);
+        assert!(result.pinned_truncated);
+    }
+
+    /// The pinned query requests `pageInfo.hasNextPage` so truncation is
+    /// observable at all.
+    #[tokio::test]
+    async fn pinned_query_requests_page_info() {
+        let mock = Arc::new(MockTransport::new());
+        enqueue(
+            &mock,
+            serde_json::json!({ "data": { "user": {
+                "pinnedItems": {"totalCount": 0, "nodes": []},
+                "itemShowcase": {"hasPinnedItems": false, "items": {"nodes": []}}
+            }}}),
+        )
+        .await;
+        let _ = fetch_profile_pinned(
+            &client(mock.clone()),
+            &Pat::from_str("ghp_test"),
+            "octocat",
+            &ProfileLimits::default(),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("pinned");
+        let recorded = mock.recorded_requests().await;
+        let body: Value = serde_json::from_str(recorded[0].body.as_deref().unwrap()).unwrap();
+        let query = body["query"].as_str().unwrap();
+        assert!(
+            query.matches("pageInfo { hasNextPage }").count() >= 2,
+            "both connections must request pageInfo.hasNextPage"
+        );
     }
 
     /// A gist-only profile has `hasPinnedItems = true` but no repository pin.

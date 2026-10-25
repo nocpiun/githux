@@ -32,10 +32,13 @@
 `ProfilePinned.showcase` 用 `Showcase` 枚举保留服务端语义，而不是替 UI 决定：
 
 - `PopularRepositories`：`hasPinnedItems=false`，返回的是 GitHub 的 Popular 回退仓库。
-- `PinnedRepositories`：有 pin，且都是仓库。
-- `PinnedWithGists { repositories, gists }`：混合 pin；两侧都保留。
-- `PinnedGistsOnly { gists }`：只有 gist pin。**不得据此宣布用户没有仓库**。
-- `Unclassified`：未知 union 成员、解析漂移或字段缺失，保持显式不确定，不当作空列表。
+- `PinnedRepositories`：有 pin，且完整观察列表都是仓库。
+- `PinnedWithGists { repositories, gists }`：完整观察列表下混合 pin；两侧都保留。
+- `PinnedGistsOnly { gists }`：完整观察列表只有 gist pin。**不得据此宣布用户没有仓库**。
+- `Truncated { repositories, gists }`：`itemShowcase.items` 是分页连接，`pageInfo.hasNextPage=true` 时只观察到前缀；**不用前缀决定 gist-only/混合策略**，保留已观察项供展示。
+- `Unclassified`：未知 union 成员、解析漂移、字段或连接缺失，保持显式不确定，不当作空列表。
+
+`ProfilePinned` 同时携带 `pinned_truncated` / `showcase_truncated`：前者在 `totalCount > repos.len()` 或 `pinnedItems.pageInfo.hasNextPage` 时为真，后者取 `itemShowcase.items.pageInfo.hasNextPage`。query 显式请求两处 `pageInfo`，否则截断不可见。
 
 不按 stars 重排，不用“按 stars 排序”替代 GitHub Popular。`pinnedItems` 即使带 `types: [REPOSITORY]` 也按 `__typename` 校验，非 `Repository` 的节点不会被误当仓库。`ProfileRepo` 保留 `databaseId`、name/nameWithOwner、description、url、isPrivate、isFork、stargazer/fork 计数、primaryLanguage、owner login。
 
@@ -94,7 +97,8 @@ GraphQL 的 `200` **不等于**全成功。`errors` 与 `data` 可并存，`erro
 | 200 仅 errors、200 data+errors 部分结果、主限流头、POST redirect 拒绝、非 2xx、超限、取消 | `github::profile::graphql::tests` |
 | 有界 POST、取消 POST 不建连接、同源/跨源 POST redirect 不跟随、POST 方法+body | `network::transport::tests` |
 | pin 顺序、REPOSITORY 过滤、gist-only、混合、Popular 回退、未知 union、部分结果、未知登录 | `github::profile::pinned::tests` |
+| Pinned/showcase 截断未被当成完整列表（`Truncated`）、`pinned_truncated`、`pageInfo` 请求 | `github::profile::pinned::tests::truncated_showcase_is_not_classified_as_gist_only`、`complete_showcase_without_next_page_is_classified`、`higher_total_count_marks_pins_truncated`、`pinned_query_requests_page_info` |
 | 热力图字段、零贡献、未知 level、权限不足、限流、区间变量 | `github::profile::contributions::tests` |
 | 区间格式/真实性/顺序/跨度校验 | `domain::profile::tests` |
 
-本地全量 `cargo test` 通过（228 passed）。测试使用合成凭据与本地 mock/真实 localhost socket；未做真实 GitHub GraphQL 联调、真实私有贡献/SSO/TLS 验证。运行证据见[开发日志](devlog/2026-10-25-profile-api.md)。
+本地全量 `cargo test` 通过（298 passed）。测试使用合成凭据与本地 mock/真实 localhost socket；未做真实 GitHub GraphQL 联调、真实私有贡献/SSO/TLS 验证。运行证据见[开发日志](devlog/2026-10-25-profile-api.md)。

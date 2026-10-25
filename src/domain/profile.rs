@@ -127,19 +127,32 @@ pub struct ProfileRepo {
 /// "Popular" repository fallback. Its items are a `PinnableItem` union
 /// (`Repository` / `Gist`), and `hasPinnedItems` counts both. This type keeps
 /// that distinction instead of silently converting gists into repositories.
+///
+/// The connection is paginated, so a bounded first page may return only a
+/// prefix of the pins. That case is kept explicit ([`Showcase::Truncated`])
+/// rather than classified as if the prefix described every pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Showcase {
     /// No pins at all: the server returned its "Popular repositories" fallback.
     PopularRepositories(Vec<ProfileRepo>),
-    /// Pins exist and are all repositories.
+    /// Pins exist and the full observed list is all repositories.
     PinnedRepositories(Vec<ProfileRepo>),
-    /// Pins exist and mix repositories and gists.
+    /// Pins exist and mix repositories and gists (complete observed list).
     PinnedWithGists {
         repositories: Vec<ProfileRepo>,
         gists: usize,
     },
-    /// Pins exist but are all gists (no repository pin to show).
+    /// Pins exist but the complete observed list is all gists (no repository
+    /// pin to show).
     PinnedGistsOnly { gists: usize },
+    /// Only a prefix of the showcase was observed (`pageInfo.hasNextPage`). The
+    /// pin-type classification is therefore not reliable; the observed prefix is
+    /// preserved for display but must not be used to decide gist-only/mixed
+    /// policy.
+    Truncated {
+        repositories: Vec<ProfileRepo>,
+        gists: usize,
+    },
     /// The showcase could not be classified (unknown union member, parse drift
     /// or a missing field). Kept explicit rather than treated as "no repos".
     Unclassified,
@@ -154,9 +167,14 @@ pub struct ProfilePinned {
     /// Total repository pins reported by the server. May exceed `repos.len()`
     /// when the node list is truncated.
     pub total_repos: u32,
+    /// True when only a prefix of the repository pins was observed
+    /// (`total_repos > repos.len()` or `pageInfo.hasNextPage`).
+    pub pinned_truncated: bool,
     /// `itemShowcase.hasPinnedItems`: true when the user pinned any item
     /// (repository *or* gist).
     pub has_pinned_items: bool,
+    /// True when only a prefix of the showcase was observed.
+    pub showcase_truncated: bool,
     pub showcase: Showcase,
     /// GraphQL errors that accompanied otherwise-usable data.
     pub errors: Vec<ProfileGraphqlError>,

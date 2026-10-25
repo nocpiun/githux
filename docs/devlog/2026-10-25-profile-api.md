@@ -21,9 +21,13 @@
 
 ## 验证
 
-Windows 本地全部通过：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（228 passed，0 failed）、`cargo build --locked`、`git diff --check`。重型 Cargo 命令使用 `CARGO_BUILD_JOBS=1`。
+Windows 本地全部通过：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（298 passed，0 failed）、`cargo build --locked`、`git diff --check`。重型 Cargo 命令使用 `CARGO_BUILD_JOBS=1`。
 
 新增用例覆盖：REST 资料/404/login 编码；固定 query+variables 的 JSON 编码与 Authorization/Content-Type；真实 localhost POST 方法+body、有界 POST 超限、取消不建连接、同源/跨源 POST redirect 不跟随；GraphQL 200 仅 errors、200 data+errors 部分结果、主限流头、非 2xx、超限、取消；pin 顺序/REPOSITORY 过滤/gist-only/混合/Popular/未知 union/部分结果/未知登录；热力图字段/零贡献/未知 level/权限不足/限流/区间变量；区间格式/真实性/顺序/跨度。既有 GET/blob/network 用例随全量测试执行，无回归。
+
+## 审查轮次
+
+第一轮 Codex 审查提出一条 P2：当 `showcase_items` 小于实际 pin 数时，只按返回前缀分类会把“gist 在前、仓库在后”的截断结果误报为 `PinnedGistsOnly`，调用方无法区分截断与真正的 gist-only。经官方 GraphQL schema 核实 `ProfileItemShowcase.items` 是分页连接（`pageInfo.hasNextPage`），该意见成立且属于可直接修复的不确定性问题，不是产品选型。修复：query 增加两处 `pageInfo { hasNextPage }`，新增 `Showcase::Truncated` 与 `pinned_truncated`/`showcase_truncated`，截断时不再据前缀定性；新增回归用例，并反向验证去掉修复会在 `truncated_showcase_is_not_classified_as_gist_only` 失败（298 passed）。这是可独立修复项，全程未出现需产品/架构裁决的争议。
 
 验证边界：全部为合成凭据与本地 mock/真实 localhost socket，不访问 GitHub，不读取用户 PAT/gh token/Cookie，未做真实 GraphQL 私有贡献、SSO、TLS 联调。未接入 data/UI，未做真实窗口验收。
 
