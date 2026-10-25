@@ -80,6 +80,14 @@ git diff --check
 
 再次验证（合并 `origin/main` 之后，本机 Windows x86_64-pc-windows-msvc，工具链 1.98.1）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（161 项）、`git diff --check` 全部通过。
 
+## 第二轮审查（head `91b3ada`）
+
+新 head 的 Codex review `5641707950` 提出一条 P2：焦点落在**非活动**标签的标签条条目上，用鼠标关闭按钮关闭该标签时，`focused_in_closed` 成立但 `was_active` 为假，原先的 `was_active && focused_in_closed` 守卫不会移动焦点，被关闭的句柄随之离开树。属于既有验收（“关闭标签释放专属滚动/焦点/状态”）内的正确性修复，直接修复：
+
+- `close_tab` 现在区分焦点来源：焦点来自被关闭会话的**标签条**时，转到当前活动会话的标签条条目；来自**页面**时，转到当前活动会话的页面。活动会话本身不变（关闭非活动标签仍是“不切换当前页”）。
+- 新增 `closing_a_focused_inactive_tab_keeps_the_page_and_restores_focus`；同时修正上一轮用例的期望——`Ctrl+W` 关闭活动标签时若焦点在标签条上，落点是新活动标签的条目而不是页面。
+- 本地 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（162 项）与 `git diff --check` 全部通过。
+
 ## 交接与后续
 
 1. 负责人/主 Agent 在真实窗口验收多标签交互与中文候选确认；`human_review_required=true`、`human_review_approved=false`，PR 保持 open，等待验收后才由 coordinator 合并。

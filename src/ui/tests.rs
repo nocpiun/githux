@@ -992,12 +992,45 @@ fn closing_a_focused_tab_moves_focus_to_a_live_page(cx: &mut TestAppContext) {
 
     press("ctrl-w", cx);
     assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
+    // The focus was on a tab entry, so it moves to the entry that replaced it, not to a page.
     let home = view.read_with(cx, |shell, _| shell.active_tab_id());
-    let home_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(home).unwrap());
+    let home_strip = view.read_with(cx, |shell, _| shell.tab_strip_focus(home).unwrap());
     let focused = cx.update(|window, cx| window.focused(cx));
     assert_eq!(
         focused.as_ref(),
-        Some(&home_focus),
+        Some(&home_strip),
         "focus leaves the closed tab entry"
+    );
+}
+
+/// An inactive tab can hold focus too; closing it with its own close button must not leave the
+/// window focused on a handle that just left the tree, and must not change the active page.
+#[gpui::test]
+fn closing_a_focused_inactive_tab_keeps_the_page_and_restores_focus(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+
+    // Focus the inactive tab's entry without activating it, as Tab does.
+    let inactive_strip = view.read_with(cx, |shell, _| shell.tab_strip_focus(a).unwrap());
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&inactive_strip, cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
+
+    click("tab-close-1", cx);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        b,
+        "closing an inactive tab keeps the current page"
+    );
+    let b_strip = view.read_with(cx, |shell, _| shell.tab_strip_focus(b).unwrap());
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(
+        focused.as_ref(),
+        Some(&b_strip),
+        "focus lands on a live tab entry"
     );
 }

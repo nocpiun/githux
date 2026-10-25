@@ -227,26 +227,37 @@ impl Shell {
     }
 
     /// Closes `id`. Closing the active session moves to its neighbour; the current page is kept
-    /// when a non-active session closes. Focus follows only when it lived in the closed session,
-    /// whether on its page or on its own tab-strip entry.
+    /// when a non-active session closes. Focus only moves when the closed session held it, and it
+    /// lands on the matching live target: the active session's tab-strip entry when the focus was
+    /// on the closed tab's entry, otherwise the active session's page. The active session stays
+    /// whatever it was.
     pub fn close_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let focused_in_closed = self.workspace.session(id).is_some_and(|session| {
+        let focus_in_closed = self.workspace.session(id).map(|session| {
             let focused = window.focused(cx);
             let state = session.state();
-            focused.as_ref() == Some(&state.focus)
-                || focused.as_ref() == Some(&state.strip_focus)
-                || state.focus.contains_focused(window, cx)
-                || state.strip_focus.contains_focused(window, cx)
+            let strip = focused.as_ref() == Some(&state.strip_focus)
+                || state.strip_focus.contains_focused(window, cx);
+            let page =
+                focused.as_ref() == Some(&state.focus) || state.focus.contains_focused(window, cx);
+            (strip, page)
         });
-        let was_active = self.workspace.active_id() == id;
         let Some(result) = self.workspace.close(id, cx) else {
             return;
         };
         self.hint = None;
-        if was_active && focused_in_closed {
-            self.focus_page(result.active, window, cx);
+        match focus_in_closed {
+            Some((true, _)) => self.focus_strip(result.active, window, cx),
+            Some((false, true)) => self.focus_page(result.active, window, cx),
+            _ => {}
         }
         cx.notify();
+    }
+
+    fn focus_strip(&self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.workspace.session(id) {
+            let focus = session.state().strip_focus.clone();
+            window.focus(&focus, cx);
+        }
     }
 
     /// `Ctrl+W`: closes the active session unless the palette owns the keyboard.
