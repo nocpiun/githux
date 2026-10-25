@@ -15,7 +15,7 @@
 
 ## 实现与决定
 
-**会话模型（`src/workspace/mod.rs`）。** `Workspace` 持有有序的 `Session` 集合与唯一活动标签。`TabId(u64)` 单调递增，关闭后不复用。`Route::key()` 给出可比较的资源身份，仓库部分做 ASCII 小写折叠，因此 `Githux-Dev/GitHux` 与 `githux-dev/githux` 落到同一会话（保留首次打开的显示大小写）。`Workspace::open` 返回 `Activated`/`Opened`/`LimitReached`；`close` 返回新的活动标签；`cycle(±1)` 环绕切换。`MAX_OPEN_TABS = 8` 是集中的预览上限，不是永久产品承诺。
+**会话模型（`src/workspace/mod.rs`）。** `Workspace` 持有有序的 `Session` 集合与唯一活动标签。`TabId(u64)` 单调递增，关闭后不复用。`Route::key()` 给出可比较的资源身份，仓库部分做 ASCII 小写折叠，因此 `Githux-Dev/GitHux` 与 `githux-dev/githux` 落到同一会话（保留首次打开的显示大小写）。`Workspace::open` 返回 `Activated`/`Opened`；`close` 返回新的活动标签；`cycle(±1)` 环绕切换。标签数量不设上限（2026-10-25 负责人修订，原 `MAX_OPEN_TABS = 8` 已删除）。
 
 **每标签页面状态。** 每个 `Session` 持有真实的 `ScrollHandle`、页面 `FocusHandle` 与标签条 `FocusHandle`，以及仓库会话选择（`branch` / `file`，R3 阅读器填充；本轮只由测试驱动）。关闭会话即 drop 这些句柄与状态；island 页容器按 `TabId` 取元素 id，元素状态不会在页面之间串用。
 
@@ -47,12 +47,16 @@ git diff --check
 - `opening_the_same_page_reuses_its_tab`：侧栏点击与 palette 都复用同一标签，不重复。
 - `repositories_and_profile_keep_separate_scroll_focus_and_selection`：同时打开仓库 A/B 与 Profile；Home 真实滚轮滚动后切走再切回保留自身偏移，A/Profile 偏移保持 0；`Ctrl+Tab`/`Shift+Ctrl+Tab` 后焦点分别落到 B/A 各自的页面句柄；A/B 的仓库会话选择互不串用。
 - `closing_tabs_keeps_the_active_page_and_picks_a_neighbour`：关闭非活动标签不切换；`Ctrl+W` 关活动标签切左邻；关最后一个后新建 Home 且 id 不复用。
-- `the_tab_limit_keeps_existing_sessions_and_shows_a_hint`：8 个标签后打开第 9 个被拒，活动标签、id 与路由不变，显示提示；切到已打开页仍可用并清除提示。
-- `the_tab_strip_stays_bounded_at_the_minimum_window`：880×560、8 个标签时标签条不超出 island，每个标签都落在条内且宽度 ≥ 55px。
+- `more_tabs_than_fit_scroll_horizontally_instead_of_compressing`：880×560 下打开 12 个标签全部成功；每个标签保持固定可读宽度；island 不被撑宽；平移回行首后最后一个标签确实超出可视区；标签纵向位置与只有 1 个标签时一致。
+- `wheel_and_manual_scroll_move_only_the_strip`：垂直滚轮把标签条横向移动，`Shift`+滚轮（Windows 已转成横向 delta）只移动一次，页面与侧栏偏移不变；重绘不抢回手动位置；关闭尾部标签后偏移被 clamp。
+- `the_strip_scrollbar_can_be_dragged`：Ely 的覆盖式水平滚动条拇指可拖动，拖动只改变标签条横向偏移。
+- `opening_and_switching_reveal_the_target_tab`、`tabbing_to_an_offscreen_tab_reveals_it`：新建/激活/Tab 聚焦可视区外的标签后它被滚入视野，且后续重绘不重置手动滚动；键盘焦点不会激活标签。
+- `middle_click_closes_a_tab_once_without_activating_it`、`left_click_and_enter_still_activate_a_tab`：中键在图标、关闭按钮、空白/末个标签上各关闭一次且不激活、不重复关闭；左键与右键语义不变。
+- `the_first_tab_is_inset_equally_on_top_and_left`：首标签相对 island 内边界（计入 1px 边框）的上/左间距相等，聚焦不改变标签几何。
 - `keyboard_closes_and_cycles_tabs_and_the_palette_keeps_its_keys`、`closing_a_tab_releases_its_state_and_focus`、`tab_reaches_the_session_strip_and_enter_activates`：快捷键、关闭释放状态/焦点、Tab 到达标签条并用 Enter 激活。
-- workspace 单元测试：启动只有 Home、复用、大小写别名、上限拒绝、关闭邻居顺序、id 不复用、环绕切换、会话状态隔离。
+- workspace 单元测试：启动只有 Home、复用、大小写别名、任意数量会话、关闭邻居顺序、id 不复用、环绕切换、会话状态隔离。
 
-**最小窗口证据：** 在 880×560、8 个标签时，island 内容宽约 631px，标签条内每个标签实测约 73.5px（测试断言 ≥ 55px），标签标题以省略号截断、tooltip 给完整名称。8 个标签在该窗口仍可用，因此本轮保留 `MAX_OPEN_TABS = 8`；若后续真实窗口认为过窄，可下调该常量或改为更窄的标签样式，不需要新增进阶交互。
+**最小窗口证据：** 880×560 下 island 约 633×505，标签条 631×46（8px inset + 26px 标签 + 12px 滚动条带），首标签相对 island 内边界的上/左间距都是 8px；12 个标签时每个保持 168px 宽、行内容宽约 2064px，可视宽 615px，滚动余量约 1445px。
 
 **未覆盖 / 待人工验收（不据此宣布通过）：**
 
@@ -74,7 +78,7 @@ git diff --check
 
 ## 裁决后的文档同步
 
-- `docs/architecture.md`：修正过时的“窗口只有一个活动页，`Workspace` 只保存当前 `Route`”描述，改为会话集合、活动标签、每会话滚动/焦点/仓库会话状态、`MAX_OPEN_TABS` 与不可复用 `TabId`；同时修正 `TabId`/`ResourceKey` 段落（当前规则不允许重复资源标签）、工程边界中的 `ui::Shell`/`workspace::Workspace` 职责与 `src/ui/tabs.rs`，并保留 R2 服务已实现但 UI 未接入的说明。账户切换时的标签处理仍写明未决定。
+- `docs/architecture.md`：修正过时的“窗口只有一个活动页，`Workspace` 只保存当前 `Route`”描述，改为会话集合、活动标签、每会话滚动/焦点/仓库会话状态与不可复用 `TabId`；同时修正 `TabId`/`ResourceKey` 段落（当前规则不允许重复资源标签）、工程边界中的 `ui::Shell`/`workspace::Workspace` 职责与 `src/ui/tabs.rs`，并保留 R2 服务已实现但 UI 未接入的说明。账户切换时的标签处理仍写明未决定。
 - `docs/README.md`、`docs/roadmap.md`、`README.md`：只调整与本任务直接相关的入口描述（应用级基础标签已实现、服务层已实现但 UI 未接入），不重写无关章节。
 - 与 `origin/main` 同步：只有 `README.md` 出现冲突（测试证据段落），合并两侧内容为“外壳 + 服务层两部分证据”；其余文件自动合并，未重写无关章节。
 
@@ -87,6 +91,24 @@ git diff --check
 - `close_tab` 现在区分焦点来源：焦点来自被关闭会话的**标签条**时，转到当前活动会话的标签条条目；来自**页面**时，转到当前活动会话的页面。活动会话本身不变（关闭非活动标签仍是“不切换当前页”）。
 - 新增 `closing_a_focused_inactive_tab_keeps_the_page_and_restores_focus`；同时修正上一轮用例的期望——`Ctrl+W` 关闭活动标签时若焦点在标签条上，落点是新活动标签的条目而不是页面。
 - 本地 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（162 项）与 `git diff --check` 全部通过。
+
+## 第三轮：负责人真实窗口反馈后的四项修订（2026-10-25）
+
+负责人查看真实窗口后提出四点，均已实现；这不是验收通过，`human_review_approved` 仍为 `false`。
+
+**1. 上/左间距不一致。** 原先 `TAB_STRIP_HEIGHT = 38` 用 `items_center` 隐含 6px 上间距、`px_2` 给 8px 左间距。现在标签条只有一个集中值 `TAB_STRIP_INSET = 8`，同时用于 `pt`/`pl`/`pr`；高度改为 `inset + TAB_HEIGHT + TAB_SCROLLBAR_BAND`（8+26+12=46），滚动条带始终保留，所以滚动条出现/消失不移动标签。测试在 880×560 下核对首标签相对 island 内边界（计入 1px 边框）的上/左间距相等。island 圆角、Ely 配色、原生 Tall 标题栏与搜索框尺寸未动。
+
+**2. 去掉 8 标签上限，改为横向滚动。** `MAX_OPEN_TABS`、`OpenResult::LimitReached`、`tab-limit-hint` 与其测试全部删除；`Workspace::open` 永远新建或激活。标签宽度改为一个固定可读值 `TAB_WIDTH = 168`（不再在 min/max 之间压缩），行使用 GPUI 的 `overflow_x_scroll` + `track_scroll`，因此只有横向一个滚动轴：垂直滚轮、Windows 已转换的 `Shift`+滚轮横向 delta、设备原生水平 delta 各移动一次，没有二次转换。滚动条复用 Ely `layout::Scrollbar`（覆盖式、可拖动），绑同一个句柄；未溢出时 Ely 自身按 `reach <= 0` 不绘制。滚动条带固定保留，避免出现/消失推移标签。
+
+**3. reveal 行为。** `Shell` 保存一个 `tab_scroll` 句柄和一个待 reveal 的 `TabId`；新建、显式激活、`Ctrl+Tab`/`Shift+Ctrl+Tab`、以及标签条条目获得键盘焦点时登记 reveal，渲染时按 `index × (TAB_WIDTH + TAB_GAP)` 计算位置并做最小位移滚动，成功后清空标记，所以普通重绘不会反复抢回位置，手动滚动仍可浏览。关闭后 `clamp_tab_scroll` 把偏移收进新内容范围，避免末尾空白。测试覆盖“重绘不重置手动滚动”“失去焦点不回滚”。
+
+**4. 中键关闭与蓝色边框。** 标签用 GPUI 的 `on_aux_click`（只接收非主键）在标签主体上处理中键，`event.is_middle_click()` 时关闭一次；嵌套的关闭按钮只有左键 `on_click`，所以中键按在关闭按钮上也只有标签这一层执行一次关闭，不会先激活（`on_click` 只服务左键/键盘激活），也不会重复关闭。左键、Enter/Space、`Ctrl+W` 不变。标签的 `focus(...)` 样式从 `colors.focus`（蓝色描边）改为中性文字色 `colors.fg`，`border_color` 在所有状态保持透明；非活动标签因此仍不会被看成活动态。`track_focus`、ARIA 角色与 `aria_selected` 保留。
+
+**同步基线：** 合入前 `origin/main` 已前进到 `262a013`（PR #18 账户持久化、PR #19 仓库快照）。核对 `git merge-tree` 无冲突，且当前 head 的 CI 已与 `262a013` 组合测试，因此本轮**没有**为形式制造合并提交，也未触碰 `auth/data/storage/github/Cargo`。
+
+**验证：** 本机 `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（168 项）与 `git diff --check` 全部通过。新增/替换的用例见上文“验证”列表。
+
+**仍需负责人真实窗口验收（自动测试不能替代）：** 上下左右间距在实际 DPI 下的观感、滚轮与 `Shift`+滚轮以及触控板横向手势、拖动滚动条、中键关闭、中键在关闭按钮上、标签颜色与焦点提示、900/1200 宽窗口下的标签可读性。
 
 ## 交接与后续
 

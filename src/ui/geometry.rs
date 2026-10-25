@@ -39,10 +39,22 @@ pub const ACCOUNT_ROW_HEIGHT: f32 = 40.0;
 /// Height of a Home activity row.
 pub const ACTIVITY_ROW_HEIGHT: f32 = 52.0;
 
-/// The application session tab strip at the top of the island. The strip never widens the
-/// island: it clips, and each tab shrinks between the two width bounds below.
-pub const TAB_STRIP_HEIGHT: f32 = 38.0;
+/// The application session tab strip at the top of the island.
+///
+/// The strip's inset is one value on every in-scroll edge, so the first tab's top and left gaps
+/// (and the last tab's right gap) match the island's inner boundary regardless of DPI rounding.
+/// The strip clips horizontally and scrolls; it never widens the island, and its height is derived
+/// so that the horizontal scrollbar, when it appears, does not move the tabs.
+pub const TAB_STRIP_INSET: f32 = 8.0;
 pub const TAB_HEIGHT: f32 = 26.0;
-pub const TAB_MIN_WIDTH: f32 = 56.0;
-pub const TAB_MAX_WIDTH: f32 = 180.0;
+/// One fixed, readable tab width. Tabs never compress: the strip scrolls instead.
+pub const TAB_WIDTH: f32 = 168.0;
 pub const TAB_CLOSE_SIZE: f32 = 16.0;
+/// The gap between two tabs in the strip.
+pub const TAB_GAP: f32 = 4.0;
+/// Reserved room under the tabs for Ely's overlay horizontal scrollbar. Ely's horizontal track is
+/// two thicknesses tall, so the band is that tall; the thumb lands centred in it. The band is
+/// always reserved, so the scrollbar appearing or disappearing never moves the tabs.
+pub const TAB_SCROLLBAR_BAND: f32 = 12.0;
+/// The strip's total height: one inset, the tabs, then the scrollbar band.
+pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;

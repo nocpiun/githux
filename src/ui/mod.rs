@@ -21,7 +21,7 @@ use gpui::{
 
 use crate::{
     platform::fonts,
-    workspace::{MAX_OPEN_TABS, OpenResult, Route, TabId, Workspace},
+    workspace::{OpenResult, Route, TabId, Workspace},
 };
 
 mod chrome;
@@ -40,12 +40,6 @@ actions!(
     [OpenCommandPalette, CloseActiveTab, NextTab, PreviousTab]
 );
 
-/// The short notice shown when a new page cannot open at [`MAX_OPEN_TABS`]. It is cleared by the
-/// next successful tab action, so it never becomes a permanent banner.
-fn tab_limit_hint() -> String {
-    format!("Tab limit reached ({MAX_OPEN_TABS}); close a tab to open another")
-}
-
 pub struct Shell {
     workspace: Workspace,
     repositories: Vec<fixtures::RepoFixture>,
@@ -58,8 +52,17 @@ pub struct Shell {
     palette: Option<palette::Session>,
     restore_focus: bool,
     search_focus: FocusHandle,
-    /// The tab-limit notice, cleared by the next successful tab action.
-    hint: Option<String>,
+    /// The strip's horizontal offset. One handle for the whole row, so the drag, the wheel and the
+    /// scrollbar all move the same scroll position.
+    tab_scroll: ScrollHandle,
+    /// A tab the strip still has to bring into view, resolved in render once its bounds exist.
+    revealed_tab: Option<TabId>,
+    /// The tab whose strip entry last took keyboard focus, so Tab onto an offscreen tab reveals it
+    /// once instead of on every frame.
+    focused_tab: Option<TabId>,
+    /// The strip's scrollable reach as of the last frame, so a newly overflowing (or no longer
+    /// overflowing) strip repaints once to show or hide the scrollbar.
+    tab_reach: gpui::Pixels,
 }
 
 impl Shell {
@@ -96,7 +99,10 @@ impl Shell {
             palette: None,
             restore_focus: false,
             search_focus,
-            hint: None,
+            tab_scroll: ScrollHandle::new(),
+            revealed_tab: None,
+            focused_tab: None,
+            tab_reach: gpui::Pixels::ZERO,
         }
     }
 
@@ -160,16 +166,6 @@ impl Shell {
         self.workspace.sessions().iter().map(|s| s.id()).collect()
     }
 
-    /// The open routes, in strip order.
-    #[cfg(test)]
-    pub fn tab_routes(&self) -> Vec<Route> {
-        self.workspace
-            .sessions()
-            .iter()
-            .map(|session| session.route().clone())
-            .collect()
-    }
-
     #[cfg(test)]
     pub fn tab_count(&self) -> usize {
         self.workspace.sessions().len()
@@ -199,31 +195,39 @@ impl Shell {
         }
     }
 
+    /// The strip's horizontal scroll offset, for the strip-scrolling tests.
     #[cfg(test)]
-    pub fn tab_limit_hint(&self) -> Option<String> {
-        self.hint.clone()
+    pub fn tab_scroll_offset(&self) -> Point<gpui::Pixels> {
+        self.tab_scroll.offset()
+    }
+
+    /// The strip's scrollable reach, for the clamp test.
+    #[cfg(test)]
+    pub fn tab_scroll_max(&self) -> gpui::Point<gpui::Pixels> {
+        self.tab_scroll.max_offset()
+    }
+
+    /// Scrolls the strip by hand, the way a wheel or a scrollbar drag would.
+    #[cfg(test)]
+    pub fn scroll_tabs_by(&self, dx: gpui::Pixels) {
+        let offset = self.tab_scroll.offset();
+        self.tab_scroll
+            .set_offset(gpui::point(offset.x + dx, offset.y));
     }
 
     /// Opens or activates the session for `route`, closing an open palette; true when the active
     /// page changed. Every entry point (sidebar, quick entries, command palette) goes through
-    /// here, so reuse rules live in one place. At the session limit the current page stays put and
-    /// a short notice is shown instead.
+    /// here, so reuse rules live in one place, and the resulting tab is brought into view.
     pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.close_palette(cx);
         let previous = self.workspace.active_id();
-        match self.workspace.open(route, cx) {
-            OpenResult::LimitReached => {
-                self.hint = Some(tab_limit_hint());
-                cx.notify();
-                false
-            }
-            OpenResult::Opened(id) | OpenResult::Activated(id) => {
-                self.hint = None;
-                self.follow_page_focus(previous, id, window, cx);
-                cx.notify();
-                previous != id
-            }
-        }
+        let id = match self.workspace.open(route, cx) {
+            OpenResult::Opened(id) | OpenResult::Activated(id) => id,
+        };
+        self.follow_page_focus(previous, id, window, cx);
+        self.reveal_tab(id);
+        cx.notify();
+        previous != id
     }
 
     /// Closes `id`. Closing the active session moves to its neighbour; the current page is kept
@@ -244,13 +248,95 @@ impl Shell {
         let Some(result) = self.workspace.close(id, cx) else {
             return;
         };
-        self.hint = None;
+        // The strip got shorter: drop the remembered tab so the next frame reveals the survivor
+        // and the offset clamps to the new content instead of leaving empty space at the end.
+        self.revealed_tab = None;
+        self.clamp_tab_scroll();
         match focus_in_closed {
             Some((true, _)) => self.focus_strip(result.active, window, cx),
             Some((false, true)) => self.focus_page(result.active, window, cx),
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Keeps the strip's offset inside its content. Called after a close so the tail never leaves
+    /// a blank stretch, and harmless when nothing was clamped.
+    fn clamp_tab_scroll(&self) {
+        let max = self.tab_scroll.max_offset();
+        let offset = self.tab_scroll.offset();
+        let x = offset
+            .x
+            .clamp(-max.x.max(gpui::Pixels::ZERO), gpui::Pixels::ZERO);
+        if x != offset.x {
+            self.tab_scroll.set_offset(gpui::point(x, offset.y));
+        }
+    }
+
+    /// Records that `id` should be brought into view. The actual scroll happens in render, using
+    /// that frame's measured bounds, and only once per newly revealed tab so a manual scroll is
+    /// never overridden on later frames.
+    fn reveal_tab(&mut self, id: TabId) {
+        self.revealed_tab = Some(id);
+    }
+
+    /// Resolves pending reveals: a strip entry that just took keyboard focus, then any tab an
+    /// open/activate/cycle asked for. Runs before this frame's layout, so the scroll and the frame
+    /// that shows the tab agree.
+    fn reveal_pending_tabs(&mut self, window: &mut Window) {
+        let focused = self
+            .workspace
+            .sessions()
+            .iter()
+            .find(|session| session.state().strip_focus.is_focused(window))
+            .map(|session| session.id());
+        if focused != self.focused_tab {
+            self.focused_tab = focused;
+            if focused.is_some() {
+                self.revealed_tab = focused;
+            }
+        }
+        let Some(id) = self.revealed_tab else {
+            return;
+        };
+        if self.reveal_tab_in_strip(id) {
+            self.revealed_tab = None;
+        }
+    }
+
+    /// Brings a tab fully into the strip's viewport with the least movement; true when the scroll
+    /// position could be decided.
+    ///
+    /// The tab's place in the row is arithmetic (index × (width + gap)), so this needs no measured
+    /// child bounds and never waits a frame for a tab that was just created. Only the viewport
+    /// width comes from layout, and every tab strip has one after its first frame.
+    fn reveal_tab_in_strip(&mut self, id: TabId) -> bool {
+        let Some(index) = self.workspace.position(id) else {
+            return true;
+        };
+        let viewport: f32 = self.tab_scroll.bounds().size.width.into();
+        if viewport <= 0.0 {
+            return false;
+        }
+        let step = geometry::TAB_WIDTH + geometry::TAB_GAP;
+        let left = index as f32 * step;
+        let right = left + geometry::TAB_WIDTH;
+        let offset: f32 = self.tab_scroll.offset().x.into();
+        let visible_left = -offset;
+        let visible_right = visible_left + viewport;
+        let target = if left < visible_left {
+            -left
+        } else if right > visible_right {
+            -(right - viewport)
+        } else {
+            return true;
+        };
+        // Never past the row's left edge; the lower end is left to GPUI's own clamp, which runs
+        // against this frame's freshly laid out content and is therefore not a frame behind.
+        let x = target.min(0.0);
+        self.tab_scroll
+            .set_offset(gpui::point(gpui::px(x), gpui::Pixels::ZERO));
+        true
     }
 
     fn focus_strip(&self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -276,8 +362,8 @@ impl Shell {
         }
         let previous = self.workspace.active_id();
         if let Some(next) = self.workspace.cycle(by) {
-            self.hint = None;
             self.follow_page_focus(previous, next, window, cx);
+            self.reveal_tab(next);
             cx.notify();
         }
     }
@@ -711,17 +797,18 @@ impl Shell {
                 }
             })
             .collect::<Vec<_>>();
-        tabs::strip(entries, self.hint.clone(), cx)
+        tabs::strip(entries, &self.tab_scroll, cx)
     }
 
-    /// Makes an already open session active, following focus that lived in the previous page.
+    /// Makes an already open session active, following focus that lived in the previous page and
+    /// bringing its tab into the strip's view.
     fn activate_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         let previous = self.workspace.active_id();
         if !self.workspace.activate(id) {
             return;
         }
-        self.hint = None;
         self.follow_page_focus(previous, id, window, cx);
+        self.reveal_tab(id);
         cx.notify();
     }
 
@@ -774,6 +861,17 @@ impl Render for Shell {
             this.update(cx, |shell, cx| shell.open_palette(window, cx));
         };
         let titlebar = chrome::titlebar(self.search_focus.clone(), open_search, window, cx);
+        // The strip's measurement lands at the end of a frame, so a reveal and a scrollbar that
+        // just became necessary (or unnecessary) both need exactly one more frame to apply.
+        let reach = self.tab_scroll.max_offset().x;
+        if reach != self.tab_reach {
+            self.tab_reach = reach;
+            window.request_animation_frame();
+        }
+        self.reveal_pending_tabs(window);
+        if self.revealed_tab.is_some() {
+            window.request_animation_frame();
+        }
         let sidebar = self.sidebar(window, cx);
         let island = self.island(cx);
         let palette = self.palette(cx);

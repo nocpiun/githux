@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use super::Shell;
-use crate::workspace::{MAX_OPEN_TABS, RepositorySession, Route};
+use crate::workspace::{RepositorySession, Route};
 
 /// A `debug_selector` string built at runtime for the tests that index rows.
 fn selector(name: String) -> &'static str {
@@ -794,90 +794,220 @@ fn closing_tabs_keeps_the_active_page_and_picks_a_neighbour(cx: &mut TestAppCont
     assert!(fresh_home > c, "a closed id is never reused");
 }
 
-/// The preview limit refuses a new page without touching the sessions that are already open.
+/// Nine or more tabs stay open: the strip scrolls instead of compressing tabs, refusing a page or
+/// widening the island, and its scrollbar only appears when there is something to scroll.
 #[gpui::test]
-fn the_tab_limit_keeps_existing_sessions_and_shows_a_hint(cx: &mut TestAppContext) {
+fn more_tabs_than_fit_scroll_horizontally_instead_of_compressing(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
-    for index in 0..(MAX_OPEN_TABS - 1) {
-        click(selector(format!("repo-row-{index}")), cx);
-    }
-    assert_eq!(
-        view.read_with(cx, |shell, _| shell.tab_count()),
-        MAX_OPEN_TABS
-    );
-    let active = view.read_with(cx, |shell, _| shell.active_tab_id());
-    let ids = view.read_with(cx, |shell, _| shell.tab_ids());
-    let routes = view.read_with(cx, |shell, _| shell.tab_routes());
-
-    click(selector(format!("repo-row-{}", MAX_OPEN_TABS - 1)), cx);
-    assert_eq!(
-        view.read_with(cx, |shell, _| shell.tab_count()),
-        MAX_OPEN_TABS
-    );
-    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), active);
-    assert_eq!(view.read_with(cx, |shell, _| shell.tab_routes()), routes);
-    assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), ids);
-    assert!(
-        view.read_with(cx, |shell, _| shell.tab_limit_hint())
-            .is_some(),
-        "the shell shows a short notice"
-    );
-    assert!(cx.debug_bounds("tab-limit-hint").is_some());
-
-    // Switching to an already open page still works at the limit and clears the notice.
-    click("repo-row-0", cx);
-    assert!(
-        view.read_with(cx, |shell, _| shell.tab_limit_hint())
-            .is_none()
-    );
-    assert!(cx.debug_bounds("tab-limit-hint").is_none());
-}
-
-/// At the minimum window the strip clips instead of widening the island, and every tab stays
-/// inside it with a usable width.
-#[gpui::test]
-fn the_tab_strip_stays_bounded_at_the_minimum_window(cx: &mut TestAppContext) {
-    let (view, cx) = shell(cx);
-    for index in 0..(MAX_OPEN_TABS - 1) {
-        click(selector(format!("repo-row-{index}")), cx);
-    }
-    assert_eq!(
-        view.read_with(cx, |shell, _| shell.tab_count()),
-        MAX_OPEN_TABS
-    );
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
 
+    // A single tab: nothing overflows, so the strip has no reach to scroll and its overlay
+    // scrollbar paints nothing.
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 1);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_max()).x,
+        px(0.0)
+    );
+    assert!(cx.debug_bounds("tab-scrollbar-band").is_some());
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()),
+        Point::default()
+    );
+    let single_tab_top = bounds("tab-0", cx).top();
+
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        12,
+        "no page is refused"
+    );
+
     let island = bounds("island", cx);
     let strip = bounds("tab-strip", cx);
-    assert!(strip.left() >= island.left() - px(1.0));
     assert!(strip.right() <= island.right() + px(1.0));
-    assert!(strip.top() >= island.top());
+    let reach = view.read_with(cx, |shell, _| shell.tab_scroll_max());
     assert!(
-        strip.top() <= island.top() + px(2.0),
-        "the strip sits at the island's top"
+        reach.x > px(0.0),
+        "the strip can now be scrolled: {reach:?}"
     );
-    for index in 0..MAX_OPEN_TABS {
+    // The band is always reserved; Ely's overlay scrollbar paints inside it only when the handle
+    // has something to scroll, which is the reach asserted above.
+    assert!(cx.debug_bounds("tab-scrollbar-band").is_some());
+
+    // Tabs keep one readable width; the row overflows instead of shrinking them.
+    for index in 0..12 {
         let tab = bounds(selector(format!("tab-{index}")), cx);
-        assert!(
-            tab.left() >= strip.left() - px(1.0),
-            "tab {index} starts inside the strip: {tab:?} in {strip:?}"
-        );
-        assert!(
-            tab.right() <= strip.right() + px(1.0),
-            "tab {index} ends inside the strip: {tab:?} in {strip:?}"
-        );
-        assert!(
-            tab.size.width >= px(super::geometry::TAB_MIN_WIDTH - 1.0),
-            "tab {index} stays usable: {:?}",
-            tab.size.width
+        assert_eq!(
+            tab.size.width,
+            px(super::geometry::TAB_WIDTH),
+            "tab {index} keeps its width"
         );
     }
-    // The page keeps its own space below the strip.
+    // Scroll back to the row's start: the whole row is wider than the viewport.
+    view.update(cx, |shell, _| {
+        let offset = shell.tab_scroll_offset();
+        shell.scroll_tabs_by(-offset.x);
+    });
+    pump(cx);
+    let last = bounds("tab-11", cx);
+    assert!(
+        last.right() > strip.right(),
+        "without scrolling the row, the last tab is past the visible strip: {last:?} in {strip:?}"
+    );
+
+    // The island itself stays inside the window at the minimum size.
+    assert!(island.right() <= px(880.0) + px(1.0));
     let page = bounds("island-page", cx);
-    assert!(page.top() >= strip.bottom() - px(1.0));
-    assert!(page.bottom() <= island.bottom() + px(1.0));
-    assert!(page.size.height > px(0.0));
+    assert!(page.right() <= island.right() + px(1.0));
+    // Tabs keep their vertical position whether or not the scrollbar has something to show.
+    assert_eq!(bounds("tab-0", cx).top(), single_tab_top);
+}
+
+/// The wheel moves the strip horizontally and nothing else: the page and the sidebar keep their
+/// offsets, whole-tab scroll positions survive manual scrolling, and a clamp keeps the tail short
+/// after a close.
+#[gpui::test]
+fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+
+    // Start from the row's left end so both wheel gestures have somewhere to go.
+    view.update(cx, |shell, _| {
+        let offset = shell.tab_scroll_offset();
+        shell.scroll_tabs_by(-offset.x);
+    });
+    pump(cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()).x,
+        px(0.0)
+    );
+
+    let strip = bounds("tab-scroll", cx);
+    cx.simulate_mouse_move(strip.center(), None, Modifiers::none());
+
+    // A plain vertical wheel moves the strip sideways because it is the only scrollable axis.
+    cx.simulate_event(ScrollWheelEvent {
+        position: strip.center(),
+        delta: ScrollDelta::Lines(gpui::point(0.0, -6.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    cx.run_until_parked();
+    let after_wheel = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    assert!(
+        after_wheel.x < px(0.0),
+        "the wheel moved the strip: {after_wheel:?}"
+    );
+    assert_eq!(after_wheel.y, px(0.0), "the strip never scrolls vertically");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.page_offset()),
+        Point::default(),
+        "the page did not scroll"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repo_offset()),
+        Point::default(),
+        "the sidebar did not scroll"
+    );
+
+    // Shift+wheel arrives as a horizontal delta on Windows; it moves the strip by itself.
+    let before_shift = after_wheel;
+    cx.simulate_event(ScrollWheelEvent {
+        position: strip.center(),
+        delta: ScrollDelta::Lines(gpui::point(-3.0, 0.0)),
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::none()
+        },
+        touch_phase: Default::default(),
+    });
+    cx.run_until_parked();
+    let after_shift = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    assert!(
+        after_shift.x < before_shift.x,
+        "a native horizontal delta scrolls the strip once: {after_shift:?}"
+    );
+
+    // Manual scrolling is not undone by later frames.
+    let held = after_shift;
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()),
+        held,
+        "rendering alone does not fight the user's scroll"
+    );
+
+    // Closing the tail clamps the offset so no blank stretch is left behind.
+    let last = view.read_with(cx, |shell, _| shell.tab_ids()[11]);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.close_tab(last, window, cx);
+    });
+    cx.run_until_parked();
+    let max = view.read_with(cx, |shell, _| {
+        (shell.tab_scroll_offset(), shell.tab_scroll_max())
+    });
+    assert!(
+        max.0.x >= -max.1.x - px(1.0),
+        "the offset stays inside the new content: {:?} of {:?}",
+        max.0,
+        max.1
+    );
+}
+
+/// Opening, activating and cycling bring the target tab into view, once, without pinning it there.
+#[gpui::test]
+fn opening_and_switching_reveal_the_target_tab(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+
+    // Opening the twelfth tab brings it fully into view. The scroll offset is applied by the
+    // frame that also paints it, so let that frame run.
+    pump(cx);
+    let strip = bounds("tab-scroll", cx);
+    let last = bounds("tab-11", cx);
+    assert!(
+        last.left() >= strip.left() - px(1.0) && last.right() <= strip.right() + px(1.0),
+        "the newest tab is fully visible: {last:?} in {strip:?}"
+    );
+    assert!(view.read_with(cx, |shell, _| shell.tab_scroll_offset()).x < px(0.0));
+
+    // Cycling back to the first tab brings it back into view.
+    let first = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.activate_tab(first, window, cx);
+    });
+    pump(cx);
+    let strip = bounds("tab-scroll", cx);
+    let home = bounds("tab-0", cx);
+    assert!(
+        home.left() >= strip.left() - px(1.0) && home.right() <= strip.right() + px(1.0),
+        "the activated tab is visible: {home:?} in {strip:?}"
+    );
+
+    // A manual scroll is still the user's own until the next reveal.
+    view.update(cx, |shell, _| shell.scroll_tabs_by(px(-120.0)));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let manual = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()),
+        manual,
+        "repeated renders keep the manual position"
+    );
 }
 
 /// Ctrl+W and Ctrl+Tab drive the strip; while the palette is open it owns those keys.
@@ -1032,5 +1162,240 @@ fn closing_a_focused_inactive_tab_keeps_the_page_and_restores_focus(cx: &mut Tes
         focused.as_ref(),
         Some(&b_strip),
         "focus lands on a live tab entry"
+    );
+}
+
+/// Runs one more frame so a scroll offset applied during render is reflected in the painted bounds.
+fn pump(cx: &mut VisualTestContext) {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Helper: press and release `button` at `position`, as a real mouse delivers a click.
+fn click_button(
+    position: gpui::Point<Pixels>,
+    button: gpui::MouseButton,
+    cx: &mut VisualTestContext,
+) {
+    cx.simulate_mouse_down(position, button, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(position, button, Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// Middle-clicking any part of a tab closes it exactly once and never activates it first.
+#[gpui::test]
+fn middle_click_closes_a_tab_once_without_activating_it(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 3);
+
+    // Middle click on the inactive tab's icon area: it closes, and the active page stays `b`.
+    let tab = bounds("tab-1", cx);
+    let icon = gpui::point(tab.left() + px(14.0), tab.center().y);
+    click_button(icon, gpui::MouseButton::Middle, cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+    assert!(!view.read_with(cx, |shell, _| shell.tab_ids().contains(&a)));
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        b,
+        "middle click does not activate the tab it closes"
+    );
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert!(focused.is_some(), "focus stays on a live target");
+
+    // Middle click directly on the close button closes once, with no second close from the button.
+    let close = bounds("tab-close-1", cx);
+    let remaining = view.read_with(cx, |shell, _| shell.tab_count());
+    click_button(close.center(), gpui::MouseButton::Middle, cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        remaining - 1,
+        "exactly one tab closes"
+    );
+
+    // Middle click on the last remaining tab leaves a fresh Home instead of an empty strip.
+    let home = bounds("tab-0", cx);
+    click_button(home.center(), gpui::MouseButton::Middle, cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 1);
+    assert_eq!(route(&view, cx), Route::Home);
+}
+
+/// Left click and Enter still activate; only the middle button closes.
+#[gpui::test]
+fn left_click_and_enter_still_activate_a_tab(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("nav-home", cx);
+    assert_ne!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
+
+    click("tab-1", cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+
+    // Right click is neither activation nor close.
+    click("nav-home", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let tab = bounds("tab-1", cx);
+    click_button(tab.center(), gpui::MouseButton::Right, cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 2);
+}
+
+/// The strip's top and left gaps match at the first tab, and the tab never paints a coloured
+/// focus border: the border stays transparent in every state.
+#[gpui::test]
+fn the_first_tab_is_inset_equally_on_top_and_left(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+
+    let island = bounds("island", cx);
+    let strip = bounds("tab-strip", cx);
+    let tab = bounds("tab-0", cx);
+    let inset = px(super::geometry::TAB_STRIP_INSET);
+    // The island draws a 1px border; the strip starts on its inner edge. One logical pixel of
+    // slack covers DPI rounding of the border and padding.
+    let inner_left = island.left() + px(1.0);
+    let inner_top = island.top() + px(1.0);
+    assert!(
+        (tab.left() - inner_left - inset).abs() <= px(1.0),
+        "left inset {} measured {:?}",
+        inset,
+        tab.left() - inner_left
+    );
+    assert!(
+        (tab.top() - inner_top - inset).abs() <= px(1.0),
+        "top inset {} measured {:?}",
+        inset,
+        tab.top() - inner_top
+    );
+    // The two gaps agree with each other, which is what the owner saw as inconsistent.
+    assert!(
+        (tab.left() - inner_left - (tab.top() - inner_top)).abs() <= px(1.0),
+        "top and left gaps must match"
+    );
+    assert_eq!(strip.left(), inner_left);
+    assert_eq!(strip.top(), inner_top);
+
+    // Focusing a tab changes no geometry and does not need a coloured border to be reachable.
+    let strip_focus = view.read_with(cx, |shell, _| {
+        shell.tab_strip_focus(shell.tab_ids()[0]).unwrap()
+    });
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&strip_focus, cx));
+    cx.run_until_parked();
+    let focused = bounds("tab-0", cx);
+    assert_eq!(focused, tab, "focus alone does not move or resize the tab");
+}
+
+/// Tabbing onto a tab that sits outside the strip's viewport brings it into view once.
+#[gpui::test]
+fn tabbing_to_an_offscreen_tab_reveals_it(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    // Go back to the first tab so the far ones are off screen.
+    let first = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.activate_tab(first, window, cx);
+    });
+    pump(cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()).x,
+        px(0.0)
+    );
+
+    // The last tab's strip entry takes keyboard focus the way Tab would.
+    let last = view.read_with(cx, |shell, _| shell.tab_ids()[11]);
+    let focus = view.read_with(cx, |shell, _| shell.tab_strip_focus(last).unwrap());
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&focus, cx));
+    pump(cx);
+
+    let strip = bounds("tab-scroll", cx);
+    let tab = bounds("tab-11", cx);
+    assert!(
+        tab.left() >= strip.left() - px(1.0) && tab.right() <= strip.right() + px(1.0),
+        "the focused tab is scrolled into view: {tab:?} in {strip:?}"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        first,
+        "keyboard focus alone does not activate the tab"
+    );
+
+    // Turning away from the tab does not scroll back by itself.
+    let held = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    let page_focus = view.read_with(cx, |shell, _| {
+        shell.tab_page_focus(shell.active_tab_id()).unwrap()
+    });
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&page_focus, cx));
+    pump(cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_scroll_offset()),
+        held,
+        "losing focus does not undo the reveal"
+    );
+}
+
+/// Ely's overlay horizontal scrollbar is real and draggable: dragging its thumb moves the strip.
+#[gpui::test]
+fn the_strip_scrollbar_can_be_dragged(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    // Back to the row start so the thumb sits at the track's left end.
+    view.update(cx, |shell, _| {
+        let offset = shell.tab_scroll_offset();
+        shell.scroll_tabs_by(-offset.x);
+    });
+    pump(cx);
+    let reach = view.read_with(cx, |shell, _| shell.tab_scroll_max());
+    assert!(reach.x > px(0.0));
+
+    let band = bounds("tab-scrollbar-band", cx);
+    // Ely draws the horizontal thumb inside the track's half-thickness top padding, so the thumb
+    // occupies the band's lower half.
+    // Ely's horizontal thumb occupies the track's top thickness (6px) inside the band.
+    let thumb_y = band.top() + px(3.0);
+    let thumb_start = gpui::point(band.left() + px(6.0), thumb_y);
+    cx.simulate_mouse_move(thumb_start, None, Modifiers::none());
+    cx.simulate_mouse_down(thumb_start, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    // A real drag: exceed the drag threshold, then move along the track.
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(thumb_start.x + px(8.0 * step as f32), thumb_start.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(
+        gpui::point(thumb_start.x + px(64.0), thumb_start.y),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+
+    let dragged = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    assert!(
+        dragged.x < px(0.0),
+        "dragging the thumb scrolled the strip: {dragged:?}"
+    );
+    assert_eq!(dragged.y, px(0.0), "the strip never scrolls vertically");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.page_offset()),
+        Point::default(),
+        "dragging the strip scrollbar never scrolls the page"
     );
 }

@@ -10,14 +10,13 @@
 //! Each session owns the page-local state that has to survive switching: a real GPUI
 //! [`ScrollHandle`] and [`FocusHandle`], plus the repository browsing selection the reader will
 //! fill in during R3. The shell drops a session's state when the session closes.
+//!
+//! There is no ceiling on open sessions. Once the strip runs out of width the shell scrolls it
+//! horizontally instead of shrinking tabs further or refusing to open another page.
 
 use gpui::{App, FocusHandle, ScrollHandle};
 
 use crate::ui::fixtures::RepoFixture;
-
-/// Conservative preview bound on simultaneously open sessions. It is a single tunable constant,
-/// not a permanent product promise; a later task can raise it with real-window evidence.
-pub const MAX_OPEN_TABS: usize = 8;
 
 /// Stable identity of one session. Ids increase monotonically and a closed id is never handed out
 /// again.
@@ -174,8 +173,6 @@ pub enum OpenResult {
     Activated(TabId),
     /// A new session was created and became active.
     Opened(TabId),
-    /// [`MAX_OPEN_TABS`] sessions are open; nothing changed.
-    LimitReached,
 }
 
 /// What one [`Workspace::close`] call did.
@@ -245,8 +242,8 @@ impl Workspace {
     }
 
     /// Opens or activates the session for `route`. A resource that is already open is activated
-    /// instead of duplicated; at [`MAX_OPEN_TABS`] a new resource is refused and the current
-    /// session stays active, so no existing session is lost.
+    /// instead of duplicated; a resource that is not open always gets a new session, however many
+    /// are already open.
     pub fn open(&mut self, route: Route, cx: &mut App) -> OpenResult {
         let key = route.key();
         if let Some(session) = self
@@ -257,9 +254,6 @@ impl Workspace {
             let id = session.id;
             self.active = id;
             return OpenResult::Activated(id);
-        }
-        if self.sessions.len() >= MAX_OPEN_TABS {
-            return OpenResult::LimitReached;
         }
         let id = self.push(route, cx);
         self.active = id;
@@ -368,25 +362,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_limit_refuses_a_new_session_without_touching_the_current_one(cx: &mut TestAppContext) {
+    fn any_number_of_sessions_can_open(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let mut workspace = Workspace::new(cx);
-            for index in 0..(MAX_OPEN_TABS - 1) {
-                workspace.open(repo("owner", &format!("repo-{index}")), cx);
+            for index in 0..48 {
+                assert!(matches!(
+                    workspace.open(repo("owner", &format!("repo-{index}")), cx),
+                    OpenResult::Opened(_)
+                ));
             }
-            assert_eq!(workspace.sessions().len(), MAX_OPEN_TABS);
-            let active = workspace.active_id();
-            assert_eq!(
-                workspace.open(repo("owner", "one-too-many"), cx),
-                OpenResult::LimitReached
-            );
-            assert_eq!(workspace.sessions().len(), MAX_OPEN_TABS);
-            assert_eq!(workspace.active_id(), active);
-            // An existing resource still switches at the limit.
+            assert_eq!(workspace.sessions().len(), 49, "Home plus 48 repositories");
+            // Re-opening an existing resource still activates instead of adding one.
             assert!(matches!(
                 workspace.open(Route::Home, cx),
                 OpenResult::Activated(_)
             ));
+            assert_eq!(workspace.sessions().len(), 49);
         });
     }
 

@@ -67,6 +67,6 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 
 `storage/content` 仍是边界说明，无业务实现。`domain/auth/network/github/data/diagnostics` 已有本切片的真实实现（见 [认证与网络](auth-and-network.md)），但**UI 与 app 入口尚未调用**，binary 里这些模块暂时是未使用代码，各自带一个写明原因的模块级 `dead_code` 允许，不是 crate 级屏蔽；接入 UI 后应移除。HTTP 与运行时已选定 `reqwest` + `tokio`（理由见同文）；数据库仍未选择。现有依赖中曾出现的相关库是框架传递依赖，不作为采用依据。
 
-本轮状态归属：窗口持有 `workspace::Workspace` 的有序 `Session` 集合与唯一活动标签；`Workspace::open` 按 `Route::key()` 打开或激活，`close` 选择邻居并在关闭最后一个标签时新建 Home，`MAX_OPEN_TABS = 8` 是集中可调的预览上限。每个 `Session` 拥有真实的 `ScrollHandle`、页面 `FocusHandle`、标签条 `FocusHandle` 与仓库会话选择（branch/file，R3 阅读器填充）；关闭会话即释放这些状态。`Shell` 的侧栏滚动、浮层与根焦点仍是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。账户切换时如何处理标签仍未决定。
+本轮状态归属：窗口持有 `workspace::Workspace` 的有序 `Session` 集合与唯一活动标签；`Workspace::open` 按 `Route::key()` 打开或激活，`close` 选择邻居并在关闭最后一个标签时新建 Home，打开数量不设上限。每个 `Session` 拥有真实的 `ScrollHandle`、页面 `FocusHandle`、标签条 `FocusHandle` 与仓库会话选择（branch/file，R3 阅读器填充）；关闭会话即释放这些状态。标签条自身的横向偏移是 `Shell` 的视图局部状态（一个 `ScrollHandle`），由 GPUI 的横向溢出、Ely 的覆盖式滚动条、滚轮与中键关闭驱动，与页面滚动、侧栏滚动互不影响。`Shell` 的侧栏滚动、浮层与根焦点同样是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。账户切换时如何处理标签仍未决定。
 
 GPUI 基线为 `gpui-pre` / `gpui-pre-platform` 0.3.8（`font-kit`），Ely 固定 Git revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不引用原型 path 或共享 target。当前使用未打补丁的上游；以后接入输入/只读编辑器时，先验证原型 IME/readonly 问题是否仍可重现，再决定上游升级或最小补丁。搜索浮层没有直接复用 Ely 的 `CommandPalette`：后者在任何 Enter 上运行高亮行，而输入法候选确认也可能是 Enter，因此浮层自绘卡片并在按键绑定前拦截按键、检查查询框的 marked 区间。构建命令见 [README](../README.md)，真实验收证据见 [本轮开发日志](devlog/2026-10-22-shell-layout.md)。
