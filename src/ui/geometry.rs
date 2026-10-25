@@ -53,8 +53,9 @@ pub const TAB_CLOSE_SIZE: f32 = 16.0;
 /// The gap between two tabs in the strip.
 pub const TAB_GAP: f32 = 4.0;
 /// Reserved room under the tabs for Ely's overlay horizontal scrollbar. Ely's horizontal track is
-/// two thicknesses tall, so the band is that tall; the thumb lands centred in it. The band is
-/// always reserved, so the scrollbar appearing or disappearing never moves the tabs.
+/// two thicknesses tall and its thumb paints in the upper half, so the band is exactly that tall
+/// and the thumb sits inside it. The band is always reserved, so the scrollbar appearing or
+/// disappearing never moves the tabs.
 pub const TAB_SCROLLBAR_BAND: f32 = 12.0;
 /// The strip's total height: one inset, the tabs, then the scrollbar band.
 pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;
