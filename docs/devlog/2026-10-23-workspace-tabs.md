@@ -126,7 +126,15 @@ git diff --check
 
 **6. 右侧固定工具栏。** 标签条改为"内边距盒子 = 滚动视口 + 工具栏"：toolbar 在视口之外（`TAB_TOOLBAR_WIDTH = TAB_HEIGHT - 2`），不参与横向滚动、不被挤出、不遮最后一个标签；视口因此变窄，reveal/overflow/拖拽坐标全部基于新的视口宽度。里面先放一个 Ely `IconButton`（Ghost、Sm、`RotateCw`、tooltip Refresh），处于 `disabled` 状态，不接任何刷新逻辑、请求或导航。
 
-**验证：** 本机 `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（185 项）与 `git diff --check` 全部通过。新增测试覆盖：inset 与 island 间距一致；工具栏固定且缩小视口、其占位按钮不改变状态；close 只在 hover/active 时响应且不移动布局；拖拽前后顺序、状态跟随、取消/被关闭/无效投放、边缘自动滚动不滚动页面、排序后的 cycle 与 close 邻居；滚动条只在 hover 时出现、可拖动、淡入淡出与反向连续、拖动 pin 与隐藏后不可点击。动画用固定时钟值驱动，没有随机 sleep。拖拽的落地槽位另有一条纯函数单元测试（`landing_slots_follow_the_tab_middles_and_the_current_offset`），投放位置指示线是覆盖层，因此显示它不会移动任何标签（`the_drop_marker_does_not_shift_any_tab`）。
+**验证：** 本机 `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（232 项，含合并 main 后的服务层用例）与 `git diff --check` 全部通过。新增测试覆盖：inset 与 island 间距一致；工具栏固定且缩小视口、其占位按钮不改变状态；close 只在 hover/active 时响应且不移动布局；拖拽前后顺序、状态跟随、取消/被关闭/无效投放、边缘自动滚动不滚动页面、排序后的 cycle 与 close 邻居；滚动条只在 hover 时出现、可拖动、淡入淡出与反向连续、拖动 pin 与隐藏后不可点击。动画用固定时钟值驱动，没有随机 sleep。拖拽的落地槽位另有一条纯函数单元测试（`landing_slots_follow_the_tab_middles_and_the_current_offset`），投放位置指示线是覆盖层，因此显示它不会移动任何标签（`the_drop_marker_does_not_shift_any_tab`）。
+
+**第四轮审查修复（head `f605e08`）。** Codex 该轮三条 P2，均直接修复：
+
+1. **右向投放到中间缝隙落错位。** 插入槽是"当前集合中两个标签之间的位置"，`reorder` 先移除被拖标签再插入，因此落点大于原索引时要减一。此前只有首/尾测试掩盖了这个偏差，现在 `a_rightward_drop_lands_between_the_tabs_the_marker_names` 覆盖中间缝隙往返。纯函数 `landing_slot` 保持"插入槽"语义，索引换算集中在 `Shell::advance_tab_drag`。
+2. **指针停在边缘不再继续滚动。** 保留拖动中的指针位置，由 `advance_tab_drag` 同时在 `move_tab_drag`（鼠标移动）与渲染循环里推进有界自动滚动；拖动结束后停止。新增 `edge_scrolling_continues_while_the_pointer_is_stationary`，不依赖鼠标重复移动。
+3. **滚动条 thumb 拖动未接入淡入淡出状态。** 拖动 thumb 现在显式 `set_dragging(true)`，渲染循环在平台拖动结束（包括在 strip 外释放）时解除，因此拖到标签条外 140ms 后也不会把正在使用的 thumb 淡出掉。
+
+随后同步 `origin/main`（`42291f7`，含 PR #18/#19/#21/#22），无冲突。该 head 的本地 fmt / check / clippy / build / test（232 项，含合并 main 后的服务层用例）与 `git diff --check` 通过。
 
 **仍需负责人真实窗口验收：** 缩小后的内边距观感、细滚动条的可见度与淡入淡出是否顺滑、图标与标题间距、拖拽手感与自动滚动速度、close 出现时机、右侧工具栏位置；性能与动画流畅度只能由实际窗口确认。
 
