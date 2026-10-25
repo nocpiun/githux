@@ -361,6 +361,34 @@ async fn later_page_failure_keeps_earlier_items() {
 }
 
 #[tokio::test]
+async fn later_page_item_conversion_failure_keeps_earlier_items() {
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        body(5, false, vec![item(1, 1, false)]),
+        Some("<https://api.github.com/search/issues?page=2>; rel=\"next\""),
+    )))
+    .await;
+    let mut bad = item(2, 2, false);
+    bad["repository_url"] = serde_json::json!("not a url");
+    mock.enqueue(Ok(ok(body(5, false, vec![bad]), None))).await;
+
+    let outcome = run(
+        &mock,
+        &HomeQuery::new(login("test-user")),
+        &HomeSearchLimits::default(),
+    )
+    .await
+    .expect("partial outcome");
+    assert_eq!(outcome.items.len(), 1);
+    assert_eq!(outcome.items[0].id, 1);
+    assert!(matches!(
+        outcome.readiness,
+        HomeReadiness::Partial { ref reasons }
+            if reasons.iter().any(|r| matches!(r, HomePartialReason::ParseFailed { .. }))
+    ));
+}
+
+#[tokio::test]
 async fn untrusted_next_link_is_partial() {
     let mock = Arc::new(MockTransport::new());
     mock.enqueue(Ok(ok(

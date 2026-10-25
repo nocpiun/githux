@@ -192,18 +192,39 @@ pub async fn search_involving(
         }
 
         let mut truncated = false;
+        let mut conversion_failed = false;
         for raw in parsed.items {
             if items.len() >= limits.max_items {
                 truncated = true;
                 break;
             }
-            let item = convert_item(raw)?;
+            let item = match convert_item(raw) {
+                Ok(item) => item,
+                Err(error) => {
+                    // A malformed first page with nothing collected is a hard
+                    // error. Once any item exists (later page, or an earlier
+                    // item on this page) the already-collected results are
+                    // preserved and reported as partial, matching the
+                    // malformed-JSON handling above.
+                    if pages_fetched == 1 && items.is_empty() {
+                        return Err(error);
+                    }
+                    reasons.push(HomePartialReason::ParseFailed {
+                        message: error.to_string(),
+                    });
+                    conversion_failed = true;
+                    break;
+                }
+            };
             if seen.insert(item.id) {
                 items.push(item);
             }
         }
         if truncated {
             reasons.push(HomePartialReason::EntryLimit);
+            break;
+        }
+        if conversion_failed {
             break;
         }
 
