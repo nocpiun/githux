@@ -362,6 +362,42 @@ async fn local_page_limit_marks_partial() {
 }
 
 #[tokio::test]
+async fn partial_outcome_withholds_the_reusable_validator() {
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![event(
+            "1",
+            "WatchEvent",
+            serde_json::json!({"action": "started"}),
+        )]),
+        vec![
+            ("ETag", "\"feed-1\""),
+            (
+                "Link",
+                "<https://api.github.com/users/test-user/received_events?page=2>; rel=\"next\"",
+            ),
+        ],
+    )))
+    .await;
+    mock.enqueue(Ok(HttpResponse {
+        status: 503,
+        headers: vec![],
+        body: "{}".to_string(),
+    }))
+    .await;
+
+    let FeedFetch::Events(outcome) = run(&mock, None, &FeedLimits::default()).await.expect("ok")
+    else {
+        panic!("expected events");
+    };
+    assert!(matches!(outcome.readiness, FeedReadiness::Partial { .. }));
+    assert_eq!(
+        outcome.etag, None,
+        "a partial pagination must not return a validator that would 304 away the retry"
+    );
+}
+
+#[tokio::test]
 async fn untrusted_next_link_is_partial() {
     let mock = Arc::new(MockTransport::new());
     mock.enqueue(Ok(ok(

@@ -73,6 +73,7 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 - **保留** `actor{id,login,display_login,avatar_url}`、`repo{id,name,url}`、`created_at`、`id`、`type`、`public`。
 - **最小 typed payload**：常见 `PushEvent`、`PullRequestEvent`、`IssuesEvent`、`IssueCommentEvent`、`WatchEvent`（star）、`CreateEvent`、`DeleteEvent`、`ForkEvent`、`ReleaseEvent`、`PublicEvent`、`MemberEvent` 按官方事件 schema 抽取少量字段。**未知 type 不 panic**，`FeedEventType::Unknown(name)` + `FeedPayload::Unknown`，**不保留整个 payload**，避免未来形状无限增长。
 - **调度信息**：返回 `etag` 与 `poll_interval_seconds`（来自 `X-Poll-Interval`）。条件请求命中返回 `FeedFetch::NotModified { etag, poll_interval_seconds }`，与 `Events(...)` 区分，不当作错误。`304` 不消耗主限额。
+- **部分结果不返回 ETag**：分页未完整时（`FeedReadiness::Partial`）`etag` 置空。否则调用方把部分结果的验证器传回会得到第 1 页 `304`，永远不重试缺失页；`poll_interval_seconds` 仍保留。
 - **本层不自己轮询**：没有后台定时器、没有网页 Cookie、没有内部端点；调用方按 `X-Poll-Interval` 自行调度。
 - **数据来源限制**：Events 时间线只含**最近 30 天、最多 300 条**事件，且可能延迟 30 秒–6 小时。`Complete` 只表示本次分页未截断，绝不代表完整历史或与网站 Following feed 逐条一致。
 

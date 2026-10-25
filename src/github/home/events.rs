@@ -258,11 +258,19 @@ pub async fn fetch_received_events(
         }
     }
 
+    let readiness = FeedReadiness::from_reasons(reasons);
+    // A partial pagination must not hand back a reusable validator: a caller
+    // that sent it back would get `304 NotModified` on page 1 and never retry
+    // the missing page. The poll hint is still safe to return.
+    let etag = match &readiness {
+        FeedReadiness::Partial { .. } => None,
+        FeedReadiness::Complete => etag,
+    };
     Ok(FeedFetch::Events(FeedOutcome {
         events,
         etag,
         poll_interval_seconds,
-        readiness: FeedReadiness::from_reasons(reasons),
+        readiness,
     }))
 }
 
