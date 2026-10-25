@@ -1,73 +1,64 @@
 ---
 name: githux-pr-review
-description: 使用 gh CLI 等待 Githux PR 最新提交的 Codex 审查和 CI，处理反馈并按全程裁决记录决定合并执行者。在创建 PR 或推送修复并请求重审后使用。
+description: 使用 gh CLI 等待 Githux PR 最新提交的 Codex 审查和 CI，独立处理历史线程、证据冲突及基线变化，超时单次重试，并按全程裁决记录决定合并执行者。在创建 PR 或推送修复并请求重审后使用。
 metadata:
   internal: true
 ---
 
 # Githux PR 审查循环
 
-用于已授权任务的现有分支、worktree 和执行会话。依赖 Node.js 20+ 与已登录的 gh。先读 [共享工作流](../../../docs/agent-workflow.md) 的整批分类、裁决历史和合并门槛；本 skill 不另设逐 PR 人工审批。脚本轮询读取 GitHub；唯一自动写操作是等待到期后的单次 `@codex review` 恢复请求，不改代码或合并。
+依赖 Node.js 20+、已登录 gh；在已有任务 worktree 中执行。先读 [共享工作流](../../../docs/agent-workflow.md) 与 [完整流程图/返回状态](../../../docs/pr-review-flow.md)。不增加逐 PR 人工批准；原有人工验收及永久裁决记录继续适用。脚本只读收集事实，唯一自动写操作是一小时无结果后的单次 `@codex review`，不改代码、resolve 或合并。
 
-## 开始一轮
+## 开始与等待
 
-1. 记录仓库、PR、远端完整 head SHA；恢复 PR 描述、分页评论/review 和本地任务中的全程裁决历史。不完整不默认 false；已知 true/coordinator 永不重置。
-2. 首次创建 PR 自动审查，直接等待。后续每次 push（含文档）先确认远端 head，再用 gh 发一次精确的 `@codex review`，记录返回的 comment ID/created_at。发送结果不明时先查询，不能重复触发。
-3. 默认每轮最多等待 1 小时。到期且仍无本轮审查结果时，脚本复核当前 PR，再自动发送一次 `@codex review`，使用返回的 comment ID/created_at 等待新一轮，最多再等 1 小时。同一任务的同一 repo/PR/head 只允许一次自动恢复；不要手动重复启动来刷新额度。不要用短 SHA 或本机猜测时间代替证据。
+1. 核对 repo、PR、远端完整 head；恢复 PR 描述、分页评论/review 及本地任务的全程裁决历史。已知 true/coordinator 永不重置，历史不全不默认 false。
+2. 首次创建 PR 自动审查。后续每次 push（含文档/同步基线）核对远端 head 后，用 gh 发送一次精确的 `@codex review`，记录返回的 comment ID/created_at。发送结果不明先查评论，不重复发送。
+3. 当前 PR 出现另一新触发时，核对其发起者、时间与 head，改用该轮服务端游标；不要继续把之前结果当作新轮次结果。
 
 ```sh
 gh api --method GET repos/OWNER/REPO/pulls/123 --jq .head.sha
 gh api --method POST repos/OWNER/REPO/issues/123/comments -f 'body=@codex review'
+node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --head FULL_40_CHARACTER_SHA --wait-ci true --out .agents/task/review-result.json
 ```
 
-## 一次前台等待
+手动重审加 `--since TRIGGER_CREATED_AT --after-comment-id TRIGGER_ID`；排除已处理正式 review 可加 `--after-review-id ID`。摘要原地更新，用 Code Review 自身时间和 SHA 校验，不用摘要创建 ID 或本机猜测时间。
 
-```sh
-node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --head FULL_40_CHARACTER_SHA --wait-ci true --interval-seconds 30 --timeout-seconds 3600 --out .agents/task/review-result.json
-```
+默认每轮一小时、30 秒轮询；到期仍无审查结果且状态适用时自动补发一次，使用服务器回执开始第二轮，最多再等一小时。`--timeout-seconds 0` 是一次只读查询；`--auto-retry false` 禁止自动补发；自定义 reviewer 也不自动触发 Codex。证据缺口/矛盾默认最多缓冲两分钟，随后交回，受本轮总期限限制。
 
-后续重审增加 `--since TRIGGER_CREATED_AT --after-comment-id TRIGGER_ID`；需要排除已处理正式 review 时加 `--after-review-id ID`。这些游标不排除原地更新的摘要，摘要按代码审查自身时间与完整 SHA 验证。具体信任、轮次与兼容性边界见 [摘要与 CI 契约](references/review-evidence.md)。
+状态不变由脚本等待，不调用模型、不并行启动第二个等待器。宿主工具允许约两小时及有界 API 收尾，或使用可恢复前台等待；不要套更短的 timeout、用 `tail` 截断结果或覆盖退出码。无需持续读取过程日志。工具完成后，读取完整 JSON 并核对本次 run_id、head、status 与原始退出码。
 
-调用后由脚本轮询 API，状态不变时不重复输出提示或调用模型。不并行启动第二个监控脚本；使用宿主可恢复工具等待。工具尚未返回时停止生成，宿主工具需允许两轮约 2 小时加有界 API 收尾时间，或使用宿主可恢复等待方式，不宣称已有后台唤醒。主 Agent 派发后结束聊天与执行者前台等待是不同情形。
+`--wait-ci true` 始终包含 CI 汇总。`--check NAME` 只能追加同一 CI workflow 内检查，不能移除 CI。没有 wait-ci 不核验 CI；review_completed 不是合并许可。
 
-`--timeout-seconds 0` 为单次只读诊断；`--auto-retry false` 禁止自动恢复；自定义 reviewer 也不会自动触发 Codex。已有完成摘要、收据、正式 review，或只剩 CI、历史线程/证据未齐时不会重触发；未知消息、审查失败、合并冲突、head 改变、PR 关闭按原状态交回。重试记录和发送不明的恢复方法见 [证据契约](references/review-evidence.md#超时恢复)。
+## 返回后的处理
 
-`--wait-ci true` 等待当前 head 的 GitHub Actions 汇总检查 `CI`；额外门槛可重复传 `--check NAME`（指定后替换默认集合，应包含 CI）。不传 wait-ci 时只等待审查。结果文件留在忽略的任务目录。
+完整状态表见 [返回约定](../../../docs/pr-review-flow.md#返回与调用约定)。重点：
 
-| 状态 / 退出码 | 执行者处理 |
-| --- | --- |
-| review_arrived / 0 | 整批阅读审查正文与行内意见；到达不代表通过 |
-| review_completed / 0 | 可信摘要明确完成且无未解决 findings（可有已解决历史）；未等待 CI，继续核验其他门槛 |
-| checks_ready / 0 | 可信摘要已完成且无未解决 findings，所选 CI 全成功；按共享工作流核验最终 head、权限历史、基线及任务验收后再合并 |
-| merge_conflict / 8 | PR 确认有合并冲突，停止等待；同步目标分支并解决冲突，push 后针对新 head 请求审查。存在语义取舍时按裁决流程处理；保留人工 review / Draft 限制 |
-| ci_failed / 6 | CI 失败、取消、跳过或其他非成功结论；定位并修复，不认定通过 |
-| review_failed / 7 | 摘要报告审查失败/取消；排查原因，不当作无问题 |
-| unverified_bot_message / 5 | 身份、摘要格式、轮次或普通评论无法验证；阅读证据，不放行 |
-| timeout / 2 | 自动恢复额度已用完，或已有审查证据/新触发/无法确认状态而不适用重试；读取 waiting_on、message、retry 和证据，报告实际缺项 |
-| retry_uncertain / 9 | 重试已占用但发送结果或持久化不明；核对 GitHub 评论和本地记录，不盲目重发 |
-| head_changed / 3；pr_closed / 4 | 停止旧轮次；核对变更或关闭原因 |
-| error / 1；interrupted / 130 | 查询错误或取消，不算成功 |
+- `review_arrived`：整批阅读正文、行内意见及人工回复，同时检查返回的 CI 状态；到达不等于通过。
+- `history_pending`：本轮可能已 clean，仍须核实旧线程/人工线程。逐条对照当前代码和修复证据，已解决且无争议才能通过 gh resolve。不盲目批量关闭；争议永久记录 true/coordinator 后交回。只收尾线程、没有新 commit 时，用原触发游标重新核验，不重复触发审查。
+- `evidence_incomplete`、`evidence_conflict`、`ci_unverified`：缓冲期后仍有缺口/矛盾，读取各维度证据，不原样重启一小时等待。不要把工作流格式变化猜成通过。
+- `base_changed`、`merge_conflict`：核对目标分支；解决冲突或补齐组合验证，有新 head 则重新 CI/review。Draft、BLOCKED、未知 mergeability 不冒充冲突；已有人工验收限制不因同步基线解除。
+- `timeout`：读取 waiting_on/last_error/retry。`retry_uncertain`：发送可能已发生，保留意图，核对实际评论后用已确认游标只读恢复，不能删除记录来补发。
+- `checks_ready`：核对完整裁决/验收历史、milestone、最新 head/保护和当前基线后才能合并；review_passed=null、verdict=not_evaluated 始终保留。
+- `error`、`interrupted`、未知 Bot 消息、失败/取消：不算成功。错误输出文件若无法写入，依据 stdout 与退出码处理，不能退回读取旧成功文件。
 
-所有结果的 `review_passed` 仍为 null、`verdict` 为 not_evaluated：脚本提供事实，不代替项目合并裁决。空检查列表、无评论、COMMENTED、退出 0 都不是自动批准。
+## 反馈与交付
 
-## 反馈、修复与交付
+按共享工作流：全可修则修复、验证、同步文档、commit/push、请求新 head 审查；混合批次先永久记录 true/coordinator，再修独立小项并交回（默认保留本地）；全需裁决先记录并停下，不改代码。不用新提交、换 Agent 或另建 PR 清除历史。
 
-按共享工作流整批处理：全可修则修复、验证、更新文档、提交/push、请求新 head 审查；混合批次先永久记录 true/coordinator，再修独立小项并停下交接（默认保留本地）；全需裁决先记录再停，不改代码。误报、冲突及新取舍交负责人或主 Agent。不得用争议解决、重启、换执行者或另建 PR 清除裁决历史。记录同步失败仍保持 true，保存待同步内容并停止。
-
-普通无争议 PR 由原执行者完成检查和合并，无需主 Agent 重做整套审查。有过裁决的 PR 只能由负责人或主 Agent 合并。两者都须最新 head 的 CI 与对应代码审查通过，并核验完整历史、未决线程、基线/分支保护及验收；不得用旧 head 的结果。
+无争议任务由原执行者完成闭环；任何一轮有过裁决，只能由负责人/主 Agent 合并。最终双方都满足完整门槛，用 squash 和 GitHub 默认消息：
 
 ```sh
 gh pr merge PR --repo OWNER/REPO --squash --match-head-commit FULL_HEAD_SHA
 ```
 
-保留 GitHub 默认标题/正文，不传 subject/body/body-file，不使用 admin/auto 绕过门槛。查询实际 MERGED 与 merge commit 后再报告。保留在使用或有改动的 worktree。共享文档随实现提交；最终合并证据留 PR 或私有交接，不为记录结果再补未经检查的提交。
+不传 subject/body/body-file，不使用 admin/auto 绕过门槛。查询实际 MERGED 后再报告，保留使用中的 worktree。共享文档随代码提交；最终合并证据留 PR 或私有交接，不为记录结果再造未审查提交。
 
-交接只给结论、PR/head、验证链接、未解决问题及是否需裁决；原始日志按需读取。负责人手动提醒主 Agent的约定不变。
+## 技术与验证
 
-## 离线验证
+Bot 格式、CI 证据、重试记录边界见 [技术契约](references/review-evidence.md)。离线测试：
 
 ```sh
 node --test "/ABSOLUTE/SKILL/DIR/scripts/wait-review.test.mjs"
 ```
 
-测试模拟 GitHub 和时钟；真实 API/审查行为另记证据，不把模拟结果当实际通过。
+模拟 GitHub/时钟不证明云端审查一定成功；真实验证只陈述实际查询/触发的结果。

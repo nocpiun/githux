@@ -40,6 +40,10 @@
 
 基层 Agent 使用 [githux-pr-review](../.agents/skills/githux-pr-review/SKILL.md) 以前台工具调用等待普通程序轮询；工具返回后原会话继续。等待期间无需反复调用模型。超时、Bot 额度失败、无回复或无法绑定提交均不能认定通过。等待器发现合并冲突会返回 `merge_conflict`（退出码 8）；执行者先同步目标分支并解决冲突，推送后对新 head 触发审查再等待，不原样重启等待器。冲突中的语义取舍按裁决流程处理，已有人工 review / Draft 限制不变。
 
+等待器按 [完整流程图](pr-review-flow.md) 分别报告本轮审查、历史/人工线程、CI 和集成状态。本轮 clean 不代表旧线程已关闭；执行者核对当前代码与讨论后收尾已解决且无争议的线程，争议继续走永久裁决记录。正文反馈不要求行内评论；证据缺失或冲突默认最多复查两分钟后交回，不持续等不存在的反馈。CI 绑定最新 run/attempt 与真实 checkout 基线，额外检查不能移除 CI 汇总。
+
+结果使用本次 run_id；启动先写 running，错误/取消同样落盘。执行者读取完整 JSON 和原始退出码，不通过 tail/echo 或旧成功文件判断通过。主 Agent 亲自实现的任务也使用同一契约。
+
 ### 首版 Milestone
 
 实现 [已确认首版功能](product.md#首版范围) 及其直接配套工作的 PR，**创建时必须关联 [First Release（milestone #1）](https://github.com/nocpiun/githux/milestone/1)**。应设置 GitHub PR 的 milestone 字段，只在标题或正文提到它不算关联。已排除的后续功能和无关工作不自动归入首版；仍待明确的功能先确认范围，再按任务归属关联。

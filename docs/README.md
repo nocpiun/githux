@@ -16,6 +16,7 @@
 | 实现和验证的共同要求 | [代码约定](code-standards.md) |
 | 实际教训 | [LESSONS.md](../LESSONS.md) |
 | 已做工作、证据与后续交接 | [开发日志](devlog/README.md) |
+| 审查、历史线程、CI 与超时恢复的完整流程图 | [PR 审查与等待流程](pr-review-flow.md) |
 | 等待审查的可执行步骤 | [githux-pr-review skill](../.agents/skills/githux-pr-review/SKILL.md) |
 | 建立任务 worktree、启动/恢复可见执行会话 | [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md) |
 
