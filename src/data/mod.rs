@@ -275,8 +275,21 @@ impl RepoService {
         };
 
         let store = self.store.clone();
-        let token = tokio::task::spawn_blocking(move || store.load(&credential))
-            .await
+        let loaded = tokio::task::spawn_blocking(move || store.load(&credential)).await;
+        // Retired slots can disappear while the blocking load is queued. Check
+        // every load outcome before returning an error for the captured slot.
+        if self.closed.load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .registry
+                .lock()
+                .expect("registry lock")
+                .active_context()
+                .as_ref()
+                != Some(&context)
+        {
+            return Err(GitHubError::StaleContext);
+        }
+        let token = loaded
             .map_err(|_| GitHubError::CredentialStore {
                 message: "credential worker closed".into(),
             })?

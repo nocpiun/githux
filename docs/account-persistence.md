@@ -56,7 +56,7 @@ SQLite 与系统凭据不是一个事务。添加/替换采用独立 UUID revisi
 
 open/migration、SQLite、凭据 save/load/delete、恢复清理都通过 `spawn_blocking`。写操作使用共享互斥提交入口，网络核验不占提交锁；操作按后台取得提交锁的顺序线性化。查询 summaries/active_context 只短暂读内存，不等待磁盘锁。单次 SQLite busy 等待默认 500ms，可配置并上限 5s；OS 凭据 API 自身没有本层可取消的 timeout。
 
-替换捕获账户 incarnation，提交时复查；remove → re-add 后旧替换不能覆盖新账户。并发替换同一个仍存活的账户可依序提交，各自分配新 epoch。A → B → A 继续推进 selection，替换/移除/重验使旧成功与旧错误失效。持久化选择须用 `AccountService::set_active().await`；旧的同步 `RepoService::set_active` 在持久化服务返回 `PersistenceRequired`（内存测试服务保持原行为），不能绕过落盘。可写 registry handle 仅测试可用。
+替换捕获账户 incarnation，提交时复查；remove → re-add 后旧替换不能覆盖新账户。并发替换同一个仍存活的账户可依序提交，各自分配新 epoch。A → B → A 继续推进 selection，替换/移除/重验使旧成功与旧错误失效。RepoService 在 blocking 凭据加载后也核对上下文，包括缺失、读取失败和 worker 失败，防止退休槽的错误误报到新凭据。持久化选择须用 `AccountService::set_active().await`；旧的同步 `RepoService::set_active` 在持久化服务返回 `PersistenceRequired`（内存测试服务保持原行为），不能绕过落盘。可写 registry handle 仅测试可用。
 
 `login_cancellable(pat, cancel)` 在等网络许可与 GET /user 时可取消；提交前观察取消则不写入。提交一旦投递到 blocking worker，就运行至完成，丢弃等待 future 不会截断跨存储步骤；取消并不是撤销已经提交的操作。结果丢失时重新读取目录和 recovery_pending，不宣称已回滚。`close().await` 立即拒绝未来提交，等待已进入提交区的操作完成并在后台关闭数据库；尚未取得锁的提交返回 Closed。网络结果在关闭后也被丢弃。调用方还须管理网络 executor 的任务并关闭它。未显式 close 的兜底 Drop 将数据库关闭移到独立线程，租约释放可能稍晚，需立即重开时必须 await close。
 

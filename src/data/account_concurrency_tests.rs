@@ -51,6 +51,78 @@ impl PausedSave {
 }
 
 #[tokio::test]
+async fn retired_credential_load_missing_or_error_is_stale_but_current_failure_is_preserved() {
+    struct PausedLoad {
+        inner: InMemoryCredentialStore,
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        resume: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        error: bool,
+    }
+    impl CredentialStore for PausedLoad {
+        fn save(&self, r: &CredentialRef, p: &Pat) -> Result<(), CredentialError> {
+            self.inner.save(r, p)
+        }
+        fn delete(&self, r: &CredentialRef) -> Result<(), CredentialError> {
+            self.inner.delete(r)
+        }
+        fn describe(&self) -> &'static str {
+            "paused load"
+        }
+        fn load(&self, r: &CredentialRef) -> Result<Option<Pat>, CredentialError> {
+            let resume = self.resume.lock().unwrap().take();
+            if let Some(resume) = resume {
+                if let Some(tx) = self.entered.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                resume
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if self.error {
+                    return Err(CredentialError::Corrupted);
+                }
+            }
+            self.inner.load(r)
+        }
+    }
+    for error in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = config(&temp);
+        let store = Arc::new(PausedLoad {
+            inner: InMemoryCredentialStore::new(),
+            entered: Mutex::new(None),
+            resume: Mutex::new(None),
+            error,
+        });
+        let mock = Arc::new(MockTransport::new());
+        let exec = Arc::new(BackgroundExecutor::new(2));
+        let a = open(cfg, store.clone(), mock.clone(), exec).await;
+        user(&mock, 1).await;
+        a.login(Pat::from_str("old_fake")).await.unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *store.entered.lock().unwrap() = Some(entered);
+        *store.resume.lock().unwrap() = Some(resume);
+        let repos = a.repo_service();
+        let read = tokio::spawn(async move { repos.list_repos().await });
+        ready.await.unwrap();
+        user(&mock, 1).await;
+        a.replace(key(1), Pat::from_str("new_fake")).await.unwrap();
+        release.send(()).unwrap();
+        assert_eq!(read.await.unwrap(), Err(GitHubError::StaleContext));
+        let reference = a.registry.lock().unwrap().credential_ref(key(1)).unwrap();
+        store.delete(&reference).unwrap();
+        assert!(
+            matches!(
+                a.repo_service().list_repos().await,
+                Err(GitHubError::CredentialStore { .. })
+            ),
+            "current missing credential must remain a real error"
+        );
+        a.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn aborting_commit_waiter_does_not_block_network_or_lose_commit_during_close() {
     let temp = tempfile::tempdir().unwrap();
     let cfg = config(&temp);

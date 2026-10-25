@@ -30,7 +30,7 @@ cargo build --locked
 git diff --check
 ```
 
-上述本地 Windows 检查通过；全量 154 passed / 0 failed（原有 144 + 本轮 10）。四平台 Debug CI 的结果由 PR 当前 head 检查确认，本地结果不代替它。
+上述本地 Windows 检查通过；全量 155 passed / 0 failed（原有 144 + 本轮 11）。四平台 Debug CI 的结果由 PR 当前 head 检查确认，本地结果不代替它。
 
 新增验证覆盖：
 
@@ -48,6 +48,10 @@ git diff --check
 | 并发与 runtime | 多线程并发 replace/remove/add/select 与重启快照相符；暂停 blocking save，current-thread 网络 runtime 仍可推进；取消等待方不截断提交，close 等待后重开可恢复 |
 
 首轮 149/150 通过，schema 用例重开时遇 InUse；原因是测试依赖兜底异步 Drop 立即释放租约，修正为显式 close 后通过。Clippy 指出部分成功错误过大，summary 改为 Box；未屏蔽该检查。
+
+## 首轮审查修复
+
+PR #18 的 `8bd8b5b` 收到一条成立的 P2：读取捕获旧 CredentialRef 后，替换可能删除旧槽，blocking load 返回 None/error 时原代码提前 `?` 返回，未核对上下文，可能把旧槽错误显示为新凭据问题。现对 blocking load 的成功、缺失、错误及 worker 失败统一先核对 runtime context/closed，再返回结果。新增 paused-load 真并发测试分别覆盖 None 和 Corrupted，并确认当前槽缺失仍返回真实 CredentialStore 错误。相关用例、全量 155 项、check/clippy/build 通过；无待裁决事项。
 
 ## 验证边界
 
