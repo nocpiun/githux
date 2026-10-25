@@ -2,7 +2,7 @@
 
 更新：2026-10-23。本文记录 **Classic PAT 身份验证、Windows 安全凭据存取、账户授权代次、可取消的 GitHub 读取服务** 的实现范围、接口、验证证据与未覆盖项。
 
-**范围事实：** 本次交付的是真实服务基础，不是空 trait 占位，也不是完整登录产品。UI 尚未接入（那属于后续 UI 任务），因此 binary 里这些模块暂未被调用，`auth/network/github/data/domain/diagnostics` 各自带一个**模块级** `#![allow(dead_code)]`，并写明了原因；crate 根没有 `#![allow]` 兜底。首个切片不含账户落盘；后续已实现独立 SQLite 账户目录、活动选择和恢复接口，详见 [账户持久化](account-persistence.md)。私有业务内容落盘与重启后多账户 UI 仍未实现。
+**范围事实：** 本次交付的是真实服务基础，不是空 trait 占位，也不是完整登录产品。UI 尚未接入（那属于后续 UI 任务），因此 binary 里这些模块暂未被调用，`auth/network/github/data/domain/diagnostics` 各自带一个**模块级** `#![allow(dead_code)]`，并写明了原因；crate 根没有 `#![allow]` 兜底。首个切片不含账户落盘；后续已实现独立 SQLite 账户目录、活动选择和恢复接口，详见 [账户持久化](account-persistence.md)。私有业务内容落盘与重启后多账户 UI 仍未实现。仓库快照 REST 已通过固定账户上下文的读取会话接入 data，接口、跨步骤归属与发布复查见 [仓库账户数据服务](repository-data-service.md)。
 
 ## 1. 已实现的内容
 
@@ -34,7 +34,7 @@
 
 `AccountService::replace(expected, pat)` 是更换已有账户 PAT 的**唯一**入口：先 `GET /user` 验证，再比对 `expected`；token 属于别的账户时返回 `IdentityMismatch`，两个账户都不会被保存或改动。`login()` 是“添加账户”路径，不承担替换语义。
 
-读取请求前捕获 `AuthContext { account, epoch }`，返回后再次比对；不一致返回 `GitHubError::StaleContext`，数据被丢弃，不进入新账户。
+读取请求前捕获 `AuthContext { account, epoch, selection }`，返回后再次比对；不一致返回 `GitHubError::StaleContext`，数据被丢弃，不进入新账户。仓库多步读取使用 `RepositorySession` 固定原上下文，并以 `RepositoryReadContext` 标记服务实例，不能每步重新捕获活动账户继续旧浏览；详见 [data 接入契约](repository-data-service.md#await-边界与发布)。
 
 `AccountRegistry` 只保存 `AccountIdentity` + `CredentialRef`，**从不持有 token**。
 
@@ -300,3 +300,4 @@ git diff --check
 - [架构方案](architecture.md) · [缓存策略](cache-strategy.md) · [GitHub API 能力核验](github-api-capabilities.md)
 - [产品约定：登录与未来写能力](product.md#登录与未来写能力)
 - [本轮开发日志](devlog/2026-10-23-pat-data-service.md)
+- [仓库账户数据服务](repository-data-service.md) · [仓库快照 REST](repository-snapshot-service.md)

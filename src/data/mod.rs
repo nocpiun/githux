@@ -31,11 +31,16 @@ mod account_concurrency_tests;
 #[cfg(test)]
 mod account_tests;
 mod accounts;
+pub mod repository;
+#[cfg(test)]
+mod repository_tests;
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::storage::accounts::StorageError;
 #[allow(unused_imports)]
 pub use accounts::AccountError;
+#[allow(unused_imports)]
+pub use repository::{RepositoryReadContext, RepositorySession, Scoped};
 use std::sync::Arc;
 
 /// Account and credential lifecycle service.
@@ -56,6 +61,7 @@ pub struct AccountService {
 }
 
 /// Repository read service scoped to the active account.
+#[derive(Clone)]
 pub struct RepoService {
     registry: Arc<std::sync::Mutex<AccountRegistry>>,
     store: Arc<dyn CredentialStore>,
@@ -262,79 +268,11 @@ impl RepoService {
         &self,
         cancel: CancellationToken,
     ) -> Result<ReposOutcome, GitHubError> {
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(GitHubError::StaleContext);
-        }
-        let (context, credential) = {
-            let reg = self.registry.lock().expect("registry lock");
-            let context = reg.active_context().ok_or(GitHubError::StaleContext)?;
-            let credential = reg
-                .credential_ref(context.account.clone())
-                .ok_or(GitHubError::StaleContext)?;
-            (context, credential)
-        };
-
-        let store = self.store.clone();
-        let loaded = tokio::task::spawn_blocking(move || store.load(&credential)).await;
-        // Retired slots can disappear while the blocking load is queued. Check
-        // every load outcome before returning an error for the captured slot.
-        if self.closed.load(std::sync::atomic::Ordering::Acquire)
-            || self
-                .registry
-                .lock()
-                .expect("registry lock")
-                .active_context()
-                .as_ref()
-                != Some(&context)
-        {
-            return Err(GitHubError::StaleContext);
-        }
-        let token = loaded
-            .map_err(|_| GitHubError::CredentialStore {
-                message: "credential worker closed".into(),
-            })?
-            .map_err(|e| GitHubError::CredentialStore {
-                message: e.to_string(),
-            })?
-            .ok_or(GitHubError::CredentialStore {
-                message: "credential missing".to_string(),
-            })?;
-
-        // Bound simultaneous GitHub reads through the executor's shared
-        // semaphore so a burst of pages/accounts cannot open unbounded sockets.
-        //
-        // Waiting for a permit races against cancellation: if every permit is
-        // taken, a cancelled read must stop queuing immediately instead of
-        // waiting through an unrelated request's full timeout and redirect chain
-        // before the transport finally notices the cancelled token.
-        let _permit = tokio::select! {
-            permit = self.executor.semaphore().acquire_owned() => {
-                permit.map_err(|_| GitHubError::CredentialStore {
-                    message: "request scheduler closed".to_string(),
-                })?
-            }
-            _ = cancel.clone().cancelled() => return Err(GitHubError::Cancelled),
-        };
-
-        let result = fetch_user_repos(&self.client, &token, cancel).await;
-
-        // Re-check the context *for every outcome*, including errors. If the
-        // account was switched, the PAT replaced or the account removed while
-        // the request was in flight, the result belongs to a stale
-        // authorization: a stale `Unauthorized` must not invalidate or prompt
-        // replacement of the *new* credential, so it is converted to
-        // `StaleContext` just like a stale success.
-        let current = {
-            let reg = self.registry.lock().expect("registry lock");
-            reg.active_context()
-        };
-        if self.closed.load(std::sync::atomic::Ordering::Acquire)
-            || current.as_ref() != Some(&context)
-        {
-            return Err(GitHubError::StaleContext);
-        }
-
-        result
+        let context = self.capture_read_context()?;
+        self.read_authenticated(&context, cancel, async move |token, cancel| {
+            fetch_user_repos(&self.client, &token, cancel).await
+        })
+        .await
     }
 
     /// Legacy synchronous selection for in-memory services. Persistent services
