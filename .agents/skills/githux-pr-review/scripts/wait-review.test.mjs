@@ -6,13 +6,13 @@ import { dirname, join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { parseArgs, ghApi, inspectReview, waitForReview, saveResult } from './wait-review.mjs';
+import { parseArgs, ghApi, inspectReview, waitForReview, saveResult, postReviewRetry } from './wait-review.mjs';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 const BOT = 'chatgpt-codex-connector[bot]';
 const since = '2026-10-21T10:00:00Z';
 const args = ['--repo', 'acme/githux', '--pr', '42', '--head', A];
-const options = (extra = {}) => ({ ...parseArgs(args), ...extra });
+const options = (extra = {}) => ({ ...parseArgs(args), autoRetry: false, ...extra });
 const pr = (extra = {}) => ({ state: 'open', head: { sha: A },
   created_at: '2026-10-20T00:00:00Z', ...extra });
 const review = (extra = {}) => ({ id: 12, user: { login: BOT },
@@ -584,4 +584,193 @@ test('closure and changed head take precedence over merge conflicts before and a
       assert.equal(r.ci, undefined);
     }
   }
+});
+// Retry tests use temporary state and fake clocks; none post to GitHub.
+async function retryHarness(t, extra = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'githux-review-retry-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let clock = Date.parse(since);
+  const sent = [];
+  const opts = options({ autoRetry: true, timeoutMs: 2000, intervalMs: 1000,
+    retryState: join(dir, 'retry.json'), ...extra });
+  const deps = { now: () => clock, sleep: async ms => { clock += ms; },
+    postRetry: async received => {
+      sent.push({ ...received, at: clock });
+      return { id: 50, created_at: new Date(clock).toISOString(), url: 'https://example.test/50' };
+    } };
+  return { opts, deps, sent, now: () => clock, setTime: value => { clock = value; } };
+}
+
+test('default timeout is one hour; retry is enabled and can be explicitly disabled', () => {
+  assert.equal(parseArgs(args).timeoutMs, 3600000);
+  assert.equal(parseArgs(args).autoRetry, true);
+  assert.equal(parseArgs([...args, '--auto-retry', 'false']).autoRetry, false);
+  assert.throws(() => parseArgs([...args, '--auto-retry', 'yes']));
+});
+
+test('expiry posts exactly once then grants one more bounded round', async t => {
+  const h = await retryHarness(t);
+  const start = h.now();
+  const r = await waitForReview(h.opts, { ...h.deps, api: fixture().api });
+  assert.equal(r.status, 'timeout');
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].at, start + 2000);
+  assert.equal(h.now(), start + 4000);
+  assert.equal(r.retry.trigger.id, 50);
+  assert.equal(r.review_passed, null);
+  assert.equal(JSON.parse(await readFile(h.opts.retryState, 'utf8')).status, 'sent');
+});
+
+test('new round rejects pre-trigger evidence and accepts the updated server-timestamped summary', async t => {
+  const h = await retryHarness(t, { since, afterCommentId: 20 });
+  const api = async (path, config) => {
+    const comments = h.sent.length ? [summary({ at: h.now() === Date.parse(since) + 2000 ? since :
+      new Date(h.now()).toISOString(), extra: { updated_at: new Date(h.now()).toISOString() } })] : [];
+    return fixture({ comments }).api(path, config);
+  };
+  const r = await waitForReview(h.opts, { ...h.deps, api });
+  assert.equal(r.status, 'review_completed');
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.now(), Date.parse(since) + 3000);
+  assert.equal(r.retry.trigger.created_at, new Date(Date.parse(since) + 2000).toISOString());
+});
+
+test('restart resumes the recorded round without resetting its deadline or sending twice', async t => {
+  const h = await retryHarness(t);
+  const first = await waitForReview(h.opts, { ...h.deps, api: fixture().api });
+  h.setTime(Date.parse(first.retry.trigger.created_at) + 1000);
+  const resumed = await waitForReview(h.opts, { ...h.deps, api: fixture().api });
+  assert.equal(resumed.status, 'timeout');
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.now(), Date.parse(since) + 4000);
+});
+
+test('ambiguous POST response leaves a durable intent and is not replayed after restart', async t => {
+  const h = await retryHarness(t);
+  let calls = 0;
+  const postRetry = async () => { calls++; throw new Error('connection reset after send'); };
+  const run = () => waitForReview(h.opts, { ...h.deps, api: fixture().api, postRetry });
+  assert.equal((await run()).status, 'retry_uncertain');
+  assert.equal((await run()).status, 'retry_uncertain');
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(await readFile(h.opts.retryState, 'utf8')).status, 'intent');
+});
+
+test('existing claim from another waiter prevents a duplicate POST', async t => {
+  const h = await retryHarness(t);
+  let created = false;
+  const sleep = async ms => {
+    await h.deps.sleep(ms);
+    if (!created) {
+      created = true;
+      await saveResult(h.opts.retryState, { version: 1, repo: h.opts.repo, pr: 42, head: A, status: 'intent' });
+    }
+  };
+  assert.equal((await waitForReview(h.opts, { ...h.deps, sleep, api: fixture().api })).status, 'retry_uncertain');
+  assert.equal(h.sent.length, 0);
+});
+
+test('zero timeout, explicit opt-out and custom reviewer waits never post or write retry state', async t => {
+  for (const extra of [{ timeoutMs: 0 }, { autoRetry: false }, { reviewers: ['another-bot'] }]) {
+    const h = await retryHarness(t, extra);
+    assert.equal((await waitForReview(h.opts, { ...h.deps, api: fixture().api })).status, 'timeout');
+    assert.equal(h.sent.length, 0);
+    await assert.rejects(readFile(h.opts.retryState), { code: 'ENOENT' });
+  }
+});
+
+test('completed review waiting for CI or historical evidence is never retriggered', async t => {
+  const receipt = { ...summary(), id: 30, created_at: since,
+    body: '<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `' + A.slice(0, 10) + '`' };
+  for (const comments of [[summary()], [summary({ findings: true })],
+    [summary({ status: 'running' }), receipt]]) {
+    const h = await retryHarness(t, { waitCi: true });
+    const r = await waitForReview(h.opts, { ...h.deps, api: withChecks({ comments }, []).api });
+    assert.equal(r.status, 'timeout');
+    assert.equal(r.review_received, true);
+    assert.equal(h.sent.length, 0);
+  }
+});
+
+test('formal review behind a lagging running summary is not retriggered', async t => {
+  const h = await retryHarness(t);
+  const r = await waitForReview(h.opts, { ...h.deps,
+    api: fixture({ comments: [summary({ status: 'running' })], reviews: [review()] }).api });
+  assert.equal(r.status, 'timeout');
+  assert.equal(r.waiting_on, 'review_evidence');
+  assert.equal(h.sent.length, 0);
+});
+
+test('final snapshot catches just-completed review, closure, push and conflict before posting', async t => {
+  for (const expected of ['review_completed', 'pr_closed', 'head_changed', 'merge_conflict']) {
+    const h = await retryHarness(t);
+    const api = (path, config) => {
+      const expired = h.now() >= Date.parse(since) + 2000;
+      const changes = { pr_closed: { state: 'closed' }, head_changed: { head: { sha: B } },
+        merge_conflict: { mergeable: false } };
+      return fixture({ comments: expired && expected === 'review_completed' ? [summary()] : [],
+        heads: [pr(expired ? changes[expected] : {})] }).api(path, config);
+    };
+    assert.equal((await waitForReview(h.opts, { ...h.deps, api })).status, expected);
+    assert.equal(h.sent.length, 0);
+  }
+});
+
+test('a newer manual trigger or failed fresh query prevents automatic posting', async t => {
+  for (const mode of ['manual', 'network']) {
+    const h = await retryHarness(t);
+    const api = (path, config) => {
+      if (mode === 'network' && h.now() >= Date.parse(since) + 2000)
+        throw Object.assign(new Error('HTTP 503'), { transient: true });
+      return fixture({ comments: mode === 'manual' ? [{ id: 99, body: '@codex review', created_at: since,
+        user: { login: 'owner' } }] : [] }).api(path, config);
+    };
+    assert.equal((await waitForReview(h.opts, { ...h.deps, api })).status, 'timeout');
+    assert.equal(h.sent.length, 0);
+  }
+});
+
+test('known failures and unknown bot messages surface instead of triggering a retry', async t => {
+  for (const [comments, expected] of [[[summary({ status: 'failed' })], 'review_failed'],
+    [[{ id: 30, user: { login: BOT }, created_at: since, body: 'Quota unavailable' }], 'unverified_bot_message']]) {
+    const h = await retryHarness(t);
+    assert.equal((await waitForReview(h.opts, { ...h.deps, api: fixture({ comments }).api })).status, expected);
+    assert.equal(h.sent.length, 0);
+  }
+});
+
+test('retry journal from another head fails closed', async t => {
+  const h = await retryHarness(t);
+  await saveResult(h.opts.retryState, { version: 1, repo: h.opts.repo, pr: 42, head: B, status: 'sent' });
+  await assert.rejects(waitForReview(h.opts, { ...h.deps, api: fixture().api }), /identity/);
+  assert.equal(h.sent.length, 0);
+});
+
+test('POST adapter sends only the exact comment via argv and validates the server receipt', async () => {
+  const execute = async (file, argv, config) => {
+    assert.equal(file, 'gh');
+    assert.deepEqual(argv, ['api', 'repos/acme/githux/issues/42/comments', '--hostname', 'github.com',
+      '--method', 'POST', '-f', 'body=@codex review']);
+    assert.equal(config.shell, false);
+    return { stdout: JSON.stringify({ id: 50, created_at: since, body: '@codex review' }) };
+  };
+  assert.equal((await postReviewRetry(options(), { execute })).created_at, since);
+  await assert.rejects(postReviewRetry(options(), { execute: async () => ({ stdout: '{}' }) }), /receipt/);
+});
+
+test('result output cannot replace the durable retry journal', async t => {
+  const h = await retryHarness(t);
+  await assert.rejects(waitForReview({ ...h.opts, out: h.opts.retryState }, h.deps), /overwrite/);
+  assert.equal(h.sent.length, 0);
+});
+
+test('cancellation during POST preserves the claim without retrying on restart', async t => {
+  const h = await retryHarness(t);
+  const controller = new AbortController();
+  let sends = 0;
+  const postRetry = async () => { sends++; controller.abort(); controller.signal.throwIfAborted(); };
+  await assert.rejects(waitForReview(h.opts, { ...h.deps, api: fixture().api, signal: controller.signal, postRetry }), /abort/i);
+  const resumed = await waitForReview(h.opts, { ...h.deps, api: fixture().api, postRetry });
+  assert.equal(resumed.status, 'retry_uncertain');
+  assert.equal(sends, 1);
 });

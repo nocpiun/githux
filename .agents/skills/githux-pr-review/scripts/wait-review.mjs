@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdir, writeFile, rename, unlink } from 'node:fs/promises';
+import { mkdir, writeFile, rename, unlink, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -13,24 +13,24 @@ const SHA = /^[0-9a-f]{40}$/i;
 const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/;
 const codes = { review_arrived: 0, error: 1, timeout: 2, head_changed: 3,
   pr_closed: 4, unverified_bot_message: 5, ci_failed: 6, review_failed: 7, merge_conflict: 8,
-  review_completed: 0, checks_ready: 0, interrupted: 130 };
+  review_completed: 0, checks_ready: 0, retry_uncertain: 9, interrupted: 130 };
 export const HELP = [
-  '通过 gh CLI 等待 Codex 审查；只检测到达，不判定通过。',
+  '通过 gh CLI 等待 Codex 审查；超时自动重试一次，不判定通过。',
   'node wait-review.mjs --repo OWNER/REPO --pr N --head 完整40位SHA',
   '  [--since ISO时间] [--after-review-id N] [--after-comment-id N]',
-  '  [--reviewer LOGIN ...] [--interval-seconds 30] [--timeout-seconds 1800]',
+  '  [--reviewer LOGIN ...] [--interval-seconds 30] [--timeout-seconds 3600]',
   '  [--wait-ci true|false] [--check NAME ...]',
-  '  [--out 文件]',
-  'timeout=0 查询一次。默认作者：' + BOT,
+  '  [--auto-retry true|false] [--retry-state 文件] [--out 文件]',
+  'timeout=0 只读查询一次；默认每轮1小时，最多自动重试一次。默认作者：' + BOT,
   '退出码：0 审查到达/完成或检查齐备；1 错误；2 超时；3 head改变；4 PR关闭；',
-  '5 Bot消息需核实；6 CI失败；7 审查失败；8 合并冲突；130 中断。退出0不等于允许合并。',
+  '5 Bot消息需核实；6 CI失败；7 审查失败；8 合并冲突；9 重试发送状态不明；130 中断。退出0不等于允许合并。',
 ].join('\n');
 
 export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
   const values = {};
   const allowed = new Set(['repo', 'pr', 'head', 'since', 'after-review-id',
-    'after-comment-id', 'reviewer', 'interval-seconds', 'timeout-seconds', 'out', 'wait-ci', 'check']);
+    'after-comment-id', 'reviewer', 'interval-seconds', 'timeout-seconds', 'out', 'wait-ci', 'check', 'auto-retry', 'retry-state']);
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
     const value = argv[i + 1];
@@ -61,13 +61,16 @@ export function parseArgs(argv) {
   if (values['wait-ci'] !== undefined && !['true', 'false'].includes(values['wait-ci']))
     throw new Error('wait-ci must be true or false');
   if (values.check && values['wait-ci'] !== 'true') throw new Error('--check requires --wait-ci true');
+  if (values['auto-retry'] !== undefined && !['true', 'false'].includes(values['auto-retry']))
+    throw new Error('auto-retry must be true or false');
   return {
+    autoRetry: values['auto-retry'] !== 'false', retryState: values['retry-state'],
     waitCi: values['wait-ci'] === 'true', checks: [...new Set(values.check ?? ['CI'])],
     repo: values.repo, pr: number('pr', undefined, 1), head: values.head.toLowerCase(),
     since: values.since, afterReviewId: number('after-review-id', 0, 0),
     afterCommentId: number('after-comment-id', 0, 0), reviewers,
     intervalMs: number('interval-seconds', 30, 1, 3600) * 1000,
-    timeoutMs: number('timeout-seconds', 1800, 0, 86400) * 1000, out: values.out,
+    timeoutMs: number('timeout-seconds', 3600, 0, 86400) * 1000, out: values.out,
   };
 }
 
@@ -225,7 +228,7 @@ async function unresolvedCommentIds(options, inline, api, signal) {
   return new Set(inline.filter(c => rootIds.has(c.id) || rootIds.has(c.in_reply_to_id)).map(c => c.id));
 }
 
-export async function inspectReview(options, api = ghApi, signal) {
+export async function inspectReview(options, api = ghApi, signal, observe = () => {}) {
   const base = 'repos/' + options.repo;
   const endpoint = base + '/pulls/' + options.pr;
   const get = path => api(path, { signal });
@@ -241,6 +244,10 @@ export async function inspectReview(options, api = ghApi, signal) {
     Number.isFinite(Date.parse(time)) && Date.parse(time) >= since;
   const comments = await list(base + '/issues/' + options.pr + '/comments');
   if (!Array.isArray(comments)) throw new Error('无效普通评论列表');
+  const pending = { waiting_on: 'review', review_received: false };
+  const newerTrigger = comments.find(c => c.body?.trim() === '@codex review' &&
+    Number.isSafeInteger(c.id) && c.id > options.afterCommentId && Date.parse(c.created_at) >= since);
+  if (newerTrigger) pending.newer_trigger = { id: newerTrigger.id, created_at: newerTrigger.created_at };
   const summaries = [], unknown = [], receipts = [];
   for (const c of comments) {
     if (!authors.has(c.user?.login?.toLowerCase())) continue;
@@ -264,6 +271,12 @@ export async function inspectReview(options, api = ghApi, signal) {
     });
   }
   const summary = summaries.length === 1 ? summaries[0] : null;
+  if (summary) pending.summary = summary;
+  if (summary?.status === 'completed' || receipts.length) {
+    pending.review_received = true;
+    pending.waiting_on = 'review_evidence';
+    pending.receipts = receipts.map(c => ({ id: c.id, url: c.html_url, created_at: c.created_at }));
+  }
   if (!result && summary) {
     if (['failed', 'cancelled', 'error'].includes(summary.status))
       result = event(options, 'review_failed', { summary });
@@ -279,6 +292,7 @@ export async function inspectReview(options, api = ghApi, signal) {
     const reviews = all.filter(r => recent(r, r.submitted_at, options.afterReviewId) &&
       ['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED'].includes(r.state) &&
       String(r.commit_id).toLowerCase() === options.head);
+    if (reviews.length) { pending.review_received = true; pending.waiting_on = 'review_evidence'; }
     const collected = [];
     for (const r of reviews) {
       const inline = await list(endpoint + '/reviews/' + r.id + '/comments');
@@ -305,49 +319,149 @@ export async function inspectReview(options, api = ghApi, signal) {
   }
   if (options.waitCi && (!result || result.status === 'review_completed')) {
     const ci = await inspectCI(options, api, signal);
+    pending.ci = ci;
+    if (result?.status === 'review_completed') pending.waiting_on = 'ci';
     if (ci.state === 'failed') result = event(options, 'ci_failed', { ci, summary });
     else if (result?.status === 'review_completed')
       result = ci.state === 'success' ? event(options, 'checks_ready', { ci, summary }) : null;
   }
+  observe(pending);
   // Recheck after every batch of evidence, including conflicts introduced by a base update.
   if (result) return inspectHead(options, await get(endpoint)) ?? result;
   return null;
 }
 
+// One durable retry allowance per repo/PR/head in this task. A claimed but
+// unconfirmed POST is never replayed automatically, including after a crash.
+function retryFile(options) {
+  return resolve(options.retryState ?? ('.agents/task/review-retries/' +
+    options.repo.toLowerCase() + '/' + options.pr + '-' + options.head + '.json'));
+}
+function validateTrigger(comment) {
+  if (!Number.isSafeInteger(comment?.id) || comment.id < 1 ||
+      !ISO.test(comment.created_at ?? '') || !Number.isFinite(Date.parse(comment.created_at)) ||
+      comment.body !== '@codex review') throw new Error('Invalid retry comment receipt');
+  return { id: comment.id, created_at: comment.created_at, url: comment.html_url ?? null };
+}
+async function loadRetry(file, options) {
+  let state;
+  try { state = JSON.parse(await readFile(file, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (state.version !== 1 || state.repo !== options.repo.toLowerCase() || state.pr !== options.pr ||
+      state.head !== options.head || !['intent', 'sent'].includes(state.status))
+    throw new Error('Invalid retry state identity/schema: ' + file);
+  if (state.status === 'sent') validateTrigger({ ...state.trigger, body: '@codex review' });
+  return state;
+}
+export async function postReviewRetry(options, { signal, execute = exec } = {}) {
+  const { stdout } = await execute('gh', ['api', 'repos/' + options.repo + '/issues/' + options.pr +
+    '/comments', '--hostname', 'github.com', '--method', 'POST', '-f', 'body=@codex review'], {
+    shell: false, windowsHide: true, encoding: 'utf8', timeout: 30000, signal,
+    maxBuffer: 1024 * 1024,
+    env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', GH_PAGER: 'cat' },
+  });
+  return validateTrigger(JSON.parse(stdout));
+}
+
 export async function waitForReview(options, {
   api = ghApi, now = Date.now, sleep = (ms, signal) => delay(ms, undefined, { signal }),
-  signal, progress = () => {},
+  signal, progress = () => {}, postRetry = postReviewRetry,
 } = {}) {
-  const deadline = now() + options.timeoutMs;
-  let errors = 0, attempts = 0, lastError, lastProgress = '';
-  for (;;) {
-    signal?.throwIfAborted();
-    if (attempts && now() >= deadline)
-      return event(options, 'timeout', { attempts, last_error: lastError ?? null });
-    attempts++;
-    const budget = options.timeoutMs === 0 ? 30000 : Math.max(1, deadline - now());
+  // Custom reviewer waits and diagnostic single reads must remain read-only.
+  const retryEnabled = options.autoRetry && options.timeoutMs > 0 &&
+    options.reviewers.length === 1 && options.reviewers[0] === BOT;
+  const file = retryEnabled ? retryFile(options) : null;
+  const pathKey = value => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
+  if (file && options.out && pathKey(file) === pathKey(options.out))
+    throw new Error('--out must not overwrite --retry-state');
+  let retry = file ? await loadRetry(file, options) : null;
+  let current = { ...options }, deadline = now() + options.timeoutMs;
+  let errors = 0, attempts = 0, lastError, lastProgress = '', pending;
+  const finish = (status, extra = {}) => event(current, status, {
+    attempts, last_error: lastError ?? null, ...pending,
+    retry: retry ? { ...retry, file } : null, ...extra,
+  });
+  if (retry?.status === 'intent') return finish('retry_uncertain', {
+    message: '已有重试发送意图但无确认回执；先核对 GitHub 评论，不自动重发。',
+  });
+  const adopt = trigger => {
+    current = { ...options, since: trigger.created_at, afterCommentId: trigger.id };
+    // Restarting the waiter does not grant a fresh timeout or retry allowance.
+    deadline = Date.parse(trigger.created_at) + options.timeoutMs;
+  };
+  if (retry?.status === 'sent' && options.afterCommentId <= retry.trigger.id) adopt(retry.trigger);
+
+  const query = async budget => {
     const request = new AbortController();
     const forwardAbort = () => request.abort(signal.reason);
     signal?.addEventListener('abort', forwardAbort, { once: true });
     const timer = setTimeout(() => request.abort(), budget);
     try {
-      const found = await inspectReview(options, api, request.signal);
-      if (found) return found;
-      errors = 0;
-      lastError = undefined;
+      const found = await inspectReview(current, api, request.signal, value => { pending = value; });
+      errors = 0; lastError = undefined;
+      return found;
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (request.signal.aborted)
-        return event(options, 'timeout', { attempts, last_error: '查询达到等待时限' });
-      if (!error.transient) throw error;
+      if (!request.signal.aborted && !error.transient) throw error;
       errors++;
-      lastError = error.message;
+      lastError = request.signal.aborted ? '查询达到等待时限' : error.message;
+      pending = undefined; // Never use a stale snapshot to authorize a write.
+      return null;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', forwardAbort);
     }
-    if (!options.timeoutMs || now() >= deadline)
-      return event(options, 'timeout', { attempts, last_error: lastError ?? null });
+  };
+  for (;;) {
+    signal?.throwIfAborted();
+    if (attempts && now() >= deadline) {
+      if (!retryEnabled || retry) return finish('timeout');
+      // A bounded fresh snapshot at expiry prevents retrying a review that has
+      // just arrived, a CI-only wait, or a PR changed since the last poll.
+      const found = await query(30000);
+      if (found) return { ...found, retry };
+      if (!pending || pending.review_received || pending.newer_trigger)
+        return finish('timeout', { message: '未重触发：已有审查证据、新触发评论或无法确认当前状态。' });
+      // Running summaries can lag a submitted formal batch.
+      const submitted = await api('repos/' + current.repo + '/pulls/' + current.pr +
+        '/reviews?per_page=100', { paginate: true, signal });
+      if (!Array.isArray(submitted)) throw new Error('无效 review 列表');
+      if (submitted.some(r => r.user?.login === BOT && r.commit_id?.toLowerCase() === current.head &&
+          r.id > current.afterReviewId && Date.parse(r.submitted_at) >= Date.parse(current.since ?? '1970-01-01') &&
+          ['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED'].includes(r.state)))
+        return finish('timeout', { waiting_on: 'review_evidence', review_received: true,
+          message: '已有本轮正式审查，摘要尚未就绪；不重复触发。' });
+      const changed = inspectHead(current, await api('repos/' + current.repo + '/pulls/' + current.pr, { signal }));
+      if (changed) return changed;
+      signal?.throwIfAborted();
+      retry = { version: 1, repo: options.repo.toLowerCase(), pr: options.pr, head: options.head,
+        status: 'intent', claimed_at: new Date(now()).toISOString() };
+      await mkdir(dirname(file), { recursive: true });
+      try {
+        await writeFile(file, JSON.stringify(retry, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        return finish('retry_uncertain', { message: '另一等待器已占用重试记录；不重复发送。' });
+      }
+      try {
+        const trigger = await postRetry(current, { signal });
+        // Validate injected or future adapters as well as the real gh receipt.
+        validateTrigger({ ...trigger, body: '@codex review' });
+        retry = { ...retry, status: 'sent', trigger };
+        await saveResult(file, retry);
+        adopt(trigger);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        return finish('retry_uncertain', { message: '重试发送或记录失败，请核对 GitHub 后恢复：' + error.message });
+      }
+      pending = undefined;
+      progress('已自动发送一次 @codex review：' + retry.trigger.id + '；等待新轮次，不再自动重试。');
+      continue;
+    }
+    attempts++;
+    const found = await query(options.timeoutMs === 0 ? 30000 : Math.max(1, deadline - now()));
+    if (found) return { ...found, retry: retry ? { ...retry, file } : null };
+    if (!options.timeoutMs) return finish('timeout');
     const message = lastError ? '暂时无法查询，退避等待：' + lastError : '等待 ' + options.head + (options.waitCi ? ' 的 Codex 审查与 CI…' : ' 的 Codex 审查…');
     if (message !== lastProgress) { progress(message); lastProgress = message; }
     const interval = Math.min(120000, options.intervalMs * 2 ** Math.min(errors, 3));
