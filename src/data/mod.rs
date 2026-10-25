@@ -16,17 +16,31 @@
 // root deliberately has no `#![allow]` blanket.
 #![allow(dead_code)]
 
+use crate::auth::RegistryError;
 use crate::auth::credential::{CredentialError, CredentialRef, CredentialStore};
 use crate::auth::token::Pat;
-use crate::auth::{AccountRegistry, AuthContext, RegistryError};
+use crate::auth::{AccountRegistry, AuthContext};
 use crate::domain::AccountSummary;
 use crate::domain::error::GitHubError;
 use crate::domain::repo::ReposOutcome;
 use crate::github::client::GitHubClient;
 use crate::github::repos::fetch_user_repos;
 use crate::github::user::{AuthenticatedUser, fetch_authenticated_user};
+#[cfg(test)]
+mod account_concurrency_tests;
+#[cfg(test)]
+mod account_tests;
+mod accounts;
+pub mod repository;
+#[cfg(test)]
+mod repository_tests;
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
+use crate::storage::accounts::StorageError;
+#[allow(unused_imports)]
+pub use accounts::AccountError;
+#[allow(unused_imports)]
+pub use repository::{RepositoryReadContext, RepositorySession, Scoped};
 use std::sync::Arc;
 
 /// Account and credential lifecycle service.
@@ -40,15 +54,22 @@ pub struct AccountService {
     /// could save token B and commit, and then A could commit and report success
     /// while the store actually holds token B. The epoch alone does not protect
     /// this because the store write happens outside the registry lock.
-    credential_commit: Arc<tokio::sync::Mutex<()>>,
+    credential_commit: Arc<std::sync::Mutex<()>>,
+    database: accounts::Database,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    persistent: bool,
 }
 
 /// Repository read service scoped to the active account.
+#[derive(Clone)]
 pub struct RepoService {
     registry: Arc<std::sync::Mutex<AccountRegistry>>,
     store: Arc<dyn CredentialStore>,
     client: Arc<GitHubClient>,
     executor: Arc<BackgroundExecutor>,
+    persistent: bool,
+    credential_commit: Arc<std::sync::Mutex<()>>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +89,9 @@ pub enum LoginError {
         actual_account: u64,
     },
     NotFound,
+    Storage(StorageError),
+    /// Saved and active; retired secret cleanup is still pending.
+    CleanupPending(Box<AccountSummary>),
 }
 
 impl From<GitHubError> for LoginError {
@@ -83,6 +107,8 @@ impl From<CredentialError> for LoginError {
 }
 
 impl AccountService {
+    /// Isolated legacy in-memory fixture; production uses open() exclusively.
+    #[cfg(test)]
     pub fn new(
         store: Arc<dyn CredentialStore>,
         client: Arc<GitHubClient>,
@@ -93,10 +119,14 @@ impl AccountService {
             store,
             client,
             executor,
-            credential_commit: Arc::new(tokio::sync::Mutex::new(())),
+            credential_commit: Arc::new(std::sync::Mutex::new(())),
+            database: Arc::new(std::sync::Mutex::new(None)),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistent: false,
         }
     }
 
+    #[cfg(test)]
     pub fn registry_handle(&self) -> Arc<std::sync::Mutex<AccountRegistry>> {
         self.registry.clone()
     }
@@ -107,6 +137,9 @@ impl AccountService {
             store: self.store.clone(),
             client: self.client.clone(),
             executor: self.executor.clone(),
+            persistent: self.persistent,
+            credential_commit: self.credential_commit.clone(),
+            closed: self.closed.clone(),
         }
     }
 
@@ -118,37 +151,22 @@ impl AccountService {
     /// [`AccountService::replace`] so a token for a different account cannot
     /// silently swap identities.
     pub async fn login(&self, pat: Pat) -> Result<LoginOutcome, LoginError> {
-        let verified = self.verify(&pat).await?;
-        let credential =
-            CredentialRef::new(verified.identity.key.host.clone(), verified.identity.key.id);
+        self.login_cancellable(pat, CancellationToken::default())
+            .await
+    }
 
-        // Serialize save + registry commit (see `credential_commit`).
-        let _commit = self.credential_commit.lock().await;
-
-        // Save credential before registering the account so a storage failure
-        // never leaves a registry entry claiming persistence.
-        self.store
-            .save(&credential, &pat)
-            .map_err(LoginError::from)?;
-
-        let outcome = {
-            let mut reg = self.registry.lock().expect("registry lock");
-            let existing = reg.credential_ref(verified.identity.key.clone()).is_some();
-            if existing {
-                let summary = reg
-                    .replace(
-                        verified.identity.key.clone(),
-                        verified.identity.clone(),
-                        credential,
-                    )
-                    .map_err(|_| LoginError::NotFound)?;
-                LoginOutcome::Replaced(summary)
-            } else {
-                let summary = reg.upsert_verified(verified.identity.clone(), credential);
-                LoginOutcome::SignedIn(summary)
-            }
-        };
-        Ok(outcome)
+    /// Cancellation before submission leaves no writes. After submission the
+    /// durable commit completes even if this future is dropped.
+    pub async fn login_cancellable(
+        &self,
+        pat: Pat,
+        cancel: CancellationToken,
+    ) -> Result<LoginOutcome, LoginError> {
+        let verified = self.verify_cancellable(&pat, cancel.clone()).await?;
+        if cancel.is_cancelled() {
+            return Err(LoginError::GitHub(GitHubError::Cancelled));
+        }
+        self.commit_login(verified.identity, pat, None).await
     }
 
     /// Replace the PAT of an **existing** account.
@@ -162,6 +180,12 @@ impl AccountService {
         expected: crate::domain::AccountKey,
         pat: Pat,
     ) -> Result<LoginOutcome, LoginError> {
+        let epoch = self
+            .registry
+            .lock()
+            .expect("registry lock")
+            .incarnation(&expected)
+            .ok_or(LoginError::NotFound)?;
         let verified = self.verify(&pat).await?;
         if verified.identity.key != expected {
             return Err(LoginError::IdentityMismatch {
@@ -170,66 +194,26 @@ impl AccountService {
             });
         }
 
-        // Replacement is not an add path: the account must already exist.
-        let already_registered = {
-            let reg = self.registry.lock().expect("registry lock");
-            reg.credential_ref(expected.clone()).is_some()
-        };
-        if !already_registered {
-            return Err(LoginError::NotFound);
-        }
-
-        let credential =
-            CredentialRef::new(verified.identity.key.host.clone(), verified.identity.key.id);
-
-        // Serialize save + registry commit so overlapping replacements cannot
-        // leave the store holding one token while the registry reports another.
-        let _commit = self.credential_commit.lock().await;
-
-        // Re-validate existence under the commit lock: the account may have been
-        // removed between verification and this point.
-        let still_registered = {
-            let reg = self.registry.lock().expect("registry lock");
-            reg.credential_ref(expected.clone()).is_some()
-        };
-        if !still_registered {
-            return Err(LoginError::NotFound);
-        }
-
-        // Save first: a storage failure must not advance the epoch or replace
-        // the registry record while claiming the new token is persisted.
-        self.store
-            .save(&credential, &pat)
-            .map_err(LoginError::from)?;
-
-        let summary = {
-            let mut reg = self.registry.lock().expect("registry lock");
-            reg.replace(expected, verified.identity, credential)
-                .map_err(|e| match e {
-                    RegistryError::AccountIdentityMismatch { expected, actual } => {
-                        LoginError::IdentityMismatch {
-                            expected_account: expected.id,
-                            actual_account: actual.id,
-                        }
-                    }
-                    _ => LoginError::NotFound,
-                })?
-        };
-        Ok(LoginOutcome::Replaced(summary))
+        self.commit_login(verified.identity, pat, Some(epoch)).await
     }
 
     async fn verify(&self, pat: &Pat) -> Result<AuthenticatedUser, LoginError> {
-        let cancel = CancellationToken::default();
-        let _permit = self
-            .executor
-            .semaphore()
-            .acquire_owned()
+        self.verify_cancellable(pat, CancellationToken::default())
             .await
-            .map_err(|_| {
-                LoginError::GitHub(GitHubError::CredentialStore {
-                    message: "request scheduler closed".to_string(),
-                })
-            })?;
+    }
+
+    async fn verify_cancellable(
+        &self,
+        pat: &Pat,
+        cancel: CancellationToken,
+    ) -> Result<AuthenticatedUser, LoginError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(LoginError::Storage(StorageError::Closed));
+        }
+        let _permit = tokio::select! {
+            permit = self.executor.semaphore().acquire_owned() => permit.map_err(|_|LoginError::Storage(StorageError::Closed))?,
+            _ = cancel.clone().cancelled() => return Err(LoginError::GitHub(GitHubError::Cancelled)),
+        };
         Ok(fetch_authenticated_user(&self.client, pat, cancel).await?)
     }
 
@@ -238,7 +222,8 @@ impl AccountService {
     /// A credential deletion failure is reported instead of silently claiming a
     /// successful removal. The registry entry is still dropped so no stale
     /// reference remains active, and the returned error tells the caller that a
-    /// stored secret may linger and needs retrying.
+    /// stored secret may linger and needs retrying. Persistent services retain
+    /// a durable cleanup reference; remove_saved exposes the typed partial result.
     ///
     /// Removal participates in the same `credential_commit` serialization as
     /// login and replacement. Without it, an overlapping `replace` could pass its
@@ -246,39 +231,11 @@ impl AccountService {
     /// account, and the replacement could then save a new PAT that no account
     /// refers to — leaving an orphaned secret with no cleanup path.
     pub async fn remove(&self, account: crate::domain::AccountKey) -> Result<(), GitHubError> {
-        let _commit = self.credential_commit.lock().await;
-
-        let credential = {
-            let reg = self.registry.lock().expect("registry lock");
-            reg.credential_ref(account.clone())
-        };
-
-        let delete_result = match &credential {
-            Some(cred) => self.store.delete(cred),
-            None => Ok(()),
-        };
-
-        let removed = {
-            let mut reg = self.registry.lock().expect("registry lock");
-            reg.remove(account)
-        };
-        match removed {
-            Ok(()) => {}
-            Err(RegistryError::NotFound) => {
-                return Err(GitHubError::CredentialStore {
-                    message: "account not found".to_string(),
-                });
-            }
-            Err(_) => {
-                return Err(GitHubError::CredentialStore {
-                    message: "registry error".to_string(),
-                });
-            }
-        }
-
-        delete_result.map_err(|e| GitHubError::CredentialStore {
-            message: format!("account removed but credential deletion failed: {e}"),
-        })
+        self.remove_saved(account)
+            .await
+            .map_err(|e| GitHubError::CredentialStore {
+                message: format!("account removal: {e:?}"),
+            })
     }
 
     pub fn summaries(&self) -> Vec<AccountSummary> {
@@ -311,62 +268,25 @@ impl RepoService {
         &self,
         cancel: CancellationToken,
     ) -> Result<ReposOutcome, GitHubError> {
-        let (context, credential) = {
-            let reg = self.registry.lock().expect("registry lock");
-            let context = reg.active_context().ok_or(GitHubError::StaleContext)?;
-            let credential = reg
-                .credential_ref(context.account.clone())
-                .ok_or(GitHubError::StaleContext)?;
-            (context, credential)
-        };
-
-        let token = self
-            .store
-            .load(&credential)
-            .map_err(|e| GitHubError::CredentialStore {
-                message: e.to_string(),
-            })?
-            .ok_or(GitHubError::CredentialStore {
-                message: "credential missing".to_string(),
-            })?;
-
-        // Bound simultaneous GitHub reads through the executor's shared
-        // semaphore so a burst of pages/accounts cannot open unbounded sockets.
-        //
-        // Waiting for a permit races against cancellation: if every permit is
-        // taken, a cancelled read must stop queuing immediately instead of
-        // waiting through an unrelated request's full timeout and redirect chain
-        // before the transport finally notices the cancelled token.
-        let _permit = tokio::select! {
-            permit = self.executor.semaphore().acquire_owned() => {
-                permit.map_err(|_| GitHubError::CredentialStore {
-                    message: "request scheduler closed".to_string(),
-                })?
-            }
-            _ = cancel.clone().cancelled() => return Err(GitHubError::Cancelled),
-        };
-
-        let result = fetch_user_repos(&self.client, &token, cancel).await;
-
-        // Re-check the context *for every outcome*, including errors. If the
-        // account was switched, the PAT replaced or the account removed while
-        // the request was in flight, the result belongs to a stale
-        // authorization: a stale `Unauthorized` must not invalidate or prompt
-        // replacement of the *new* credential, so it is converted to
-        // `StaleContext` just like a stale success.
-        let current = {
-            let reg = self.registry.lock().expect("registry lock");
-            reg.active_context()
-        };
-        if current.as_ref() != Some(&context) {
-            return Err(GitHubError::StaleContext);
-        }
-
-        result
+        let context = self.capture_read_context()?;
+        self.read_authenticated(&context, cancel, async move |token, cancel| {
+            fetch_user_repos(&self.client, &token, cancel).await
+        })
+        .await
     }
 
-    /// Explicitly select the active account (future multi-account UI hook).
+    /// Legacy synchronous selection for in-memory services. Persistent services
+    /// return PersistenceRequired: use AccountService::set_active().await.
     pub fn set_active(&self, account: crate::domain::AccountKey) -> Result<(), RegistryError> {
+        // Legacy in-memory selection remains synchronous. Persistent callers
+        // must await AccountService::set_active to observe durable completion.
+        if self.persistent {
+            return Err(RegistryError::PersistenceRequired);
+        }
+        let _gate = self
+            .credential_commit
+            .try_lock()
+            .map_err(|_| RegistryError::Busy)?;
         let mut reg = self.registry.lock().expect("registry lock");
         reg.set_active(account)
     }
@@ -957,7 +877,10 @@ mod tests {
             store: store.clone(),
             client,
             executor: exec.clone(),
-            credential_commit: Arc::new(tokio::sync::Mutex::new(())),
+            credential_commit: Arc::new(std::sync::Mutex::new(())),
+            database: Arc::new(std::sync::Mutex::new(None)),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistent: false,
         };
 
         svc.login(Pat::from_str("ghp_old")).await.expect("login");
@@ -1180,7 +1103,10 @@ mod tests {
             store: store.clone(),
             client,
             executor: exec.clone(),
-            credential_commit: Arc::new(tokio::sync::Mutex::new(())),
+            credential_commit: Arc::new(std::sync::Mutex::new(())),
+            database: Arc::new(std::sync::Mutex::new(None)),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistent: false,
         };
 
         svc.login(Pat::from_str("ghp_a1")).await.expect("login A");

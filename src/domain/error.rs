@@ -74,6 +74,9 @@ pub enum GitHubError {
     #[error("failed to parse response: {message}")]
     Parse { message: String },
 
+    #[error("HTTP response exceeds {limit} bytes")]
+    ResponseTooLarge { limit: usize },
+
     /// The authorization context that produced this response is stale (account
     /// switched, PAT replaced or account removed), so the result is rejected.
     #[error("stale authorization context; result discarded")]

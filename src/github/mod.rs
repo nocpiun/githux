@@ -18,13 +18,21 @@
 // root deliberately has no `#![allow]` blanket.
 #![allow(dead_code)]
 
+pub mod blob;
+pub mod branches;
 pub mod client;
 pub mod error;
 pub mod headers;
 pub mod permission;
+pub mod readme;
 pub mod repos;
+pub mod repository;
+pub mod revision;
+pub mod tree;
 pub mod user;
 
+#[allow(unused_imports)]
+pub use branches::fetch_branches;
 #[allow(unused_imports)]
 pub use client::{GitHubClient, GitHubConfig};
 #[allow(unused_imports)]
@@ -32,6 +40,14 @@ pub use headers::{parse_link_next, parse_sso_authorization_url, parse_sso_header
 #[allow(unused_imports)]
 pub use permission::{WriteAction, WritePermission, is_write_confirmed_allowed, write_permission};
 #[allow(unused_imports)]
+pub use readme::discover_readme;
+#[allow(unused_imports)]
 pub use repos::fetch_user_repos;
+#[allow(unused_imports)]
+pub use repository::{RepositoryLimits, fetch_repository};
+#[allow(unused_imports)]
+pub use revision::resolve_revision;
+#[allow(unused_imports)]
+pub use tree::fetch_directory;
 #[allow(unused_imports)]
 pub use user::{AuthenticatedUser, fetch_authenticated_user};
