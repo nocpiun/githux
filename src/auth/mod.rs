@@ -48,7 +48,7 @@ use crate::domain::{AccountIdentity, AccountKey, AccountSummary, AuthEpoch};
 /// tokens. It is the authority for account identity and authorization epoch;
 /// the data layer snapshots an [`AuthContext`] before issuing a request and
 /// validates it again when results arrive.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AccountRegistry {
     accounts: Vec<AccountRecord>,
     active: Option<usize>,
@@ -68,6 +68,8 @@ struct AccountRecord {
     identity: AccountIdentity,
     credential: CredentialRef,
     epoch: AuthEpoch,
+    incarnation: AuthEpoch,
+    authorization: crate::domain::account::AuthorizationState,
 }
 
 /// Snapshot captured before a request so late results can be rejected.
@@ -92,6 +94,8 @@ pub enum RegistryError {
         actual: AccountKey,
     },
     AlreadyExists,
+    PersistenceRequired,
+    Busy,
 }
 
 impl AccountRegistry {
@@ -124,15 +128,19 @@ impl AccountRegistry {
             slot.identity = identity;
             slot.credential = credential;
             slot.epoch = epoch;
+            slot.authorization = crate::domain::account::AuthorizationState::Verified;
             return AccountSummary {
                 identity: slot.identity.clone(),
                 epoch: slot.epoch,
+                authorization: slot.authorization.clone(),
             };
         }
         let record = AccountRecord {
             identity,
             credential,
             epoch,
+            incarnation: epoch,
+            authorization: crate::domain::account::AuthorizationState::Verified,
         };
         self.accounts.push(record);
         let new_active = self.accounts.len() - 1;
@@ -144,6 +152,7 @@ impl AccountRegistry {
         AccountSummary {
             identity: slot.identity.clone(),
             epoch: slot.epoch,
+            authorization: slot.authorization.clone(),
         }
     }
 
@@ -171,9 +180,11 @@ impl AccountRegistry {
         slot.identity = identity;
         slot.credential = credential;
         slot.epoch = epoch;
+        slot.authorization = crate::domain::account::AuthorizationState::Verified;
         Ok(AccountSummary {
             identity: slot.identity.clone(),
             epoch: slot.epoch,
+            authorization: slot.authorization.clone(),
         })
     }
 
@@ -230,6 +241,7 @@ impl AccountRegistry {
         Some(AccountSummary {
             identity: record.identity.clone(),
             epoch: record.epoch,
+            authorization: record.authorization.clone(),
         })
     }
 
@@ -248,8 +260,69 @@ impl AccountRegistry {
             .map(|r| AccountSummary {
                 identity: r.identity.clone(),
                 epoch: r.epoch,
+                authorization: r.authorization.clone(),
             })
             .collect()
+    }
+
+    pub(crate) fn incarnation(&self, key: &AccountKey) -> Option<AuthEpoch> {
+        self.accounts
+            .iter()
+            .find(|r| &r.identity.key == key)
+            .map(|r| r.incarnation)
+    }
+
+    pub(crate) fn directory(&self) -> crate::storage::accounts::Directory {
+        crate::storage::accounts::Directory {
+            accounts: self
+                .accounts
+                .iter()
+                .map(|r| crate::storage::accounts::SavedAccount {
+                    identity: r.identity.clone(),
+                    credential: r.credential.clone(),
+                })
+                .collect(),
+            active: self.active.map(|i| self.accounts[i].identity.key.clone()),
+        }
+    }
+
+    pub(crate) fn restore(directory: crate::storage::accounts::Directory) -> Self {
+        let mut registry = Self::default();
+        for saved in directory.accounts {
+            let key = saved.identity.key.clone();
+            registry.upsert_verified(saved.identity, saved.credential);
+            registry.set_authorization(
+                &key,
+                crate::domain::account::AuthorizationState::PendingVerification,
+            );
+        }
+        registry.active = directory
+            .active
+            .and_then(|key| registry.accounts.iter().position(|r| r.identity.key == key));
+        registry.bump_selection();
+        registry
+    }
+
+    pub(crate) fn revalidated(
+        &mut self,
+        key: &AccountKey,
+        state: crate::domain::account::AuthorizationState,
+    ) {
+        let epoch = self.allocate_epoch();
+        if let Some(record) = self.accounts.iter_mut().find(|r| &r.identity.key == key) {
+            record.epoch = epoch;
+            record.authorization = state;
+        }
+    }
+
+    pub(crate) fn set_authorization(
+        &mut self,
+        key: &AccountKey,
+        state: crate::domain::account::AuthorizationState,
+    ) {
+        if let Some(record) = self.accounts.iter_mut().find(|r| &r.identity.key == key) {
+            record.authorization = state;
+        }
     }
 
     pub fn is_empty(&self) -> bool {

@@ -74,6 +74,17 @@ pub struct AccountIdentity {
 pub struct AccountSummary {
     pub identity: AccountIdentity,
     pub epoch: AuthEpoch,
+    /// Runtime evidence only; never persisted as proof of current access.
+    pub authorization: AuthorizationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationState {
+    PendingVerification,
+    Verified,
+    MissingCredential,
+    CredentialUnavailable,
+    VerificationFailed(crate::domain::error::GitHubError),
 }
 
 /// Monotonically increasing authorization generation.
