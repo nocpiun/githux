@@ -9,6 +9,10 @@ pub fn classify_transport(err: TransportError) -> GitHubError {
         TransportError::Timeout { seconds } => GitHubError::Timeout { seconds },
         TransportError::Cancelled => GitHubError::Cancelled,
         TransportError::Network { message } => GitHubError::Network { message },
+        TransportError::ResponseTooLarge { limit } => GitHubError::ResponseTooLarge { limit },
+        TransportError::BoundedReadUnsupported => GitHubError::Network {
+            message: "transport does not support bounded reads".into(),
+        },
     }
 }
 

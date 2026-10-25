@@ -18,6 +18,7 @@
 // root deliberately has no `#![allow]` blanket.
 #![allow(dead_code)]
 
+pub mod blob;
 pub mod branches;
 pub mod client;
 pub mod error;

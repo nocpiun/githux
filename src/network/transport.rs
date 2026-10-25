@@ -125,6 +125,10 @@ pub enum TransportError {
     Timeout { seconds: u32 },
     #[error("request cancelled")]
     Cancelled,
+    #[error("HTTP response exceeds {limit} bytes")]
+    ResponseTooLarge { limit: usize },
+    #[error("transport does not support bounded reads")]
+    BoundedReadUnsupported,
 }
 
 /// Trait-object-friendly transport. The returned future is `Send` so it can be
@@ -135,6 +139,18 @@ pub trait Transport: Send + Sync {
         request: HttpRequest,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>>;
+
+    /// Fail closed by default: an existing/custom transport must explicitly
+    /// implement a receive-time bound. Falling back to `execute` would buffer
+    /// an unbounded body before inspecting its size.
+    fn execute_bounded<'a>(
+        &'a self,
+        _request: HttpRequest,
+        _cancel: CancellationToken,
+        _max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async { Err(TransportError::BoundedReadUnsupported) })
+    }
 }
 
 /// reqwest-backed production transport.
@@ -147,6 +163,7 @@ pub struct ReqwestTransport {
     client: reqwest::Client,
     timeout: Duration,
     max_redirects: usize,
+    bounded_reads_supported: bool,
 }
 
 impl ReqwestTransport {
@@ -161,14 +178,18 @@ impl ReqwestTransport {
             client,
             timeout,
             max_redirects: 5,
+            bounded_reads_supported: true,
         })
     }
 
+    /// Legacy injection path. A supplied client's redirect policy cannot be
+    /// inspected, so bounded reads require `new` and fail closed on this path.
     pub fn with_client(client: reqwest::Client, timeout: Duration) -> Self {
         Self {
             client,
             timeout,
             max_redirects: 5,
+            bounded_reads_supported: false,
         }
     }
 }
@@ -186,17 +207,21 @@ impl ReqwestTransport {
     }
 }
 
-impl Transport for ReqwestTransport {
-    fn execute<'a>(
+impl ReqwestTransport {
+    fn execute_with_limit<'a>(
         &'a self,
         request: HttpRequest,
         cancel: CancellationToken,
+        max_body_bytes: Option<usize>,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
             // Deterministic early exit: an already-cancelled request must not
             // open a connection at all.
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
+            }
+            if max_body_bytes.is_some() && !self.bounded_reads_supported {
+                return Err(TransportError::BoundedReadUnsupported);
             }
             let origin = Origin::parse(&request.url);
             let mut url = request.url.clone();
@@ -212,7 +237,7 @@ impl Transport for ReqwestTransport {
                 }
 
                 let send = builder.send();
-                let response = tokio::select! {
+                let mut response = tokio::select! {
                     r = send => r.map_err(|e| {
                         // Cancellation is reported as `Cancelled` even if tearing
                         // the request down also surfaces a connect/IO error. The
@@ -224,7 +249,7 @@ impl Transport for ReqwestTransport {
                                 seconds: self.timeout_seconds(),
                             }
                         } else {
-                            TransportError::Network { message: e.to_string() }
+                            TransportError::Network { message: e.without_url().to_string() }
                         }
                     })?,
                     _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
@@ -270,6 +295,49 @@ impl Transport for ReqwestTransport {
                     }
                 }
 
+                if let Some(limit) = max_body_bytes {
+                    // Content-Length is only an early rejection hint. Always
+                    // count actual chunks, including errors and chunked bodies.
+                    if response
+                        .content_length()
+                        .is_some_and(|size| size > limit as u64)
+                    {
+                        return Err(TransportError::ResponseTooLarge { limit });
+                    }
+                    let mut bytes = Vec::new();
+                    loop {
+                        let chunk = tokio::select! {
+                            biased;
+                            _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
+                            chunk = response.chunk() => chunk.map_err(|e| {
+                                if cancel.is_cancelled() {
+                                    TransportError::Cancelled
+                                } else if e.is_timeout() {
+                                    TransportError::Timeout { seconds: self.timeout_seconds() }
+                                } else {
+                                    TransportError::Network { message: e.without_url().to_string() }
+                                }
+                            })?,
+                        };
+                        let Some(chunk) = chunk else { break };
+                        if chunk.len() > limit.saturating_sub(bytes.len()) {
+                            return Err(TransportError::ResponseTooLarge { limit });
+                        }
+                        bytes.reserve_exact(chunk.len());
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    // JSON must be UTF-8. Reject invalid wire encoding instead
+                    // of introducing replacement characters into source data.
+                    let body = String::from_utf8(bytes).map_err(|_| TransportError::Network {
+                        message: "HTTP JSON body is not UTF-8".into(),
+                    })?;
+                    return Ok(HttpResponse {
+                        status,
+                        headers,
+                        body,
+                    });
+                }
+
                 // Cancellation must cover the body read too, not just the
                 // header phase: a large or stalled body would otherwise keep
                 // running until the request timeout even after the caller
@@ -298,6 +366,25 @@ impl Transport for ReqwestTransport {
                 });
             }
         })
+    }
+}
+
+impl Transport for ReqwestTransport {
+    fn execute<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        self.execute_with_limit(request, cancel, None)
+    }
+
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        self.execute_with_limit(request, cancel, Some(max_body_bytes))
     }
 }
 
@@ -402,6 +489,23 @@ impl MockTransport {
 }
 
 impl Transport for MockTransport {
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self.execute(request, cancel).await?;
+            if response.body.len() > max_body_bytes {
+                return Err(TransportError::ResponseTooLarge {
+                    limit: max_body_bytes,
+                });
+            }
+            Ok(response)
+        })
+    }
+
     fn execute<'a>(
         &'a self,
         request: HttpRequest,
@@ -454,6 +558,9 @@ pub fn headers(map: HashMap<&str, &str>) -> Vec<(String, String)> {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
+
+#[cfg(test)]
+mod bounded_tests;
 
 #[cfg(test)]
 mod tests {
