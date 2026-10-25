@@ -67,7 +67,7 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 
 `storage/content` 仍是边界说明，无业务实现。`domain/auth/network/github/data/diagnostics` 已有本切片的真实实现（见 [认证与网络](auth-and-network.md)），但**UI 与 app 入口尚未调用**，binary 里这些模块暂时是未使用代码，各自带一个写明原因的模块级 `dead_code` 允许，不是 crate 级屏蔽；接入 UI 后应移除。HTTP 与运行时已选定 `reqwest` + `tokio`（理由见同文）；数据库仍未选择。现有依赖中曾出现的相关库是框架传递依赖，不作为采用依据。
 
-侧栏尺寸与收起状态由 `Shell::sidebar_state` 持有（`src/ui/sidebar_state.rs`），本次运行记住展开宽度，渲染按当前窗口预算 clamp；GPUI drag 生命周期与 Ely 菜单焦点同属视图，不进入路由、账户或存储。几何与交互契约见 [侧栏布局](sidebar-layout.md)。
+侧栏尺寸与收起状态由 `Shell::sidebar_state` 持有（`src/ui/sidebar_state.rs`），本次运行记住展开宽度，渲染按当前窗口预算 clamp；GPUI drag 生命周期与 Ely 菜单焦点同属视图，不进入路由、账户或存储。`src/ui/scrolling.rs` 提供共享的滚轮平滑适配（离散滚轮缓动、精确滚动直通、捕获阶段只消费一次），已接入侧栏仓库、island 页面与 palette 列表；它只持有各区域的 `ScrollHandle` 与呈现偏移，不进入数据层。几何与交互契约见 [侧栏布局](sidebar-layout.md)。
 
 本轮状态归属：窗口只有一个活动页，`Workspace` 只保存当前 `Route`；`TabId`、页面会话集合与各自的分支/文件/滚动/焦点状态仍属于下一份 R1 任务。`Shell` 的滚动、浮层与焦点是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。
 

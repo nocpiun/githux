@@ -3,7 +3,7 @@ use super::{Shell, geometry::*, sidebar_state::SidebarState};
 use crate::workspace::Route;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    TestAppContext, VisualTestContext, point, px, size,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
 };
 
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
@@ -163,7 +163,7 @@ fn collapse_restores_width_route_scroll_and_has_a_real_menu(cx: &mut TestAppCont
     click("sidebar-more", cx);
     click("menu-row-Issues", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Issues);
-    click("account-row", cx);
+    click("account-identity", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
     click("nav-settings", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Settings);
@@ -212,7 +212,7 @@ fn footer_stays_inside_each_client_size(cx: &mut TestAppContext) {
         assert_eq!(quarters.bottom(), px(h - SIDEBAR_PADDING));
         assert_eq!(
             bounds("sidebar-toggle", cx).center().y,
-            bounds("shell-body", cx).center().y
+            bounds("shell-body", cx).center().y - px(ISLAND_INSET / 2.0)
         );
     }
 }
@@ -305,9 +305,12 @@ fn rail_rows_share_square_hitboxes_and_avatar_diameter(cx: &mut TestAppContext) 
         click(selector, cx);
         let marker = bounds("sidebar-indicator", cx);
         let row = bounds(selector, cx);
+        let expected = (f32::from(row.size.height) * SIDEBAR_INDICATOR_HEIGHT_RATIO)
+            .clamp(SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_MAX_HEIGHT);
         assert_eq!(marker.left(), bounds("shell-body", cx).left());
-        assert_eq!(marker.top(), row.top() + px(SIDEBAR_INDICATOR_INSET));
-        assert_eq!(marker.bottom(), row.bottom() - px(SIDEBAR_INDICATOR_INSET));
+        assert_eq!(marker.size.width, px(SIDEBAR_INDICATOR_WIDTH));
+        assert_eq!(marker.size.height, px(expected));
+        assert_eq!(marker.center().y, row.center().y);
     }
     click("sidebar-toggle", cx);
     assert_eq!(bounds("sidebar-account-avatar", cx).size.width, px(32.0));
@@ -365,7 +368,7 @@ fn animated_layout_uses_one_width_for_sidebar_island_and_divider(cx: &mut TestAp
     assert_eq!(bounds("sidebar-resize", cx).left(), width);
     assert_eq!(
         bounds("sidebar-toggle", cx).center().x,
-        width + px(ISLAND_GAP / 2.0)
+        width + px(ISLAND_GAP + ISLAND_BORDER_WIDTH / 2.0)
     );
     click("sidebar-toggle", cx);
     assert_eq!(bounds("sidebar", cx).size.width, width);
@@ -473,4 +476,143 @@ fn resizing_interrupts_animation_and_restores_clamped_user_width(cx: &mut TestAp
     click("sidebar-toggle", cx);
     assert_eq!(bounds("sidebar", cx).size.width, width);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
+}
+
+#[test]
+fn smooth_state_eases_reverses_clamps_and_stops() {
+    use super::scrolling::SmoothState;
+    use std::time::{Duration, Instant};
+    let s = SmoothState::default();
+    let t0 = Instant::now();
+    // A discrete notch starts easing rather than jumping.
+    assert_eq!(s.wheel(t0, 0.0, 1000.0, -120.0, false, false), None);
+    assert!(s.is_animating());
+    let mid = s
+        .tick(t0 + Duration::from_millis(65), 0.0, 1000.0, false)
+        .unwrap();
+    assert!(mid < 0.0 && mid > -120.0, "mid={mid}");
+    // Reverse mid-flight: the next target is above the presented value, and the tick continues
+    // from where it was rather than jumping back to the original start.
+    assert_eq!(
+        s.wheel(
+            t0 + Duration::from_millis(65),
+            mid,
+            1000.0,
+            40.0,
+            false,
+            false
+        ),
+        None
+    );
+    let reversed = s
+        .tick(t0 + Duration::from_millis(80), mid, 1000.0, false)
+        .unwrap();
+    assert!(reversed > mid, "reverse must move up: {reversed} vs {mid}");
+    // Settle exactly on the accumulated target and stop asking for frames.
+    let end = s
+        .tick(t0 + Duration::from_millis(400), reversed, 1000.0, false)
+        .unwrap();
+    assert_eq!(end, -80.0);
+    assert!(!s.is_animating());
+    assert!(
+        s.tick(t0 + Duration::from_millis(500), -80.0, 1000.0, false)
+            .is_none()
+    );
+    // Precise input applies at once.
+    assert_eq!(s.wheel(t0, 0.0, 1000.0, -50.0, true, false), Some(-50.0));
+    // A content shrink clamps the presented value into the valid [-max, 0] range.
+    assert_eq!(s.wheel(t0, -500.0, 100.0, 0.0, true, false), Some(-100.0));
+    assert!(!s.is_animating());
+}
+
+#[gpui::test]
+fn wheel_overlay_is_painted_over_the_repository_viewport(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let region = bounds("repo-scroll-region", cx);
+    let overlay = bounds("wheel-overlay-repo", cx);
+    assert_eq!(overlay.origin, region.origin);
+    assert_eq!(overlay.size, region.size);
+}
+
+#[gpui::test]
+fn footer_divider_separates_the_repository_viewport_from_the_account(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let divider = bounds("sidebar-footer-divider", cx);
+    let repo = bounds("repo-scroll", cx);
+    let account = bounds("account-row", cx);
+    assert!(
+        divider.top() >= repo.bottom() && divider.bottom() <= account.top(),
+        "divider must sit between the viewport and the footer"
+    );
+    // The divider and footer are fixed: scrolling the repository must not move them.
+    view.update(cx, |s, cx| {
+        s.repo_scroll.set_offset(point(px(0.0), px(-500.0)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(bounds("sidebar-footer-divider", cx), divider);
+    assert_eq!(bounds("account-row", cx), account);
+    assert_eq!(bounds("account-row", cx).bottom(), account.bottom());
+}
+
+#[gpui::test]
+fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    // Expanded: the separate status button exists and never navigates.
+    let status = bounds("account-status", cx);
+    cx.simulate_click(status.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
+    // The compact identity cluster opens the profile.
+    click("account-identity", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
+    // The blank space between the identity and the status is not a Profile hit area.
+    view.update(cx, |s, cx| {
+        s.navigate(Route::Home, cx);
+    });
+    cx.run_until_parked();
+    let identity = bounds("account-identity", cx);
+    let status = bounds("account-status", cx);
+    assert!(
+        identity.right() < status.left(),
+        "the fixture leaves a blank gap to test"
+    );
+    let blank_x = px((f32::from(identity.right()) + f32::from(status.left())) / 2.0);
+    cx.simulate_click(point(blank_x, identity.center().y), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |s, _| s.route()),
+        Route::Home,
+        "the blank right side must not open the profile"
+    );
+    // Collapsed: the status button is hidden, but the identity still opens the profile.
+    click("sidebar-toggle", cx);
+    assert!(cx.debug_bounds("account-status").is_none());
+    click("account-identity", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
+}
+
+#[gpui::test]
+fn one_wheel_notch_is_consumed_once_and_settles_at_that_delta(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let scroll = bounds("repo-scroll", cx);
+    let line = cx.update(|window, _| window.line_height());
+    cx.simulate_mouse_move(scroll.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: scroll.center(),
+        delta: ScrollDelta::Lines(point(0.0, -6.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    let offset = view.read_with(cx, |s, _| s.repo_offset());
+    let expected = px(-6.0 * f32::from(line));
+    assert!(
+        (offset.y - expected).abs() <= px(1.0),
+        "the built-in jump must not double the delta: offset={offset:?} expected={expected:?}"
+    );
 }

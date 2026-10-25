@@ -15,8 +15,20 @@ pub const SIDEBAR_MAX_WIDTH: f32 = 360.0;
 pub const SIDEBAR_RAIL_ITEM_SIZE: f32 = 28.0;
 pub const SIDEBAR_COLLAPSED_WIDTH: f32 = SIDEBAR_RAIL_ITEM_SIZE + SIDEBAR_PADDING;
 pub const SIDEBAR_ANIMATION_MS: u64 = 200;
-pub const SIDEBAR_INDICATOR_INSET: f32 = 2.0;
-pub const SIDEBAR_INDICATOR_RADIUS: f32 = 2.0;
+/// Active-route marker: flush to the drawable left edge, square on the left, rounded on the
+/// right, and about two thirds of the row height so it never reads as a full-height bar.
+pub const SIDEBAR_INDICATOR_WIDTH: f32 = 3.0;
+pub const SIDEBAR_INDICATOR_RADIUS: f32 = 4.0;
+pub const SIDEBAR_INDICATOR_HEIGHT_RATIO: f32 = 2.0 / 3.0;
+pub const SIDEBAR_INDICATOR_MIN_HEIGHT: f32 = 20.0;
+pub const SIDEBAR_INDICATOR_MAX_HEIGHT: f32 = 24.0;
+/// A thin, low-contrast rule separating the repository group from the fixed footer.
+pub const FOOTER_DIVIDER_HEIGHT: f32 = 1.0;
+/// The sidebar column's row gap; the footer divider band keeps the repo/footer spacing balanced.
+pub const SIDEBAR_ROW_GAP: f32 = 4.0;
+pub const FOOTER_DIVIDER_BAND: f32 = REPO_ACCOUNT_GAP - 2.0 * SIDEBAR_ROW_GAP;
+/// Size of the account status button (expanded only).
+pub const STATUS_BUTTON_SIZE: f32 = 24.0;
 pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
 pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
@@ -31,6 +43,10 @@ pub const ISLAND_GAP: f32 = 8.0;
 
 /// The island's own corner radius.
 pub const ISLAND_RADIUS: f32 = 6.0;
+
+/// Width of the island's border. The divider toggle is centred on this line, so both derive
+/// from one value instead of guessing pixels.
+pub const ISLAND_BORDER_WIDTH: f32 = 1.0;
 
 /// Content row and symmetric vertical inset (spacing 2 / 0.5rem).
 pub const TITLEBAR_CONTENT_HEIGHT: f32 = 32.0;

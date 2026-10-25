@@ -20,9 +20,12 @@ use gpui::{
 use super::{
     fixtures::{AccountFixture, RepoFixture},
     geometry::{
-        ACCOUNT_ROW_HEIGHT, REPO_ACCOUNT_GAP, REPO_LEFT_PADDING, REPO_ROW_HEIGHT,
-        SIDEBAR_INDICATOR_INSET, SIDEBAR_INDICATOR_RADIUS, SIDEBAR_PADDING, SIDEBAR_RAIL_ITEM_SIZE,
+        ACCOUNT_ROW_HEIGHT, FOOTER_DIVIDER_BAND, FOOTER_DIVIDER_HEIGHT, REPO_LEFT_PADDING,
+        REPO_ROW_HEIGHT, SIDEBAR_INDICATOR_HEIGHT_RATIO, SIDEBAR_INDICATOR_MAX_HEIGHT,
+        SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_RADIUS, SIDEBAR_INDICATOR_WIDTH,
+        SIDEBAR_PADDING, SIDEBAR_RAIL_ITEM_SIZE, SIDEBAR_ROW_GAP, STATUS_BUTTON_SIZE,
     },
+    scrolling::{self, SmoothScroll},
     sidebar_state::SidebarFrame,
 };
 
@@ -76,9 +79,14 @@ impl super::Shell {
             .id("sidebar-toggle")
             .debug_selector(|| "sidebar-toggle".to_string())
             .absolute()
-            .left(px(width + ISLAND_GAP / 2.0 - SIDEBAR_TOGGLE_SIZE / 2.0))
+            // Centre on the island's left border line, and on the island's own height (which
+            // stops at the bottom inset), so both follow one geometry source through animation,
+            // resize, maximize and restore.
+            .left(px(
+                width + ISLAND_GAP + ISLAND_BORDER_WIDTH / 2.0 - SIDEBAR_TOGGLE_SIZE / 2.0
+            ))
             .top(gpui::relative(0.5))
-            .mt(px(-SIDEBAR_TOGGLE_SIZE / 2.0))
+            .mt(px(-(SIDEBAR_TOGGLE_SIZE + ISLAND_INSET) / 2.0))
             .size(px(SIDEBAR_TOGGLE_SIZE))
             .rounded_full()
             .bg(bg)
@@ -134,29 +142,48 @@ impl super::Shell {
     }
 }
 
+/// Per-render row metrics shared by the sidebar navigation rows: the animation's expansion
+/// ratio and the resulting row height, so the marker and the row agree.
+#[derive(Clone, Copy)]
+pub(super) struct RowMetrics {
+    pub expansion: f32,
+    pub height: f32,
+}
+
+/// Build navigation-row metrics from the current frame and the window's rem size.
+pub(super) fn nav_metrics(expansion: f32, rem_size: gpui::Pixels, cx: &App) -> RowMetrics {
+    let expanded = f32::from(
+        cx.theme()
+            .control_height(ely_gpui_component::theme::ControlSize::Md)
+            .to_pixels(rem_size),
+    );
+    RowMetrics {
+        expansion,
+        height: SIDEBAR_RAIL_ITEM_SIZE + (expanded - SIDEBAR_RAIL_ITEM_SIZE) * expansion,
+    }
+}
+
 /// Home or Settings; walks and clicks as every other sidebar row does.
 pub(super) fn nav_row(
     selector: &'static str,
     icon: IconName,
     label: &'static str,
     active: bool,
-    frame: SidebarFrame,
+    metrics: RowMetrics,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
     let (fg, hover, muted) = (theme.colors.fg, theme.colors.hover, theme.colors.fg_muted);
-    let expanded_height = theme.control_height(ely_gpui_component::theme::ControlSize::Md);
-    let height = gpui::rems(SIDEBAR_RAIL_ITEM_SIZE / 16.0) * (1.0 - frame.expansion)
-        + expanded_height * frame.expansion;
-    let collapsed = frame.expansion == 0.0;
+    let (height, expansion) = (metrics.height, metrics.expansion);
+    let collapsed = expansion == 0.0;
     let row = div()
         .id(selector)
         .debug_selector(move || selector.to_string())
         .flex()
         .items_center()
-        .gap(px(8.0 * frame.expansion))
-        .h(height)
+        .gap(px(8.0 * expansion))
+        .h(px(height))
         .w_full()
         .min_w_0()
         .rounded(theme.radius(Radius::Md))
@@ -178,30 +205,31 @@ pub(super) fn nav_row(
             if collapsed {
                 row.justify_center()
             } else {
-                row.px(px(6.0 + 2.0 * frame.expansion))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .opacity(frame.expansion)
-                            .child(Ellipsis::new(label)),
-                    )
+                row.px(px(6.0 + 2.0 * expansion)).overflow_hidden().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .opacity(expansion)
+                        .child(Ellipsis::new(label)),
+                )
             }
         })
         .tooltip(Tooltip::text(label));
-    marked(row.into_any_element(), active, height.into(), cx)
+    marked(row.into_any_element(), active, height, cx)
 }
 
 /// Full-width lane: clickable background starts at the inset; marker has no hitbox.
 /// Repository lanes and their markers are clipped together by the repository viewport.
-fn marked(row: AnyElement, active: bool, height: gpui::Length, cx: &App) -> AnyElement {
+fn marked(row: AnyElement, active: bool, row_height: f32, cx: &App) -> AnyElement {
+    let indicator_height = (row_height * SIDEBAR_INDICATOR_HEIGHT_RATIO)
+        .clamp(SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_MAX_HEIGHT);
+    let inset = ((row_height - indicator_height) / 2.0).max(0.0);
     div()
         .relative()
         .flex_none()
         .w_full()
         .min_w_0()
-        .h(height)
+        .h(px(row_height))
         .pl(px(SIDEBAR_PADDING))
         .child(row)
         .when(active, |lane| {
@@ -210,9 +238,9 @@ fn marked(row: AnyElement, active: bool, height: gpui::Length, cx: &App) -> AnyE
                     .debug_selector(|| "sidebar-indicator".to_string())
                     .absolute()
                     .left_0()
-                    .top(px(SIDEBAR_INDICATOR_INSET))
-                    .bottom(px(SIDEBAR_INDICATOR_INSET))
-                    .w(px(2.0))
+                    .top(px(inset))
+                    .w(px(SIDEBAR_INDICATOR_WIDTH))
+                    .h(px(indicator_height))
                     .rounded_tl(px(0.0))
                     .rounded_bl(px(0.0))
                     .rounded_tr(px(SIDEBAR_INDICATOR_RADIUS))
@@ -303,10 +331,12 @@ pub(super) fn repo_row(
         })
         .tooltip(Tooltip::text(full_name))
         .into_any_element();
-    marked(row, active, px(height).into(), cx)
+    marked(row, active, height, cx)
 }
 
-/// The signed-in account; pressing it opens the profile.
+/// The signed-in account. Only the compact avatar/name/@id cluster opens the profile; the row
+/// itself is not a button and does not light up as a whole. Expanded mode adds a separate
+/// placeholder status button on the right.
 pub(super) fn account_row(
     account: AccountFixture,
     active: bool,
@@ -316,55 +346,58 @@ pub(super) fn account_row(
 ) -> AnyElement {
     let theme = cx.theme();
     let colors = &theme.colors;
-    let (radius, name_size, login_size) = (
-        theme.radius(Radius::Md),
-        theme.text_size(TextSize::Sm),
-        theme.text_size(TextSize::Xs),
-    );
+    let (name_size, login_size) = (theme.text_size(TextSize::Sm), theme.text_size(TextSize::Xs));
     let (hover, fg, subtle, focus) = (colors.hover, colors.fg, colors.fg_subtle, colors.fg_muted);
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (ACCOUNT_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
-    let label = format!("Profile: {} (@{})", account.name, account.login);
+    let identity_label = format!("Profile: {} (@{})", account.name, account.login);
+    let collapsed_label = format!(
+        "{} (@{}) · {} {}",
+        account.name, account.login, account.status_emoji, account.status_label
+    );
+    let status_label = format!("Status: {}", account.status_label);
     let run: Run = Box::new(run);
-    let row = div()
-        .id("account-row")
-        .debug_selector(|| "account-row".to_string())
+
+    let identity = div()
+        .id("account-identity")
+        .debug_selector(|| "account-identity".to_string())
         .flex()
-        .flex_none()
         .items_center()
-        .gap(px(8.0 * frame.expansion))
-        .h(px(height))
-        .overflow_hidden()
-        .w_full()
         .min_w_0()
-        .when(collapsed, |row| row.justify_center())
-        .when(!collapsed, |row| row.px(px(3.0 + 5.0 * frame.expansion)))
-        .rounded(radius)
+        .gap(px(8.0 * frame.expansion))
+        .when(!collapsed, |identity| identity.px(px(2.0)))
+        .rounded(theme.radius(Radius::Sm))
         .border_1()
         .border_color(transparent_black())
-        .text_color(fg)
-        .when(active, |row| row.bg(hover))
-        .hover(move |style| style.bg(hover))
         .role(Role::Button)
-        .aria_label(format!("Profile: {} ({})", account.name, account.login))
+        .aria_label(if collapsed {
+            collapsed_label.clone()
+        } else {
+            identity_label.clone()
+        })
         .cursor_pointer()
         .tab_index(0)
         .focus(move |style| style.border_color(focus))
+        .hover(move |style| style.bg(hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
+        .tooltip(Tooltip::text(if collapsed {
+            collapsed_label.clone()
+        } else {
+            identity_label.clone()
+        }))
         .child(SidebarAvatar {
             name: account.name.into(),
             expansion: frame.expansion,
         })
-        .when(!collapsed, |row| {
-            row.child(
+        .when(!collapsed, |identity| {
+            identity.child(
                 div()
                     .flex()
                     .flex_col()
-                    .opacity(frame.expansion)
-                    .flex_1()
                     .min_w_0()
+                    .opacity(frame.expansion)
                     .child(
                         div()
                             .text_size(name_size)
@@ -378,10 +411,56 @@ pub(super) fn account_row(
                             .child(Ellipsis::new(format!("@{}", account.login))),
                     ),
             )
+        });
+
+    let status = div()
+        .id("account-status")
+        .debug_selector(|| "account-status".to_string())
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(STATUS_BUTTON_SIZE))
+        .rounded(theme.radius(Radius::Sm))
+        .border_1()
+        .border_color(transparent_black())
+        .role(Role::Button)
+        .aria_label(status_label.clone())
+        .cursor_pointer()
+        .tab_index(0)
+        .focus(move |style| style.border_color(focus))
+        .hover(move |style| style.bg(hover))
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_click(move |_, _, cx| {
+            // Placeholder for a future GitHub status editor: no navigation, no write.
+            cx.stop_propagation();
         })
-        .tooltip(Tooltip::text(label))
+        .tooltip(Tooltip::text(account.status_label))
+        .child(
+            div()
+                .text_size(theme.text_size(TextSize::Sm))
+                .child(account.status_emoji),
+        );
+
+    let row = div()
+        .id("account-row")
+        .debug_selector(|| "account-row".to_string())
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(height))
+        .overflow_hidden()
+        .w_full()
+        .min_w_0()
+        .when(collapsed, |row| row.justify_center())
+        .when(!collapsed, |row| {
+            row.justify_between().px(px(3.0 + 5.0 * frame.expansion))
+        })
+        .text_color(fg)
+        .child(identity)
+        .when(!collapsed, |row| row.child(status))
         .into_any_element();
-    marked(row, active, px(height).into(), cx)
+    marked(row, active, height, cx)
 }
 
 /// Account-only interpolated avatar. Ely Avatar exposes enum sizes, so use its initials/tint
@@ -444,11 +523,12 @@ pub(super) fn quarter_button(
 ) -> AnyElement {
     let theme = cx.theme();
     let colors = &theme.colors;
-    let (radius, hover, muted, focus) = (
+    let (radius, hover, muted, focus, border) = (
         theme.radius(Radius::Md),
         colors.hover,
         if active { colors.fg } else { colors.fg_muted },
         colors.fg_muted,
+        colors.border,
     );
     let run: Run = Box::new(run);
     div()
@@ -461,7 +541,7 @@ pub(super) fn quarter_button(
         .h(px(REPO_ROW_HEIGHT))
         .rounded(radius)
         .border_1()
-        .border_color(transparent_black())
+        .border_color(border)
         .hover(move |style| style.bg(hover))
         .role(Role::Button)
         .aria_label(label)
@@ -526,6 +606,7 @@ pub(super) fn overflow(
 ) -> AnyElement {
     use crate::workspace::Route;
     use ely_gpui_component::menus::{Menu, MenuItem, OverflowMenu};
+    let theme = cx.theme();
     let mut menu = Menu::new();
     for (label, icon, target) in [
         ("Notifications", IconName::Bell, Route::Notifications),
@@ -558,6 +639,9 @@ pub(super) fn overflow(
                 .debug_selector(|| "sidebar-more-button".to_string())
                 .size(px(SIDEBAR_RAIL_ITEM_SIZE))
                 .flex_none()
+                .rounded(theme.radius(Radius::Sm))
+                .border_1()
+                .border_color(theme.colors.border)
                 .child(SidebarOverflow {
                     menu: OverflowMenu::new("sidebar-overflow", menu).tooltip("More"),
                     restore: focus.clone(),
@@ -638,10 +722,12 @@ pub(super) fn reveal_row(scroll: &ScrollHandle, row: gpui::Bounds<gpui::Pixels>)
     }
 }
 
-/// The repository scroll group: the only part of the sidebar that scrolls.
+/// The repository scroll group: the only part of the sidebar that scrolls. A transparent overlay
+/// routes wheel deltas through the shared smoothing instead of GPUI's per-event jump.
 pub(super) fn repository_group(
     rows: Vec<AnyElement>,
     scroll: &ScrollHandle,
+    smooth: SmoothScroll,
     cx: &App,
 ) -> AnyElement {
     let gap = cx
@@ -649,18 +735,44 @@ pub(super) fn repository_group(
         .control_height(ely_gpui_component::theme::ControlSize::Sm)
         / 12.0;
     div()
-        .id("repo-scroll-list")
-        .debug_selector(|| "repo-scroll".to_string())
-        .flex()
-        .flex_col()
-        .gap(gap)
+        .debug_selector(|| "repo-scroll-region".to_string())
+        .relative()
         .flex_1()
         .min_h_0()
         .w_full()
-        .overflow_y_scroll()
-        .overflow_x_hidden()
-        .track_scroll(scroll)
-        .children(rows)
+        .child(
+            div()
+                .id("repo-scroll-list")
+                .debug_selector(|| "repo-scroll".to_string())
+                .flex()
+                .flex_col()
+                .gap(gap)
+                .size_full()
+                .overflow_y_scroll()
+                .overflow_x_hidden()
+                .track_scroll(scroll)
+                .children(rows),
+        )
+        .child(scrolling::wheel_overlay("repo", smooth))
+        .into_any_element()
+}
+
+/// A thin, low-contrast rule between the repository viewport and the fixed footer.
+fn footer_divider(cx: &App) -> AnyElement {
+    div()
+        .debug_selector(|| "sidebar-footer-divider".to_string())
+        .flex_none()
+        .w_full()
+        .h(px(FOOTER_DIVIDER_BAND))
+        .px(px(SIDEBAR_PADDING))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .w_full()
+                .h(px(FOOTER_DIVIDER_HEIGHT))
+                .bg(cx.theme().colors.border),
+        )
         .into_any_element()
 }
 
@@ -672,6 +784,7 @@ pub(super) fn sidebar(
     account: AnyElement,
     quarters: AnyElement,
     frame: SidebarFrame,
+    cx: &App,
 ) -> AnyElement {
     div()
         .debug_selector(|| "sidebar".to_string())
@@ -682,7 +795,7 @@ pub(super) fn sidebar(
         .h_full()
         .min_h_0()
         .overflow_x_hidden()
-        .gap_1()
+        .gap(px(SIDEBAR_ROW_GAP))
         .pt(px(SIDEBAR_PADDING))
         .pb(px(SIDEBAR_PADDING))
         .child(nav)
@@ -697,7 +810,7 @@ pub(super) fn sidebar(
             )
         })
         .child(repositories)
-        .child(div().flex_none().h(px(REPO_ACCOUNT_GAP - 8.0)))
+        .child(footer_divider(cx))
         .child(account)
         .child(quarters)
         .into_any_element()

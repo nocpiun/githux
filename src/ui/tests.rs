@@ -180,6 +180,12 @@ fn the_repository_group_scrolls_without_moving_the_island_page(cx: &mut TestAppC
         touch_phase: Default::default(),
     });
     cx.run_until_parked();
+    // The wheel now eases over real time; let the smoothing settle before reading the offset.
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
     let repo_offset = view.read_with(cx, |shell, _| shell.repo_offset());
     assert!(
         repo_offset.y < px(0.0),
@@ -210,7 +216,7 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
     click("quarter-pull-requests", cx);
     assert_eq!(route(&view, cx), Route::PullRequests);
 
-    click("account-row", cx);
+    click("account-identity", cx);
     assert_eq!(route(&view, cx), Route::Profile);
     assert!(cx.debug_bounds("page-profile").is_some());
 
@@ -596,6 +602,12 @@ fn the_wheel_keeps_the_user_position_until_the_cursor_moves(cx: &mut TestAppCont
         touch_phase: Default::default(),
     });
     cx.run_until_parked();
+    // Let the wheel easing settle before checking that a repaint keeps the user's position.
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
     let before = view.read_with(cx, |shell, _| shell.palette_scroll_offset());
     assert!(before.y < px(0.0), "the wheel moves the list");
 

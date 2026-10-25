@@ -54,3 +54,20 @@
 真实 debug 预览确认展开态 layout 正常，收起后的 account avatar、行背景、贴边 indicator 与 More 行为可用；完全动画流畅度、四项视觉与手感仍由负责人确认，不把测试或构建结果写成已验收。
 
 最终真实窗口视觉和全部手感由负责人验收。重点：外 inset 与 Profile 两侧留白是否舒适、repo/avatar 左移量、圆按钮位置/命中、边缘窗口 resize 不受活动线影响、菜单焦点与中文 palette 组合输入。PR 与 CI/Codex 最新提交结果只记在 PR/交接，避免为后补结果制造额外未经审查提交。
+
+## 第二轮修订：footer 分割、身份区、toggle 对齐、indicator、平滑滚动、入口边框
+
+负责人再次真实查看预览后提出六项反馈，本轮已处理；仍未验收通过，最终观感待其确认。
+
+1. 仓库 viewport 与固定 footer 之间加入 1px、低对比度水平细线（`sidebar-footer-divider`），在 12px 总间距内居中，不随仓库滚动。账号外层不再是整行 button，也不整行 hover/active 点亮；只有 `account-identity`（头像 + 名字 + @ID）打开 Profile，空白右侧不响应。展开时右侧增加独立 emoji 状态按钮（`account-status`，占位 💻 / `Coding`，tooltip `Coding`），点击不导航且停止冒泡；无编辑弹窗/网络/写状态。收起时状态按钮隐藏，状态并入头像 tooltip；账号活动 indicator 仍贴左缘。
+2. 收起/展开圆按钮的水平中心改到 island 左边框线（`width + ISLAND_GAP + ISLAND_BORDER_WIDTH/2`），垂直中心对齐 island 自身高度中点（扣底部 inset），两轴都由与 island 相同的常量推导。
+3. 仓库标题精确改为 `Repositories (N)`，N 来自当前列表长度。
+4. 活动 indicator 缩短并加宽：宽 3px，左直角、右 4px 圆角，高度取行高约 2/3 并 clamp 到 20–24px、垂直居中，随行高（含动画中间值）变化。
+5. 新增 `src/ui/scrolling.rs`：离散滚轮累加目标偏移并按真实时间 `ease_out_cubic` 缓动（约 130ms），触控板像素滚动直接应用，clamp 到 `[-max, 0]`，无动画不请求帧，遵循 reduced-motion；捕获阶段只消费一次并抑制 GPUI 内建跳变；键盘 reveal/路由重置/光标移动取消缓动。已接入侧栏仓库、island 页面、palette 结果列表；workspace-tabs 横向滚动未在本分支，未宣称覆盖。
+6. 展开态四个底部入口各加一条 Ely 中性低对比度细边框，保持四等分与圆角；收起 More 使用一致轻描边。
+
+### 验证（第二轮）
+
+`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（187 passed）、`cargo build --locked`、`git diff --check` 通过。新增覆盖：footer 分割线位置且不随仓库滚动、身份区导航而空白/状态不导航、状态按钮展开存在/收起隐藏、indicator 宽度/高度/贴左、平滑滚动纯状态（缓动/反向/边界/精确/内容变短/停止）、overlay 覆盖 viewport、单次滚轮不被内建跳变加倍；并更新了因新几何/行为而过时的既有断言。
+
+真实 Windows debug 预览（150% DPI，本 worktree）确认展开态：`Repositories (124)`、footer 分割线、身份区 + 💻 状态按钮、四个带边框底部入口、贴左且左直右圆的 indicator，以及 toggle 落在 island 边框上。**收起态的合成点击未能送达**：该窗口在本会话不是前台且无法抢占前台，`PostMessage`/真实鼠标事件均未被处理，所以收起/展开的逐帧观感仍只由 GPUI 测试平台覆盖，不写成已真实验收；平滑滚动的实际手感（触控板/连续滚轮）也需负责人真机确认。

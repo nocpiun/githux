@@ -27,6 +27,7 @@ pub mod fixtures;
 pub(crate) mod geometry;
 mod page;
 mod palette;
+mod scrolling;
 mod sidebar;
 mod sidebar_state;
 
@@ -43,11 +44,13 @@ pub struct Shell {
     repositories: Vec<fixtures::RepoFixture>,
     root_focus: FocusHandle,
     repo_scroll: ScrollHandle,
+    repo_smooth: scrolling::SmoothScroll,
     /// One tab stop per repository row.
     repo_focus: Vec<FocusHandle>,
     /// The repository row last scrolled into view, so a still focus does not scroll every frame.
     revealed_row: Option<usize>,
     page_scroll: ScrollHandle,
+    page_smooth: scrolling::SmoothScroll,
     palette: Option<palette::Session>,
     restore_focus: bool,
     search_focus: FocusHandle,
@@ -73,6 +76,8 @@ impl Shell {
         let root_focus = cx.focus_handle();
         window.focus(&root_focus, cx);
         let search_focus = cx.focus_handle().tab_stop(true);
+        let repo_scroll = ScrollHandle::new();
+        let page_scroll = ScrollHandle::new();
         let repositories = fixtures::repositories();
         let repo_focus = (0..repositories.len())
             .map(|_| cx.focus_handle().tab_stop(true))
@@ -121,10 +126,12 @@ impl Shell {
             workspace: Workspace::new(),
             repositories,
             root_focus,
-            repo_scroll: ScrollHandle::new(),
+            repo_smooth: scrolling::SmoothScroll::new(repo_scroll.clone()),
+            repo_scroll,
             repo_focus,
             revealed_row: None,
-            page_scroll: ScrollHandle::new(),
+            page_smooth: scrolling::SmoothScroll::new(page_scroll.clone()),
+            page_scroll,
             palette: None,
             restore_focus: false,
             search_focus,
@@ -208,6 +215,7 @@ impl Shell {
         let changed = self.workspace.navigate(route);
         if changed {
             self.page_scroll.set_offset(Point::default());
+            self.page_smooth.cancel();
         }
         cx.notify();
         changed
@@ -345,6 +353,7 @@ impl Shell {
         let route = self.workspace.route().clone();
         let collapsed = self.sidebar_state.collapsed;
         let frame = self.sidebar_state.frame;
+        let nav_metrics = sidebar::nav_metrics(frame.expansion, window.rem_size(), cx);
 
         let home = {
             let this = this.clone();
@@ -353,7 +362,7 @@ impl Shell {
                 IconName::House,
                 "Home",
                 route == Route::Home,
-                frame,
+                nav_metrics,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Home, cx);
@@ -369,7 +378,7 @@ impl Shell {
                 IconName::Settings,
                 "Settings",
                 route == Route::Settings,
-                frame,
+                nav_metrics,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Settings, cx);
@@ -387,7 +396,7 @@ impl Shell {
             .into_any_element();
 
         let heading =
-            sidebar::group_heading(format!("Repositories · {}", self.repositories.len()), cx);
+            sidebar::group_heading(format!("Repositories ({})", self.repositories.len()), cx);
         // A row reached with Tab must be visible: otherwise its focus ring and Enter's target sit
         // outside the viewport. Done in render, before this frame's prepaint, so the scroll and the
         // focused row land in the same frame; the stored index keeps a still focus from re-scrolling.
@@ -397,6 +406,8 @@ impl Shell {
             .position(|handle| handle.is_focused(window));
         match focused_row {
             Some(index) if self.revealed_row != Some(index) => {
+                // A keyboard reveal wins over any in-flight wheel easing.
+                self.repo_smooth.cancel();
                 if let Some(row) = self.repo_scroll.bounds_for_item(index) {
                     sidebar::reveal_row(&self.repo_scroll, row);
                 }
@@ -431,7 +442,8 @@ impl Shell {
                 )
             })
             .collect::<Vec<_>>();
-        let repositories = sidebar::repository_group(rows, &self.repo_scroll, cx);
+        let repositories =
+            sidebar::repository_group(rows, &self.repo_scroll, self.repo_smooth.clone(), cx);
 
         let account = {
             let this = this.clone();
@@ -510,7 +522,7 @@ impl Shell {
             ])
         };
 
-        sidebar::sidebar(nav, heading, repositories, account, quarters, frame)
+        sidebar::sidebar(nav, heading, repositories, account, quarters, frame, cx)
     }
 
     fn island(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -535,15 +547,23 @@ impl Shell {
             .overflow_hidden()
             .child(
                 div()
-                    .id("island-page")
+                    .debug_selector(|| "island-scroll-region".to_string())
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .overflow_y_scroll()
-                    // Content never paints past the island's right edge; wide text is cut inside.
-                    .overflow_x_hidden()
-                    .track_scroll(&self.page_scroll)
-                    .child(body),
+                    .child(
+                        div()
+                            .id("island-page")
+                            .debug_selector(|| "island-page-scroll".to_string())
+                            .size_full()
+                            .overflow_y_scroll()
+                            // Content never paints past the island's right edge; wide text is cut inside.
+                            .overflow_x_hidden()
+                            .track_scroll(&self.page_scroll)
+                            .child(body),
+                    )
+                    .child(scrolling::wheel_overlay("page", self.page_smooth.clone())),
             )
             .into_any_element()
     }
@@ -574,6 +594,7 @@ impl Shell {
             input: session.input.clone(),
             focus: session.focus.clone(),
             scroll: session.scroll.clone(),
+            smooth: session.smooth.clone(),
             cursor: session.cursor,
             commands: session.commands.clone(),
             on_close: close,
@@ -594,6 +615,20 @@ impl Render for Shell {
             window.viewport_size().width.into(),
             reduced,
         ) {
+            window.request_animation_frame();
+        }
+        let now = std::time::Instant::now();
+        if self.repo_smooth.tick(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self.page_smooth.tick(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self
+            .palette
+            .as_ref()
+            .is_some_and(|session| session.smooth.tick(now, reduced))
+        {
             window.request_animation_frame();
         }
         let theme = cx.theme();
