@@ -143,6 +143,10 @@ git diff --check
 
 合并 `origin/main`（`42291f7`）后本地 fmt / check / clippy / build / test（234 项）与 `git diff --check` 通过。
 
+**第六轮审查修复（head `dd09151`）。** 一条 P2：拖动标签时每个 drag-move 回调都把 strip 的 hover 强制设回 `true`，指针移出标签条后释放仍会因 `hovered = true` 让滚动条常显。现在 drag-move 只更新拖动位置与槽位，不再改 hover；可见性由拖动标志单独维持，释放后立即回到真实指针位置，因此移出后释放会正常淡出。新增 `the_scrollbar_fades_after_a_drag_that_ended_outside_the_strip`（拖动中移出保持 1.0，释放后从 1.0 连续降到 0）。同轮核对并 resolve 了上两轮已修好的五条历史线程。
+
+该 head 本地 fmt / check / clippy / build / test（235 项）与 `git diff --check` 通过。
+
 **仍需负责人真实窗口验收：** 缩小后的内边距观感、细滚动条的可见度与淡入淡出是否顺滑、图标与标题间距、拖拽手感与自动滚动速度、close 出现时机、右侧工具栏位置；性能与动画流畅度只能由实际窗口确认。
 
 ## 交接与后续

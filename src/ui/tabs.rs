@@ -282,8 +282,6 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
     let start = view.on_drag_start.clone();
     let moved = view.on_drag_move.clone();
     let dropped = view.on_drop.clone();
-    let hovered_on_start = view.on_hover.clone();
-    let hovered_on_move = view.on_hover.clone();
     let payload = TabDrag { id, owner };
 
     div()
@@ -330,15 +328,14 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
         // so gating it on a drag already being in progress would make it unreachable.
         .on_drag(payload, move |drag, _, window, cx| {
             start(drag.id, window, cx);
-            hovered_on_start(true, window, cx);
             cx.new(|_| gpui::EmptyView)
         })
         .on_drag_move(move |event: &gpui::DragMoveEvent<TabDrag>, window, cx| {
             if event.drag(cx).owner != owner {
                 return;
             }
-            // Dragging keeps the scrollbar visible even when the pointer leaves the strip.
-            hovered_on_move(true, window, cx);
+            // Hover is left to the strip's own hover callback, which reports the real pointer
+            // position. The drag's own flag, not a forced hover, keeps the scrollbar visible.
             moved(event.drag(cx).id, event.event.position, window, cx);
         })
         .tooltip(Tooltip::text(tooltip))

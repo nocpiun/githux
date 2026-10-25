@@ -1049,6 +1049,8 @@ impl Shell {
         // under the pointer.
         self.revealed_tab = None;
         self.focused_tab = None;
+        // The fade keeps the bar visible for the whole drag through its dragging flag, which is
+        // independent of the pointer's real hover state.
         if self.tab_fade.set_dragging(true, self.tab_now_ms()) {
             cx.notify();
         }

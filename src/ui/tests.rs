@@ -2264,3 +2264,69 @@ fn close_and_middle_click_do_not_start_a_drag(cx: &mut TestAppContext) {
     assert!(ids.contains(&b));
     assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
 }
+
+/// Dragging a tab keeps the scrollbar up, but once the drag ends the bar follows the real pointer
+/// position instead of staying visible because a drag-move once reported hover.
+#[gpui::test]
+fn the_scrollbar_fades_after_a_drag_that_ended_outside_the_strip(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    // Hover the strip so its scrollbar is fully visible, then start carrying a tab.
+    hover("tab-scroll", cx);
+    view.update(cx, |shell, _| shell.show_tab_scrollbar());
+    let dragged = view.read_with(cx, |shell, _| shell.tab_ids()[1]);
+    let row = bounds("tab-scroll", cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(dragged, window, cx);
+        shell.drag_tab_to(
+            dragged,
+            gpui::point(row.left() + px(4.0), row.center().y),
+            window,
+            cx,
+        );
+    });
+    pump(cx);
+    assert_eq!(
+        view.update(cx, |shell, _| shell.tab_scrollbar_opacity()),
+        1.0,
+        "a live drag pins the scrollbar"
+    );
+
+    // Leaving the strip while dragging keeps it visible; the drag flag alone does that now.
+    cx.simulate_mouse_move(gpui::point(px(40.0), px(400.0)), None, Modifiers::none());
+    pump(cx);
+    assert_eq!(
+        view.update(cx, |shell, _| shell.tab_scrollbar_opacity()),
+        1.0
+    );
+
+    // Dropping the drag hands visibility back to the real hover state, which is "left", so the
+    // bar fades out instead of staying up. The clock is pinned first so the fade is stepped by
+    // the test rather than by wall time.
+    view.update(cx, |shell, _| shell.pin_tab_clock(100_000));
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.cancel_tab_drag(window, cx);
+    });
+    let at_release = view.update(cx, |shell, _| shell.tab_scrollbar_opacity());
+    assert_eq!(at_release, 1.0, "no jump on release");
+    let midway = view.update(cx, |shell, _| {
+        shell.pin_tab_clock(100_000 + super::geometry::TAB_SCROLLBAR_FADE_MS / 2);
+        shell.tab_scrollbar_opacity()
+    });
+    assert!(
+        midway < 1.0 && midway > 0.0,
+        "the bar fades after the drag ended outside: {midway}"
+    );
+    let settled = view.update(cx, |shell, _| {
+        shell.pin_tab_clock(100_000 + super::geometry::TAB_SCROLLBAR_FADE_MS * 2);
+        shell.tab_scrollbar_opacity()
+    });
+    assert_eq!(
+        settled, 0.0,
+        "and reaches zero without re-entering the strip"
+    );
+}
