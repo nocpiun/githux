@@ -23,11 +23,13 @@ pub mod branches;
 pub mod client;
 pub mod error;
 pub mod headers;
+pub mod home;
 pub mod permission;
 pub mod profile;
 pub mod readme;
 pub mod repos;
 pub mod repository;
+pub mod repository_extras;
 pub mod revision;
 pub mod tree;
 pub mod user;
@@ -38,6 +40,8 @@ pub use branches::fetch_branches;
 pub use client::{GitHubClient, GitHubConfig};
 #[allow(unused_imports)]
 pub use headers::{parse_link_next, parse_sso_authorization_url, parse_sso_header};
+#[allow(unused_imports)]
+pub use home::{FeedLimits, HomeSearchLimits, fetch_received_events, search_involving};
 #[allow(unused_imports)]
 pub use permission::{WriteAction, WritePermission, is_write_confirmed_allowed, write_permission};
 #[allow(unused_imports)]
@@ -50,6 +54,11 @@ pub use readme::discover_readme;
 pub use repos::fetch_user_repos;
 #[allow(unused_imports)]
 pub use repository::{RepositoryLimits, fetch_repository};
+#[allow(unused_imports)]
+pub use repository_extras::{
+    RepositoryExtrasLimits, fetch_contributors, fetch_languages, fetch_latest_release,
+    fetch_releases,
+};
 #[allow(unused_imports)]
 pub use revision::resolve_revision;
 #[allow(unused_imports)]

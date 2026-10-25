@@ -2,6 +2,8 @@
 //! Git object handles continue to enforce the snapshot relationships from PR19.
 use super::RepoService;
 use crate::auth::{AuthContext, token::Pat};
+use crate::content::{PreparedContent, prepare_content};
+use crate::domain::blob::{BlobIdentity, BlobLimits, BlobRead};
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
     BranchesOutcome, DirectoryTree, ReadmeDiscovery, RepoSnapshot, RepositoryDetails,
@@ -47,6 +49,8 @@ impl RepoService {
         Ok(RepositorySession {
             service: self.clone(),
             context,
+            #[cfg(test)]
+            preparation: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -163,12 +167,34 @@ impl RepoService {
     }
 }
 
+/// Per-session test instrumentation, absent from production. Pauses after
+/// classification and reports that worker's thread, without global state.
+#[cfg(test)]
+pub(super) struct PreparationProbe {
+    entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
+    resume: std::sync::mpsc::Receiver<()>,
+    fail: bool,
+}
+
+#[cfg(test)]
+impl PreparationProbe {
+    fn finish(self) {
+        self.entered.send(std::thread::current().id()).unwrap();
+        self.resume
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("release preparation worker");
+        assert!(!self.fail, "synthetic preparation worker failure");
+    }
+}
+
 /// A constrained browse, never a PAT holder. Clone/start separate sessions for
 /// independent reads; cancellation belongs to each method call, not a session.
 #[derive(Clone)]
 pub struct RepositorySession {
     service: RepoService,
     context: RepositoryReadContext,
+    #[cfg(test)]
+    preparation: Arc<Mutex<Option<PreparationProbe>>>,
 }
 
 impl std::fmt::Debug for RepositorySession {
@@ -186,6 +212,24 @@ impl RepositorySession {
 
     pub fn verify(&self) -> bool {
         self.service.is_current(&self.context)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_preparation(
+        &self,
+        fail: bool,
+    ) -> (
+        tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *self.preparation.lock().unwrap() = Some(PreparationProbe {
+            entered,
+            resume,
+            fail,
+        });
+        (ready, release)
     }
 
     async fn read<T, F, Fut>(
@@ -274,5 +318,60 @@ impl RepositorySession {
             github::discover_readme(&self.service.client, &pat, snapshot, limits, cancel).await
         })
         .await
+    }
+
+    /// Raw fixed-SHA bytes. An already-known oversized blob is a local
+    /// `BlobBody::TooLarge` result, but it still passes every context gate.
+    pub async fn blob(
+        &self,
+        identity: &BlobIdentity,
+        limits: &BlobLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<BlobRead>, RepositoryError> {
+        self.read(cancel, async move |pat, cancel| {
+            github::blob::fetch_blob(&self.service.client, &pat, identity, limits, cancel).await
+        })
+        .await
+    }
+
+    /// Read and prepare in one call, on the caller-provided Tokio runtime.
+    /// Classification runs on its blocking pool, outside the async/GUI thread.
+    pub async fn content(
+        &self,
+        identity: &BlobIdentity,
+        limits: &BlobLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<PreparedContent>, RepositoryError> {
+        let budget = limits.decoded_bytes;
+        let blob = self.blob(identity, limits, cancel.clone()).await?;
+        let service = self.service.clone();
+        let context = self.context.clone();
+        #[cfg(test)]
+        let probe = self.preparation.lock().unwrap().take();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let content = prepare_content(blob.value, budget);
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe.finish();
+            }
+            content
+        });
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(GitHubError::Cancelled.into()),
+            prepared = prepared => prepared.map_err(|_| RepositoryError::GitHub(
+                GitHubError::CredentialStore { message: "content preparation worker closed".into() },
+            )),
+        };
+        // Preparation is another await boundary: staleness outranks the
+        // prepared text, cancellation and worker failure, exactly as in
+        // read_authenticated. Check before propagating any of them.
+        if !service.is_current(&context) {
+            return Err(GitHubError::StaleContext.into());
+        }
+        Ok(Scoped {
+            context,
+            value: outcome?,
+        })
     }
 }
