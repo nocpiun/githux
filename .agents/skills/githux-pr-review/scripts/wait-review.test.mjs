@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -614,4 +615,55 @@ test('stale PR base metadata cannot stand in for the current target branch', asy
   assert.equal(r.integration.pr_base_sha, B);
   assert.equal(r.integration.base_sha, C);
   assert.equal(r.ci.tested_base, B);
+});
+
+test('text-log argv is accepted by the installed gh CLI without version-specific flags', async () => {
+  const api = createGithubApi({ execute: async (file, args, config) => {
+    assert.deepEqual(args, ['api', 'repos/acme/githux/actions/jobs/91/logs', '--hostname', 'github.com', '--method', 'GET', '--include']);
+    // --help exercises gh's real flag parser without network or authentication.
+    const help = execFileSync(file, [...args, '--help'], { ...config, stdio: 'pipe' });
+    assert.match(help, /--include/);
+    return { stdout: http(checkoutLog(M)) };
+  } });
+  assert.equal(checkoutRevision(await api('repos/acme/githux/actions/jobs/91/logs', { text: true })), M);
+});
+
+test('headerless EOF and upstream failures back off and recover; invalid CLI flags remain fatal', async t => {
+  for (const [detail, transient] of [['Get "https://api.github.com/repos/acme/githux": EOF', true],
+    ['HTTP 502: Bad Gateway', true], ['unknown flag: --bad-option', false]]) {
+    const broken = createGithubApi({ execute: async () => { throw Object.assign(new Error('gh failed'), { stderr: detail }); } });
+    await assert.rejects(broken('repos/acme/githux'), e => e.transient === transient);
+    if (!transient) continue;
+    const h = await harness(t);
+    const good = fixture({ comments: [summary()] }).api;
+    let first = true;
+    const api = async (...args) => { if (first) { first = false; return broken(...args); } return good(...args); };
+    assert.equal((await waitForReview(h.opts, { ...h.deps, api })).status, 'review_completed');
+    assert.deepEqual(h.sleeps, [2000]);
+    assert.equal(h.posts.length, 0);
+  }
+});
+
+
+test('new gh escape gate retries a captured text GET once only when explicitly supported', async () => {
+  const notice = 'the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway';
+  for (const failTwice of [false, true]) {
+    const calls = [];
+    const api = createGithubApi({ execute: async (_file, args, config) => {
+      calls.push([...args]);
+      assert.equal(config.shell, false);
+      if (calls.length === 1 || failTwice) throw Object.assign(new Error('gh failed'), { stdout: http('', 200), stderr: notice });
+      return { stdout: http(checkoutLog(M)) };
+    } });
+    const read = api('repos/acme/githux/actions/jobs/91/logs', { text: true });
+    if (failTwice) await assert.rejects(read, /terminal escape sequences/);
+    else assert.equal(checkoutRevision(await read), M);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].includes('--allow-escape-sequences'), false);
+    assert.deepEqual(calls[1], [...calls[0], '--allow-escape-sequences']);
+  }
+  let calls = 0;
+  const unsupported = createGithubApi({ execute: async () => { calls++; throw Object.assign(new Error('gh failed'), { stderr: 'unknown flag: --include' }); } });
+  await assert.rejects(unsupported('repos/acme/githux/actions/jobs/91/logs', { text: true }), /unknown flag/);
+  assert.equal(calls, 1);
 });

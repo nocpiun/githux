@@ -44,21 +44,32 @@ export function createGithubApi({ execute = exec, now = Date.now } = {}) {
       else {
         const args = ['api', path, '--hostname', 'github.com', '--method', query ? 'POST' : 'GET', '--include'];
         if (query) args.push('-f', 'query=' + query);
-        if (text) args.push('--allow-escape-sequences');
         if (old?.etag) args.push('-H', 'If-None-Match: ' + old.etag);
         let result, failure;
-        try { result = await execute('gh', args, {
-          shell: false, windowsHide: true, encoding: 'utf8', timeout: 30000,
-          maxBuffer: 32 * 1024 * 1024, signal,
-          env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', GH_PAGER: 'cat' },
-        }); } catch (error) { failure = error; result = error; }
+        for (let attempt = 0; attempt < 2; attempt++) {
+          failure = undefined;
+          try { result = await execute('gh', args, {
+            shell: false, windowsHide: true, encoding: 'utf8', timeout: 30000,
+            maxBuffer: 32 * 1024 * 1024, signal,
+            env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', GH_PAGER: 'cat' },
+          }); } catch (error) { failure = error; result = error; }
+          signal?.throwIfAborted();
+          // Old gh accepts raw logs without this newer flag. Only a CLI that
+          // explicitly requests the flag proves support; capture, never print ANSI.
+          if (attempt === 0 && text && failure &&
+              /the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway/.test(String(failure.stderr))) {
+            args.push('--allow-escape-sequences');
+            continue;
+          }
+          break;
+        }
         if (signal?.aborted) signal.throwIfAborted();
         let received;
         try { received = response(result.stdout); } catch (error) {
           if (!failure) throw error;
           const detail = String(failure.stderr || failure.message);
           throw Object.assign(new Error('gh query failed: ' + detail), {
-            transient: Boolean(failure.killed || /timed? ?out|ECONNRESET|ETIMEDOUT|TLS handshake|connection reset|dial tcp/i.test(detail)),
+            transient: Boolean(failure.killed || /timed? ?out|ECONNRESET|ETIMEDOUT|TLS handshake|connection reset|dial tcp|\bEOF\b|HTTP 5\d\d/i.test(detail)),
           });
         }
         const { status, headers, body } = received;
@@ -77,7 +88,7 @@ export function createGithubApi({ execute = exec, now = Date.now } = {}) {
           if (headers['x-ratelimit-remaining'] === '0')
             retryAt = Math.max(retryAt || 0, Number(headers['x-ratelimit-reset']) * 1000 || 0);
           if (rateLimit && !retryAt) retryAt = now() + 60000;
-          throw Object.assign(new Error('GitHub HTTP ' + status + ': ' + body.slice(0, 1000)), {
+          throw Object.assign(new Error('GitHub HTTP ' + status + ': ' + (body || failure?.stderr || failure?.message || '').slice(0, 1000)), {
             transient: rateLimit || status >= 500, retryAt,
           });
         } else {

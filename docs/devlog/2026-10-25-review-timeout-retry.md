@@ -17,12 +17,17 @@
 
 ## 验证
 
-- `node --test .agents/skills/githux-pr-review/scripts/wait-review.test.mjs`：重组后的 56 项测试通过（多项含参数化场景），覆盖完整流程及首轮重试边界。
+- `node --test .agents/skills/githux-pr-review/scripts/wait-review.test.mjs`：重组后的 59 项测试通过（多项含参数化场景），覆盖完整流程及首轮重试边界。
 - PR #14 的 clean 收据 + 旧 unresolved 线程情形在离线回归中立即返回 history_pending，同时保持 review=clean；纯正文和矛盾 review 有单独回归。
 - 只读真实验证：对 PR #17 的 f807c56，传入负责人手动触发的 ID 6392942472 / 2026-10-25T03:26:41Z。解析到了可信 clean 摘要/收据、全部线程、CI run 40158048254 attempt 1，以及各执行 job 的 checkout c0cb1f9。
 - 该 checkout 的 parents 是 a57e56c + f807c56。真实 PR base.sha 仍为 a57e56c，但目标 main ref 已为 9125427；补强 ref 核验后正确返回 base_changed / ci=stale_base，而非 checks_ready。结果仅存忽略的任务目录。
 - 本分支已同步 main 的 PAT 服务提交；没有改应用代码。等待脚本不执行 Rust 构建；云端按变更范围执行 Agent script checks。
 - 未实际等待两小时或向其他任务 PR 发测试评论；离线测试不保证云端审查服务一定恢复。
+
+## 审查修复
+
+- ce8b4c4 的审查指出旧版 gh 不支持 `--allow-escape-sequences`。不再无条件传参：先使用通用 GET 参数；本机 gh 2.101 对含 ANSI 的真实日志会明确要求该开关，仅遇到这一确切错误才补参重试一次，输出仍由进程捕获用于解析。旧版无需该开关。增加真实 `gh api … --help` 参数解析验证、两版行为回归及实际日志读取核验。
+- 实际等待遇到 GitHub 连接 EOF，原先误作不可重试错误；现在与无 HTTP 头的上游 5xx 一样按短暂网络失败退避，增加恢复回归，非法 CLI 参数仍立即报错。
 
 ## 边界
 
