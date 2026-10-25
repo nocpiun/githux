@@ -1,9 +1,9 @@
 # 应用级标签：会话、打开/复用/关闭与最小窗口边界
 
-- 日期：2026-10-23；任务 ID：workspace-tabs；执行者：基层 Agent。
-- 状态：实现、自动检查与 GPUI 测试平台回归完成；**真实 Windows 窗口的多标签交互与中文候选确认仍待负责人验收**，`human_review_required=true`、`human_review_approved=false`，本轮不自行合并。
+- 日期：2026-10-23，2026-10-25 同步更新；任务 ID：workspace-tabs；执行者：基层 Agent。
+- 状态：实现、自动检查与 GPUI 测试平台回归完成；首轮审查的焦点修复与架构文档同步已完成，正在新一轮审查。**真实 Windows 窗口的多标签交互与中文候选确认仍待负责人验收**，`human_review_required=true`、`human_review_approved=false`，PR 保持 open，不自行合并。
 - 交付范围：[路线图](../roadmap.md) R1 剩余的基础页面会话/多标签外壳。账户/网络/缓存仍为 fixture，不含真实读取；H6 进阶标签交互不在范围。
-- 基线：`b00a9e382137f90c5d2364fb04372b0cacf86d74`（Tall 原生标题栏已验收合并）。
+- 基线：`b00a9e382137f90c5d2364fb04372b0cacf86d74`（Tall 原生标题栏已验收合并），已合并 `origin/main`（含 PR #14 认证服务、#15 运行时 runner、#17 审查流程）。
 
 ## 确认规则（负责人 2026-10-23）
 
@@ -42,7 +42,7 @@ cargo test --locked
 git diff --check
 ```
 
-`cargo test --locked` 共 50 项通过（基线 34 项 + 本任务新增 16 项，含 8 项 workspace 单元测试）。新增的 GPUI 测试平台回归：
+`cargo test --locked` 在同步 `origin/main` 后共 161 项通过（本任务的 51 项外壳/工作区用例 + 服务层用例）。本任务新增的 GPUI 测试平台回归：
 
 - `opening_the_same_page_reuses_its_tab`：侧栏点击与 palette 都复用同一标签，不重复。
 - `repositories_and_profile_keep_separate_scroll_focus_and_selection`：同时打开仓库 A/B 与 Profile；Home 真实滚轮滚动后切走再切回保留自身偏移，A/Profile 偏移保持 0；`Ctrl+Tab`/`Shift+Ctrl+Tab` 后焦点分别落到 B/A 各自的页面句柄；A/B 的仓库会话选择互不串用。
@@ -61,19 +61,26 @@ git diff --check
 - 关闭标签后真实窗口的焦点环与滚动位置；多 DPI/跨屏下标签条的截断与 tooltip。
 - macOS/Linux 仍用系统标题栏，未做标签条原生验收。
 
-**预览：** 已在本 worktree 执行 `scripts/prepare-windows-runtime.ps1`（x64，写入 `target/debug`）。负责人可在该终端运行 `cargo run --locked` 后按上述检查项验收。
+**预览：** `.cargo/config.toml` 已由 PR #15 合入，Windows 下 `cargo run` 会自动准备 app-local Windows App SDK 运行时（见 [Windows 运行时](windows-runtime.md)），不再需要手工执行 `scripts/prepare-windows-runtime.ps1`。负责人可直接在该终端运行 `cargo run --locked` 并按上述检查项验收。
 
-## 首轮审查（head `1f76b37`）与待裁决事项
+## 首轮审查（head `1f76b37`）与裁决记录
 
 首轮 Codex review `5627818142` 提出两条：
 
-1. **P2（`src/ui/mod.rs`）：`close_tab` 只检查页面焦点，忽略标签条焦点。** 用户 Tab 到活动标签后按 `Ctrl+W` 时，被关闭的标签条句柄仍持有焦点，焦点可能悬空。属于既有验收（“关闭标签释放专属滚动/焦点/状态”）内的正确性修复：现在同时检查被关闭会话的页面焦点与标签条焦点，焦点在两者任一处时都把焦点移到新的活动页。新增回归测试 `closing_a_focused_tab_moves_focus_to_a_live_page`。该修复已在本地完成并通过 fmt/clippy/test（51 项），按混合批次默认暂不 push。
-2. **P1（`docs/devlog/...` 行内意见 `4359204869`）：要求本 PR 更新 `docs/architecture.md`。** 该文件“本轮状态归属”确实已过时，但本任务派发明确禁止修改 `docs/architecture.md`，属于任务边界与审查意见的取舍，已按流程永久记录为待裁决（PR 评论 `6364717050`），`merge_owner=coordinator`。
+1. **P2（`src/ui/mod.rs`）：`close_tab` 只检查页面焦点，忽略标签条焦点。** 用户 Tab 到活动标签后按 `Ctrl+W` 时，被关闭的标签条句柄仍持有焦点，焦点可能悬空。属于既有验收（“关闭标签释放专属滚动/焦点/状态”）内的正确性修复：现在同时检查被关闭会话的页面焦点与标签条焦点，焦点在两者任一处时都把焦点移到新的活动页。新增回归测试 `closing_a_focused_tab_moves_focus_to_a_live_page`（提交 `2afffde`）。
+2. **P1（`docs/devlog/...` 行内意见 `4359204869`）：要求本 PR 更新 `docs/architecture.md`。** 该文件“本轮状态归属”确实已过时，但原派发禁止写入该文件，属于任务边界与审查意见的取舍。
 
-在裁决前不再 push 新 head，也不进入下一轮审查。
+按流程已永久记录待裁决（PR 评论 `6364717050`），`arbitration_ever_required=true`、`merge_owner=coordinator`。负责人/主 Agent 随后裁决**采纳选项 A**，在本 PR 内更新 `docs/architecture.md` 的相关段落（公开裁决记录：[comment 6393565586](https://github.com/nocpiun/githux/pull/16#issuecomment-6393565586)）。
+
+## 裁决后的文档同步
+
+- `docs/architecture.md`：修正过时的“窗口只有一个活动页，`Workspace` 只保存当前 `Route`”描述，改为会话集合、活动标签、每会话滚动/焦点/仓库会话状态、`MAX_OPEN_TABS` 与不可复用 `TabId`；同时修正 `TabId`/`ResourceKey` 段落（当前规则不允许重复资源标签）、工程边界中的 `ui::Shell`/`workspace::Workspace` 职责与 `src/ui/tabs.rs`，并保留 R2 服务已实现但 UI 未接入的说明。账户切换时的标签处理仍写明未决定。
+- `docs/README.md`、`docs/roadmap.md`、`README.md`：只调整与本任务直接相关的入口描述（应用级基础标签已实现、服务层已实现但 UI 未接入），不重写无关章节。
+- 与 `origin/main` 同步：只有 `README.md` 出现冲突（测试证据段落），合并两侧内容为“外壳 + 服务层两部分证据”；其余文件自动合并，未重写无关章节。
+
+再次验证（合并 `origin/main` 之后，本机 Windows x86_64-pc-windows-msvc，工具链 1.98.1）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`（161 项）、`git diff --check` 全部通过。
 
 ## 交接与后续
 
-1. 负责人/主 Agent 在真实窗口验收多标签交互与中文候选确认后，再按门槛合并；`human_review_required=true`。
-2. `docs/architecture.md` 的“本轮状态归属”仍写着“窗口只有一个活动页，`Workspace` 只保存当前 `Route`”，该文件不在本任务写入范围，已变为过时描述，需由有权修改者同步。
-3. R3 接入真实分支/文件读取时填充 `RepositorySession` 并替换 fixture 默认值；账户切换如何影响标签仍待负责人决定。
+1. 负责人/主 Agent 在真实窗口验收多标签交互与中文候选确认；`human_review_required=true`、`human_review_approved=false`，PR 保持 open，等待验收后才由 coordinator 合并。
+2. R3 接入真实分支/文件读取时填充 `RepositorySession` 并替换 fixture 默认值；账户切换如何影响标签仍待负责人决定。
