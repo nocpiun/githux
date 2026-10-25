@@ -49,6 +49,8 @@ impl RepoService {
         Ok(RepositorySession {
             service: self.clone(),
             context,
+            #[cfg(test)]
+            preparation: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -165,49 +167,23 @@ impl RepoService {
     }
 }
 
-/// Test-only evidence about the preparation boundary: which thread ran it and
-/// a controllable pause between the completed read and publication. The pause
-/// is keyed by the exact BlobIdentity so a concurrently running test cannot
-/// consume another read's gate.
+/// Per-session test instrumentation, absent from production. Pauses after
+/// classification and reports that worker's thread, without global state.
 #[cfg(test)]
-pub(super) mod test_hooks {
-    use crate::domain::blob::BlobIdentity;
-    use std::collections::HashMap;
-    use std::sync::{Mutex, mpsc};
-    static LAST: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
-    type Gates = HashMap<String, (mpsc::Sender<()>, mpsc::Receiver<()>)>;
-    static GATES: std::sync::LazyLock<Mutex<Gates>> =
-        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-    /// Value key: fetch_blob clones the identity, so a pointer key would miss.
-    fn key(identity: &BlobIdentity) -> String {
-        format!(
-            "{}:{}:{}:{}:{:?}",
-            identity.repository().id(),
-            identity.commit().as_str(),
-            identity.blob().as_str(),
-            identity.path().as_str(),
-            identity.size()
-        )
-    }
-    pub fn before_prepare(identity: &BlobIdentity) {
-        *LAST.lock().unwrap() = Some(std::thread::current().id());
-        let gate = GATES.lock().unwrap().remove(&key(identity));
-        if let Some((entered, resume)) = gate {
-            let _ = entered.send(());
-            let _ = resume.recv_timeout(std::time::Duration::from_secs(5));
-        }
-    }
-    pub fn last_prepare_thread() -> Option<std::thread::ThreadId> {
-        *LAST.lock().unwrap()
-    }
-    pub fn pause_prepare_of(identity: &BlobIdentity) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
-        let (entered, ready) = mpsc::channel();
-        let (release, resume) = mpsc::channel();
-        GATES
-            .lock()
-            .unwrap()
-            .insert(key(identity), (entered, resume));
-        (ready, release)
+pub(super) struct PreparationProbe {
+    entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
+    resume: std::sync::mpsc::Receiver<()>,
+    fail: bool,
+}
+
+#[cfg(test)]
+impl PreparationProbe {
+    fn finish(self) {
+        self.entered.send(std::thread::current().id()).unwrap();
+        self.resume
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("release preparation worker");
+        assert!(!self.fail, "synthetic preparation worker failure");
     }
 }
 
@@ -217,6 +193,8 @@ pub(super) mod test_hooks {
 pub struct RepositorySession {
     service: RepoService,
     context: RepositoryReadContext,
+    #[cfg(test)]
+    preparation: Arc<Mutex<Option<PreparationProbe>>>,
 }
 
 impl std::fmt::Debug for RepositorySession {
@@ -234,6 +212,24 @@ impl RepositorySession {
 
     pub fn verify(&self) -> bool {
         self.service.is_current(&self.context)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_preparation(
+        &self,
+        fail: bool,
+    ) -> (
+        tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *self.preparation.lock().unwrap() = Some(PreparationProbe {
+            entered,
+            resume,
+            fail,
+        });
+        (ready, release)
     }
 
     async fn read<T, F, Fut>(
@@ -338,8 +334,8 @@ impl RepositorySession {
         .await
     }
 
-    /// Read and prepare in one call. Preparation is CPU work on the bounded
-    /// executor's blocking pool, never on the calling (possibly GUI) thread.
+    /// Read and prepare in one call, on the caller-provided Tokio runtime.
+    /// Classification runs on its blocking pool, outside the async/GUI thread.
     pub async fn content(
         &self,
         identity: &BlobIdentity,
@@ -350,10 +346,15 @@ impl RepositorySession {
         let blob = self.blob(identity, limits, cancel.clone()).await?;
         let service = self.service.clone();
         let context = self.context.clone();
+        #[cfg(test)]
+        let probe = self.preparation.lock().unwrap().take();
         let prepared = tokio::task::spawn_blocking(move || {
+            let content = prepare_content(blob.value, budget);
             #[cfg(test)]
-            test_hooks::before_prepare(&blob.value.identity);
-            prepare_content(blob.value, budget)
+            if let Some(probe) = probe {
+                probe.finish();
+            }
+            content
         });
         let outcome = tokio::select! {
             biased;

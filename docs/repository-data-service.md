@@ -43,7 +43,7 @@
 
 正文读取与快照步骤共用同一个 `read_authenticated`：同一个 semaphore、同一个 CancellationToken、同一份原授权上下文。凭据只在后台 blocking load 中出现，返回值只含 `Scoped.context` 与 `BlobRead`/`PreparedContent`。因此已知 size 超限的**本地** TooLarge 也不是本次授权成功：它仍先经过调用前/凭据后/排队后门槛，并在准备后复查；此时过期或取消按原有优先级返回，不发布 TooLarge。`PreparedContent.identity` 保留构造时的 commit/blob/path，分支移动不会让已派生句柄漂移。
 
-接收方仍须在发布前用同一 RepoService 的 `is_current(&context)` 二次检查成功与错误，再核对页面请求代次与选中文件。`content` 只在当前 Tokio runtime 的 blocking pool 上解码/分类，GUI 线程只做 await；取消等待后已提交的准备工作可能结束，但结果不会绕过上下文门槛。
+接收方仍须在发布前用同一 RepoService 的 `is_current(&context)` 二次检查成功与错误，再核对页面请求代次与选中文件。调用方在既有 BackgroundExecutor 的 Tokio 任务内执行 `content`，GPUI 只通过通道接收结果；其中 UTF-8 转换和正文分类在当前 Tokio runtime 的 blocking pool 执行。blob JSON/base64 解码沿用底层适配器，在该后台 Tokio 任务内执行；取消等待后已提交的准备工作可能结束，但结果不会绕过上下文门槛。
 
 ## 调用示例
 
@@ -63,7 +63,7 @@ let snapshot = browse.revision(&metadata.value.identity, revision, &limits, canc
 let root = browse.directory(&SnapshotDirectory::root(&snapshot.value), &limits, cancel.clone()).await?;
 let readme = browse.readme(&snapshot.value, &limits, cancel.clone()).await;
 // 由目录条目或 README 描述符派生固定身份，再读准备后正文。
-if let ReadmeDiscovery::Found(descriptor) = &readme.as_ref().unwrap().value {
+if let Ok(Scoped { value: ReadmeDiscovery::Found(descriptor), .. }) = &readme {
     let identity = BlobIdentity::from_readme(descriptor);
     let body = browse.content(&identity, &BlobLimits::default(), cancel).await?;
     if repos.is_current(&body.context) {
@@ -84,6 +84,6 @@ if repos.is_current(&publication_context) {
 
 [`src/data/repository_tests.rs`](../src/data/repository_tests.rs) 使用合成 PAT、临时 SQLite 和可控 transport / blocking load gate，覆盖完整资料→分支→revision→根/子目录→README 链路、分支移动后固定 A、Partial/409/README 不确定状态、每个接口调用前过期、在途成功与错误的 A→B/A→B→A/replace/remove-readd/revalidate/close、退休 slot 缺失/读取错误/worker 失败、凭据等待取消、排队取消与排队失效不发送、在途取消不影响独立调用、跨实例归属和 Debug 不泄露 token。
 
-本轮没有读取真实 PAT 或访问真实账户 GitHub。数据层新链路为可控 mock 证据；已有 github/network 的 localhost socket 和 Credential Manager 自清理测试仍保留。完整检查与实际结果见 [开发日志](devlog/2026-10-25-repository-data-service.md)。正文接线另有 [`src/data/repository_content_tests.rs`](../src/data/repository_content_tests.rs)：repository/revision/tree 与 README 描述符到 PreparedContent 的固定身份链路、分支移动不漂移、原始 blob、已知 TooLarge 无网络但仍过门槛、每个正文接口调用前过期、在途成功/Unauthorized 的 A→B/A→B→A/replace/remove-readd/close、按 BlobIdentity 值键控的准备门控下的切换与取消（含切换后再取消仍 StaleContext 优先）、空/非 UTF-8/控制字符/准备预算、排队取消与失效不发送、独立读取取消隔离、凭据加载取消与替换、准备线程非调用线程。fixture transport 的 `execute_bounded` 只检查已给定字节数，真实接收时限流仍由 PR21 的 socket 测试证明。
+本轮没有读取真实 PAT 或访问真实账户 GitHub。数据层新链路为可控 mock 证据；已有 github/network 的 localhost socket 和 Credential Manager 自清理测试仍保留。完整检查与实际结果见 [开发日志](devlog/2026-10-25-repository-data-service.md)。正文接线另有 [`src/data/repository_content_tests.rs`](../src/data/repository_content_tests.rs)：repository/revision/tree 与 README 描述符到 PreparedContent 的固定身份链路、分支移动不漂移、原始 blob、已知 TooLarge 无网络但仍过门槛、每个正文接口调用前过期、在途成功/Unauthorized 的 A→B/A→B→A/replace/remove-readd/close、session 专属的准备门控下的切换、替换、移除重加、取消与 worker 失败（含切换后再取消/worker 失败仍 StaleContext 优先）、空/非 UTF-8/控制字符/准备预算、排队取消与失效不发送、独立读取取消隔离、凭据加载取消与替换、准备线程非调用线程。fixture transport 的 `execute_bounded` 只检查已给定字节数，真实接收时限流仍由 PR21 的 socket 测试证明。
 
 这些证据不代表 UI 或真实 GitHub 联调已完成。正文检查与实际结果见 [开发日志](devlog/2026-10-25-repository-content.md)。

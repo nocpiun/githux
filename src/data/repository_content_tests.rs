@@ -240,23 +240,36 @@ async fn snapshot_chain_reads_fixed_blob_and_prepares_with_the_same_context() {
     assert_eq!(raw.context, publication);
     assert_eq!(raw.value.identity(), &identity);
     assert_eq!(raw.value.body(), &BlobBody::Bytes("héllo".into()));
-    let requests = transport.requests.lock().unwrap();
-    let blobs: Vec<_> = requests
-        .iter()
-        .filter(|r| r.url.contains("/git/blobs/"))
-        .collect();
-    assert_eq!(blobs.len(), 2);
-    for request in blobs {
-        assert!(request.url.ends_with(&format!("git/blobs/{BLOB}")));
-        assert!(
-            request
-                .headers
-                .iter()
-                .any(|(name, value)| name.eq_ignore_ascii_case("accept")
-                    && value == "application/vnd.github+json")
-        );
+    {
+        let requests = transport.requests.lock().unwrap();
+        let blobs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.contains("/git/blobs/"))
+            .collect();
+        assert_eq!(blobs.len(), 2);
+        for request in blobs {
+            assert!(request.url.ends_with(&format!("git/blobs/{BLOB}")));
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("accept")
+                        && value == "application/vnd.github+json")
+            );
+        }
+        assert!(!format!("{session:?}{prepared:?}{raw:?}").contains("synthetic-secret"));
     }
-    assert!(!format!("{session:?}{prepared:?}{raw:?}").contains("synthetic-secret"));
+    // A result already delivered to an event queue needs a second check when
+    // the UI consumes it, including an error held with the captured context.
+    transport.push(401, json!({"message":"Bad credentials"}));
+    let error = session
+        .blob(&identity, &BlobLimits::default(), Default::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error, GitHubError::Unauthorized.into());
+    login(&svc, &transport, 2).await;
+    assert!(!svc.repo_service().is_current(&prepared.context));
+    assert!(!svc.repo_service().is_current(&publication));
 }
 
 #[tokio::test]
@@ -352,7 +365,6 @@ async fn known_too_large_skips_network_but_never_skips_the_context_gates() {
     login(&svc, &transport, 2).await;
     login(&svc, &transport, 1).await;
     let session = svc.repo_service().session().unwrap();
-    transport.push(200, tree_with_file("big.bin", BLOB, 4096));
     let limits = BlobLimits {
         decoded_bytes: 1024,
         ..Default::default()
@@ -531,9 +543,9 @@ async fn in_flight_blob_results_are_stale_for_all_account_mutations() {
     }
 }
 
-/// Preparation must not run on the caller's thread, and its result is still
-/// gated. A large UTF-8 body makes the blocking work observable by thread id.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// On a current-thread runtime the caller cannot migrate, so the reported
+/// preparation thread must differ. The probe belongs to this exact session.
+#[tokio::test]
 async fn preparation_runs_off_the_calling_thread() {
     let temp = tempfile::tempdir().unwrap();
     let transport = Arc::new(Controlled::default());
@@ -561,10 +573,19 @@ async fn preparation_runs_off_the_calling_thread() {
     let text = "x".repeat(512 * 1024);
     transport.push(200, text_blob_json(BLOB, &text));
     let caller = std::thread::current().id();
-    let prepared = session
-        .content(&identity, &Default::default(), Default::default())
+    let (entered, release) = session.pause_preparation(false);
+    let task = tokio::spawn(async move {
+        session
+            .content(&identity, &Default::default(), Default::default())
+            .await
+    });
+    let worker = tokio::time::timeout(Duration::from_secs(5), entered)
         .await
+        .unwrap()
         .unwrap();
+    assert_ne!(worker, caller);
+    release.send(()).unwrap();
+    let prepared = task.await.unwrap().unwrap();
     assert_eq!(
         prepared.value.body,
         PreparedBody::Utf8 {
@@ -572,13 +593,6 @@ async fn preparation_runs_off_the_calling_thread() {
             has_bom: false
         }
     );
-    // The calling thread only awaited; the preparation thread is observable via
-    // the preparation hook installed for this test build.
-    assert_ne!(
-        crate::data::repository::test_hooks::last_prepare_thread(),
-        Some(caller)
-    );
-    assert!(crate::data::repository::test_hooks::last_prepare_thread().is_some());
 }
 
 /// The account can change after the read completed and before the prepared
@@ -589,7 +603,11 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
         ("switch", 1),
         ("aba", 1),
         ("close", 1),
+        ("replace", 1),
+        ("remove-readd", 1),
         ("cancel", 1),
+        ("worker-fail", 1),
+        ("switch-worker-fail", 1),
         // Cancellation and a lost context together: staleness still wins.
         ("switch-then-cancel", 1),
         // A purely local TooLarge outcome is gated at the same boundary.
@@ -628,23 +646,31 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
             transport.push(200, text_blob_json(BLOB, "a"));
         }
         let count = transport.count();
-        let (entered, release) = crate::data::repository::test_hooks::pause_prepare_of(&identity);
+        let (entered, release) = session.pause_preparation(change.contains("worker-fail"));
         let (cancel, source) = CancellationToken::new();
         let task = tokio::spawn(async move { session.content(&identity, &limits, cancel).await });
-        // The blocking prepare thread signals over std mpsc; keep this async
-        // test thread yielding so the spawned read can make progress.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while entered.try_recv().is_err() {
-            assert!(std::time::Instant::now() < deadline, "preparation started");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), entered)
+            .await
+            .unwrap()
+            .expect("classification completed");
         match change {
-            "switch" => svc.set_active(key(2)).await.unwrap(),
+            "switch" | "switch-worker-fail" => svc.set_active(key(2)).await.unwrap(),
             "aba" => {
                 svc.set_active(key(2)).await.unwrap();
                 svc.set_active(key(1)).await.unwrap();
             }
             "close" => svc.close().await.unwrap(),
+            "replace" => {
+                transport.push(200, json!({"id":1,"login":"user1"}));
+                svc.replace(key(1), Pat::from_str("synthetic-new"))
+                    .await
+                    .unwrap();
+            }
+            "remove-readd" => {
+                svc.remove_saved(key(1)).await.unwrap();
+                login(&svc, &transport, 1).await;
+            }
+            "worker-fail" => {}
             "cancel" => source.cancel(),
             "switch-then-cancel" => {
                 svc.set_active(key(2)).await.unwrap();
@@ -660,22 +686,29 @@ async fn context_changes_and_cancellation_during_preparation_discard_the_result(
             .unwrap_err();
         assert_eq!(
             error,
-            if change == "cancel" {
-                cancelled()
-            } else {
-                stale()
+            match change {
+                "cancel" => cancelled(),
+                "worker-fail" => GitHubError::CredentialStore {
+                    message: "content preparation worker closed".into(),
+                }
+                .into(),
+                _ => stale(),
             },
             "{change}, size={size}"
         );
         assert!(
-            !matches!(change, "cancel") || svc.repo_service().is_current(&session_context),
+            !matches!(change, "cancel" | "worker-fail")
+                || svc.repo_service().is_current(&session_context),
             "{change}"
         );
-        if change != "cancel" {
+        if !matches!(change, "cancel" | "worker-fail") {
             assert!(!svc.repo_service().is_current(&session_context));
         }
-        // No extra request was issued to recover or revalidate the old content.
-        assert_eq!(transport.count(), count + usize::from(size == 1));
+        let account_verification = usize::from(matches!(change, "replace" | "remove-readd"));
+        assert_eq!(
+            transport.count(),
+            count + usize::from(size == 1) + account_verification
+        );
     }
 }
 
@@ -840,6 +873,14 @@ async fn cancelling_one_in_flight_blob_does_not_affect_an_independent_read() {
     let task =
         tokio::spawn(async move { first.blob(&identity, &Default::default(), cancel).await });
     ready(entered).await;
+    let (other_entered, other_release) = transport.block(200, text_blob_json(SECOND_BLOB, "b"));
+    let other_identity = make(SECOND_BLOB);
+    let other_task = tokio::spawn(async move {
+        second
+            .content(&other_identity, &Default::default(), Default::default())
+            .await
+    });
+    ready(other_entered).await;
     source.cancel();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -849,11 +890,12 @@ async fn cancelling_one_in_flight_blob_does_not_affect_an_independent_read() {
             .unwrap_err(),
         cancelled()
     );
-    transport.push(200, text_blob_json(SECOND_BLOB, "b"));
-    let other = second
-        .content(&make(SECOND_BLOB), &Default::default(), Default::default())
-        .await
-        .unwrap();
+    assert!(
+        !other_task.is_finished(),
+        "independent request is still in flight"
+    );
+    other_release.send(()).unwrap();
+    let other = other_task.await.unwrap().unwrap();
     assert_eq!(other.value.identity.blob().as_str(), SECOND_BLOB);
     assert_eq!(
         other.value.body,
@@ -873,6 +915,7 @@ struct PausedLoad {
             std::sync::mpsc::Receiver<()>,
         )>,
     >,
+    threads: Mutex<Vec<std::thread::ThreadId>>,
 }
 impl CredentialStore for PausedLoad {
     fn save(&self, r: &CredentialRef, p: &Pat) -> Result<(), CredentialError> {
@@ -885,7 +928,12 @@ impl CredentialStore for PausedLoad {
         "controlled load"
     }
     fn load(&self, r: &CredentialRef) -> Result<Option<Pat>, CredentialError> {
-        if let Some((entered, resume)) = self.gate.lock().unwrap().take() {
+        self.threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((entered, resume)) = gate {
             entered.send(()).unwrap();
             resume.recv_timeout(Duration::from_secs(5)).unwrap();
         }
@@ -900,6 +948,7 @@ async fn credential_load_cancellation_and_late_replacement_drop_blob_results() {
     let store = Arc::new(PausedLoad {
         inner: Default::default(),
         gate: Mutex::new(None),
+        threads: Mutex::new(Vec::new()),
     });
     let svc = service(&temp, transport.clone(), store.clone(), 1).await;
     login(&svc, &transport, 1).await;
@@ -928,6 +977,14 @@ async fn credential_load_cancellation_and_late_replacement_drop_blob_results() {
             .await
     });
     ready(signal).await;
+    assert!(
+        store
+            .threads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|thread| *thread != std::thread::current().id())
+    );
     source.cancel();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), task)
