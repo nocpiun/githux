@@ -147,6 +147,8 @@ git diff --check
 
 该 head 本地 fmt / check / clippy / build / test（235 项）与 `git diff --check` 通过。
 
+**第七轮审查修复（head `c1ebd5a`）。** 一条 P2：投放处理器原先只挂在每个标签上，而在标签之间的 4px 缝隙或末尾空白处释放时没有目标，标记显示的落点无法生效。现在 `on_drop` 挂在滚动视口本身（工具栏在其外部，因此仍不可能是目标），缝隙与末尾空白都能落地。新增 `dropping_in_a_gap_applies_the_marked_reorder`，用真实鼠标在 B 之后的缝隙释放并断言顺序改变。该 head 本地 fmt / check / clippy / build / test（236 项）与 `git diff --check` 通过。
+
 **仍需负责人真实窗口验收：** 缩小后的内边距观感、细滚动条的可见度与淡入淡出是否顺滑、图标与标题间距、拖拽手感与自动滚动速度、close 出现时机、右侧工具栏位置；性能与动画流畅度只能由实际窗口确认。
 
 ## 交接与后续

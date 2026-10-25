@@ -111,6 +111,11 @@ pub(super) fn strip(
     let entries = &view.entries;
     // Only the tabs are children of the scrolling row. The drop marker is an overlay, so showing
     // it never shifts a tab and the slot arithmetic (`index × step`) stays exact.
+    // The drop is accepted by the whole scrolling viewport, not by individual tabs: the marked
+    // insertion positions are the gaps between tabs and the empty space after the last one, and a
+    // release there must apply the reorder the marker showed. The pinned toolbar is outside this
+    // element, so it can never be a drop target.
+    let on_drop = view.on_drop.clone();
     let rows = div()
         .id("tab-scroll")
         .debug_selector(|| "tab-scroll".to_string())
@@ -125,6 +130,12 @@ pub(super) fn strip(
         // native horizontal delta (or Windows' Shift+wheel) moves it by itself.
         .overflow_x_scroll()
         .track_scroll(&view.scroll)
+        .on_drop(move |drag: &TabDrag, window, cx| {
+            if drag.owner != owner {
+                return;
+            }
+            on_drop(drag.id, window, cx);
+        })
         .children(entries.iter().map(|entry| tab(entry, &view, owner, cx)));
 
     let marker = view
@@ -281,7 +292,6 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
     let middle_close = entry.close.clone();
     let start = view.on_drag_start.clone();
     let moved = view.on_drag_move.clone();
-    let dropped = view.on_drop.clone();
     let payload = TabDrag { id, owner };
 
     div()
@@ -378,14 +388,5 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
                 .tooltip(Tooltip::text("Close tab"))
                 .child(Icon::new(IconName::X).size(IconSize::Xs).color(muted)),
         )
-        .on_drop({
-            let dropped = dropped.clone();
-            move |drag: &TabDrag, window, cx| {
-                if drag.owner != owner {
-                    return;
-                }
-                dropped(drag.id, window, cx);
-            }
-        })
         .into_any_element()
 }

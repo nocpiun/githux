@@ -2330,3 +2330,50 @@ fn the_scrollbar_fades_after_a_drag_that_ended_outside_the_strip(cx: &mut TestAp
         "and reaches zero without re-entering the strip"
     );
 }
+
+/// Releasing in the gap between two tabs, or past the last one, applies the reorder the marker
+/// showed: the drop target is the whole scrolling viewport, not only the tab boxes.
+#[gpui::test]
+fn dropping_in_a_gap_applies_the_marked_reorder(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    // Press on A, then release in the 4px gap between B and the end of the row.
+    let start = bounds("tab-1", cx).center();
+    let row = bounds("tab-scroll", cx);
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let gap = gpui::point(
+        bounds("tab-2", cx).right() + px(super::geometry::TAB_GAP / 2.0),
+        row.center().y,
+    );
+    for step in 1..=10 {
+        cx.simulate_mouse_move(
+            gpui::point(start.x + (gap.x - start.x) * step as f32 / 10.0, gap.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        Some(a),
+        "the press started a reorder"
+    );
+    cx.simulate_mouse_up(gap, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b, a],
+        "a release in the gap applies the reorder"
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+}
