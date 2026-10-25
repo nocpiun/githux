@@ -27,6 +27,7 @@ pub mod permission;
 pub mod readme;
 pub mod repos;
 pub mod repository;
+pub mod repository_extras;
 pub mod revision;
 pub mod tree;
 pub mod user;
@@ -45,6 +46,11 @@ pub use readme::discover_readme;
 pub use repos::fetch_user_repos;
 #[allow(unused_imports)]
 pub use repository::{RepositoryLimits, fetch_repository};
+#[allow(unused_imports)]
+pub use repository_extras::{
+    RepositoryExtrasLimits, fetch_contributors, fetch_languages, fetch_latest_release,
+    fetch_releases,
+};
 #[allow(unused_imports)]
 pub use revision::resolve_revision;
 #[allow(unused_imports)]
