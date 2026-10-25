@@ -53,6 +53,10 @@ git diff --check
 
 PR #18 的 `8bd8b5b` 收到一条成立的 P2：读取捕获旧 CredentialRef 后，替换可能删除旧槽，blocking load 返回 None/error 时原代码提前 `?` 返回，未核对上下文，可能把旧槽错误显示为新凭据问题。现对 blocking load 的成功、缺失、错误及 worker 失败统一先核对 runtime context/closed，再返回结果。新增 paused-load 真并发测试分别覆盖 None 和 Corrupted，并确认当前槽缺失仍返回真实 CredentialStore 错误。相关用例、全量 155 项、check/clippy/build 通过；无待裁决事项。
 
+## 与新 main 的组合验证
+
+审查 clean 后 main 前进到 `8163f2c`（仓库不可变快照 REST 服务，PR #19）。本分支无冲突 rebase 到该基线；未修改其文件。组合后的 fmt/check/clippy/build 与全量 168 项测试通过（包含该基线新增用例）。新 head 仍重新触发 Codex 与四平台 CI，不沿用旧 SHA 收据。
+
 ## 验证边界
 
 新增测试只使用 fake store 和临时目录，没有使用真实 PAT/gh token/Cookie，没有访问真实 GitHub，没有新增真实 Credential Manager 测试。全量运行包含仓库原有自清理 Credential Manager 用例，本任务未改该用例。生产端到端 UI 重启恢复尚未验证。SQLite 四平台编译以本 PR CI 为准，非 Windows 凭据功能仍不支持。
