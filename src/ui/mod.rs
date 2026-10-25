@@ -28,6 +28,10 @@ pub(crate) mod geometry;
 mod page;
 mod palette;
 mod sidebar;
+mod sidebar_state;
+
+#[cfg(test)]
+mod sidebar_tests;
 
 #[cfg(test)]
 mod tests;
@@ -47,6 +51,11 @@ pub struct Shell {
     palette: Option<palette::Session>,
     restore_focus: bool,
     search_focus: FocusHandle,
+    sidebar_state: sidebar_state::SidebarState,
+    sidebar_activation: gpui::Subscription,
+    sidebar_keys: gpui::Subscription,
+    sidebar_bounds: gpui::Subscription,
+    sidebar_more_focus: FocusHandle,
 }
 
 impl Shell {
@@ -68,7 +77,44 @@ impl Shell {
         let repo_focus = (0..repositories.len())
             .map(|_| cx.focus_handle().tab_stop(true))
             .collect::<Vec<_>>();
+        let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
+            if !window.is_window_active() && shell.sidebar_state.dragging {
+                shell.sidebar_state.dragging = false;
+                cx.stop_active_drag(window);
+                cx.notify();
+            }
+        });
+        // A changed window is not a new drag. The remembered expanded width is kept and
+        // clamped only when used, so widening the window again restores the user's choice.
+        let sidebar_bounds = cx.observe_window_bounds(window, |shell, window, cx| {
+            if shell.sidebar_state.dragging {
+                shell.sidebar_state.dragging = false;
+                cx.stop_active_drag(window);
+            }
+            // Ely closes its menu when focus leaves. Keep it anchored safely when the
+            // viewport changes, including maximize/restore, without retaining a stale panel.
+            if shell.sidebar_state.menu_open.get() && shell.palette.is_none() {
+                window.focus(&shell.sidebar_more_focus, cx);
+            }
+            cx.notify();
+        });
+        let this = cx.entity();
+        let sidebar_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            this.update(cx, |shell, cx| {
+                if event.keystroke.key == "escape" && shell.sidebar_state.dragging {
+                    shell.sidebar_state.dragging = false;
+                    cx.stop_active_drag(window);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            });
+        });
         Self {
+            sidebar_keys,
+            sidebar_bounds,
+            sidebar_more_focus: cx.focus_handle(),
+            sidebar_state: sidebar_state::SidebarState::default(),
+            sidebar_activation,
             workspace: Workspace::new(),
             repositories,
             root_focus,
@@ -294,6 +340,7 @@ impl Shell {
     fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let this = cx.entity();
         let route = self.workspace.route().clone();
+        let collapsed = self.sidebar_state.collapsed;
 
         let home = {
             let this = this.clone();
@@ -302,11 +349,13 @@ impl Shell {
                 IconName::House,
                 "Home",
                 route == Route::Home,
+                collapsed,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Home, cx);
                     });
                 },
+                cx,
             )
         };
         let settings = {
@@ -316,11 +365,13 @@ impl Shell {
                 IconName::Settings,
                 "Settings",
                 route == Route::Settings,
+                collapsed,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Settings, cx);
                     });
                 },
+                cx,
             )
         };
         let nav = div()
@@ -365,6 +416,7 @@ impl Shell {
                     repo,
                     &focus,
                     active,
+                    collapsed,
                     move |_, cx| {
                         let target = target.clone();
                         this.update(cx, |shell, cx| {
@@ -382,6 +434,7 @@ impl Shell {
             sidebar::account_row(
                 fixtures::ACCOUNT,
                 route == Route::Profile,
+                collapsed,
                 move |_, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Profile, cx);
@@ -414,36 +467,55 @@ impl Shell {
                 cx,
             )
         };
-        let quarters = sidebar::quarter_row([
-            quarter(
-                "notifications",
-                IconName::Bell,
-                "Notifications",
-                Some(Route::Notifications),
-                route == Route::Notifications,
+        let quarters = if collapsed {
+            sidebar::overflow(
                 this.clone(),
-            ),
-            quarter(
-                "issues",
-                IconName::CircleDot,
-                "Issues",
-                Some(Route::Issues),
-                route == Route::Issues,
-                this.clone(),
-            ),
-            quarter(
-                "pull-requests",
-                IconName::GitPullRequest,
-                "Pull requests",
-                Some(Route::PullRequests),
-                route == Route::PullRequests,
-                this.clone(),
-            ),
-            // New has no approved resource list this round: named, disabled, does nothing.
-            quarter("new", IconName::Plus, "New", None, false, this.clone()),
-        ]);
+                &route,
+                &self.sidebar_more_focus,
+                self.sidebar_state.menu_open.clone(),
+                cx,
+            )
+        } else {
+            sidebar::quarter_row([
+                quarter(
+                    "notifications",
+                    IconName::Bell,
+                    "Notifications",
+                    Some(Route::Notifications),
+                    route == Route::Notifications,
+                    this.clone(),
+                ),
+                quarter(
+                    "issues",
+                    IconName::CircleDot,
+                    "Issues",
+                    Some(Route::Issues),
+                    route == Route::Issues,
+                    this.clone(),
+                ),
+                quarter(
+                    "pull-requests",
+                    IconName::GitPullRequest,
+                    "Pull requests",
+                    Some(Route::PullRequests),
+                    route == Route::PullRequests,
+                    this.clone(),
+                ),
+                // New has no approved resource list this round: named, disabled, does nothing.
+                quarter("new", IconName::Plus, "New", None, false, this.clone()),
+            ])
+        };
 
-        sidebar::sidebar(nav, heading, repositories, account, quarters)
+        sidebar::sidebar(
+            nav,
+            heading,
+            repositories,
+            account,
+            quarters,
+            self.sidebar_state
+                .width(window.viewport_size().width.into()),
+            collapsed,
+        )
     }
 
     fn island(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -530,7 +602,14 @@ impl Render for Shell {
             this.update(cx, |shell, cx| shell.open_palette(window, cx));
         };
         let titlebar = chrome::titlebar(self.search_focus.clone(), open_search, window, cx);
+        // Keep the subscription alive for the lifetime of the shell.
+        let _ = (
+            &self.sidebar_activation,
+            &self.sidebar_keys,
+            &self.sidebar_bounds,
+        );
         let sidebar = self.sidebar(window, cx);
+        let divider = self.sidebar_divider(window, cx);
         let island = self.island(cx);
         let palette = self.palette(cx);
 
@@ -567,7 +646,41 @@ impl Render for Shell {
                     .child(titlebar)
                     .child(
                         div()
+                            .id("shell-body")
                             .debug_selector(|| "shell-body".to_string())
+                            .relative()
+                            .on_drag_move(cx.listener(
+                                |shell,
+                                 event: &gpui::DragMoveEvent<sidebar_state::SidebarDrag>,
+                                 window,
+                                 cx| {
+                                    let drag = event.drag(cx);
+                                    if drag.owner != cx.entity_id() || !shell.sidebar_state.dragging
+                                    {
+                                        return;
+                                    }
+                                    let width = drag.start_width
+                                        + f32::from(event.event.position.x - drag.start_x.get());
+                                    shell
+                                        .sidebar_state
+                                        .resize(width, window.viewport_size().width.into());
+                                    cx.notify();
+                                },
+                            ))
+                            .on_mouse_up(
+                                gpui::MouseButton::Left,
+                                cx.listener(|shell, _, _, cx| {
+                                    shell.sidebar_state.dragging = false;
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                gpui::MouseButton::Left,
+                                cx.listener(|shell, _, _, cx| {
+                                    shell.sidebar_state.dragging = false;
+                                    cx.notify();
+                                }),
+                            )
                             .bg(bg)
                             .flex()
                             .flex_1()
@@ -587,7 +700,8 @@ impl Render for Shell {
                                     .pb(px(geometry::ISLAND_INSET))
                                     .pl(px(geometry::ISLAND_GAP))
                                     .child(island),
-                            ),
+                            )
+                            .child(divider),
                     )
                     .children(palette),
             )

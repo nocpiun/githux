@@ -7,8 +7,16 @@
 /// Width of the fixed sidebar; its column owns the horizontal padding, so rows line up inside it.
 pub const SIDEBAR_WIDTH: f32 = 232.0;
 
-/// Sidebar inner horizontal padding.
-pub const SIDEBAR_PADDING: f32 = 10.0;
+/// Client-edge inset. The island gap supplies the matching right inset for sidebar rows.
+pub const SIDEBAR_PADDING: f32 = 8.0;
+pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
+pub const SIDEBAR_MAX_WIDTH: f32 = 360.0;
+pub const SIDEBAR_COLLAPSED_WIDTH: f32 = 56.0;
+pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
+pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
+pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
+pub const REPO_ACCOUNT_GAP: f32 = 12.0;
+pub const REPO_LEFT_PADDING: f32 = 4.0;
 
 /// Gap between the window edge and the island.
 pub const ISLAND_INSET: f32 = 7.0;
@@ -34,7 +42,7 @@ pub const SEARCH_WIDTH: f32 = 300.0;
 pub const REPO_ROW_HEIGHT: f32 = 30.0;
 
 /// Height of the account row at the sidebar's bottom.
-pub const ACCOUNT_ROW_HEIGHT: f32 = 40.0;
+pub const ACCOUNT_ROW_HEIGHT: f32 = 48.0;
 
 /// Height of a Home activity row.
 pub const ACTIVITY_ROW_HEIGHT: f32 = 52.0;
