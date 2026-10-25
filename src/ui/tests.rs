@@ -2009,7 +2009,12 @@ fn the_drop_marker_does_not_shift_any_tab(cx: &mut TestAppContext) {
         bounds("tab-2", cx),
     );
     assert_eq!(idle, live, "the marker is an overlay, not a layout child");
-    // The pointer is at the row's left edge, so the slot is the very first one.
+    // The pointer is at the row's left edge, so the marker's gap is the very first one and the
+    // reorder target is the same index (a leftward drag needs no conversion).
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_slot()),
+        Some(0)
+    );
     assert_eq!(
         view.read_with(cx, |shell, _| shell.tab_drag_target()),
         Some(0)
@@ -2055,9 +2060,17 @@ fn a_rightward_drop_lands_between_the_tabs_the_marker_names(cx: &mut TestAppCont
         shell.drag_tab(a, window, cx);
         shell.drag_tab_to(a, between_b_and_c, window, cx);
     });
+    // B is at index 2, so the gap after it is insertion slot 3. `reorder` removes A (index 1)
+    // first, which shifts that same gap down to index 2.
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_slot()),
+        Some(3),
+        "the marker sits in the B/C gap"
+    );
     assert_eq!(
         view.read_with(cx, |shell, _| shell.tab_drag_target()),
-        Some(2)
+        Some(2),
+        "the reorder index drops by one for a rightward drag"
     );
     view.update(cx, |shell, cx| {
         shell.drop_dragged_tab(a, cx);
@@ -2133,4 +2146,121 @@ fn edge_scrolling_continues_while_the_pointer_is_stationary(cx: &mut TestAppCont
         stopped,
         "releasing the drag stops the auto-scroll"
     );
+}
+
+/// A tab drag starts through real mouse events, not only through the test helper: the tab's drag
+/// handler must be registered on an ordinary render, before any drag exists.
+#[gpui::test]
+fn dragging_with_the_mouse_starts_from_a_real_press_and_moves(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, a, b]
+    );
+
+    // No drag exists before the press, so this exercises the always-registered handler.
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+
+    let start = bounds("tab-1", cx).center();
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    // Move past GPUI's drag threshold, then well past the next tab's middle.
+    let row = bounds("tab-scroll", cx);
+    for step in 1..=12 {
+        cx.simulate_mouse_move(
+            gpui::point(start.x + px(20.0 * step as f32), row.center().y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        Some(a),
+        "pressing and dragging a tab starts a reorder"
+    );
+    cx.simulate_mouse_up(
+        gpui::point(start.x + px(240.0), row.center().y),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b, a],
+        "the drag reordered the tab it carried"
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        3,
+        "nothing was closed or duplicated"
+    );
+}
+
+/// A press on the close button or a middle click never starts a reorder.
+#[gpui::test]
+fn close_and_middle_click_do_not_start_a_drag(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let original = view.read_with(cx, |shell, _| shell.tab_ids());
+
+    // Drag from the active tab's close button: it must not become a reorder.
+    let close = bounds("tab-2", cx);
+    let close_button = bounds("tab-close-2", cx).center();
+    cx.simulate_mouse_move(close_button, None, Modifiers::none());
+    cx.simulate_mouse_down(close_button, gpui::MouseButton::Left, Modifiers::none());
+    for step in 1..=10 {
+        cx.simulate_mouse_move(
+            gpui::point(close.center().x + px(30.0 * step as f32), close.center().y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(
+        gpui::point(close.center().x + px(300.0), close.center().y),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        None,
+        "pressing the close button does not start a reorder"
+    );
+
+    // A middle click over a tab closes it once and never starts a reorder.
+    let tab = bounds("tab-1", cx);
+    cx.simulate_mouse_down(tab.center(), gpui::MouseButton::Middle, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        None,
+        "a middle press never starts a reorder"
+    );
+    cx.simulate_mouse_up(tab.center(), gpui::MouseButton::Middle, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    let ids = view.read_with(cx, |shell, _| shell.tab_ids());
+    assert_eq!(
+        ids.len(),
+        original.len() - 1,
+        "the middle click closed its tab once: {ids:?}"
+    );
+    assert!(!ids.contains(&a));
+    assert!(ids.contains(&b));
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), b);
 }

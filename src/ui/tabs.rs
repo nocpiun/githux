@@ -76,10 +76,8 @@ pub(super) struct View {
     pub scroll: ScrollHandle,
     /// The tab being dragged, if any: it stays in place but is drawn as the lifted item.
     pub dragging: Option<TabId>,
-    /// Whether tab drags are accepted this frame (they always are; kept explicit so the strip can
-    /// be rendered read-only without touching the tab builder).
-    pub reorder: bool,
-    /// Where the dragged tab would land, as a slot between tabs.
+    /// Where the dragged tab would land, as an insertion slot between the tabs currently shown.
+    /// This is the same coordinate the marker is drawn in, so the line matches the drop.
     pub drop_at: Option<usize>,
     pub toolbar: AnyElement,
     pub on_hover: OnFlag,
@@ -286,7 +284,6 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
     let dropped = view.on_drop.clone();
     let hovered_on_start = view.on_hover.clone();
     let hovered_on_move = view.on_hover.clone();
-    let has_reorder = view.reorder;
     let payload = TabDrag { id, owner };
 
     div()
@@ -329,20 +326,20 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
             }
         })
         .when(dragging, |tab| tab.opacity(0.45))
-        .when(has_reorder, |tab| {
-            tab.on_drag(payload, move |drag, _, window, cx| {
-                start(drag.id, window, cx);
-                hovered_on_start(true, window, cx);
-                cx.new(|_| gpui::EmptyView)
-            })
-            .on_drag_move(move |event: &gpui::DragMoveEvent<TabDrag>, window, cx| {
-                if event.drag(cx).owner != owner {
-                    return;
-                }
-                // Dragging keeps the scrollbar visible even when the pointer leaves the strip.
-                hovered_on_move(true, window, cx);
-                moved(event.drag(cx).id, event.event.position, window, cx);
-            })
+        // Drag handlers are always registered: this `on_drag` callback is what starts a reorder,
+        // so gating it on a drag already being in progress would make it unreachable.
+        .on_drag(payload, move |drag, _, window, cx| {
+            start(drag.id, window, cx);
+            hovered_on_start(true, window, cx);
+            cx.new(|_| gpui::EmptyView)
+        })
+        .on_drag_move(move |event: &gpui::DragMoveEvent<TabDrag>, window, cx| {
+            if event.drag(cx).owner != owner {
+                return;
+            }
+            // Dragging keeps the scrollbar visible even when the pointer leaves the strip.
+            hovered_on_move(true, window, cx);
+            moved(event.drag(cx).id, event.event.position, window, cx);
         })
         .tooltip(Tooltip::text(tooltip))
         .child(Icon::new(entry.icon).size(IconSize::Xs).color(icon_color))
@@ -384,14 +381,14 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
                 .tooltip(Tooltip::text("Close tab"))
                 .child(Icon::new(IconName::X).size(IconSize::Xs).color(muted)),
         )
-        .when(has_reorder, |tab| {
+        .on_drop({
             let dropped = dropped.clone();
-            tab.on_drop(move |drag: &TabDrag, window, cx| {
+            move |drag: &TabDrag, window, cx| {
                 if drag.owner != owner {
                     return;
                 }
                 dropped(drag.id, window, cx);
-            })
+            }
         })
         .into_any_element()
 }

@@ -93,7 +93,11 @@ pub struct Shell {
 /// One in-flight tab drag.
 struct TabDragState {
     id: TabId,
-    /// Where the dragged tab would land, as an insertion slot between the tabs it sits beside.
+    /// The insertion slot the marker is drawn in: a gap between the tabs as they are currently
+    /// shown, in the still-unmodified collection.
+    slot: usize,
+    /// The index to hand to `Workspace::reorder`, which removes the dragged session first. It only
+    /// differs from `slot` for rightward drags.
     target: usize,
     /// The pointer's position over the window, retained so edge auto-scroll can keep advancing on
     /// later frames while the pointer itself is stationary.
@@ -913,8 +917,7 @@ impl Shell {
             entries,
             scroll: self.tab_scroll.clone(),
             dragging: self.tab_drag.as_ref().map(|drag| drag.id),
-            drop_at: self.tab_drag.as_ref().map(|drag| drag.target),
-            reorder: self.tab_drag.is_some(),
+            drop_at: self.tab_drag.as_ref().map(|drag| drag.slot),
             toolbar: tabs::toolbar(),
             on_hover,
             on_drag_start,
@@ -970,7 +973,13 @@ impl Shell {
         self.tab_drag.as_ref().map(|drag| drag.id)
     }
 
-    /// The landing slot of the drag in progress.
+    /// The landing slot of the drag in progress, in the coordinate the marker draws in.
+    #[cfg(test)]
+    pub fn tab_drag_slot(&self) -> Option<usize> {
+        self.tab_drag.as_ref().map(|drag| drag.slot)
+    }
+
+    /// The index the drag would hand to `Workspace::reorder`.
     #[cfg(test)]
     pub fn tab_drag_target(&self) -> Option<usize> {
         self.tab_drag.as_ref().map(|drag| drag.target)
@@ -1032,6 +1041,7 @@ impl Shell {
         };
         self.tab_drag = Some(TabDragState {
             id,
+            slot: index,
             target: index,
             position: gpui::Point::default(),
         });
@@ -1106,18 +1116,17 @@ impl Shell {
                     .set_offset(gpui::point(gpui::px(next), gpui::Pixels::ZERO));
             }
         }
-        // The slot is computed after the step, against the offset the pointer now sees.
-        let target = tabs::landing_slot(
+        // `landing_slot` is an insertion slot in the collection as it is currently shown, which is
+        // exactly the coordinate the marker draws in. `reorder` removes the dragged session before
+        // inserting, so the index it needs shifts left by one for a rightward drag.
+        let slot = tabs::landing_slot(
             position.x - view.left(),
             self.tab_scroll.offset().x,
             self.workspace.sessions().len(),
         );
-        // `landing_slot` is an insertion slot in the collection as it is now; `reorder` removes the
-        // dragged tab before inserting, so a slot past its original place shifts left by one.
-        let target = if target > from { target - 1 } else { target };
-        if let Some(drag) = self.tab_drag.as_mut()
-            && drag.target != target
-        {
+        let target = if slot > from { slot - 1 } else { slot };
+        if let Some(drag) = self.tab_drag.as_mut() {
+            drag.slot = slot;
             drag.target = target;
         }
     }

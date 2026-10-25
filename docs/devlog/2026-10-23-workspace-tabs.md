@@ -136,6 +136,13 @@ git diff --check
 
 随后同步 `origin/main`（`42291f7`，含 PR #18/#19/#21/#22），无冲突。该 head 的本地 fmt / check / clippy / build / test（232 项，含合并 main 后的服务层用例）与 `git diff --check` 通过。
 
+**第五轮审查修复（head `ee6ce18`）。** 该轮两条 P2，都是我上一轮修复引入/遗留的问题：
+
+1. **标签拖拽根本无法用鼠标启动。** 我把 `on_drag`/`on_drop` 注册条件写成了"已经在拖动中"（`reorder: tab_drag.is_some()`），而 `on_drag` 正是启动拖动的入口，形成死循环；只有测试用的 `drag_tab` 绕过它。现在 drag/drop 处理器在每次渲染都注册，`reorder: bool` 字段随之删除；新增 `dragging_with_the_mouse_starts_from_a_real_press_and_moves` 用真实鼠标按下/移动/抬起驱动排序，并有 `close_and_middle_click_do_not_start_a_drag` 确认 close 按钮与中键不会误触发。
+2. **投放标记与最终位置不一致。** 上一轮我把插入槽就地转换成了"移除被拖项后的索引"，但标记是按仍含被拖项的顺序绘制的，右向拖动时线会画在前一个缝。现在 `TabDragState` 同时保存 `slot`（标记用的插入槽，未转换）与 `target`（交给 `reorder` 的索引），转换只在投递时使用；`a_rightward_drop_lands_between_the_tabs_the_marker_names` 同时断言两者（B/C 缝是 slot 3、目标索引 2）。
+
+合并 `origin/main`（`42291f7`）后本地 fmt / check / clippy / build / test（234 项）与 `git diff --check` 通过。
+
 **仍需负责人真实窗口验收：** 缩小后的内边距观感、细滚动条的可见度与淡入淡出是否顺滑、图标与标题间距、拖拽手感与自动滚动速度、close 出现时机、右侧工具栏位置；性能与动画流畅度只能由实际窗口确认。
 
 ## 交接与后续
