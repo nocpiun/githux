@@ -2,14 +2,14 @@
 
 更新：2026-10-23。本文记录 **Classic PAT 身份验证、Windows 安全凭据存取、账户授权代次、可取消的 GitHub 读取服务** 的实现范围、接口、验证证据与未覆盖项。
 
-**范围事实：** 本次交付的是真实服务基础，不是空 trait 占位，也不是完整登录产品。UI 尚未接入（那属于后续 UI 任务），因此 binary 里这些模块暂未被调用，`auth/network/github/data/domain/diagnostics` 各自带一个**模块级** `#![allow(dead_code)]`，并写明了原因；crate 根没有 `#![allow]` 兜底。SQLite、私有业务内容落盘、账户目录持久化、重启后多账户 UI 均**不在**本切片内。
+**范围事实：** 本次交付的是真实服务基础，不是空 trait 占位，也不是完整登录产品。UI 尚未接入（那属于后续 UI 任务），因此 binary 里这些模块暂未被调用，`auth/network/github/data/domain/diagnostics` 各自带一个**模块级** `#![allow(dead_code)]`，并写明了原因；crate 根没有 `#![allow]` 兜底。首个切片不含账户落盘；后续已实现独立 SQLite 账户目录、活动选择和恢复接口，详见 [账户持久化](account-persistence.md)。私有业务内容落盘与重启后多账户 UI 仍未实现。
 
 ## 1. 已实现的内容
 
 | 层 | 位置 | 已实现 | 未实现（明确边界） |
 | --- | --- | --- | --- |
 | domain | [`src/domain`](../src/domain) | `AccountKey`/`HostId`/`AccountIdentity`/`AccountSummary`/`AuthEpoch`、`GitHubError`、`RepoSummary`/`ReposOutcome`/`ReposReadiness` | 仓库详情、分支、内容模型 |
-| auth | [`src/auth`](../src/auth) | `Pat`（不实现 Debug/Display/Serialize）、`CredentialStore` 抽象、Windows Credential Manager 适配、内存 fake、多账户注册表与代次、最小 scope 建议 | 账户元数据落盘、重启恢复 |
+| auth | [`src/auth`](../src/auth) | `Pat`（Debug 脱敏，无 Display/Serialize）、`CredentialStore` 抽象、Windows Credential Manager 适配、内存 fake、多账户注册表与代次、最小 scope 建议；后续账户恢复见专文 | UI 登录流程 |
 | network | [`src/network`](../src/network) | 独立 Tokio 后台执行器、有界并发信号量、可取消令牌、reqwest 传输、仅同源重定向、localhost 测试服务 | 常驻调度服务、通用重试框架 |
 | github | [`src/github`](../src/github) | 固定请求头、受信 host 才注入 Authorization、`GET /user`、`GET /user/repos` 完整 `Link` 分页、错误分类、SSO/限流头解析、写权限占位边界 | H7 写操作、GraphQL |
 | data | [`src/data`](../src/data) | 登录（先验证后保存）、替换/移除推进代次、过期响应丢弃、仓库读取 | 缓存、在途请求合并 |
@@ -49,7 +49,7 @@ pub trait CredentialStore: Send + Sync {
 }
 ```
 
-- **Windows**：`WindowsCredentialStore`（`src/auth/windows.rs`）使用 `CredWriteW`/`CredReadW`/`CredDeleteW`，`CRED_TYPE_GENERIC` + `CRED_PERSIST_LOCAL_MACHINE`，target 名 `githux:<host>:<account_id>`（不含密钥）。`ERROR_NOT_FOUND` 视为 `Ok(None)`/幂等删除。
+- **Windows**：`WindowsCredentialStore`（`src/auth/windows.rs`）使用 `CredWriteW`/`CredReadW`/`CredDeleteW`，`CRED_TYPE_GENERIC` + `CRED_PERSIST_LOCAL_MACHINE`，基础 target 名 `githux:<host>:<account_id>`；持久化替换用 `githux:<host>:<account_id>:<uuid revision>` 独立槽（均不含密钥）。`ERROR_NOT_FOUND` 视为 `Ok(None)`/幂等删除。
 - **其他平台**：`UnsupportedStore` 一律返回 `CredentialError::Unsupported`。**没有明文回退**，不会把 token 写进配置或数据库。
 - **测试**：`InMemoryCredentialStore` 只存在于进程内，测试实例互不共享；`failing_saves()` 注入保存失败，用来验证“保存失败不宣称登录成功”。
 - **真实 Windows 项**：唯一一个真实 `Credential Manager` 测试用自己的 account id `0xDEADBEEFCAFE`，测试开始先删、结束删除，失败也删（cleanup guard），不读取或修改任何真实凭据。
@@ -127,6 +127,8 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 
 **分页中途取消仍是硬取消**：即使在获取第 2 页及以后时取消，也返回 `Cancelled` 而不是 `Partial`——调用方已经要求停止，就不应拿到那次请求的数据。
 
+**后续持久化变更**：SQLite、系统凭据均已移到 blocking worker；持久化选择必须 await AccountService，替换采用独立凭据槽与可恢复 cleanup journal。以下描述为首个内存切片背景，现行跨存储行为与失败契约以 [账户持久化](account-persistence.md) 为准。
+
 **替换、登录与移除都序列化提交**：`AccountService` 用一把 `credential_commit` 互斥锁把“写/删凭据 + 提交注册表记录”包成一个临界区。移除也必须参与，否则并发的 `remove` 与 `replace` 可能在 replace 通过存在性复查后：remove 删掉旧凭据并移除账户，replace 再把新 PAT 写进存储并返回 `NotFound`，留下没有任何账户引用、也没有清理路径的孤儿秘密。回归测试为 `data::tests::removal_is_serialized_with_replacement`。否则两个并发 `replace` 可能 A 写 token A、B 写 token B 并提交、A 再提交，最终存储在 B、注册表却报 A 的 epoch，后续读取会在 A 的 epoch 下使用 B 的 token。回归测试用真正的多线程 runtime 与一个会在凭据操作重叠时报警的 store 验证（去掉锁会稳定失败）。
 
 **移除账户的凭据删除失败会上报**：`AccountService::remove` 仍会移除注册表条目（不让陈旧引用保持活动），但把删除失败作为 `CredentialStore` 错误返回，避免声称“已成功移除”而实际仍留有持久化秘密。
@@ -176,7 +178,9 @@ let store: Arc<dyn CredentialStore> = Arc::new(WindowsCredentialStore::new());
 let transport = Arc::new(ReqwestTransport::new(Duration::from_secs(30))?);
 let client = Arc::new(GitHubClient::new(GitHubConfig::default(), transport));
 let executor = Arc::new(BackgroundExecutor::new(4));
-let accounts = AccountService::new(store, client, executor.clone());
+let accounts = AccountService::open(
+    AccountDatabaseConfig::application_data()?, store, client, executor.clone(),
+).await?; // 恢复账户为 PendingVerification，不能当作已验证授权
 
 // 登录：先 GET /user 验证，再保存；保存失败返回 CredentialSave，不会假装已登录
 match accounts.login(Pat::from_str(user_input)).await {
@@ -284,7 +288,7 @@ git diff --check
 
 ## 10. 未覆盖 / 后续
 
-- 账户元数据与凭据引用的持久化（SQLite 或设置文件）、重启后恢复、迁移；私有内容保留政策仍待确认。
+- 账户目录与引用已由 [独立 SQLite 持久化服务](account-persistence.md) 实现，包括 v1 迁移、活动选择、重启恢复和跨存储清理。UI 尚未接入，私有内容缓存及其保留政策仍待确认。
 - UI 接入：登录表单、账户切换、仓库列表渲染、错误呈现；本 PR 不修改 `src/ui/**`、`src/app/**`、`src/main.rs`。
 - 在途请求合并与缓存：本切片每次读取直接请求，没有缓存层。
 - 自动重试/退避调度：只返回 `RetryAfter`，不自行重试。

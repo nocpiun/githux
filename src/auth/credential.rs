@@ -2,8 +2,8 @@
 //!
 //! The trait is async-free and synchronous: platform credential APIs (Windows
 //! Credential Manager) are blocking C calls, and the data service offloads the
-//! entire request lifecycle (including credential reads) onto its background
-//! executor, so blocking here never touches the GPUI/UI thread.
+//! storage operations onto blocking workers, so blocking here touches neither
+//! the GPUI/UI thread nor the Tokio network runtime.
 
 use crate::auth::token::Pat;
 use crate::domain::HostId;
@@ -24,18 +24,36 @@ pub enum CredentialError {
 
 /// Stable reference to a stored credential. Never contains the secret itself.
 ///
-/// The reference is derived from the host and stable account id so it survives
-/// login changes and is stable across restarts (future persistence is keyed by
-/// this value, not by the token).
+/// The reference includes host, stable account id and an optional non-secret
+/// revision. Persistent replacements use fresh revisions and atomically publish
+/// their references, so a failed save cannot overwrite the existing secret.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CredentialRef {
     host: HostId,
     account_id: u64,
+    revision: Option<String>,
 }
 
 impl CredentialRef {
     pub fn new(host: HostId, account_id: u64) -> Self {
-        Self { host, account_id }
+        Self {
+            host,
+            account_id,
+            revision: None,
+        }
+    }
+
+    /// A fresh slot prevents a failed replacement from overwriting the old PAT.
+    pub fn versioned(host: HostId, account_id: u64, revision: String) -> Self {
+        Self {
+            host,
+            account_id,
+            revision: Some(revision),
+        }
+    }
+
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
     }
 
     pub fn host(&self) -> &HostId {
@@ -48,7 +66,11 @@ impl CredentialRef {
 
     /// Target name used by platform stores. Contains no secret material.
     pub fn target_name(&self) -> String {
-        format!("githux:{}:{}", self.host.as_str(), self.account_id)
+        let base = format!("githux:{}:{}", self.host.as_str(), self.account_id);
+        match &self.revision {
+            Some(revision) => format!("{base}:{revision}"),
+            None => base,
+        }
     }
 }
 
