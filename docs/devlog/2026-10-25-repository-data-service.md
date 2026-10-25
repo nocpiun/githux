@@ -16,9 +16,9 @@ Windows / Rust 1.98.1，本轮已执行：
 - `cargo fmt --all -- --check`：通过。
 - `cargo check --locked --all-targets`：通过。
 - `cargo clippy --locked --all-targets -- -D warnings`：通过。
-- `cargo test --locked`：175 项通过，包含 7 组新增 data 测试及既有账户持久化、repo list、github/network、GPUI 测试平台用例。
-- `cargo build --locked`：进行中，提交前补记最终结果。
-- `git diff --check`：提交前核验。
+- `cargo test --locked`：初始基线 175 项通过；同步 PR21 后 189 项通过，包含 7 组新增 data 测试及既有账户持久化、repo list、blob、github/network、GPUI 测试平台用例。
+- `cargo build --locked`：同步后 Windows Debug 构建通过。一次尚未结束的旧基线构建与同步交错，读取了新源码与旧 manifest 而失败；待其退出后，针对稳定新基线的完整构建通过。
+- `git diff --check`：通过。
 
 新测试使用临时 SQLite、合成凭据和 oneshot / blocking load 可控 gate：五个入口在下一步调用前失效不发送、A→B→A、切账户、PAT replace、remove/re-add、重验、close 的成功/401 均丢弃，退休槽清理期间的 missing / CredentialError / worker panic 不误报新凭据；排队失效不发请求，取消凭据等待/排队/在途可结束且不影响独立读取；跨服务实例相同代次不能混用。完整成功链路验证分支移动后 A 的树和 README 不变、子目录句柄、Partial/409/README 不确定状态与 Debug 脱敏。
 
@@ -26,6 +26,6 @@ Windows / Rust 1.98.1，本轮已执行：
 
 ## 集成与剩余
 
-实现期间 main 已合入 blob 服务 PR21；交付前同步并验证组合，具体 SHA、CI/review 和合并结果留 PR / delivery-state。PR16、PR20 未操作。
+实现期间 main 已合入 blob 服务 PR21；已同步 `880431d8b7bc471ccc69d4a375efd150567256df` 并通过 fmt、locked check/clippy/test/build 组合验证。具体 head、CI/review 和合并结果留 PR / delivery-state。PR16、PR20 未操作。
 
 后续 app 装配现有服务、UI 保留 browse context 与页面请求代次并在发布成功/错误前复查、接入 blob 正文、阅读器与业务缓存。私有内容保留政策、切账户的标签产品规则仍未在本任务决定。文档契约见 [仓库账户数据服务](../repository-data-service.md)。
