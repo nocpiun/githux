@@ -1,0 +1,13 @@
+# Development launch preparation for Windows.
+#
+# The runner makes the app-local Windows App SDK runtime ready beside the executable
+# before `cargo run` starts it, so a fresh worktree, `cargo clean`, `--release`,
+# `--target` and a custom `--target-dir` all work without a manual prepare step.
+#
+# Only `cargo run` uses this: `cargo build`, `check`, `clippy` and the cross-platform
+# matrix stay plain builds, and CI still stages the runtime in its own packaging step.
+# Caveat: a runner is not used when the project is invoked from outside the repository
+# (`--manifest-path`), because Cargo only reads `.cargo/config.toml` found from the
+# current directory upwards. See docs/windows-runtime.md.
+[target.'cfg(windows)']
+runner = ["./scripts/run-githux.cmd"]

@@ -22,7 +22,7 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 | Windows 外壳与基础交互 | 自定义标题栏、island、固定侧边栏与有界仓库组、本地导航搜索浮层、应用级基础标签已实现；拖动、双击最大化、贴靠与窗口按钮在本机真实窗口核验，见 [开发日志](devlog/2026-10-22-shell-layout.md)；Windows 原生 Tall 标题栏（系统绘制按钮、48px 顶栏）已由 PR #13 验收合并，见 [Tall 标题栏记录](devlog/2026-10-23-tall-caption.md)。中文 IME、多 DPI 跨屏与逐个窗口按钮验收仍待完成 |
 | Windows 字体 | 字体随 binary 注册、启动不再分配控制台；中文回退与 IME 尚未验收 |
 | CI 与交付流程 | [PR #1](https://github.com/nocpiun/githux/pull/1)、[PR #2](https://github.com/nocpiun/githux/pull/2) 已交付；PR #7 起代码检查在 Ubuntu 24.04 运行（fmt/check/clippy/test），四平台 Debug Build 与最终 `CI` 汇总 job 不变 |
-| 业务架构 | `workspace/auth/data/github/network/storage/content` 等仅预留职责，不能算已有账户、API、缓存或阅读器实现 |
+| 业务架构 | `auth/network/github/data/domain/diagnostics` 的 R2 服务切片已实现但 UI 未接入（见 [认证与网络](auth-and-network.md)）；`storage/content` 仍是边界说明；账户元数据落盘、缓存、私有内容政策与阅读器仍未实现 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用；派发 skill 和完整并行调度尚未产品化 |
 
 已有 CI 的分支规则是否启用，以仓库实际设置为准。路线图不替负责人修改规则。负责人已于 2026-10-22 解除首次试跑的单实现者限制，并明确按依赖、文件冲突、编译资源与审查积压安排并行；这不改变同一任务同一时刻只有一个有效写入者的要求。

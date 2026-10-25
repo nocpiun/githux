@@ -10,20 +10,23 @@
 | 首版开发顺序、依赖与验收讨论稿 | [开发路线图](roadmap.md) |
 | 模块职责、状态归属与实现提案 | [架构方案](architecture.md) |
 | 各类数据如何存储、刷新、失效 | [缓存策略](cache-strategy.md) |
+| PAT 认证、凭据存储、账户代次与可取消的 GitHub 读取服务 | [认证与网络](auth-and-network.md) |
 | 首版功能对应的 REST/GraphQL 接口、token 权限与限流边界 | [GitHub API 能力核验](github-api-capabilities.md) |
 | 派发、并行、审查循环与合并权限 | [Agent 工作流](agent-workflow.md) |
 | 实现和验证的共同要求 | [代码约定](code-standards.md) |
 | 实际教训 | [LESSONS.md](../LESSONS.md) |
 | 已做工作、证据与后续交接 | [开发日志](devlog/README.md) |
+| 审查、历史线程、CI 与超时恢复的完整流程图 | [PR 审查与等待流程](pr-review-flow.md) |
 | 等待审查的可执行步骤 | [githux-pr-review skill](../.agents/skills/githux-pr-review/SKILL.md) |
 | 建立任务 worktree、启动/恢复可见执行会话 | [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md) |
 
 ## 当前状态
 
-- Rust + GPUI + Ely 正式单 package 工程已建立。当前实现 R1 的外壳布局：Windows 自定义标题栏、固定侧边栏与有界仓库列表、island、Home 双列假数据、本地导航搜索浮层；运行及源码入口见 [README](../README.md)，实现与真实窗口验收状态见 [外壳布局开发日志](devlog/2026-10-22-shell-layout.md)。登录、网络、数据库与业务页面仍未实现，模块边界之外没有业务代码。
+- Rust + GPUI + Ely 正式单 package 工程已建立。当前实现 R1 的外壳布局：Windows 自定义标题栏、固定侧边栏与有界仓库列表、island、Home 双列假数据、本地导航搜索浮层、应用级基础标签（打开/复用/切换/关闭）；运行及源码入口见 [README](../README.md)，实现与真实窗口验收状态见 [外壳布局开发日志](devlog/2026-10-22-shell-layout.md) 与 [标签开发日志](devlog/2026-10-23-workspace-tabs.md)。业务页面与 UI 接入仍未实现；服务层实现见下一条。
+- R2 的首个服务切片已实现（`auth`/`network`/`github`/`data`/`domain`/`diagnostics`）：Classic PAT 身份验证（`GET /user`）、Windows Credential Manager 存取、账户授权代次与旧响应丢弃、`GET /user/repos` 完整 `Link` 分页与部分结果、可取消的后台 Tokio 执行器。它是真实服务基础，UI 尚未接入，也没有账户元数据落盘、SQLite、缓存或 H1/H7 写操作；接口、验证与未覆盖项见 [认证与网络](auth-and-network.md) 和 [本轮开发日志](devlog/2026-10-23-pat-data-service.md)。
 - `githux-pr-review` 的等待脚本有离线测试，跨平台 CI 配置已建立。具体PR的检查、审查和合并状态以GitHub记录为准，不由本地测试或规范文档推断。
 - `githux-agent-dispatch` 提供 create/start/status/resume，生成独立 worktree 和任务上下文，在可见 Windows CMD 中启动配置的交互 CLI。离线测试以及本机真实启动、键盘接管、正常退出与同会话恢复已通过，见 [验证记录](devlog/2026-10-21-agent-dispatch.md)。手工 attach 不在单写入者锁保证内；多实现者并行集成仍待验证。
-- 模块拆分、认证类型、具体网络/数据库库和缓存参数中的提案仍需确认，不因出现在这里而自动定案。
+- 模块拆分、认证类型、具体网络/数据库库和缓存参数中的提案仍需确认，不因出现在这里而自动定案。R2 切片已选定 reqwest + Tokio 与 Classic PAT 的类型化错误契约，见 [认证与网络](auth-and-network.md)；数据库、缓存参数与私有内容保留政策仍未定。
 
 ## 文档怎样维护
 

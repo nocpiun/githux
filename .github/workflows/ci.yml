@@ -159,6 +159,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Starts the runner fixture in a temporary directory: proves the Cargo runner and
+      # the preparation logic still work on a clean Windows runner before packaging.
+      - name: Test Windows runtime preparation and Cargo runner
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/tests/windows-runtime.test.ps1
+
       - name: Build executable
         run: cargo build --locked --target ${{ matrix.target }}
 
