@@ -76,10 +76,21 @@ impl BackgroundExecutorHandle {
         // counter to fall back to zero, so this task is either drained or the
         // runtime outlives it.
         self.in_flight.fetch_add(1, Ordering::Release);
-        let in_flight = self.in_flight.clone();
+
+        // Build the guard *before* spawning and move it into the future. If the
+        // task is aborted before the runtime ever polls it, the future is
+        // dropped unpolled; because the guard is part of the future's captured
+        // state, it is dropped too and the counter is decremented. Constructing
+        // it inside the async block would leak the increment in exactly that
+        // case, making shutdown wait out the whole grace period for work that
+        // never ran.
+        let guard = InFlightGuard {
+            in_flight: self.in_flight.clone(),
+        };
         let handle = self.handle.spawn(async move {
-            // Decrement even if the task panics or is cancelled.
-            let _guard = InFlightGuard { in_flight };
+            // Hold the guard for the lifetime of the task; dropping it (on
+            // completion, panic or abort) decrements the counter.
+            let _guard = guard;
             future.await
         });
         Ok(handle)
@@ -519,6 +530,54 @@ mod tests {
         assert!(
             matches!(rejected, Err(SpawnError)),
             "spawn after shutdown must be rejected"
+        );
+    }
+
+    /// Regression: aborting a tracked task before the runtime ever polls it must
+    /// still release its in-flight slot. Otherwise the counter stays elevated and
+    /// shutdown waits out the full grace period for work that never ran.
+    #[test]
+    fn aborting_an_unpolled_task_releases_its_in_flight_slot() {
+        let mut exec = BackgroundExecutor::new(1);
+        // A long grace period: if the counter leaks, shutdown would block here.
+        exec.set_grace(Duration::from_secs(30));
+        let handle = exec.handle();
+
+        let task = handle
+            .spawn(async {
+                // Never reached: the task is aborted before being polled.
+                std::future::pending::<()>().await;
+                0
+            })
+            .expect("spawn accepted");
+        assert_eq!(exec.in_flight(), 1, "spawn counts the task");
+
+        // Abort immediately, before the runtime polls the future.
+        task.abort();
+
+        // The slot must be released. Poll briefly because abort is asynchronous:
+        // the runtime drops the future, which drops the captured guard.
+        let mut released = false;
+        for _ in 0..200 {
+            if exec.in_flight() == 0 {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            released,
+            "an aborted, never-polled task must release its in-flight slot (still {})",
+            exec.in_flight()
+        );
+
+        // And shutdown must therefore return promptly, not wait 30s.
+        let started = std::time::Instant::now();
+        exec.shutdown();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "shutdown waited {}s for a task that never ran",
+            started.elapsed().as_secs()
         );
     }
 

@@ -36,7 +36,7 @@
 cargo fmt --all -- --check                  # 通过
 cargo check --locked --all-targets          # 通过
 cargo clippy --locked --all-targets -- -D warnings   # 通过，无警告
-cargo test --locked                         # 137 passed / 0 failed（110 → 122 → 125 → 133 → 137）
+cargo test --locked                         # 138 passed / 0 failed（110 → 122 → 125 → 133 → 137 → 138）
 cargo build --locked                        # 通过
 git diff --check                            # 通过
 ```
@@ -103,6 +103,20 @@ Codex 首轮审查在 `44e0559` 上给出 7 条意见，全部成立、全部属
 | `HttpRequest` 的 Debug 泄露凭据 | 派生 `Debug` 会把 `Authorization: Bearer <PAT>` 原样打印，绕过 `Pat` 的脱敏 | 手写 `Debug`，脱敏 Authorization / Proxy-Authorization / Cookie |
 
 新增 5 个回归测试。另外发现并修掉一个测试基础设施缺陷：`MockTransport` 在已取消时仍会消费一个脚本响应，导致 `cancelling_one_read_does_not_affect_another` 在并行负载下偶发失败；改为“已取消则不消耗脚本响应 + `select! biased`”，与真实 transport 的行为一致，之后连续 8 次全量运行稳定通过。
+
+## 第五轮审查的 1 个新缺陷与修复
+
+`6238329` 之后，Codex 在 `c3d097b` 的审查线程上追加了一条新 P2 意见（02:23:04），该代码在 `6238329` 中未变，因此仍然成立：
+
+| 意见 | 实际缺陷 | 修复 |
+| --- | --- | --- |
+| P2 未轮询即 abort 会泄漏 in-flight 计数 | `InFlightGuard` 写在 async block 内部。任务在 runtime 首次轮询前被 abort 时，future 被未轮询地丢弃，守卫从未构造，但计数已经 `+1`；`in_flight()` 永久偏高，关闭时会为一个从未运行的任务白等整个宽限期（默认 5s） | 守卫改为在 `spawn` 之前构造并 move 进 future，未轮询丢弃时同样析构并回落计数 |
+
+回归测试 `aborting_an_unpolled_task_releases_its_in_flight_slot` 把宽限期设为 30s：去掉修复时会在 32s 后失败（已反向验证），保留修复时约 20ms 通过。
+
+### 关于“审查已通过”的判断
+
+本轮我先核对了证据而不是直接采信：审查摘要评论当时仍写着 `has_unresolved_findings: true`，`6238329` 上没有新的 review 记录，但 `c3d097b` 的审查线程在 02:23 追加了上述意见，且它指向的代码在当前 head 仍然存在。其余 5 条旧意见是 `isOutdated=true` 的历史项。因此按“当前 head 的对应审查已闭环”这个门槛，这条必须修完才算通过。
 
 ## 验证边界（不得省略）
 

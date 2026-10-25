@@ -78,6 +78,7 @@ executor.shutdown(); // 停止接收、宽限期内排空、否则取消并 join
 - 关闭：`shutdown()` 先拒绝新工作，然后**继续驱动 runtime** 直到被跟踪的任务全部完成或宽限期（默认 5s，可用 `set_grace` 覆盖）到期，之后才开始 runtime 关闭。这一步很关键：直接调用 `Runtime::shutdown_timeout` 并不是宽限期——Tokio 文档明确说明 shutdown 开始后，spawned task 只在让出之前继续运行、一旦 yield 就被丢弃，所以先 `shutdown_timeout` 会立刻杀掉在途请求而不是给它收尾机会。
 - 只有经 `BackgroundExecutorHandle::spawn` 派发的任务会被计数并纳入排空；`raw_handle()` / `handle.raw()` 提供未经跟踪的原始 `Handle` 给不得不自行 spawn 的代码，这类任务不享受宽限。
 - `spawn` 在关闭开始后返回 `SpawnError`。接受标志与 owner 共享，因此存活到关闭之后的 handle 不会再把任务投递给正在销毁的 runtime（`spawn_is_rejected_after_shutdown_begins`）。
+- 计数守卫在 `spawn` **之前**构造并移入 future。若任务在 runtime 首次轮询前就被 abort，future 被未轮询地丢弃，守卫随之析构、计数回落；把守卫写在 async block 内部会在这种情况泄漏计数，使关闭为一个从未运行的任务白等整个宽限期（`aborting_an_unpolled_task_releases_its_in_flight_slot`）。
 - **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 - **自线程 drop 安全**：最后一个 `Arc<BackgroundExecutor>` 可能由网络线程上刚结束的任务释放。若此时 `Drop` 直接 `join()` 自己会死锁。网络线程用 thread-local 标记自己的身份，`Drop` 检测到“在当前线程上”时只发关闭信号并分离 join handle，不 join 自身。
 
@@ -266,6 +267,7 @@ git diff --check
 | body 阶段超时保持类型化并报告配置时长 | `network::transport::tests::body_phase_timeout_is_typed_and_reports_the_configured_duration` | 1s 配置 → `Timeout{seconds:1}` |
 | 排队等许可时可被取消 | `data::tests::cancelling_a_queued_read_returns_without_waiting_for_a_permit` | 单许可 executor |
 | 关闭后拒绝 spawn | `network::executor::tests::spawn_is_rejected_after_shutdown_begins` | 存活 handle |
+| 未轮询即 abort 也释放计数 | `network::executor::tests::aborting_an_unpolled_task_releases_its_in_flight_slot` | 去掉修复会在 32s 后失败 |
 | 请求 Debug 脱敏凭据 | `network::transport::tests::request_debug_redacts_credentials` | Authorization/Cookie |
 | 多账户与代次 | `auth::tests` | |
 | 最小 scope 建议 | `auth::capability::tests` | 不含管理 scope |
