@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub mod account;
+pub mod blob;
 pub mod error;
 pub mod repo;
 pub mod repository;

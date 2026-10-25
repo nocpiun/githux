@@ -2334,6 +2334,7 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 name = "githux"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs 7.0.0",
  "ely-gpui-component",
  "gpui-pre",
