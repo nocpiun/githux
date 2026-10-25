@@ -2,6 +2,8 @@
 //! Git object handles continue to enforce the snapshot relationships from PR19.
 use super::RepoService;
 use crate::auth::{AuthContext, token::Pat};
+use crate::content::{PreparedContent, prepare_content};
+use crate::domain::blob::{BlobIdentity, BlobLimits, BlobRead};
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
     BranchesOutcome, DirectoryTree, ReadmeDiscovery, RepoSnapshot, RepositoryDetails,
@@ -163,6 +165,31 @@ impl RepoService {
     }
 }
 
+/// Test-only evidence about the preparation boundary: which thread ran it and
+/// a controllable pause between the completed read and publication.
+#[cfg(test)]
+pub(super) mod test_hooks {
+    use std::sync::{Mutex, mpsc};
+    static LAST: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+    static GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+    pub fn before_prepare() {
+        *LAST.lock().unwrap() = Some(std::thread::current().id());
+        if let Some((entered, resume)) = GATE.lock().unwrap().take() {
+            let _ = entered.send(());
+            let _ = resume.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    }
+    pub fn last_prepare_thread() -> Option<std::thread::ThreadId> {
+        *LAST.lock().unwrap()
+    }
+    pub fn pause_next_prepare() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, ready) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        *GATE.lock().unwrap() = Some((entered, resume));
+        (ready, release)
+    }
+}
+
 /// A constrained browse, never a PAT holder. Clone/start separate sessions for
 /// independent reads; cancellation belongs to each method call, not a session.
 #[derive(Clone)]
@@ -274,5 +301,54 @@ impl RepositorySession {
             github::discover_readme(&self.service.client, &pat, snapshot, limits, cancel).await
         })
         .await
+    }
+
+    /// Raw fixed-SHA bytes. An already-known oversized blob is a local
+    /// `BlobBody::TooLarge` result, but it still passes every context gate.
+    pub async fn blob(
+        &self,
+        identity: &BlobIdentity,
+        limits: &BlobLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<BlobRead>, RepositoryError> {
+        self.read(cancel, async move |pat, cancel| {
+            github::blob::fetch_blob(&self.service.client, &pat, identity, limits, cancel).await
+        })
+        .await
+    }
+
+    /// Read and prepare in one call. Preparation is CPU work on the bounded
+    /// executor's blocking pool, never on the calling (possibly GUI) thread.
+    pub async fn content(
+        &self,
+        identity: &BlobIdentity,
+        limits: &BlobLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<PreparedContent>, RepositoryError> {
+        let budget = limits.decoded_bytes;
+        let blob = self.blob(identity, limits, cancel.clone()).await?;
+        let service = self.service.clone();
+        let context = self.context.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            test_hooks::before_prepare();
+            prepare_content(blob.value, budget)
+        });
+        let prepared = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(GitHubError::Cancelled.into()),
+            prepared = prepared => prepared.map_err(|_| RepositoryError::GitHub(
+                GitHubError::CredentialStore { message: "content preparation worker closed".into() },
+            ))?,
+        };
+        // Preparation is another await boundary: a switch, replacement or
+        // close during it discards both the text and the identity snapshot.
+        if !service.is_current(&context) {
+            return Err(GitHubError::StaleContext.into());
+        }
+        Ok(Scoped {
+            context,
+            value: prepared,
+        })
     }
 }
