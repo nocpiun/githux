@@ -58,3 +58,10 @@
 - **原因**：为“两个并发 replace 不会让存储与注册表不一致”写的第一个测试用 `tokio::join!` 跑在 current-thread runtime 上，两个 future 实际上不会在阻塞的临界区内交错；把提交锁**删掉**测试依然通过，等于没有验证任何东西。改成 `flavor = "multi_thread"` + 双 `spawn` + 记录 `save` 并发数的 store 后，删锁稳定失败、留锁稳定通过。
 - **证据**：2026-10-23 `pat-data-service` 第二轮审查修复中的实际反复；测试 `data::tests::overlapping_replacements_are_serialized`。为此在 `[dev-dependencies]` 增加 `tokio` 的 `rt-multi-thread`，生产 runtime 保持 current-thread。
 - **范围**：锁、原子状态机、单写入者约束、请求合并/去重等一切“同时发生才出错”的逻辑。写完测试要反向验证：去掉修复后测试必须失败。
+
+## L009：审查完成、线程关闭和可合并必须分别判断
+
+- **规则**：本轮 clean 与历史线程 resolved 是不同维度；目标分支实时 HEAD 要读 ref，不把 PR base.sha 或 CI 元数据当作实际测试基线。实现见 [完整流程](docs/pr-review-flow.md)。
+- **原因**：PR #14 的本轮 clean 收据与历史未解决线程同时存在，旧脚本继续等不存在的新行内评论；PR #17 只读核验又发现 PR base.sha 仍为 a57e56c，而 main ref 已到 9125427。
+- **证据**：[PR #14 收据](https://github.com/nocpiun/githux/pull/14#issuecomment-6392497811)、[PR #17 的旧 CI](https://github.com/nocpiun/githux/actions/runs/40158048254)；真实 checkout merge 的 parents 与目标 ref 核验及回归记录见 [开发日志](docs/devlog/2026-10-25-review-timeout-retry.md)。
+- **范围**：审查等待器和并行 PR 集成；不能用更多轮询、重触发或关闭所有线程掩盖维度混淆。
