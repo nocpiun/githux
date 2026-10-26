@@ -99,6 +99,9 @@ pub struct Shell {
     sidebar_keys: gpui::Subscription,
     sidebar_bounds: gpui::Subscription,
     sidebar_more_focus: FocusHandle,
+    /// The collapse/expand toggle's own focus. Keyboard activation must keep focus here so a
+    /// second Enter/Space reverses the mode instead of dropping into the shell root.
+    sidebar_toggle_focus: FocusHandle,
     /// Focus while the collapsed More menu is open. A dedicated handle (not the trigger's) so
     /// Escape, arrows and Enter reach the panel, not the row behind it.
     sidebar_menu_focus: FocusHandle,
@@ -193,6 +196,7 @@ impl Shell {
             sidebar_keys,
             sidebar_bounds,
             sidebar_more_focus: cx.focus_handle(),
+            sidebar_toggle_focus: cx.focus_handle(),
             sidebar_menu_focus: cx.focus_handle(),
             sidebar_menu: false,
             sidebar_menu_cursor: 0,

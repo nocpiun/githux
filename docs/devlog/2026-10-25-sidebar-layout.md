@@ -101,3 +101,7 @@ Codex 针对 `6827ce4`（P2）指出：More 菜单打开时 Tab 可把焦点移�
 ### 审查修复：关闭菜单后焦点回到可操作按钮
 
 Codex 针对 `9adf9b0`（P2）指出：Esc 关闭 More 后焦点落在布局 wrapper，而 tab stop 与点击在子按钮上，Enter/Space 无法重开、也不显示按钮焦点样式。已将 `sidebar_more_focus` 挂到实际按钮（`sidebar-more-button`）上，关闭时回到可操作的 More；新增 `escape_returns_focus_to_the_more_button_and_enter_reopen` 覆盖 Esc 后立刻 Enter 重开。全量 375 tests 与 clippy 通过。
+
+### 审查修复：键盘激活后保留 toggle 焦点
+
+Codex 针对 `bb28fb6`（P2）指出：键盘 Tab 到收起/展开按钮并按 Enter/Space 后，代码无条件把焦点转给 shell root，再按 Enter/Space 无法反向切换。已修复：toggle 使用自己的 `sidebar_toggle_focus` 并 `track_focus`，激活后焦点留在同一个可操作按钮上。新增 `keyboard_toggle_keeps_focus_and_reverses_immediately`（Enter 折叠→焦点检查→Enter 展开→Space 再折叠）。全量 376 tests、clippy、build 通过。

@@ -920,3 +920,25 @@ fn escape_returns_focus_to_the_more_button_and_enter_reopens(cx: &mut TestAppCon
         "Enter must reopen the menu from the restored button"
     );
 }
+
+#[gpui::test]
+fn keyboard_toggle_keeps_focus_and_reverses_immediately(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let toggle = view.read_with(cx, |s, _| s.sidebar_toggle_focus.clone());
+    cx.update(|window, cx| window.focus(&toggle, cx));
+    cx.run_until_parked();
+    press("enter", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    cx.update(|window, cx| {
+        assert_eq!(
+            window.focused(cx).as_ref(),
+            Some(&toggle),
+            "focus stays on the same actionable toggle"
+        );
+    });
+    // A second activation reverses the mode without walking the tab order again.
+    press("enter", cx);
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    press("space", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+}

@@ -110,9 +110,13 @@ impl super::Shell {
                     },
                 )
             });
+        // The toggle owns its focus handle across mode changes: activating it by keyboard must
+        // leave focus on the same actionable button.
+        let toggle_focus = self.sidebar_toggle_focus.clone();
         let button = div()
             .id("sidebar-toggle")
             .debug_selector(|| "sidebar-toggle".to_string())
+            .track_focus(&toggle_focus)
             .absolute()
             // Centre on the island's left border line, and on the island's own height (which
             // stops at the bottom inset), so both follow one geometry source through animation,
@@ -146,7 +150,7 @@ impl super::Shell {
                 cx.stop_propagation();
             })
             .on_click(cx.listener(|shell, _, window, cx| {
-                window.focus(&shell.root_focus, cx);
+                window.focus(&shell.sidebar_toggle_focus, cx);
                 // A mode change drops any open footer overlay instead of leaving it floating.
                 shell.close_sidebar_menu(window, cx);
                 let reduced = cx.theme().reduced_motion || cx.reduce_motion();
