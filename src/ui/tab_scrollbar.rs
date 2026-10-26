@@ -104,6 +104,11 @@ impl Fade {
         self.painted
     }
 
+    /// The opacity painted last frame, for assertions that avoid forcing it.
+    pub fn painted(&self) -> f32 {
+        self.painted
+    }
+
     pub fn is_animating(&self) -> bool {
         self.run.is_some()
     }

@@ -51,7 +51,9 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 
 **已实现并有测试证据：** 源码 gutter 右侧改为 6px 真实布局 padding，行文本与选择命中仍使用同一 `TextLayout`（`gutter_padding_keeps_selection_coordinates_aligned`，拖选后 Ctrl+C 内容一致）；源码纵/横滚动条绑定 `UniformListScrollHandle.base_handle`，范围来自列表 `max_offset()`，hover 显示、滚轮同步（`source_scrollbars_follow_the_real_list_and_fade_out`）。抽取 `src/ui/scrollbar.rs` 共享 3px/透明度/140ms `Fade`，已合并的 `tab_scrollbar.rs` 保持原实现与参数，原有标签条用例全部通过；`ui/mod.rs` 仅增加模块声明。
 
-**未通过、未宣称解决：** 阅读器滚动条 thumb 拖动在 GPUI 测试平台上没有移动真实偏移（能进入按下，但 `on_drag_move` 未执行），同一共用实现在标签条用例中可用。已停止继续试探性改法，保留失败证据，拖动、淡出时序和双轴角落命中交负责人真实窗口验收。
+**审查修复：** 已恢复 `Fade` 动画期间的 `window.request_animation_frame()`，修复负责人视角下“进入/离开后停在同一透明度”的问题。
+
+**未通过、未宣称解决：** 阅读器滚动条 thumb 拖动在 GPUI 测试平台上没有移动真实偏移（能进入按下，但 `on_drag_move` 未执行），同一共用实现在标签条用例中可用；真实 hover 淡入的测试断言也没有通过。已停止继续试探性改法并移除强制 `snap` 的替代断言，保留范围/滚轮/显示证据，拖动、淡入淡出时序和双轴角落命中交负责人真实窗口验收。
 
 **待裁决：** Markdown inline code 字体/圆角/padding，以及 fenced-code 语言标签位置，都需要 Ely 文档预览暴露真实布局或代码块绘制钩子；现有公开 API 不足。已记录 `githux:arbitration-required:v1`，`arbitration_ever_required=true`/`merge_owner=coordinator`，未改 checkout 或 vendor。
 

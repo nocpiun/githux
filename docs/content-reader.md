@@ -70,7 +70,7 @@ view.update(cx, |view, _| {
 
 `src/ui/scrollbar.rs` 只抽取外观与 `Fade`，`src/ui/tab_scrollbar.rs` 保留已验收的标签条实现和参数；`ui/mod.rs` 仅新增 `reader`/`scrollbar` 模块声明，未改 Shell、侧栏、工作区导航或标签布局。
 
-真实窗口反馈第一项要求“阅读区有可见滚动条”。已实现：源码视图在 hover 时显示纵向/横向细条，条绑定真实列表句柄，范围与滚轮同步（测试 `source_scrollbars_follow_the_real_list_and_fade_out`）。**拇指拖动在测试平台上未通过**：按下能建立拖动，但移动监听未收到，偏移不变；同一共用拖动实现已在标签条测试中通过。因此拖动、淡出时序和角落命中**仍待真实窗口验收**，本轮不宣称已解决，也没有移除失败的验证记录。
+真实窗口反馈第一项要求“阅读区有可见滚动条”。已实现：源码视图绘制纵向/横向细条，条绑定真实列表句柄，范围与滚轮同步（测试 `source_scrollbars_follow_the_real_list_and_fade_out`），并在 `Fade` 仍在动画时请求下一帧（修复审查指出的“静止后停在半透明”问题）。**拇指拖动与真实 hover 淡入在测试平台上未通过**：按下能建立拖动，但移动监听未收到、偏移不变；同一共用拖动实现已在标签条测试中通过。因此拖动、淡入淡出时序和角落命中**仍待真实窗口验收**，本轮不宣称已解决，也没有用强制 `snap` 的测试替代它。
 
 负责人反馈的 Markdown inline code、fenced-code 语言标签位置无法通过当前 Ely 公开接口完成：`MarkdownDocument` 不暴露真实 `ListState`，不转发 `MarkdownRenderer` 已有的代码块绘制回调，inline code 仅有 `HighlightStyle`（无独立字体、圆角、padding 或布局位置）。已按工作流登记待裁决（PR #27 的 `githux:arbitration-required:v1`），`arbitration_ever_required=true`、`merge_owner=coordinator`；在裁决前不改本机 Cargo checkout、不 vendor、不升级依赖，也不声称这三项已完成。
 

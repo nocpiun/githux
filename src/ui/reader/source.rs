@@ -141,6 +141,11 @@ impl SourceView {
         self.fade.opacity(now)
     }
 
+    /// The opacity the last frame painted through the real hover path.
+    pub fn scrollbar_opacity_at_now(&self) -> f32 {
+        self.fade.painted()
+    }
+
     #[cfg(test)]
     pub fn pin_scrollbar_clock(&mut self, ms: u64) {
         self.pinned_clock = Some(ms);
@@ -336,6 +341,9 @@ impl Render for SourceView {
             self.fade.set_dragging(false, self.now_ms());
         }
         let opacity = self.fade.opacity(self.now_ms());
+        if self.fade.is_animating() {
+            window.request_animation_frame();
+        }
         let handle = self.scroll.0.borrow().base_handle.clone();
         let reach = handle.max_offset();
         if reach != self.last_reach {
