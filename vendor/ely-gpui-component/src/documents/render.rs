@@ -104,6 +104,7 @@ pub(crate) struct Hooks<'a> {
     pub cell: Option<&'a OpenCell>,
     /// Reader typography with one continuous shaped paragraph and selection.
     pub reader_inline: bool,
+    pub reader_only: bool,
 }
 
 /// Headings and strong text share one weight.
@@ -361,6 +362,7 @@ impl Draw<'_> {
                     alt: alt.clone(),
                     url: url.clone(),
                     base: self.hooks.base.clone(),
+                    allow_filesystem: !self.hooks.reader_only,
                 });
                 let drawn = match link.clone() {
                     None => picture.into_any_element(),
@@ -446,6 +448,7 @@ impl RenderOnce for MarkdownRenderer {
                 on_point: &None,
                 cell: None,
                 reader_inline: false,
+                reader_only: false,
             },
             next: std::cell::Cell::new(0),
             sections: &self.sections,

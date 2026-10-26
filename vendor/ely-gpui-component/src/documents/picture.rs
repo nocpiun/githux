@@ -18,7 +18,7 @@ use crate::{
 
 /// Where a picture's bytes come from.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Origin {
+pub enum Origin {
     File(PathBuf),
     /// Bytes inline in the address, and their type.
     Data(ImageFormat, Arc<[u8]>),
@@ -53,7 +53,7 @@ fn path(written: &str) -> Result<PathBuf, SharedString> {
 }
 
 /// Where `url` points, read from the folder `base`.
-pub(crate) fn origin(url: &str, base: Option<&Path>) -> Origin {
+pub fn origin(url: &str, base: Option<&Path>) -> Origin {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") || url.starts_with("//") {
@@ -145,6 +145,7 @@ pub(crate) struct Picture {
     pub url: String,
     /// The folder relative addresses start from.
     pub base: Option<Arc<Path>>,
+    pub allow_filesystem: bool,
 }
 
 impl RenderOnce for Picture {
@@ -154,11 +155,11 @@ impl RenderOnce for Picture {
 }
 
 fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
-    let Picture { id, alt, url, base } = shown;
+    let Picture { id, alt, url, base, allow_filesystem } = shown;
     let (alt, url) = (alt.as_str(), url.as_str());
     let colors = cx.theme().colors.clone();
     let (loaded, svg) = match origin(url, base.as_deref()) {
-        Origin::File(path) => {
+        Origin::File(path) if allow_filesystem => {
             let svg = path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
@@ -168,6 +169,7 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
                 .map(|loaded| loaded.map_err(|error| SharedString::from(error.to_string())));
             (loaded, svg)
         }
+        Origin::File(_) => return note(alt, "filesystem pictures are disabled".into(), colors.fg_subtle, cx),
         Origin::Data(format, bytes) => {
             let svg = format == ImageFormat::Svg;
             let image = |loaded: &Result<Arc<RenderImage>, _>| loaded.as_ref().ok().cloned();
