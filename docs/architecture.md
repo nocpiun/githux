@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-10-23。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package；UI 侧仍是 R1 的外壳布局（自定义标题栏、固定侧边栏、island、本地导航与搜索浮层），没有登录页面、账户切换界面或业务页面。R2 的服务切片已实现但**尚未接入 UI**：认证、凭据、账户代次与两个 GitHub 读取接口真实存在，具体接口与边界见 [认证与网络](auth-and-network.md)。数据库、缓存与私有内容保留政策仍未定。
+更新：2026-10-23。Rust + GPUI + Ely、PAT 登录、多账户保存但单账户活动、离线阅读已确认。正式工程采用单 Cargo package；UI 侧仍是 R1 的外壳布局（自定义标题栏、固定侧边栏、island、应用级基础标签、本地导航与搜索浮层），没有登录页面、账户切换界面或业务页面。R2 的服务切片已实现但**尚未接入 UI**：认证、凭据、账户代次与两个 GitHub 读取接口真实存在，具体接口与边界见 [认证与网络](auth-and-network.md)。数据库、缓存与私有内容保留政策仍未定。
 
 ## 建议的职责划分
 
@@ -18,7 +18,7 @@
 
 工作区是某个窗口内组织页面会话的状态容器，不是本地 Git 工作目录。应用字体/主题可共享；活动账户拥有业务请求和缓存范围；工作区拥有标签顺序和当前标签；每个页面会话拥有自己的分支、文件、筛选、滚动与焦点。
 
-`TabId` 标识会话，`ResourceKey` 标识共享内容；同一资源可以被多个会话读取而保留不同位置。是否允许用户主动创建重复资源标签仍属产品选择。
+`TabId` 标识会话（单调递增、关闭后不复用），`ResourceKey` 标识共享内容、仍属后续任务。当前产品规则不允许重复资源标签：`Route::key()` 折叠 GitHub 名称大小写，同一资源只保留一个会话；每个会话拥有自己的分支、文件、筛选、滚动与焦点。
 
 ## 请求与状态流转
 
@@ -61,12 +61,12 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 
 ## 已建立的工程边界
 
-[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，并在启动时绑定外壳快捷键；[`workspace::Route`](../src/workspace/mod.rs) 是唯一地址模型，[`ui::Shell`](../src/ui/mod.rs) 持有当前路由、两条滚动句柄与搜索浮层状态，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。
+[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，并在启动时绑定外壳快捷键；[`workspace::Route`](../src/workspace/mod.rs) 是唯一地址模型，[`workspace::Workspace`](../src/workspace/mod.rs) 持有会话集合与活动标签，[`ui::Shell`](../src/ui/mod.rs) 持有工作区、侧栏滚动句柄与搜索浮层状态，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。
 
-外壳按职责拆开，避免所有布局挤在一个视图里：`src/ui/chrome.rs` 画标题栏与搜索入口，`src/ui/sidebar.rs` 画固定列与有界的仓库组，`src/ui/page.rs` 画岛内页面，`src/ui/palette.rs` 是本地导航浮层，`src/ui/geometry.rs` 集中放间距、宽度与圆角，`src/ui/fixtures.rs` 是确定性的本地面板数据。标题栏在所有平台绘制同一条品牌 + 搜索入口，只有 Windows 的三个窗口按钮由 `cfg!(target_os = "windows")` 控制；已确认行为（搜索入口固定在标题栏）不能挂在平台分支上。窗口拖动、双击最大化和边缘缩放使用 GPUI 的 `WindowControlArea` / `start_window_move`，由平台上已有的非客户区命中测试驱动，没有新增平台补丁。
+外壳按职责拆开，避免所有布局挤在一个视图里：`src/ui/chrome.rs` 画标题栏与搜索入口，`src/ui/sidebar.rs` 画固定列与有界的仓库组，`src/ui/page.rs` 画岛内页面，`src/ui/tabs.rs` 画应用级标签条，`src/ui/palette.rs` 是本地导航浮层，`src/ui/geometry.rs` 集中放间距、宽度与圆角，`src/ui/fixtures.rs` 是确定性的本地面板数据。标题栏在所有平台绘制同一条品牌 + 搜索入口，只有 Windows 的三个窗口按钮由 `cfg!(target_os = "windows")` 控制；已确认行为（搜索入口固定在标题栏）不能挂在平台分支上。窗口拖动、双击最大化和边缘缩放使用 GPUI 的 `WindowControlArea` / `start_window_move`，由平台上已有的非客户区命中测试驱动，没有新增平台补丁。
 
 `storage/content` 仍是边界说明，无业务实现。`domain/auth/network/github/data/diagnostics` 已有本切片的真实实现（见 [认证与网络](auth-and-network.md)），但**UI 与 app 入口尚未调用**，binary 里这些模块暂时是未使用代码，各自带一个写明原因的模块级 `dead_code` 允许，不是 crate 级屏蔽；接入 UI 后应移除。HTTP 与运行时已选定 `reqwest` + `tokio`（理由见同文）；数据库仍未选择。现有依赖中曾出现的相关库是框架传递依赖，不作为采用依据。
 
-本轮状态归属：窗口只有一个活动页，`Workspace` 只保存当前 `Route`；`TabId`、页面会话集合与各自的分支/文件/滚动/焦点状态仍属于下一份 R1 任务。`Shell` 的滚动、浮层与焦点是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。
+本轮状态归属：窗口持有 `workspace::Workspace` 的有序 `Session` 集合与唯一活动标签；`Workspace::open` 按 `Route::key()` 打开或激活，`close` 选择邻居并在关闭最后一个标签时新建 Home，打开数量不设上限。每个 `Session` 拥有真实的 `ScrollHandle`、页面 `FocusHandle`、标签条 `FocusHandle` 与仓库会话选择（branch/file，R3 阅读器填充）；关闭会话即释放这些状态。标签条自身的横向偏移是 `Shell` 的视图局部状态（一个 `ScrollHandle`），由 GPUI 的横向溢出、`src/ui/tab_scrollbar.rs` 的细滚动条（自带 hover 淡入淡出状态，不改共享主题）、滚轮、中键关闭与拖拽排序驱动，与页面滚动、侧栏滚动互不影响。拖拽只是按稳定 `TabId` 移动 `Session` 在集合中的位置（`Workspace::reorder`），不关闭、不重建会话，也不改变活动标签；落地槽位由滚动视口的实际偏移与宽度算出，工具栏在视口之外，因此不可能是投放目标。`Shell` 的侧栏滚动、浮层与根焦点同样是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。账户切换时如何处理标签仍未决定。
 
 GPUI 基线为 `gpui-pre` / `gpui-pre-platform` 0.3.8（`font-kit`），Ely 固定 Git revision `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不引用原型 path 或共享 target。当前使用未打补丁的上游；以后接入输入/只读编辑器时，先验证原型 IME/readonly 问题是否仍可重现，再决定上游升级或最小补丁。搜索浮层没有直接复用 Ely 的 `CommandPalette`：后者在任何 Enter 上运行高亮行，而输入法候选确认也可能是 Enter，因此浮层自绘卡片并在按键绑定前拦截按键、检查查询框的 marked 区间。构建命令见 [README](../README.md)，真实验收证据见 [本轮开发日志](devlog/2026-10-22-shell-layout.md)。

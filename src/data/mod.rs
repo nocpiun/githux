@@ -33,6 +33,8 @@ mod account_tests;
 mod accounts;
 pub mod repository;
 #[cfg(test)]
+mod repository_content_tests;
+#[cfg(test)]
 mod repository_tests;
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
