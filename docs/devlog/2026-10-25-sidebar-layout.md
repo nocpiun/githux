@@ -105,3 +105,7 @@ Codex 针对 `9adf9b0`（P2）指出：Esc 关闭 More 后焦点落在布局 wra
 ### 审查修复：键盘激活后保留 toggle 焦点
 
 Codex 针对 `bb28fb6`（P2）指出：键盘 Tab 到收起/展开按钮并按 Enter/Space 后，代码无条件把焦点转给 shell root，再按 Enter/Space 无法反向切换。已修复：toggle 使用自己的 `sidebar_toggle_focus` 并 `track_focus`，激活后焦点留在同一个可操作按钮上。新增 `keyboard_toggle_keeps_focus_and_reverses_immediately`（Enter 折叠→焦点检查→Enter 展开→Space 再折叠）。全量 376 tests、clippy、build 通过。
+
+### 审查修复：拖动结束后按真实 hover 重置 sash 目标
+
+Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` 被清掉但 sash 目标仍为 1，导致高亮常驻。已修复：`SidebarState::end_resize` 统一结束/取消拖动，并根据指针是否仍在热区（新增的 `geometry::sidebar_resize_band`，与绘制共用几何）重新计算目标；释放、out-of-band 释放、Esc 与失焦都走该路径。新增 `releasing_the_drag_outside_the_band_clears_the_sash_target` 验证带外释放后淡出归零。全量 377 tests 与 clippy 通过。

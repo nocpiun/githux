@@ -118,3 +118,15 @@ pub const TAB_TOOLBAR_WIDTH: f32 = TAB_HEIGHT;
 
 /// How long the strip's scrollbar takes to fade in or out.
 pub const TAB_SCROLLBAR_FADE_MS: u64 = 140;
+
+/// The resize hit band's box in the shell body: `width` is the presented sidebar width and
+/// `body_height` the full body height. The band shares this with the rendered hit target.
+pub fn sidebar_resize_band(width: f32, body_height: f32) -> gpui::Bounds<gpui::Pixels> {
+    gpui::Bounds::new(
+        gpui::point(gpui::px(width), gpui::Pixels::ZERO),
+        gpui::size(
+            gpui::px(SIDEBAR_RESIZE_HIT_WIDTH),
+            gpui::px((body_height - SIDEBAR_PADDING).max(0.0)),
+        ),
+    )
+}

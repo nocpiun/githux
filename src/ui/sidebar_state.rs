@@ -161,6 +161,17 @@ impl SidebarState {
         true
     }
 
+    /// Finishes (or cancels) a drag: the sash now follows the real pointer position, not the
+    /// stale drag flag. `hovered` is whether the pointer is still inside the resize band.
+    pub fn end_resize(&mut self, now: Instant, hovered: bool, reduced: bool) {
+        self.dragging = false;
+        self.sash_since = now;
+        self.sash_target = if hovered { 1.0 } else { 0.0 };
+        if reduced {
+            self.sash_opacity = self.sash_target;
+        }
+    }
+
     pub fn begin_resize(&mut self) {
         self.transition = None;
         self.collapsed = false;

@@ -942,3 +942,28 @@ fn keyboard_toggle_keeps_focus_and_reverses_immediately(cx: &mut TestAppContext)
     press("space", cx);
     assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
 }
+
+#[gpui::test]
+fn releasing_the_drag_outside_the_band_clears_the_sash_target(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    // Reduced motion is on by default in these tests, so the sash lands on its target at once.
+    let band = bounds("sidebar-resize", cx);
+    let start = point(band.left() + px(2.0), band.top() + px(120.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.sash_hovered()));
+    drag_start(cx);
+    let far = point(px(900.0), px(200.0));
+    cx.simulate_mouse_move(far, Some(MouseButton::Left), Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: far,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.dragging));
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.sash_hovered()));
+    assert_eq!(view.read_with(cx, |s, _| s.sidebar_state.sash()), 0.0);
+}

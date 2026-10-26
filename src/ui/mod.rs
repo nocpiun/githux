@@ -155,7 +155,11 @@ impl Shell {
             .collect::<Vec<_>>();
         let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
             if !window.is_window_active() && shell.sidebar_state.dragging {
-                shell.sidebar_state.dragging = false;
+                shell.sidebar_state.end_resize(
+                    cx.background_executor().now(),
+                    false,
+                    cx.theme().reduced_motion || cx.reduce_motion(),
+                );
                 cx.stop_active_drag(window);
                 cx.notify();
             }
@@ -185,7 +189,11 @@ impl Shell {
                     cx.stop_propagation();
                     shell.close_sidebar_menu(window, cx);
                 } else if event.keystroke.key == "escape" && shell.sidebar_state.dragging {
-                    shell.sidebar_state.dragging = false;
+                    shell.sidebar_state.end_resize(
+                        cx.background_executor().now(),
+                        false,
+                        cx.theme().reduced_motion || cx.reduce_motion(),
+                    );
                     cx.stop_active_drag(window);
                     cx.stop_propagation();
                     cx.notify();
@@ -1564,15 +1572,29 @@ impl Render for Shell {
                             ))
                             .on_mouse_up(
                                 gpui::MouseButton::Left,
-                                cx.listener(|shell, _, _, cx| {
-                                    shell.sidebar_state.dragging = false;
+                                cx.listener(|shell, event: &gpui::MouseUpEvent, window, cx| {
+                                    let band = geometry::sidebar_resize_band(
+                                        shell.sidebar_state.frame.width,
+                                        f32::from(window.viewport_size().height),
+                                    );
+                                    let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                                    shell.sidebar_state.end_resize(
+                                        cx.background_executor().now(),
+                                        band.contains(&event.position),
+                                        reduced,
+                                    );
                                     cx.notify();
                                 }),
                             )
                             .on_mouse_up_out(
                                 gpui::MouseButton::Left,
                                 cx.listener(|shell, _, _, cx| {
-                                    shell.sidebar_state.dragging = false;
+                                    let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                                    shell.sidebar_state.end_resize(
+                                        cx.background_executor().now(),
+                                        false,
+                                        reduced,
+                                    );
                                     cx.notify();
                                 }),
                             )
