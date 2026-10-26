@@ -170,7 +170,7 @@ pub(super) fn strip(
         .flex()
         .flex_row()
         .flex_none()
-        .items_center()
+        .items_start()
         .h(px(TAB_STRIP_HEIGHT))
         .w_full()
         .min_w_0()
@@ -187,9 +187,9 @@ pub(super) fn strip(
                 .flex_none()
                 .items_center()
                 .justify_center()
-                // Height matches the scroll viewport so the toolbar's button lines up with the
-                // tabs rather than the scrollbar band.
-                .h(px(TAB_HEIGHT + TAB_SCROLLBAR_BAND))
+                // A square slot aligned with the tab row keeps the button's top and right
+                // gaps equal; the scrollbar band belongs only to the viewport.
+                .h(px(TAB_HEIGHT))
                 .w(px(TAB_TOOLBAR_WIDTH))
                 .child(view.toolbar),
         )
@@ -201,7 +201,7 @@ pub(super) fn strip(
 /// suggest the capability already exists.
 pub(super) fn toolbar() -> AnyElement {
     div()
-        .debug_selector(|| "tab-toolbar".to_string())
+        .debug_selector(|| "tab-toolbar-content".to_string())
         .flex()
         .items_center()
         .justify_center()

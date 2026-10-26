@@ -77,8 +77,8 @@ pub const TAB_SCROLLBAR_BAND: f32 = TAB_SCROLLBAR_THICKNESS + 2.0;
 pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;
 
 /// Width of the toolbar pinned to the strip's right edge, outside the scrolling viewport. It is one
-/// small icon button wide; the strip's inset already provides the gap to the island's edge.
-pub const TAB_TOOLBAR_WIDTH: f32 = TAB_HEIGHT - 2.0;
+/// square slot matching the tab height, so its centered icon has equal top and right gaps.
+pub const TAB_TOOLBAR_WIDTH: f32 = TAB_HEIGHT;
 
 /// How long the strip's scrollbar takes to fade in or out.
 pub const TAB_SCROLLBAR_FADE_MS: u64 = 140;

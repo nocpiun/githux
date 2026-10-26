@@ -153,7 +153,15 @@ git diff --check
 
 **仍需负责人真实窗口验收：** 缩小后的内边距观感、细滚动条的可见度与淡入淡出是否顺滑、图标与标题间距、拖拽手感与自动滚动速度、close 出现时机、右侧工具栏位置；性能与动画流畅度只能由实际窗口确认。
 
+## 刷新按钮间距微调（2026-10-26）
+
+负责人已确认其他标签改动没有问题，仅要求刷新按钮到 island 上沿与右沿的间距一致，并明确先查看修正版再推送。原工具栏按标签高度加滚动条带的总高度垂直居中，宽度却只有 24px，导致上方留白大于右方。
+
+工具栏现为与标签等高的 26×26px 正方形，并对齐标签行顶部，滚动条的 5px 预留区只属于滚动视口。刷新按钮在正方形内居中，上、右共同使用 strip 的 7px 外留白。保持禁用占位功能、固定位置与其他标签交互不变。负责人查看修正版后确认“没问题”，授权推送并在最新提交 CI 与审查通过后由主 Agent 合并。
+
+验证：`cargo fmt --all -- --check`、已有工具栏固定布局测试 `the_strip_toolbar_is_pinned_and_shrinks_the_viewport`、`cargo build --locked` 与 `git diff --check` 通过；同时将内层与外层工具栏的重复 debug selector 分开，确保既有测试实际测量外层布局。Windows 预览已由负责人实际验收通过。
+
 ## 交接与后续
 
-1. 负责人/主 Agent 在真实窗口验收多标签交互与中文候选确认；`human_review_required=true`、`human_review_approved=false`，PR 保持 open，等待验收后才由 coordinator 合并。
+1. 负责人已于 2026-10-26 完成此次标签改动和 Refresh 间距的真实窗口验收；`human_review_required=true`、`human_review_approved=true`。保留 `arbitration_ever_required=true` / `merge_owner=coordinator`，主 Agent 在最新提交 CI、Codex 审查及当前 main 组合验证通过后合并。
 2. R3 接入真实分支/文件读取时填充 `RepositorySession` 并替换 fixture 默认值；账户切换如何影响标签仍待负责人决定。
