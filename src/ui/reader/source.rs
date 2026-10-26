@@ -229,6 +229,13 @@ impl SourceView {
         cx.notify();
     }
 
+    fn end_selection_drag(&mut self, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.dragging = false;
+            cx.notify();
+        }
+    }
+
     fn drag(
         &mut self,
         line: usize,
@@ -468,6 +475,17 @@ impl Render for SourceView {
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
                 view.drag_anywhere(event, cx);
             }))
+            // The gesture ends on release, including a release outside the
+            // viewport; otherwise a later drag that never started on the text
+            // would keep extending the previous selection.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| view.end_selection_drag(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| view.end_selection_drag(cx)),
+            )
             .on_hover(cx.listener(|view, hovered, _, cx| {
                 if view.fade.set_hovered(*hovered, view.now_ms()) {
                     cx.notify();

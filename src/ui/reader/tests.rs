@@ -556,6 +556,52 @@ short
     );
 }
 
+/// A released gesture stops extending the selection: a later drag that starts
+/// outside the text must not change what a copy would produce.
+#[gpui::test]
+fn releasing_ends_the_selection_gesture(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        fixtures::source(),
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(300.0)));
+    frames(cx);
+    let row = cx.debug_bounds("reader-source-body-0").unwrap();
+    let start = point(row.left() + px(4.0), row.center().y);
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(
+        point(start.x + px(80.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(
+        point(start.x + px(80.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    frames(cx);
+    let selected = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).selected_text());
+    assert!(selected.is_some(), "the drag selected something");
+    // A fresh drag over the text after the release must not extend the old one
+    // from the previous head position.
+    let other = point(row.left() + px(200.0), row.center().y);
+    cx.simulate_mouse_down(other, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(other, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(other, MouseButton::Left, Modifiers::none());
+    frames(cx);
+    let after = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).selected_text());
+    assert!(
+        after.as_deref().map(str::len).unwrap_or(0)
+            <= selected.as_deref().map(str::len).unwrap_or(0),
+        "a press after release starts a new caret, not a longer old selection: {after:?}"
+    );
+}
+
 /// Row hit bounds belong to the frame that painted them: after scrolling, a
 /// drag maps to the row now under the pointer, never to a line that used to sit
 /// at those pixels.
