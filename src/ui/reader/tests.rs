@@ -1164,11 +1164,7 @@ fn markdown_hard_breaks_remain_line_boundaries(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
-    let source = format!(
-        "{}
-",
-        "`x` ".repeat(2_000)
-    );
+    let source = "`x` ".repeat(20_000);
     let (reader, cx) = open(
         cx,
         PreparedBody::Utf8 {
@@ -1179,12 +1175,23 @@ fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
     );
     frames(cx);
     let start = std::time::Instant::now();
-    reader.update_in(cx, |reader, window, cx| {
-        reader.show(fixtures::markdown(), DocumentKind::Markdown, window, cx)
-    });
+    cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
     frames(cx);
-    assert!(start.elapsed() < std::time::Duration::from_secs(5));
-    assert!(cx.debug_bounds("reader-markdown").is_some());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "dense paragraph resize took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        reader.read_with(cx, |reader, cx| reader
+            .markdown()
+            .unwrap()
+            .read(cx)
+            .text(cx)
+            .len())
+            > 70_000
+    );
+    assert!(cx.debug_bounds("reader-inline-paragraph").is_some());
 }
 
 #[test]
@@ -1195,18 +1202,169 @@ fn repository_pictures_never_resolve_to_filesystem_reads() {
         r"\\server\share\secret.png",
         "/tmp/secret.png",
         "images/diagram.png",
+        "data:image/svg+xml;base64,PHN2Zy8+",
     ] {
-        let origin = ely_gpui_component::documents::picture_origin(
+        let origin = ely_gpui_component::documents::repository_picture_origin(
             url,
             Some(std::path::Path::new("C:/repo")),
         );
         assert!(
             matches!(
                 origin,
-                ely_gpui_component::documents::PictureOrigin::File(_)
+                ely_gpui_component::documents::PictureOrigin::Bad(_)
                     | ely_gpui_component::documents::PictureOrigin::Loose
             ),
             "{url}: {origin:?}"
         );
     }
+}
+
+#[gpui::test]
+fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
+    let (_, cx)=open(cx, PreparedBody::Utf8 { text: "| left heading | center heading | right heading |\n| :--- | :---: | ---: |\n| left | `middle` | right |\n".into(), has_bom:false }, DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(900.0), px(500.0)));
+    frames(cx);
+    let left = inline_snapshot(cx, "left");
+    let center = inline_snapshot(cx, "middle");
+    let right = inline_snapshot(cx, "right");
+    let a = cx.debug_bounds("markdown-cell-0-1-0").unwrap();
+    let b = cx.debug_bounds("markdown-cell-0-1-1").unwrap();
+    let c = cx.debug_bounds("markdown-cell-0-1-2").unwrap();
+    assert!((left.bounds.left() - a.left() - px(12.0)).abs() <= px(1.0));
+    assert!(
+        (center.bounds.center().x - b.center().x).abs() <= px(1.0),
+        "{center:?} in {b:?}"
+    );
+    assert!(
+        (c.right() - right.bounds.right() - px(12.0)).abs() <= px(1.0),
+        "{right:?} in {c:?}"
+    );
+}
+
+#[gpui::test]
+fn markdown_hover_fades_and_resize_and_replacement_clamp_the_real_list(cx: &mut TestAppContext) {
+    let body = PreparedBody::Utf8 {
+        text: "paragraph `code`\n\n".repeat(80),
+        has_bom: false,
+    };
+    let (reader, cx) = open(cx, body, DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(600.0), px(240.0)));
+    cx.simulate_mouse_move(point(px(-20.0), px(-20.0)), None, Modifiers::none());
+    frames(cx);
+    reader.update_in(cx, |r, _, cx| {
+        r.pin_scrollbar_clock(0);
+        r.scroll_fade = Default::default();
+        cx.notify();
+    });
+    frames(cx);
+    let bounds = cx.debug_bounds("reader-markdown").unwrap();
+    cx.simulate_mouse_move(
+        point(bounds.left() + px(10.0), bounds.top() + px(10.0)),
+        None,
+        Modifiers::none(),
+    );
+    frames(cx);
+    reader.update_in(cx, |r, _, cx| {
+        r.pin_scrollbar_clock(70);
+        cx.notify();
+    });
+    frames(cx);
+    assert!(cx.debug_bounds("reader-markdown-scrollbar-thumb").is_some());
+    let opacity = reader.read_with(cx, |r, _| r.scroll_fade.painted());
+    assert!(
+        opacity > 0.0 && opacity < 1.0,
+        "hover starts the actual fade: {opacity}"
+    );
+    reader.update_in(cx, |r, _, cx| {
+        r.pin_scrollbar_clock(140);
+        cx.notify();
+    });
+    frames(cx);
+    assert_eq!(reader.read_with(cx, |r, _| r.scroll_fade.painted()), 1.0);
+    cx.simulate_event(ScrollWheelEvent {
+        position: bounds.center(),
+        delta: ScrollDelta::Lines(point(0.0, -10000.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    frames(cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+    frames(cx);
+    reader.read_with(cx, |r, cx| {
+        let list = r.markdown().unwrap().read(cx).list_state();
+        let offset = -list.scroll_px_offset_for_scrollbar().y;
+        assert!(
+            offset >= px(0.0) && offset <= list.max_offset_for_scrollbar().y + px(1.0),
+            "resize clamps {offset:?}"
+        );
+    });
+    cx.simulate_mouse_move(point(px(-20.0), px(-20.0)), None, Modifiers::none());
+    frames(cx);
+    reader.update_in(cx, |r, _, cx| {
+        r.pin_scrollbar_clock(210);
+        cx.notify();
+    });
+    frames(cx);
+    let opacity = reader.read_with(cx, |r, _| r.scroll_fade.painted());
+    assert!(
+        opacity > 0.0 && opacity < 1.0,
+        "leaving starts fade out: {opacity}"
+    );
+    reader.update_in(cx, |r, _, cx| {
+        r.pin_scrollbar_clock(280);
+        cx.notify();
+    });
+    frames(cx);
+    assert!(cx.debug_bounds("reader-markdown-scrollbar-thumb").is_none());
+    reader.update_in(cx, |r, w, cx| {
+        r.show(fixtures::inline_code_short(), DocumentKind::Markdown, w, cx)
+    });
+    frames(cx);
+    reader.read_with(cx, |r, cx| {
+        let list = r.markdown().unwrap().read(cx).list_state();
+        assert_eq!(list.scroll_px_offset_for_scrollbar().y, px(0.0));
+        assert_eq!(list.max_offset_for_scrollbar().y, px(0.0));
+    });
+}
+
+#[gpui::test]
+fn a_single_character_link_opens_from_its_right_half(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "[x](guide.md)
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let layout = inline_snapshot(cx, "x");
+    let piece = &layout.pieces[0];
+    let right_half = point(
+        piece.text_bounds.right() - px(1.0),
+        piece.text_bounds.center().y,
+    );
+    cx.simulate_click(right_half, Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        reader.read_with(cx, |r, _| r.last_action().cloned()),
+        Some(ReaderAction::Link(LinkTarget::Repository(_)))
+    ));
+}
+
+#[gpui::test]
+fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext) {
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "![untrusted](file://attacker.example/share/image.png)\n".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    assert!(cx.debug_bounds("markdown-picture-note").is_some());
+    assert!(cx.debug_bounds("markdown-picture").is_none());
 }

@@ -1,0 +1,825 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -92,43 +92,3 @@
+ opt-level = "z"
+ lto = true
+ codegen-units = 1
+-
+-[[example]]
+-name = "gallery"
+-path = "examples/gallery/main.rs"
+-
+-[[example]]
+-name = "docs_hello"
+-path = "examples/docs/hello.rs"
+-
+-[[example]]
+-name = "docs_start"
+-path = "examples/docs/start.rs"
+-
+-[[example]]
+-name = "docs_theme"
+-path = "examples/docs/theme.rs"
+-
+-[[example]]
+-name = "docs_focus"
+-path = "examples/docs/focus.rs"
+-
+-[[example]]
+-name = "docs_motion"
+-path = "examples/docs/motion.rs"
+-
+-[[example]]
+-name = "docs_icons"
+-path = "examples/docs/icons.rs"
+-
+-[[example]]
+-name = "docs_overlays"
+-path = "examples/docs/overlays.rs"
+-
+-[[example]]
+-name = "docs_i18n"
+-path = "examples/docs/i18n.rs"
+-
+-[[example]]
+-name = "docs_render"
+-path = "examples/docs/render.rs"
+--- a/src/documents/mod.rs
++++ b/src/documents/mod.rs
+@@ -50,9 +50,13 @@
+ pub use markdown::markdown_highlights;
+ pub use modes::{MarkdownEditor, MarkdownMode};
+ pub use pages::{PageCover, PageIcon};
++#[cfg(feature = "test-support")]
++pub use picture::{Origin as PictureOrigin, repository_picture_origin};
+ pub use print::{Margins, Paper, PrintPreview, PrintSettings, sheet};
+ pub use reading::{Footnote, Glossary, ReadingProgress, TooltipTerm, ZenMode};
+ pub use render::MarkdownRenderer;
++#[cfg(feature = "test-support")]
++pub use render::{ReaderInlineLayout, ReaderInlinePiece, reader_inline_layout};
+ pub use rich::RichTextEditor;
+ pub use templates::{Template, TemplatePicker};
+ pub use thumbs::PageThumbnailList;
+--- a/src/documents/document/mod.rs
++++ b/src/documents/document/mod.rs
+@@ -20,8 +20,8 @@
+ use std::{ops::Range, path::Path, rc::Rc, sync::Arc, time::Duration};
+ 
+ use gpui::{
+-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment,
+-    ListState, Pixels, Subscription, Task, Window,
++    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
++    ListAlignment, ListState, Pixels, Subscription, Task, Window,
+ };
+ 
+ pub use crate::documents::tree::DocumentHeading;
+@@ -125,6 +125,7 @@
+     pressed: u64,
+     on_link: Option<OnLink>,
+     on_heading: Option<OnHeading>,
++    reader_inline: bool,
+     _subscriptions: Vec<Subscription>,
+ }
+ 
+@@ -193,8 +194,18 @@
+             pressed: 0,
+             on_link: None,
+             on_heading: Some(on_heading),
++            reader_inline: false,
+             _subscriptions: subscriptions,
+         };
++        // An owner-drawn scrollbar needs a frame after every scroll: the list
++        // repaints itself, but the document's overlay only moves when the
++        // document re-renders. Notification is that frame.
++        let this = cx.entity().downgrade();
++        document.list.set_scroll_handler(move |_, _, cx| {
++            if let Some(document) = this.upgrade() {
++                document.update(cx, |_, cx| cx.notify());
++            }
++        });
+         document.reparse(true, cx);
+         document
+     }
+@@ -212,6 +223,21 @@
+ 
+     pub fn editor(&self) -> &Entity<CodeEditor> {
+         &self.editor
++    }
++
++    /// The block list's own scroll state, for an owner-drawn scrollbar.
++    ///
++    /// The list owns its offset, measured extent and drag maths; an owner can
++    /// bind a hairline thumb to exactly what the virtualized list scrolls,
++    /// without rebuilding the list or faking an outer handle.
++    pub fn list_state(&self) -> &ListState {
++        &self.list
++    }
++
++    /// Enables padded, rounded code runs within a continuous selectable
++    /// paragraph. Preview only; editing retains its source-point mapping.
++    pub fn set_reader_inline(&mut self, enabled: bool) {
++        self.reader_inline = enabled;
+     }
+ 
+     pub fn mode(&self) -> MarkdownMode {
+--- a/src/documents/document/visual.rs
++++ b/src/documents/document/visual.rs
+@@ -155,6 +155,8 @@
+                         on_heading: &self.on_heading,
+                         on_point: &on_point,
+                         cell: cell.as_ref(),
++                        reader_inline: self.reader_inline,
++                        reader_only: self.reader_inline,
+                     },
+                     self.look.scale,
+                     cx,
+--- a/src/documents/render.rs
++++ b/src/documents/render.rs
+@@ -21,6 +21,9 @@
+ };
+ 
+ mod blocks;
++mod inline;
++#[cfg(feature = "test-support")]
++pub use inline::{ReaderInlineLayout, ReaderInlinePiece, reader_inline_layout};
+ mod point;
+ mod table;
+ 
+@@ -99,6 +102,9 @@
+     pub on_point: &'a Option<OnPoint>,
+     /// The cell typed in, drawn in its place.
+     pub cell: Option<&'a OpenCell>,
++    /// Reader typography with one continuous shaped paragraph and selection.
++    pub reader_inline: bool,
++    pub reader_only: bool,
+ }
+ 
+ /// Headings and strong text share one weight.
+@@ -198,6 +204,9 @@
+     }
+ 
+     fn inline(&self, inline: &Inline, cx: &App) -> AnyElement {
++        if self.hooks.reader_inline && self.hooks.on_point.is_none() {
++            return inline::ReaderInline::new(self.key("inline"), inline.clone(), self.hooks.on_link.clone()).into_any_element();
++        }
+         let theme = cx.theme();
+         let colors = &theme.colors;
+         let rule = theme.underline_thickness();
+@@ -302,7 +311,12 @@
+                 };
+                 let code = StyledText::new(text.clone()).with_highlights(styles);
+                 let layout = code.layout().clone();
++                // The fence's language sits close to the block's top edge:
++                // the old even padding floated it in the middle of the gap.
++                // Only the label's inset changes; the code keeps its own
++                // padding, line height and colours.
+                 let block = div()
++                    .debug_selector(|| "markdown-code-block".to_string())
+                     .flex()
+                     .flex_col()
+                     .gap_1()
+@@ -314,11 +328,14 @@
+                     .text_color(colors.syntax.variable)
+                     .children(language.clone().map(|name| {
+                         div()
++                            .debug_selector(|| "markdown-code-language".to_string())
++                            .relative()
++                            .top(gpui::px(-8.0))
+                             .text_size(theme.text_size(TextSize::Xs) * self.scale)
+                             .text_color(colors.fg_subtle)
+                             .child(name)
+                     }))
+-                    .child(code)
++                    .child(div().debug_selector(|| "markdown-code-text".into()).child(code))
+                     .into_any_element();
+                 self.point_code(block, Some(layout), text, *from)
+             }
+@@ -345,6 +362,7 @@
+                     alt: alt.clone(),
+                     url: url.clone(),
+                     base: self.hooks.base.clone(),
++                    allow_filesystem: !self.hooks.reader_only,
+                 });
+                 let drawn = match link.clone() {
+                     None => picture.into_any_element(),
+@@ -429,6 +447,8 @@
+                 on_heading: &None,
+                 on_point: &None,
+                 cell: None,
++                reader_inline: false,
++                reader_only: false,
+             },
+             next: std::cell::Cell::new(0),
+             sections: &self.sections,
+--- a/src/documents/render/inline.rs
++++ b/src/documents/render/inline.rs
+@@ -0,0 +1,543 @@
++//! One continuous shaped reader paragraph. Padding affects measured advances,
++//! wrapping, paint and hit testing, never the source or copied bytes.
++use super::{OnLink, highlight, open_link};
++use crate::{
++    documents::tree::{Inline, Style},
++    theme::ActiveTheme,
++};
++use gpui::{
++    App, AvailableSpace, Bounds, ClipboardItem, Element, ElementId, Entity, FocusHandle,
++    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, ParentElement, Pixels,
++    Point, RenderOnce, ShapedLine, SharedString, Styled, Window, div, fill, point, prelude::*, px,
++    size,
++};
++use std::{cell::RefCell, ops::Range, rc::Rc};
++use unicode_segmentation::UnicodeSegmentation;
++const PAD: f32 = 3.5;
++#[derive(Clone)]
++struct Piece {
++    range: Range<usize>,
++    line: ShapedLine,
++    origin: Point<Pixels>,
++    code: bool,
++}
++#[derive(Default)]
++struct Layout {
++    pieces: Vec<Piece>,
++    bounds: Bounds<Pixels>,
++    line_height: Pixels,
++    code_run_fonts: Vec<SharedString>,
++}
++impl Layout {
++    fn glyph_index(&self, position: Point<Pixels>) -> usize {
++        let local = position - self.bounds.origin;
++        let row = (local.y / self.line_height).floor().max(0.0);
++        for p in &self.pieces {
++            if (p.origin.y / self.line_height).floor() != row {
++                continue;
++            }
++            if local.x < p.origin.x + p.line.width() {
++                return p.range.start
++                    + p.line
++                        .index_for_x(local.x - p.origin.x)
++                        .unwrap_or(p.line.len());
++            }
++        }
++        self.index(position)
++    }
++    fn index(&self, position: Point<Pixels>) -> usize {
++        let local = position - self.bounds.origin;
++        let row = (local.y / self.line_height).floor().max(0.0);
++        let candidates: Vec<_> = self
++            .pieces
++            .iter()
++            .filter(|p| (p.origin.y / self.line_height).floor() == row)
++            .collect();
++        for p in &candidates {
++            if local.x < p.origin.x + p.line.width() {
++                return p.range.start + p.line.closest_index_for_x(local.x - p.origin.x);
++            }
++        }
++        candidates.last().map_or_else(
++            || self.pieces.last().map_or(0, |p| p.range.end),
++            |p| p.range.end,
++        )
++    }
++}
++struct Selection {
++    focus: FocusHandle,
++    anchor: usize,
++    head: usize,
++    dragging: bool,
++    pressed_link: Option<String>,
++}
++impl Selection {
++    fn range(&self) -> Range<usize> {
++        self.anchor.min(self.head)..self.anchor.max(self.head)
++    }
++}
++#[derive(IntoElement)]
++pub(super) struct ReaderInline {
++    id: ElementId,
++    inline: Inline,
++    on_link: Option<OnLink>,
++}
++impl ReaderInline {
++    pub fn new(id: ElementId, inline: Inline, on_link: Option<OnLink>) -> Self {
++        Self {
++            id,
++            inline,
++            on_link,
++        }
++    }
++}
++impl RenderOnce for ReaderInline {
++    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
++        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| Selection {
++            focus: cx.focus_handle(),
++            anchor: 0,
++            head: 0,
++            dragging: false,
++            pressed_link: None,
++        });
++        let focus = state.read(cx).focus.clone();
++        let layout = Rc::new(RefCell::new(Layout::default()));
++        let (down, moving, up, keys) = (state.clone(), state.clone(), state.clone(), state.clone());
++        let (dl, ml, link_layout) = (layout.clone(), layout.clone(), layout.clone());
++        let text = self.inline.text.clone();
++        let links = self.inline.links.clone();
++        let on_link = self.on_link;
++        div()
++            .id(self.id)
++            .debug_selector(|| "reader-inline-paragraph".into())
++            .track_focus(&focus)
++            .cursor_text()
++            .on_mouse_down(MouseButton::Left, move |e, w, cx| {
++                let at = dl.borrow().index(e.position);
++                let glyph = link_layout.borrow().glyph_index(e.position);
++                down.update(cx, |s, cx| {
++                    w.focus(&s.focus, cx);
++                    if !e.modifiers.shift {
++                        s.anchor = at;
++                    }
++                    s.head = at;
++                    s.dragging = true;
++                    s.pressed_link = links
++                        .iter()
++                        .find(|(r, _)| r.contains(&glyph))
++                        .map(|(_, url)| url.clone());
++                    cx.notify();
++                });
++            })
++            .on_mouse_move(move |e, _, cx| {
++                if moving.read(cx).dragging && e.dragging() {
++                    let at = ml.borrow().index(e.position);
++                    moving.update(cx, |s, cx| {
++                        s.head = at;
++                        cx.notify();
++                    });
++                }
++            })
++            .on_mouse_up(MouseButton::Left, {
++                let u = up.clone();
++                move |_, _, cx| {
++                    u.update(cx, |s, cx| {
++                        s.dragging = false;
++                        cx.notify();
++                    })
++                }
++            })
++            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
++                up.update(cx, |s, cx| {
++                    s.dragging = false;
++                    cx.notify();
++                })
++            })
++            .on_click({
++                let state = state.clone();
++                move |_, w, cx| {
++                    let s = state.read(cx);
++                    if s.anchor == s.head {
++                        if let Some(url) = s.pressed_link.clone() {
++                            open_link(&on_link, &url, w, cx);
++                        }
++                    }
++                }
++            })
++            .on_key_down(move |e, _, cx| {
++                if e.keystroke.modifiers.secondary() {
++                    match e.keystroke.key.as_str() {
++                        "c" => {
++                            let r = keys.read(cx).range();
++                            if !r.is_empty() {
++                                cx.write_to_clipboard(ClipboardItem::new_string(
++                                    text[r].to_string(),
++                                ));
++                                cx.stop_propagation();
++                            }
++                        }
++                        "a" => keys.update(cx, |s, cx| {
++                            s.anchor = 0;
++                            s.head = text.len();
++                            cx.notify();
++                        }),
++                        _ => {}
++                    }
++                }
++            })
++            .child(Paragraph {
++                inline: self.inline,
++                layout,
++                selection: state,
++            })
++    }
++}
++struct Paragraph {
++    inline: Inline,
++    layout: Rc<RefCell<Layout>>,
++    selection: Entity<Selection>,
++}
++impl IntoElement for Paragraph {
++    type Element = Self;
++    fn into_element(self) -> Self {
++        self
++    }
++}
++impl Element for Paragraph {
++    type RequestLayoutState = ();
++    type PrepaintState = ();
++    fn id(&self) -> Option<ElementId> {
++        None
++    }
++    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
++        None
++    }
++    fn request_layout(
++        &mut self,
++        _: Option<&GlobalElementId>,
++        _: Option<&InspectorElementId>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> (LayoutId, ()) {
++        let style = window.text_style();
++        let font_size = style.font_size.to_pixels(window.rem_size());
++        let line_height = window.line_height().max(font_size + px(4.0));
++        let theme = cx.theme();
++        let text = self.inline.text.trim_end_matches('\n').to_string();
++        let mut edges = vec![0, text.len()];
++        let mut flags = vec![0u8; text.len()];
++        for (r, kind) in &self.inline.styles {
++            if r.end <= text.len() {
++                edges.extend([r.start, r.end]);
++                if *kind == Style::Code {
++                    flags[r.clone()].fill(1);
++                }
++            }
++        }
++        edges.sort_unstable();
++        edges.dedup();
++        // Sweep the covering intervals once. This is O(styles * log styles),
++        // independent of how many boundaries and code spans a paragraph has.
++        let mut events: Vec<_> = self
++            .inline
++            .styles
++            .iter()
++            .filter(|(_, s)| *s != Style::Code)
++            .flat_map(|(r, k)| [(r.start, true, k), (r.end, false, k)])
++            .collect();
++        events.sort_by_key(|(at, enter, _)| (*at, !*enter));
++        let mut runs = Vec::new();
++        let mut active: Vec<&Style> = Vec::new();
++        let mut event = 0;
++        for e in edges.windows(2) {
++            while event < events.len() && events[event].0 <= e[0] {
++                let (at, enter, kind) = events[event];
++                if enter {
++                    active.push(kind)
++                } else {
++                    active.retain(|k| !std::ptr::eq(*k, kind));
++                }
++                event += 1;
++                let _ = at;
++            }
++            let mut rs = style.clone();
++            for kind in &active {
++                rs = rs.highlight(highlight(kind, &theme.colors, theme.underline_thickness()));
++            }
++            let mut run = rs.to_run(e[1] - e[0]);
++            if flags.get(e[0]) == Some(&1) {
++                run.font.family = theme.mono_family.clone();
++            }
++            runs.push(run);
++        }
++        let layout = self.layout.clone();
++        let code_run_fonts = runs
++            .iter()
++            .filter(|r| r.font.family == theme.mono_family)
++            .map(|r| r.font.family.clone())
++            .collect::<Vec<_>>();
++        let id = window.request_measured_layout(
++            gpui::Style::default(),
++            move |known, available, window, _| {
++                let width = known
++                    .width
++                    .or(match available.width {
++                        AvailableSpace::Definite(w) => Some(w),
++                        _ => None,
++                    })
++                    .unwrap_or(px(100000.0))
++                    .max(px(1.0));
++                let shaped = window.text_system().shape_line(
++                    SharedString::from(text.replace('\n', " ")),
++                    font_size,
++                    &runs,
++                    None,
++                );
++                // GPUI x_for_index scans every glyph. Index once, then use O(1)
++                // lookups at grapheme boundaries during wrapping.
++                let mut positions = vec![shaped.width(); text.len() + 1];
++                for run in &shaped.runs {
++                    for glyph in &run.glyphs {
++                        positions[glyph.index] = glyph.position.x;
++                    }
++                }
++                let mut next = shaped.width();
++                for at in (0..text.len()).rev() {
++                    if positions[at] != shaped.width() {
++                        next = positions[at];
++                    } else {
++                        positions[at] = next;
++                    }
++                }
++                let is_code = |at| flags.get(at) == Some(&1);
++                let code_edges = &edges;
++                let chars: Vec<_> = text
++                    .grapheme_indices(true)
++                    .map(|(at, g)| (at, at + g.len(), g))
++                    .collect();
++                let mut rows = Vec::new();
++                let mut start = 0;
++                while start < chars.len() {
++                    let mut end = start;
++                    let mut used = Pixels::ZERO;
++                    let mut candidate = None;
++                    while end < chars.len() {
++                        let (a, b, g) = chars[end];
++                        if g == "\n" {
++                            end += 1;
++                            break;
++                        }
++                        let code = is_code(a);
++                        let edge = if code && (end == start || !is_code(chars[end - 1].0)) {
++                            px(PAD)
++                        } else {
++                            Pixels::ZERO
++                        };
++                        let closing = if code { px(PAD) } else { Pixels::ZERO };
++                        let advance = positions[b] - positions[a];
++                        if used + edge + advance + closing > width && end > start {
++                            if let Some(c) = candidate {
++                                end = c;
++                            }
++                            break;
++                        }
++                        used += edge + advance;
++                        if code && (end + 1 == chars.len() || !is_code(chars[end + 1].0)) {
++                            used += px(PAD);
++                        }
++                        end += 1;
++                        if g.chars().all(char::is_whitespace) || !g.is_ascii() {
++                            candidate = Some(end);
++                        }
++                    }
++                    end = end.max(start + 1);
++                    rows.push(chars[start].0..chars[end - 1].1);
++                    start = end;
++                }
++                let mut pieces = Vec::new();
++                let mut cursor = shaped.cursor();
++                let mut measured_width = Pixels::ZERO;
++                for (row, range) in rows.iter().enumerate() {
++                    let mut at = range.start;
++                    let mut x = Pixels::ZERO;
++                    while at < range.end {
++                        let code = is_code(at);
++                        let end = code_edges
++                            .get(code_edges.partition_point(|edge| *edge <= at))
++                            .copied()
++                            .filter(|edge| *edge < range.end)
++                            .unwrap_or(range.end);
++                        let line = cursor.take_until(end);
++                        if code {
++                            x += px(PAD);
++                        }
++                        let advance = line.width();
++                        pieces.push(Piece {
++                            range: at..end,
++                            line,
++                            origin: point(x, line_height * row),
++                            code,
++                        });
++                        x += advance;
++                        if code {
++                            x += px(PAD);
++                        }
++                        at = end;
++                    }
++                    measured_width = measured_width.max(x);
++                }
++                let height = line_height * rows.len().max(1);
++                *layout.borrow_mut() = Layout {
++                    pieces,
++                    bounds: Bounds::default(),
++                    line_height,
++                    code_run_fonts: code_run_fonts.clone(),
++                };
++                size(
++                    known.width.unwrap_or(measured_width.ceil().min(width)),
++                    height,
++                )
++            },
++        );
++        (id, ())
++    }
++    fn prepaint(
++        &mut self,
++        _: Option<&GlobalElementId>,
++        _: Option<&InspectorElementId>,
++        bounds: Bounds<Pixels>,
++        _: &mut (),
++        _: &mut Window,
++        cx: &mut App,
++    ) {
++        self.layout.borrow_mut().bounds = bounds;
++        #[cfg(feature = "test-support")]
++        {
++            let l = self.layout.borrow();
++            let snapshot = ReaderInlineLayout {
++                text: self.inline.text.clone(),
++                bounds,
++                line_height: l.line_height,
++                code_font: cx.theme().mono_family.clone(),
++                code_run_fonts: l.code_run_fonts.clone(),
++                pieces: l
++                    .pieces
++                    .iter()
++                    .map(|p| ReaderInlinePiece {
++                        range: p.range.clone(),
++                        code: p.code,
++                        text_bounds: Bounds::new(
++                            bounds.origin + p.origin,
++                            size(p.line.width(), l.line_height),
++                        ),
++                        box_bounds: Bounds::new(
++                            bounds.origin + p.origin - point(px(PAD), px(-1.0)),
++                            size(p.line.width() + px(PAD * 2.0), l.line_height - px(2.0)),
++                        ),
++                        fonts: p.line.runs.iter().map(|r| r.font_id).collect(),
++                    })
++                    .collect(),
++            };
++            if !cx.has_global::<ReaderInlineLayouts>() {
++                cx.set_global(ReaderInlineLayouts::default());
++            }
++            cx.global_mut::<ReaderInlineLayouts>()
++                .0
++                .insert(snapshot.text.clone(), snapshot);
++        }
++        #[cfg(not(feature = "test-support"))]
++        let _ = cx;
++    }
++    fn paint(
++        &mut self,
++        _: Option<&GlobalElementId>,
++        _: Option<&InspectorElementId>,
++        _: Bounds<Pixels>,
++        _: &mut (),
++        _: &mut (),
++        window: &mut Window,
++        cx: &mut App,
++    ) {
++        let l = self.layout.borrow();
++        let selected = self.selection.read(cx).range();
++        let (bg, selection_color) = {
++            let theme = cx.theme();
++            (theme.colors.sunken, theme.colors.selection)
++        };
++        let visible = window.content_mask().bounds;
++        for p in &l.pieces {
++            let origin = l.bounds.origin + p.origin;
++            if origin.y + l.line_height < visible.top() || origin.y > visible.bottom() {
++                continue;
++            }
++            if p.code {
++                let bounds = Bounds::new(
++                    origin - point(px(PAD), px(-1.0)),
++                    size(p.line.width() + px(PAD * 2.0), l.line_height - px(2.0)),
++                );
++                window.paint_quad(gpui::quad(
++                    bounds,
++                    px(4.0),
++                    bg,
++                    gpui::Edges::default(),
++                    gpui::transparent_black(),
++                    gpui::BorderStyle::default(),
++                ));
++            }
++            let a = selected.start.max(p.range.start);
++            let b = selected.end.min(p.range.end);
++            if a < b {
++                let x = p.line.x_for_index(a - p.range.start);
++                let end = p.line.x_for_index(b - p.range.start);
++                window.paint_quad(fill(
++                    Bounds::new(origin + point(x, px(0.0)), size(end - x, l.line_height)),
++                    selection_color,
++                ));
++            }
++            let _ = p.line.paint_background(
++                origin,
++                l.line_height,
++                gpui::TextAlign::Left,
++                None,
++                window,
++                cx,
++            );
++            let _ = p.line.paint(
++                origin,
++                l.line_height,
++                gpui::TextAlign::Left,
++                None,
++                window,
++                cx,
++            );
++        }
++    }
++}
++#[cfg(feature = "test-support")]
++#[derive(Clone, Debug)]
++pub struct ReaderInlinePiece {
++    pub range: Range<usize>,
++    pub code: bool,
++    pub text_bounds: Bounds<Pixels>,
++    pub box_bounds: Bounds<Pixels>,
++    pub fonts: Vec<gpui::FontId>,
++}
++#[cfg(feature = "test-support")]
++#[derive(Clone, Debug)]
++pub struct ReaderInlineLayout {
++    pub text: String,
++    pub bounds: Bounds<Pixels>,
++    pub line_height: Pixels,
++    pub code_font: SharedString,
++    pub code_run_fonts: Vec<SharedString>,
++    pub pieces: Vec<ReaderInlinePiece>,
++}
++#[cfg(feature = "test-support")]
++#[derive(Default)]
++struct ReaderInlineLayouts(std::collections::HashMap<String, ReaderInlineLayout>);
++#[cfg(feature = "test-support")]
++impl gpui::Global for ReaderInlineLayouts {}
++#[cfg(feature = "test-support")]
++pub fn reader_inline_layout(text: &str, cx: &App) -> Option<ReaderInlineLayout> {
++    cx.try_global::<ReaderInlineLayouts>()?.0.get(text).cloned()
++}
+--- a/src/documents/picture.rs
++++ b/src/documents/picture.rs
+@@ -18,7 +18,7 @@
+ 
+ /// Where a picture's bytes come from.
+ #[derive(Clone, Debug, PartialEq)]
+-pub(crate) enum Origin {
++pub enum Origin {
+     File(PathBuf),
+     /// Bytes inline in the address, and their type.
+     Data(ImageFormat, Arc<[u8]>),
+@@ -53,7 +53,7 @@
+ }
+ 
+ /// Where `url` points, read from the folder `base`.
+-pub(crate) fn origin(url: &str, base: Option<&Path>) -> Origin {
++pub fn origin(url: &str, base: Option<&Path>) -> Origin {
+     let url = url.trim();
+     let lower = url.to_ascii_lowercase();
+     if lower.starts_with("http://") || lower.starts_with("https://") || url.starts_with("//") {
+@@ -79,6 +79,15 @@
+         Ok(path) if path.is_absolute() => Origin::File(path),
+         Ok(path) => base.map_or(Origin::Loose, |base| Origin::File(base.join(path))),
+         Err(why) => Origin::Bad(why),
++    }
++}
++
++/// Apply the repository reader's policy before constructing an image loader.
++/// The full origin parser still handles percent-encoded and platform paths.
++pub fn repository_picture_origin(url: &str, base: Option<&Path>) -> Origin {
++    match origin(url, base) {
++        Origin::File(_) | Origin::Data(_, _) => Origin::Bad("repository pictures require a controlled resolver".into()),
++        source => source,
+     }
+ }
+ 
+@@ -145,6 +154,7 @@
+     pub url: String,
+     /// The folder relative addresses start from.
+     pub base: Option<Arc<Path>>,
++    pub allow_filesystem: bool,
+ }
+ 
+ impl RenderOnce for Picture {
+@@ -154,10 +164,11 @@
+ }
+ 
+ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
+-    let Picture { id, alt, url, base } = shown;
++    let Picture { id, alt, url, base, allow_filesystem } = shown;
+     let (alt, url) = (alt.as_str(), url.as_str());
+     let colors = cx.theme().colors.clone();
+-    let (loaded, svg) = match origin(url, base.as_deref()) {
++    let source = if allow_filesystem { origin(url, base.as_deref()) } else { repository_picture_origin(url, base.as_deref()) };
++    let (loaded, svg) = match source {
+         Origin::File(path) => {
+             let svg = path
+                 .extension()
+@@ -212,6 +223,7 @@
+     let theme = cx.theme();
+     let colors = &theme.colors;
+     div()
++        .debug_selector(|| "markdown-picture-note".into())
+         .flex()
+         .items_center()
+         .gap_2()

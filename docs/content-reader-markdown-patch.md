@@ -16,12 +16,12 @@
 
 1. `document/mod.rs`：真实 `ListState` 访问器和滚动通知。
 2. `document/visual.rs`、`render.rs`：Preview 可选启用 reader 排版；编辑模式保持 Ely 原有点到源码映射。
-3. `render/inline.rs`：一个连续段落元素。每段按正文和 `theme.mono_family` 的真实 `TextRun` 塑形；代码 padding 参与推进、换行、圆角背景和命中计算。长代码按 grapheme 边界断行，复制直接读原 inline 字节，不塞入 padding 字符。测试快照来自同一帧实际布局，包含代码字体与几何。
+3. `render/inline.rs`：一个连续段落元素。每段按正文和 `theme.mono_family` 的真实 `TextRun` 塑形；代码 padding 参与推进、换行、圆角背景和命中计算。长代码按 grapheme 边界断行，复制直接读原 inline 字节，不塞入 padding 字符。硬换行强制另起一行，链接按字形命中，与选择 caret 分开。短段落返回实际固有宽度以保留表格列对齐。样式边界用 sweep，字形位置只索引一次，避免逐字调用 GPUI 线性 `x_for_index`；只绘制裁剪区内的行。测试快照来自同一帧实际布局，包含代码字体与几何。
 4. fence 语言标签仅局部上移 8px；代码文本保持其布局与语法着色。
-5. `documents/mod.rs` 仅在 `test-support` 下导出布局核验接口。
+5. `picture.rs`：仓库 reader 的图片策略在创建 loader 前拒绝文件系统与 data 来源，包括 `file:`、绝对/UNC 路径、带 base 的相对路径；外网图片仍只显示未下载提示。通用上游调用方的默认行为保持原样。`documents/mod.rs` 仅在 `test-support` 下导出布局/策略核验接口。
 
 阅读器侧 `ReaderView` 持有与源码/标签条同源的 `Fade`，hover 淡入淡出、拖动保持反馈、无溢出不画条。Source gutter 仍为原 0.75rem 加 6px。
 
 ## 验证边界
 
-GPUI 测试平台覆盖真实 ListState 滚轮/拖动/范围、长文虚拟化、代码字体和布局、窄窗口断行、跨代码段选择复制与 fence 几何。Windows 真实窗口仍由负责人验收；不声称测试平台等于最终视觉验收。
+GPUI 测试平台覆盖真实 ListState 滚轮/拖动、hover 淡入淡出、resize/替换范围 clamp、长文虚拟化、代码字体和布局、窄窗口断行、跨代码段选择复制、fence 几何、表格对齐和文件图片拒绝。密集段落使用 20,000 个 inline code span，计时实际 resize 排版而非切换到普通 fixture。Windows 真实窗口仍由负责人验收；不声称测试平台等于最终视觉验收。

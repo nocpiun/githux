@@ -92,3 +92,12 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 协调裁决已批准最小 Ely 补丁。实际采用根 `[patch]` + `vendor/ely-gpui-component`，基线仍为 `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不修改 Cargo 缓存，不升级版本。fence 标签局部上移 8px；inline code 在真实连续字形排版中使用 mono 字体、圆角浅背景和小 padding，长代码断行，跨代码段拖选复制不加字符；Markdown 滚动条直接绑定真实 `ListState`。Source gutter 保持 0.75rem+6px。
 
 阅读器 41 项集成测试通过，覆盖真实滚动/拖动/无溢出隐藏、长文虚拟化、实际代码字体/几何、窄窗口断行与跨代码段复制，既有链接和 Source 测试也保持通过。完整命令与最新 head、预览 PID 见本轮 PR/交付状态；真实 Windows 最终视觉仍待负责人验收，未自行合并。
+
+
+### 第四轮 Codex 修复与验证补充
+
+本轮 review 指出的硬换行、重复全量扫描、单字符链接右半区域、文件系统图片和表格对齐均按实际行为修复。额外定位到固定 GPUI `x_for_index` 每次从头扫描字形，原先每字符两次调用导致密集段落平方级排版；改为一次位置索引后，恢复 20,000 span 的真实 resize 预算测试并通过。短段落返回固有宽度，表格左/居中/右列用实测坐标核验；长段落保持换行并跳过屏外绘制。安全策略在 loader 创建前拒绝文件系统/data 图片，覆盖 UNC 和绝对路径，不依赖点击链接回调。
+
+新增真实 hover 淡入淡出与 resize/替换内容的 ListState clamp 测试，不用 snap 代替交互；保留单字符链接右半位置点击测试。预览新增 Inline wrap fixture，仍只复用实际 reader，不接主界面。补丁差异重新生成到 vendor/ely-gpui-component/patches/reader.patch。
+
+全量测试曾有两个网络 bounded 用例在并发负载下失败（Network 而非 ResponseTooLarge），独立模块 5 项重跑通过；不修改无关网络实现，也不把该次全量执行写成通过。最终 CI/审查结果以 PR 当前 head 的证据为准，永久 true/coordinator 和人工验收 hold 保留。

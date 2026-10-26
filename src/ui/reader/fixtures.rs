@@ -82,7 +82,9 @@ pub fn inline_code_short() -> PreparedBody {
 pub fn inline_code_long() -> PreparedBody {
     let long = "code_".repeat(60);
     PreparedBody::Utf8 {
-        text: format!("# Inline code\n\n中文和 emoji 🚀 在长代码 `{long}` 之间。\n"),
+        text: format!(
+            "# Inline code\n\n中文和 emoji 🚀 在长代码 `{long}` 之间。\n\n普通正文 `短代码` 连续代码：`first` `second`，以及 emoji `🚀中文` 与正文交错。\n"
+        ),
         has_bom: false,
     }
 }

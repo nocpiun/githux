@@ -156,7 +156,7 @@ impl MarkdownDocument {
                         on_point: &on_point,
                         cell: cell.as_ref(),
                         reader_inline: self.reader_inline,
-                        reader_only: true,
+                        reader_only: self.reader_inline,
                     },
                     self.look.scale,
                     cx,

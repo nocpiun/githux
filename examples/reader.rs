@@ -52,6 +52,11 @@ const FIXTURES: &[Fixture] = &[
         kind: || DocumentKind::Markdown,
     },
     Fixture {
+        label: "Inline wrap",
+        body: fixtures::inline_code_long,
+        kind: || DocumentKind::Markdown,
+    },
+    Fixture {
         label: "Source",
         body: fixtures::source,
         kind: || DocumentKind::Source {

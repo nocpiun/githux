@@ -82,6 +82,15 @@ pub fn origin(url: &str, base: Option<&Path>) -> Origin {
     }
 }
 
+/// Apply the repository reader's policy before constructing an image loader.
+/// The full origin parser still handles percent-encoded and platform paths.
+pub fn repository_picture_origin(url: &str, base: Option<&Path>) -> Origin {
+    match origin(url, base) {
+        Origin::File(_) | Origin::Data(_, _) => Origin::Bad("repository pictures require a controlled resolver".into()),
+        source => source,
+    }
+}
+
 /// A `file:` address after its scheme: host, path, no query.
 fn file(rest: &str) -> Origin {
     let rest = rest.split(['?', '#']).next().unwrap_or_default();
@@ -158,8 +167,9 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
     let Picture { id, alt, url, base, allow_filesystem } = shown;
     let (alt, url) = (alt.as_str(), url.as_str());
     let colors = cx.theme().colors.clone();
-    let (loaded, svg) = match origin(url, base.as_deref()) {
-        Origin::File(path) if allow_filesystem => {
+    let source = if allow_filesystem { origin(url, base.as_deref()) } else { repository_picture_origin(url, base.as_deref()) };
+    let (loaded, svg) = match source {
+        Origin::File(path) => {
             let svg = path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
@@ -169,7 +179,6 @@ fn picture(shown: Picture, window: &mut Window, cx: &mut App) -> AnyElement {
                 .map(|loaded| loaded.map_err(|error| SharedString::from(error.to_string())));
             (loaded, svg)
         }
-        Origin::File(_) => return note(alt, "filesystem pictures are disabled".into(), colors.fg_subtle, cx),
         Origin::Data(format, bytes) => {
             let svg = format == ImageFormat::Svg;
             let image = |loaded: &Result<Arc<RenderImage>, _>| loaded.as_ref().ok().cloned();
@@ -214,6 +223,7 @@ fn note(alt: &str, said: SharedString, tone: Hsla, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let colors = &theme.colors;
     div()
+        .debug_selector(|| "markdown-picture-note".into())
         .flex()
         .items_center()
         .gap_2()

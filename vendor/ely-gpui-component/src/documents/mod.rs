@@ -50,7 +50,8 @@ pub use markdown::file_options as markdown_options;
 pub use markdown::markdown_highlights;
 pub use modes::{MarkdownEditor, MarkdownMode};
 pub use pages::{PageCover, PageIcon};
-pub use picture::{Origin as PictureOrigin, origin as picture_origin};
+#[cfg(feature = "test-support")]
+pub use picture::{Origin as PictureOrigin, repository_picture_origin};
 pub use print::{Margins, Paper, PrintPreview, PrintSettings, sheet};
 pub use reading::{Footnote, Glossary, ReadingProgress, TooltipTerm, ZenMode};
 pub use render::MarkdownRenderer;
