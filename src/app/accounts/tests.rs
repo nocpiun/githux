@@ -645,6 +645,54 @@ fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut T
     wait_for(&view, cx, |state| state.accounts.len() == 1);
 }
 
+/// Review round 6: an operation that fails must keep its own error even when
+/// the directory has unrelated journalled cleanup, and stale reply snapshots
+/// must not overwrite a newer reconciliation.
+#[gpui::test]
+fn a_failed_operation_keeps_its_error_and_presentation_comes_from_the_service(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        // The second login is rejected by GitHub.
+        mock.enqueue(Ok(HttpResponse {
+            status: 401,
+            headers: vec![],
+            body: "{}".into(),
+        }))
+        .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    put_token(&view, cx, "good");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    put_token(&view, cx, "bad");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| {
+        state
+            .status
+            .as_ref()
+            .is_some_and(|status| status.tone == StatusTone::Error && status.text.contains("401"))
+    });
+    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    assert!(
+        !presentation
+            .status
+            .as_ref()
+            .is_some_and(|status| status.text.starts_with("The account change was committed")),
+        "an unrelated cleanup journal must not rewrite this operation's error"
+    );
+    assert_eq!(
+        presentation.accounts.len(),
+        1,
+        "the failed login saved nothing"
+    );
+}
+
 /// Review round 4: two cancelled mutations may settle in any order. Tracking
 /// only the most recent generation would permanently drop the earlier one.
 #[gpui::test]

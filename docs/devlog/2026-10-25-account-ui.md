@@ -34,7 +34,7 @@
 cargo fmt --all                 # 已格式化
 cargo check --locked --all-targets        → ok
 cargo clippy --locked --all-targets -- -D warnings → ok
-cargo test --locked                       → 203 passed（其中本任务 14 项）
+cargo test --locked                       → 204 passed（其中本任务 15 项）
 cargo build --locked                      → ok
 ```
 
@@ -79,6 +79,15 @@ Codex 第四轮 P2：`reconciling` 只保存一个代次。先取消 A 的重新
 Codex 第五轮 P2：上一轮把待对账改成了列表，但“作废仓库结果”只在最后一个结算时执行。若 A 的重新验证先结算并记录了授权失败，`refresh_presentation` 会显示新的授权状态，而 A 账户的仓库结果仍标为 Complete 直到 B 也结算。
 
 修复：每次结算都作废仓库展示并刷新权威账户状态；仍只在全部结算后给出汇总提示。回归测试扩展 `every_cancelled_mutation_is_reconciled_independently`，在每次结算前放入加载态并断言被作废。
+
+## 第 7 轮：审查修复
+
+Codex 第六轮两条 P2：
+
+1. **reply 快照可能覆盖较新的对账状态**：`send_reply` 在 await `recovery_pending()` 之前抓账户快照；期间被取消操作的结算可能已经更新了其他账户的授权状态，随后旧快照被应用。修复：`Reply` 不再携带账户快照，应用结果时用 `refresh_presentation` 读取服务权威状态。
+2. **全局待清理覆盖本次错误**：`recovery_pending()` 是目录级状态，不代表本操作已提交；无条件覆盖会把 401 等真实失败改写成“已提交”。修复：保留操作自身结果，把待清理作为追加警告。
+
+新增回归 `a_failed_operation_keeps_its_error_and_presentation_comes_from_the_service`。预览套件 15 项，全仓 204 项。
 
 ## 剩余问题
 

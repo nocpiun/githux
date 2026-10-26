@@ -52,11 +52,11 @@ struct Reply {
     generation: u64,
     operation: Operation,
     result: Result<Success, String>,
-    accounts: Vec<AccountSummary>,
-    active: Option<AccountKey>,
     /// Captured before a repository request. Only repository results are
     /// validated against it: account mutations intentionally advance the epoch.
     publication: Option<RepositoryReadContext>,
+    /// Global journalled cleanup observed after this reply. It is reported
+    /// separately and never rewrites this operation's own outcome.
     recovery_pending: bool,
     repositories: Option<Result<crate::domain::repo::ReposOutcome, GitHubError>>,
 }
@@ -371,8 +371,10 @@ impl AccountPreview {
             cx.notify();
             return;
         }
-        self.presentation.accounts = reply.accounts;
-        self.presentation.active = reply.active;
+        // Read authoritative state now: an unrelated cancelled mutation may
+        // have reconciled (or revalidated) the directory after this reply's
+        // work finished, and a stale snapshot must not roll that back.
+        self.refresh_presentation(cx);
         match reply.result {
             Ok(success) => {
                 self.presentation.status = Some(match success {
@@ -443,9 +445,20 @@ impl AccountPreview {
             }
         }
         if reply.recovery_pending {
+            // Outstanding cleanup is a directory-level condition, not evidence
+            // that this operation committed. Keep the operation's own message
+            // and append the separate warning.
+            let current = self
+                .presentation
+                .status
+                .as_ref()
+                .map(|status| status.text.clone())
+                .unwrap_or_default();
             self.presentation.status = Some(StatusMessage::new(
                 StatusTone::Warning,
-                "The account change was committed, but retired credential cleanup remains pending.",
+                format!(
+                    "{current} Retired credential cleanup remains pending for the saved account directory."
+                ),
             ));
         }
         cx.notify();
@@ -532,8 +545,6 @@ impl AccountPreview {
                     generation,
                     operation,
                     result,
-                    accounts: Vec::new(),
-                    active: None,
                     publication,
                     recovery_pending: false,
                     repositories,
@@ -631,8 +642,6 @@ impl AccountPreview {
                     generation,
                     operation,
                     result,
-                    accounts: Vec::new(),
-                    active: None,
                     publication: None,
                     recovery_pending: false,
                     repositories: None,
@@ -786,8 +795,6 @@ async fn send_reply(
     alive: &watch::Sender<bool>,
     mut reply: Reply,
 ) {
-    reply.accounts = accounts.summaries();
-    reply.active = accounts.active_context().map(|context| context.account);
     reply.recovery_pending = accounts.recovery_pending().await.unwrap_or(true);
     enqueue(inbox, alive, Message::Operation(reply));
 }
