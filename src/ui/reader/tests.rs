@@ -556,6 +556,46 @@ short
     );
 }
 
+/// Row hit bounds belong to the frame that painted them: after scrolling, a
+/// drag maps to the row now under the pointer, never to a line that used to sit
+/// at those pixels.
+#[gpui::test]
+fn row_hit_bounds_are_replaced_after_scrolling(cx: &mut TestAppContext) {
+    let mut text = String::new();
+    for n in 0..200 {
+        text.push_str(&format!(
+            "line {n}
+"
+        ));
+    }
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text,
+            has_bom: false,
+        },
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(500.0), px(220.0)));
+    frames(cx);
+    let before = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).row_count());
+    assert!(before > 0, "the first frame painted rows: {before}");
+    let frame = cx.debug_bounds("reader-source").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: frame.center(),
+        delta: ScrollDelta::Lines(point(0.0, -40.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    frames(cx);
+    let after = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).row_count());
+    assert!(
+        after > 0 && after <= before + 4,
+        "scrolling replaces the map instead of accumulating it: {before} then {after}"
+    );
+}
+
 /// A near-limit Markdown document is parsed off the UI thread and only its
 /// visible blocks are drawn.
 #[gpui::test]

@@ -57,7 +57,14 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 
 **待裁决：** Markdown inline code 字体/圆角/padding，以及 fenced-code 语言标签位置，都需要 Ely 文档预览暴露真实布局或代码块绘制钩子；现有公开 API 不足。已记录 `githux:arbitration-required:v1`，`arbitration_ever_required=true`/`merge_owner=coordinator`，未改 checkout 或 vendor。
 
-验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（366 主程序 + 30 integration）、`cargo build --locked --example reader` 与 `git diff --check` 均通过；视觉与拖动交互不因这些命令视为验收通过。
+**第二轮审查修复：**
+
+1. 预览/测试的模块树曾用嵌套 `#[path]`，使 `cargo fmt --check` 在 Linux 上解析到错误目录而 CI 失败。现在由 `src/bin_support/reader_modules.rs` 单点声明，所有 `#[path]` 相对该文件解析，两个平台的 fmt/check 一致。
+2. 选择拖动原先只挂在行内文本上，拖到短行尾空白或空行就停住。现在按 prepaint 记录的行 bounds 与 `TextLayout` 映射指针，并把列 clamp 到行尾；新增“长行拖到空行后复制”的回归。
+3. 两个轴的滚动条共用 owner，垂直拖动可能被水平轨道消费。现在同时比较 `axis`。
+4. 行命中映射曾跨帧累积，滚动后旧行可能在相同像素位置胜出。现在帧末用本次 prepaint 的记录整体替换，并新增滚动后映射数量不膨胀的回归。
+
+验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（368 主程序 + 32 integration）、`cargo build --locked --example reader` 与 `git diff --check` 均通过；视觉、拖动与淡入淡出时序不因这些命令视为验收通过。
 
 ## 后续
 

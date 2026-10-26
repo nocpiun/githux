@@ -63,6 +63,10 @@ pub struct SourceView {
     /// Body bounds and shaped layout of each row actually painted this frame,
     /// so a drag over trailing whitespace still maps to a real column.
     rows: std::collections::HashMap<usize, (gpui::Bounds<Pixels>, gpui::TextLayout)>,
+    /// Rows recorded by the prepaint that is running now. They replace `rows`
+    /// once the frame's prepaint ends, so a scrolled-away line can never keep
+    /// winning a hit test at its old screen position.
+    painting: std::cell::RefCell<Vec<(usize, gpui::Bounds<Pixels>, gpui::TextLayout)>>,
     #[cfg(test)]
     pinned_clock: Option<u64>,
     /// The widest row observed so far; visible rows can extend this after layout.
@@ -93,6 +97,7 @@ impl SourceView {
             thumb_dragging: false,
             last_reach: Default::default(),
             rows: std::collections::HashMap::new(),
+            painting: Default::default(),
             #[cfg(test)]
             pinned_clock: None,
             widest,
@@ -250,6 +255,11 @@ impl SourceView {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
     /// Extends the selection from a pointer anywhere in the viewport: the row
     /// under `y`, and a column clamped to that row's own length.
     fn drag_anywhere(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -336,7 +346,7 @@ impl SourceView {
                         view.widest = ix;
                         cx.notify();
                     }
-                    view.rows.insert(ix, (bounds, layout));
+                    view.painting.borrow_mut().push((ix, bounds, layout));
                 });
             })
             .id(("reader-source-body", ix))
@@ -404,6 +414,17 @@ impl Render for SourceView {
         let line_height = (size * 1.6).round();
         let count = self.line_starts.len();
         let widest = self.widest;
+        // Rows recorded by the *previous* frame's prepaint were complete by the
+        // time this render ran, so swapping here always matches what is on
+        // screen and drops rows that scrolled away.
+        if !self.painting.borrow().is_empty() {
+            self.rows = self
+                .painting
+                .borrow_mut()
+                .drain(..)
+                .map(|(ix, bounds, layout)| (ix, (bounds, layout)))
+                .collect();
+        }
         if self.thumb_dragging && !cx.has_active_drag() {
             self.thumb_dragging = false;
             self.fade.set_dragging(false, self.now_ms());

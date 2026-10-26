@@ -15,10 +15,14 @@ mod domain;
 #[path = "../src/platform/fonts.rs"]
 mod fonts;
 
-// The reader's module tree lives at the crate root so `rustfmt` resolves every
-// `#[path]` from the same directory on Windows and Linux. The included file
-// declares `mod ui { ... }`, matching the real package.
-include!("../support/reader_modules.rs");
+// The module tree lives in one file so every `#[path]` inside it resolves
+// against that file on Windows and Linux alike (and `rustfmt` can find it).
+#[path = "../src/bin_support/reader_modules.rs"]
+mod reader_modules;
+#[allow(unused_imports)]
+use reader_modules as ui;
+#[allow(unused_imports)]
+use reader_modules::reader;
 
 use std::rc::Rc;
 
