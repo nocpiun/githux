@@ -75,7 +75,9 @@ pub fn render(
         .opacity(opacity)
         .on_drag_move(move |event: &gpui::DragMoveEvent<Drag>, window, cx| {
             let drag = event.drag(cx);
-            if drag.owner != owner {
+            // Both axes share the owner, so the axis is part of the identity:
+            // a vertical drag must never move the horizontal offset.
+            if drag.owner != owner || drag.axis != axis {
                 return;
             }
             let local = event.event.position - event.bounds.origin;

@@ -509,6 +509,53 @@ fn source_scrollbars_follow_the_real_list_and_fade_out(cx: &mut TestAppContext) 
     );
 }
 
+/// A drag that continues onto a shorter or empty row keeps extending the
+/// selection, and the copied text matches the selection the reader reports.
+#[gpui::test]
+fn dragging_across_short_and_empty_rows_keeps_selecting(cx: &mut TestAppContext) {
+    let (_reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "a much longer first line
+
+short
+"
+            .to_string(),
+            has_bom: false,
+        },
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(500.0), px(300.0)));
+    frames(cx);
+    let long = cx.debug_bounds("reader-source-body-0").unwrap();
+    let empty_row = cx.debug_bounds("reader-source-row-hit-1").unwrap();
+    let start = point(long.left() + px(4.0), long.center().y);
+    let end = empty_row.center();
+    cx.simulate_click(start, Modifiers::none());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let selected = _reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).selected_text());
+    assert!(
+        selected
+            .as_deref()
+            .is_some_and(|text| text.starts_with("a much longer first line")),
+        "a visible selection exists before copying: {selected:?}"
+    );
+    cx.simulate_keystrokes("secondary-c");
+    cx.run_until_parked();
+    let copied = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .expect("the drag copies");
+    assert!(
+        copied.contains("a much longer first line"),
+        "the selection spans to the empty row: {copied:?}"
+    );
+}
+
 /// A near-limit Markdown document is parsed off the UI thread and only its
 /// visible blocks are drawn.
 #[gpui::test]

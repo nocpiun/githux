@@ -8,8 +8,8 @@
 mod content;
 #[path = "../src/domain/mod.rs"]
 mod domain;
-mod ui {
-    #[path = "../support/reader_shared.rs"]
-    mod shared;
-    pub use shared::*;
-}
+
+// The reader's module tree lives at the crate root so `rustfmt` resolves every
+// `#[path]` from the same directory on Windows and Linux. The included file
+// declares `mod ui { ... }`, matching the real package.
+include!("../support/reader_modules.rs");

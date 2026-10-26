@@ -14,13 +14,11 @@ mod content;
 mod domain;
 #[path = "../src/platform/fonts.rs"]
 mod fonts;
-mod ui {
-    #[path = "../../support/reader_example.rs"]
-    mod shared;
-    pub use shared::*;
-}
 
-use ui::reader;
+// The reader's module tree lives at the crate root so `rustfmt` resolves every
+// `#[path]` from the same directory on Windows and Linux. The included file
+// declares `mod ui { ... }`, matching the real package.
+include!("../support/reader_modules.rs");
 
 use std::rc::Rc;
 

@@ -60,6 +60,9 @@ pub struct SourceView {
     clock: std::time::Instant,
     thumb_dragging: bool,
     last_reach: gpui::Point<Pixels>,
+    /// Body bounds and shaped layout of each row actually painted this frame,
+    /// so a drag over trailing whitespace still maps to a real column.
+    rows: std::collections::HashMap<usize, (gpui::Bounds<Pixels>, gpui::TextLayout)>,
     #[cfg(test)]
     pinned_clock: Option<u64>,
     /// The widest row observed so far; visible rows can extend this after layout.
@@ -89,6 +92,7 @@ impl SourceView {
             clock: std::time::Instant::now(),
             thumb_dragging: false,
             last_reach: Default::default(),
+            rows: std::collections::HashMap::new(),
             #[cfg(test)]
             pinned_clock: None,
             widest,
@@ -246,6 +250,43 @@ impl SourceView {
         cx.notify();
     }
 
+    /// Extends the selection from a pointer anywhere in the viewport: the row
+    /// under `y`, and a column clamped to that row's own length.
+    fn drag_anywhere(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.dragging || !event.dragging() {
+            return;
+        }
+        let Some((line, (bounds, layout))) = self
+            .rows
+            .iter()
+            .filter(|(_, (bounds, _))| bounds.top() <= event.position.y)
+            .max_by(|a, b| {
+                f32::from(a.1.0.top())
+                    .partial_cmp(&f32::from(b.1.0.top()))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(line, row)| (*line, row.clone()))
+        else {
+            return;
+        };
+        let range = self.line_range(line);
+        let at = range.start
+            + layout
+                .index_for_position(event.position)
+                .unwrap_or_else(|near| near)
+                .min(range.len());
+        let at = at.max(range.start);
+        let _ = bounds;
+        let Some(selection) = self.selection.as_mut() else {
+            return;
+        };
+        if selection.head == at {
+            return;
+        }
+        selection.head = at;
+        cx.notify();
+    }
+
     fn row(
         &self,
         ix: usize,
@@ -277,6 +318,8 @@ impl SourceView {
             .text_color(colors.fg_subtle)
             .child(format!("{:>width$}", ix + 1, width = digits));
         let view = cx.entity().downgrade();
+        let row_layout = layout.clone();
+        let row_layout_for_paint = row_layout.clone();
         let body = div()
             // The initial shortlist is only a probe. Every rendered line reports
             // its actual shaped width, including font fallback, so a wider line
@@ -285,12 +328,15 @@ impl SourceView {
                 let Some(bounds) = bounds.first() else {
                     return;
                 };
+                let bounds = *bounds;
+                let layout = row_layout_for_paint.clone();
                 let _ = view.update(cx, |view, cx| {
                     if bounds.size.width > view.width {
                         view.width = bounds.size.width;
                         view.widest = ix;
                         cx.notify();
                     }
+                    view.rows.insert(ix, (bounds, layout));
                 });
             })
             .id(("reader-source-body", ix))
@@ -303,10 +349,32 @@ impl SourceView {
                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                     view.press(ix, &layout, event, window, cx);
                 }),
+            );
+        // Selection extends across the whole row, including its trailing
+        // whitespace and an empty line, so a drag keeps moving after the text
+        // ends. `drag` clamps the column to the line's own length.
+        let drag_view = cx.entity().downgrade();
+        let press_layout = dragged.clone();
+        let row_layout = dragged.clone();
+        let hit = div()
+            .id(("reader-source-row-hit", ix))
+            .debug_selector(move || format!("reader-source-row-hit-{ix}"))
+            .flex_1()
+            .min_w_0()
+            .h(line_height)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    view.press(ix, &press_layout, event, window, cx);
+                }),
             )
-            .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _, cx| {
-                view.drag(ix, &dragged, event, cx);
-            }));
+            .on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
+                let _ = drag_view.update(cx, |view, cx| {
+                    view.drag(ix, &row_layout, event, cx);
+                });
+            })
+            .child(body)
+            .into_any_element();
         div()
             .id(("reader-source-row", ix))
             .debug_selector(move || format!("reader-source-row-{ix}"))
@@ -316,7 +384,7 @@ impl SourceView {
             .font_family(theme.mono_family.clone())
             .text_size(size)
             .child(gutter)
-            .child(body)
+            .child(hit)
             .into_any_element()
     }
 }
@@ -376,6 +444,9 @@ impl Render for SourceView {
             .child(list)
             .children(self.scrollbar(gpui::Axis::Vertical, opacity, &handle, cx))
             .children(self.scrollbar(gpui::Axis::Horizontal, opacity, &handle, cx))
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
+                view.drag_anywhere(event, cx);
+            }))
             .on_hover(cx.listener(|view, hovered, _, cx| {
                 if view.fade.set_hovered(*hovered, view.now_ms()) {
                     cx.notify();
