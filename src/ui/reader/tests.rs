@@ -449,6 +449,42 @@ fn gutter_padding_keeps_selection_coordinates_aligned(cx: &mut TestAppContext) {
     let row = cx.debug_bounds("reader-source-row-0").unwrap();
     assert_eq!(gutter.left(), row.left());
     assert_eq!(body.left() - row.left(), gutter.size.width);
+    // The gap is the original 0.75rem plus 6px, measured through the real
+    // layout, not typed spaces.
+    let expected = super::source::gutter_gap(px(16.0));
+    assert_eq!(expected, px(18.0));
+    // Gutter box = left inset + drawn number + this gap. Both numbers are
+    // measured, so the padding cannot be replaced by typed spaces unnoticed.
+    let number: f32 = cx.update(|window, cx| {
+        use ely_gpui_component::theme::ActiveTheme as _;
+        let theme = cx.theme();
+        let size = theme
+            .text_size(ely_gpui_component::theme::TextSize::Sm)
+            .to_pixels(window.rem_size());
+        let run = gpui::TextRun {
+            len: 1,
+            font: gpui::font(theme.mono_family.clone()),
+            color: Default::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .layout_line("1", size, std::slice::from_ref(&run), None)
+            .width
+            .into()
+    });
+    let gap = f32::from(gutter.size.width) - 8.0 - number;
+    assert!(
+        (gap - f32::from(expected)).abs() <= 1.0,
+        "the gutter gap is the original 0.75rem plus 6px: {gap} vs {}",
+        f32::from(expected)
+    );
+    assert!(
+        gap > 12.0,
+        "the gap grew past the original 0.75rem baseline: {gap}"
+    );
     cx.simulate_click(
         point(body.left() + px(2.0), body.center().y),
         Modifiers::none(),
@@ -507,6 +543,74 @@ fn source_scrollbars_follow_the_real_list_and_fade_out(cx: &mut TestAppContext) 
         cx.debug_bounds("reader-scrollbar-y").is_some(),
         "the vertical bar stays while the pointer is over the reader"
     );
+}
+
+/// Right-aligned numbers of 1, 2, 4 and 5 digits keep the same gap, so the
+/// text column does not shift as a file grows.
+#[gpui::test]
+fn gutter_keeps_its_gap_for_every_number_width(cx: &mut TestAppContext) {
+    let mut text = String::new();
+    for n in 0..12_000 {
+        text.push_str(&format!(
+            "line {n}
+"
+        ));
+    }
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text,
+            has_bom: false,
+        },
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(400.0)));
+    frames(cx);
+    let reach = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).reach());
+    assert!(reach.y > px(0.0), "the fixture scrolls: {reach:?}");
+    let mut gaps = Vec::new();
+    for step in 0..=40 {
+        if step > 0 {
+            let frame = cx.debug_bounds("reader-source").unwrap();
+            cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+            cx.simulate_event(ScrollWheelEvent {
+                position: frame.center(),
+                delta: ScrollDelta::Lines(point(0.0, -120.0)),
+                modifiers: Modifiers::none(),
+                touch_phase: Default::default(),
+            });
+        }
+        frames(cx);
+        let mut found = 0;
+        for ix in 0..12_000 {
+            let Ok(gutter) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let key: &'static str =
+                    Box::leak(format!("reader-source-gutter-{ix}").into_boxed_str());
+                cx.debug_bounds(key)
+            })) else {
+                continue;
+            };
+            let Some(gutter) = gutter else { continue };
+            let body_key: &'static str =
+                Box::leak(format!("reader-source-body-{ix}").into_boxed_str());
+            let Some(body) = cx.debug_bounds(body_key) else {
+                continue;
+            };
+            // Same gap between the gutter box and the text on every row.
+            gaps.push(f32::from(body.left()) - f32::from(gutter.right()));
+            found += 1;
+            if found > 2 {
+                break;
+            }
+        }
+    }
+    assert!(gaps.len() > 8, "sampled gaps: {gaps:?}");
+    let first = gaps[0];
+    assert!(
+        gaps.iter().all(|gap| (gap - first).abs() <= 0.5),
+        "the text column never shifts with number width: {gaps:?}"
+    );
+    assert!(first >= 0.0);
 }
 
 /// A drag that continues onto a shorter or empty row keeps extending the
@@ -668,4 +772,124 @@ fn frames(cx: &mut VisualTestContext) {
         cx.update(|window, cx| window.simulate_next_frame(cx));
     }
     cx.run_until_parked();
+}
+
+/// The thumb drag moves the list's real offset.
+///
+/// `on_drag` creates the drag on the first move that crosses the threshold and
+/// then stops propagation, so that move only arms the gesture; the capture
+/// listener sees `active_drag` from the next move on. A real drag therefore
+/// needs more than one move, which is what this exercises.
+#[gpui::test]
+fn dragging_the_source_scrollbar_moves_the_real_offset(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        fixtures::source(),
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(200.0)));
+    frames(cx);
+    let frame = cx.debug_bounds("reader-source").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    reader.update_in(cx, |reader, _, cx| {
+        reader.source().unwrap().update(cx, |source, _| {
+            source.pin_scrollbar_clock(0);
+            source.show_scrollbar();
+        });
+    });
+    frames(cx);
+    let vertical = cx
+        .debug_bounds("reader-scrollbar-y-thumb")
+        .expect("the vertical thumb is drawn");
+    let start = vertical.origin + point(px(1.0), px(f32::from(vertical.size.height) / 2.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let mut offsets = Vec::new();
+    for step in 1..=5 {
+        cx.simulate_mouse_move(
+            start + point(px(0.0), px(15.0 * step as f32)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        offsets.push(reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).offset()));
+    }
+    cx.simulate_mouse_up(
+        start + point(px(0.0), px(75.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        offsets[0],
+        point(px(0.0), px(0.0)),
+        "the arming move does not jump the thumb"
+    );
+    let moved = offsets.last().copied().expect("five moves");
+    assert!(
+        moved.y < px(-10.0),
+        "dragging down scrolls the real list offset: {offsets:?}"
+    );
+    assert_eq!(
+        moved.x,
+        px(0.0),
+        "a vertical drag never moves x: {offsets:?}"
+    );
+    let reach = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).reach());
+    assert!(
+        moved.y >= -reach.y,
+        "the drag clamps to the list's measured extent: {moved:?} vs {reach:?}"
+    );
+}
+
+/// A horizontal drag moves only x, so the two axes stay independent.
+#[gpui::test]
+fn dragging_the_horizontal_scrollbar_leaves_the_vertical_offset(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        fixtures::source(),
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(200.0)));
+    frames(cx);
+    let frame = cx.debug_bounds("reader-source").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    reader.update_in(cx, |reader, _, cx| {
+        reader.source().unwrap().update(cx, |source, _| {
+            source.pin_scrollbar_clock(0);
+            source.show_scrollbar();
+        });
+    });
+    frames(cx);
+    let horizontal = cx
+        .debug_bounds("reader-scrollbar-x-thumb")
+        .expect("the horizontal thumb is drawn");
+    let start = horizontal.origin + point(px(f32::from(horizontal.size.width) / 2.0), px(1.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    for step in 1..=5 {
+        cx.simulate_mouse_move(
+            start + point(px(20.0 * step as f32), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(
+        start + point(px(100.0), px(0.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let offset = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).offset());
+    assert!(
+        offset.x < px(0.0),
+        "the horizontal offset moved: {offset:?}"
+    );
+    assert_eq!(offset.y, px(0.0), "and the vertical offset did not");
 }

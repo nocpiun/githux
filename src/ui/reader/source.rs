@@ -309,6 +309,7 @@ impl SourceView {
         ix: usize,
         line_height: Pixels,
         size: Pixels,
+        gutter_gap: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let line = self.line_text(ix);
@@ -329,9 +330,10 @@ impl SourceView {
             .flex_none()
             .debug_selector(move || format!("reader-source-gutter-{ix}"))
             .pl_2()
-            // Real layout space, not characters: the body and its TextLayout
-            // share this origin during selection and horizontal scrolling.
-            .pr(px(6.0))
+            // Real layout space, never typed spaces: the original 0.75rem gap
+            // plus 6px, and the body's `TextLayout` keeps this same origin so
+            // selection and horizontal scrolling stay aligned.
+            .pr(gutter_gap)
             .text_color(colors.fg_subtle)
             .child(format!("{:>width$}", ix + 1, width = digits));
         let view = cx.entity().downgrade();
@@ -419,6 +421,7 @@ impl Render for SourceView {
         let mono = theme.mono_family.clone();
         let size = theme.text_size(TextSize::Sm).to_pixels(window.rem_size());
         let line_height = (size * 1.6).round();
+        let gutter_gap = gutter_gap(window.rem_size());
         let count = self.line_starts.len();
         let widest = self.widest;
         // Rows recorded by the *previous* frame's prepaint were complete by the
@@ -451,7 +454,7 @@ impl Render for SourceView {
             count,
             cx.processor(move |view: &mut Self, range: Range<usize>, _window, cx| {
                 range
-                    .map(|ix| view.row(ix, line_height, size, cx))
+                    .map(|ix| view.row(ix, line_height, size, gutter_gap, cx))
                     .collect::<Vec<_>>()
             }),
         )
@@ -543,6 +546,14 @@ impl SourceView {
             super::scrollbar::render(handle, axis, opacity, cx.entity_id(), name, on_dragging, cx)
         })
     }
+}
+
+/// The gap between the gutter's number and the source text.
+///
+/// It keeps the original 0.75rem spacing and adds 6px on top of it, so the
+/// change is visibly larger than before at any DPI rather than replacing it.
+pub fn gutter_gap(rem: Pixels) -> Pixels {
+    rem * 0.75 + px(6.0)
 }
 
 /// The byte offset where each line starts.

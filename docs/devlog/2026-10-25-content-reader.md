@@ -66,6 +66,20 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 
 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（368 主程序 + 32 integration）、`cargo build --locked --example reader` 与 `git diff --check` 均通过；视觉、拖动与淡入淡出时序不因这些命令视为验收通过。
 
+## 2026-10-26 第三轮：纠正第二轮的四项实际缺口
+
+负责人再次确认四项视觉反馈仍未达成。逐条处理：
+
+**1. 行号间距（已实现）。** 第二轮把 `.pr_3()`（0.75rem）换成 `px(6.0)`，实际是**变窄**。现在改为在原有间距上叠加：`source::gutter_gap(rem) = rem * 0.75 + 6px`（16px rem 下 18px），仍是真实布局 padding。回归：`gutter_padding_keeps_selection_coordinates_aligned` 用实测字形宽度反推间距并断言 ≥ 原基线；`gutter_keeps_its_gap_for_every_number_width` 在 12,000 行文件滚动采样，1/2/4/5 位行号的文字列不移动。
+
+**2. 源码滚动条拖动（已修复根因，附真实偏移证据）。** 因果：GPUI 的 `on_drag` 在**跨过阈值的第一次移动**里创建拖动并立即 `cx.stop_propagation()`；同一事件的 Capture 阶段先执行，因此那一次捕获监听看不到 `active_drag`。旧测试只发一次移动，所以永远停在第 0 步。不是产品缺陷，也没有测试平台特例。新增 `dragging_the_source_scrollbar_moves_the_real_offset`（五段移动，offset 0 → -18.5 → -37.0 → -47px，并断言 clamp 到 `max_offset`）与 `dragging_the_horizontal_scrollbar_leaves_the_vertical_offset`（x 动、y 不动）。断言未放宽，未用 `snap` 替代。
+
+**3. Markdown 三项（未实现，方案待裁决）。** 真实滚动条、inline code 圆角/代码字体/小 padding、fence 语言标签上移都受 Ely 公开接口限制。已写出 [最小可审查补丁方案](../content-reader-markdown-patch.md)：三处新增入口（文档 scroll handle、fenced-code 渲染钩子透传、inline code 行内序列钩子）、换行与跨段选择的影响、tag+rev 固定与干净 CI 复现、回滚方式，并列出裁决需回答的三个问题。未改 checkout、未 vendor、未升级。
+
+**4. 过期内容修正（已实现）。** PR 正文与文档改为当前 head、模块已声明、`arbitration_ever_required=true`，CI 链接只对应最新 head。
+
+验证见 PR #27 与 `docs/content-reader.md`；视觉与真实窗口交互仍以负责人验收为准。
+
 ## 后续
 
 - 接入前置：`ui/mod.rs` 增加模块声明；仓库页面把 `data` 层的正文与会话上下文交给 `ReaderView`，并由集成层实现 `ReaderAction`（外部 URL、同 commit 文件切换）。
