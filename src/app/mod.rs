@@ -76,4 +76,9 @@ pub fn run() {
             .detach();
             cx.activate(true);
         });
+    if account_preview {
+        // The GUI loop has returned; do not let process exit truncate a
+        // submitted SQLite/credential commit or the executor drain.
+        accounts::wait_for_shutdown();
+    }
 }

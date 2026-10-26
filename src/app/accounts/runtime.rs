@@ -3,8 +3,8 @@
 //! The only production database, credential store, HTTP transport and executor
 //! come from the existing service layer. Tests inject every external boundary.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::auth::credential::CredentialStore;
 #[cfg(not(target_os = "windows"))]
@@ -15,6 +15,50 @@ use crate::network::cancel::CancellationTokenSource;
 use crate::network::executor::BackgroundExecutor;
 use crate::network::transport::ReqwestTransport;
 use crate::storage::accounts::AccountDatabaseConfig;
+
+/// Process-exit gate for background account teardown.
+///
+/// `AccountService::close` and the executor drain run on a detached thread so
+/// GPUI never blocks. The process must not exit before they finish, or an
+/// in-flight credential/SQLite commit is truncated; `app::run` waits here after
+/// the event loop returns, bounded by `EXIT_WAIT`.
+static EXIT: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+const EXIT_WAIT: Duration = Duration::from_secs(10);
+
+fn exit_gate() -> &'static (Mutex<usize>, Condvar) {
+    EXIT.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+fn begin_drain() {
+    let (pending, _) = exit_gate();
+    *pending.lock().expect("exit gate") += 1;
+}
+
+fn end_drain() {
+    let (pending, signal) = exit_gate();
+    let mut count = pending.lock().expect("exit gate");
+    *count = count.saturating_sub(1);
+    signal.notify_all();
+}
+
+/// Block until every started teardown finished, bounded so a stuck platform
+/// credential call cannot hang process exit forever.
+pub(crate) fn wait_for_drain() {
+    let (pending, signal) = exit_gate();
+    let deadline = Instant::now() + EXIT_WAIT;
+    let mut count = pending.lock().expect("exit gate");
+    while *count > 0 {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        count = signal
+            .wait_timeout(count, deadline - now)
+            .expect("exit gate")
+            .0;
+    }
+}
 
 /// Owns the existing account service and its network executor. No UI state or
 /// PAT input lives here. Clones may travel through background jobs; shutdown is
@@ -74,6 +118,9 @@ impl AccountRuntime {
         for job in self.jobs.lock().expect("preview jobs").drain(..) {
             job.abort();
         }
+        // Counted before the thread starts so the exit gate cannot observe an
+        // epoch between spawning teardown and registering it.
+        begin_drain();
         let accounts = self.accounts.clone();
         let executor = self.executor.clone();
         std::thread::spawn(move || {
@@ -88,6 +135,9 @@ impl AccountRuntime {
                 let _ = done_rx.recv_timeout(Duration::from_secs(5));
             }
             drop(executor);
+            // Release the process-exit gate only after SQLite is closed and the
+            // executor has joined, so quitting cannot truncate the drain.
+            end_drain();
         });
     }
 }

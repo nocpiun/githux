@@ -34,7 +34,7 @@
 cargo fmt --all                 # 已格式化
 cargo check --locked --all-targets        → ok
 cargo clippy --locked --all-targets -- -D warnings → ok
-cargo test --locked                       → 204 passed（其中本任务 15 项）
+cargo test --locked                       → 205 passed（其中本任务 16 项）
 cargo build --locked                      → ok
 ```
 
@@ -88,6 +88,14 @@ Codex 第六轮两条 P2：
 2. **全局待清理覆盖本次错误**：`recovery_pending()` 是目录级状态，不代表本操作已提交；无条件覆盖会把 401 等真实失败改写成“已提交”。修复：保留操作自身结果，把待清理作为追加警告。
 
 新增回归 `a_failed_operation_keeps_its_error_and_presentation_comes_from_the_service`。预览套件 15 项，全仓 204 项。
+
+## 第 8 轮：审查修复
+
+Codex 第七轮 P2：关闭预览时 `app::run` 立即退出，而 SQLite/凭据提交的排空在线程中异步进行，进程退出会截断它；线程内部的 5s 等待并不阻止进程结束。
+
+修复：新增进程退出闸门（`OnceLock<(Mutex<usize>, Condvar)>`）。开始关闭前计数，SQLite 关闭与执行器 join 完成后才减到 0；`app::run` 在预览模式下于事件循环返回后调用 `wait_for_shutdown()`，最多等待 10s，使卡住的平台凭据调用也不能无限阻塞退出。回归测试 `shutdown_waits_for_background_teardown`。
+
+预览套件 16 项，全仓 205 项。
 
 ## 剩余问题
 

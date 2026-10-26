@@ -890,6 +890,12 @@ fn error_text(error: &GitHubError) -> String {
     }
 }
 
+/// Keep the process alive until background account teardown finishes. Called by
+/// `app::run` after the GPUI event loop returns in preview mode.
+pub(crate) fn wait_for_shutdown() {
+    runtime::wait_for_drain();
+}
+
 /// Open only the opt-in preview, with the platform title bar. The normal Shell
 /// startup path remains untouched.
 pub(crate) fn open_window(cx: &mut App) {

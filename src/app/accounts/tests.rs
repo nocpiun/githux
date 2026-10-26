@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use gpui::{Entity, KeyUpEvent, Keystroke, TestAppContext, VisualContext, VisualTestContext};
 
+use super::wait_for_shutdown;
 use super::*;
 use crate::auth::InMemoryCredentialStore;
 use crate::data::AccountService;
@@ -643,6 +644,31 @@ fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut T
         submit(&view, cx);
     }
     wait_for(&view, cx, |state| state.accounts.len() == 1);
+}
+
+/// Review round 7: process exit must wait for the detached teardown instead of
+/// truncating an in-flight commit.
+#[gpui::test]
+fn shutdown_waits_for_background_teardown(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    if let Some(runtime) = view.read_with(cx, |view, _| view.runtime.clone()) {
+        runtime.shutdown();
+    }
+    drop(view);
+    let started = std::time::Instant::now();
+    wait_for_shutdown();
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "the exit gate must be bounded"
+    );
+    // A second call after the drain has completed returns immediately.
+    let again = std::time::Instant::now();
+    wait_for_shutdown();
+    assert!(again.elapsed() < Duration::from_secs(1));
 }
 
 /// Review round 6: an operation that fails must keep its own error even when
