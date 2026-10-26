@@ -454,6 +454,47 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
     );
 }
 
+/// Review round 2: a mutation that reports an error can still have committed
+/// (CleanupPending), so repositories read under the previous account must not
+/// remain displayed as a complete set.
+#[gpui::test]
+fn an_errored_mutation_clears_repository_results_for_the_previous_account(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(async {
+        // login A, login B, repository read for B, then reselect A
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(user(2, "bob"))).await;
+        mock.enqueue(Ok(repos(2, "bob", &["bob-repo"]))).await;
+        mock.enqueue(Ok(user(1, "alice"))).await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
+    let (view, cx) = preview(cx, runtime);
+    put_token(&view, cx, "first");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    put_token(&view, cx, "second");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 2);
+    view.update(cx, |view, cx| view.refresh(cx));
+    wait_for(&view, cx, |state| {
+        matches!(state.repositories, RepositoryPreview::Ready(_))
+    });
+    // Selecting another saved account changes the authoritative account, so
+    // the repository set read under the previous account must be dropped.
+    view.update(cx, |view, cx| {
+        view.select(AccountKey::new(1, HostId::github()), cx)
+    });
+    wait_for(&view, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+    });
+    assert!(matches!(
+        view.read_with(cx, |view, _| view.presentation.repositories.clone()),
+        RepositoryPreview::Idle(_)
+    ));
+}
+
 /// Regression for review finding 1: cancelling an account mutation whose
 /// durable commit already landed must reconcile the authoritative directory
 /// instead of leaving a stale "no saved accounts" view.

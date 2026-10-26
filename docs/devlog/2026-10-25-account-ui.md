@@ -34,7 +34,7 @@
 cargo fmt --all                 # 已格式化
 cargo check --locked --all-targets        → ok
 cargo clippy --locked --all-targets -- -D warnings → ok
-cargo test --locked                       → 199 passed（其中本任务 10 项）
+cargo test --locked                       → 200 passed（其中本任务 11 项）
 cargo build --locked                      → ok
 ```
 
@@ -50,6 +50,12 @@ Codex 首轮提出两条 P2，均属可直接修复范围：
 2. **重新验证不参与取消**：`AccountService::revalidate` 没有可取消变体，内部总会提交运行时核验并推进 epoch。这里不假装网络已取消，也不在 data 层外伪造取消语义：取消只停止发布，任务照常收尾并触发上面的对账，界面不显示被取消操作的成功。回归测试 `cancelling_revalidation_does_not_publish_its_late_success`。若后续需要真正可中断的 revalidate，应在 data 层新增 `revalidate_cancellable`，不在 UI 层模拟。
 
 对账信号的投递方式也调整过：`oneshot` 完成会在网络线程唤醒前台任务，GPUI 测试调度器把它判为非确定性；改回“后台只入队、前台按 50ms 节拍取用”，与首轮实现一致。
+
+## 第 3 轮：审查修复
+
+Codex 第二轮提出第 3 条 P2：账户变更以错误返回时，`repo_service` 的旧结果仍显示为 Complete。`AccountService::mutate` 在 `CleanupPending` 之前已经提交了目录与活动选择，所以错误 reply 同样推进了权威账户状态。
+
+修复：`apply` 的错误分支对**所有非仓库读取**操作都作废仓库展示，不只对仓库读取错误作废；成功分支此前已如此处理。回归测试 `an_errored_mutation_clears_repository_results_for_the_previous_account`（A→B 读仓库→切回 A 后旧结果消失）。预览套件 11 项，全部 200 项通过。
 
 ## 剩余问题
 

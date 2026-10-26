@@ -387,6 +387,15 @@ impl AccountPreview {
                                 "The request failed; no successful empty list is implied.".into()
                             }),
                     );
+                } else {
+                    // An errored mutation may still have committed: for example
+                    // `CleanupPending` is returned after the directory and active
+                    // selection were already persisted. Repository data read
+                    // under the previous account must not stay on screen.
+                    self.presentation.repositories = RepositoryPreview::Idle(
+                        "An account change was attempted. Refresh to read the current account's repositories."
+                            .into(),
+                    );
                 }
             }
         }
