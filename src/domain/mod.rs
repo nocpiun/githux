@@ -15,9 +15,13 @@
 #![allow(dead_code)]
 
 pub mod account;
+pub mod blob;
 pub mod error;
+pub mod home;
+pub mod profile;
 pub mod repo;
 pub mod repository;
+pub mod repository_extras;
 
 // Re-exported surface for the pending UI integration; see docs/auth-and-network.md
 // for the minimal call example. Nothing in the current binary consumes it yet.
@@ -25,5 +29,18 @@ pub mod repository;
 pub use account::{AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId};
 #[allow(unused_imports)]
 pub use error::GitHubError;
+#[allow(unused_imports)]
+pub use home::{
+    DateBound, FeedActor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason,
+    FeedPayload, FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind,
+    HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
+    UpdatedWindow,
+};
+#[allow(unused_imports)]
+pub use profile::{
+    ContributionCalendar, ContributionDay, ContributionMonth, ContributionRange, ContributionWeek,
+    GraphqlErrorKind, ProfileBasic, ProfileError, ProfileGraphqlError, ProfilePinned, ProfileRepo,
+    Showcase,
+};
 #[allow(unused_imports)]
 pub use repo::{RepoOwner, RepoSummary, RepoVisibility, ReposOutcome, ReposReadiness};

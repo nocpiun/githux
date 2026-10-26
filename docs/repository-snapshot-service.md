@@ -57,11 +57,11 @@ API 与模型没有 GPUI、TabId 或账户选择状态。**调用方仍必须经
 | tree_entries | 100,000 | 保留上限内条目，Partial/EntryLimit |
 | response_bytes | 8 MiB | 仓库/commit/README/首个分支页返回 LimitExceeded；后续分支页保留 Partial；树返回无条目的 Partial/ResponseLimit，truncated 为 unknown |
 
-现有 Transport 先把 body 缓冲为 String，再由本服务检查字节上限，因此上限限制解析和服务结果，不是网络接收/峰值内存硬上限。需要流式大小保护时应协调 network 所有者，不复制 HTTP 客户端。
+本快照服务仍使用原有 `Transport::execute`，先缓冲 String 再检查，因此此处 response_bytes 限制解析和服务结果，不是网络接收/峰值内存硬上限。后续 [blob 正文服务](blob-content-service.md) 新增 `execute_bounded` 并在真实 reqwest chunk 累计前设限；快照接口尚未迁移到该有界路径。
 
 ## README 定位边界
 
-README 返回 `ReadmeDescriptor { repository, commit, path, blob, size }`，无 blob 正文请求、base64 解码、Markdown 渲染或临时下载 URL 标识。使用已有固定 `Accept: application/vnd.github+json`；官方 JSON 响应含内联 content，本服务接收响应但忽略该字段，不把它暴露为正文能力。
+README 定位返回 `ReadmeDescriptor { repository, commit, path, blob, size }`，定位本身没有 blob 正文请求、base64 解码、Markdown 渲染或临时下载 URL 标识。后续正文可通过 `BlobIdentity::from_readme` 和 [fetch_blob](blob-content-service.md) 按固定 blob SHA 单独读取，并进行有界 base64 解码及严格 UTF-8/二进制分类；仍无渲染或图片读取。使用已有固定 `Accept: application/vnd.github+json`；官方 JSON 响应含内联 content，本服务接收响应但忽略该字段，不把它暴露为正文能力。
 
 404 后查询同快照根 tree：完整空树给出 `AbsentInEmptyTree`；可读非空或不完整树给出 `NotFoundOrInaccessible`。不自行枚举 GitHub 所支持的 README 扩展名/优先级，非空仓库即使看起来没有 README 仍保留不确定语义。根 tree 的 401/403/404/409/取消/网络错误向上传递，不被降级为空或确认缺失；解析时可见不保证之后仍可见，不能缓存裸 404 为永久缺失。
 
@@ -77,4 +77,4 @@ README 返回 `ReadmeDescriptor { repository, commit, path, blob, size }`，无 
 
 [`src/github/repository/tests.rs`](../src/github/repository/tests.rs) 包含 mock 回归与真实 localhost ReqwestTransport 串联：两页分支去重、默认分支解析、观察移动到 B 后 A 的根/子树/README 请求不变、固定头与安全编码、取消、首/后续页失败、错误分类、未知/截断/超限树、symlink/submodule、非法输入及 README 404 的证据边界。全部凭据为合成测试字符串；不请求真实 GitHub API、不读取用户 PAT、gh token 或 Cookie。官方文档读取不等于真实 GitHub 认证联调。
 
-本轮缺项：data 接入与代次封装、UI、blob/正文、渲染、磁盘缓存/离线、在途合并、递归树、README 非空树缺失的进一步证据、真实私有/SSO 联调，以及流式传输限额。后续阅读器应消费本服务的 commit/tree/blob 标识，不能回到每步重读 main。
+固定 SHA 的 blob/正文及其流式传输限额现见 [blob 正文服务](blob-content-service.md)。剩余集成：正文 data 接入与代次封装、UI、渲染、磁盘缓存/离线、在途合并、递归树、README 非空树缺失的进一步证据、真实私有/SSO 联调，以及本快照接口迁移有界传输。后续阅读器应消费本服务的 commit/tree/blob 标识，不能回到每步重读 main。

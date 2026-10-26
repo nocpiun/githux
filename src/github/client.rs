@@ -1,7 +1,7 @@
 //! GitHub REST client construction and trusted-host enforcement.
 
 use crate::auth::token::Pat;
-use crate::network::transport::{HttpRequest, Transport};
+use crate::network::transport::{HttpMethod, HttpRequest, Transport};
 use std::sync::Arc;
 
 /// Configuration for the GitHub client.
@@ -46,6 +46,38 @@ impl GitHubClient {
     /// api.github.com). Pagination `next` URLs and any redirect target are
     /// validated by the caller via [`Self::url_is_trusted`].
     pub fn build_get(&self, path_or_url: &str, token: &Pat) -> HttpRequest {
+        self.build(
+            HttpMethod::Get,
+            path_or_url,
+            token,
+            &self.config.accept,
+            None,
+        )
+    }
+
+    /// Build a read-only GraphQL POST request. The caller supplies the JSON body
+    /// (a fixed query plus variables); this client never builds or replays a
+    /// mutation. Authorization is injected only for the trusted origin, exactly
+    /// as for GET, and the transport refuses to follow a POST redirect.
+    pub fn build_post(&self, path_or_url: &str, token: &Pat, body: String) -> HttpRequest {
+        self.build(
+            HttpMethod::Post,
+            path_or_url,
+            token,
+            "application/json",
+            Some(body),
+        )
+        .with_header("Content-Type", "application/json")
+    }
+
+    fn build(
+        &self,
+        method: HttpMethod,
+        path_or_url: &str,
+        token: &Pat,
+        accept: &str,
+        body: Option<String>,
+    ) -> HttpRequest {
         let url = if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
             path_or_url.to_string()
         } else {
@@ -56,10 +88,13 @@ impl GitHubClient {
             )
         };
 
-        let mut req = HttpRequest::get(&url)
-            .with_header("User-Agent", &self.config.user_agent)
-            .with_header("Accept", &self.config.accept)
-            .with_header("X-GitHub-Api-Version", &self.config.api_version);
+        let mut req = match method {
+            HttpMethod::Get => HttpRequest::get(&url),
+            HttpMethod::Post => HttpRequest::post(&url, body.unwrap_or_default()),
+        }
+        .with_header("User-Agent", &self.config.user_agent)
+        .with_header("Accept", accept)
+        .with_header("X-GitHub-Api-Version", &self.config.api_version);
 
         if self.url_is_trusted(&url) {
             req = req.with_header("Authorization", format!("Bearer {}", token.expose()));
@@ -140,6 +175,34 @@ mod tests {
 
         // A non-trusted absolute URL must not carry Authorization.
         let untrusted = client.build_get("https://evil.com/steal", &pat);
+        assert!(!untrusted.headers.iter().any(|(k, _)| k == "Authorization"));
+    }
+
+    /// A GraphQL POST is a POST with a JSON content type, and Authorization is
+    /// injected only for the trusted origin.
+    #[test]
+    fn post_authorization_only_for_trusted_host() {
+        let client = GitHubClient::new(
+            GitHubConfig::default(),
+            Arc::new(crate::network::transport::MockTransport::new()),
+        );
+        let pat = Pat::from_str("ghp_secret123");
+        let trusted = client.build_post("graphql", &pat, "{}".to_string());
+        assert_eq!(trusted.method, HttpMethod::Post);
+        assert!(
+            trusted
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "Bearer ghp_secret123")
+        );
+        assert!(
+            trusted
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Content-Type" && v == "application/json")
+        );
+
+        let untrusted = client.build_post("https://evil.com/graphql", &pat, "{}".to_string());
         assert!(!untrusted.headers.iter().any(|(k, _)| k == "Authorization"));
     }
 

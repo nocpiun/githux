@@ -18,14 +18,18 @@
 // root deliberately has no `#![allow]` blanket.
 #![allow(dead_code)]
 
+pub mod blob;
 pub mod branches;
 pub mod client;
 pub mod error;
 pub mod headers;
+pub mod home;
 pub mod permission;
+pub mod profile;
 pub mod readme;
 pub mod repos;
 pub mod repository;
+pub mod repository_extras;
 pub mod revision;
 pub mod tree;
 pub mod user;
@@ -37,13 +41,24 @@ pub use client::{GitHubClient, GitHubConfig};
 #[allow(unused_imports)]
 pub use headers::{parse_link_next, parse_sso_authorization_url, parse_sso_header};
 #[allow(unused_imports)]
+pub use home::{FeedLimits, HomeSearchLimits, fetch_received_events, search_involving};
+#[allow(unused_imports)]
 pub use permission::{WriteAction, WritePermission, is_write_confirmed_allowed, write_permission};
+#[allow(unused_imports)]
+pub use profile::{
+    ProfileLimits, fetch_contribution_calendar, fetch_profile, fetch_profile_pinned,
+};
 #[allow(unused_imports)]
 pub use readme::discover_readme;
 #[allow(unused_imports)]
 pub use repos::fetch_user_repos;
 #[allow(unused_imports)]
 pub use repository::{RepositoryLimits, fetch_repository};
+#[allow(unused_imports)]
+pub use repository_extras::{
+    RepositoryExtrasLimits, fetch_contributors, fetch_languages, fetch_latest_release,
+    fetch_releases,
+};
 #[allow(unused_imports)]
 pub use revision::resolve_revision;
 #[allow(unused_imports)]

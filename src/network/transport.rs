@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
-/// HTTP method. Only reads (`GET`) are exercised by the first-release GitHub
-/// layer; future write actions remain a boundary, not an implementation.
+/// HTTP method. Reads are `GET`; `POST` exists solely for read-only GraphQL
+/// queries (the transport has no mutation entry point and never replays one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
+    Post,
 }
 
 /// A prepared outbound request. Headers are owned strings; the GitHub layer is
@@ -26,6 +27,10 @@ pub struct HttpRequest {
     pub method: HttpMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// Optional request body. Used only by read-only GraphQL POST queries. It is
+    /// never printed by `Debug`: variables may carry data that must not reach
+    /// logs.
+    pub body: Option<String>,
 }
 
 /// Headers whose values must never appear in diagnostics.
@@ -53,6 +58,9 @@ impl std::fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("headers", &headers)
+            // Presence only: the body may embed GraphQL variables with data
+            // that should not appear in logs, panics or test output.
+            .field("body", &self.body.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -63,6 +71,19 @@ impl HttpRequest {
             method: HttpMethod::Get,
             url: url.into(),
             headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// A read-only POST (GraphQL query). There is deliberately no way to build
+    /// a mutation: this layer only ever sends a caller-supplied body to the
+    /// GraphQL endpoint, and the transport never auto-replays it.
+    pub fn post(url: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Post,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Some(body.into()),
         }
     }
 
@@ -125,6 +146,10 @@ pub enum TransportError {
     Timeout { seconds: u32 },
     #[error("request cancelled")]
     Cancelled,
+    #[error("HTTP response exceeds {limit} bytes")]
+    ResponseTooLarge { limit: usize },
+    #[error("transport does not support bounded reads")]
+    BoundedReadUnsupported,
 }
 
 /// Trait-object-friendly transport. The returned future is `Send` so it can be
@@ -135,6 +160,18 @@ pub trait Transport: Send + Sync {
         request: HttpRequest,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>>;
+
+    /// Fail closed by default: an existing/custom transport must explicitly
+    /// implement a receive-time bound. Falling back to `execute` would buffer
+    /// an unbounded body before inspecting its size.
+    fn execute_bounded<'a>(
+        &'a self,
+        _request: HttpRequest,
+        _cancel: CancellationToken,
+        _max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async { Err(TransportError::BoundedReadUnsupported) })
+    }
 }
 
 /// reqwest-backed production transport.
@@ -147,6 +184,7 @@ pub struct ReqwestTransport {
     client: reqwest::Client,
     timeout: Duration,
     max_redirects: usize,
+    bounded_reads_supported: bool,
 }
 
 impl ReqwestTransport {
@@ -161,14 +199,18 @@ impl ReqwestTransport {
             client,
             timeout,
             max_redirects: 5,
+            bounded_reads_supported: true,
         })
     }
 
+    /// Legacy injection path. A supplied client's redirect policy cannot be
+    /// inspected, so bounded reads require `new` and fail closed on this path.
     pub fn with_client(client: reqwest::Client, timeout: Duration) -> Self {
         Self {
             client,
             timeout,
             max_redirects: 5,
+            bounded_reads_supported: false,
         }
     }
 }
@@ -186,11 +228,12 @@ impl ReqwestTransport {
     }
 }
 
-impl Transport for ReqwestTransport {
-    fn execute<'a>(
+impl ReqwestTransport {
+    fn execute_with_limit<'a>(
         &'a self,
         request: HttpRequest,
         cancel: CancellationToken,
+        max_body_bytes: Option<usize>,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
             // Deterministic early exit: an already-cancelled request must not
@@ -198,21 +241,31 @@ impl Transport for ReqwestTransport {
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
             }
+            if max_body_bytes.is_some() && !self.bounded_reads_supported {
+                return Err(TransportError::BoundedReadUnsupported);
+            }
             let origin = Origin::parse(&request.url);
             let mut url = request.url.clone();
             let mut redirects = 0usize;
 
             loop {
-                let mut builder = self
-                    .client
-                    .request(reqwest::Method::GET, &url)
-                    .timeout(self.timeout);
+                let method = match request.method {
+                    HttpMethod::Get => reqwest::Method::GET,
+                    HttpMethod::Post => reqwest::Method::POST,
+                };
+                let mut builder = self.client.request(method, &url).timeout(self.timeout);
                 for (name, value) in &request.headers {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
+                // Re-attach the body on every hop so the method/body semantics
+                // are preserved. POST redirects are never followed (below), so
+                // this body only ever goes to the original trusted origin.
+                if let Some(body) = &request.body {
+                    builder = builder.body(body.clone());
+                }
 
                 let send = builder.send();
-                let response = tokio::select! {
+                let mut response = tokio::select! {
                     r = send => r.map_err(|e| {
                         // Cancellation is reported as `Cancelled` even if tearing
                         // the request down also surfaces a connect/IO error. The
@@ -224,7 +277,7 @@ impl Transport for ReqwestTransport {
                                 seconds: self.timeout_seconds(),
                             }
                         } else {
-                            TransportError::Network { message: e.to_string() }
+                            TransportError::Network { message: e.without_url().to_string() }
                         }
                     })?,
                     _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
@@ -239,6 +292,20 @@ impl Transport for ReqwestTransport {
                 }
 
                 if (300..400).contains(&status) {
+                    // Conservative GraphQL rule: never follow a redirect for a
+                    // POST. A 301/302/303 would silently turn the method into
+                    // GET and drop the query body, while 307/308 would re-send
+                    // the body — neither is safe to automate for a query whose
+                    // variables may carry user data. Surface the 3xx so the
+                    // GraphQL layer rejects it as an error. GET keeps the
+                    // existing same-origin follow behaviour.
+                    if request.method == HttpMethod::Post {
+                        return Ok(HttpResponse {
+                            status,
+                            headers,
+                            body: String::new(),
+                        });
+                    }
                     let location = headers
                         .iter()
                         .find(|(k, _)| k == "location")
@@ -270,6 +337,49 @@ impl Transport for ReqwestTransport {
                     }
                 }
 
+                if let Some(limit) = max_body_bytes {
+                    // Content-Length is only an early rejection hint. Always
+                    // count actual chunks, including errors and chunked bodies.
+                    if response
+                        .content_length()
+                        .is_some_and(|size| size > limit as u64)
+                    {
+                        return Err(TransportError::ResponseTooLarge { limit });
+                    }
+                    let mut bytes = Vec::new();
+                    loop {
+                        let chunk = tokio::select! {
+                            biased;
+                            _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
+                            chunk = response.chunk() => chunk.map_err(|e| {
+                                if cancel.is_cancelled() {
+                                    TransportError::Cancelled
+                                } else if e.is_timeout() {
+                                    TransportError::Timeout { seconds: self.timeout_seconds() }
+                                } else {
+                                    TransportError::Network { message: e.without_url().to_string() }
+                                }
+                            })?,
+                        };
+                        let Some(chunk) = chunk else { break };
+                        if chunk.len() > limit.saturating_sub(bytes.len()) {
+                            return Err(TransportError::ResponseTooLarge { limit });
+                        }
+                        bytes.reserve_exact(chunk.len());
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    // JSON must be UTF-8. Reject invalid wire encoding instead
+                    // of introducing replacement characters into source data.
+                    let body = String::from_utf8(bytes).map_err(|_| TransportError::Network {
+                        message: "HTTP JSON body is not UTF-8".into(),
+                    })?;
+                    return Ok(HttpResponse {
+                        status,
+                        headers,
+                        body,
+                    });
+                }
+
                 // Cancellation must cover the body read too, not just the
                 // header phase: a large or stalled body would otherwise keep
                 // running until the request timeout even after the caller
@@ -298,6 +408,25 @@ impl Transport for ReqwestTransport {
                 });
             }
         })
+    }
+}
+
+impl Transport for ReqwestTransport {
+    fn execute<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        self.execute_with_limit(request, cancel, None)
+    }
+
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        self.execute_with_limit(request, cancel, Some(max_body_bytes))
     }
 }
 
@@ -386,6 +515,12 @@ impl MockTransport {
             .collect()
     }
 
+    /// Full recorded requests, including method and body, for tests that verify
+    /// the exact GraphQL POST encoding.
+    pub async fn recorded_requests(&self) -> Vec<HttpRequest> {
+        self.recorded.lock().await.clone()
+    }
+
     async fn next_response(&self) -> Option<MockResponse> {
         self.responses.lock().await.pop()
     }
@@ -402,6 +537,23 @@ impl MockTransport {
 }
 
 impl Transport for MockTransport {
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self.execute(request, cancel).await?;
+            if response.body.len() > max_body_bytes {
+                return Err(TransportError::ResponseTooLarge {
+                    limit: max_body_bytes,
+                });
+            }
+            Ok(response)
+        })
+    }
+
     fn execute<'a>(
         &'a self,
         request: HttpRequest,
@@ -454,6 +606,9 @@ pub fn headers(map: HashMap<&str, &str>) -> Vec<(String, String)> {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
+
+#[cfg(test)]
+mod bounded_tests;
 
 #[cfg(test)]
 mod tests {
@@ -566,6 +721,130 @@ mod tests {
             recorded[1].header("authorization"),
             Some("Bearer ghp_local_mock_token")
         );
+    }
+
+    /// Real socket round-trip: a POST is sent with its method and JSON body.
+    #[tokio::test]
+    async fn post_request_carries_method_and_body() {
+        let server = LocalHttpServer::start(vec![ScriptedResponse::json(200, "{}")]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(
+            format!("{}graphql", server.base_url()),
+            r#"{"query":"{viewer{login}}"}"#,
+        )
+        .with_header("Content-Type", "application/json")
+        .with_header("Authorization", "Bearer ghp_local_mock_token");
+
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("request");
+        assert_eq!(response.status, 200);
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].request_line.starts_with("POST /graphql"));
+        assert_eq!(recorded[0].body, r#"{"query":"{viewer{login}}"}"#);
+        assert_eq!(recorded[0].header("content-type"), Some("application/json"));
+        assert_eq!(
+            recorded[0].header("authorization"),
+            Some("Bearer ghp_local_mock_token")
+        );
+    }
+
+    /// A bounded POST response is rejected at receive time, before the body is
+    /// buffered.
+    #[tokio::test]
+    async fn bounded_post_response_is_rejected_over_the_limit() {
+        let server = LocalHttpServer::start(vec![ScriptedResponse::json(200, "0123456789")]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(format!("{}graphql", server.base_url()), "{}");
+        let result = transport
+            .execute_bounded(request, CancellationToken::default(), 4)
+            .await;
+        assert_eq!(result, Err(TransportError::ResponseTooLarge { limit: 4 }));
+    }
+
+    /// A POST that never receives a response is classified as a timeout with
+    /// the configured duration.
+    #[tokio::test]
+    async fn post_timeout_is_classified() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let _keep = listener.accept();
+            std::thread::sleep(Duration::from_secs(3));
+        });
+
+        let transport = ReqwestTransport::new(Duration::from_millis(600)).expect("client");
+        let result = transport
+            .execute(
+                HttpRequest::post(format!("http://{addr}/graphql"), "{}"),
+                CancellationToken::default(),
+            )
+            .await;
+        assert_eq!(result, Err(TransportError::Timeout { seconds: 1 }));
+        let _ = handle.join();
+    }
+
+    /// Conservative GraphQL rule: a POST redirect is never followed, even on
+    /// the same origin, so the query body cannot be re-sent.
+    #[tokio::test]
+    async fn post_redirect_is_not_followed_even_same_origin() {
+        let server = LocalHttpServer::start(vec![
+            ScriptedResponse::json(307, "").with_header("Location", "/graphql-elsewhere"),
+        ]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(
+            format!("{}graphql", server.base_url()),
+            r#"{"query":"{viewer{login}}"}"#,
+        );
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("transport returns the 3xx");
+        assert_eq!(response.status, 307);
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1, "the redirect must not be followed");
+        assert!(recorded[0].request_line.starts_with("POST /graphql"));
+    }
+
+    /// A cross-origin POST redirect target is never contacted, so neither the
+    /// credential nor the query body can leak.
+    #[tokio::test]
+    async fn cross_origin_post_redirect_is_not_followed() {
+        let target = LocalHttpServer::start(vec![ScriptedResponse::json(200, "stolen")]);
+        let server = LocalHttpServer::start(vec![
+            ScriptedResponse::json(302, "").with_header("Location", target.base_url()),
+        ]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let request = HttpRequest::post(format!("{}graphql", server.base_url()), "{}")
+            .with_header("Authorization", "Bearer ghp_post_secret");
+        let response = transport
+            .execute(request, CancellationToken::default())
+            .await
+            .expect("transport returns the 3xx");
+        assert_eq!(response.status, 302);
+        assert_eq!(server.recorded().len(), 1);
+        assert!(target.recorded().is_empty());
+        // Let the target's drop wake-up exit without consuming a fixture.
+        target.script(vec![]);
+    }
+
+    /// A cancelled POST does not open a connection at all.
+    #[tokio::test]
+    async fn cancelled_post_does_not_open_a_connection() {
+        let server = LocalHttpServer::start(vec![]);
+        let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+        let (cancel, source) = CancellationToken::new();
+        source.cancel();
+        let result = transport
+            .execute(
+                HttpRequest::post(format!("{}graphql", server.base_url()), "{}"),
+                cancel,
+            )
+            .await;
+        assert_eq!(result, Err(TransportError::Cancelled));
+        assert!(server.recorded().is_empty());
     }
 
     /// Real socket round-trip: a cross-origin redirect is NOT followed. The 3xx
