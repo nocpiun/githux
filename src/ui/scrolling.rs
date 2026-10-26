@@ -67,18 +67,24 @@ impl SmoothState {
         if !self.animating.get() {
             return None;
         }
+        // The range can shrink under an in-flight animation (content removed, viewport grown).
+        // Pull the stored target (and start) into the new range so a later reverse wheel is not
+        // accumulated against an unreachable value.
+        let target = self.target.get().clamp(-max, 0.0);
+        self.target.set(target);
         if reduced {
-            let next = self.target.get().clamp(-max, 0.0);
+            let next = target;
             self.presented.set(next);
             self.animating.set(false);
             return Some(next);
         }
+        let from = self.from.get().clamp(-max, 0.0);
+        self.from.set(from);
         let since = self.since.get().unwrap_or(now);
         let elapsed = now.saturating_duration_since(since).as_secs_f32();
         let progress = (elapsed / (WHEEL_EASE_MS / 1000.0)).clamp(0.0, 1.0);
         let ease = ely_gpui_component::motion::ease_out_cubic(progress);
-        let next =
-            (self.from.get() + (self.target.get() - self.from.get()) * ease).clamp(-max, 0.0);
+        let next = (from + (target - from) * ease).clamp(-max, 0.0);
         self.presented.set(next);
         if progress >= 1.0 {
             self.animating.set(false);

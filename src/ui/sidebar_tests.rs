@@ -652,3 +652,89 @@ fn wheel_over_the_palette_scrolls_the_palette_not_the_page(cx: &mut TestAppConte
         "the palette itself must scroll"
     );
 }
+
+#[test]
+fn shrinking_range_clamps_target_so_reverse_scroll_still_moves() {
+    use super::scrolling::SmoothState;
+    use std::time::{Duration, Instant};
+    let s = SmoothState::default();
+    let t0 = Instant::now();
+    s.wheel(t0, 0.0, 1000.0, -600.0, false, false);
+    let first = s
+        .tick(t0 + Duration::from_millis(10), 0.0, 1000.0, false)
+        .unwrap();
+    assert!(first < 0.0 && first > -600.0, "easing has begun: {first}");
+    // Content/viewport shrinks before the next frame: the stored target must be clamped too.
+    // `current` is what the previous tick actually presented, so this is not an external jump.
+    let at_shrink = s
+        .tick(t0 + Duration::from_millis(20), first, 100.0, false)
+        .unwrap();
+    assert!(
+        at_shrink < 0.0 && at_shrink > -100.0,
+        "presentation still animates within the new range: {at_shrink}"
+    );
+    let settled = s
+        .tick(t0 + Duration::from_millis(400), at_shrink, 100.0, false)
+        .unwrap();
+    assert_eq!(settled, -100.0);
+    assert!(!s.is_animating());
+    // Reverse now: must move immediately, not accumulate against the old -600 target.
+    let reverse = s
+        .wheel(
+            t0 + Duration::from_millis(500),
+            -100.0,
+            100.0,
+            120.0,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(reverse, 0.0);
+    // Also exercise a discrete reverse after a range shrink.
+    let s2 = SmoothState::default();
+    s2.wheel(t0, 0.0, 1000.0, -600.0, false, false);
+    let first2 = s2
+        .tick(t0 + Duration::from_millis(10), 0.0, 1000.0, false)
+        .unwrap();
+    let _ = s2.tick(t0 + Duration::from_millis(400), first2, 100.0, false);
+    s2.wheel(
+        t0 + Duration::from_millis(500),
+        -100.0,
+        100.0,
+        120.0,
+        false,
+        false,
+    );
+    let moved = s2
+        .tick(t0 + Duration::from_millis(600), -100.0, 100.0, false)
+        .unwrap();
+    assert!(moved > -100.0, "reverse must move toward zero: {moved}");
+}
+
+#[test]
+fn reduced_motion_range_shrink_is_clamped_immediately() {
+    use super::scrolling::SmoothState;
+    use std::time::{Duration, Instant};
+    let s = SmoothState::default();
+    let t0 = Instant::now();
+    s.wheel(t0, 0.0, 1000.0, -600.0, false, false);
+    let first = s
+        .tick(t0 + Duration::from_millis(10), 0.0, 1000.0, false)
+        .unwrap();
+    let next = s
+        .tick(t0 + Duration::from_millis(20), first, 100.0, true)
+        .unwrap();
+    assert_eq!(next, -100.0);
+    assert!(!s.is_animating());
+    assert_eq!(
+        s.wheel(
+            t0 + Duration::from_millis(30),
+            -100.0,
+            100.0,
+            120.0,
+            true,
+            true
+        ),
+        Some(0.0)
+    );
+}
