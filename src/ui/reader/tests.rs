@@ -1144,3 +1144,41 @@ fn code_fence_language_sits_near_the_block_top(cx: &mut TestAppContext) {
         language.size.height
     );
 }
+
+#[gpui::test]
+fn markdown_hard_breaks_remain_line_boundaries(cx: &mut TestAppContext) {
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "first  \nsecond with `code`".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let layout = inline_snapshot(cx, "first\nsecond with code");
+    let first = layout.pieces.iter().find(|p| p.range.start == 0).unwrap();
+    let second = layout.pieces.iter().find(|p| p.range.contains(&7)).unwrap();
+    assert!(second.text_bounds.top() >= first.text_bounds.bottom());
+}
+
+#[gpui::test]
+fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
+    let source = format!(
+        "{}
+",
+        "`x` ".repeat(2_000)
+    );
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let start = std::time::Instant::now();
+    frames(cx);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(cx.debug_bounds("reader-inline-paragraph").is_some());
+}
