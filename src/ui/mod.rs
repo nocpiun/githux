@@ -1413,6 +1413,9 @@ impl Render for Shell {
             window.request_animation_frame();
         }
         let now = std::time::Instant::now();
+        if self.sidebar_state.sample_sash(now, reduced) {
+            window.request_animation_frame();
+        }
         if self.repo_smooth.tick(now, reduced) {
             window.request_animation_frame();
         }

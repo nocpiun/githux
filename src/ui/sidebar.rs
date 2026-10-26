@@ -20,7 +20,7 @@ use gpui::{
 use super::{
     fixtures::{AccountFixture, RepoFixture},
     geometry::{
-        ACCOUNT_ROW_HEIGHT, FOOTER_DIVIDER_BAND, FOOTER_DIVIDER_HEIGHT, REPO_LEFT_PADDING,
+        ACCOUNT_ROW_HEIGHT, FOOTER_DIVIDER_HEIGHT, FOOTER_DIVIDER_SPACE, REPO_LEFT_PADDING,
         REPO_ROW_HEIGHT, SIDEBAR_INDICATOR_HEIGHT_RATIO, SIDEBAR_INDICATOR_MAX_HEIGHT,
         SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_RADIUS, SIDEBAR_INDICATOR_WIDTH,
         SIDEBAR_PADDING, SIDEBAR_RAIL_ITEM_SIZE, SIDEBAR_ROW_GAP, STATUS_BUTTON_SIZE,
@@ -46,6 +46,7 @@ impl super::Shell {
             cx.theme().colors.fg_muted,
         );
         let this = cx.entity();
+        let sash_opacity = self.sidebar_state.sash();
         let handle = div()
             .id("sidebar-resize")
             .debug_selector(|| "sidebar-resize".to_string())
@@ -55,6 +56,37 @@ impl super::Shell {
             .left(px(width))
             .w(px(SIDEBAR_RESIZE_HIT_WIDTH))
             .cursor(gpui::CursorStyle::ResizeLeftRight)
+            .child(
+                // A thin foreground line centred in the hit band. Invisible until the pointer is
+                // on the band or a drag is running, then a short foreground fade; the hit band
+                // itself stays wide and independent of this visual width.
+                div()
+                    .debug_selector(|| "sidebar-sash".to_string())
+                    .absolute()
+                    .top(px(ISLAND_RADIUS))
+                    .bottom(px(ISLAND_INSET + ISLAND_RADIUS))
+                    .left(px((SIDEBAR_RESIZE_HIT_WIDTH - SIDEBAR_SASH_WIDTH) / 2.0))
+                    .w(px(SIDEBAR_SASH_WIDTH))
+                    .bg(fg.opacity(sash_opacity)),
+            )
+            .on_mouse_move(cx.listener(move |shell, _, _, cx| {
+                if !shell.sidebar_state.sash_hovered() {
+                    shell.sidebar_state.set_sash_hover(
+                        true,
+                        cx.background_executor().now(),
+                        cx.theme().reduced_motion || cx.reduce_motion(),
+                    );
+                    cx.notify();
+                }
+            }))
+            .on_mouse_exit(cx.listener(move |shell, _, _, cx| {
+                shell.sidebar_state.set_sash_hover(
+                    false,
+                    cx.background_executor().now(),
+                    cx.theme().reduced_motion || cx.reduce_motion(),
+                );
+                cx.notify();
+            }))
             .when(!self.sidebar_state.collapsed, |handle| {
                 handle.on_drag(
                     SidebarDrag {
@@ -66,6 +98,9 @@ impl super::Shell {
                         drag.start_x.set(window.mouse_position().x);
                         this.update(cx, |shell, cx| {
                             shell.sidebar_state.begin_resize();
+                            shell
+                                .sidebar_state
+                                .note_drag(cx.background_executor().now());
                             cx.notify();
                         });
                         cx.set_active_drag_cursor_style(gpui::CursorStyle::ResizeLeftRight, window);
@@ -347,7 +382,7 @@ pub(super) fn account_row(
     let theme = cx.theme();
     let colors = &theme.colors;
     let (name_size, login_size) = (theme.text_size(TextSize::Sm), theme.text_size(TextSize::Xs));
-    let (hover, fg, subtle, focus) = (colors.hover, colors.fg, colors.fg_subtle, colors.fg_muted);
+    let (fg, subtle, focus) = (colors.fg, colors.fg_subtle, colors.fg_muted);
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (ACCOUNT_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
@@ -366,7 +401,6 @@ pub(super) fn account_row(
         .items_center()
         .min_w_0()
         .gap(px(8.0 * frame.expansion))
-        .when(!collapsed, |identity| identity.px(px(2.0)))
         .rounded(theme.radius(Radius::Sm))
         .border_1()
         .border_color(transparent_black())
@@ -379,7 +413,6 @@ pub(super) fn account_row(
         .cursor_pointer()
         .tab_index(0)
         .focus(move |style| style.border_color(focus))
-        .hover(move |style| style.bg(hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
         .tooltip(Tooltip::text(if collapsed {
@@ -406,9 +439,11 @@ pub(super) fn account_row(
                     )
                     .child(
                         div()
+                            .debug_selector(|| "account-login".to_string())
                             .text_size(login_size)
                             .text_color(subtle)
-                            .child(Ellipsis::new(format!("@{}", account.login))),
+                            .child(Ellipsis::new(format!("@{}", account.login)))
+                            .hover(|style| style.underline()),
                     ),
             )
         });
@@ -429,7 +464,7 @@ pub(super) fn account_row(
         .cursor_pointer()
         .tab_index(0)
         .focus(move |style| style.border_color(focus))
-        .hover(move |style| style.bg(hover))
+        .hover(move |style| style.bg(colors.hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, _, cx| {
             // Placeholder for a future GitHub status editor: no navigation, no write.
@@ -454,7 +489,7 @@ pub(super) fn account_row(
         .min_w_0()
         .when(collapsed, |row| row.justify_center())
         .when(!collapsed, |row| {
-            row.justify_between().px(px(3.0 + 5.0 * frame.expansion))
+            row.justify_between().pr(px(3.0 + 5.0 * frame.expansion))
         })
         .text_color(fg)
         .child(identity)
@@ -937,10 +972,14 @@ fn footer_divider(cx: &App) -> AnyElement {
         .debug_selector(|| "sidebar-footer-divider".to_string())
         .flex_none()
         .w_full()
-        .h(px(FOOTER_DIVIDER_BAND))
-        .px(px(SIDEBAR_PADDING))
         .flex()
-        .items_center()
+        .flex_col()
+        // Equal spacers on both sides of the rule. The column's own gap adds below the whole
+        // band, so the lower spacer is shortened by exactly that much: the rendered space from
+        // the list to the rule equals the space from the rule to the identity in both modes.
+        .pt(px(FOOTER_DIVIDER_SPACE))
+        .pb(px(FOOTER_DIVIDER_SPACE - SIDEBAR_ROW_GAP))
+        .px(px(SIDEBAR_PADDING))
         .child(
             div()
                 .w_full()
@@ -984,7 +1023,14 @@ pub(super) fn sidebar(
             )
         })
         .child(repositories)
-        .child(footer_divider(cx))
+        // The divider owns its full band; the column gap is cancelled for this child so the rule
+        // has equal space above and below in both modes.
+        .child(
+            div()
+                .flex_none()
+                .mt(px(-SIDEBAR_ROW_GAP))
+                .child(footer_divider(cx)),
+        )
         .child(account)
         .child(quarters)
         .into_any_element()

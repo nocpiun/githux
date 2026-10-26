@@ -17,22 +17,29 @@ pub const SIDEBAR_COLLAPSED_WIDTH: f32 = SIDEBAR_RAIL_ITEM_SIZE + SIDEBAR_PADDIN
 pub const SIDEBAR_ANIMATION_MS: u64 = 200;
 /// Active-route marker: flush to the drawable left edge, square on the left, rounded on the
 /// right, and about two thirds of the row height so it never reads as a full-height bar.
-pub const SIDEBAR_INDICATOR_WIDTH: f32 = 3.0;
+pub const SIDEBAR_INDICATOR_WIDTH: f32 = 2.0;
 pub const SIDEBAR_INDICATOR_RADIUS: f32 = 4.0;
 pub const SIDEBAR_INDICATOR_HEIGHT_RATIO: f32 = 2.0 / 3.0;
 pub const SIDEBAR_INDICATOR_MIN_HEIGHT: f32 = 20.0;
 pub const SIDEBAR_INDICATOR_MAX_HEIGHT: f32 = 24.0;
 /// A thin, low-contrast rule separating the repository group from the fixed footer.
 pub const FOOTER_DIVIDER_HEIGHT: f32 = 1.0;
-/// The sidebar column's row gap; the footer divider band keeps the repo/footer spacing balanced.
+/// The sidebar column's row gap.
 pub const SIDEBAR_ROW_GAP: f32 = 4.0;
-pub const FOOTER_DIVIDER_BAND: f32 = REPO_ACCOUNT_GAP - 2.0 * SIDEBAR_ROW_GAP;
+/// Space above and below the footer rule, measured from the repository viewport's edge to the
+/// account row. The column gap does not participate here: the divider owns its whole band so the
+/// rule is visually centred in both collapsed and expanded layouts.
+/// Space above and below the footer rule. The column gap adds below this band's own content, so
+/// the band is sized to absorb it: the rule ends up equally spaced from the list and identity.
+pub const FOOTER_DIVIDER_SPACE: f32 = 8.0;
 /// Size of the account status button (expanded only).
 pub const STATUS_BUTTON_SIZE: f32 = 24.0;
 pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
 pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
+/// The visible sash line inside the resize hit band, and how long it takes to fade.
+pub const SIDEBAR_SASH_WIDTH: f32 = 2.0;
+pub const SIDEBAR_SASH_FADE_MS: u64 = 140;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
-pub const REPO_ACCOUNT_GAP: f32 = 12.0;
 pub const REPO_LEFT_PADDING: f32 = 4.0;
 
 /// Gap between the window edge and the island.

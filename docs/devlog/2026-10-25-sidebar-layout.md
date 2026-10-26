@@ -79,3 +79,17 @@ Codex 首轮审查（针对 `4b92c0b`，P2）指出：palette 打开并覆盖在
 ### 审查修复：滚动范围收缩时同步 clamp 存储目标
 
 Codex 第二轮审查（针对 `b3c9a3d`，P2）指出：滚动范围在缓动中收缩时，`tick` 只 clamp 呈现值而未 clamp 存储目标，后续反向滚轮仍会累加到不可达目标上，看起来不响应。已修复：每 tick 先把存储 `target`/`from` 一并 clamp 到当前 `[-max, 0]` 再计算，含 reduced-motion 分支；新增 `shrinking_range_clamps_target_so_reverse_scroll_still_moves`（覆盖中途收缩后离散反向与精确反向）和 `reduced_motion_range_shrink_is_clamped_immediately`。全量 190 tests 与 clippy 通过。
+
+## 第三轮修订：分割线居中、身份 hover、indicator 变细、sash 反馈（2026-10-26）
+
+负责人第三次真实查看预览后提出五项反馈；本轮已处理，仍未验收。
+
+1. 分割线改为自带上下对称留白（`FOOTER_DIVIDER_SPACE`）；此前列 gap 只加在下方造成上 8px/下 12px，现在渲染实测上下各 8px（1px 线），两态一致，仍固定在 footer 内、不随仓库滚动。旧 `REPO_ACCOUNT_GAP` 常量随职责转移删除，间距由 `FOOTER_DIVIDER_SPACE/HEIGHT` 表达。
+2. 收起态 More 触发按钮去掉可见边框（保留焦点环、tooltip "More"、菜单与键盘）。展开态四入口浅边框保留。
+3. 身份区去掉整块 hover 背景（此前 `account-identity` 有 `.hover(bg)`），改为 pointer 光标 + `@ID` 文本下划线；账号行左侧内缩减少，身份簇与上方仓库 avatar 轴对齐，头像与两行文字作为整体在行内垂直居中。空白区域仍不可点，状态 emoji 仍是独立操作。
+4. indicator 宽度 3px → 2px（`SIDEBAR_INDICATOR_WIDTH`），保持贴可绘制左缘、左直角/右 4px 圆角、约 2/3 行高并垂直居中。
+5. resize 热区新增可见 sash：2px 前景色竖线（`SIDEBAR_SASH_WIDTH`），仅在 hover 或拖动时以 140ms ease-out 淡入、离开淡出，从中断时的呈现值可逆续接；纵向从 island 顶部圆角附近到底部圆角/inset 之内，横向居中于 8px 命中带，不铺满侧栏，也不遮挡中部 toggle（toggle 占据带中点，其自身命中优先）。遵循 reduced-motion，动画结束不再请求帧。
+
+合并 `origin/main`（含已验收的 PR16 会话标签）时保留双方：标签条、页面会话滚动/焦点、Refresh 等上/右间距不变；`scrolling.rs` 的页面平滑滚动改为每会话状态（`PageState::smooth`），只覆盖标签条以下的页面区域，不再抢标签条滚轮；侧栏收起菜单改为侧栏自有的浮层状态（原因：Ely `OverflowMenu` 的私有 focus takeover 在收起动画重绘中会被重新武装，导致 Esc/窗口变化无法关闭），视觉仍用 Ely 主题 token（overlay/border/elevation/menu width）与同样的四项/禁用 New。
+
+验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（373 passed）、`cargo build --locked`、`git diff --check` 通过。新增/更新测试：分割线两态上下等距、身份登录行存在、indicator 宽度与几何、sash 淡入淡出可逆与 reduced-motion、sash 线宽与 island 纵向范围、外点关闭不触发下层导航（按真实 press/release 语义覆盖）、标签条滚轮与页面/侧栏互不影响。真实视觉、sash 实际手感与动画观感仍待负责人验收。

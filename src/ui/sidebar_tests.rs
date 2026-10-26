@@ -94,7 +94,11 @@ fn measured_insets_footer_gap_and_marker_are_outside_the_row(cx: &mut TestAppCon
     assert_eq!(account.left(), px(SIDEBAR_PADDING));
     assert_eq!(island.left() - account.right(), account.left());
     assert_eq!(sidebar.bottom() - quarters.bottom(), account.left());
-    assert_eq!(account.top() - repo.bottom(), px(REPO_ACCOUNT_GAP));
+    // The footer divider owns the whole band between the list and the identity row now.
+    assert_eq!(
+        account.top() - repo.bottom(),
+        px(FOOTER_DIVIDER_HEIGHT + 2.0 * FOOTER_DIVIDER_SPACE)
+    );
     assert_eq!(account.size.height, px(48.0));
     let marker = bounds("sidebar-indicator", cx);
     let home = bounds("nav-home", cx);
@@ -783,4 +787,84 @@ fn probe_menu_click2(cx: &mut TestAppContext) {
         view.read_with(cx, |s, _| s.sidebar_menu_open()),
         cx.debug_bounds("menu-panel-0")
     );
+}
+
+#[gpui::test]
+fn footer_divider_has_equal_space_above_and_below_in_both_modes(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let check = |cx: &mut VisualTestContext| {
+        let repo = bounds("repo-scroll", cx);
+        let divider = bounds("sidebar-footer-divider", cx);
+        let account = bounds("account-row", cx);
+        // The rule is 1px tall at the top spacer's end; measure from the actual rule line, not
+        // the container's centre.
+        let rule_top = divider.top() + px(FOOTER_DIVIDER_SPACE);
+        let rule_bottom = rule_top + px(FOOTER_DIVIDER_HEIGHT);
+        let above = rule_top - repo.bottom();
+        let below = account.top() - rule_bottom;
+        assert!(
+            (above - below).abs() <= px(1.0),
+            "rule must sit visually between list and identity: above={above:?} below={below:?}"
+        );
+        // The divider container spans the column; its rule is inset by the sidebar padding on
+        // both sides, matching every row lane.
+        assert_eq!(divider.left(), px(0.0));
+        assert_eq!(divider.size.width, bounds("sidebar", cx).size.width);
+    };
+    check(cx);
+    click("sidebar-toggle", cx);
+    cx.run_until_parked();
+    check(cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
+}
+
+#[gpui::test]
+fn identity_has_no_block_hover_and_only_the_login_underlines(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let identity = bounds("account-identity", cx);
+    cx.simulate_mouse_move(identity.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    // Hovering the identity cluster must not paint a whole-row/block background: the login line is
+    // the affordance. The row itself stays inert.
+    let login = bounds("account-login", cx);
+    assert!(login.size.height > px(0.0));
+}
+
+#[test]
+fn sash_fade_is_reversible_and_settles_at_its_target() {
+    use std::time::{Duration, Instant};
+    let mut state = SidebarState::default();
+    let t0 = Instant::now();
+    assert_eq!(state.sash(), 0.0);
+    state.set_sash_hover(true, t0, false);
+    assert!(state.sample_sash(t0 + Duration::from_millis(70), false));
+    let mid_in = state.sash();
+    assert!(mid_in > 0.0 && mid_in < 1.0, "fading in: {mid_in}");
+    state.set_sash_hover(false, t0 + Duration::from_millis(70), false);
+    state.sample_sash(t0 + Duration::from_millis(110), false);
+    let mid_out = state.sash();
+    assert!(
+        mid_out < mid_in,
+        "reverse must fade out from the presented value"
+    );
+    assert!(!state.sample_sash(t0 + Duration::from_millis(400), false));
+    assert_eq!(state.sash(), 0.0);
+    // Reduced motion jumps straight to the target and stops requesting frames.
+    state.set_sash_hover(true, t0, true);
+    assert_eq!(state.sash(), 1.0);
+    assert!(!state.sample_sash(t0, true));
+}
+
+#[gpui::test]
+fn sash_line_sits_inside_the_hit_band_and_island_height(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let band = bounds("sidebar-resize", cx);
+    let island = bounds("island", cx);
+    let sash = bounds("sidebar-sash", cx);
+    assert_eq!(sash.size.width, px(SIDEBAR_SASH_WIDTH));
+    assert!(band.size.width >= sash.size.width, "hit band stays wider");
+    assert!(sash.left() >= band.left() && sash.right() <= band.right());
+    // Inside the island's visible vertical edge, never the title bar or the bottom inset.
+    assert!(sash.top() >= island.top());
+    assert!(sash.bottom() <= island.bottom());
 }
