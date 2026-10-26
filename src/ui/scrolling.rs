@@ -113,13 +113,13 @@ impl SmoothState {
 
 /// A scroll region with wheel smoothing attached to its handle.
 #[derive(Clone)]
-pub(super) struct SmoothScroll {
+pub(crate) struct SmoothScroll {
     scroll: ScrollHandle,
     state: Rc<SmoothState>,
 }
 
 impl SmoothScroll {
-    pub(super) fn new(scroll: ScrollHandle) -> Self {
+    pub(crate) fn new(scroll: ScrollHandle) -> Self {
         Self {
             scroll,
             state: Rc::new(SmoothState::default()),
@@ -127,12 +127,12 @@ impl SmoothScroll {
     }
 
     /// Drop any pending motion; call before a programmatic jump so it is not pulled back.
-    pub(super) fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.state.cancel(f32::from(self.scroll.offset().y));
     }
 
     /// Apply one wheel event to the handle. Returns whether the region consumed it.
-    pub(super) fn wheel(&self, now: Instant, delta_y: f32, precise: bool, reduced: bool) -> bool {
+    pub(crate) fn wheel(&self, now: Instant, delta_y: f32, precise: bool, reduced: bool) -> bool {
         let current = f32::from(self.scroll.offset().y);
         let max = f32::from(self.scroll.max_offset().y).max(0.0);
         if max <= 0.0 {
@@ -148,7 +148,7 @@ impl SmoothScroll {
     }
 
     /// Advance the handle toward the target. Returns true while another frame is needed.
-    pub(super) fn tick(&self, now: Instant, reduced: bool) -> bool {
+    pub(crate) fn tick(&self, now: Instant, reduced: bool) -> bool {
         let current = f32::from(self.scroll.offset().y);
         let max = f32::from(self.scroll.max_offset().y).max(0.0);
         let Some(next) = self.state.tick(now, current, max, reduced) else {
@@ -168,7 +168,7 @@ impl SmoothScroll {
 /// hitbox only feeds hit testing, so it never blocks clicks. Put it in a `relative` parent as a
 /// sibling of the scrolling element. Consumption is gated on `should_handle_scroll`, so a modal
 /// (the command palette, an Ely menu) in front suppresses this region instead of scrolling it.
-pub(super) fn wheel_overlay(id: &'static str, smooth: SmoothScroll) -> AnyElement {
+pub(crate) fn wheel_overlay(id: &'static str, smooth: SmoothScroll) -> AnyElement {
     let smooth = smooth.clone();
     div()
         .debug_selector(move || format!("wheel-overlay-{id}"))

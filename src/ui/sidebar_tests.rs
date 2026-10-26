@@ -3,7 +3,8 @@ use super::{Shell, geometry::*, sidebar_state::SidebarState};
 use crate::workspace::Route;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualContext, VisualTestContext, point, px,
+    size,
 };
 
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
@@ -222,16 +223,21 @@ fn menu_keyboard_outside_click_and_resize_close_without_navigation(cx: &mut Test
     let (view, cx) = shell(cx);
     click("sidebar-toggle", cx);
     click("sidebar-more", cx);
+    // The first entry is highlighted when the menu opens; Down moves to Issues.
     press("down", cx);
     press("enter", cx);
-    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Notifications);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Issues);
     assert!(cx.debug_bounds("menu-panel-0").is_none());
     click("sidebar-more", cx);
-    click("nav-home", cx);
+    // A press over the dismissal layer closes the menu and must not activate the row underneath.
+    let shield = bounds("sidebar-menu-dismiss", cx);
+    let away_from_panel = shield.center();
+    cx.simulate_click(away_from_panel, Modifiers::none());
+    cx.run_until_parked();
     assert!(cx.debug_bounds("menu-panel-0").is_none());
     assert_eq!(
         view.read_with(cx, |s, _| s.route()),
-        Route::Notifications,
+        Route::Issues,
         "a dismissal click must not activate the row under it"
     );
     click("sidebar-more", cx);
@@ -567,8 +573,8 @@ fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestApp
     click("account-identity", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
     // The blank space between the identity and the status is not a Profile hit area.
-    view.update(cx, |s, cx| {
-        s.navigate(Route::Home, cx);
+    cx.update_window_entity(&view, |s, window, cx| {
+        s.navigate(Route::Home, window, cx);
     });
     cx.run_until_parked();
     let identity = bounds("account-identity", cx);
@@ -736,5 +742,45 @@ fn reduced_motion_range_shrink_is_clamped_immediately() {
             true
         ),
         Some(0.0)
+    );
+}
+
+#[gpui::test]
+fn probe_menu_click2(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("sidebar-toggle", cx);
+    click("sidebar-more", cx);
+    println!(
+        "open menu={} panel={:?} dismiss={:?}",
+        view.read_with(cx, |s, _| s.sidebar_menu_open()),
+        cx.debug_bounds("menu-panel-0"),
+        cx.debug_bounds("sidebar-menu-dismiss")
+    );
+    let p = bounds("nav-home", cx).center();
+    cx.simulate_mouse_move(p, None, Modifiers::none());
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: p,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    println!(
+        "down route={:?} menu={}",
+        view.read_with(cx, |s, _| s.route()),
+        view.read_with(cx, |s, _| s.sidebar_menu_open())
+    );
+    cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: p,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+    println!(
+        "up route={:?} menu={} panel={:?}",
+        view.read_with(cx, |s, _| s.route()),
+        view.read_with(cx, |s, _| s.sidebar_menu_open()),
+        cx.debug_bounds("menu-panel-0")
     );
 }

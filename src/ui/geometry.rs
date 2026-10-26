@@ -67,3 +67,47 @@ pub const ACCOUNT_ROW_HEIGHT: f32 = 48.0;
 
 /// Height of a Home activity row.
 pub const ACTIVITY_ROW_HEIGHT: f32 = 52.0;
+
+/// The application session tab strip at the top of the island.
+///
+/// The strip's inset is one value on every in-scroll edge, so the first tab's top and left gaps
+/// match the island's inner boundary regardless of DPI rounding. It deliberately matches the gap
+/// between the island and the window edge, so the strip's own padding reads as the same rhythm as
+/// the frame instead of a second, larger margin.
+pub const TAB_STRIP_INSET: f32 = ISLAND_INSET;
+
+/// One tab's height. The strip is a little taller than the tab, which leaves room for the thin
+/// scrollbar without another inset.
+pub const TAB_HEIGHT: f32 = 26.0;
+
+/// One fixed, readable tab width. Tabs never compress: the strip scrolls instead.
+pub const TAB_WIDTH: f32 = 168.0;
+
+/// The icons' touch target inside a tab.
+pub const TAB_CLOSE_SIZE: f32 = 16.0;
+
+/// Gap between a tab's icon and its title. The icon-to-close spacing stays tighter, so the label
+/// keeps most of the width.
+pub const TAB_ICON_GAP: f32 = 7.0;
+
+/// The gap between two tabs in the strip.
+pub const TAB_GAP: f32 = 4.0;
+
+/// Visible thickness of the strip's own scrollbar thumb. It is a hairline compared with the
+/// theme's default thickness, and it is the implementation starting point rather than a signed-off
+/// value.
+pub const TAB_SCROLLBAR_THICKNESS: f32 = 3.0;
+
+/// Height of the band the scrollbar paints in. It is reserved whether or not the scrollbar is
+/// visible, so fading it in or out never moves the tabs.
+pub const TAB_SCROLLBAR_BAND: f32 = TAB_SCROLLBAR_THICKNESS + 2.0;
+
+/// The strip's total height: the inset, the tabs, then the scrollbar band.
+pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;
+
+/// Width of the toolbar pinned to the strip's right edge, outside the scrolling viewport. It is one
+/// square slot matching the tab height, so its centered icon has equal top and right gaps.
+pub const TAB_TOOLBAR_WIDTH: f32 = TAB_HEIGHT;
+
+/// How long the strip's scrollbar takes to fade in or out.
+pub const TAB_SCROLLBAR_FADE_MS: u64 = 140;

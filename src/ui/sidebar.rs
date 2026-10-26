@@ -596,39 +596,57 @@ pub(super) fn group_heading(text: String, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Ely's menu supplies keyboard navigation, disabled rows, window snapping and focus takeover.
-pub(super) fn overflow(
-    shell: gpui::Entity<super::Shell>,
-    route: &crate::workspace::Route,
-    focus: &FocusHandle,
-    open: std::rc::Rc<std::cell::Cell<bool>>,
-    cx: &App,
-) -> AnyElement {
-    use crate::workspace::Route;
-    use ely_gpui_component::menus::{Menu, MenuItem, OverflowMenu};
+/// The collapsed rail's overflow trigger and menu.
+///
+/// The menu is drawn here with Ely's public theme tokens (overlay surface, border, elevation and
+/// menu width), and the shell owns its open state, focus and keys. Ely's `OverflowMenu` keeps a
+/// private focus takeover; a sidebar repaint during the collapse animation could re-arm it and
+/// leave Escape or a window change unable to close the panel. Owning the state keeps every
+/// dismissal path explicit (and testable) while the look still follows the theme.
+pub(super) struct OverflowMenuView<'a> {
+    pub shell: gpui::Entity<super::Shell>,
+    pub route: &'a crate::workspace::Route,
+    pub focus: &'a FocusHandle,
+    pub menu_focus: &'a FocusHandle,
+    pub open: std::rc::Rc<std::cell::Cell<bool>>,
+    pub menu_open: bool,
+    pub cursor: usize,
+    pub viewport: gpui::Size<gpui::Pixels>,
+}
+
+pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
+    let OverflowMenuView {
+        shell,
+        route,
+        focus,
+        menu_focus,
+        open,
+        menu_open,
+        cursor,
+        viewport,
+    } = view;
     let theme = cx.theme();
-    let mut menu = Menu::new();
-    for (label, icon, target) in [
-        ("Notifications", IconName::Bell, Route::Notifications),
-        ("Issues", IconName::CircleDot, Route::Issues),
-        ("PRs", IconName::GitPullRequest, Route::PullRequests),
-    ] {
-        let this = shell.clone();
-        menu = menu.item(
-            MenuItem::check(label, *route == target)
-                .icon(icon)
-                .on_click(move |_, cx| {
-                    this.update(cx, |shell, cx| {
-                        shell.navigate(target.clone(), cx);
-                    });
-                }),
-        );
-    }
-    menu = menu.item(MenuItem::new("New").icon(IconName::Plus).disabled(true));
-    div()
-        .id("sidebar-more-host")
-        .track_focus(focus)
+    let colors = &theme.colors;
+    let this = shell.clone();
+    let toggle = {
+        let this = this.clone();
+        let open = open.clone();
+        move |window: &mut Window, cx: &mut App| {
+            let opening = !open.get();
+            open.set(opening);
+            this.update(cx, |shell, cx| {
+                if opening {
+                    shell.open_sidebar_menu(window, cx);
+                } else {
+                    shell.close_sidebar_menu(window, cx);
+                }
+            });
+        }
+    };
+    let trigger = div()
+        .id("sidebar-more-trigger")
         .debug_selector(|| "sidebar-more".to_string())
+        .track_focus(focus)
         .flex()
         .flex_none()
         .justify_center()
@@ -636,67 +654,223 @@ pub(super) fn overflow(
         .w_full()
         .child(
             div()
+                .id("sidebar-more-button")
                 .debug_selector(|| "sidebar-more-button".to_string())
                 .size(px(SIDEBAR_RAIL_ITEM_SIZE))
                 .flex_none()
                 .rounded(theme.radius(Radius::Sm))
-                .border_1()
-                .border_color(theme.colors.border)
-                .child(SidebarOverflow {
-                    menu: OverflowMenu::new("sidebar-overflow", menu).tooltip("More"),
-                    restore: focus.clone(),
-                    open,
-                }),
+                .tab_index(0)
+                .role(Role::Button)
+                .aria_label("More")
+                .cursor_pointer()
+                .focus(move |style| style.border_color(colors.focus))
+                .hover(move |style| style.bg(colors.hover))
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(move |_, window, cx| toggle(window, cx))
+                .child(
+                    Icon::new(IconName::Ellipsis)
+                        .size(IconSize::Sm)
+                        .color(colors.fg_muted),
+                )
+                .tooltip(Tooltip::text("More")),
         )
-        .text_color(cx.theme().colors.fg_muted)
-        .into_any_element()
-}
+        .text_color(colors.fg_muted);
 
-/// Ely owns the menu's focus and keyboard handling. Observe that focus takeover to place a
-/// dismissal shield below its raised panel; an outside press then cannot click the page behind.
-#[derive(IntoElement)]
-struct SidebarOverflow {
-    menu: ely_gpui_component::menus::OverflowMenu,
-    restore: FocusHandle,
-    open: std::rc::Rc<std::cell::Cell<bool>>,
-}
+    if !menu_open {
+        return trigger.into_any_element();
+    }
 
-impl gpui::RenderOnce for SidebarOverflow {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state("sidebar-menu-focus", cx, |_, _| None::<FocusHandle>);
-        let before = window.focused(cx);
-        let menu = self.menu.render(window, cx).into_any_element();
-        let after = window.focused(cx);
-        if before != after {
-            state.update(cx, |focus, _| *focus = after.clone());
-        }
-        let open = state
-            .read(cx)
-            .as_ref()
-            .is_some_and(|focus| focus.is_focused(window) && *focus != self.restore);
-        self.open.set(open);
-        let viewport = window.viewport_size();
-        div().child(menu).when(open, |host| {
-            host.child(
-                gpui::deferred(
-                    gpui::anchored().position(gpui::Point::default()).child(
+    let entries = [
+        (
+            "Notifications",
+            IconName::Bell,
+            Some(crate::workspace::Route::Notifications),
+        ),
+        (
+            "Issues",
+            IconName::CircleDot,
+            Some(crate::workspace::Route::Issues),
+        ),
+        (
+            "PRs",
+            IconName::GitPullRequest,
+            Some(crate::workspace::Route::PullRequests),
+        ),
+        ("New", IconName::Plus, None),
+    ];
+    let row_height = theme.control_height(ely_gpui_component::theme::ControlSize::Md);
+    let rows = entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, icon, target))| {
+            let active = target.as_ref().is_some_and(|target| route == target);
+            let disabled = target.is_none();
+            let highlighted = cursor == index && !disabled;
+            let this = this.clone();
+            let run = {
+                let this = this.clone();
+                let open = open.clone();
+                let target = target.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    open.set(false);
+                    this.update(cx, |shell, cx| {
+                        shell.pick_sidebar_menu(target.clone(), window, cx);
+                    });
+                }
+            };
+            let row = div()
+                .id(("sidebar-menu-row", index))
+                .debug_selector(move || format!("menu-row-{label}"))
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(row_height)
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .rounded(theme.radius(Radius::Md))
+                .text_color(if disabled {
+                    colors.fg_subtle
+                } else {
+                    colors.fg
+                })
+                .when(highlighted, |row| row.bg(colors.hover))
+                .when(active && !disabled, |row| {
+                    row.font_weight(FontWeight::MEDIUM)
+                })
+                .when(disabled, |row| row.opacity(0.45))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(14.0))
+                        .child(Icon::new(icon).size(IconSize::Sm).color(if disabled {
+                            colors.fg_subtle
+                        } else {
+                            colors.fg_muted
+                        })),
+                )
+                .child(div().flex_1().min_w_0().child(Ellipsis::new(label)));
+            if disabled {
+                row.aria_description("Creating resources is not available in this round.")
+                    .into_any_element()
+            } else {
+                row.role(Role::Button)
+                    .aria_label(label)
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(move |_, window, cx| run(window, cx))
+                    .when(active, |row| {
+                        row.child(Icon::new(IconName::Check).size(IconSize::Xs))
+                    })
+                    .into_any_element()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let panel = div()
+        .id("sidebar-menu-panel")
+        .debug_selector(|| "menu-panel-0".to_string())
+        .track_focus(menu_focus)
+        .relative()
+        .occlude()
+        .w(theme.menu_width())
+        .p_1()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .rounded(theme.radius(Radius::Lg))
+        .bg(colors.overlay)
+        .border_1()
+        .border_color(colors.border)
+        .shadow(theme.elevation(ely_gpui_component::theme::Elevation::Floating))
+        .text_size(theme.text_size(TextSize::Sm))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_key_down({
+            let this = this.clone();
+            let open = open.clone();
+            move |event, window, cx| {
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => {
+                        open.set(false);
+                        this.update(cx, |shell, cx| shell.close_sidebar_menu(window, cx));
+                        cx.stop_propagation();
+                    }
+                    "down" | "up" => {
+                        let by = if key == "down" { 1 } else { -1 };
+                        this.update(cx, |shell, cx| {
+                            shell.move_sidebar_menu_cursor(by, cx);
+                        });
+                        cx.stop_propagation();
+                    }
+                    "enter" | "space" if !event.keystroke.modifiers.modified() => {
+                        this.update(cx, |shell, cx| {
+                            shell.pick_sidebar_menu_cursor(window, cx);
+                        });
+                        cx.stop_propagation();
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .children(rows);
+
+    // One raised layer: the full-window dismissal shield first, then the panel above it. Sharing
+    // the layer keeps their stacking together, so the press and its release both land on the
+    // shield (or the panel) and never on the row underneath.
+    let shield = {
+        let this = this.clone();
+        let open = open.clone();
+        div()
+            .id("sidebar-menu-dismiss")
+            .debug_selector(|| "sidebar-menu-dismiss".to_string())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(viewport.width)
+            .h(viewport.height)
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                open.set(false);
+                this.update(cx, |shell, cx| shell.close_sidebar_menu(window, cx));
+            })
+    };
+    trigger
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(gpui::Point::default())
+                    .child(
                         div()
-                            .id("sidebar-menu-dismiss")
-                            .debug_selector(|| "sidebar-menu-dismiss".to_string())
+                            .relative()
                             .w(viewport.width)
                             .h(viewport.height)
-                            .occlude()
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                window.focus(&self.restore, cx);
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            }),
-                    ),
-                )
-                .with_priority(0),
+                            .child(shield)
+                            .child(
+                                gpui::anchored()
+                                    .position(gpui::Point::new(px(SIDEBAR_PADDING), px(0.0)))
+                                    .anchor(gpui::Anchor::BottomLeft)
+                                    .snap_to_window()
+                                    .child(panel),
+                            ),
+                    )
+                    .snap_to_window(),
             )
-        })
-    }
+            .with_priority(1),
+        )
+        .into_any_element()
 }
 
 /// Scrolls `row` into the list's viewport with the least movement, leaving a row that already fits
