@@ -106,6 +106,97 @@ pub fn render(
     track.child(thumb).into_any_element()
 }
 
+/// The same hairline over a virtualized [`gpui::ListState`].
+///
+/// The list owns its measured extent and its drag maths, so this reads the
+/// viewport and `max_offset_for_scrollbar` straight from it and writes a drag
+/// back through `set_offset_from_scrollbar`. Nothing is rebuilt to measure the
+/// content, and the thumb cannot drift from what the list actually scrolls.
+/// `on_dragging` must call `scrollbar_drag_ended` when the drag finishes.
+pub fn render_list(
+    state: &gpui::ListState,
+    opacity: f32,
+    owner: EntityId,
+    name: &'static str,
+    on_dragging: OnDragging,
+    cx: &App,
+) -> AnyElement {
+    let span = state.viewport_bounds().size.height;
+    let reach = state.max_offset_for_scrollbar().y;
+    let scrolled = -state.scroll_px_offset_for_scrollbar().y;
+    let style = Style::READER;
+    let length = (span * (span / (span + reach)))
+        .max(px(style.min_thumb))
+        .min(span);
+    let travel = span - length;
+    if reach <= Pixels::ZERO || travel <= Pixels::ZERO || opacity <= 0.0 {
+        return div().into_any_element();
+    }
+    let start = travel * (scrolled / reach).clamp(0.0, 1.0);
+    let thickness = px(style.thickness);
+    let state = state.clone();
+    let drag_state = state.clone();
+    let (idle, busy) = style.colors(cx);
+    let thumb = div()
+        .id(gpui::ElementId::Name(
+            format!("{name}-thumb-{}", owner.as_u64()).into(),
+        ))
+        .debug_selector(move || format!("{name}-thumb"))
+        .absolute()
+        .rounded_full()
+        .bg(idle)
+        .hover(move |style| style.bg(busy))
+        .on_drag(
+            Drag {
+                owner,
+                start: f32::from(start),
+                axis: Axis::Vertical,
+                anchor: Default::default(),
+            },
+            {
+                let on_dragging = on_dragging.clone();
+                move |_, _, window, cx| {
+                    // Freeze the measured height for the drag so a row that
+                    // measures itself under the pointer cannot move the thumb.
+                    drag_state.scrollbar_drag_started();
+                    on_dragging(true, window, cx);
+                    cx.new(|_| EmptyView)
+                }
+            },
+        )
+        .top(start)
+        .left_0()
+        .w(thickness)
+        .h(length);
+    let track = div()
+        .id(gpui::ElementId::Name(
+            format!("{name}-track-{}", owner.as_u64()).into(),
+        ))
+        .debug_selector(move || name.to_string())
+        .absolute()
+        .opacity(opacity)
+        .on_drag_move(move |event: &gpui::DragMoveEvent<Drag>, window, cx| {
+            let drag = event.drag(cx);
+            if drag.owner != owner || drag.axis != Axis::Vertical {
+                return;
+            }
+            let local: f32 = (event.event.position.y - event.bounds.origin.y).into();
+            let anchor = drag.anchor.get().unwrap_or_else(|| {
+                drag.anchor.set(Some(local));
+                local
+            });
+            let ratio = ((drag.start + local - anchor) / f32::from(travel)).clamp(0.0, 1.0);
+            let reach = f32::from(reach);
+            state.set_offset_from_scrollbar(point(px(0.0), px(-(reach * ratio))));
+            window.refresh();
+        })
+        .top_0()
+        .bottom(px(4.0))
+        .right(px(4.0))
+        .w(px(8.0));
+    track.child(thumb).into_any_element()
+}
+
 struct Drag {
     owner: EntityId,
     start: f32,

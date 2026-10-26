@@ -66,15 +66,15 @@ view.update(cx, |view, _| {
 
 **已定位的 Ely 行为边界：** 若把长文本直接传给 `MarkdownDocument::new(text, ..)`，其异步读取会 splice 进一个「已经按 0 项测量过」的列表，结果**一个块都不绘制**。在测试平台上以 130 KiB 起稳定复现（独立于本模块，直接用 `MarkdownDocument` 也复现）。`new(String::new(), ..)` 后再 `reset(text, cx)` 会请求在读取落地后定位到首行，列表仍锚定在 block 0，因此能正常绘制到 2 MiB。本模块因此采用后者，并在注释与开发日志里记录原因。这是上游行为观察，不是本仓库的补丁，也不改 Ely revision。
 
-## 共享滚动条与未完成项
+## Markdown 阅读排版与真实滚动条
 
-`src/ui/scrollbar.rs` 只抽取外观与 `Fade`，`src/ui/tab_scrollbar.rs` 保留已验收的标签条实现和参数；`ui/mod.rs` 仅新增 `reader`/`scrollbar` 模块声明，未改 Shell、侧栏、工作区导航或标签布局。
+Ely 通过本 PR 的单 crate `[patch]` 固定在同一基线的本地副本，见 [Markdown 补丁](content-reader-markdown-patch.md)。Preview 的 inline code 使用 `theme.mono_family`（预览为 Google Sans Code），正文继续使用 Noto Sans。3.5px 左右、1px 上下 padding 和 4px 圆角浅背景来自真实字形排版；长代码按 grapheme 断行，跨代码段拖选与 `Ctrl+C` 使用同一段落布局，复制不含 padding 字符。fence 语言标签局部上移 8px，代码首行与语法着色不随之平移。
 
-源码视图的纵向/横向滚动条绑定真实列表句柄，范围与滚轮同步（`source_scrollbars_follow_the_real_list_and_fade_out`），`Fade` 动画期间请求下一帧。
+Markdown 右侧 3px 细滚动条直接绑定文档原有 `ListState`，不是外层伪造的 `ScrollHandle`。范围、滚轮、拖动、resize clamp 均走列表接口；无溢出不构建滚动条，hover 使用共享 `Fade`，拖动保持反馈。只有可见 block 参与排版。
 
-**拇指拖动已可改变真实 `ScrollHandle` 偏移**（`dragging_the_source_scrollbar_moves_the_real_offset`：五段真实鼠标移动后 offset 从 0 到约 -47px 并 clamp 在 `max_offset` 内；`dragging_the_horizontal_scrollbar_leaves_the_vertical_offset` 证明两轴独立）。此前的失败原因是测试只发一次移动：`on_drag` 在跨过阈值的那一次移动才创建拖动并随即 `stop_propagation()`，所以那一次只负责“武装”，从下一次移动起捕获监听才看到拖动。这是测试缺陷，已在用例注释中写明，没有放宽断言。hover 淡入淡出时序与双轴角落命中仍需真实窗口确认。
+## 共享滚动条
 
-**Markdown 三项仍未实现**（真实滚动条、inline code 圆角/小 padding/代码字体、fence 语言标签上移）。原因是固定 Ely 的公开接口缺口，逐文件核对见 [Markdown 补丁方案](content-reader-markdown-patch.md)；该文档列出三处最小新增入口、换行/选择/虚拟化影响和固定 SHA 的复现方式。已登记待裁决（PR #27 的 `githux:arbitration-required:v1`，`arbitration_ever_required=true`、`merge_owner=coordinator`），裁决前不改本机 Cargo checkout、不 vendor、不升级依赖。
+`src/ui/scrollbar.rs` 只抽取外观与 `Fade`，`src/ui/tab_scrollbar.rs` 保留已验收的标签条实现和参数；`ui/mod.rs` 仅新增 `reader`/`scrollbar` 模块声明，未改 Shell、侧栏、工作区导航或标签布局。Source 纵/横滚动条仍绑定 `UniformListScrollHandle.base_handle`；轴独立，横向溢出可达。
 
 ## 未覆盖与待验收
 

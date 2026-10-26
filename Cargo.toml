@@ -37,3 +37,12 @@ ely-gpui-component = { git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-G
 # tasks inside the critical section, so the test would pass even without a lock.
 # The production runtime stays current-thread.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }
+
+# The reader's inline-code and scrollbar work needs a few additions inside Ely
+# that its public API does not expose. The exact upstream baseline
+# (`da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`) is vendored under
+# `vendor/ely-gpui-component` with only those additions; this patch makes both
+# the normal and the dev dependency resolve to it, so a clean `--locked` build
+# never reaches the network for Ely. See `docs/content-reader-markdown-patch.md`.
+[patch."https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git"]
+ely-gpui-component = { path = "vendor/ely-gpui-component" }

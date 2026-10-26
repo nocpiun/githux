@@ -66,6 +66,27 @@ pub const LINK_ONLY: &str = "[press me](guide.md#setup)\n";
 /// The first block is one dangerous link.
 pub const DANGEROUS_LINK_ONLY: &str = "[do not run](javascript:alert(1))\n";
 
+/// One short inline-code span, for the padding/background layout check.
+///
+/// Exactly one code span, so `reader-inline-code` names one element.
+pub fn inline_code_short() -> PreparedBody {
+    PreparedBody::Utf8 {
+        text: "# Inline code\n\nA short `x` span.\n".to_string(),
+        has_bom: false,
+    }
+}
+
+/// A long inline-code span that must wrap in a narrow window, with Chinese and
+/// emoji around it. Exactly one code span, so `reader-inline-code` is
+/// unambiguous.
+pub fn inline_code_long() -> PreparedBody {
+    let long = "code_".repeat(60);
+    PreparedBody::Utf8 {
+        text: format!("# Inline code\n\n中文和 emoji 🚀 在长代码 `{long}` 之间。\n"),
+        has_bom: false,
+    }
+}
+
 /// The source acceptance fixture: Chinese, emoji and one very long line.
 pub const SOURCE: &str = r#"// Githux reader source fixture
 use std::collections::HashMap;

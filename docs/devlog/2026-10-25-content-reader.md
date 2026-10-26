@@ -85,3 +85,10 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 - 接入前置：`ui/mod.rs` 增加模块声明；仓库页面把 `data` 层的正文与会话上下文交给 `ReaderView`，并由集成层实现 `ReaderAction`（外部 URL、同 commit 文件切换）。
 - 真实窗口验收未做，`merge_owner=coordinator`、`human_review_required=true / approved=false`：PR 完成后保持 OPEN，由负责人真实验收后再决定合并。
 - 若上游后续修好「构造期长文本不绘制」的问题，可去掉 `reset` 变通并删除对应注释。
+
+
+## 2026-10-26 第四轮：协调裁决后的四项实现
+
+协调裁决已批准最小 Ely 补丁。实际采用根 `[patch]` + `vendor/ely-gpui-component`，基线仍为 `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，不修改 Cargo 缓存，不升级版本。fence 标签局部上移 8px；inline code 在真实连续字形排版中使用 mono 字体、圆角浅背景和小 padding，长代码断行，跨代码段拖选复制不加字符；Markdown 滚动条直接绑定真实 `ListState`。Source gutter 保持 0.75rem+6px。
+
+阅读器 41 项集成测试通过，覆盖真实滚动/拖动/无溢出隐藏、长文虚拟化、实际代码字体/几何、窄窗口断行与跨代码段复制，既有链接和 Source 测试也保持通过。完整命令与最新 head、预览 PID 见本轮 PR/交付状态；真实 Windows 最终视觉仍待负责人验收，未自行合并。

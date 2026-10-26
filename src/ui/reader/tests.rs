@@ -20,6 +20,12 @@ use crate::content::PreparedBody;
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(ely_gpui_component::init_for_tests);
+    cx.update(|cx| {
+        ely_gpui_component::theme::Theme::update(cx, |theme| {
+            theme.font_family = "Noto Sans".into();
+            theme.mono_family = "Google Sans Code".into();
+        })
+    });
 }
 
 fn context() -> ResourceContext {
@@ -892,4 +898,249 @@ fn dragging_the_horizontal_scrollbar_leaves_the_vertical_offset(cx: &mut TestApp
         "the horizontal offset moved: {offset:?}"
     );
     assert_eq!(offset.y, px(0.0), "and the vertical offset did not");
+}
+
+/// The Markdown body's hairline binds the document's real `ListState`: it is
+/// absent until the list overflows, the wheel moves the same offset, and a
+/// thumb drag moves the list's own scroll position and clamps to its extent.
+#[gpui::test]
+fn markdown_scrollbar_follows_the_real_list_and_drags(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(700.0), px(300.0)));
+    frames(cx);
+    reader.update_in(cx, |reader, _, _| {
+        reader.pin_scrollbar_clock(0);
+        reader.show_scrollbar();
+    });
+    frames(cx);
+    let frame = cx
+        .debug_bounds("reader-markdown")
+        .expect("the reader draws");
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    frames(cx);
+    assert!(
+        cx.debug_bounds("reader-markdown-scrollbar").is_some(),
+        "an overflowing Markdown body draws the bar"
+    );
+    let reach = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .unwrap()
+            .read(cx)
+            .list_state()
+            .max_offset_for_scrollbar()
+    });
+    assert!(reach.y > px(0.0), "the short viewport overflows: {reach:?}");
+    cx.simulate_event(ScrollWheelEvent {
+        position: frame.center(),
+        delta: ScrollDelta::Lines(point(0.0, -30.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    frames(cx);
+    let wheeled = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .unwrap()
+            .read(cx)
+            .list_state()
+            .scroll_px_offset_for_scrollbar()
+    });
+    assert!(
+        wheeled.y < px(0.0),
+        "the wheel scrolls the same list the bar binds: {wheeled:?}"
+    );
+    let thumb = cx
+        .debug_bounds("reader-markdown-scrollbar-thumb")
+        .expect("the thumb is drawn");
+    let start = thumb.origin + point(px(1.0), px(f32::from(thumb.size.height) / 2.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let mut offsets = Vec::new();
+    for step in 1..=5 {
+        cx.simulate_mouse_move(
+            start + point(px(0.0), px(12.0 * step as f32)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        offsets.push(reader.read_with(cx, |reader, cx| {
+            reader
+                .markdown()
+                .unwrap()
+                .read(cx)
+                .list_state()
+                .scroll_px_offset_for_scrollbar()
+        }));
+    }
+    let moved = offsets.last().copied().expect("five moves");
+    assert!(
+        moved.y < wheeled.y,
+        "the drag moves the real list further: {offsets:?}"
+    );
+    // During a drag the list reports the height it froze at drag start, which
+    // is the extent the thumb's travel is measured against. Read it while the
+    // drag is still active so the clamp is compared to the same extent.
+    let frozen = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .unwrap()
+            .read(cx)
+            .list_state()
+            .max_offset_for_scrollbar()
+    });
+    assert!(
+        moved.y >= -frozen.y,
+        "the drag clamps to the list's measured extent: {moved:?} vs {frozen:?}"
+    );
+    cx.simulate_mouse_up(
+        start + point(px(0.0), px(60.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    frames(cx);
+}
+
+/// A short Markdown body has nothing to scroll, so no bar is built at all: it
+/// cannot take a press or overlap the text.
+#[gpui::test]
+fn markdown_scrollbar_is_absent_without_overflow(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::inline_code_short(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+    frames(cx);
+    reader.update_in(cx, |reader, _, _| {
+        reader.pin_scrollbar_clock(0);
+        reader.show_scrollbar();
+    });
+    frames(cx);
+    let frame = cx
+        .debug_bounds("reader-markdown")
+        .expect("the reader draws");
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    frames(cx);
+    let reach = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .unwrap()
+            .read(cx)
+            .list_state()
+            .max_offset_for_scrollbar()
+    });
+    assert_eq!(reach.y, px(0.0), "the fixture fits: {reach:?}");
+    assert!(
+        cx.debug_bounds("reader-markdown-scrollbar-thumb").is_none(),
+        "no thumb is built without overflow"
+    );
+}
+
+fn inline_snapshot(
+    cx: &mut VisualTestContext,
+    text: &str,
+) -> ely_gpui_component::documents::ReaderInlineLayout {
+    cx.update(|_, cx| {
+        ely_gpui_component::documents::reader_inline_layout(text, cx)
+            .expect("the real paragraph was laid out")
+    })
+}
+
+#[gpui::test]
+fn inline_code_has_real_padding_code_font_and_wrapped_geometry(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx, fixtures::inline_code_short(), DocumentKind::Markdown);
+    frames(cx);
+    let layout = inline_snapshot(cx, "A short x span.");
+    let code = layout.pieces.iter().find(|p| p.code).unwrap();
+    assert_eq!(
+        code.box_bounds.size.width - code.text_bounds.size.width,
+        px(7.0)
+    );
+    assert_eq!(code.text_bounds.left() - code.box_bounds.left(), px(3.5));
+    let code = layout.pieces.iter().find(|p| p.code).unwrap();
+    assert!(
+        layout.code_run_fonts.contains(&layout.code_font),
+        "code runs request the theme mono family: {:?}",
+        layout.code_run_fonts
+    );
+    let last = layout.pieces.last().unwrap();
+    assert!(
+        last.text_bounds.left() >= code.box_bounds.right(),
+        "padding participates in following text placement"
+    );
+}
+
+#[gpui::test]
+fn long_inline_code_wraps_and_drags_across_code_spans(cx: &mut TestAppContext) {
+    let long = "long_code_".repeat(50);
+    let rendered = format!("中文 🚀 first code中间 second {long} end");
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: format!("中文 🚀 `first code`中间 `second {long}` end"),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(420.0), px(700.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, &rendered);
+    assert!(
+        layout.pieces.iter().filter(|p| p.code).count() > 2,
+        "long code wraps into actual shaped rows"
+    );
+    for p in &layout.pieces {
+        assert!(
+            p.text_bounds.right() <= layout.bounds.right() + px(0.5),
+            "no horizontal overflow: {p:?}"
+        );
+        assert!(rendered.is_char_boundary(p.range.start) && rendered.is_char_boundary(p.range.end));
+    }
+    let first = &layout.pieces[0];
+    let last = layout.pieces.last().unwrap();
+    let start = point(first.text_bounds.left(), first.text_bounds.center().y);
+    let end = point(
+        last.text_bounds.right() + px(1.0),
+        last.text_bounds.center().y,
+    );
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    frames(cx);
+    cx.simulate_keystrokes("secondary-c");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|i| i.text()),
+        Some(rendered)
+    );
+}
+
+/// The fenced-code language sits near the block's top edge, with the code area
+/// still below it.
+#[gpui::test]
+fn code_fence_language_sits_near_the_block_top(cx: &mut TestAppContext) {
+    let (_reader, cx) = open(cx, fixtures::markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(1100.0), px(900.0)));
+    frames(cx);
+    let block = cx
+        .debug_bounds("markdown-code-block")
+        .expect("the fenced block draws");
+    let language = cx
+        .debug_bounds("markdown-code-language")
+        .expect("its language label draws");
+    let inset = f32::from(language.top() - block.top());
+    assert!(
+        (0.0..=8.0).contains(&inset),
+        "the label sits near the block's top edge, inset {inset}"
+    );
+    assert!(
+        language.bottom() <= block.bottom(),
+        "the label stays inside the block"
+    );
+    assert!(
+        block.size.height > language.size.height * 2.0,
+        "the code area is below the label: {:?} vs {:?}",
+        block.size.height,
+        language.size.height
+    );
 }

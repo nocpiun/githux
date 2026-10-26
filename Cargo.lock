@@ -1660,7 +1660,6 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 [[package]]
 name = "ely-gpui-component"
 version = "0.1.1"
-source = "git+https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components.git?rev=da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721#da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -8169,7 +8168,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
