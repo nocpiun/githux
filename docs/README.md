@@ -22,7 +22,7 @@
 
 ## 当前状态
 
-- Rust + GPUI + Ely 正式单 package 工程已建立。当前实现 R1 的外壳布局：Windows 自定义标题栏、固定侧边栏与有界仓库列表、island、Home 双列假数据、本地导航搜索浮层；运行及源码入口见 [README](../README.md)，实现与真实窗口验收状态见 [外壳布局开发日志](devlog/2026-10-22-shell-layout.md)。登录、网络、数据库与业务页面仍未实现，模块边界之外没有业务代码。
+- Rust + GPUI + Ely 正式单 package 工程已建立。当前实现 R1 的外壳布局：Windows 自定义标题栏、固定侧边栏与有界仓库列表、island、Home 双列假数据、本地导航搜索浮层、应用级基础标签（打开/复用/切换/关闭）；运行及源码入口见 [README](../README.md)，实现与真实窗口验收状态见 [外壳布局开发日志](devlog/2026-10-22-shell-layout.md) 与 [标签开发日志](devlog/2026-10-23-workspace-tabs.md)。业务页面与 UI 接入仍未实现；服务层实现见下一条。
 - R2 的首个服务切片已实现（`auth`/`network`/`github`/`data`/`domain`/`diagnostics`）：Classic PAT 身份验证（`GET /user`）、Windows Credential Manager 存取、账户授权代次与旧响应丢弃、`GET /user/repos` 完整 `Link` 分页与部分结果、可取消的后台 Tokio 执行器。它是真实服务基础，UI 尚未接入，也没有账户元数据落盘、SQLite、缓存或 H1/H7 写操作；接口、验证与未覆盖项见 [认证与网络](auth-and-network.md) 和 [本轮开发日志](devlog/2026-10-23-pat-data-service.md)。
 - `githux-pr-review` 的等待脚本有离线测试，跨平台 CI 配置已建立。具体PR的检查、审查和合并状态以GitHub记录为准，不由本地测试或规范文档推断。
 - `githux-agent-dispatch` 提供 create/start/status/resume，生成独立 worktree 和任务上下文，在可见 Windows CMD 中启动配置的交互 CLI。离线测试以及本机真实启动、键盘接管、正常退出与同会话恢复已通过，见 [验证记录](devlog/2026-10-21-agent-dispatch.md)。手工 attach 不在单写入者锁保证内；多实现者并行集成仍待验证。

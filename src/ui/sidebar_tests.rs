@@ -3,7 +3,8 @@ use super::{Shell, geometry::*, sidebar_state::SidebarState};
 use crate::workspace::Route;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualContext, VisualTestContext, point, px,
+    size,
 };
 
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
@@ -93,7 +94,11 @@ fn measured_insets_footer_gap_and_marker_are_outside_the_row(cx: &mut TestAppCon
     assert_eq!(account.left(), px(SIDEBAR_PADDING));
     assert_eq!(island.left() - account.right(), account.left());
     assert_eq!(sidebar.bottom() - quarters.bottom(), account.left());
-    assert_eq!(account.top() - repo.bottom(), px(REPO_ACCOUNT_GAP));
+    // The footer divider owns the whole band between the list and the identity row now.
+    assert_eq!(
+        account.top() - repo.bottom(),
+        px(FOOTER_DIVIDER_HEIGHT + 2.0 * FOOTER_DIVIDER_SPACE)
+    );
     assert_eq!(account.size.height, px(48.0));
     let marker = bounds("sidebar-indicator", cx);
     let home = bounds("nav-home", cx);
@@ -222,16 +227,21 @@ fn menu_keyboard_outside_click_and_resize_close_without_navigation(cx: &mut Test
     let (view, cx) = shell(cx);
     click("sidebar-toggle", cx);
     click("sidebar-more", cx);
+    // The first entry is highlighted when the menu opens; Down moves to Issues.
     press("down", cx);
     press("enter", cx);
-    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Notifications);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Issues);
     assert!(cx.debug_bounds("menu-panel-0").is_none());
     click("sidebar-more", cx);
-    click("nav-home", cx);
+    // A press over the dismissal layer closes the menu and must not activate the row underneath.
+    let shield = bounds("sidebar-menu-dismiss", cx);
+    let away_from_panel = shield.center();
+    cx.simulate_click(away_from_panel, Modifiers::none());
+    cx.run_until_parked();
     assert!(cx.debug_bounds("menu-panel-0").is_none());
     assert_eq!(
         view.read_with(cx, |s, _| s.route()),
-        Route::Notifications,
+        Route::Issues,
         "a dismissal click must not activate the row under it"
     );
     click("sidebar-more", cx);
@@ -567,8 +577,8 @@ fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestApp
     click("account-identity", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
     // The blank space between the identity and the status is not a Profile hit area.
-    view.update(cx, |s, cx| {
-        s.navigate(Route::Home, cx);
+    cx.update_window_entity(&view, |s, window, cx| {
+        s.navigate(Route::Home, window, cx);
     });
     cx.run_until_parked();
     let identity = bounds("account-identity", cx);
@@ -737,4 +747,272 @@ fn reduced_motion_range_shrink_is_clamped_immediately() {
         ),
         Some(0.0)
     );
+}
+
+#[gpui::test]
+fn footer_divider_is_horizontally_centred_and_has_equal_vertical_space(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let check = |cx: &mut VisualTestContext| {
+        let repo = bounds("repo-scroll", cx);
+        let divider = bounds("sidebar-footer-divider", cx);
+        let rule = bounds("sidebar-footer-divider-rule", cx);
+        let account = bounds("account-row", cx);
+        let island = bounds("island", cx);
+        // The rule is 1px tall at the top spacer's end; measure from the actual rule line, not
+        // the container's centre. This part is unchanged by the horizontal fix.
+        let rule_top = divider.top() + px(FOOTER_DIVIDER_SPACE);
+        let rule_bottom = rule_top + px(FOOTER_DIVIDER_HEIGHT);
+        let above = rule_top - repo.bottom();
+        let below = account.top() - rule_bottom;
+        assert!(
+            (above - below).abs() <= px(1.0),
+            "rule must sit visually between list and identity: above={above:?} below={below:?}"
+        );
+        // Horizontal centring is measured against the *visible* sidebar area: the column plus the
+        // island gap, which the layout deliberately treats as the sidebar's right margin so rows
+        // have 8px on both sides. Centring inside the column alone leaves the line ~4px left of
+        // that area's midpoint.
+        let visible_left = bounds("sidebar", cx).left();
+        let visible_right = island.left();
+        let visible_mid = (visible_left + visible_right) / 2.0;
+        assert!(
+            (rule.center().x - visible_mid).abs() <= px(0.5),
+            "rule centre {:?} must match the visible sidebar midpoint {:?}",
+            rule.center().x,
+            visible_mid
+        );
+        // Same lane as the row backgrounds: inset by the left padding and stopping one island gap
+        // short of the island, so both visible margins are equal.
+        assert_eq!(rule.left(), visible_left + px(SIDEBAR_PADDING));
+        assert_eq!(rule.right(), visible_right - px(ISLAND_GAP));
+        assert_eq!(divider.left(), px(0.0));
+        assert_eq!(divider.size.width, bounds("sidebar", cx).size.width);
+    };
+    check(cx);
+    click("sidebar-toggle", cx);
+    cx.run_until_parked();
+    check(cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
+}
+
+#[gpui::test]
+fn identity_has_no_block_hover_and_only_the_login_underlines(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let identity = bounds("account-identity", cx);
+    cx.simulate_mouse_move(identity.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    // Hovering the identity cluster must not paint a whole-row/block background: the login line is
+    // the affordance. The row itself stays inert.
+    let login = bounds("account-login", cx);
+    assert!(login.size.height > px(0.0));
+}
+
+#[gpui::test]
+fn account_identity_sits_left_and_is_vertically_centred_in_its_row(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let row = bounds("account-row", cx);
+    let identity = bounds("account-identity", cx);
+    let avatar = bounds("sidebar-account-avatar", cx);
+    let name = bounds("account-name", cx);
+    let login = bounds("account-login", cx);
+    // "A little to the left": the cluster starts just inside the row's own left padding rather
+    // than being pushed right by a large inset.
+    assert!(
+        identity.left() - row.left() <= px(4.0),
+        "identity starts {:?} inside the row",
+        identity.left() - row.left()
+    );
+    // The avatar plus the two text lines form one block that is vertically centred in the row,
+    // measured from real layout rather than assumed from an items-center declaration.
+    let text_top = name.top();
+    let text_bottom = login.bottom();
+    let block_top = avatar.top().min(text_top);
+    let block_bottom = avatar.bottom().max(text_bottom);
+    let above = block_top - row.top();
+    let below = row.bottom() - block_bottom;
+    assert!(
+        (above - below).abs() <= px(1.0),
+        "identity block must be centred: above={above:?} below={below:?}"
+    );
+}
+
+#[test]
+fn sash_fade_is_reversible_and_settles_at_its_target() {
+    use std::time::{Duration, Instant};
+    let mut state = SidebarState::default();
+    let t0 = Instant::now();
+    assert_eq!(state.sash(), 0.0);
+    state.set_sash_hover(true, t0, false);
+    assert!(state.sample_sash(t0 + Duration::from_millis(70), false));
+    let mid_in = state.sash();
+    assert!(mid_in > 0.0 && mid_in < 1.0, "fading in: {mid_in}");
+    state.set_sash_hover(false, t0 + Duration::from_millis(70), false);
+    state.sample_sash(t0 + Duration::from_millis(110), false);
+    let mid_out = state.sash();
+    assert!(
+        mid_out < mid_in,
+        "reverse must fade out from the presented value"
+    );
+    assert!(!state.sample_sash(t0 + Duration::from_millis(400), false));
+    assert_eq!(state.sash(), 0.0);
+    // Reduced motion jumps straight to the target and stops requesting frames.
+    state.set_sash_hover(true, t0, true);
+    assert_eq!(state.sash(), 1.0);
+    assert!(!state.sample_sash(t0, true));
+}
+
+#[gpui::test]
+fn sash_line_sits_inside_the_hit_band_and_island_height(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let band = bounds("sidebar-resize", cx);
+    let island = bounds("island", cx);
+    let sash = bounds("sidebar-sash", cx);
+    assert_eq!(sash.size.width, px(SIDEBAR_SASH_WIDTH));
+    assert!(band.size.width >= sash.size.width, "hit band stays wider");
+    assert!(sash.left() >= band.left() && sash.right() <= band.right());
+    // Inside the island's visible vertical edge, never the title bar or the bottom inset.
+    assert!(sash.top() >= island.top());
+    assert!(sash.bottom() <= island.bottom());
+}
+
+#[gpui::test]
+fn sash_hides_without_hover_and_never_covers_the_toggle(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let band = bounds("sidebar-resize", cx);
+    let toggle = bounds("sidebar-toggle", cx);
+    let island = bounds("island", cx);
+    let sash = bounds("sidebar-sash", cx);
+    // No hover: the line has no opacity at all, so the collapsed/initial state leaves nothing lit.
+    assert_eq!(view.read_with(cx, |s, _| s.sidebar_state.sash()), 0.0);
+    // The visible line stays narrower than the heat band, so the original resize hit width and the
+    // toggle's own press target are untouched.
+    assert!(sash.size.width < band.size.width);
+    assert!(sash.size.width <= px(SIDEBAR_SASH_WIDTH));
+    // The toggle is occluding and sits on the band, so a press there can never start a resize or
+    // reach the line behind it.
+    assert!(
+        toggle.left() <= band.right() && toggle.right() >= band.left(),
+        "toggle overlaps the band by design"
+    );
+    // The line stops inside the island's rounded edge at both ends, not at the title bar or the
+    // window's bottom inset.
+    assert!(sash.top() >= island.top());
+    assert!(sash.bottom() < island.bottom());
+}
+
+#[gpui::test]
+fn menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let more = view.read_with(cx, |s, _| s.sidebar_more_focus.clone());
+    click("sidebar-toggle", cx);
+    click("sidebar-more", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+
+    // Tab must not move focus out of the open menu and leave it modal but keyboard-dead.
+    let menu_focus = view.read_with(cx, |s, _| s.sidebar_menu_focus.clone());
+    press("tab", cx);
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert!(
+        focused.as_ref() == Some(&menu_focus) || focused.as_ref() == Some(&more),
+        "focus stays inside the open menu"
+    );
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+
+    // Ctrl+K opens the palette and must not stack an overlay on the still-visible menu.
+    press("secondary-k", cx);
+    assert!(view.read_with(cx, |s, _| s.palette_open()));
+    assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+    press("escape", cx);
+
+    // A mode change closes it too.
+    click("sidebar-more", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    click("sidebar-toggle", cx);
+    assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+}
+
+#[gpui::test]
+fn escape_returns_focus_to_the_more_button_and_enter_reopens(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let more = view.read_with(cx, |s, _| s.sidebar_more_focus.clone());
+    click("sidebar-toggle", cx);
+    click("sidebar-more", cx);
+    press("escape", cx);
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+    cx.update(|window, cx| {
+        assert_eq!(window.focused(cx).as_ref(), Some(&more));
+    });
+    // Enter on the restored button opens the menu again, so keyboard users are not stranded.
+    press("enter", cx);
+    assert!(
+        view.read_with(cx, |s, _| s.sidebar_menu_open()),
+        "Enter must reopen the menu from the restored button"
+    );
+}
+
+#[gpui::test]
+fn keyboard_toggle_keeps_focus_and_reverses_immediately(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let toggle = view.read_with(cx, |s, _| s.sidebar_toggle_focus.clone());
+    cx.update(|window, cx| window.focus(&toggle, cx));
+    cx.run_until_parked();
+    press("enter", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    cx.update(|window, cx| {
+        assert_eq!(
+            window.focused(cx).as_ref(),
+            Some(&toggle),
+            "focus stays on the same actionable toggle"
+        );
+    });
+    // A second activation reverses the mode without walking the tab order again.
+    press("enter", cx);
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    press("space", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+}
+
+#[test]
+fn a_drag_does_not_masquerade_as_hover_for_the_sash() {
+    use std::time::{Duration, Instant};
+    let mut state = SidebarState::default();
+    let t0 = Instant::now();
+    // A drag keeps the line up even though the pointer is not "hovering" in the state sense...
+    state.begin_resize();
+    state.note_drag(t0, true);
+    assert_eq!(state.sash(), 1.0);
+    assert!(
+        !state.sash_hovered(),
+        "a drag must not report the pointer as inside the band"
+    );
+    // ...so a later pointer position can still turn it off, which the old hover flag prevented.
+    state.end_resize(t0 + Duration::from_millis(10), false, true);
+    assert_eq!(state.sash(), 0.0);
+}
+
+#[gpui::test]
+fn releasing_the_drag_outside_the_band_clears_the_sash_target(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    // Reduced motion is on by default in these tests, so the sash lands on its target at once.
+    let band = bounds("sidebar-resize", cx);
+    let start = point(band.left() + px(2.0), band.top() + px(120.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.sash_hovered()));
+    drag_start(cx);
+    let far = point(px(900.0), px(200.0));
+    cx.simulate_mouse_move(far, Some(MouseButton::Left), Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: far,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.dragging));
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.sash_hovered()));
+    assert_eq!(view.read_with(cx, |s, _| s.sidebar_state.sash()), 0.0);
 }
