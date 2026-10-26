@@ -868,3 +868,36 @@ fn sash_line_sits_inside_the_hit_band_and_island_height(cx: &mut TestAppContext)
     assert!(sash.top() >= island.top());
     assert!(sash.bottom() <= island.bottom());
 }
+
+#[gpui::test]
+fn menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let more = view.read_with(cx, |s, _| s.sidebar_more_focus.clone());
+    click("sidebar-toggle", cx);
+    click("sidebar-more", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+
+    // Tab must not move focus out of the open menu and leave it modal but keyboard-dead.
+    let menu_focus = view.read_with(cx, |s, _| s.sidebar_menu_focus.clone());
+    press("tab", cx);
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert!(
+        focused.as_ref() == Some(&menu_focus) || focused.as_ref() == Some(&more),
+        "focus stays inside the open menu"
+    );
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+
+    // Ctrl+K opens the palette and must not stack an overlay on the still-visible menu.
+    press("secondary-k", cx);
+    assert!(view.read_with(cx, |s, _| s.palette_open()));
+    assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+    press("escape", cx);
+
+    // A mode change closes it too.
+    click("sidebar-more", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    click("sidebar-toggle", cx);
+    assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+}

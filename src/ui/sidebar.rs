@@ -147,6 +147,8 @@ impl super::Shell {
             })
             .on_click(cx.listener(|shell, _, window, cx| {
                 window.focus(&shell.root_focus, cx);
+                // A mode change drops any open footer overlay instead of leaving it floating.
+                shell.close_sidebar_menu(window, cx);
                 let reduced = cx.theme().reduced_motion || cx.reduce_motion();
                 shell.sidebar_state.toggle(
                     cx.background_executor().now(),
@@ -832,6 +834,11 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
             move |event, window, cx| {
                 let key = event.keystroke.key.as_str();
                 match key {
+                    // Keep Tab inside the menu while it is open: the panel and its trigger are the
+                    // only reachable stops, and the highlight stays the item keyboard Enter runs.
+                    "tab" => {
+                        cx.stop_propagation();
+                    }
                     "escape" => {
                         open.set(false);
                         this.update(cx, |shell, cx| shell.close_sidebar_menu(window, cx));

@@ -175,7 +175,10 @@ impl Shell {
         let this = cx.entity();
         let sidebar_keys = cx.intercept_keystrokes(move |event, window, cx| {
             this.update(cx, |shell, cx| {
-                if event.keystroke.key == "escape" && shell.sidebar_menu {
+                if matches!(event.keystroke.key.as_str(), "tab") && shell.sidebar_menu {
+                    // The menu is modal while open: Tab must not park focus behind it.
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "escape" && shell.sidebar_menu {
                     cx.stop_propagation();
                     shell.close_sidebar_menu(window, cx);
                 } else if event.keystroke.key == "escape" && shell.sidebar_state.dragging {
@@ -654,6 +657,8 @@ impl Shell {
         if self.palette.is_some() {
             return;
         }
+        // Only one overlay at a time: an open More menu closes before the palette takes focus.
+        self.close_sidebar_menu(window, cx);
         // The palette returns focus to the entry, not to whatever transient node holds it.
         window.focus(&self.search_focus, cx);
         let mut session = palette::Session::new(window, cx, palette::commands(&self.repositories));

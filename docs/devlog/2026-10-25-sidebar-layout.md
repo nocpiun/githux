@@ -93,3 +93,7 @@ Codex 第二轮审查（针对 `b3c9a3d`，P2）指出：滚动范围在缓动�
 合并 `origin/main`（含已验收的 PR16 会话标签）时保留双方：标签条、页面会话滚动/焦点、Refresh 等上/右间距不变；`scrolling.rs` 的页面平滑滚动改为每会话状态（`PageState::smooth`），只覆盖标签条以下的页面区域，不再抢标签条滚轮；侧栏收起菜单改为侧栏自有的浮层状态（原因：Ely `OverflowMenu` 的私有 focus takeover 在收起动画重绘中会被重新武装，导致 Esc/窗口变化无法关闭），视觉仍用 Ely 主题 token（overlay/border/elevation/menu width）与同样的四项/禁用 New。
 
 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（373 passed）、`cargo build --locked`、`git diff --check` 通过。新增/更新测试：分割线两态上下等距、身份登录行存在、indicator 宽度与几何、sash 淡入淡出可逆与 reduced-motion、sash 线宽与 island 纵向范围、外点关闭不触发下层导航（按真实 press/release 语义覆盖）、标签条滚轮与页面/侧栏互不影响。真实视觉、sash 实际手感与动画观感仍待负责人验收。
+
+### 审查修复：菜单焦点约束与其他浮层协调
+
+Codex 针对 `6827ce4`（P2）指出：More 菜单打开时 Tab 可把焦点移出面板，菜单与全窗遮罩仍可见但 Up/Down/Enter 失去作用；Ctrl+K 也会在菜单之上再叠开 palette。已修复：菜单打开期间在 shell 按键拦截器消费 Tab/Shift-Tab，面板与触发按钮是唯一可达焦点；`open_palette` 先关闭 More 菜单再打开 palette；收起/展开同样关闭菜单。新增回归 `menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change`。全量 374 tests 与 clippy 通过。
