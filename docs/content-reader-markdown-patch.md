@@ -14,7 +14,7 @@
 
 ## 实际改动
 
-1. `document/mod.rs`：真实 `ListState` 访问器和滚动通知。
+1. `document/mod.rs`：真实 `ListState` 访问器和滚动通知；空列表首次采用异步解析的 blocks 时 reset 测量状态，避免等待无关滚轮才显示正文。
 2. `document/visual.rs`、`render.rs`：Preview 可选启用 reader 排版；编辑模式保持 Ely 原有点到源码映射。
 3. `render/inline.rs`：一个连续段落元素。每段按正文和 `theme.mono_family` 的真实 `TextRun` 塑形；代码 padding 参与推进、换行、圆角背景和命中计算。长代码按 grapheme 边界断行，复制直接读原 inline 字节，不塞入 padding 字符。硬换行强制另起一行，链接按字形命中，与选择 caret 分开。短段落返回实际固有宽度以保留表格列对齐。样式边界用 sweep，字形位置只索引一次，避免逐字调用 GPUI 线性 `x_for_index`；只绘制裁剪区内的行。测试快照来自同一帧实际布局，包含代码字体与几何。
 4. fence 语言标签仅局部上移 8px；代码文本保持其布局与语法着色。

@@ -1394,3 +1394,23 @@ fn adjacent_differently_styled_code_budgets_every_padding_inset(cx: &mut TestApp
         );
     }
 }
+
+#[gpui::test]
+fn async_markdown_first_load_paints_without_forced_refresh_or_input(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::inline_code_short(), DocumentKind::Markdown);
+    cx.run_until_parked();
+    reader.update_in(cx, |r, w, cx| {
+        r.show(fixtures::large_markdown(), DocumentKind::Markdown, w, cx)
+    });
+    cx.run_until_parked();
+    for _ in 0..4 {
+        cx.update(|w, cx| w.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).read_now(cx)));
+    assert!(
+        cx.debug_bounds("markdown-block-0").is_some(),
+        "parse completion schedules the first block without window.refresh or wheel input"
+    );
+    assert!(cx.debug_bounds("markdown-block-20000").is_none());
+}

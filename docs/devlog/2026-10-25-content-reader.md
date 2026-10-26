@@ -103,3 +103,5 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 全量测试曾有两个网络 bounded 用例在并发负载下失败（Network 而非 ResponseTooLarge），独立模块 5 项重跑通过；不修改无关网络实现，也不把该次全量执行写成通过。最终 CI/审查结果以 PR 当前 head 的证据为准，永久 true/coordinator 和人工验收 hold 保留。
 
 后续审查指出连续代码 span 之间的样式边界会拆成多个绘制 piece，而换行预算只计算整个 code region 的一组 padding。现改为换行与绘制共用有序边界，每个 piece 都计算左右 inset。`adjacent_differently_styled_code_budgets_every_padding_inset` 在 190px 视口核对每个实际背景矩形不越界；reader 49 项通过。
+
+真实窗口补充：在 150% DPI 下先修正截图脚本的 DPI 感知，避免把捕获位图截短误判为布局溢出。已实际核对长 inline 窄窗换行、代码围栏、Source 的 1/2/4/5 位行号和大 Markdown 原生滚轮/右侧细条。首次异步 blocks 采用时增加 ListState reset，真实窗口无需滚轮即可自动显示 Section 0；近 2 MiB fixture 的后台解析约十几秒，仍是性能边界，不宣称即时加载。新增无 window.refresh/输入的首块绘制回归。最终视觉与原生输入由负责人验收。

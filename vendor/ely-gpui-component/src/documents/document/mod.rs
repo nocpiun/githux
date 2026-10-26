@@ -373,8 +373,15 @@ impl MarkdownDocument {
         }
         let (head, tail) = alike(&self.parsed, &read);
         let old = self.parsed.blocks.len();
-        self.list
-            .splice(head..old - tail, read.blocks.len() - head - tail);
+        if old == 0 && !read.blocks.is_empty() {
+            // A list already measured while the asynchronous parser had no
+            // blocks must leave its empty measuring state. Splice alone keeps
+            // it blank until an unrelated scroll/resize forces layout.
+            self.list.reset(read.blocks.len());
+        } else {
+            self.list
+                .splice(head..old - tail, read.blocks.len() - head - tail);
+        }
         let headings: Vec<usize> = read.headings.iter().map(|heading| heading.at).collect();
         self.editor
             .update(cx, |editor, _| editor.set_anchors(headings));
