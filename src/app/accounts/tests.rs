@@ -454,6 +454,95 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
     );
 }
 
+/// Regression for review finding 1: cancelling an account mutation whose
+/// durable commit already landed must reconcile the authoritative directory
+/// instead of leaving a stale "no saved accounts" view.
+#[gpui::test]
+fn cancelling_after_a_committed_mutation_reconciles_saved_accounts(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
+    let (view, cx) = preview(cx, runtime);
+    put_token(&view, cx, "synthetic");
+    submit(&view, cx);
+    // Cancel while the login is in flight; the login may still commit.
+    view.update(cx, |view, cx| view.cancel(cx));
+    let runtime = view.read_with(cx, |view, _| view.runtime.clone().unwrap());
+    // Drive the login to completion through the service itself, then let the
+    // view observe `Settled` and reconcile.
+    for _ in 0..200 {
+        view.update(cx, |view, cx| view.drain(cx));
+        std::thread::sleep(Duration::from_millis(5));
+        if !runtime.accounts.summaries().is_empty() {
+            break;
+        }
+    }
+    for _ in 0..200 {
+        view.update(cx, |view, cx| view.drain(cx));
+        std::thread::sleep(Duration::from_millis(5));
+        if view.read_with(cx, |view, _| view.presentation.accounts.len() == 1) {
+            break;
+        }
+    }
+    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    assert_eq!(
+        presentation.accounts.len(),
+        runtime.accounts.summaries().len(),
+        "the displayed directory must match the service after cancellation settles"
+    );
+    assert!(
+        !presentation
+            .status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("verified and saved")),
+        "a cancelled operation must not publish its own success message"
+    );
+}
+
+/// Review finding 2: a cancelled revalidation may still settle in the service,
+/// but neither its reply nor its epoch change may be presented as the outcome
+/// of a newer read.
+#[gpui::test]
+fn cancelling_revalidation_does_not_publish_its_late_success(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(user(1, "alice"))).await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    put_token(&view, cx, "synthetic");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    let key = AccountKey::new(1, HostId::github());
+    view.update(cx, |view, cx| view.revalidate(key, cx));
+    view.update(cx, |view, cx| view.cancel(cx));
+    for _ in 0..200 {
+        view.update(cx, |view, cx| view.drain(cx));
+        std::thread::sleep(Duration::from_millis(5));
+        if view.read_with(cx, |view, _| {
+            view.presentation
+                .status
+                .as_ref()
+                .is_some_and(|status| status.text.contains("Cancellation settled"))
+        }) {
+            break;
+        }
+    }
+    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    assert!(
+        !presentation
+            .status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("revalidated against")),
+        "a cancelled revalidation must not publish its own success"
+    );
+}
+
 #[gpui::test]
 fn closing_the_view_cancels_and_cannot_publish(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();

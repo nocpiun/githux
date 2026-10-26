@@ -37,10 +37,15 @@ impl AccountRuntime {
     }
 
     /// Run one tracked operation on the existing Tokio executor. The caller owns
-    /// the operation generation and sends its result over the GPUI channel.
+    /// the operation generation and both the result and the completion signal.
+    ///
+    /// `settled` runs on the network thread after the future ends (including a
+    /// durable commit that outlived cancellation). It must only enqueue cheap
+    /// data; it must not touch GPUI or block.
     pub fn spawn(
         self: &Arc<Self>,
         cancel: CancellationTokenSource,
+        settled: impl FnOnce() + Send + 'static,
         operation: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ()> {
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {
@@ -52,6 +57,7 @@ impl AccountRuntime {
             .spawn(async move {
                 let _cancel_on_drop = CancelOnDrop(cancel);
                 operation.await;
+                settled();
             })
             .map_err(|_| ())?;
         self.jobs.lock().expect("preview jobs").push(job);

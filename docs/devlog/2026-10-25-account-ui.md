@@ -34,13 +34,22 @@
 cargo fmt --all                 # 已格式化
 cargo check --locked --all-targets        → ok
 cargo clippy --locked --all-targets -- -D warnings → ok
-cargo test --locked                       → 196 passed（其中本任务 8 项）
+cargo test --locked                       → 199 passed（其中本任务 10 项）
 cargo build --locked                      → ok
 ```
 
 8 项预览测试覆盖：登录后仓库进入视图；掩码 + 提交后清空 + Debug 不含 token；Tab 到提交按钮；重复提交不推进；替换/切换/重验证/重启恢复（恢复后为 `PendingVerification`）；401/限流不冒充空列表；Partial 保留已取数据；取消后旧 generation 不覆盖新结果；请求期间切账户丢弃旧仓库结果并结束加载态；视图关闭后不再发布。
 
 真实窗口：`githux.exe --account-preview` 在本机启动并保持运行后被手动关闭；无参数启动仍进入原 Shell。两者都不代表真实 GitHub 联调。
+
+## 第 2 轮：审查修复
+
+Codex 首轮提出两条 P2，均属可直接修复范围：
+
+1. **取消后账户显示可能与存储不一致**：取消清空 `operation` 后，reply 永久被丢弃，而已提交的跨存储变更仍会写入 SQLite 与注册表。修复：后台任务结束时压入 `Settled(generation)`，前台对账服务权威的账户列表与当前账户；被取消操作的 reply 仍丢弃，也不采用它的仓库结果。回归测试 `cancelling_after_a_committed_mutation_reconciles_saved_accounts`。
+2. **重新验证不参与取消**：`AccountService::revalidate` 没有可取消变体，内部总会提交运行时核验并推进 epoch。这里不假装网络已取消，也不在 data 层外伪造取消语义：取消只停止发布，任务照常收尾并触发上面的对账，界面不显示被取消操作的成功。回归测试 `cancelling_revalidation_does_not_publish_its_late_success`。若后续需要真正可中断的 revalidate，应在 data 层新增 `revalidate_cancellable`，不在 UI 层模拟。
+
+对账信号的投递方式也调整过：`oneshot` 完成会在网络线程唤醒前台任务，GPUI 测试调度器把它判为非确定性；改回“后台只入队、前台按 50ms 节拍取用”，与首轮实现一致。
 
 ## 剩余问题
 

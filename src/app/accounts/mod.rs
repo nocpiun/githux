@@ -71,6 +71,10 @@ enum Success {
 enum Message {
     Opened(Result<Arc<AccountRuntime>, String>),
     Operation(Reply),
+    /// The cancelled operation's background future ended. A durable account
+    /// commit may already have happened, so the view reconciles the
+    /// authoritative directory without publishing the cancelled reply.
+    Settled(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +105,8 @@ pub(crate) struct AccountPreview {
     alive: Arc<watch::Sender<bool>>,
     operation: Option<OperationControl>,
     generation: u64,
+    current_operation: Option<Operation>,
+    reconciling: Option<u64>,
     replacing: Option<AccountKey>,
     presentation: Presentation,
     receiver_task: Option<Task<()>>,
@@ -136,6 +142,8 @@ impl AccountPreview {
             alive: Arc::new(alive),
             operation: None,
             generation: 0,
+            current_operation: None,
+            reconciling: None,
             replacing: None,
             presentation: Presentation {
                 accounts: Vec::new(),
@@ -262,7 +270,27 @@ impl AccountPreview {
                 cx.notify();
             }
             Message::Operation(reply) => self.apply(reply, cx),
+            Message::Settled(generation) => self.reconcile(generation, cx),
         }
+    }
+
+    /// Re-read the authoritative account directory after a cancelled mutation
+    /// settles. Repository results are never taken from the cancelled request.
+    fn reconcile(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.reconciling != Some(generation) {
+            return;
+        }
+        self.reconciling = None;
+        self.refresh_presentation(cx);
+        self.presentation.repositories = RepositoryPreview::Idle(
+            "The cancelled request has settled. Review the current saved accounts, then refresh to read repositories."
+                .into(),
+        );
+        self.presentation.status = Some(StatusMessage::new(
+            StatusTone::Info,
+            "Cancellation settled. Saved accounts and the current selection are shown as stored; an already committed change was not rolled back.",
+        ));
+        cx.notify();
     }
 
     fn refresh_presentation(&mut self, cx: &mut Context<Self>) {
@@ -279,6 +307,7 @@ impl AccountPreview {
             return;
         }
         self.operation = None;
+        self.current_operation = None;
         self.input
             .update(cx, |input, cx| input.set_disabled(false, cx));
         if let (Some(publication), Some(runtime)) = (&reply.publication, &self.runtime)
@@ -384,6 +413,7 @@ impl AccountPreview {
         };
         self.generation += 1;
         let generation = self.generation;
+        self.current_operation = Some(operation);
         let control = control();
         self.operation = Some(control.clone());
         self.presentation.status = Some(StatusMessage::new(
@@ -408,7 +438,8 @@ impl AccountPreview {
         let inbox = self.inbox.clone();
         let alive = self.alive.clone();
         let accounts = runtime.accounts.clone();
-        let spawned = runtime.spawn(control.source, async move {
+        let settled = settled_signal(self.inbox.clone(), self.alive.clone(), generation);
+        let spawned = runtime.spawn(control.source, settled, async move {
             let (result, repositories) = match operation {
                 Operation::Select(id) => (
                     accounts
@@ -419,6 +450,10 @@ impl AccountPreview {
                     None,
                 ),
                 Operation::Revalidate(id) => (
+                    // The existing data-layer revalidate has no cancellable
+                    // variant and always commits its runtime evidence. Cancelling
+                    // therefore stops publication, not the operation: the reply is
+                    // discarded and `Settled` reconciles authoritative state.
                     accounts
                         .revalidate(AccountKey::new(id, HostId::github()))
                         .await
@@ -456,6 +491,7 @@ impl AccountPreview {
         });
         if spawned.is_err() {
             self.operation = None;
+            self.current_operation = None;
             self.input
                 .update(cx, |input, cx| input.set_disabled(false, cx));
             self.presentation.status = Some(StatusMessage::new(
@@ -494,6 +530,7 @@ impl AccountPreview {
         self.reset_input(window, cx);
         self.generation += 1;
         let generation = self.generation;
+        self.current_operation = Some(operation);
         let control = control();
         self.operation = Some(control.clone());
         self.input
@@ -506,7 +543,8 @@ impl AccountPreview {
         let accounts = runtime.accounts.clone();
         let inbox = self.inbox.clone();
         let alive = self.alive.clone();
-        let spawned = runtime.spawn(control.source.clone(), async move {
+        let settled = settled_signal(self.inbox.clone(), self.alive.clone(), generation);
+        let spawned = runtime.spawn(control.source.clone(), settled, async move {
             let pending = async {
                 match operation {
                     Operation::Add => accounts.login_cancellable(pat, control.token.clone()).await,
@@ -552,6 +590,7 @@ impl AccountPreview {
         });
         if spawned.is_err() {
             self.operation = None;
+            self.current_operation = None;
             self.input
                 .update(cx, |input, cx| input.set_disabled(false, cx));
             self.presentation.status = Some(StatusMessage::new(
@@ -565,10 +604,16 @@ impl AccountPreview {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         if let Some(operation) = self.operation.take() {
             operation.source.cancel();
+            // Account mutations may already have submitted a durable commit, so
+            // their authoritative state is reconciled when they settle. Their
+            // own reply stays discarded because `operation` is now None.
+            if !matches!(self.current_operation, Some(Operation::Repositories) | None) {
+                self.reconciling = Some(self.generation);
+            }
         }
         self.presentation.status = Some(StatusMessage::new(
             StatusTone::Info,
-            "Cancellation requested. An already submitted durable commit still finishes; the preview will not claim it was rolled back.",
+            "Cancellation requested. An in-flight account operation still settles in the service; saved accounts are reconciled when it does, and the preview will not claim it was rolled back.",
         ));
         self.presentation.repositories = RepositoryPreview::Idle(
             "Cancelled preview request; no new repository result was applied.".into(),
@@ -689,6 +734,16 @@ async fn send_reply(
     reply.active = accounts.active_context().map(|context| context.account);
     reply.recovery_pending = accounts.recovery_pending().await.unwrap_or(true);
     enqueue(inbox, alive, Message::Operation(reply));
+}
+
+/// Completion signal for one background operation. It runs on the network
+/// thread and only pushes a marker; the foreground drain does the UI work.
+fn settled_signal(
+    inbox: Arc<Mutex<VecDeque<Message>>>,
+    alive: Arc<watch::Sender<bool>>,
+    generation: u64,
+) -> impl FnOnce() + Send + 'static {
+    move || enqueue(&inbox, &alive, Message::Settled(generation))
 }
 
 fn enqueue(inbox: &Arc<Mutex<VecDeque<Message>>>, alive: &watch::Sender<bool>, message: Message) {
