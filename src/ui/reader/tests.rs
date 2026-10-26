@@ -1368,3 +1368,29 @@ fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext)
     assert!(cx.debug_bounds("markdown-picture-note").is_some());
     assert!(cx.debug_bounds("markdown-picture").is_none());
 }
+
+#[gpui::test]
+fn adjacent_differently_styled_code_budgets_every_padding_inset(cx: &mut TestAppContext) {
+    let source = "`aaaa`**`bbbb`**".repeat(12);
+    let text = "aaaabbbb".repeat(12);
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(190.0), px(700.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, &text);
+    assert!(layout.pieces.len() >= 24);
+    for p in layout.pieces.iter().filter(|p| p.code) {
+        assert!(p.box_bounds.left() >= layout.bounds.left() - px(0.5));
+        assert!(
+            p.box_bounds.right() <= layout.bounds.right() + px(0.5),
+            "code padding must fit the row: {p:?} in {:?}",
+            layout.bounds
+        );
+    }
+}

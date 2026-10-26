@@ -328,7 +328,8 @@ impl Element for Paragraph {
                             break;
                         }
                         let code = is_code(a);
-                        let edge = if code && (end == start || !is_code(chars[end - 1].0)) {
+                        let edge = if code && (end == start || code_edges.binary_search(&a).is_ok())
+                        {
                             px(PAD)
                         } else {
                             Pixels::ZERO
@@ -342,7 +343,8 @@ impl Element for Paragraph {
                             break;
                         }
                         used += edge + advance;
-                        if code && (end + 1 == chars.len() || !is_code(chars[end + 1].0)) {
+                        if code && (end + 1 == chars.len() || code_edges.binary_search(&b).is_ok())
+                        {
                             used += px(PAD);
                         }
                         end += 1;

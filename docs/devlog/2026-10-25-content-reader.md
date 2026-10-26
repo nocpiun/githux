@@ -101,3 +101,5 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 新增真实 hover 淡入淡出与 resize/替换内容的 ListState clamp 测试，不用 snap 代替交互；保留单字符链接右半位置点击测试。预览新增 Inline wrap fixture，仍只复用实际 reader，不接主界面。补丁差异重新生成到 vendor/ely-gpui-component/patches/reader.patch。
 
 全量测试曾有两个网络 bounded 用例在并发负载下失败（Network 而非 ResponseTooLarge），独立模块 5 项重跑通过；不修改无关网络实现，也不把该次全量执行写成通过。最终 CI/审查结果以 PR 当前 head 的证据为准，永久 true/coordinator 和人工验收 hold 保留。
+
+后续审查指出连续代码 span 之间的样式边界会拆成多个绘制 piece，而换行预算只计算整个 code region 的一组 padding。现改为换行与绘制共用有序边界，每个 piece 都计算左右 inset。`adjacent_differently_styled_code_budgets_every_padding_inset` 在 190px 视口核对每个实际背景矩形不越界；reader 49 项通过。
