@@ -34,7 +34,7 @@
 cargo fmt --all                 # 已格式化
 cargo check --locked --all-targets        → ok
 cargo clippy --locked --all-targets -- -D warnings → ok
-cargo test --locked                       → 202 passed（其中本任务 13 项）
+cargo test --locked                       → 203 passed（其中本任务 14 项）
 cargo build --locked                      → ok
 ```
 
@@ -67,6 +67,12 @@ Codex 第三轮两条 P2：
 修复过程中另发现并修掉一个真实缺陷：`watch::Sender::send` 在没有 receiver 时返回错误且**不写入**，关闭标志因此一直是 `true`，后台任务仍会入队。改用 `send_replace`，测试直接覆盖释放后 `alive == false`。
 
 预览套件 13 项，全仓 202 项通过。
+
+## 第 5 轮：审查修复
+
+Codex 第四轮 P2：`reconciling` 只保存一个代次。先取消 A 的重新验证、再取消 B 的，A 的待对账标记被覆盖；B 结算后清空标记，A 晚到的核验结果就再也不会反映到界面。
+
+修复：改为 `Vec<u64>` 记录全部未结算的已取消变更，逐个移除；只有最后一个结算才显示汇总提示，避免中间态反复覆盖。回归测试 `every_cancelled_mutation_is_reconciled_independently`（按任意顺序结算两项）。预览套件 14 项，全仓 203 项。
 
 ## 剩余问题
 

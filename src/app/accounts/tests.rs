@@ -645,6 +645,48 @@ fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut T
     wait_for(&view, cx, |state| state.accounts.len() == 1);
 }
 
+/// Review round 4: two cancelled mutations may settle in any order. Tracking
+/// only the most recent generation would permanently drop the earlier one.
+#[gpui::test]
+fn every_cancelled_mutation_is_reconciled_independently(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    put_token(&view, cx, "synthetic");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    let key = AccountKey::new(1, HostId::github());
+    // Cancel one mutation, then cancel a second one before the first settles.
+    view.update(cx, |view, cx| view.revalidate(key.clone(), cx));
+    let first = view.read_with(cx, |view, _| view.generation);
+    view.update(cx, |view, cx| view.cancel(cx));
+    view.update(cx, |view, cx| view.revalidate(key, cx));
+    let second = view.read_with(cx, |view, _| view.generation);
+    view.update(cx, |view, cx| view.cancel(cx));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.reconciling.clone()),
+        vec![first, second],
+        "both cancelled mutations stay pending until they settle"
+    );
+    // Whichever order the two settlements arrive in, both are reconciled.
+    view.update(cx, |view, cx| view.reconcile(second, cx));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.reconciling.clone()),
+        vec![first]
+    );
+    view.update(cx, |view, cx| view.reconcile(first, cx));
+    assert!(view.read_with(cx, |view, _| view.reconciling.is_empty()));
+    assert!(view.read_with(cx, |view, _| {
+        view.presentation
+            .status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Cancellations settled"))
+    }));
+}
+
 /// Review round 3: the preview must not be retained by its own keystroke
 /// subscription, otherwise releasing the view never runs `Drop` and the
 /// runtime/request teardown is skipped.

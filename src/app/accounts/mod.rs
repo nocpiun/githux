@@ -109,7 +109,12 @@ pub(crate) struct AccountPreview {
     operation: Option<OperationControl>,
     generation: u64,
     current_operation: Option<Operation>,
-    reconciling: Option<u64>,
+    /// Generations of cancelled mutations whose durable work may still settle.
+    ///
+    /// A single slot would drop an earlier generation when a second mutation
+    /// is cancelled before the first settles, so every outstanding settlement
+    /// is kept until it reports completion.
+    reconciling: Vec<u64>,
     replacing: Option<AccountKey>,
     presentation: Presentation,
     receiver_task: Option<Task<()>>,
@@ -150,7 +155,7 @@ impl AccountPreview {
             operation: None,
             generation: 0,
             current_operation: None,
-            reconciling: None,
+            reconciling: Vec::new(),
             replacing: None,
             presentation: Presentation {
                 accounts: Vec::new(),
@@ -301,18 +306,28 @@ impl AccountPreview {
     /// Re-read the authoritative account directory after a cancelled mutation
     /// settles. Repository results are never taken from the cancelled request.
     fn reconcile(&mut self, generation: u64, cx: &mut Context<Self>) {
-        if self.reconciling != Some(generation) {
+        let Some(at) = self
+            .reconciling
+            .iter()
+            .position(|pending| *pending == generation)
+        else {
+            return;
+        };
+        self.reconciling.remove(at);
+        self.refresh_presentation(cx);
+        if !self.reconciling.is_empty() {
+            // More cancelled mutations are still settling; keep the message
+            // stable until the last one reports completion.
+            cx.notify();
             return;
         }
-        self.reconciling = None;
-        self.refresh_presentation(cx);
         self.presentation.repositories = RepositoryPreview::Idle(
-            "The cancelled request has settled. Review the current saved accounts, then refresh to read repositories."
+            "Cancelled requests have settled. Review the current saved accounts, then refresh to read repositories."
                 .into(),
         );
         self.presentation.status = Some(StatusMessage::new(
             StatusTone::Info,
-            "Cancellation settled. Saved accounts and the current selection are shown as stored; an already committed change was not rolled back.",
+            "Cancellations settled. Saved accounts and the current selection are shown as stored; an already committed change was not rolled back.",
         ));
         cx.notify();
     }
@@ -640,8 +655,10 @@ impl AccountPreview {
             // Account mutations may already have submitted a durable commit, so
             // their authoritative state is reconciled when they settle. Their
             // own reply stays discarded because `operation` is now None.
-            if !matches!(self.current_operation, Some(Operation::Repositories) | None) {
-                self.reconciling = Some(self.generation);
+            if !matches!(self.current_operation, Some(Operation::Repositories) | None)
+                && !self.reconciling.contains(&self.generation)
+            {
+                self.reconciling.push(self.generation);
             }
         }
         self.presentation.status = Some(StatusMessage::new(
