@@ -23,8 +23,9 @@ use ely_gpui_component::{
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, HighlightStyle,
     Hsla, InteractiveElement, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, StrikethroughStyle, Styled,
-    StyledText, TextRun, UniformListScrollHandle, Window, div, font, px, uniform_list,
+    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, StatefulInteractiveElement,
+    StrikethroughStyle, Styled, StyledText, TextRun, UniformListScrollHandle, Window, div, font,
+    px, uniform_list,
 };
 
 /// One end of a selection, in document byte offsets.
@@ -55,6 +56,12 @@ pub struct SourceView {
     dragging: bool,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
+    fade: crate::ui::scrollbar::Fade,
+    clock: std::time::Instant,
+    thumb_dragging: bool,
+    last_reach: gpui::Point<Pixels>,
+    #[cfg(test)]
+    pinned_clock: Option<u64>,
     /// The widest row observed so far; visible rows can extend this after layout.
     widest: usize,
     width: Pixels,
@@ -78,6 +85,12 @@ impl SourceView {
             dragging: false,
             focus: cx.focus_handle().tab_stop(true),
             scroll: UniformListScrollHandle::new(),
+            fade: Default::default(),
+            clock: std::time::Instant::now(),
+            thumb_dragging: false,
+            last_reach: Default::default(),
+            #[cfg(test)]
+            pinned_clock: None,
             widest,
             width,
         }
@@ -117,6 +130,25 @@ impl SourceView {
     /// The scroll offset, for the bounded-scroll test.
     pub fn offset(&self) -> gpui::Point<Pixels> {
         self.scroll.0.borrow().base_handle.offset()
+    }
+
+    /// True extent reported by the virtualized list itself.
+    pub fn reach(&self) -> gpui::Point<Pixels> {
+        self.scroll.0.borrow().base_handle.max_offset()
+    }
+
+    pub fn scrollbar_opacity(&mut self, now: u64) -> f32 {
+        self.fade.opacity(now)
+    }
+
+    #[cfg(test)]
+    pub fn pin_scrollbar_clock(&mut self, ms: u64) {
+        self.pinned_clock = Some(ms);
+    }
+
+    #[cfg(test)]
+    pub fn show_scrollbar(&mut self) {
+        self.fade.snap(true);
     }
 
     fn line_range(&self, ix: usize) -> Range<usize> {
@@ -232,8 +264,11 @@ impl SourceView {
         let digits = self.line_starts.len().to_string().len();
         let gutter = div()
             .flex_none()
+            .debug_selector(move || format!("reader-source-gutter-{ix}"))
             .pl_2()
-            .pr_3()
+            // Real layout space, not characters: the body and its TextLayout
+            // share this origin during selection and horizontal scrolling.
+            .pr(px(6.0))
             .text_color(colors.fg_subtle)
             .child(format!("{:>width$}", ix + 1, width = digits));
         let view = cx.entity().downgrade();
@@ -296,8 +331,19 @@ impl Render for SourceView {
         let line_height = (size * 1.6).round();
         let count = self.line_starts.len();
         let widest = self.widest;
+        if self.thumb_dragging && !cx.has_active_drag() {
+            self.thumb_dragging = false;
+            self.fade.set_dragging(false, self.now_ms());
+        }
+        let opacity = self.fade.opacity(self.now_ms());
+        let handle = self.scroll.0.borrow().base_handle.clone();
+        let reach = handle.max_offset();
+        if reach != self.last_reach {
+            self.last_reach = reach;
+            cx.notify();
+        }
         let list = uniform_list(
-            "reader-source",
+            "reader-source-list",
             count,
             cx.processor(move |view: &mut Self, range: Range<usize>, _window, cx| {
                 range
@@ -310,15 +356,23 @@ impl Render for SourceView {
         .track_scroll(&self.scroll)
         .size_full();
         div()
-            .id("reader-source")
+            .id("reader-source-root")
             .debug_selector(|| "reader-source".to_string())
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .overflow_hidden()
             .bg(colors.surface)
             .font_family(mono)
             .text_color(colors.fg)
             .child(list)
+            .children(self.scrollbar(gpui::Axis::Vertical, opacity, &handle, cx))
+            .children(self.scrollbar(gpui::Axis::Horizontal, opacity, &handle, cx))
+            .on_hover(cx.listener(|view, hovered, _, cx| {
+                if view.fade.set_hovered(*hovered, view.now_ms()) {
+                    cx.notify();
+                }
+            }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;
                 if !keystroke.modifiers.secondary() {
@@ -336,20 +390,40 @@ impl Render for SourceView {
                     _ => {}
                 }
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    view.dragging = false;
+    }
+}
+
+impl SourceView {
+    fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(ms) = self.pinned_clock {
+            return ms;
+        }
+        self.clock.elapsed().as_millis() as u64
+    }
+
+    fn scrollbar(
+        &self,
+        axis: gpui::Axis,
+        opacity: f32,
+        handle: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        (opacity > 0.0).then(|| {
+            let name = match axis {
+                gpui::Axis::Vertical => "reader-scrollbar-y",
+                gpui::Axis::Horizontal => "reader-scrollbar-x",
+            };
+            let this = cx.entity().downgrade();
+            let on_dragging = std::rc::Rc::new(move |dragging, _: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |view, cx| {
+                    view.thumb_dragging = dragging;
+                    view.fade.set_dragging(dragging, view.now_ms());
                     cx.notify();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    view.dragging = false;
-                    cx.notify();
-                }),
-            )
+                });
+            });
+            super::scrollbar::render(handle, axis, opacity, cx.entity_id(), name, on_dragging, cx)
+        })
     }
 }
 

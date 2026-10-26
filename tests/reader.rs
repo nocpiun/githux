@@ -8,6 +8,8 @@
 mod content;
 #[path = "../src/domain/mod.rs"]
 mod domain;
-#[path = "../src/ui/reader/mod.rs"]
-#[allow(unused_imports)]
-mod reader;
+mod ui {
+    #[path = "../support/reader_shared.rs"]
+    mod shared;
+    pub use shared::*;
+}

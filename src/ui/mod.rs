@@ -29,6 +29,9 @@ pub mod fixtures;
 pub(crate) mod geometry;
 mod page;
 mod palette;
+pub mod reader;
+#[allow(dead_code)] // Re-exported shared scrollbar style for the reader slice.
+mod scrollbar;
 mod sidebar;
 mod tab_scrollbar;
 mod tabs;

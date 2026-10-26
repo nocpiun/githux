@@ -14,8 +14,13 @@ mod content;
 mod domain;
 #[path = "../src/platform/fonts.rs"]
 mod fonts;
-#[path = "../src/ui/reader/mod.rs"]
-mod reader;
+mod ui {
+    #[path = "../../support/reader_example.rs"]
+    mod shared;
+    pub use shared::*;
+}
+
+use ui::reader;
 
 use std::rc::Rc;
 

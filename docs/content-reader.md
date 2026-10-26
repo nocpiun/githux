@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-26。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成 Ely 的 Markdown 预览或本模块的只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
+更新：2026-10-26（第二轮真实窗口反馈）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成 Ely 的 Markdown 预览或本模块的只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -48,7 +48,8 @@ view.update(cx, |view, _| {
 先核对了 Ely 的 `CodeEditor`（`src/editor/state.rs`、`view.rs`、`line.rs`）：它有行号、选区、`Ctrl+C`、`uniform_list` 纵向虚拟化，`read_only()` 会拒绝 `insert`/`paste`/`cut`/IME `replace_and_mark_text_in_range`。**但它仍有本轮不可接受的边界**：只读时顶部永远画一条带「Make editable」按钮的 `ReadOnlyBanner`（点击即解锁编辑），且 `overflow_hidden` 没有横向滚动，长行被裁掉。因此本模块不直接复用它，而是复用它的好部分——Ely 公开的 `code_highlights`、代码字体、gpui 的 `uniform_list` ——并删除全部输入路径：
 
 - 没有文本输入处理器、没有 IME 处理器、没有编辑 action，因此键入、粘贴、删除都无法修改文档。测试用 `simulate_input("hello 世界 🌍")` 和 `backspace delete enter tab` 对比全文前后一致。
-- 行号右对齐到实际行数位数，等宽字体取主题的 `mono_family`。
+- 行号右对齐到实际行数位数，等宽字体取主题的 `mono_family`。行号 gutter 右侧有 6px 真实布局 padding（不是字符串空格），行文本与选择命中共用同一 `TextLayout` 起点。
+- 纵向/横向滚动条绑定 `UniformListScrollHandle.base_handle`（列表真实测量与滚动的那个句柄），不复用外层空容器 offset。范围直接来自列表的 `max_offset()`，不构建全量行。条使用与 workspace tabs 相同的 3px、20%/38% 透明度与 140ms `Fade` 状态机，见 [共享滚动条](#共享滚动条与未完成项)。
 - 语法着色走 Ely 公开的 `code_highlights`（通用代码着色）。`language` 只是标签：Ely 把 `syntax_of` / `code_highlights_with` 保持为 crate 私有，按语言逐 fence 选语法会需要本地复制语法表或改上游，因此本轮明确只提供通用着色，不声称逐语言准确。
 - 纵向用 `uniform_list`；横向用 `ListHorizontalSizingBehavior::Unconstrained` 让内容宽度可以超过视口。初始按字节长度取 8 个候选实测，这只是启动探测；每个可见行在 prepaint 时上报实际 `StyledText` 宽度，发现更宽的行便扩展横向范围。屏外行滚入视口后同样参与，避免中文/ASCII/emoji 混排时漏掉字节更短但视觉更宽的行，也避免预先排版所有行。选中背景在同一次 `StyledText` 布局里切分，不用第二套宽度估算；语法区间与选区边界顺序合并，复杂度为线性，不为每段重新扫描全部语法区间。
 - 选择：左键按下/拖动扩展选区，`Shift` 扩展、`Ctrl+A` 全选、`Ctrl+C` 写入剪贴板。`Ctrl+A`/`Ctrl+C` 通过 `on_key_down` 检查 `secondary()`，不依赖焦点在某个输入控件上。
@@ -64,6 +65,14 @@ view.update(cx, |view, _| {
 正文解析发生在 `MarkdownDocument` 自己的 `background_spawn`（Ely 的既有实现，`AT_ONCE = 128 KiB` 以内同步、以上异步），本模块没有新增 UI 线程解析。
 
 **已定位的 Ely 行为边界：** 若把长文本直接传给 `MarkdownDocument::new(text, ..)`，其异步读取会 splice 进一个「已经按 0 项测量过」的列表，结果**一个块都不绘制**。在测试平台上以 130 KiB 起稳定复现（独立于本模块，直接用 `MarkdownDocument` 也复现）。`new(String::new(), ..)` 后再 `reset(text, cx)` 会请求在读取落地后定位到首行，列表仍锚定在 block 0，因此能正常绘制到 2 MiB。本模块因此采用后者，并在注释与开发日志里记录原因。这是上游行为观察，不是本仓库的补丁，也不改 Ely revision。
+
+## 共享滚动条与未完成项
+
+`src/ui/scrollbar.rs` 只抽取外观与 `Fade`，`src/ui/tab_scrollbar.rs` 保留已验收的标签条实现和参数；`ui/mod.rs` 仅新增 `reader`/`scrollbar` 模块声明，未改 Shell、侧栏、工作区导航或标签布局。
+
+真实窗口反馈第一项要求“阅读区有可见滚动条”。已实现：源码视图在 hover 时显示纵向/横向细条，条绑定真实列表句柄，范围与滚轮同步（测试 `source_scrollbars_follow_the_real_list_and_fade_out`）。**拇指拖动在测试平台上未通过**：按下能建立拖动，但移动监听未收到，偏移不变；同一共用拖动实现已在标签条测试中通过。因此拖动、淡出时序和角落命中**仍待真实窗口验收**，本轮不宣称已解决，也没有移除失败的验证记录。
+
+负责人反馈的 Markdown inline code、fenced-code 语言标签位置无法通过当前 Ely 公开接口完成：`MarkdownDocument` 不暴露真实 `ListState`，不转发 `MarkdownRenderer` 已有的代码块绘制回调，inline code 仅有 `HighlightStyle`（无独立字体、圆角、padding 或布局位置）。已按工作流登记待裁决（PR #27 的 `githux:arbitration-required:v1`），`arbitration_ever_required=true`、`merge_owner=coordinator`；在裁决前不改本机 Cargo checkout、不 vendor、不升级依赖，也不声称这三项已完成。
 
 ## 未覆盖与待验收
 

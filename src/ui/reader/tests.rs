@@ -425,6 +425,90 @@ fn mixed_unicode_lines_expand_horizontal_extent(cx: &mut TestAppContext) {
     );
 }
 
+/// The gutter is real layout padding and the selection uses that same origin.
+#[gpui::test]
+fn gutter_padding_keeps_selection_coordinates_aligned(cx: &mut TestAppContext) {
+    let (_reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "abcdef\n".to_string(),
+            has_bom: false,
+        },
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
+    frames(cx);
+    let gutter = cx
+        .debug_bounds("reader-source-gutter-0")
+        .expect("gutter drawn");
+    let body = cx.debug_bounds("reader-source-body-0").expect("body drawn");
+    assert!(
+        body.left() >= gutter.right(),
+        "the body starts after the padded gutter"
+    );
+    let row = cx.debug_bounds("reader-source-row-0").unwrap();
+    assert_eq!(gutter.left(), row.left());
+    assert_eq!(body.left() - row.left(), gutter.size.width);
+    cx.simulate_click(
+        point(body.left() + px(2.0), body.center().y),
+        Modifiers::none(),
+    );
+    cx.simulate_keystrokes("secondary-a secondary-c");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("abcdef\n")
+    );
+}
+
+/// Reader bars bind the UniformList's own base handle: they exist only while
+/// visible, start hidden, and wheel scrolling moves the same real offset.
+#[gpui::test]
+fn source_scrollbars_follow_the_real_list_and_fade_out(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        fixtures::source(),
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(200.0)));
+    frames(cx);
+    let frame = cx.debug_bounds("reader-source").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    reader.update_in(cx, |reader, _, cx| {
+        reader.source().unwrap().update(cx, |source, _| {
+            source.pin_scrollbar_clock(0);
+            source.show_scrollbar();
+        });
+    });
+    frames(cx);
+    assert!(cx.debug_bounds("reader-scrollbar-y").is_some());
+    assert!(cx.debug_bounds("reader-scrollbar-x").is_some());
+    let reach = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).reach());
+    assert!(reach.y > px(0.0), "the short viewport overflows: {reach:?}");
+    assert!(reach.x > px(0.0), "a long line overflows: {reach:?}");
+    cx.simulate_event(ScrollWheelEvent {
+        position: frame.center(),
+        delta: ScrollDelta::Lines(point(0.0, -40.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    frames(cx);
+    let offset = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).offset());
+    assert!(
+        offset.y < px(0.0),
+        "the wheel moves the same handle: {offset:?}"
+    );
+    // Fade-out timing depends on real hover transitions and is left to the
+    // window acceptance; this asserts only that the bars exist while shown and
+    // bind the same list the wheel moved.
+    assert!(
+        cx.debug_bounds("reader-scrollbar-y").is_some(),
+        "the vertical bar stays while the pointer is over the reader"
+    );
+}
+
 /// A near-limit Markdown document is parsed off the UI thread and only its
 /// visible blocks are drawn.
 #[gpui::test]

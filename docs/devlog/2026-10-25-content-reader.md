@@ -45,6 +45,18 @@ PR [#27](https://github.com/nocpiun/githux/pull/27) 已同步 main `84b029e`，�
 
 本轮 fmt、`check --locked --all-targets`、`clippy --locked --all-targets -- -D warnings`、`test --locked` 与 `build --locked --example reader` 均通过。完整测试结果为 345 项主程序测试，以及 `tests/reader.rs` 的 24 项（19 项阅读器 + 5 项由复用 domain 模块带入的测试）。真实 Windows 验收仍待负责人完成；此前进程有窗口句柄而屏幕捕获仅见墙纸，不能据此宣布视觉或原生输入通过。
 
+## 2026-10-26 第二轮负责人真实窗口反馈
+
+PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理并记录了未通过项：
+
+**已实现并有测试证据：** 源码 gutter 右侧改为 6px 真实布局 padding，行文本与选择命中仍使用同一 `TextLayout`（`gutter_padding_keeps_selection_coordinates_aligned`，拖选后 Ctrl+C 内容一致）；源码纵/横滚动条绑定 `UniformListScrollHandle.base_handle`，范围来自列表 `max_offset()`，hover 显示、滚轮同步（`source_scrollbars_follow_the_real_list_and_fade_out`）。抽取 `src/ui/scrollbar.rs` 共享 3px/透明度/140ms `Fade`，已合并的 `tab_scrollbar.rs` 保持原实现与参数，原有标签条用例全部通过；`ui/mod.rs` 仅增加模块声明。
+
+**未通过、未宣称解决：** 阅读器滚动条 thumb 拖动在 GPUI 测试平台上没有移动真实偏移（能进入按下，但 `on_drag_move` 未执行），同一共用实现在标签条用例中可用。已停止继续试探性改法，保留失败证据，拖动、淡出时序和双轴角落命中交负责人真实窗口验收。
+
+**待裁决：** Markdown inline code 字体/圆角/padding，以及 fenced-code 语言标签位置，都需要 Ely 文档预览暴露真实布局或代码块绘制钩子；现有公开 API 不足。已记录 `githux:arbitration-required:v1`，`arbitration_ever_required=true`/`merge_owner=coordinator`，未改 checkout 或 vendor。
+
+验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（366 主程序 + 30 integration）、`cargo build --locked --example reader` 与 `git diff --check` 均通过；视觉与拖动交互不因这些命令视为验收通过。
+
 ## 后续
 
 - 接入前置：`ui/mod.rs` 增加模块声明；仓库页面把 `data` 层的正文与会话上下文交给 `ReaderView`，并由集成层实现 `ReaderAction`（外部 URL、同 commit 文件切换）。

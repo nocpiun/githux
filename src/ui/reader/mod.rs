@@ -17,15 +17,16 @@
 //! reported as a [`ReaderAction`]; dangerous schemes are refused. The
 //! integration layer owns actually opening an external URL or switching files.
 //!
-//! This round the module is delivered through `examples/reader.rs` and
-//! `tests/reader.rs`; wiring it into `Shell` belongs to a later task, so the
-//! module-level allowance below keeps real warnings visible elsewhere. Remove
-//! it when `ui/mod.rs` declares the module.
+//! The module is declared by `ui::mod` so shared reader services can use the
+//! same scrollbar implementation. `examples/reader.rs` includes a small
+//! `#[path]` module tree for its independent preview; the real `Shell` wiring
+//! remains a separate task. `dead_code` is scoped to this not-yet-wired slice.
 
 #![allow(dead_code)]
 
 pub mod fixtures;
 mod links;
+mod scrollbar;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -400,11 +401,9 @@ impl Render for ReaderView {
                 .size_full()
                 .child(document.clone())
                 .into_any_element(),
-            ReaderState::Source(view) => div()
-                .debug_selector(|| "reader-source-frame".to_string())
-                .size_full()
-                .child(view.clone())
-                .into_any_element(),
+            // Keep the source root's overlay siblings direct: an extra
+            // full-size wrapper can reorder hit testing against the rows.
+            ReaderState::Source(view) => view.clone().into_any_element(),
         };
         div()
             .debug_selector(|| "reader".to_string())
