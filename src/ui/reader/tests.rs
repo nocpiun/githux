@@ -1182,3 +1182,30 @@ fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert!(cx.debug_bounds("reader-inline-paragraph").is_some());
 }
+
+#[gpui::test]
+fn a_single_character_link_opens_from_its_right_half(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "[x](guide.md)
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let layout = inline_snapshot(cx, "x");
+    let piece = &layout.pieces[0];
+    let right_half = point(
+        piece.text_bounds.right() - px(1.0),
+        piece.text_bounds.center().y,
+    );
+    cx.simulate_click(right_half, Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        reader.read_with(cx, |r, _| r.last_action().cloned()),
+        Some(ReaderAction::Link(LinkTarget::Repository(_)))
+    ));
+}

@@ -16,6 +16,17 @@ struct Piece { range: Range<usize>, line: ShapedLine, origin: Point<Pixels>, cod
 #[derive(Default)]
 struct Layout { pieces: Vec<Piece>, bounds: Bounds<Pixels>, line_height: Pixels, code_run_fonts: Vec<SharedString> }
 impl Layout {
+    fn glyph_index(&self, position: Point<Pixels>) -> usize {
+        let local=position-self.bounds.origin;
+        let row=(local.y/self.line_height).floor().max(0.0);
+        for p in &self.pieces {
+            if (p.origin.y/self.line_height).floor()!=row { continue; }
+            if local.x<p.origin.x+p.line.width() {
+                return p.range.start+p.line.index_for_x(local.x-p.origin.x).unwrap_or(p.line.len());
+            }
+        }
+        self.index(position)
+    }
     fn index(&self, position: Point<Pixels>) -> usize {
         let local=position-self.bounds.origin;
         let row=(local.y/self.line_height).floor().max(0.0);
@@ -24,23 +35,23 @@ impl Layout {
         candidates.last().map_or_else(||self.pieces.last().map_or(0,|p|p.range.end),|p|p.range.end)
     }
 }
-struct Selection { focus:FocusHandle, anchor:usize, head:usize, dragging:bool }
+struct Selection { focus:FocusHandle, anchor:usize, head:usize, dragging:bool, pressed_link:Option<String> }
 impl Selection { fn range(&self)->Range<usize>{self.anchor.min(self.head)..self.anchor.max(self.head)} }
 #[derive(IntoElement)]
 pub(super) struct ReaderInline { id:ElementId, inline:Inline, on_link:Option<OnLink> }
 impl ReaderInline { pub fn new(id:ElementId,inline:Inline,on_link:Option<OnLink>)->Self{Self{id,inline,on_link}} }
 impl RenderOnce for ReaderInline {
     fn render(self,window:&mut Window,cx:&mut App)->impl IntoElement{
-        let state=window.use_keyed_state(self.id.clone(),cx,|_,cx|Selection{focus:cx.focus_handle(),anchor:0,head:0,dragging:false});
+        let state=window.use_keyed_state(self.id.clone(),cx,|_,cx|Selection{focus:cx.focus_handle(),anchor:0,head:0,dragging:false,pressed_link:None});
         let focus=state.read(cx).focus.clone(); let layout=Rc::new(RefCell::new(Layout::default()));
         let (down,moving,up,keys)=(state.clone(),state.clone(),state.clone(),state.clone());
-        let (dl,ml)=(layout.clone(),layout.clone()); let text=self.inline.text.clone(); let links=self.inline.links.clone(); let on_link=self.on_link;
+        let (dl,ml,link_layout)=(layout.clone(),layout.clone(),layout.clone()); let text=self.inline.text.clone(); let links=self.inline.links.clone(); let on_link=self.on_link;
         div().id(self.id).debug_selector(||"reader-inline-paragraph".into()).track_focus(&focus).cursor_text()
-        .on_mouse_down(MouseButton::Left,move|e,w,cx|{let at=dl.borrow().index(e.position);down.update(cx,|s,cx|{w.focus(&s.focus,cx);if !e.modifiers.shift{s.anchor=at;}s.head=at;s.dragging=true;cx.notify();});})
+        .on_mouse_down(MouseButton::Left,move|e,w,cx|{let at=dl.borrow().index(e.position);let glyph=link_layout.borrow().glyph_index(e.position);down.update(cx,|s,cx|{w.focus(&s.focus,cx);if !e.modifiers.shift{s.anchor=at;}s.head=at;s.dragging=true;s.pressed_link=links.iter().find(|(r,_)|r.contains(&glyph)).map(|(_,url)|url.clone());cx.notify();});})
         .on_mouse_move(move|e,_,cx|{if moving.read(cx).dragging&&e.dragging(){let at=ml.borrow().index(e.position);moving.update(cx,|s,cx|{s.head=at;cx.notify();});}})
         .on_mouse_up(MouseButton::Left,{let u=up.clone();move|_,_,cx|u.update(cx,|s,cx|{s.dragging=false;cx.notify();})})
         .on_mouse_up_out(MouseButton::Left,move|_,_,cx|up.update(cx,|s,cx|{s.dragging=false;cx.notify();}))
-        .on_click({let state=state.clone();move|_,w,cx|{let s=state.read(cx);if s.anchor==s.head{if let Some((_,url))=links.iter().find(|(r,_)|r.contains(&s.head)){open_link(&on_link,url,w,cx);}}}})
+        .on_click({let state=state.clone();move|_,w,cx|{let s=state.read(cx);if s.anchor==s.head{if let Some(url)=s.pressed_link.clone(){open_link(&on_link,&url,w,cx);}}}})
         .on_key_down(move|e,_,cx|{if e.keystroke.modifiers.secondary(){match e.keystroke.key.as_str(){"c"=>{let r=keys.read(cx).range();if !r.is_empty(){cx.write_to_clipboard(ClipboardItem::new_string(text[r].to_string()));cx.stop_propagation();}},"a"=>keys.update(cx,|s,cx|{s.anchor=0;s.head=text.len();cx.notify();}),_=>{}}}})
         .child(Paragraph{inline:self.inline,layout,selection:state})
     }
