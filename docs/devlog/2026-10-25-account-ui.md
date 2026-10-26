@@ -34,7 +34,7 @@
 cargo fmt --all                 # 已格式化
 cargo check --locked --all-targets        → ok
 cargo clippy --locked --all-targets -- -D warnings → ok
-cargo test --locked                       → 200 passed（其中本任务 11 项）
+cargo test --locked                       → 202 passed（其中本任务 13 项）
 cargo build --locked                      → ok
 ```
 
@@ -56,6 +56,17 @@ Codex 首轮提出两条 P2，均属可直接修复范围：
 Codex 第二轮提出第 3 条 P2：账户变更以错误返回时，`repo_service` 的旧结果仍显示为 Complete。`AccountService::mutate` 在 `CleanupPending` 之前已经提交了目录与活动选择，所以错误 reply 同样推进了权威账户状态。
 
 修复：`apply` 的错误分支对**所有非仓库读取**操作都作废仓库展示，不只对仓库读取错误作废；成功分支此前已如此处理。回归测试 `an_errored_mutation_clears_repository_results_for_the_previous_account`（A→B 读仓库→切回 A 后旧结果消失）。预览套件 11 项，全部 200 项通过。
+
+## 第 4 轮：审查修复
+
+Codex 第三轮两条 P2：
+
+1. **输入不触发父视图重绘**：按钮的 `can_submit` 属于 `AccountPreview`，但没有订阅 `TextInput` 变化，输入或粘贴后按钮保持禁用。修复：`make_input` 返回实体与变化订阅，`Changed` 时 `cx.notify()`；`reset_input` 替换订阅。回归测试 `typing_a_token_enables_the_submit_button_without_another_operation`。
+2. **按键订阅持有强引用形成环**：`intercept_keystrokes` 捕获强 `Entity`，而预览持有该订阅，导致视图释放后不执行 `Drop`，请求与运行时收尾都不发生。修复：改为 `cx.weak_entity()` 并忽略失败的 update。回归测试 `the_keystroke_subscription_does_not_retain_the_preview`。
+
+修复过程中另发现并修掉一个真实缺陷：`watch::Sender::send` 在没有 receiver 时返回错误且**不写入**，关闭标志因此一直是 `true`，后台任务仍会入队。改用 `send_replace`，测试直接覆盖释放后 `alive == false`。
+
+预览套件 13 项，全仓 202 项通过。
 
 ## 剩余问题
 

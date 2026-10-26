@@ -12,7 +12,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ely_gpui_component::{forms::TextInput, theme::ActiveTheme};
+use ely_gpui_component::{
+    forms::{InputEvent, TextInput},
+    theme::ActiveTheme,
+};
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Task, Window,
@@ -110,6 +113,7 @@ pub(crate) struct AccountPreview {
     replacing: Option<AccountKey>,
     presentation: Presentation,
     receiver_task: Option<Task<()>>,
+    input_changed: Option<Subscription>,
     _keys: Subscription,
 }
 
@@ -124,14 +128,17 @@ impl AccountPreview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = Self::make_input(window, cx);
+        let (input, input_changed) = Self::make_input(window, cx);
         window.focus(&input.read(cx).focus_handle(cx), cx);
         let root_focus = cx.focus_handle();
         let inbox = Arc::new(Mutex::new(VecDeque::new()));
         let (alive, _) = watch::channel(true);
-        let this = cx.entity();
+        // Downgrade: the subscription is owned by the preview, so holding a
+        // strong entity here would keep it alive forever and skip `Drop`.
+        let this = cx.weak_entity();
         let keys = cx.intercept_keystrokes(move |event, window, cx| {
-            this.update(cx, |this, cx| this.on_key(event, window, cx));
+            this.update(cx, |this, cx| this.on_key(event, window, cx))
+                .ok();
         });
         let mut this = Self {
             runtime,
@@ -154,6 +161,7 @@ impl AccountPreview {
                 status: None,
             },
             receiver_task: None,
+            input_changed: Some(input_changed),
             _keys: keys,
         };
         this.start_receiver(cx);
@@ -165,19 +173,35 @@ impl AccountPreview {
         this
     }
 
-    fn make_input(window: &mut Window, cx: &mut Context<Self>) -> Entity<TextInput> {
-        cx.new(|cx| {
+    /// Builds the token field and its change subscription. The parent owns the
+    /// submit-enabled state, so it must redraw whenever the child text changes.
+    fn make_input(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<TextInput>, Subscription) {
+        let input = cx.new(|cx| {
             TextInput::new(window, cx)
                 .masked()
                 .label("Classic personal access token")
                 .placeholder("Paste a Classic PAT")
-        })
+        });
+        let changed = cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+            // Enter stays with the keystroke interceptor so an input method can
+            // claim it; only a text change affects the parent-owned button.
+            if *event == InputEvent::Changed {
+                cx.notify();
+            }
+        });
+        (input, changed)
     }
 
     fn reset_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A new entity also drops old edit/undo snapshots. The secret is never
         // copied into Presentation, operation replies, diagnostics or Debug.
-        self.input = Self::make_input(window, cx);
+        let (input, changed) = Self::make_input(window, cx);
+        self.input = input;
+        // Replace the subscription with the new entity's; the old one detaches.
+        self.input_changed = Some(changed);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
 
@@ -723,7 +747,9 @@ impl Render for AccountPreview {
 
 impl Drop for AccountPreview {
     fn drop(&mut self) {
-        let _ = self.alive.send(false);
+        // `send` fails when no receiver is held, which is exactly our case:
+        // `send_replace` still stores the value so late workers observe it.
+        self.alive.send_replace(false);
         if let Some(operation) = self.operation.take() {
             operation.source.cancel();
         }

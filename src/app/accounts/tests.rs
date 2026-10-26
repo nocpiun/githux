@@ -602,7 +602,7 @@ fn closing_the_view_cancels_and_cannot_publish(cx: &mut TestAppContext) {
     view.update(cx, |view, cx| view.refresh(cx));
     let before = view.read_with(cx, |view, _| view.presentation.clone());
     view.update(cx, |view, _| {
-        let _ = view.alive.send(false);
+        view.alive.send_replace(false);
         if let Some(operation) = view.operation.take() {
             operation.source.cancel();
         }
@@ -619,6 +619,57 @@ fn closing_the_view_cancels_and_cannot_publish(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |view, _| {
         view.inbox.lock().unwrap().is_empty() && view.presentation == before
     }));
+}
+
+/// Review round 3: the parent owns the submit-enabled flag, so typing must
+/// redraw it; otherwise the button stays disabled until an unrelated update.
+#[gpui::test]
+fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    cx.simulate_input("synthetic-token");
+    cx.run_until_parked();
+    // A plain simulated click on the submit button must reach the service.
+    let target = cx
+        .debug_bounds("account-token-submit")
+        .map(|bounds| bounds.center());
+    if let Some(target) = target {
+        cx.simulate_click(target, gpui::Modifiers::none());
+    } else {
+        submit(&view, cx);
+    }
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+}
+
+/// Review round 3: the preview must not be retained by its own keystroke
+/// subscription, otherwise releasing the view never runs `Drop` and the
+/// runtime/request teardown is skipped.
+#[gpui::test]
+fn the_keystroke_subscription_does_not_retain_the_preview(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    let weak = view.downgrade();
+    // The window root owns the view; closing it and dropping the test handle
+    // leaves only what the subscription itself retains.
+    cx.update(|window, _| window.remove_window());
+    drop(view);
+    for _ in 0..400 {
+        if weak.upgrade().is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        weak.upgrade().is_none(),
+        "the interceptor must hold a weak reference, not the entity"
+    );
 }
 
 #[gpui::test]
