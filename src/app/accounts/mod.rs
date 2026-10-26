@@ -315,20 +315,24 @@ impl AccountPreview {
         };
         self.reconciling.remove(at);
         self.refresh_presentation(cx);
-        if !self.reconciling.is_empty() {
-            // More cancelled mutations are still settling; keep the message
-            // stable until the last one reports completion.
-            cx.notify();
-            return;
-        }
+        // Each settlement can have changed this account's authorization
+        // evidence, so invalidate the displayed repository set every time —
+        // not only when the last pending cancellation finishes.
         self.presentation.repositories = RepositoryPreview::Idle(
-            "Cancelled requests have settled. Review the current saved accounts, then refresh to read repositories."
+            "A cancelled request has settled. Refresh to read repositories under the current authorization."
                 .into(),
         );
-        self.presentation.status = Some(StatusMessage::new(
-            StatusTone::Info,
-            "Cancellations settled. Saved accounts and the current selection are shown as stored; an already committed change was not rolled back.",
-        ));
+        self.presentation.status = Some(if self.reconciling.is_empty() {
+            StatusMessage::new(
+                StatusTone::Info,
+                "Cancellations settled. Saved accounts and the current selection are shown as stored; an already committed change was not rolled back.",
+            )
+        } else {
+            StatusMessage::new(
+                StatusTone::Info,
+                "One cancelled request settled; another is still settling. Saved accounts are shown as currently stored.",
+            )
+        });
         cx.notify();
     }
 

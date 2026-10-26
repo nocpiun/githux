@@ -74,6 +74,12 @@ Codex 第四轮 P2：`reconciling` 只保存一个代次。先取消 A 的重新
 
 修复：改为 `Vec<u64>` 记录全部未结算的已取消变更，逐个移除；只有最后一个结算才显示汇总提示，避免中间态反复覆盖。回归测试 `every_cancelled_mutation_is_reconciled_independently`（按任意顺序结算两项）。预览套件 14 项，全仓 203 项。
 
+## 第 6 轮：审查修复
+
+Codex 第五轮 P2：上一轮把待对账改成了列表，但“作废仓库结果”只在最后一个结算时执行。若 A 的重新验证先结算并记录了授权失败，`refresh_presentation` 会显示新的授权状态，而 A 账户的仓库结果仍标为 Complete 直到 B 也结算。
+
+修复：每次结算都作废仓库展示并刷新权威账户状态；仍只在全部结算后给出汇总提示。回归测试扩展 `every_cancelled_mutation_is_reconciled_independently`，在每次结算前放入加载态并断言被作废。
+
 ## 剩余问题
 
 - 真实 PAT、真实组织 SSO、私有仓库可见性与中文输入法/粘贴/焦点，须由负责人在预览窗口确认。
