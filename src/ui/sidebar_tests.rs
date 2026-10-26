@@ -901,3 +901,22 @@ fn menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change(cx: &mut Tes
     assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
     assert!(cx.debug_bounds("menu-panel-0").is_none());
 }
+
+#[gpui::test]
+fn escape_returns_focus_to_the_more_button_and_enter_reopens(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let more = view.read_with(cx, |s, _| s.sidebar_more_focus.clone());
+    click("sidebar-toggle", cx);
+    click("sidebar-more", cx);
+    press("escape", cx);
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+    cx.update(|window, cx| {
+        assert_eq!(window.focused(cx).as_ref(), Some(&more));
+    });
+    // Enter on the restored button opens the menu again, so keyboard users are not stranded.
+    press("enter", cx);
+    assert!(
+        view.read_with(cx, |s, _| s.sidebar_menu_open()),
+        "Enter must reopen the menu from the restored button"
+    );
+}

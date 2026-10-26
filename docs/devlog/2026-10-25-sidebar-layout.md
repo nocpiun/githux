@@ -97,3 +97,7 @@ Codex 第二轮审查（针对 `b3c9a3d`，P2）指出：滚动范围在缓动�
 ### 审查修复：菜单焦点约束与其他浮层协调
 
 Codex 针对 `6827ce4`（P2）指出：More 菜单打开时 Tab 可把焦点移出面板，菜单与全窗遮罩仍可见但 Up/Down/Enter 失去作用；Ctrl+K 也会在菜单之上再叠开 palette。已修复：菜单打开期间在 shell 按键拦截器消费 Tab/Shift-Tab，面板与触发按钮是唯一可达焦点；`open_palette` 先关闭 More 菜单再打开 palette；收起/展开同样关闭菜单。新增回归 `menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change`。全量 374 tests 与 clippy 通过。
+
+### 审查修复：关闭菜单后焦点回到可操作按钮
+
+Codex 针对 `9adf9b0`（P2）指出：Esc 关闭 More 后焦点落在布局 wrapper，而 tab stop 与点击在子按钮上，Enter/Space 无法重开、也不显示按钮焦点样式。已将 `sidebar_more_focus` 挂到实际按钮（`sidebar-more-button`）上，关闭时回到可操作的 More；新增 `escape_returns_focus_to_the_more_button_and_enter_reopen` 覆盖 Esc 后立刻 Enter 重开。全量 375 tests 与 clippy 通过。

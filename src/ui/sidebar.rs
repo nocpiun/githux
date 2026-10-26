@@ -683,7 +683,6 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
     let trigger = div()
         .id("sidebar-more-trigger")
         .debug_selector(|| "sidebar-more".to_string())
-        .track_focus(focus)
         .flex()
         .flex_none()
         .justify_center()
@@ -693,6 +692,9 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
             div()
                 .id("sidebar-more-button")
                 .debug_selector(|| "sidebar-more-button".to_string())
+                // The focus handle belongs to the actionable button, not the layout wrapper:
+                // dismissal returns here and Enter/Space can reopen the menu immediately.
+                .track_focus(focus)
                 .size(px(SIDEBAR_RAIL_ITEM_SIZE))
                 .flex_none()
                 .rounded(theme.radius(Radius::Sm))
