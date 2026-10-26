@@ -19,20 +19,21 @@ use gpui::{
 
 use crate::{
     ui::fixtures::{self, ActivityKind, RepoFixture},
-    workspace::{RepositorySession, Route, Session},
+    workspace::Route,
 };
 
 use super::geometry::ACTIVITY_ROW_HEIGHT;
 
-/// The page for the active `session`.
-pub(super) fn page(session: &Session, repositories: &[RepoFixture], cx: &App) -> AnyElement {
-    match session.route() {
+/// The page for `route`.
+pub(super) fn page(route: &Route, repositories: &[RepoFixture], cx: &App) -> AnyElement {
+    match route {
         Route::Home => home(cx),
-        Route::Repository { .. } => {
-            let route = session.route();
-            let repo = repositories.iter().find(|repo| route.is_repository(repo));
+        Route::Repository { namespace, name } => {
+            let repo = repositories
+                .iter()
+                .find(|repo| repo.namespace == *namespace && repo.name == *name);
             match repo {
-                Some(repo) => repository(repo, session.state().repository.as_ref(), cx),
+                Some(repo) => repository(repo, cx),
                 None => blank(),
             }
         }
@@ -284,12 +285,9 @@ fn feed_row(row: &fixtures::FeedFixture, cx: &App) -> AnyElement {
 }
 
 /// A repository route's minimal identifier: enough to confirm the right page opened. The reader,
-/// header information and content tabs belong to later tasks. When the session has a browsing
-/// selection set (the R3 reader will do that), it is shown here as session state.
-fn repository(repo: &RepoFixture, session: Option<&RepositorySession>, cx: &App) -> AnyElement {
+/// header information and content tabs belong to later tasks.
+fn repository(repo: &RepoFixture, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let branch = session.and_then(|session| session.branch.clone());
-    let file = session.and_then(|session| session.file.clone());
     div()
         .debug_selector(|| "page-repository".to_string())
         .flex()
@@ -321,38 +319,6 @@ fn repository(repo: &RepoFixture, session: Option<&RepositorySession>, cx: &App)
                 .text_color(theme.colors.fg_muted)
                 .child(repo.description),
         )
-        .when_some(branch, |page, branch| {
-            let file = file.clone();
-            page.child(
-                div()
-                    .debug_selector(|| "repository-session".to_string())
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .child(
-                        Icon::new(IconName::GitBranch)
-                            .size(IconSize::Xs)
-                            .color(theme.colors.fg_subtle),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.text_size(TextSize::Xs))
-                            .text_color(theme.colors.fg_subtle)
-                            .child(branch),
-                    )
-                    .when_some(file, |row, file| {
-                        row.child(
-                            div()
-                                .min_w_0()
-                                .text_size(theme.text_size(TextSize::Xs))
-                                .text_color(theme.colors.fg_muted)
-                                .child(Ellipsis::new(file)),
-                        )
-                    }),
-            )
-        })
         .into_any_element()
 }
 

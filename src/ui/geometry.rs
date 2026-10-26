@@ -17,29 +17,22 @@ pub const SIDEBAR_COLLAPSED_WIDTH: f32 = SIDEBAR_RAIL_ITEM_SIZE + SIDEBAR_PADDIN
 pub const SIDEBAR_ANIMATION_MS: u64 = 200;
 /// Active-route marker: flush to the drawable left edge, square on the left, rounded on the
 /// right, and about two thirds of the row height so it never reads as a full-height bar.
-pub const SIDEBAR_INDICATOR_WIDTH: f32 = 2.0;
+pub const SIDEBAR_INDICATOR_WIDTH: f32 = 3.0;
 pub const SIDEBAR_INDICATOR_RADIUS: f32 = 4.0;
 pub const SIDEBAR_INDICATOR_HEIGHT_RATIO: f32 = 2.0 / 3.0;
 pub const SIDEBAR_INDICATOR_MIN_HEIGHT: f32 = 20.0;
 pub const SIDEBAR_INDICATOR_MAX_HEIGHT: f32 = 24.0;
 /// A thin, low-contrast rule separating the repository group from the fixed footer.
 pub const FOOTER_DIVIDER_HEIGHT: f32 = 1.0;
-/// The sidebar column's row gap.
+/// The sidebar column's row gap; the footer divider band keeps the repo/footer spacing balanced.
 pub const SIDEBAR_ROW_GAP: f32 = 4.0;
-/// Space above and below the footer rule, measured from the repository viewport's edge to the
-/// account row. The column gap does not participate here: the divider owns its whole band so the
-/// rule is visually centred in both collapsed and expanded layouts.
-/// Space above and below the footer rule. The column gap adds below this band's own content, so
-/// the band is sized to absorb it: the rule ends up equally spaced from the list and identity.
-pub const FOOTER_DIVIDER_SPACE: f32 = 8.0;
+pub const FOOTER_DIVIDER_BAND: f32 = REPO_ACCOUNT_GAP - 2.0 * SIDEBAR_ROW_GAP;
 /// Size of the account status button (expanded only).
 pub const STATUS_BUTTON_SIZE: f32 = 24.0;
 pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
 pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
-/// The visible sash line inside the resize hit band, and how long it takes to fade.
-pub const SIDEBAR_SASH_WIDTH: f32 = 2.0;
-pub const SIDEBAR_SASH_FADE_MS: u64 = 140;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
+pub const REPO_ACCOUNT_GAP: f32 = 12.0;
 pub const REPO_LEFT_PADDING: f32 = 4.0;
 
 /// Gap between the window edge and the island.
@@ -74,59 +67,3 @@ pub const ACCOUNT_ROW_HEIGHT: f32 = 48.0;
 
 /// Height of a Home activity row.
 pub const ACTIVITY_ROW_HEIGHT: f32 = 52.0;
-
-/// The application session tab strip at the top of the island.
-///
-/// The strip's inset is one value on every in-scroll edge, so the first tab's top and left gaps
-/// match the island's inner boundary regardless of DPI rounding. It deliberately matches the gap
-/// between the island and the window edge, so the strip's own padding reads as the same rhythm as
-/// the frame instead of a second, larger margin.
-pub const TAB_STRIP_INSET: f32 = ISLAND_INSET;
-
-/// One tab's height. The strip is a little taller than the tab, which leaves room for the thin
-/// scrollbar without another inset.
-pub const TAB_HEIGHT: f32 = 26.0;
-
-/// One fixed, readable tab width. Tabs never compress: the strip scrolls instead.
-pub const TAB_WIDTH: f32 = 168.0;
-
-/// The icons' touch target inside a tab.
-pub const TAB_CLOSE_SIZE: f32 = 16.0;
-
-/// Gap between a tab's icon and its title. The icon-to-close spacing stays tighter, so the label
-/// keeps most of the width.
-pub const TAB_ICON_GAP: f32 = 7.0;
-
-/// The gap between two tabs in the strip.
-pub const TAB_GAP: f32 = 4.0;
-
-/// Visible thickness of the strip's own scrollbar thumb. It is a hairline compared with the
-/// theme's default thickness, and it is the implementation starting point rather than a signed-off
-/// value.
-pub const TAB_SCROLLBAR_THICKNESS: f32 = 3.0;
-
-/// Height of the band the scrollbar paints in. It is reserved whether or not the scrollbar is
-/// visible, so fading it in or out never moves the tabs.
-pub const TAB_SCROLLBAR_BAND: f32 = TAB_SCROLLBAR_THICKNESS + 2.0;
-
-/// The strip's total height: the inset, the tabs, then the scrollbar band.
-pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;
-
-/// Width of the toolbar pinned to the strip's right edge, outside the scrolling viewport. It is one
-/// square slot matching the tab height, so its centered icon has equal top and right gaps.
-pub const TAB_TOOLBAR_WIDTH: f32 = TAB_HEIGHT;
-
-/// How long the strip's scrollbar takes to fade in or out.
-pub const TAB_SCROLLBAR_FADE_MS: u64 = 140;
-
-/// The resize hit band's box in the shell body: `width` is the presented sidebar width and
-/// `body_height` the full body height. The band shares this with the rendered hit target.
-pub fn sidebar_resize_band(width: f32, body_height: f32) -> gpui::Bounds<gpui::Pixels> {
-    gpui::Bounds::new(
-        gpui::point(gpui::px(width), gpui::Pixels::ZERO),
-        gpui::size(
-            gpui::px(SIDEBAR_RESIZE_HIT_WIDTH),
-            gpui::px((body_height - SIDEBAR_PADDING).max(0.0)),
-        ),
-    )
-}

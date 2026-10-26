@@ -79,33 +79,3 @@ Codex 首轮审查（针对 `4b92c0b`，P2）指出：palette 打开并覆盖在
 ### 审查修复：滚动范围收缩时同步 clamp 存储目标
 
 Codex 第二轮审查（针对 `b3c9a3d`，P2）指出：滚动范围在缓动中收缩时，`tick` 只 clamp 呈现值而未 clamp 存储目标，后续反向滚轮仍会累加到不可达目标上，看起来不响应。已修复：每 tick 先把存储 `target`/`from` 一并 clamp 到当前 `[-max, 0]` 再计算，含 reduced-motion 分支；新增 `shrinking_range_clamps_target_so_reverse_scroll_still_moves`（覆盖中途收缩后离散反向与精确反向）和 `reduced_motion_range_shrink_is_clamped_immediately`。全量 190 tests 与 clippy 通过。
-
-## 第三轮修订：分割线居中、身份 hover、indicator 变细、sash 反馈（2026-10-26）
-
-负责人第三次真实查看预览后提出五项反馈；本轮已处理，仍未验收。
-
-1. 分割线改为自带上下对称留白（`FOOTER_DIVIDER_SPACE`）；此前列 gap 只加在下方造成上 8px/下 12px，现在渲染实测上下各 8px（1px 线），两态一致，仍固定在 footer 内、不随仓库滚动。旧 `REPO_ACCOUNT_GAP` 常量随职责转移删除，间距由 `FOOTER_DIVIDER_SPACE/HEIGHT` 表达。
-2. 收起态 More 触发按钮去掉可见边框（保留焦点环、tooltip "More"、菜单与键盘）。展开态四入口浅边框保留。
-3. 身份区去掉整块 hover 背景（此前 `account-identity` 有 `.hover(bg)`），改为 pointer 光标 + `@ID` 文本下划线；账号行左侧内缩减少，身份簇与上方仓库 avatar 轴对齐，头像与两行文字作为整体在行内垂直居中。空白区域仍不可点，状态 emoji 仍是独立操作。
-4. indicator 宽度 3px → 2px（`SIDEBAR_INDICATOR_WIDTH`），保持贴可绘制左缘、左直角/右 4px 圆角、约 2/3 行高并垂直居中。
-5. resize 热区新增可见 sash：2px 前景色竖线（`SIDEBAR_SASH_WIDTH`），仅在 hover 或拖动时以 140ms ease-out 淡入、离开淡出，从中断时的呈现值可逆续接；纵向从 island 顶部圆角附近到底部圆角/inset 之内，横向居中于 8px 命中带，不铺满侧栏，也不遮挡中部 toggle（toggle 占据带中点，其自身命中优先）。遵循 reduced-motion，动画结束不再请求帧。
-
-合并 `origin/main`（含已验收的 PR16 会话标签）时保留双方：标签条、页面会话滚动/焦点、Refresh 等上/右间距不变；`scrolling.rs` 的页面平滑滚动改为每会话状态（`PageState::smooth`），只覆盖标签条以下的页面区域，不再抢标签条滚轮；侧栏收起菜单改为侧栏自有的浮层状态（原因：Ely `OverflowMenu` 的私有 focus takeover 在收起动画重绘中会被重新武装，导致 Esc/窗口变化无法关闭），视觉仍用 Ely 主题 token（overlay/border/elevation/menu width）与同样的四项/禁用 New。
-
-验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（373 passed）、`cargo build --locked`、`git diff --check` 通过。新增/更新测试：分割线两态上下等距、身份登录行存在、indicator 宽度与几何、sash 淡入淡出可逆与 reduced-motion、sash 线宽与 island 纵向范围、外点关闭不触发下层导航（按真实 press/release 语义覆盖）、标签条滚轮与页面/侧栏互不影响。真实视觉、sash 实际手感与动画观感仍待负责人验收。
-
-### 审查修复：菜单焦点约束与其他浮层协调
-
-Codex 针对 `6827ce4`（P2）指出：More 菜单打开时 Tab 可把焦点移出面板，菜单与全窗遮罩仍可见但 Up/Down/Enter 失去作用；Ctrl+K 也会在菜单之上再叠开 palette。已修复：菜单打开期间在 shell 按键拦截器消费 Tab/Shift-Tab，面板与触发按钮是唯一可达焦点；`open_palette` 先关闭 More 菜单再打开 palette；收起/展开同样关闭菜单。新增回归 `menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change`。全量 374 tests 与 clippy 通过。
-
-### 审查修复：关闭菜单后焦点回到可操作按钮
-
-Codex 针对 `9adf9b0`（P2）指出：Esc 关闭 More 后焦点落在布局 wrapper，而 tab stop 与点击在子按钮上，Enter/Space 无法重开、也不显示按钮焦点样式。已将 `sidebar_more_focus` 挂到实际按钮（`sidebar-more-button`）上，关闭时回到可操作的 More；新增 `escape_returns_focus_to_the_more_button_and_enter_reopen` 覆盖 Esc 后立刻 Enter 重开。全量 375 tests 与 clippy 通过。
-
-### 审查修复：键盘激活后保留 toggle 焦点
-
-Codex 针对 `bb28fb6`（P2）指出：键盘 Tab 到收起/展开按钮并按 Enter/Space 后，代码无条件把焦点转给 shell root，再按 Enter/Space 无法反向切换。已修复：toggle 使用自己的 `sidebar_toggle_focus` 并 `track_focus`，激活后焦点留在同一个可操作按钮上。新增 `keyboard_toggle_keeps_focus_and_reverses_immediately`（Enter 折叠→焦点检查→Enter 展开→Space 再折叠）。全量 376 tests、clippy、build 通过。
-
-### 审查修复：拖动结束后按真实 hover 重置 sash 目标
-
-Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` 被清掉但 sash 目标仍为 1，导致高亮常驻。已修复：`SidebarState::end_resize` 统一结束/取消拖动，并根据指针是否仍在热区（新增的 `geometry::sidebar_resize_band`，与绘制共用几何）重新计算目标；释放、out-of-band 释放、Esc 与失焦都走该路径。新增 `releasing_the_drag_outside_the_band_clears_the_sash_target` 验证带外释放后淡出归零。全量 377 tests 与 clippy 通过。
