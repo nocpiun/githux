@@ -22,6 +22,7 @@ use crate::{
     workspace::{Route, Workspace},
 };
 
+pub mod accounts;
 mod chrome;
 pub mod fixtures;
 pub(crate) mod geometry;
