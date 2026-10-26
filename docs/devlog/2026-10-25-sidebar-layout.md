@@ -118,6 +118,22 @@ Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` �
 2. **收起 More**：`6827ce4` 去掉可见边框时连 `border_1` 一起删了，`.focus(border_color)` 因此没有可绘制的边框，键盘 focus 环消失。改为保留 `border_1` + `transparent_black()`：可见边框仍无，盒子尺寸/中心/命中/28px 方形与 focus 反馈都回到基线语义。
 3. **账户身份**：左移、无整块 hover 背景、pointer、仅 `@ID` 下划线、收起头像与 repo 同为 20px 已具备。补充按真实布局测量的断言：身份块左缘距行左 ≤4px，头像与两行文字组成的块上下留白差 ≤1px（不靠 `items_center` 声明推断）。
 4. **indicator**：`SIDEBAR_INDICATOR_WIDTH` 已是 2px；贴可绘制左缘、左直角/右圆角、约 2/3 行高、长度与垂直位置均未改，原测试仍断言宽度、高度与 left。
-5. **resizer sash**：除原有淡入淡出外修了两个真实缺陷。其一，`sash_hovered()` 直接返回 `sash_target > 0`，拖动期间恒为真，`on_mouse_move` 因此不再更新 hover 状态——现在单独保存真实指针是否在热区内，`target` 只由「真实 hover 或拖动中」派生。其二，纵向端点原先在 `sidebar.rs` 手写 `ISLAND_RADIUS` 表达式，现由 `geometry::sidebar_sash_insets()` 从 island 的圆角/inset 常量导出，resize、折叠动画与窗口变化共用同一来源；新增断言覆盖无 hover 时零不透明度、可见线窄于命中带、以及线不越过 island 上下边界。toggle 外观、位置、独立命中与焦点未改。
+5. **resizer sash**（本轮后续两轮负责人反馈已取代这里的做法，见下方「第五、六轮」）：先把 `sash_hovered()` 从「等于 target」改为独立记录指针是否在热区，并把两端从手写常量改为共享几何函数。当时仍用 `on_mouse_move` / `on_mouse_exit` 驱动，纵向仍是「圆角到圆角」的直线段——这两点后来都被负责人真实窗口复现证伪，已在本轮末尾重写。
 
 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（378 passed）、`git diff --check` 通过。测试平台不经过 Windows 原生输入分发，五项最终视觉、sash 真实手感、折叠动画观感与多 DPI 仍待负责人真实窗口验收。
+
+## 第五轮（原会话）：collapsed More 图标、sash 离开残留、sash 与 island 等高
+
+负责人真实窗口发现三项：收起态 More 的三个点在按钮内部偏左上；sash 在鼠标移开后不消失（展开与收起都复现）；sash 高度要与主页面 island 完整外框一致，覆盖此前「圆角到圆角」的范围描述。
+
+三项都先在旧实现上写出会失败的真实事件/布局测试，再改实现：
+
+1. **More 图标**：`sidebar-more-button` 是固定 28px 的 `div`，没有为子元素建立布局；外层 trigger 的 `justify_center` 只把 28px 盒子居中，`Icon` 内部的 `svg()` 是 `flex_none`，于是落在槽位左上角（实测图标中心比槽位中心偏 6px）。给按钮自身加 `flex / items_center / justify_center`，图标落到同一盒子的正中。外框尺寸、位置、占位、命中、无可见边框与 focus 环都未变，也没有移动 footer。
+2. **sash 离开残留**：根因是 `on_mouse_exit` 绑定的是 `MouseExitEvent`，只在指针离开窗口时触发，不是元素 hover 结束；指针从热区移到侧栏或 island（仍在窗口内）永远不会通知。改用该版本真正提供 true/false 生命周期的 `on_hover`。它带来两个必须处理的边界：`on_hover` 在 active drag 期间被抑制，所以拖动时改由拖拽事件按指针位置自行判定；判定基准必须与指针事件同坐标空间，因此不再用 `body` 局部原点手算 band（会被标题栏/Windows content_top 偏移），而是在热区内用 `canvas` prepaint 记录真实的 window 坐标 bounds。同时删除 `geometry::sidebar_resize_band` 这个易误用的局部坐标辅助函数。
+3. **sash 与 island 等高**：原实现用 `(ISLAND_RADIUS, ISLAND_INSET + ISLAND_RADIUS)` 作为直线段内缩，父命中带又自带一层底部内缩，等于把底端扣了两次，实测底端比 island 少 8px；顶端也多缩了一个圆角。改为竖线直接铺满命中带的纵向范围，而命中带的顶部就是 island 顶边、底部内缩改为与 island 相同的 `ISLAND_INSET`（此前误用 `SIDEBAR_PADDING`，相差 1px）。测试用 `island` 与 `sidebar-sash` 的实际 bounds 断言两端各在 0.5px 内对齐，覆盖展开/收起与 560/900 两种窗口高度。`sidebar_sash_insets` 随之删除。
+
+**行为约定澄清**：sash 现在只由真实 hover 决定。此前 `retarget_sash` 用 `pointer_inside || dragging`，会让按住拖动期间持续点亮；这与负责人「只有 hover 时出现、不要因为 dragging 长期点亮」冲突，已改为只看指针是否在热区内。拖动仍可用，拖出热区淡出、拖回再淡入，释放到热区外保持熄灭。
+
+验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（382 passed）、`cargo build --locked`、`git diff --check` 通过。
+
+**未验证边界**：GPUI 测试平台不经过 Windows 原生输入分发，也不驱动真实非客户区命中测试。三项的最终视觉（More 图标与 rail 视觉中线、sash 两端与 island 的实际观感、快速进出与拖动手感）仍需负责人在真实窗口确认；多 DPI 跨屏、最大/还原过程与矮窗口的真实观感同样留待人工验收。

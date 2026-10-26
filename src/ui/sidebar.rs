@@ -47,13 +47,16 @@ impl super::Shell {
         );
         let this = cx.entity();
         let sash_opacity = self.sidebar_state.sash();
-        let sash_insets = sidebar_sash_insets();
+        // The visible line spans the island's outer frame. Its ends are expressed with the same
+        // constants that place the island (bottom inset plus the island's own border), so the line
+        // is not shortened by a second, unrelated inset as it was before.
+        let band_bounds = cx.entity();
         let handle = div()
             .id("sidebar-resize")
             .debug_selector(|| "sidebar-resize".to_string())
             .absolute()
             .top_0()
-            .bottom(px(SIDEBAR_PADDING))
+            .bottom(px(ISLAND_INSET))
             .left(px(width))
             .w(px(SIDEBAR_RESIZE_HIT_WIDTH))
             .cursor(gpui::CursorStyle::ResizeLeftRight)
@@ -64,25 +67,34 @@ impl super::Shell {
                 div()
                     .debug_selector(|| "sidebar-sash".to_string())
                     .absolute()
-                    .top(px(sash_insets.0))
-                    .bottom(px(sash_insets.1))
+                    .top_0()
+                    .bottom_0()
                     .left(px((SIDEBAR_RESIZE_HIT_WIDTH - SIDEBAR_SASH_WIDTH) / 2.0))
                     .w(px(SIDEBAR_SASH_WIDTH))
                     .bg(fg.opacity(sash_opacity)),
             )
-            .on_mouse_move(cx.listener(move |shell, _, _, cx| {
-                if !shell.sidebar_state.sash_hovered() {
-                    shell.sidebar_state.set_sash_hover(
-                        true,
-                        cx.background_executor().now(),
-                        cx.theme().reduced_motion || cx.reduce_motion(),
-                    );
-                    cx.notify();
-                }
-            }))
-            .on_mouse_exit(cx.listener(move |shell, _, _, cx| {
+            .child(
+                // Records the band's window-space bounds from the real layout, so pointer events
+                // can be tested against it without assuming the title bar inset is zero.
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        band_bounds.update(cx, |shell, _| {
+                            shell.sidebar_resize_band = Some(bounds);
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            // Hover lifecycle, not a window exit: `on_mouse_exit` only fires when the pointer
+            // leaves the window, so it never reports moving onto the sidebar or the island and the
+            // line used to stay lit. `on_hover` reports both directions, including while the mouse
+            // is stationary, and is suppressed during an active drag — the drag path below decides
+            // from the pointer position in that case.
+            .on_hover(cx.listener(move |shell, hovered, _, cx| {
                 shell.sidebar_state.set_sash_hover(
-                    false,
+                    *hovered,
                     cx.background_executor().now(),
                     cx.theme().reduced_motion || cx.reduce_motion(),
                 );
@@ -704,6 +716,11 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
                 .track_focus(focus)
                 .size(px(SIDEBAR_RAIL_ITEM_SIZE))
                 .flex_none()
+                // The slot lays out its own glyph: the trigger's centring only centres the 28px
+                // box, so without this the flex-none icon sits in the slot's top-left corner.
+                .flex()
+                .items_center()
+                .justify_center()
                 .rounded(theme.radius(Radius::Sm))
                 // The collapsed More loses its visible outline, but keeps a transparent border so
                 // the box model, the 28px square and the keyboard focus ring are unchanged.
@@ -718,9 +735,17 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(move |_, window, cx| toggle(window, cx))
                 .child(
-                    Icon::new(IconName::Ellipsis)
-                        .size(IconSize::Sm)
-                        .color(colors.fg_muted),
+                    div()
+                        .debug_selector(|| "more-icon".to_string())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::Ellipsis)
+                                .size(IconSize::Sm)
+                                .color(colors.fg_muted),
+                        ),
                 )
                 .tooltip(Tooltip::text("More")),
         )

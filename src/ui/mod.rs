@@ -99,6 +99,10 @@ pub struct Shell {
     sidebar_keys: gpui::Subscription,
     sidebar_bounds: gpui::Subscription,
     sidebar_more_focus: FocusHandle,
+    /// The resize heat band in window coordinates, captured from the real layout each prepaint.
+    /// Pointer events report window positions, while a band built from the shell body's local
+    /// origin would be off by the title bar inset; this keeps both in one space.
+    sidebar_resize_band: Option<gpui::Bounds<gpui::Pixels>>,
     /// The collapse/expand toggle's own focus. Keyboard activation must keep focus here so a
     /// second Enter/Space reverses the mode instead of dropping into the shell root.
     sidebar_toggle_focus: FocusHandle,
@@ -204,6 +208,7 @@ impl Shell {
             sidebar_keys,
             sidebar_bounds,
             sidebar_more_focus: cx.focus_handle(),
+            sidebar_resize_band: None,
             sidebar_toggle_focus: cx.focus_handle(),
             sidebar_menu_focus: cx.focus_handle(),
             sidebar_menu: false,
@@ -1567,20 +1572,31 @@ impl Render for Shell {
                                     shell
                                         .sidebar_state
                                         .resize(width, window.viewport_size().width.into());
+                                    // `on_hover` is suppressed during an active drag, so decide the
+                                    // sash from the pointer itself. The measured hitbox is already
+                                    // in window coordinates, which `event.position` also uses; the
+                                    // body-local band would be off by the title bar inset.
+                                    let hovered = shell
+                                        .sidebar_resize_band
+                                        .is_some_and(|band| band.contains(&event.event.position));
+                                    shell.sidebar_state.set_sash_hover(
+                                        hovered,
+                                        cx.background_executor().now(),
+                                        cx.theme().reduced_motion || cx.reduce_motion(),
+                                    );
                                     cx.notify();
                                 },
                             ))
                             .on_mouse_up(
                                 gpui::MouseButton::Left,
-                                cx.listener(|shell, event: &gpui::MouseUpEvent, window, cx| {
-                                    let band = geometry::sidebar_resize_band(
-                                        shell.sidebar_state.frame.width,
-                                        f32::from(window.viewport_size().height),
-                                    );
+                                cx.listener(|shell, event: &gpui::MouseUpEvent, _window, cx| {
+                                    let hovered = shell
+                                        .sidebar_resize_band
+                                        .is_some_and(|band| band.contains(&event.position));
                                     let reduced = cx.theme().reduced_motion || cx.reduce_motion();
                                     shell.sidebar_state.end_resize(
                                         cx.background_executor().now(),
-                                        band.contains(&event.position),
+                                        hovered,
                                         reduced,
                                     );
                                     cx.notify();

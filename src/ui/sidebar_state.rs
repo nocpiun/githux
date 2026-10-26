@@ -126,14 +126,13 @@ impl SidebarState {
         self.retarget_sash(now, reduced);
     }
 
-    /// Recomputes the sash target from the real hover state and the drag state. Reversing
-    /// mid-fade continues from the presented opacity, so a quick in/out never jumps.
+    /// Recomputes the sash target from the real pointer position alone. Reversing mid-fade
+    /// continues from the presented opacity, so a quick in/out never jumps.
+    ///
+    /// A drag does not pin the line on: the agreed behaviour is "only while hovered", so holding
+    /// the button and moving onto the sidebar or the island must fade it out like any other leave.
     fn retarget_sash(&mut self, now: Instant, reduced: bool) {
-        let target = if self.sash_pointer_inside || self.dragging {
-            1.0
-        } else {
-            0.0
-        };
+        let target = if self.sash_pointer_inside { 1.0 } else { 0.0 };
         self.sash_since = now;
         self.sash_target = target;
         if reduced {
@@ -146,7 +145,9 @@ impl SidebarState {
     }
 
     /// Whether the pointer is genuinely inside the heat band (independent of a drag pinning the
-    /// line on).
+    /// line on). The hover lifecycle itself comes from the element, so this is only inspected by
+    /// tests that guard the "a drag is not hover" distinction.
+    #[cfg(test)]
     pub fn sash_hovered(&self) -> bool {
         self.sash_pointer_inside
     }
@@ -192,9 +193,10 @@ impl SidebarState {
         self.expanded_width = self.frame.width.max(SIDEBAR_MIN_WIDTH);
         self.dragging = true;
     }
-    /// Keeps the drag's sash visible for as long as the drag runs, without pretending the pointer
-    /// is still inside the band.
+    /// Starts judging the line from the pointer during a drag, where the element's hover lifecycle
+    /// is suppressed. The pointer is still inside the band at drag start.
     pub fn note_drag(&mut self, now: Instant, reduced: bool) {
+        self.sash_pointer_inside = true;
         self.retarget_sash(now, reduced);
     }
 

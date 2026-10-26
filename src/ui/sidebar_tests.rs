@@ -894,10 +894,127 @@ fn sash_hides_without_hover_and_never_covers_the_toggle(cx: &mut TestAppContext)
         toggle.left() <= band.right() && toggle.right() >= band.left(),
         "toggle overlaps the band by design"
     );
-    // The line stops inside the island's rounded edge at both ends, not at the title bar or the
-    // window's bottom inset.
+    // The line matches the island's outer frame at both ends (see the dedicated span test); here
+    // only confirm it is not reaching into the title bar above or the window's bottom inset.
     assert!(sash.top() >= island.top());
-    assert!(sash.bottom() < island.bottom());
+    assert!((sash.bottom() - island.bottom()).abs() <= px(0.5));
+}
+
+/// Entering the resize band and then moving to the sidebar or the island must fade the sash out on
+/// the real event path, in both layouts and without pressing the toggle. `on_mouse_exit` is only a
+/// window exit, so this is the regression that kept the line lit after the pointer had left.
+#[gpui::test]
+fn leaving_the_resize_band_fades_the_sash_out_in_both_modes(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let check = |cx: &mut VisualTestContext| {
+        let band = bounds("sidebar-resize", cx);
+        let toggle = bounds("sidebar-toggle", cx);
+        let island = bounds("island", cx);
+        let sidebar = bounds("sidebar", cx);
+        // Stay clear of the toggle, which occludes the band's middle.
+        let inside = point(band.center().x, toggle.bottom() + px(40.0));
+        cx.simulate_mouse_move(inside, None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            view.read_with(cx, |s, _| s.sidebar_state.sash()) > 0.0,
+            "entering the band must reveal the sash"
+        );
+
+        // Move to the island: still inside the window, outside the element. This is the case that
+        // a window-only mouse-exit listener never reports.
+        cx.simulate_mouse_move(island.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |s, _| s.sidebar_state.sash()),
+            0.0,
+            "the sash must fade out after the pointer leaves the band"
+        );
+
+        // The same holds when leaving into the sidebar body.
+        cx.simulate_mouse_move(inside, None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(
+            point(sidebar.center().x, island.center().y),
+            None,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |s, _| s.sidebar_state.sash()), 0.0);
+    };
+
+    check(cx);
+    click("sidebar-toggle", cx);
+    cx.run_until_parked();
+    check(cx);
+    // Leaving the band must not have navigated or changed the mode by itself.
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+}
+
+/// The visible line spans the island's full frame, not an inset straight segment: top and bottom
+/// must match the island's own bounds in both layouts and at two window heights.
+#[gpui::test]
+fn sash_spans_the_island_frame_in_both_modes_and_window_heights(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    let assert_span = |cx: &mut VisualTestContext| {
+        let island = bounds("island", cx);
+        let sash = bounds("sidebar-sash", cx);
+        assert_eq!(sash.size.width, px(SIDEBAR_SASH_WIDTH));
+        assert!(
+            (sash.top() - island.top()).abs() <= px(0.5),
+            "sash top {:?} must match island top {:?}",
+            sash.top(),
+            island.top()
+        );
+        assert!(
+            (sash.bottom() - island.bottom()).abs() <= px(0.5),
+            "sash bottom {:?} must match island bottom {:?}",
+            sash.bottom(),
+            island.bottom()
+        );
+    };
+
+    assert_span(cx);
+    for height in [560.0, 900.0] {
+        cx.simulate_resize(size(px(1200.0), px(height)));
+        cx.run_until_parked();
+        assert_span(cx);
+    }
+    click("sidebar-toggle", cx);
+    cx.run_until_parked();
+    assert_span(cx);
+    cx.simulate_resize(size(px(1200.0), px(560.0)));
+    cx.run_until_parked();
+    assert_span(cx);
+}
+
+/// The collapsed More button's ellipsis must be centred in its existing square slot, not stuck in
+/// a corner because the slot itself has no layout for its child.
+#[gpui::test]
+fn collapsed_more_icon_is_centred_in_its_unchanged_slot(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    click("sidebar-toggle", cx);
+    let button = bounds("sidebar-more-button", cx);
+    let icon = bounds("more-icon", cx);
+    assert_eq!(
+        button.size,
+        size(px(SIDEBAR_RAIL_ITEM_SIZE), px(SIDEBAR_RAIL_ITEM_SIZE))
+    );
+    assert!(
+        (icon.center().x - button.center().x).abs() <= px(0.5),
+        "icon centre {:?} must match the slot centre {:?}",
+        icon.center().x,
+        button.center().x
+    );
+    assert!(
+        (icon.center().y - button.center().y).abs() <= px(0.5),
+        "icon centre {:?} must match the slot centre {:?}",
+        icon.center().y,
+        button.center().y
+    );
+    // The slot keeps its place directly under the account row inside the same rail lane.
+    let account = bounds("account-row", cx);
+    assert!(button.top() > account.top());
+    assert_eq!(button.left(), account.left());
 }
 
 #[gpui::test]
@@ -975,21 +1092,67 @@ fn keyboard_toggle_keeps_focus_and_reverses_immediately(cx: &mut TestAppContext)
 }
 
 #[test]
-fn a_drag_does_not_masquerade_as_hover_for_the_sash() {
+fn a_drag_follows_the_pointer_and_does_not_pin_the_sash_on() {
     use std::time::{Duration, Instant};
     let mut state = SidebarState::default();
     let t0 = Instant::now();
-    // A drag keeps the line up even though the pointer is not "hovering" in the state sense...
+    // A drag begins inside the band, so the line is up...
     state.begin_resize();
     state.note_drag(t0, true);
     assert_eq!(state.sash(), 1.0);
-    assert!(
-        !state.sash_hovered(),
-        "a drag must not report the pointer as inside the band"
-    );
-    // ...so a later pointer position can still turn it off, which the old hover flag prevented.
-    state.end_resize(t0 + Duration::from_millis(10), false, true);
+    assert!(state.sash_hovered());
+    // ...but moving the still-held pointer out of the band turns it off, rather than the drag flag
+    // keeping it lit until a click elsewhere ends the drag.
+    state.set_sash_hover(false, t0 + Duration::from_millis(10), true);
     assert_eq!(state.sash(), 0.0);
+    // Releasing outside the band leaves it off.
+    state.end_resize(t0 + Duration::from_millis(20), false, true);
+    assert_eq!(state.sash(), 0.0);
+    assert!(!state.sash_hovered());
+}
+
+#[gpui::test]
+fn dragging_out_of_the_band_fades_the_sash_and_dragging_back_restores_it(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let band = bounds("sidebar-resize", cx);
+    let start = point(band.center().x, band.top() + px(120.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.sash()) > 0.0);
+
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: start,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_mouse_move(
+        start + point(px(4.0), px(0.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.dragging));
+
+    // Held down, but far from the heat band: the line must not stay pinned on.
+    cx.simulate_mouse_move(
+        point(px(700.0), px(300.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |s, _| s.sidebar_state.sash()),
+        0.0,
+        "a drag outside the band must not keep the line lit"
+    );
+
+    // Back onto the band while still dragging: it follows the pointer in again.
+    let back = point(bounds("sidebar-resize", cx).center().x, px(300.0));
+    cx.simulate_mouse_move(back, Some(MouseButton::Left), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |s, _| s.sidebar_state.sash()), 1.0);
 }
 
 #[gpui::test]
