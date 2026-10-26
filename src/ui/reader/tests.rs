@@ -382,6 +382,49 @@ fn a_long_line_scrolls_horizontally(cx: &mut TestAppContext) {
     );
 }
 
+/// The widest rendered row must remain reachable even when eight other lines
+/// have more UTF-8 bytes. Use the test platform's actual shaped bounds rather
+/// than assuming how wide its fallback glyphs are.
+#[gpui::test]
+fn mixed_unicode_lines_expand_horizontal_extent(cx: &mut TestAppContext) {
+    let mut text = format!("{}\n", "中".repeat(100)).repeat(8);
+    text.push_str(&"a".repeat(299));
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text,
+            has_bom: false,
+        },
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(500.0)));
+    frames(cx);
+    let ascii = cx
+        .debug_bounds("reader-source-body-8")
+        .expect("ASCII row visible");
+    let width = reader.read_with(cx, |r, cx| r.source().unwrap().read(cx).content_width());
+    assert!(
+        width >= ascii.size.width,
+        "extent {width:?} must include ASCII width {:?}",
+        ascii.size.width
+    );
+    let frame = cx.debug_bounds("reader-source").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: frame.center(),
+        delta: ScrollDelta::Pixels(point(px(-100_000.0), px(0.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+    });
+    frames(cx);
+    let end = cx.debug_bounds("reader-source-body-8").unwrap().right();
+    assert!(
+        end <= frame.right() + px(1.0),
+        "ASCII tail {end:?} must be reachable inside {:?}",
+        frame.right()
+    );
+}
+
 /// A near-limit Markdown document is parsed off the UI thread and only its
 /// visible blocks are drawn.
 #[gpui::test]

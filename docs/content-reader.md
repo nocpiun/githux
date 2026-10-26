@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-25。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成 Ely 的 Markdown 预览或本模块的只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
+更新：2026-10-26。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成 Ely 的 Markdown 预览或本模块的只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -50,7 +50,7 @@ view.update(cx, |view, _| {
 - 没有文本输入处理器、没有 IME 处理器、没有编辑 action，因此键入、粘贴、删除都无法修改文档。测试用 `simulate_input("hello 世界 🌍")` 和 `backspace delete enter tab` 对比全文前后一致。
 - 行号右对齐到实际行数位数，等宽字体取主题的 `mono_family`。
 - 语法着色走 Ely 公开的 `code_highlights`（通用代码着色）。`language` 只是标签：Ely 把 `syntax_of` / `code_highlights_with` 保持为 crate 私有，按语言逐 fence 选语法会需要本地复制语法表或改上游，因此本轮明确只提供通用着色，不声称逐语言准确。
-- 纵向用 `uniform_list`；横向用 `ListHorizontalSizingBehavior::Unconstrained` 让内容宽度可以超过视口。最宽行按字节长度取前 8 个候选再实测，避免对 2 MiB 文件的每一行做布局（那会把工作放到 UI 线程）；选中背景在同一次 `StyledText` 布局里切分，不用第二套宽度估算。
+- 纵向用 `uniform_list`；横向用 `ListHorizontalSizingBehavior::Unconstrained` 让内容宽度可以超过视口。初始按字节长度取 8 个候选实测，这只是启动探测；每个可见行在 prepaint 时上报实际 `StyledText` 宽度，发现更宽的行便扩展横向范围。屏外行滚入视口后同样参与，避免中文/ASCII/emoji 混排时漏掉字节更短但视觉更宽的行，也避免预先排版所有行。选中背景在同一次 `StyledText` 布局里切分，不用第二套宽度估算；语法区间与选区边界顺序合并，复杂度为线性，不为每段重新扫描全部语法区间。
 - 选择：左键按下/拖动扩展选区，`Shift` 扩展、`Ctrl+A` 全选、`Ctrl+C` 写入剪贴板。`Ctrl+A`/`Ctrl+C` 通过 `on_key_down` 检查 `secondary()`，不依赖焦点在某个输入控件上。
 
 ## 大内容与线程边界

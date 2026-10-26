@@ -55,9 +55,8 @@ pub struct SourceView {
     dragging: bool,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
-    /// The line `uniform_list` measures for the horizontal extent.
+    /// The widest row observed so far; visible rows can extend this after layout.
     widest: usize,
-    /// That line's measured width, so a test can compare it to the viewport.
     width: Pixels,
 }
 
@@ -110,7 +109,7 @@ impl SourceView {
         self.line_starts.len()
     }
 
-    /// How wide the widest candidate line measures, for the horizontal test.
+    /// The widest text observed during initial probing or subsequent row layout.
     pub fn content_width(&self) -> Pixels {
         self.width
     }
@@ -237,7 +236,23 @@ impl SourceView {
             .pr_3()
             .text_color(colors.fg_subtle)
             .child(format!("{:>width$}", ix + 1, width = digits));
+        let view = cx.entity().downgrade();
         let body = div()
+            // The initial shortlist is only a probe. Every rendered line reports
+            // its actual shaped width, including font fallback, so a wider line
+            // outside that shortlist can extend the list on the next frame.
+            .on_children_prepainted(move |bounds, _, cx| {
+                let Some(bounds) = bounds.first() else {
+                    return;
+                };
+                let _ = view.update(cx, |view, cx| {
+                    if bounds.size.width > view.width {
+                        view.width = bounds.size.width;
+                        view.widest = ix;
+                        cx.notify();
+                    }
+                });
+            })
             .id(("reader-source-body", ix))
             .debug_selector(move || format!("reader-source-body-{ix}"))
             .whitespace_nowrap()
@@ -347,13 +362,12 @@ fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-/// The line whose measured width is largest.
+/// An initial width probe, not an exhaustive search for the widest line.
 ///
-/// Every line is not measured: a two-megabyte file would put that work on the
-/// UI thread. The widest candidates by byte length are measured instead, which
-/// covers ASCII and, because a CJK character is three bytes and two cells, most
-/// wide-character lines too. The `uniform_list` then measures the chosen line
-/// and grows the horizontal extent to fit it.
+/// Shape eight candidates initially, then let each visible row report its
+/// actual text width during prepaint. Byte length cannot order visual widths
+/// across ASCII, CJK and emoji; off-screen rows extend the horizontal extent
+/// when scrolled into view. No font widths are guessed from character counts.
 fn widest_line(text: &str, starts: &[usize], window: &mut Window, cx: &App) -> (usize, Pixels) {
     let theme = cx.theme();
     let size = theme.text_size(TextSize::Sm).to_pixels(window.rem_size());
@@ -422,35 +436,105 @@ fn line_highlights(
         .into_iter()
         .map(|(range, highlight)| (range, highlight_style(highlight)))
         .collect();
-    let mut cuts: Vec<usize> = vec![0, line.len()];
-    for (range, _) in &base {
-        cuts.push(range.start);
-        cuts.push(range.end);
-    }
-    if let Some(selection) = &selection {
-        cuts.push(selection.start);
-        cuts.push(selection.end);
-    }
-    cuts.retain(|cut| *cut <= line.len() && line.is_char_boundary(*cut));
-    cuts.sort_unstable();
-    cuts.dedup();
-    let mut out = Vec::with_capacity(cuts.len().saturating_sub(1));
-    for pair in cuts.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        if start >= end {
-            continue;
+    selection_highlights(line.len(), base, selection, selection_color)
+}
+
+/// Ely's lexer emits sorted, disjoint syntax spans. Walk them once, filling
+/// gaps and splitting only at the selection's two edges. No output interval
+/// searches the span list again; the work is linear in the number of spans.
+fn selection_highlights(
+    len: usize,
+    base: Vec<(Range<usize>, HighlightStyle)>,
+    selection: Option<Range<usize>>,
+    color: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::with_capacity(base.len() + 4);
+    let mut emit = |range: Range<usize>, style: HighlightStyle| {
+        let mut start = range.start;
+        let end = range.end;
+        if let Some(selected) = &selection {
+            if start < selected.start && selected.start < end {
+                out.push((start..selected.start, style));
+                start = selected.start;
+            }
+            if start < selected.end && selected.start < end {
+                let stop = end.min(selected.end);
+                out.push((
+                    start..stop,
+                    HighlightStyle {
+                        background_color: Some(color),
+                        ..style
+                    },
+                ));
+                start = stop;
+            }
         }
-        let mut style = base
-            .iter()
-            .find(|(range, _)| range.start <= start && end <= range.end)
-            .map_or_else(HighlightStyle::default, |(_, style)| *style);
-        if selection
-            .as_ref()
-            .is_some_and(|selection| selection.start < end && start < selection.end)
-        {
-            style.background_color = Some(selection_color);
+        if start < end {
+            out.push((start..end, style));
         }
-        out.push((start..end, style));
+    };
+    let mut at = 0;
+    for (range, style) in base {
+        if at < range.start {
+            emit(at..range.start, HighlightStyle::default());
+        }
+        at = range.end;
+        emit(range, style);
+    }
+    if at < len {
+        emit(at..len, HighlightStyle::default());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_splits_syntax_and_whitespace_without_losing_styles() {
+        let code = HighlightStyle {
+            color: Some(gpui::rgb(0x123456).into()),
+            ..HighlightStyle::default()
+        };
+        let selected = gpui::rgb(0xabcdef).into();
+        // UTF-8 byte ranges in "中文 x": the selection crosses both the
+        // multibyte token and an unstyled whitespace gap.
+        let result =
+            selection_highlights(8, vec![(0..6, code), (7..8, code)], Some(3..7), selected);
+        assert_eq!(
+            result.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(),
+            vec![0..3, 3..6, 6..7, 7..8]
+        );
+        assert_eq!(result[0].1, code);
+        assert_eq!(result[1].1.color, code.color);
+        assert_eq!(result[1].1.background_color, Some(selected));
+        assert_eq!(result[2].1.background_color, Some(selected));
+        assert_eq!(result[3].1, code);
+    }
+
+    #[gpui::test]
+    fn dense_line_highlighting_stays_within_an_interaction_budget(cx: &mut gpui::TestAppContext) {
+        cx.update(ely_gpui_component::init_for_tests);
+        // 131,072 syntax spans on a single visible 128 KiB minified line.
+        // The former per-interval find performs billions of comparisons here.
+        let line = "x=1;".repeat(32_768);
+        let start = std::time::Instant::now();
+        let styles = cx.update(|cx| {
+            line_highlights(
+                &line,
+                Some(1..line.len() - 1),
+                gpui::rgb(0xabcdef).into(),
+                cx,
+            )
+        });
+        assert!(styles.len() >= 100_000);
+        assert_eq!(styles.first().unwrap().0.start, 0);
+        assert_eq!(styles.last().unwrap().0.end, line.len());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "highlighting took {:?}",
+            start.elapsed()
+        );
+    }
 }

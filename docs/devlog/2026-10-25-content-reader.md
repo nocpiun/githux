@@ -36,6 +36,15 @@ cargo test --locked
 
 **未覆盖（明确列为待验收）**：真实 Windows 窗口的鼠标拖选与 `Ctrl+C`、`Shift`+滚轮横向滚动、源码视图里的中文 IME 组合态、emoji/中文字形回退与多 DPI；测试平台不经过 Windows 原生输入分发。锚点滚动、图片注入与网络图片、Markdown 与 github.com 的完全等价性都不在本轮范围。
 
+## 2026-10-26 审查修复
+
+PR [#27](https://github.com/nocpiun/githux/pull/27) 已同步 main `84b029e`，保留独立预览范围。对 `28fdc9b` 的 [Codex 审查](https://github.com/nocpiun/githux/pull/27#pullrequestreview-5646893714) 提出两项成立的源码阅读问题，均按原任务修复，无待裁决事项：
+
+- 高亮逐段从头查找语法区间产生平方级开销。改为顺序遍历不重叠语法区间、填补空白并只按选区的两个边缘切分。新增单行约 13 万语法区间的回归用例（宽松 5 秒预算）和中文/空白选区样式用例。
+- 按字节长度选 8 行无法证明覆盖视觉最宽行。保留其作为初始探测，每个可见行依据实际排版结果上报宽度并扩展横向范围。新增 8 行中文 + 第 9 行较少字节但更宽 ASCII 的布局回归，确认最右端滚动可达。
+
+本轮 fmt、`check --locked --all-targets`、`clippy --locked --all-targets -- -D warnings`、`test --locked` 与 `build --locked --example reader` 均通过。完整测试结果为 345 项主程序测试，以及 `tests/reader.rs` 的 24 项（19 项阅读器 + 5 项由复用 domain 模块带入的测试）。真实 Windows 验收仍待负责人完成；此前进程有窗口句柄而屏幕捕获仅见墙纸，不能据此宣布视觉或原生输入通过。
+
 ## 后续
 
 - 接入前置：`ui/mod.rs` 增加模块声明；仓库页面把 `data` 层的正文与会话上下文交给 `ReaderView`，并由集成层实现 `ReaderAction`（外部 URL、同 commit 文件切换）。
