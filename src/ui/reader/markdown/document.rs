@@ -209,8 +209,19 @@ impl MarkdownView {
     }
 
     fn paragraph(&self, ix: usize, inline: &Inline) -> ParagraphView {
+        self.paragraph_keyed(
+            gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
+            inline,
+        )
+    }
+
+    /// A paragraph with a key unique within the document. Selection and focus
+    /// live in the keyed state, so every selectable paragraph needs its own:
+    /// sharing a key between table cells would apply one cell's byte offsets
+    /// to another cell's text.
+    fn paragraph_keyed(&self, key: gpui::ElementId, inline: &Inline) -> ParagraphView {
         let on_link = self.on_link.clone();
-        let view = ParagraphView::new(("reader-markdown-inline", ix), inline.clone());
+        let view = ParagraphView::new(key, inline.clone());
         match on_link {
             Some(on_link) => view.on_link(on_link),
             None => view,
@@ -398,7 +409,12 @@ impl MarkdownView {
                             .min_w_0()
                             .px_3()
                             .py_2()
-                            .child(this.paragraph(ix, inline));
+                            .child(this.paragraph_keyed(
+                                gpui::ElementId::Name(
+                                    format!("reader-cell-{ix}-{row}-{column}").into(),
+                                ),
+                                inline,
+                            ));
                         if aligns.get(column) == Some(&ast::Align::Right) {
                             cell = cell.text_right();
                         } else if aligns.get(column) == Some(&ast::Align::Center) {

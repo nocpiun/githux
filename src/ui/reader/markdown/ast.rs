@@ -189,6 +189,9 @@ enum Container {
         start: Option<u64>,
         items: Vec<(Option<bool>, Vec<Block>)>,
         current: Vec<Block>,
+        /// The task marker seen in this item; nested lists keep their own
+        /// container on the stack, so a child cannot clear the parent's.
+        task: Option<bool>,
     },
     Table {
         aligns: Vec<Align>,
@@ -221,7 +224,6 @@ pub fn parse(markdown: &str) -> Document {
     let mut code: Option<(Option<String>, String)> = None;
     let mut html = String::new();
     let mut footnotes: Vec<String> = Vec::new();
-    let mut pending_task: Option<bool> = None;
 
     fn finish_inline(inline: &mut Option<(Option<u8>, Building)>, stack: &mut [Container]) {
         let Some((heading, mut building)) = inline.take() else {
@@ -360,7 +362,11 @@ pub fn parse(markdown: &str) -> Document {
                 finish_inline(&mut inline, &mut stack);
                 push_block(&mut stack, Block::Rule);
             }
-            Event::TaskListMarker(done) => pending_task = Some(done),
+            Event::TaskListMarker(done) => {
+                if let Some(Container::List { task, .. }) = stack.last_mut() {
+                    *task = Some(done);
+                }
+            }
             Event::Start(Tag::BlockQuote(kind)) => {
                 finish_inline(&mut inline, &mut stack);
                 stack.push(Container::Blocks {
@@ -406,16 +412,22 @@ pub fn parse(markdown: &str) -> Document {
                     start,
                     items: Vec::new(),
                     current: Vec::new(),
+                    task: None,
                 });
             }
             Event::Start(Tag::Item) => {
                 finish_inline(&mut inline, &mut stack);
-                pending_task = None;
             }
             Event::End(TagEnd::Item) => {
                 finish_inline(&mut inline, &mut stack);
-                if let Some(Container::List { items, current, .. }) = stack.last_mut() {
-                    items.push((pending_task.take(), std::mem::take(current)));
+                if let Some(Container::List {
+                    items,
+                    current,
+                    task,
+                    ..
+                }) = stack.last_mut()
+                {
+                    items.push((task.take(), std::mem::take(current)));
                 }
             }
             Event::End(TagEnd::List(_)) => {
@@ -648,5 +660,46 @@ mod tests {
             "{:?}",
             doc.blocks
         );
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn nested_lists_keep_their_parent_task_marker() {
+        let doc = parse(
+            "- [x] parent
+  - child
+- [ ] second",
+        );
+        let list = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("a list");
+        assert_eq!(
+            list[0].0,
+            Some(true),
+            "parent checkbox survives nested item"
+        );
+        assert_eq!(
+            list[1].0,
+            Some(false),
+            "sibling keeps its own unchecked state"
+        );
+        let nested = list[0]
+            .1
+            .iter()
+            .find_map(|b| match b {
+                Block::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("nested list");
+        assert_eq!(nested[0].0, None, "child is an ordinary bullet");
     }
 }

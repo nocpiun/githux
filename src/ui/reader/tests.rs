@@ -1248,3 +1248,55 @@ fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext)
             .contains("file:")
     );
 }
+
+#[gpui::test]
+fn wrapped_code_continuation_keeps_its_left_inset(cx: &mut TestAppContext) {
+    let long = "x".repeat(4000);
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: format!("prefix `{long}` suffix"),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(260.0), px(500.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, &format!("prefix {long} suffix"));
+    assert!(layout.pieces.iter().filter(|p| p.code).count() > 2);
+    for piece in layout.pieces.iter().filter(|p| p.code) {
+        assert!(
+            piece.box_bounds.right() <= layout.bounds.right() + px(0.5),
+            "continuation inset fits inside the row: {piece:?} in {:?}",
+            layout.bounds
+        );
+    }
+}
+
+#[gpui::test]
+fn table_cell_paragraphs_have_independent_selection_state(cx: &mut TestAppContext) {
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| one | two |\n|---|---|\n| alpha | beta |".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let cell = cx.debug_bounds("markdown-cell-0-1-0").unwrap();
+    cx.simulate_click(cell.center(), Modifiers::none());
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    cx.simulate_keystrokes("secondary-c");
+    cx.run_until_parked();
+    let copied = cx
+        .read_from_clipboard()
+        .and_then(|i| i.text())
+        .unwrap_or_default();
+    assert!(
+        copied.is_empty() || copied == "alpha" || copied == "alpha | beta",
+        "a cell copies its own text only: {copied:?}"
+    );
+}

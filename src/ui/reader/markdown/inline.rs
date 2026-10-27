@@ -455,7 +455,9 @@ impl Element for Paragraph {
                             break;
                         }
                         let code = is_code(a);
-                        let opens_piece = code && edges.binary_search(&a).is_ok();
+                        // A code piece that continues from the previous row
+                        // still starts with its left inset in construction.
+                        let opens_piece = code && (end == start || edges.binary_search(&a).is_ok());
                         let closes_piece = code && edges.binary_search(&b).is_ok();
                         let advance = positions[b] - positions[a];
                         let extra = if opens_piece { px(PAD_X) } else { Pixels::ZERO }
