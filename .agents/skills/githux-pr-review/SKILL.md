@@ -11,7 +11,7 @@ metadata:
 
 ## 开始与等待
 
-1. 核对 repo、PR、远端完整 head；恢复 PR 描述、分页评论/review 及本地任务的全程裁决历史。已知 true/coordinator 永不重置，历史不全不默认 false。
+1. 核对 repo、PR、远端完整 head 和实时 labels；`blocked` 是负责人管理的合并禁令，即使旧 CI/review 已通过也不得放行，Agent 不得自行添加或移除。需要负责人验收时添加 `pending`（`gh pr edit PR --add-label pending`），负责人明确验收通过后由协调者移除；不能用检查变绿代替验收。完整规则见 [PR 标签与规模门槛](../../../docs/agent-workflow.md#pr-标签与规模门槛)。恢复 PR 描述、分页评论/review 及本地任务的全程裁决历史。已知 true/coordinator 永不重置，历史不全不默认 false。
 2. 首次创建 PR 自动审查。后续每次 push（含文档/同步基线）核对远端 head 后，用 gh 发送一次精确的 `@codex review`，记录返回的 comment ID/created_at。发送结果不明先查评论，不重复发送。
 3. 当前 PR 出现另一新触发时，核对其发起者、时间与 head，改用该轮服务端游标；不要继续把之前结果当作新轮次结果。
 
@@ -27,7 +27,7 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --
 
 状态不变由脚本等待，不调用模型、不并行启动第二个等待器。宿主工具允许约两小时及有界 API 收尾，或使用可恢复前台等待；不要套更短的 timeout、用 `tail` 截断结果或覆盖退出码。无需持续读取过程日志。工具完成后，读取完整 JSON 并核对本次 run_id、head、status 与原始退出码。
 
-`--wait-ci true` 始终包含 CI 汇总。`--check NAME` 只能追加同一 CI workflow 内检查，不能移除 CI。没有 wait-ci 不核验 CI；review_completed 不是合并许可。
+`--wait-ci true` 包含 CI 汇总；开始或最终复核发现 `blocked` 标签时立即返回 `merge_blocked`，不继续等待或自动重审，也不宣称已核验全部 CI。`--check NAME` 只能追加同一 CI workflow 内检查，不能移除 CI。没有 wait-ci 不核验 CI；review_completed 不是合并许可。
 
 ## 返回后的处理
 
@@ -38,7 +38,8 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --
 - `evidence_incomplete`、`evidence_conflict`、`ci_unverified`：缓冲期后仍有缺口/矛盾，读取各维度证据，不原样重启一小时等待。不要把工作流格式变化猜成通过。
 - `base_changed`、`merge_conflict`：核对目标分支；解决冲突或补齐组合验证，有新 head 则重新 CI/review。Draft、BLOCKED、未知 mergeability 不冒充冲突；已有人工验收限制不因同步基线解除。
 - `timeout`：读取 waiting_on/last_error/retry。`retry_uncertain`：发送可能已发生，保留意图，核对实际评论后用已确认游标只读恢复，不能删除记录来补发。
-- `checks_ready`：核对完整裁决/验收历史、milestone、最新 head/保护和当前基线后才能合并；review_passed=null、verdict=not_evaluated 始终保留。
+- `merge_blocked`：检查 `integration.blockers`；`blocked_label` 必须等负责人手动移除后重查，不因标签所指问题已修复而自行撤掉。缺少/无效 labels 会报错，不能当无标签。
+- `checks_ready`：重新读取实时标签（不得有 `blocked`）、完整裁决/验收历史、milestone、独立 `PR` required check、最新 head/保护和当前基线后才能合并；review_passed=null、verdict=not_evaluated 始终保留。
 - `error`、`interrupted`、未知 Bot 消息、失败/取消：不算成功。错误输出文件若无法写入，依据 stdout 与退出码处理，不能退回读取旧成功文件。
 
 ## 反馈与交付

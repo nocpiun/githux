@@ -105,6 +105,18 @@ merge_owner: coordinator
 
 恢复任务时读取 PR 描述、完整分页的相关评论/review 和任务交接；已知存在一次真实待裁决就按 true 处理，不能用最新描述的 false 覆盖历史。仅信任授权执行者/负责人的流程记录，Bot 引用样例里的标记不构成授权，也不单独改变状态。没有已知 true，但历史不完整或记录真实性无法确认时是 unknown，交负责人或主 Agent 核实，不能默认 false。裁决后补充裁决者、结论及依据、后续执行者，并链接原问题评论；保留 true/coordinator。
 
+## PR 标签与规模门槛
+
+- `pending` 表示需要负责人手动验收。Agent 准备好可验收的结果后，通过 `gh pr edit <PR> --add-label pending` 添加；既有人工验收未完成时保持该标签。负责人明确验收通过后，由主 Agent/协调者通过 `--remove-label pending` 移除。它不表示 CI/review 已通过，也不因 CI 变绿自动消失；这次工作流不将它设置成自动失败条件，合并仍要核验人工验收记录。
+- `blocked` 由负责人手动添加和移除。它是独立的合并禁令，优先于旧的验收记录、CI/review 成功及 GitHub 的 `mergeable_state=clean`；Agent 不得自行添加/移除它，不得以拆标签、改名或绕过检查的方式放行。负责人移除后，重新核验当前 head、CI/review 和其他门槛。
+- [PR 工作流](../.github/workflows/pr.yml) 的显示名称和 job/check 名称均为 `PR`。在 opened/reopened/synchronize/edited/labeled/unlabeled/ready_for_review 时执行，无路径过滤、不跳过 Draft；PR 提交或标签变动无需再推一个空提交。只用只读权限获取当前 PR 元数据，不 checkout 或执行 PR 代码。
+- 通过条件是 **无 `blocked` 标签，且 `additions <= 20000`，且 `deletions <= 20000`**。两个数字是 GitHub PR 全部 diff 的汇总，分别比较、包含边界，不按净增/合计或最近一次提交计算，不豁免锁文件、生成文件、重命名或删除。数据缺失、API 失败、head/base/state 不匹配会失败，不退回旧 webhook 数字。
+- 负责人在 GitHub 的 `main` ruleset/branch protection 中把 **`PR`（GitHub Actions 来源）** 设置为 required status check；这是服务器强制禁止合并的必要配置，新增 YAML 本身不会改仓库保护。与现有 `CI` 一起保留，Agent 不设置绕过。工作流首次引入及旧 PR 需触发一次相关 PR 事件后才有该检查；合并冲突时 `pull_request` 工作流不能运行，不能把缺少检查当通过。
+- `githux-pr-review` 读取实时标签，开始/最终复核/自动重审前发现 `blocked` 都返回 `merge_blocked`（退出 15、`blocked_label`），停止通过与自动重审。标签缺失/格式未知报错，不猜测未阻塞。合并前还须再次核对实时标签，避免拿之前的成功结果直接合并。
+- 独立 `PR` 工作流不是 `CI` workflow 的追加 job，不能用 `--check PR` 代替 GitHub required check 配置。审查脚本直接强制 `blocked`；规模门槛由 `PR` 工作流及仓库保护执行。
+
+事件及统计口径依据：[GitHub pull_request 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)、[Get a pull request](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)。
+
 ## 合并前的门槛
 
 无论由谁合并，都核验以下事实：
@@ -112,8 +124,8 @@ merge_owner: coordinator
 1. PR 当前远端 head 为完整 SHA `H`，目标为 `main`，任务验收满足且没有遗漏的本地待提交修复；属于首版范围时，确认已关联 milestone #1。
 2. **`H` 的 CI/CD 通过，且以 `H` 触发、针对 `H` 的 Codex 审查通过。** 检查缺失、失败、取消、尚未完成或未经约定的跳过不等于成功。`pull_request` CI 的临时 merge SHA 必须可对应当前 head 和测试基线。
 3. Review 身份、commit、触发轮次和意见处理有证据。脚本 `review_arrived`/退出 0 仅代表到达，`COMMENTED` 或没有行内问题不等于通过。无 commit 字段的普通 Bot 评论要核实关联，无法确认则停下。
-4. 没有未决裁决、冲突或仓库保护要求。并行任务先合入 main 后，后一个 PR 必须验证与新 main 的组合；需要更新分支时，新 head 重新满足 CI 与审查，不能沿用旧 head 的放行。
-5. 合并前再次读取 head、检查与合并权限历史。按下节执行 squash merge，使用 GitHub 默认生成的提交信息并以 `--match-head-commit H` 锁定已核验的提交；不使用 `--admin`，不靠 `--auto` 提前放行。不擅自修改仓库保护或 merge queue 配置。
+4. 没有 `blocked` 标签、未决裁决、冲突或仓库保护要求；独立 `PR` required check 已通过。并行任务先合入 main 后，后一个 PR 必须验证与新 main 的组合；需要更新分支时，新 head 重新满足 CI 与审查，不能沿用旧 head 的放行。
+5. 合并前再次读取 head、实时标签、检查与合并权限历史，确认无 `blocked` 且 `pending` 对应的人工验收已明确通过。按下节执行 squash merge，使用 GitHub 默认生成的提交信息并以 `--match-head-commit H` 锁定已核验的提交；不使用 `--admin`，不靠 `--auto` 提前放行。不擅自修改仓库保护或 merge queue 配置。
 
 `--match-head-commit` 只防止合并了另一 head，不替代 CI、review、基线或权限核验。仓库原生 merge queue 若已配置，则遵循其规则并核对最终结果；提交成功、排队成功不等于已合并。实际保护设置和 Bot 信号以当前仓库状态及本轮证据核实，不能仅沿用旧 PR 的结果。
 
