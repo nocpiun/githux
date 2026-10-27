@@ -10,6 +10,11 @@ use std::ops::Range;
 
 use super::ast::{Block, Inline};
 
+/// Separators a copied table keeps: a tab between cells, a newline between
+/// rows, and a blank line after the whole table (added by `separate`).
+const CELL: &str = "\t";
+const ROW: &str = "\n";
+
 /// A placeholder cell for a repeated, presentation-only table header.
 static EMPTY: Inline = Inline {
     text: String::new(),
@@ -38,16 +43,23 @@ pub struct DocText {
     units: Vec<Unit>,
     /// Unit indices of each top-level block, in render order.
     by_block: Vec<Vec<usize>>,
+    /// The table being registered is the last chunk of its table: it closes
+    /// the table instead of continuing into another chunk.
+    table_final: bool,
+    /// Top-level block currently being registered.
+    block_ix: usize,
+    /// The next top-level block index `sequence` will hand out at this depth.
+    next_block: usize,
 }
 
 impl DocText {
     /// Build the model from the blocks the renderer will walk.
     pub fn build(blocks: &[Block]) -> Self {
         let mut model = Self::default();
-        for block in blocks {
+        for _ in blocks {
             model.by_block.push(Vec::new());
-            model.block(block);
         }
+        model.sequence(blocks);
         model
     }
 
@@ -143,7 +155,7 @@ impl DocText {
             separator,
             links,
         });
-        if let Some(block) = self.by_block.last_mut() {
+        if let Some(block) = self.by_block.get_mut(self.block_ix) {
             block.push(index);
         }
         self.text.push_str(separator);
@@ -172,34 +184,36 @@ impl DocText {
                 // renderers consume one unit per cell, so skipping an empty
                 // cell here would shift every later cell's range.
                 //
-                // A chunk's repeated header is presentation only: it gets an
-                // empty placeholder unit (so the unit cursor stays in step)
-                // but contributes no text to a copy.
-                let header_cells: Vec<&Inline> = if *repeated_head {
-                    head.iter().map(|_| &EMPTY).collect()
+                // A chunk's repeated header is presentation only: its cells
+                // get empty units (keeping the unit cursor in step) that add
+                // no text and no separator, so a copy joins the chunk rows
+                // exactly as if the table had never been split.
+                if *repeated_head {
+                    for _ in head {
+                        self.push_with_separator(&EMPTY.text, Vec::new(), "");
+                    }
                 } else {
-                    head.iter().collect()
-                };
-                // A table copies as rows: tabs between cells of one row, a
-                // newline after a row, and a block gap after the last row.
-                // Separators follow their cell, so they never shift offsets.
-                let mut grid: Vec<Vec<&Inline>> = vec![header_cells];
-                grid.extend(rows.iter().map(|cells| cells.iter().collect()));
-                let last_row = grid.len().saturating_sub(1);
-                for (row, cells) in grid.iter().enumerate() {
+                    let last_cell = head.len().saturating_sub(1);
+                    for (index, cell) in head.iter().enumerate() {
+                        let separator = if index == last_cell { ROW } else { CELL };
+                        self.push_with_separator(&cell.text, cell.links.clone(), separator);
+                    }
+                }
+                // Body rows: tabs between cells, a newline after each row.
+                // The last row leaves its ending to `separate`, which adds
+                // the block gap exactly once per table, so a virtualized
+                // chunk never inserts a blank row of its own.
+                let last_row = rows.len().saturating_sub(1);
+                let final_chunk = self.table_final;
+                for (row, cells) in rows.iter().enumerate() {
                     let last_cell = cells.len().saturating_sub(1);
                     for (index, cell) in cells.iter().enumerate() {
-                        let separator = if index == last_cell {
-                            if row == last_row {
-                                "
-
-"
-                            } else {
-                                "
-"
-                            }
+                        let separator = if index != last_cell {
+                            CELL
+                        } else if row == last_row && final_chunk {
+                            ""
                         } else {
-                            "	"
+                            ROW
                         };
                         self.push_with_separator(&cell.text, cell.links.clone(), separator);
                     }
@@ -223,8 +237,38 @@ impl DocText {
     }
 
     fn blocks(&mut self, blocks: &[Block]) {
+        // Nested blocks belong to their top-level block: keep the index.
         for block in blocks {
-            self.block(block);
+            self.walk(block);
+        }
+    }
+
+    /// Register one block at the current depth, advancing the top-level index
+    /// only when `sequence` hands out a new top-level block.
+    fn walk(&mut self, block: &Block) {
+        self.block(block);
+    }
+
+    /// Walk blocks in render order, giving each table its ending: a chunk
+    /// that continues into another chunk ends with a row break, the final
+    /// chunk ends with the block gap.
+    fn sequence(&mut self, blocks: &[Block]) {
+        let mut rest = blocks.iter().peekable();
+        while let Some(block) = rest.next() {
+            let final_chunk = !matches!(
+                rest.peek(),
+                Some(Block::Table {
+                    repeated_head: true,
+                    ..
+                })
+            );
+            self.table_final = final_chunk;
+            self.block_ix = self.next_block;
+            self.next_block += 1;
+            self.walk(block);
+            if matches!(block, Block::Table { .. }) && final_chunk {
+                self.text.push_str("\n\n");
+            }
         }
     }
 
@@ -248,6 +292,14 @@ pub fn floor_char_boundary(text: &str, at: usize) -> usize {
 mod tests {
     use super::*;
     use crate::ui::reader::markdown::ast::parse;
+
+    fn plain(text: &str) -> Inline {
+        Inline {
+            text: text.to_string(),
+            styles: Vec::new(),
+            links: Vec::new(),
+        }
+    }
 
     #[test]
     fn the_model_follows_read_order() {
@@ -333,6 +385,27 @@ next"
         assert!(model.slice(cells[2].clone()).is_empty(), "{:?}", cells[2]);
     }
 
+    #[test]
+    fn a_virtualized_table_chunk_adds_no_rows() {
+        // Two chunks of the same table: the second repeats the header for
+        // display but must not add text or separators.
+        let first = Block::Table {
+            aligns: Vec::new(),
+            head: vec![plain("a"), plain("b")],
+            rows: vec![vec![plain("c"), plain("d")]],
+            repeated_head: false,
+        };
+        let second = Block::Table {
+            aligns: Vec::new(),
+            head: vec![plain("a"), plain("b")],
+            rows: vec![vec![plain("e"), plain("f")]],
+            repeated_head: true,
+        };
+        let model = DocText::build(&[first, second]);
+        let text = model.text();
+        let expected = ["a\tb\nc\td\ne\tf\n\n"][0];
+        assert_eq!(text, expected, "{text:?}");
+    }
     #[test]
     fn a_table_copies_as_rows_not_one_line() {
         let doc = parse(

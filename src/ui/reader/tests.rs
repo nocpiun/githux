@@ -1104,12 +1104,25 @@ fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
     ] {
         assert!(cx.debug_bounds(id).is_some(), "{id}");
     }
-    // Cell text is really laid out, not an empty box.
-    let header = cx.debug_bounds("markdown-cell-0-0-1").unwrap();
-    let layout = inline_snapshot(cx, "Center");
+    // The shaped rows themselves are aligned, not just the cell box.
+    let right = cx.debug_bounds("markdown-cell-0-0-2").unwrap();
+    let right_text = inline_snapshot(cx, "Right");
+    let right_glyphs = right_text.bounds.right();
     assert!(
-        (layout.bounds.center().x - header.center().x).abs() <= px(20.0),
-        "the centered cell places its paragraph near the cell centre"
+        (right_glyphs - (right.right() - px(12.0))).abs() <= px(2.0),
+        "right-aligned glyphs end at the cell's inner right edge: {right:?} vs {right_glyphs:?}"
+    );
+    let center = cx.debug_bounds("markdown-cell-0-0-1").unwrap();
+    let center_text = inline_snapshot(cx, "Center");
+    assert!(
+        (center_text.bounds.center().x - center.center().x).abs() <= px(2.0),
+        "centered glyphs sit at the cell centre"
+    );
+    let left = cx.debug_bounds("markdown-cell-0-1-0").unwrap();
+    let left_text = inline_snapshot(cx, "left");
+    assert!(
+        (left_text.bounds.left() - (left.left() + px(12.0))).abs() <= px(2.0),
+        "left-aligned glyphs start at the cell's inner left edge"
     );
 }
 

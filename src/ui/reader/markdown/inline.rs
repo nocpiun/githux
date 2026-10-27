@@ -14,7 +14,7 @@ use ely_core::theme::ActiveTheme;
 use gpui::{
     App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, HighlightStyle,
     InspectorElementId, IntoElement, LayoutId, Pixels, Point, RenderOnce, ShapedLine, SharedString,
-    Styled, Window, div, fill, point, prelude::*, px, size,
+    Styled, TextAlign, Window, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -45,6 +45,8 @@ pub struct LocalLayout {
     line_height: Pixels,
     /// Font families requested for code pieces, for the test snapshot.
     code_fonts: Vec<SharedString>,
+    /// Alignment applied to the shaped rows (table columns).
+    align: TextAlign,
 }
 
 impl LocalLayout {
@@ -186,6 +188,8 @@ pub struct ParagraphView {
     syntax: Vec<(Range<usize>, gpui::HighlightStyle)>,
     /// Draw every run in the code font (a fenced code block).
     mono: bool,
+    /// Column alignment inherited from the table cell.
+    align: TextAlign,
     /// This paragraph's range in the document text model.
     doc: Range<usize>,
     /// The document's current selection, in document offsets.
@@ -212,7 +216,14 @@ impl ParagraphView {
             prefix: None,
             syntax: Vec::new(),
             mono: false,
+            align: TextAlign::Left,
         }
+    }
+
+    /// Align this paragraph's rows inside its box (table columns).
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.align = align;
+        self
     }
 
     /// Draw this paragraph as a fenced code block: code font for every run and
@@ -255,6 +266,7 @@ impl RenderOnce for ParagraphView {
                 layout: self.layout,
                 syntax: self.syntax,
                 mono: self.mono,
+                align: self.align,
             }))
             .into_any_element()
     }
@@ -267,6 +279,7 @@ struct Paragraph {
     layout: Rc<RefCell<LocalLayout>>,
     syntax: Vec<(Range<usize>, gpui::HighlightStyle)>,
     mono: bool,
+    align: TextAlign,
 }
 
 impl IntoElement for Paragraph {
@@ -431,6 +444,7 @@ impl Element for Paragraph {
         let inline = self.inline.clone();
         let link_color = cx.theme().colors.link;
         let shaped_runs = runs(&inline, &style, &mono, link_color, &self.syntax, self.mono);
+        let align = self.align;
         let layout = self.layout.clone();
         let code_fonts = shaped_runs
             .iter()
@@ -542,6 +556,7 @@ impl Element for Paragraph {
                 let mut pieces = Vec::new();
                 let mut cursor = shaped.cursor();
                 let mut measured = Pixels::ZERO;
+                let mut row_widths = Vec::with_capacity(rows.len());
                 for (row, range) in rows.iter().enumerate() {
                     let mut at = range.start;
                     let mut x = Pixels::ZERO;
@@ -573,6 +588,26 @@ impl Element for Paragraph {
                         at = end;
                     }
                     measured = measured.max(x);
+                    row_widths.push(x);
+                }
+                // Alignment is applied to the real shaped rows, so painting,
+                // selection and hit testing all agree. `width` is the box the
+                // rows were wrapped into.
+                if align != TextAlign::Left {
+                    for (row, range) in rows.iter().enumerate() {
+                        let shift = match align {
+                            TextAlign::Right => (width - row_widths[row]).max(Pixels::ZERO),
+                            TextAlign::Center => {
+                                ((width - row_widths[row]) / 2.0).max(Pixels::ZERO)
+                            }
+                            TextAlign::Left => Pixels::ZERO,
+                        };
+                        for piece in pieces.iter_mut().filter(|piece| {
+                            piece.range.start < range.end && piece.range.end > range.start
+                        }) {
+                            piece.origin.x += shift;
+                        }
+                    }
                 }
                 let height = line_height * rows.len().max(1);
                 *layout.borrow_mut() = LocalLayout {
@@ -580,6 +615,7 @@ impl Element for Paragraph {
                     bounds: Bounds::default(),
                     line_height,
                     code_fonts: code_fonts.clone(),
+                    align,
                 };
                 size(known.width.unwrap_or(measured.ceil().min(width)), height)
             },
@@ -597,6 +633,7 @@ impl Element for Paragraph {
         cx: &mut App,
     ) {
         self.layout.borrow_mut().bounds = bounds;
+        self.layout.borrow_mut().align = self.align;
         #[cfg(test)]
         {
             let layout = self.layout.borrow();
@@ -682,14 +719,9 @@ impl Element for Paragraph {
                     selection,
                 ));
             }
-            let _ = piece.line.paint(
-                origin,
-                layout.line_height,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+            let _ = piece
+                .line
+                .paint(origin, layout.line_height, layout.align, None, window, cx);
         }
     }
 }

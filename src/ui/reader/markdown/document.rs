@@ -13,12 +13,12 @@ use ely_core::theme::{ActiveTheme, Radius, TextSize};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, EmptyView, EventEmitter,
     FocusHandle, Focusable, InteractiveElement, IntoElement, ListAlignment, ListState, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled, Task, Window, div,
-    list, prelude::*, relative,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled, Task, TextAlign,
+    Window, div, list, prelude::*, relative,
 };
 
 use super::{
-    ast::{self, Block, Inline},
+    ast::{self, Align, Block, Inline},
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
 };
@@ -807,18 +807,16 @@ impl MarkdownView {
                             .min_w_0()
                             .px_3()
                             .py_2()
-                            .child(this.paragraph_unit(
-                                gpui::ElementId::Name(
-                                    format!("reader-cell-{ix}-{row}-{column}").into(),
-                                ),
-                                inline,
-                                this.next_unit(ix, &unit_cursor),
-                            ));
-                        if aligns.get(column) == Some(&ast::Align::Right) {
-                            cell = cell.text_right();
-                        } else if aligns.get(column) == Some(&ast::Align::Center) {
-                            cell = cell.text_center();
-                        }
+                            .child(
+                                this.paragraph_unit(
+                                    gpui::ElementId::Name(
+                                        format!("reader-cell-{ix}-{row}-{column}").into(),
+                                    ),
+                                    inline,
+                                    this.next_unit(ix, &unit_cursor),
+                                )
+                                .align(table_align(aligns, column)),
+                            );
                         if header {
                             cell = cell
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -1067,25 +1065,16 @@ impl MarkdownView {
                 aligns, head, rows, ..
             } => {
                 let cell = |this: &Self, inline: &Inline, row: usize, column: usize| {
-                    let mut cell =
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .child(this.paragraph_unit(
-                                gpui::ElementId::Name(
-                                    format!("reader-nested-cell-{}-{row}-{column}", id.1).into(),
-                                ),
-                                inline,
-                                this.next_unit(ix, units),
-                            ));
-                    if aligns.get(column) == Some(&ast::Align::Right) {
-                        cell = cell.text_right();
-                    } else if aligns.get(column) == Some(&ast::Align::Center) {
-                        cell = cell.text_center();
-                    }
-                    cell
+                    div().flex_1().min_w_0().px_3().py_2().child(
+                        this.paragraph_unit(
+                            gpui::ElementId::Name(
+                                format!("reader-nested-cell-{}-{row}-{column}", id.1).into(),
+                            ),
+                            inline,
+                            this.next_unit(ix, units),
+                        )
+                        .align(table_align(aligns, column)),
+                    )
                 };
                 let mut table = div()
                     .flex()
@@ -1221,6 +1210,15 @@ impl MarkdownView {
 
 /// Split only over-large containers into several virtualized blocks. A list
 /// keeps its own numbering by carrying the original first number and index.
+/// The text alignment a table column asks for.
+fn table_align(aligns: &[Align], column: usize) -> TextAlign {
+    match aligns.get(column) {
+        Some(Align::Right) => TextAlign::Right,
+        Some(Align::Center) => TextAlign::Center,
+        _ => TextAlign::Left,
+    }
+}
+
 fn flatten(blocks: Vec<Block>) -> Vec<Block> {
     let mut out = Vec::with_capacity(blocks.len());
     for block in blocks {
