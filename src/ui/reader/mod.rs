@@ -27,7 +27,6 @@
 pub mod fixtures;
 mod links;
 mod markdown;
-mod scrollbar;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -160,10 +159,10 @@ pub struct ReaderView {
     on_action: Option<OnAction>,
     _document_observer: Option<Subscription>,
     pending_markdown: Option<Task<()>>,
-    /// Hover/drag fade for the Markdown bar, shared with Source and tabs.
-    scroll_fade: crate::ui::scrollbar::Fade,
+    /// The Markdown bar's fade and drag, on the same shared [`crate::ui::scroll::Bars`]
+    /// as the tab strip and the sidebar.
+    bars: crate::ui::scroll::Bars,
     scroll_clock: std::time::Instant,
-    thumb_dragging: bool,
     #[cfg(test)]
     pinned_clock: Option<u64>,
 }
@@ -187,9 +186,8 @@ impl ReaderView {
             on_action: None,
             _document_observer: observer,
             pending_markdown: pending,
-            scroll_fade: Default::default(),
+            bars: crate::ui::scroll::Bars::new(),
             scroll_clock: std::time::Instant::now(),
-            thumb_dragging: false,
             #[cfg(test)]
             pinned_clock: None,
         }
@@ -229,8 +227,7 @@ impl ReaderView {
         self._document_observer = observer;
         self.pending_markdown = pending;
         self.last_action = None;
-        self.thumb_dragging = false;
-        self.scroll_fade = Default::default();
+        self.bars = crate::ui::scroll::Bars::new();
         cx.notify();
     }
 
@@ -398,7 +395,7 @@ impl ReaderView {
     /// Shows the Markdown bar without waiting for a hover fade.
     #[cfg(test)]
     pub fn show_scrollbar(&mut self) {
-        self.scroll_fade.snap(true);
+        self.bars.snap(true);
     }
 }
 
@@ -439,42 +436,52 @@ impl Render for ReaderView {
             ReaderState::Markdown(document) => {
                 let document = document.clone();
                 let state = document.read(cx).list_state().clone();
-                // The list's own drag height is released when GPUI drops the
-                // gesture, so the fade falls back to hover.
-                if self.thumb_dragging && !cx.has_active_drag() {
-                    self.thumb_dragging = false;
-                    self.scroll_fade.set_dragging(false, self.now_ms());
-                    state.scrollbar_drag_ended();
+                let now = self.now_ms();
+                let reduce = cx.reduce_motion();
+                // The platform may end a thumb drag outside the region; settle
+                // it so the bar returns to its hover resting state.
+                if self.bars.dragging().is_some() && !cx.has_active_drag() {
+                    self.bars.settle(&state, now, reduce);
                 }
-                let opacity = self.scroll_fade.opacity(self.now_ms());
-                if self.scroll_fade.is_animating() {
+                let opacity = self.bars.opacity(now);
+                if self.bars.is_animating() {
                     _window.request_animation_frame();
                 }
-                let owner = cx.entity_id();
                 let this = cx.entity().downgrade();
-                let on_dragging =
-                    std::rc::Rc::new(move |dragging: bool, _: &mut Window, cx: &mut App| {
+                let on_drag: crate::ui::scroll::OnDragging =
+                    std::rc::Rc::new(move |axis, dragging, _: &mut Window, cx: &mut App| {
                         let _ = this.update(cx, |view, cx| {
-                            view.thumb_dragging = dragging;
-                            view.scroll_fade.set_dragging(dragging, view.now_ms());
+                            let now = view.now_ms();
+                            let reduce = cx.reduce_motion();
+                            if let Some(state) = view
+                                .markdown()
+                                .map(|document| document.read(cx).list_state().clone())
+                            {
+                                view.bars.drag(&state, axis, dragging, now, reduce);
+                            }
                             cx.notify();
                         });
                     });
-                let bar = scrollbar::render_list(
-                    &state,
+                let bar = crate::ui::scroll::Bar {
+                    target: &state,
+                    id: crate::ui::scroll::BarId {
+                        owner: cx.entity_id(),
+                        name: "reader-markdown-scrollbar",
+                        axis: gpui::Axis::Vertical,
+                    },
+                    placement: crate::ui::scroll::Placement::overlay(4.0, 8.0),
+                    style: crate::ui::scroll::Style::DEFAULT,
                     opacity,
-                    owner,
-                    "reader-markdown-scrollbar",
-                    on_dragging,
-                    cx,
-                );
+                    on_drag,
+                }
+                .render(cx);
                 div()
                     .id("reader-markdown-root")
                     .debug_selector(|| "reader-markdown".to_string())
                     .relative()
                     .size_full()
                     .on_hover(cx.listener(|view, hovered, _, cx| {
-                        if view.scroll_fade.set_hovered(*hovered, view.now_ms()) {
+                        if view.bars.hover(*hovered, view.now_ms(), cx.reduce_motion()) {
                             cx.notify();
                         }
                     }))

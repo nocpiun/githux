@@ -22,7 +22,7 @@
 ## 维护的功能边界
 
 - 解析在短文本同步、长文本后台进行；每次 reset 推进代次，旧结果不能覆盖新文档。2 MiB 上限先由内容层拒绝。
-- 列表使用真实 `gpui::ListState`，只构建可见块；`list_state()` 是公开的真实滚动源，供当前 reader 细滚动条读取，未来 shared-scroll 可直接接入。没有假外层 handle、重复滚动条或透明拦截区域。
+- 列表使用真实 `gpui::ListState`，只构建可见块；`list_state()` 是公开的真实滚动源；PR #29 合入后，reader 的细条已改用共享 `src/ui/scroll` 的 `ScrollTarget for ListState`，没有过渡条或重复实现。没有假外层 handle、重复滚动条或透明拦截区域。
 - 行内代码由带真实 padding 的圆角框绘制；padding 参与换行、绘制和命中的同一组字形坐标，复制直接读原文，长代码可断行。
 - fenced code 语言标签是真元素，在代码块内上移约 6px（叠加 `mb_1`），代码正文和块间距不变。
 - 图片不创建任何 loader，仅显示 alt/未载入提示；HTML 作为惰性文本；危险链接仍由 reader 的 `links::resolve` 拒绝；链接只回调，不自动外跳。

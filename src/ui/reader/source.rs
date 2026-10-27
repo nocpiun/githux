@@ -56,9 +56,8 @@ pub struct SourceView {
     dragging: bool,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
-    fade: crate::ui::scrollbar::Fade,
+    bars: crate::ui::scroll::Bars,
     clock: std::time::Instant,
-    thumb_dragging: bool,
     last_reach: gpui::Point<Pixels>,
     /// Body bounds and shaped layout of each row actually painted this frame,
     /// so a drag over trailing whitespace still maps to a real column.
@@ -92,9 +91,8 @@ impl SourceView {
             dragging: false,
             focus: cx.focus_handle().tab_stop(true),
             scroll: UniformListScrollHandle::new(),
-            fade: Default::default(),
+            bars: crate::ui::scroll::Bars::new(),
             clock: std::time::Instant::now(),
-            thumb_dragging: false,
             last_reach: Default::default(),
             rows: std::collections::HashMap::new(),
             painting: Default::default(),
@@ -147,12 +145,7 @@ impl SourceView {
     }
 
     pub fn scrollbar_opacity(&mut self, now: u64) -> f32 {
-        self.fade.opacity(now)
-    }
-
-    /// The opacity the last frame painted through the real hover path.
-    pub fn scrollbar_opacity_at_now(&self) -> f32 {
-        self.fade.painted()
+        self.bars.opacity(now)
     }
 
     #[cfg(test)]
@@ -162,7 +155,7 @@ impl SourceView {
 
     #[cfg(test)]
     pub fn show_scrollbar(&mut self) {
-        self.fade.snap(true);
+        self.bars.snap(true);
     }
 
     fn line_range(&self, ix: usize) -> Range<usize> {
@@ -435,12 +428,13 @@ impl Render for SourceView {
                 .map(|(ix, bounds, layout)| (ix, (bounds, layout)))
                 .collect();
         }
-        if self.thumb_dragging && !cx.has_active_drag() {
-            self.thumb_dragging = false;
-            self.fade.set_dragging(false, self.now_ms());
+        let reduce = cx.reduce_motion();
+        if self.bars.dragging().is_some() && !cx.has_active_drag() {
+            let base = self.scroll.0.borrow().base_handle.clone();
+            self.bars.settle(&base, self.now_ms(), reduce);
         }
-        let opacity = self.fade.opacity(self.now_ms());
-        if self.fade.is_animating() {
+        let opacity = self.bars.opacity(self.now_ms());
+        if self.bars.is_animating() {
             window.request_animation_frame();
         }
         let handle = self.scroll.0.borrow().base_handle.clone();
@@ -473,8 +467,8 @@ impl Render for SourceView {
             .font_family(mono)
             .text_color(colors.fg)
             .child(list)
-            .children(self.scrollbar(gpui::Axis::Vertical, opacity, &handle, cx))
-            .children(self.scrollbar(gpui::Axis::Horizontal, opacity, &handle, cx))
+            .child(self.scrollbar(gpui::Axis::Vertical, opacity, &handle, cx))
+            .child(self.scrollbar(gpui::Axis::Horizontal, opacity, &handle, cx))
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
                 view.drag_anywhere(event, cx);
             }))
@@ -490,7 +484,7 @@ impl Render for SourceView {
                 cx.listener(|view, _, _, cx| view.end_selection_drag(cx)),
             )
             .on_hover(cx.listener(|view, hovered, _, cx| {
-                if view.fade.set_hovered(*hovered, view.now_ms()) {
+                if view.bars.hover(*hovered, view.now_ms(), cx.reduce_motion()) {
                     cx.notify();
                 }
             }))
@@ -529,22 +523,38 @@ impl SourceView {
         opacity: f32,
         handle: &gpui::ScrollHandle,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        (opacity > 0.0).then(|| {
-            let name = match axis {
-                gpui::Axis::Vertical => "reader-scrollbar-y",
-                gpui::Axis::Horizontal => "reader-scrollbar-x",
-            };
-            let this = cx.entity().downgrade();
-            let on_dragging = std::rc::Rc::new(move |dragging, _: &mut Window, cx: &mut App| {
+    ) -> AnyElement {
+        let name = match axis {
+            gpui::Axis::Vertical => "reader-scrollbar-y",
+            gpui::Axis::Horizontal => "reader-scrollbar-x",
+        };
+        let this = cx.entity().downgrade();
+        let on_drag: crate::ui::scroll::OnDragging =
+            std::rc::Rc::new(move |axis, dragging, _: &mut Window, cx: &mut App| {
                 let _ = this.update(cx, |view, cx| {
-                    view.thumb_dragging = dragging;
-                    view.fade.set_dragging(dragging, view.now_ms());
+                    let base = view.scroll.0.borrow().base_handle.clone();
+                    view.bars
+                        .drag(&base, axis, dragging, view.now_ms(), cx.reduce_motion());
                     cx.notify();
                 });
             });
-            super::scrollbar::render(handle, axis, opacity, cx.entity_id(), name, on_dragging, cx)
-        })
+        crate::ui::scroll::Bar {
+            target: handle,
+            id: crate::ui::scroll::BarId {
+                owner: cx.entity_id(),
+                name,
+                axis,
+            },
+            placement: match axis {
+                gpui::Axis::Vertical => crate::ui::scroll::Placement::overlay(4.0, 8.0)
+                    .clear_of(&crate::ui::scroll::Placement::overlay(4.0, 8.0), 0.0),
+                gpui::Axis::Horizontal => crate::ui::scroll::Placement::overlay(4.0, 8.0),
+            },
+            style: crate::ui::scroll::Style::DEFAULT,
+            opacity,
+            on_drag,
+        }
+        .render(cx)
     }
 }
 

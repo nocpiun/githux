@@ -76,9 +76,13 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - 图片不加载，HTML 惰性显示，链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，2 MiB 边界保持在内容层。
 - Source gutter 仍为原 0.75rem 加 6px。
 
-## 共享滚动条
+## 滚动条（共享核心）
 
-`src/ui/scrollbar.rs` 只抽取外观与 `Fade`，`src/ui/tab_scrollbar.rs` 保留已验收的标签条实现和参数；`ui/mod.rs` 仅新增 `reader`/`scrollbar` 模块声明，未改 Shell、侧栏、工作区导航或标签布局。Source 纵/横滚动条仍绑定 `UniformListScrollHandle.base_handle`；轴独立，横向溢出可达。
+main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、半透明、140ms 可反向淡出的细条，以及只读 `ScrollTarget`（`ScrollHandle` 与真实 `ListState` 适配，拖动开始/结束冻结列表测量）。Reader 直接使用这套共享实现，没有复制第二套样式或通用 scroll 子系统：
+
+- Markdown 纵向条绑定本地 `MarkdownView::list_state()` 的真实 `ListState`；滚轮、thumb 拖拽、范围更新、长文异步落地均作用于同一个列表。无溢出时 `Bar::render` 不构建元素，也不保留透明拦截区域。
+- Source 纵/横条沿用同一 `Bars`/`Bar`/`Style`，绑定 `UniformListScrollHandle.base_handle`，两轴独立、互不抢角落。
+- hover 入场、快速反向和拖动移出后释放都由 `Bars`/`Fade` 处理；拖动期间保持可见，结束后回到 hover 状态。
 
 ## 未覆盖与待验收
 
@@ -86,4 +90,4 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
 - **图片**：仓库模式不允许本地文件/data 图片，图片/HTML 在交给上游文档前被移除；没有网络下载、资产缓存或受控版本化 resolver。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 表格布局、脚注样式、绝对 URL 重写）。无法支持的语法按 Ely 的现有行为显示或按文本显示，不在本模块另造。
-- **接入**：`ui/mod.rs` 声明、仓库页面的文件选择与正文请求、data 层会话接线都还没有。本轮的预览与 fixture 只用于验收，不冒充真实数据。
+- **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有。本轮的预览与 fixture 只用于验收，不冒充真实数据。

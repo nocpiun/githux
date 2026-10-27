@@ -119,3 +119,5 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 负责人明确授权从 Ely 拆出 Markdown 阅读组件、由 Githux 维护改造；“只能等上游接口”的旧限制失效，整库 vendor 禁令不变。已在 `src/ui/reader/markdown/` 提取并重写解析、只读文档、inline 排版、选择复制、代码块和真实 ListState 滚动；官方 Ely 仅保留 `ely-core`，移除 `ely-documents`/`ely-editor`，新增的只有 `pulldown-cmark` 与 `unicode-segmentation`。源映射和 MIT 说明见主题文档。
 
 六项 UNMET 转为真实实现：fence 标签位置、inline code 字体/圆角/padding 与跨段复制、Markdown 真实滚动条、表格/列表/链接布局、异步首屏、密集 20,000 span 性能。密集章节改为一次 cursor 分段；测试由约 60 秒降到预算内。reader 55 项、主程序 390 项全部通过；fmt、locked all-target check、严格 clippy 和预览构建通过。真实窗口已核对 Markdown/Source/窄窗/代码块/滚动；最终视觉仍由负责人验收，PR 未合并。
+
+同步 main 的 PR #29 后，reader 原有过渡细条与旧 `scrollbar.rs`/`tab_scrollbar.rs` 被删除，Markdown 与 Source 均改用 `src/ui/scroll` 的共享 `Bars`/`Bar`/`ScrollTarget`；ListState 仍是唯一真实滚动源。合并后主程序 405 项、reader 67 项全部通过，严格 clippy 通过；共享滚动核心没有复制到 reader，测试/预览边界不变。
