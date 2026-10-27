@@ -115,6 +115,9 @@ pub struct MarkdownView {
     paragraph_ranges: Rc<RefCell<std::collections::HashMap<usize, std::ops::Range<usize>>>>,
     /// Painted bounds of visible top-level blocks, by block index.
     block_bounds: Rc<RefCell<std::collections::HashMap<usize, Bounds<Pixels>>>>,
+    /// Paragraph units painted in the frame being built. Hit testing uses only
+    /// these, so a row scrolled away can never win at its old position.
+    visible_units: Rc<RefCell<std::collections::HashSet<usize>>>,
     _focus_loss: Option<gpui::Subscription>,
 }
 
@@ -150,6 +153,7 @@ impl MarkdownView {
             paragraphs: Default::default(),
             paragraph_ranges: Default::default(),
             block_bounds: Default::default(),
+            visible_units: Default::default(),
             _focus_loss: None,
         };
         // Losing focus ends the gesture: a later move must not keep extending
@@ -415,7 +419,16 @@ impl MarkdownView {
         order: &[usize],
     ) -> Option<Hit> {
         let ranges = self.paragraph_ranges.borrow();
-        let mut order = order.to_vec();
+        let visible = self.visible_units.borrow();
+        let mut order: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|index| visible.contains(index))
+            .collect();
+        if order.is_empty() {
+            // Layout has not run yet (first frame): fall back to all known.
+            order = layouts.keys().copied().collect();
+        }
         order.sort_unstable();
         let mut best: Option<(usize, usize, Option<String>)> = None;
         for index in order {
@@ -891,14 +904,19 @@ impl MarkdownView {
                 .text_color(colors.fg)
                 .child(self.paragraph_unit(key, inline, self.next_unit(ix, units)))
                 .into_any_element(),
-            Block::Code { text, .. } => div()
-                .px_3()
-                .py_2()
-                .rounded(radius)
-                .bg(colors.sunken)
-                .font_family(mono.clone())
-                .child(text.clone())
-                .into_any_element(),
+            Block::Code { text, .. } => {
+                // The model registered this code block as a unit; consume it
+                // so the next paragraph maps to its own range.
+                let _ = self.next_unit(ix, units);
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded(radius)
+                    .bg(colors.sunken)
+                    .font_family(mono.clone())
+                    .child(text.clone())
+                    .into_any_element()
+            }
             Block::List { start, items } => div()
                 .flex()
                 .flex_col()
@@ -1094,6 +1112,8 @@ impl MarkdownView {
         unit: (usize, std::ops::Range<usize>),
     ) -> ParagraphView {
         let (index, doc) = unit;
+        // Laid out this frame: it may take part in hit testing.
+        self.visible_units.borrow_mut().insert(index);
         self.paragraph_ranges
             .borrow_mut()
             .insert(index, doc.clone());
@@ -1162,6 +1182,8 @@ fn flatten(blocks: Vec<Block>) -> Vec<Block> {
 impl Render for MarkdownView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors.clone();
+        // A new frame: only paragraphs laid out below are hit-testable.
+        self.visible_units.borrow_mut().clear();
         let list = list(
             self.list.clone(),
             cx.processor(|view: &mut Self, ix: usize, window: &mut Window, cx| {

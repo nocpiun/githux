@@ -1958,3 +1958,72 @@ fn line_number_left_inset_holds_for_one_to_five_digits(cx: &mut TestAppContext) 
         );
     }
 }
+
+#[gpui::test]
+fn nested_code_before_a_linked_paragraph_keeps_their_own_text(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "> ```\n> abc\n> ```\n>\n> [Guide](guide.md)".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(800.0), px(500.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, "Guide");
+    cx.simulate_click(layout.pieces[0].text_bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            reader.read_with(cx, |r, _| r.last_action().cloned()),
+            Some(ReaderAction::Link(LinkTarget::Repository(_)))
+        ),
+        "the paragraph after a nested code block keeps its own link"
+    );
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let all = selected(&reader, cx);
+    assert!(all.contains("abc") && all.contains("Guide"), "{all:?}");
+}
+
+#[gpui::test]
+fn scrolled_away_rows_do_not_win_pointer_hits(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(700.0), px(360.0)));
+    frames(cx);
+    let frame = cx.debug_bounds("reader-markdown").unwrap();
+    // Visit later blocks, then return to the top.
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    for _ in 0..6 {
+        cx.simulate_event(ScrollEvent {
+            position: frame.center(),
+            delta: ScrollDelta::Lines(point(0.0, -40.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source: gpui::ScrollSource::Pointer,
+        });
+        frames(cx);
+    }
+    for _ in 0..10 {
+        cx.simulate_event(ScrollEvent {
+            position: frame.center(),
+            delta: ScrollDelta::Lines(point(0.0, 40.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source: gpui::ScrollSource::Pointer,
+        });
+        frames(cx);
+    }
+    frames(cx);
+    let top = cx.debug_bounds("markdown-heading-0").unwrap();
+    cx.simulate_click(
+        point(top.left() + px(20.0), top.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let text = selected(&reader, cx);
+    assert!(text.starts_with("Section 0"), "{text:?}");
+}

@@ -17,6 +17,9 @@ pub struct Unit {
     pub at: Range<usize>,
     /// Its own text, in bytes.
     pub len: usize,
+    /// Text inserted after this unit before the next one, such as a blank
+    /// line between blocks or a tab between table cells.
+    pub separator: &'static str,
     /// Link ranges inside this unit, in its own bytes.
     pub links: Vec<(Range<usize>, String)>,
 }
@@ -72,12 +75,33 @@ impl DocText {
             .filter_map(|ix| self.units.get(*ix))
     }
 
+    /// The unit whose range holds `at`, half-open so a unit's last byte and
+    /// the next unit's first byte are never confused.
+    pub fn unit_containing(&self, at: usize) -> Option<&Unit> {
+        self.units
+            .iter()
+            .find(|unit| unit.at.start <= at && at < unit.at.end)
+            .or_else(|| {
+                // The document's very last byte belongs to its last unit.
+                self.units
+                    .last()
+                    .filter(|unit| unit.at.end == at && !unit.at.is_empty())
+            })
+    }
+
     /// The URL of a link covering document offset `at`.
     pub fn link_at(&self, at: usize) -> Option<String> {
+        // Half-open: a unit ending exactly where the next starts must not
+        // claim the next unit's first glyph (that glyph can begin a link).
         let unit = self
             .units
             .iter()
-            .find(|unit| unit.at.start <= at && at <= unit.at.end)?;
+            .find(|unit| unit.at.start <= at && at < unit.at.end)
+            .or_else(|| {
+                self.units
+                    .iter()
+                    .find(|unit| unit.at.start <= at && at <= unit.at.end)
+            })?;
         let local = at.checked_sub(unit.at.start)?;
         unit.links
             .iter()
@@ -86,6 +110,22 @@ impl DocText {
     }
 
     fn push(&mut self, text: &str, links: Vec<(Range<usize>, String)>) -> Range<usize> {
+        self.push_with_separator(
+            text, links, "
+
+",
+        )
+    }
+
+    /// Appends a unit followed by `separator`. The separator is part of the
+    /// document text but not of the unit, so unit offsets stay exact while a
+    /// copy keeps block and cell boundaries.
+    fn push_with_separator(
+        &mut self,
+        text: &str,
+        links: Vec<(Range<usize>, String)>,
+        separator: &'static str,
+    ) -> Range<usize> {
         let start = self.text.len();
         self.text.push_str(text);
         let at = start..self.text.len();
@@ -93,11 +133,13 @@ impl DocText {
         self.units.push(Unit {
             at: at.clone(),
             len: text.len(),
+            separator,
             links,
         });
         if let Some(block) = self.by_block.last_mut() {
             block.push(index);
         }
+        self.text.push_str(separator);
         at
     }
 
@@ -115,7 +157,10 @@ impl DocText {
             }
             Block::Table { head, rows, .. } => {
                 for cell in head.iter().chain(rows.iter().flatten()) {
-                    self.inline(cell);
+                    if cell.text.is_empty() {
+                        continue;
+                    }
+                    self.push_with_separator(&cell.text, cell.links.clone(), "	");
                 }
             }
             Block::Math { tex, .. } => {
@@ -192,6 +237,54 @@ mod tests {
         let doc = parse("see [Guide](guide.md) now");
         let model = DocText::build(&doc.blocks);
         let at = model.text().find("Guide").unwrap();
+        assert_eq!(model.link_at(at).as_deref(), Some("guide.md"));
+    }
+
+    #[test]
+    fn copying_keeps_block_and_cell_boundaries() {
+        let doc = parse(
+            "intro
+
+next
+
+- a
+- b
+
+| x | y |
+|---|---|
+| p | q |",
+        );
+        let model = DocText::build(&doc.blocks);
+        let text = model.text();
+        assert!(
+            text.contains(
+                "intro
+
+next"
+            ),
+            "{text:?}"
+        );
+        assert!(text.contains('a') && text.contains('b'), "{text:?}");
+        assert!(!text.contains("intronext"), "{text:?}");
+        assert!(
+            !text.contains(
+                "ab
+
+|x|y|"
+            ),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_link_at_the_start_of_a_unit_is_found() {
+        let doc = parse(
+            "intro
+
+[x](guide.md)",
+        );
+        let model = DocText::build(&doc.blocks);
+        let at = model.text().find('x').unwrap();
         assert_eq!(model.link_at(at).as_deref(), Some("guide.md"));
     }
 
