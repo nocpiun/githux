@@ -10,6 +10,8 @@ description = "A GitHub desktop client built with GPUI and Ely"
 # but use the application's Noto Sans / Google Sans Code instead of Ely's fonts.
 [dependencies]
 ely-core = { default-features = false, git = "https://github.com/ELY-Open-Source/Ely-GPUI-Components", rev = "30c66fe1d5d23db769a6c834b771d054d7f288cf", features = ["runtime_shaders"] }
+ely-documents = { git = "https://github.com/ELY-Open-Source/Ely-GPUI-Components", rev = "30c66fe1d5d23db769a6c834b771d054d7f288cf", default-features = false }
+ely-editor = { git = "https://github.com/ELY-Open-Source/Ely-GPUI-Components", rev = "30c66fe1d5d23db769a6c834b771d054d7f288cf", default-features = false }
 gpui = { package = "gpui-pre", version = "=0.3.10" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit"] }
 serde = { version = "1.0", features = ["derive"] }

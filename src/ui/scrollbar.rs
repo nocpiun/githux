@@ -4,7 +4,7 @@
 //! same primitives with their real scrolling handles. A fully hidden bar is
 //! not in the element tree, so it cannot intercept text selection or a link.
 
-use ely_gpui_component::theme::ActiveTheme;
+use ely_core::theme::ActiveTheme;
 use gpui::App;
 
 #[allow(unused_imports)]

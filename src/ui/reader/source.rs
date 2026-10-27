@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use ely_gpui_component::{
+use ely_core::{
     forms::{Highlight, code_highlights},
     theme::{ActiveTheme, TextSize},
 };
@@ -496,7 +496,7 @@ impl Render for SourceView {
             }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;
-                if !keystroke.modifiers.secondary() {
+                if !keystroke.modifiers.secondary(cx) {
                     return;
                 }
                 match keystroke.key.as_str() {
@@ -718,7 +718,7 @@ mod tests {
 
     #[gpui::test]
     fn dense_line_highlighting_stays_within_an_interaction_budget(cx: &mut gpui::TestAppContext) {
-        cx.update(ely_gpui_component::init_for_tests);
+        cx.update(ely_core::init_for_tests);
         // 131,072 syntax spans on a single visible 128 KiB minified line.
         // The former per-interval find performs billions of comparisons here.
         let line = "x=1;".repeat(32_768);

@@ -66,11 +66,13 @@ view.update(cx, |view, _| {
 
 **已定位的 Ely 行为边界：** 若把长文本直接传给 `MarkdownDocument::new(text, ..)`，其异步读取会 splice 进一个「已经按 0 项测量过」的列表，结果**一个块都不绘制**。在测试平台上以 130 KiB 起稳定复现（独立于本模块，直接用 `MarkdownDocument` 也复现）。`new(String::new(), ..)` 后再 `reset(text, cx)` 会请求在读取落地后定位到首行，列表仍锚定在 block 0，因此能正常绘制到 2 MiB。本模块因此采用后者，并在注释与开发日志里记录原因。这是上游行为观察，不是本仓库的补丁，也不改 Ely revision。
 
-## Markdown 阅读排版与真实滚动条
+## Markdown 阅读与上游文档
 
-Ely 通过本 PR 的单 crate `[patch]` 固定在同一基线的本地副本，见 [Markdown 补丁](content-reader-markdown-patch.md)。Preview 的 inline code 使用 `theme.mono_family`（预览为 Google Sans Code），正文继续使用 Noto Sans。3.5px 左右、1px 上下 padding 和 4px 圆角浅背景来自真实字形排版；长代码按 grapheme 断行，跨代码段拖选与 `Ctrl+C` 使用同一段落布局，复制不含 padding 字符。fence 语言标签局部上移 8px，代码首行与语法着色不随之平移。
+Markdown 使用官方 `ely-documents`（固定 SHA）的 `MarkdownDocument` Preview。文档自行虚拟化布局、解析并提供真实滚动条；Source 仍为 reader 的只读虚拟列表。初始化同时绑定 `ely-editor` / `ely-documents` 的按键，主题字体仍为 Noto Sans / Google Sans Code。
 
-Markdown 右侧 3px 细滚动条直接绑定文档原有 `ListState`，不是外层伪造的 `ScrollHandle`。范围、滚轮、拖动、resize clamp 均走列表接口；无溢出不构建滚动条，hover 使用共享 `Fade`，拖动保持反馈。只有可见 block 参与排版。
+仓库内容的图片和 HTML 在后台用公开 mdast 树移除后才交给文档，避免上游文件/data 图片路径；异步完成后校验当前文档实体，旧内容不会覆盖新内容。链接仍解析为版本化 `ReaderAction`，危险 scheme 拒绝；选择复制、2 MiB 上限和状态面板保持不变。
+
+**未完成视觉：** fence 标签上移、inline code 圆角/小 padding/代码字体、Markdown 3 px hover fade 滚动条需要固定上游未公开的文档扩展点；Source gutter 0.75rem+6px 已保留。原测试明确保留这些失败，详见 [上游接口边界](content-reader-markdown-patch.md)。本 PR 不再 vendor 或修改 Cargo 缓存。
 
 ## 共享滚动条
 
@@ -80,6 +82,6 @@ Markdown 右侧 3px 细滚动条直接绑定文档原有 `ListState`，不是外
 
 - **真实 Windows 窗口**：鼠标拖选、`Ctrl+C`、Shift+滚轮横向滚动、中文 IME 组合态在源码视图中的行为、emoji 与中文字形回退、多 DPI。测试平台不经过 Windows 原生输入分发，不能替代。
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
-- **图片**：仓库模式不允许本地文件/data 图片，没有注入资源的接口实现、没有网络下载、没有资产缓存；等待后续受控版本化 resolver。
+- **图片**：仓库模式不允许本地文件/data 图片，图片/HTML 在交给上游文档前被移除；没有网络下载、资产缓存或受控版本化 resolver。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 表格布局、脚注样式、绝对 URL 重写）。无法支持的语法按 Ely 的现有行为显示或按文本显示，不在本模块另造。
 - **接入**：`ui/mod.rs` 声明、仓库页面的文件选择与正文请求、data 层会话接线都还没有。本轮的预览与 fixture 只用于验收，不冒充真实数据。

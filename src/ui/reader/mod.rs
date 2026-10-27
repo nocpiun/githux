@@ -26,6 +26,7 @@
 
 pub mod fixtures;
 mod links;
+mod markdown;
 mod scrollbar;
 mod source;
 #[cfg(test)]
@@ -36,14 +37,14 @@ pub use source::SourceView;
 
 use std::rc::Rc;
 
-use ely_gpui_component::{
-    documents::{MarkdownDocument, MarkdownMode},
+use ely_core::{
     primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, TextSize},
 };
+use ely_documents::{MarkdownDocument, MarkdownMode};
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div,
+    Render, Styled, Subscription, Task, WeakEntity, Window, div,
 };
 
 use crate::content::{PreparedBody, PreparedContent, UnsupportedContent};
@@ -158,16 +159,8 @@ pub struct ReaderView {
     state: ReaderState,
     last_action: Option<ReaderAction>,
     on_action: Option<OnAction>,
-    /// The Markdown reading area's hover/drag fade, shared with the source and
-    /// tab scrollbars.
-    scroll_fade: crate::ui::scrollbar::Fade,
-    scroll_clock: std::time::Instant,
-    thumb_dragging: bool,
-    /// Re-renders this view when the Markdown list scrolls, so its overlay
-    /// thumb follows the real offset instead of a stale frame.
     _document_observer: Option<Subscription>,
-    #[cfg(test)]
-    pinned_clock: Option<u64>,
+    pending_markdown: Option<Task<()>>,
 }
 
 impl ReaderView {
@@ -179,7 +172,7 @@ impl ReaderView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (state, observer) =
+        let (state, observer, pending) =
             build_state(body, &kind, &context, cx.entity().downgrade(), window, cx);
         Self {
             context,
@@ -187,12 +180,8 @@ impl ReaderView {
             state,
             last_action: None,
             on_action: None,
-            scroll_fade: Default::default(),
-            scroll_clock: std::time::Instant::now(),
-            thumb_dragging: false,
             _document_observer: observer,
-            #[cfg(test)]
-            pinned_clock: None,
+            pending_markdown: pending,
         }
     }
 
@@ -217,7 +206,8 @@ impl ReaderView {
         cx: &mut Context<Self>,
     ) {
         self.kind = kind;
-        let (state, observer) = build_state(
+        self.pending_markdown = None;
+        let (state, observer, pending) = build_state(
             body,
             &self.kind,
             &self.context,
@@ -227,9 +217,8 @@ impl ReaderView {
         );
         self.state = state;
         self._document_observer = observer;
+        self.pending_markdown = pending;
         self.last_action = None;
-        self.thumb_dragging = false;
-        self.scroll_fade = Default::default();
         cx.notify();
     }
 
@@ -294,8 +283,9 @@ impl ReaderView {
 
 /// Builds the state for one body. Markdown gets Ely's preview document; source
 /// gets the local read-only view; the rest are status presentations. The
-/// returned subscription keeps this view redrawing while the Markdown list
-/// scrolls, so its overlay thumb tracks the real offset.
+/// subscription follows document notifications; the document owns its own
+/// real scrolling and scrollbar. The task sanitizes repository images off-thread
+/// and checks the active document entity before publishing a result.
 fn build_state(
     body: PreparedBody,
     kind: &DocumentKind,
@@ -303,27 +293,38 @@ fn build_state(
     view: WeakEntity<ReaderView>,
     window: &mut Window,
     cx: &mut Context<ReaderView>,
-) -> (ReaderState, Option<Subscription>) {
+) -> (ReaderState, Option<Subscription>, Option<Task<()>>) {
     match body {
-        PreparedBody::Empty => (ReaderState::Empty, None),
-        PreparedBody::Unsupported(reason) => (ReaderState::Unsupported(reason), None),
-        PreparedBody::TooLarge { size, limit } => (ReaderState::TooLarge { size, limit }, None),
+        PreparedBody::Empty => (ReaderState::Empty, None, None),
+        PreparedBody::Unsupported(reason) => (ReaderState::Unsupported(reason), None, None),
+        PreparedBody::TooLarge { size, limit } => {
+            (ReaderState::TooLarge { size, limit }, None, None)
+        }
         PreparedBody::Utf8 { text, .. } => match kind {
             DocumentKind::Markdown => {
                 let context = context.clone();
-                // The text is handed to `reset` rather than to `new`: with the
-                // text at construction, Ely's document splices an async read
-                // into a list that already measured zero items and then draws
-                // no blocks at all (reproduced on the GPUI test platform at
-                // ~130 KiB and above). `reset` asks for the top line once the
-                // read lands, which keeps the list anchored at block 0, and
-                // still parses off the UI thread. See `docs/content-reader.md`.
                 let document = cx.new(|cx| {
-                    let mut document =
-                        MarkdownDocument::new(String::new(), MarkdownMode::Preview, window, cx);
-                    document.reset(text, cx);
-                    document
+                    MarkdownDocument::new(String::new(), MarkdownMode::Preview, window, cx)
                 });
+                let target = document.downgrade();
+                let pending = Some(cx.spawn_in(window, async move |reader, cx| {
+                    let safe = cx
+                        .background_spawn(async move { markdown::safe_markdown(&text) })
+                        .await;
+                    let _ = reader.update_in(cx, |reader, window, cx| {
+                        if let Some(document) = target.upgrade() {
+                            if reader
+                                .markdown()
+                                .is_none_or(|current| current.entity_id() != document.entity_id())
+                            {
+                                return;
+                            }
+                            document.update(cx, |document, cx| document.reset(safe, cx));
+                        }
+                        window.refresh();
+                        cx.notify();
+                    });
+                }));
                 document.update(cx, |document, _| {
                     document.on_link(move |url, window, cx| {
                         let target = links::resolve(url, &context);
@@ -331,14 +332,13 @@ fn build_state(
                             view.update(cx, |view, cx| view.record_link(target, window, cx));
                         }
                     });
-                    document.set_reader_inline(true);
                 });
                 let observer = cx.observe(&document, |_, _, cx| cx.notify());
-                (ReaderState::Markdown(document), Some(observer))
+                (ReaderState::Markdown(document), Some(observer), pending)
             }
             DocumentKind::Source { language } => {
                 let view = cx.new(|cx| SourceView::new(text, language.clone(), window, cx));
-                (ReaderState::Source(view), None)
+                (ReaderState::Source(view), None, None)
             }
         },
     }
@@ -387,31 +387,8 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-impl ReaderView {
-    fn now_ms(&self) -> u64 {
-        #[cfg(test)]
-        if let Some(ms) = self.pinned_clock {
-            return ms;
-        }
-        self.scroll_clock.elapsed().as_millis() as u64
-    }
-
-    /// Freezes the Markdown scrollbar's fade clock, for tests that need the
-    /// bar present without stepping a real fade.
-    #[cfg(test)]
-    pub fn pin_scrollbar_clock(&mut self, ms: u64) {
-        self.pinned_clock = Some(ms);
-    }
-
-    /// Shows the Markdown scrollbar without waiting for a hover fade.
-    #[cfg(test)]
-    pub fn show_scrollbar(&mut self) {
-        self.scroll_fade.snap(true);
-    }
-}
-
 impl Render for ReaderView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let body = match &self.state {
             ReaderState::Empty => status_panel(
@@ -446,49 +423,12 @@ impl Render for ReaderView {
             ),
             ReaderState::Markdown(document) => {
                 let document = document.clone();
-                let state = document.read(cx).list_state().clone();
-                // A drag ends when GPUI clears the active drag; release it here
-                // so the list's frozen drag height is dropped and the fade can
-                // fall back to the hover state.
-                if self.thumb_dragging && !cx.has_active_drag() {
-                    self.thumb_dragging = false;
-                    self.scroll_fade.set_dragging(false, self.now_ms());
-                    state.scrollbar_drag_ended();
-                }
-                let opacity = self.scroll_fade.opacity(self.now_ms());
-                if self.scroll_fade.is_animating() {
-                    window.request_animation_frame();
-                }
-                let owner = cx.entity_id();
-                let this = cx.entity().downgrade();
-                let on_dragging =
-                    std::rc::Rc::new(move |dragging: bool, _: &mut Window, cx: &mut App| {
-                        let _ = this.update(cx, |view, cx| {
-                            view.thumb_dragging = dragging;
-                            view.scroll_fade.set_dragging(dragging, view.now_ms());
-                            cx.notify();
-                        });
-                    });
-                let bar = scrollbar::render_list(
-                    &state,
-                    opacity,
-                    owner,
-                    "reader-markdown-scrollbar",
-                    on_dragging,
-                    cx,
-                );
                 div()
                     .id("reader-markdown-root")
                     .debug_selector(|| "reader-markdown".to_string())
                     .relative()
                     .size_full()
-                    .on_hover(cx.listener(|view, hovered, _, cx| {
-                        if view.scroll_fade.set_hovered(*hovered, view.now_ms()) {
-                            cx.notify();
-                        }
-                    }))
                     .child(document)
-                    .child(bar)
                     .into_any_element()
             }
             // Keep the source root's overlay siblings direct: an extra

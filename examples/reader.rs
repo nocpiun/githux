@@ -26,7 +26,7 @@ use reader_modules::reader;
 
 use std::rc::Rc;
 
-use ely_gpui_component::{
+use ely_core::{
     Assets,
     buttons::Button,
     theme::{ActiveTheme, Mode, TextSize, Theme},
@@ -154,8 +154,8 @@ impl Preview {
             let active = index == self.active;
             Button::new(("fixture", index), fixture.label)
                 .variant(match active {
-                    true => ely_gpui_component::buttons::ButtonVariant::Primary,
-                    false => ely_gpui_component::buttons::ButtonVariant::Secondary,
+                    true => ely_core::buttons::ButtonVariant::Primary,
+                    false => ely_core::buttons::ButtonVariant::Secondary,
                 })
                 .on_click(move |_, window, cx| {
                     this.update(cx, |preview, cx| preview.switch(index, window, cx));
@@ -223,7 +223,9 @@ fn main() {
     gpui_platform::application()
         .with_assets(Assets)
         .run(|cx: &mut App| {
-            ely_gpui_component::init(cx).expect("Ely failed to start");
+            ely_core::init(cx).expect("Ely failed to start");
+            ely_editor::bind_keys(cx);
+            ely_documents::bind_keys(cx);
             fonts::register(cx).expect("the bundled fonts failed to register");
             Theme::set_mode_now(Mode::Dark, cx);
             Theme::update(cx, |theme| {

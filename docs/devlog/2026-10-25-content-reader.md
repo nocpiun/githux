@@ -105,3 +105,11 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 后续审查指出连续代码 span 之间的样式边界会拆成多个绘制 piece，而换行预算只计算整个 code region 的一组 padding。现改为换行与绘制共用有序边界，每个 piece 都计算左右 inset。`adjacent_differently_styled_code_budgets_every_padding_inset` 在 190px 视口核对每个实际背景矩形不越界；reader 49 项通过。
 
 真实窗口补充：在 150% DPI 下先修正截图脚本的 DPI 感知，避免把捕获位图截短误判为布局溢出。已实际核对长 inline 窄窗换行、代码围栏、Source 的 1/2/4/5 位行号和大 Markdown 原生滚轮/右侧细条。首次异步 blocks 采用时增加 ListState reset，真实窗口无需滚轮即可自动显示 Section 0；近 2 MiB fixture 的后台解析约十几秒，仍是性能边界，不宣称即时加载。新增无 window.refresh/输入的首块绘制回归。最终视觉与原生输入由负责人验收。
+
+## 2026-10-27 官方 Ely / GPUI 0.3.10 迁移
+
+同步 main `7ed70cda44c2f3ba36eeb740fd0925f20f5882b8`（本地 merge `ef0c37da0a1ffa2da6d7469e5f0649199bcd07ab`）后，负责人撤销整库/单 crate vendor 批准。已按明确路径删除本 PR 的 1,273 个 `vendor/ely-gpui-component` 跟踪文件，Cargo 只用官方仓库固定 SHA `30c66fe1d5d23db769a6c834b771d054d7f288cf`。reader 实际增加 `ely-documents`/`ely-editor`；`ely-core` 仍 default-features=false、保留 `runtime_shaders`，GPUI 统一 0.3.10。
+
+实际迁移了核心 imports、Source 的 `ScrollEvent`/`ScrollSource::Pointer` 和 `KeyBinding` 初始化；Markdown 改用上游文档异步解析。公开文档不提供图片 resolver，reader 先通过公开 mdast 删除图片/HTML，再检查当前文档实体写入；新增替代旧文档写入的 stale-result 回归。Source 的只读、选择复制、真实双轴滚动、危险链接拒绝和大内容虚拟化继续通过。
+
+迁移后的上游无法提供 fence 标签、inline 圆角代码字体和 3 px fade 滚动条的扩展点；原有验收测试未删除，仍以失败结果保留。未 vendor、fork 或改缓存，未复制 PR #29 核心。详细边界与最小方案见 [Markdown 上游接口](content-reader-markdown-patch.md)。真实窗口最终视觉仍需负责人验收，本 PR 未合并。

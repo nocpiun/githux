@@ -1,27 +1,25 @@
-# Markdown 阅读效果的 Ely 补丁
+# Markdown 阅读效果的上游接口边界
 
-更新：2026-10-26。任务 `content-reader`，PR #27。协调裁决已批准单 crate 补丁，本文记录**实际实现**，不再等待上游审批。
+更新：2026-10-27。任务 `content-reader`，PR #27。**旧 vendor / 单 crate 补丁的批准已撤销，本任务不再包含 `vendor/ely-gpui-component`、Cargo patch、fork 或缓存补丁。** 当前依赖是官方仓库固定 revision `30c66fe1d5d23db769a6c834b771d054d7f288cf` 的 `ely-core`、`ely-documents`、`ely-editor`，GPUI `=0.3.10`。
 
-## 固定与复现
+## 已完成的迁移
 
-根 `Cargo.toml` 的普通依赖与 dev-dependency 都经 `[patch]` 指向 `vendor/ely-gpui-component`。基线是 `da3fdcaf39f2fa85ce1dd9cad07c3c81cf1dd721`，Ely 0.1.1、GPUI 0.3.8、Rust 1.98.1 均未升级。`cargo metadata` / `cargo tree -i ely-gpui-component` 核对同一解析结果；`cargo check --locked` 可在不访问 Ely 上游的干净环境重建。
+- reader 的 Markdown 使用上游 `ely_documents::MarkdownDocument` Preview 模式；Source 使用 reader 自有只读虚拟列表和官方 `ely_core::forms::code_highlights`。
+- 上游文档自己持有真实 `ListState` 并提供右侧滚动条；不伪造外层 handle，也不做 overlay 双滚动条。公开可测的滚动位置是 `top_line()`，测试验证真实滚轮会改变它。
+- 上游文档有异步解析。由于 Markdown 图片/HTML 可能触发上游文件或 data 资源路径，reader 在把正文交给文档前用公开 mdast 树在后台移除 `Image`、`ImageReference`、`Html` 节点，保留换行并显示纯文本占位。完成后校验目标文档实体，旧结果不回写。2 MiB 边界、只读选择/复制、链接不自动外跳和版本化危险 scheme 拒绝仍由 reader 负责。
+- 依赖只增加 `ely-documents` 与 `ely-editor`（后者由 documents 使用并提供代码着色），不使用汇总所有垂直组件的 facade。
 
-目录只含构建必需的 `src/`、`assets/`、`Cargo.toml` 和 MIT `LICENSE`，不含整个依赖树、`.git`、缓存或上游 gallery。`README.githux.md` 记录来源、基线、实际改动与维护方法，`patches/` 保留逐文件差异。本机 Cargo cache/checkout 未修改。
+## 未满足的视觉要求（证据）
 
-## 已修正的旧 API 说法
+固定上游公开接口无法保持旧补丁提供的四项视觉细节。原验收测试仍保留并**明确失败**，没有删除、静默跳过或把上游同名组件当作完成：
 
-旧方案称 `list(...).track_scroll(&handle)` 可用于 GPUI 0.3.8 的 `List`，这是错误的。现在由 `MarkdownDocument::list_state()` 暴露**原有** `ListState`，阅读器用 `viewport_bounds`、`max_offset_for_scrollbar`、`scroll_px_offset_for_scrollbar` 绘制细滚动条，并用 `set_offset_from_scrollbar` / `scrollbar_drag_started/ended` 拖动。列表不重建，正文仍是虚拟化；滚动通知让 overlay 随真实偏移重绘。
+| 要求 | 当前证据 | 最小上游方案 |
+| --- | --- | --- |
+| fence 语言标签上移 | 文档预览不转发 `MarkdownRenderer::code(...)`；没有对应 code-block 语言元素。`code_fence_language_sits_near_the_block_top` 失败。 | 在文档绘制路径转发已有 renderer code hook，或在文档 API 暴露语言标签 inset。 |
+| inline code 圆角、小 padding、代码字体 | 文档只使用 `HighlightStyle`，无独立字体/圆角/padding 与字形位置。相关 inline 测试失败。 | 提供只读段落的代码 run 布局扩展点，保持同一文本布局用于选择/复制。 |
+| Markdown 3 px 圆角半透明 hover Fade 滚动条 | 上游 `Scrollbar` 固定主题 6 px、自身 activity 显隐，无法接 reader 的 3 px/140 ms 双向 fade；`ListState` 仍私有，无法外接。测试失败。 | 允许文档暴露真实滚动源或 style/presence/drag 接入点；不复制一套私有列表。 |
+| Source 行号 0.75rem+6px | 通过 reader `gutter_gap` 保留，真实布局和 1/2/4/5 位行号测试通过。 | 不需要上游改动。 |
 
-## 实际改动
+## 维护边界
 
-1. `document/mod.rs`：真实 `ListState` 访问器和滚动通知；空列表首次采用异步解析的 blocks 时 reset 测量状态，避免等待无关滚轮才显示正文。
-2. `document/visual.rs`、`render.rs`：Preview 可选启用 reader 排版；编辑模式保持 Ely 原有点到源码映射。
-3. `render/inline.rs`：一个连续段落元素。每段按正文和 `theme.mono_family` 的真实 `TextRun` 塑形；代码 padding 参与推进、换行、圆角背景和命中计算。长代码按 grapheme 边界断行，复制直接读原 inline 字节，不塞入 padding 字符。硬换行强制另起一行，链接按字形命中，与选择 caret 分开。短段落返回实际固有宽度以保留表格列对齐。样式边界用 sweep，字形位置只索引一次，避免逐字调用 GPUI 线性 `x_for_index`；只绘制裁剪区内的行。测试快照来自同一帧实际布局，包含代码字体与几何。
-4. fence 语言标签仅局部上移 8px；代码文本保持其布局与语法着色。
-5. `picture.rs`：仓库 reader 的图片策略在创建 loader 前拒绝文件系统与 data 来源，包括 `file:`、绝对/UNC 路径、带 base 的相对路径；外网图片仍只显示未下载提示。通用上游调用方的默认行为保持原样。`documents/mod.rs` 仅在 `test-support` 下导出布局/策略核验接口。
-
-阅读器侧 `ReaderView` 持有与源码/标签条同源的 `Fade`，hover 淡入淡出、拖动保持反馈、无溢出不画条。Source gutter 仍为原 0.75rem 加 6px。
-
-## 验证边界
-
-GPUI 测试平台覆盖真实 ListState 滚轮/拖动、hover 淡入淡出、resize/替换范围 clamp、长文虚拟化、代码字体和布局、窄窗口断行、跨代码段选择复制、fence 几何、表格对齐和文件图片拒绝。密集段落使用 20,000 个 inline code span，计时实际 resize 排版而非切换到普通 fixture。Windows 真实窗口仍由负责人验收；不声称测试平台等于最终视觉验收。
+不得恢复整库或单 crate vendor、fork、Cargo 缓存补丁，也不应为了这四项复制整套 `ely-documents` 的 Markdown 布局。上述缺口需要上游提供长期可维护的公开扩展点；此前“从上游局部提取 Markdown 架构”只是讨论稿，没有获批。PR #29 的共享滚动条核心也未合并，本任务不复制其实现；后续统一接线点应在它合并后由协调任务处理。
