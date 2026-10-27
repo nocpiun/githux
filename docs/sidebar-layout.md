@@ -20,8 +20,10 @@ Home/Settings、仓库和 Profile 的活动行从客户区可绘制左缘 x=0 �
 
 ## 平滑滚动
 
-`src/ui/scrolling.rs` 提供最小共享滚动适配：离散鼠标滚轮累加进目标偏移，按真实时间用 Ely `ease_out_cubic`（约 130ms）缓动；触控板/高精度像素滚动直接应用，不做二次惯性；边界 clamp 到 GPUI 的 `[-max, 0]`，内容变短时同样收敛；无动画时不请求帧，遵循 reduced-motion。透明 `wheel_overlay` 在捕获阶段拦截指针所在区域，只消费一次并抑制 GPUI 内建的逐事件跳变；键盘 reveal、路由重置和 palette 光标移动会取消在途缓动。
+`src/ui/scrolling.rs` 提供最小共享滚动适配：离散鼠标滚轮累加进目标偏移，按真实时间用 `ely_core::motion::ease_out_cubic`（约 130ms）缓动；触控板/高精度像素滚动直接应用，不做二次惯性；GPUI 0.3.10 新增的触屏 `ScrollSource::Touch`（含手指抬起后 GPUI 合成的动量）也走直通，避免叠加第二层惯性；边界 clamp 到 GPUI 的 `[-max, 0]`，内容变短时同样收敛；无动画时不请求帧，遵循 reduced-motion。透明 `wheel_overlay` 在捕获阶段拦截指针所在区域，只消费一次并抑制 GPUI 内建的逐事件跳变；键盘 reveal、路由重置和 palette 光标移动会取消在途缓动。
 
-已接入区域：侧栏仓库 viewport、island 页面 viewport、palette 结果列表。每个区域各有独立 `SmoothScroll`/`ScrollHandle`，互不串扰。拖动滚动条 thumb 仍由 `set_offset` 直接映射，下一次 tick 会识别外部偏移变化并取消缓动；嵌套区域只消费一次。未合并的 workspace-tabs 横向滚动不在本分支，未宣称覆盖，其接入接口就是同一个 `wheel_overlay` + `SmoothScroll`。
+已接入区域：侧栏仓库 viewport、island 页面 viewport、palette 结果列表。每个区域各有独立 `SmoothScroll`/`ScrollHandle`，互不串扰。拖动滚动条 thumb 仍由 `set_offset` 直接映射，下一次 tick 会识别外部偏移变化并取消缓动；嵌套区域只消费一次。应用级标签条有独立的横向滚动与自绘细滚动条（`src/ui/tab_scrollbar.rs`），页面 `wheel_overlay` 只覆盖标签条以下的区域，不抢标签条的横向滚轮事件。
+
+公共滚动条（shared-scroll / PR #29）尚未接入：本分支继续使用自己的局部 `SmoothScroll` 与标签细滚动条，未统一到公共 API，也没有从该未合并分支复制实现。PR #29 就绪后，收敛点是把 `wheel_overlay` 的消费与各区域 `SmoothScroll` 接到公共接口，而不是再新增一套公共 scroll API；在完成前不把当前重复实现描述成已统一。
 
 验证与预览边界见 [开发日志](devlog/2026-10-25-sidebar-layout.md)。多标签任务 PR #16 与本任务独立开发，本分支不包含或复制其未验收代码；集成冲突和组合验证由主 Agent 协调。

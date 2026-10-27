@@ -3,15 +3,15 @@ use super::{Shell, geometry::*, sidebar_state::SidebarState};
 use crate::workspace::Route;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualContext, VisualTestContext, point, px,
-    size,
+    ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, VisualContext, VisualTestContext,
+    point, px, size,
 };
 
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
     cx.update(|cx| {
-        ely_gpui_component::init_for_tests(cx);
+        ely_core::init_for_tests(cx);
         // Existing event tests inspect settled geometry; motion has separate controlled-time tests.
-        ely_gpui_component::theme::Theme::update(cx, |theme| theme.reduced_motion = true);
+        ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true);
         Shell::bind_keys(cx);
     });
     let (view, cx) = cx.add_window_view(Shell::new);
@@ -28,7 +28,7 @@ fn click(name: &'static str, cx: &mut VisualTestContext) {
     cx.simulate_click(p, Modifiers::none());
     cx.run_until_parked();
 }
-fn press(key: &str, cx: &mut VisualTestContext) {
+fn press(key: &'static str, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes(key);
     cx.run_until_parked();
     cx.simulate_event(KeyUpEvent {
@@ -362,9 +362,7 @@ fn motion_reverses_from_presented_value_and_resize_ends_it() {
 fn animated_layout_uses_one_width_for_sidebar_island_and_divider(cx: &mut TestAppContext) {
     use std::time::Duration;
     let (view, cx) = shell(cx);
-    cx.update(|_, cx| {
-        ely_gpui_component::theme::Theme::update(cx, |theme| theme.reduced_motion = false)
-    });
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
     click("sidebar-toggle", cx);
     cx.update(|_, cx| {
         cx.background_executor()
@@ -452,9 +450,7 @@ fn resizing_interrupts_animation_and_restores_clamped_user_width(cx: &mut TestAp
         s.sidebar_state.expanded_width = 340.0;
         cx.notify();
     });
-    cx.update(|_, cx| {
-        ely_gpui_component::theme::Theme::update(cx, |theme| theme.reduced_motion = false)
-    });
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
     click("sidebar-toggle", cx);
     cx.update(|_, cx| {
         cx.background_executor()
@@ -608,11 +604,12 @@ fn one_wheel_notch_is_consumed_once_and_settles_at_that_delta(cx: &mut TestAppCo
     let scroll = bounds("repo-scroll", cx);
     let line = cx.update(|window, _| window.line_height());
     cx.simulate_mouse_move(scroll.center(), None, Modifiers::none());
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: scroll.center(),
         delta: ScrollDelta::Lines(point(0.0, -6.0)),
         modifiers: Modifiers::none(),
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     for _ in 0..4 {
         std::thread::sleep(std::time::Duration::from_millis(40));
@@ -624,6 +621,30 @@ fn one_wheel_notch_is_consumed_once_and_settles_at_that_delta(cx: &mut TestAppCo
     assert!(
         (offset.y - expected).abs() <= px(1.0),
         "the built-in jump must not double the delta: offset={offset:?} expected={expected:?}"
+    );
+}
+
+/// A touch pan must apply directly. GPUI already synthesizes the finger's momentum, so easing a
+/// `Touch` delta again would add a second inertia on top of the platform's.
+#[gpui::test]
+fn touch_pan_applies_directly_without_a_second_inertia(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let scroll = bounds("repo-scroll", cx);
+    cx.simulate_mouse_move(scroll.center(), None, Modifiers::none());
+    let before = view.read_with(cx, |s, _| s.repo_offset());
+    cx.simulate_event(ScrollEvent {
+        position: scroll.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-80.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: ScrollSource::Touch,
+    });
+    cx.run_until_parked();
+    // No settle loop: a direct application is already at the target on the next frame.
+    let after = view.read_with(cx, |s, _| s.repo_offset());
+    assert!(
+        (after.y - (before.y - px(80.0))).abs() <= px(1.0),
+        "touch pan must apply at once: before={before:?} after={after:?}"
     );
 }
 
@@ -641,11 +662,12 @@ fn wheel_over_the_palette_scrolls_the_palette_not_the_page(cx: &mut TestAppConte
     let list = bounds("palette-list", cx);
     let page_before = view.read_with(cx, |s, _| s.page_offset());
     cx.simulate_mouse_move(list.center(), None, Modifiers::none());
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: list.center(),
         delta: ScrollDelta::Lines(point(0.0, -8.0)),
         modifiers: Modifiers::none(),
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     for _ in 0..4 {
         std::thread::sleep(std::time::Duration::from_millis(40));
@@ -1036,7 +1058,7 @@ fn menu_contains_tab_and_closes_for_other_overlays_or_a_mode_change(cx: &mut Tes
     assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
 
     // Ctrl+K opens the palette and must not stack an overlay on the still-visible menu.
-    press("secondary-k", cx);
+    press("ctrl-k", cx);
     assert!(view.read_with(cx, |s, _| s.palette_open()));
     assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
     assert!(cx.debug_bounds("menu-panel-0").is_none());

@@ -9,10 +9,10 @@
 
 use std::{cell::Cell, rc::Rc, time::Instant};
 
-use ely_gpui_component::theme::ActiveTheme;
+use ely_core::theme::ActiveTheme;
 use gpui::{
-    AnyElement, DispatchPhase, HitboxBehavior, IntoElement, Point, ScrollHandle, ScrollWheelEvent,
-    Styled, canvas, div, prelude::*, px,
+    AnyElement, DispatchPhase, HitboxBehavior, IntoElement, Point, ScrollEvent, ScrollHandle,
+    ScrollSource, Styled, canvas, div, prelude::*, px,
 };
 
 /// How long one wheel notch takes to ease into place.
@@ -83,7 +83,7 @@ impl SmoothState {
         let since = self.since.get().unwrap_or(now);
         let elapsed = now.saturating_duration_since(since).as_secs_f32();
         let progress = (elapsed / (WHEEL_EASE_MS / 1000.0)).clamp(0.0, 1.0);
-        let ease = ely_gpui_component::motion::ease_out_cubic(progress);
+        let ease = ely_core::motion::ease_out_cubic(progress);
         let next = (from + (target - from) * ease).clamp(-max, 0.0);
         self.presented.set(next);
         if progress >= 1.0 {
@@ -186,7 +186,7 @@ pub(crate) fn wheel_overlay(id: &'static str, smooth: SmoothScroll) -> AnyElemen
                 },
                 move |_bounds, hitbox, window, _cx| {
                     let smooth = smooth.clone();
-                    window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                    window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                         if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                             return;
                         }
@@ -198,7 +198,10 @@ pub(crate) fn wheel_overlay(id: &'static str, smooth: SmoothScroll) -> AnyElemen
                         } else {
                             f32::from(delta.x)
                         };
-                        let precise = event.delta.precise();
+                        // Touch pans (including the momentum GPUI synthesizes after the finger
+                        // lifts) and precise trackpad deltas apply directly: easing them again
+                        // would add a second inertia. Only a discrete wheel notch is smoothed.
+                        let precise = event.delta.precise() || event.source == ScrollSource::Touch;
                         let reduced = cx.theme().reduced_motion || cx.reduce_motion();
                         let now = Instant::now();
                         if smooth.wheel(now, delta_y, precise, reduced) {

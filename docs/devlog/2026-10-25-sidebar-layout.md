@@ -137,3 +137,19 @@ Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` �
 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（382 passed）、`cargo build --locked`、`git diff --check` 通过。
 
 **未验证边界**：GPUI 测试平台不经过 Windows 原生输入分发，也不驱动真实非客户区命中测试。三项的最终视觉（More 图标与 rail 视觉中线、sash 两端与 island 的实际观感、快速进出与拖动手感）仍需负责人在真实窗口确认；多 DPI 跨屏、最大/还原过程与矮窗口的真实观感同样留待人工验收。
+
+## 第七轮（原会话）：同步 main 后的 Ely / GPUI 0.3.10 迁移
+
+负责人授权同步最新 main（本地合并提交 `99bc2a8`，main `7ed70cd` 为其祖先）后，由本任务完成剩余迁移。主线共享 Shell（`mod.rs`、`chrome`、`palette`、`tabs`、`tab_scrollbar`、`app`）已由 PR #30 迁移完成，本分支只补侧栏与滚动相关的遗留：
+
+1. **crate 入口**：侧栏新增模块里的 `ely_gpui_component::*` 全部改为 `ely_core::*`，包括 `theme::ControlSize` / `theme::Elevation`、`motion::ease_out_cubic`、`init_for_tests` 与 `theme::Theme::update`。依赖仍为官方 Git `ely-core 0.2.0`，固定 revision `30c66fe1d5d23db769a6c834b771d054d7f288cf`，`default-features = false` 保留，没有 vendor、patch 或本地缓存修改。
+2. **事件类型**：`scrolling.rs` 的 `ScrollWheelEvent` 改为 `ScrollEvent`；`sidebar_tests.rs` 的两处滚轮模拟补上显式 `source: ScrollSource::Pointer`，不把普通鼠标与触屏混淆。
+3. **触屏直通**：新增 `ScrollSource::Touch` 语义。`precise` 现在为 `event.delta.precise() || source == Touch`，让触屏平移（含 GPUI 在抬手后合成的动量）直接落到 offset，不叠加第二层惯性。新增 `touch_pan_applies_directly_without_a_second_inertia` 覆盖。
+4. **按键别名**：`sidebar_tests.rs` 的 `press` helper 跟随 `Keystroke::parse` 的 `&'static str` 签名；菜单测试里旧的 `secondary-k` 别名在新解析器中会返回 `InvalidKeystrokeError`，改用可解析的 `ctrl-k`（主线的 `KeyBinding::load` 仍负责按 OS 解析 Ctrl/Cmd）。
+5. **保留项**：最新三项反馈（collapsed More 图标在按钮槽内居中、sash 只在真实 hover/合法 drag 时出现且移开消失、sash 与 island 外框等高）与其测试未改动；此前的分割线左右居中、身份区 hover、indicator 2px 等也保持。开关 toggle 的样式、大小、位置与独立命中未改。
+
+**未合并依赖**：shared-scroll / PR #29 未接入，本分支继续用局部 `SmoothScroll` 与 `tab_scrollbar.rs` 的细滚动条，未从其未合并实现复制代码，也没有新增另一套公共 scroll API。PR #29 就绪后的收敛点是把 `wheel_overlay` 与各区域 `SmoothScroll` 接到公共接口。
+
+验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（**383 passed**）、`cargo build --locked`、`git diff --check` 通过，均使用 `CARGO_BUILD_JOBS=1` 与本 worktree 的 `target/`。
+
+**未验证边界**：测试平台不经过 Windows 原生输入分发，触屏 `ScrollSource::Touch` 只有事件级回归，没有真实触屏设备证据；真实窗口的滚轮/触控板/触屏手感、IME、多 DPI 与原生窗口按钮仍待负责人验收。迁移不等于原侧栏视觉或交互已验收。

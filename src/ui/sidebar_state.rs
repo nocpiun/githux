@@ -98,7 +98,7 @@ impl SidebarState {
             self.transition = None;
             return false;
         }
-        let ease = ely_gpui_component::motion::ease_out_cubic(progress);
+        let ease = ely_core::motion::ease_out_cubic(progress);
         self.frame = SidebarFrame {
             width: t.from.width + (t.to.width - t.from.width) * ease,
             expansion: t.from.expansion + (t.to.expansion - t.from.expansion) * ease,
@@ -164,7 +164,7 @@ impl SidebarState {
         let progress = now.saturating_duration_since(self.sash_since).as_secs_f32()
             / (SIDEBAR_SASH_FADE_MS as f32 / 1000.0);
         let progress = progress.clamp(0.0, 1.0);
-        let step = ely_gpui_component::motion::ease_out_cubic(progress);
+        let step = ely_core::motion::ease_out_cubic(progress);
         let from = self.sash_opacity;
         // Ease between the value at the last change and the target.
         self.sash_opacity = if self.sash_target > from {

@@ -209,7 +209,7 @@ pub(super) struct RowMetrics {
 pub(super) fn nav_metrics(expansion: f32, rem_size: gpui::Pixels, cx: &App) -> RowMetrics {
     let expanded = f32::from(
         cx.theme()
-            .control_height(ely_gpui_component::theme::ControlSize::Md)
+            .control_height(ely_core::theme::ControlSize::Md)
             .to_pixels(rem_size),
     );
     RowMetrics {
@@ -773,7 +773,7 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
         ),
         ("New", IconName::Plus, None),
     ];
-    let row_height = theme.control_height(ely_gpui_component::theme::ControlSize::Md);
+    let row_height = theme.control_height(ely_core::theme::ControlSize::Md);
     let rows = entries
         .into_iter()
         .enumerate()
@@ -860,7 +860,7 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
         .bg(colors.overlay)
         .border_1()
         .border_color(colors.border)
-        .shadow(theme.elevation(ely_gpui_component::theme::Elevation::Floating))
+        .shadow(theme.elevation(ely_core::theme::Elevation::Floating))
         .text_size(theme.text_size(TextSize::Sm))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
