@@ -1051,7 +1051,7 @@ fn the_strip_scrollbar_appears_on_hover_and_can_be_dragged(cx: &mut TestAppConte
     let track = bounds("tab-scrollbar", cx);
     assert_eq!(
         track.size.height,
-        px(super::geometry::TAB_SCROLLBAR_THICKNESS),
+        px(super::scroll::THICKNESS),
         "the thumb is a hairline, not the theme's thickness"
     );
     assert_eq!(track.left(), band.left());
@@ -1113,10 +1113,10 @@ fn the_strip_scrollbar_fades_in_out_and_pins_while_dragged(cx: &mut TestAppConte
         shell.pin_tab_clock(0);
         shell.tab_scrollbar_hover(true, 0);
     });
-    let quarter = super::geometry::TAB_SCROLLBAR_FADE_MS / 4;
+    let quarter = super::scroll::FADE_MS / 4;
     let mid = fade(&view, cx, quarter);
     assert!(mid > 0.0 && mid < 1.0, "mid fade in: {mid}");
-    assert_eq!(fade(&view, cx, super::geometry::TAB_SCROLLBAR_FADE_MS), 1.0);
+    assert_eq!(fade(&view, cx, super::scroll::FADE_MS), 1.0);
     assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
 
     // Reverse half way: it continues from where it was painted, not from 1.
@@ -1143,11 +1143,7 @@ fn the_strip_scrollbar_fades_in_out_and_pins_while_dragged(cx: &mut TestAppConte
     );
     // The second reversal began at 3_000 + quarter, so it finishes a quarter later again.
     assert_eq!(
-        fade(
-            &view,
-            cx,
-            3_000 + quarter + super::geometry::TAB_SCROLLBAR_FADE_MS
-        ),
+        fade(&view, cx, 3_000 + quarter + super::scroll::FADE_MS),
         1.0
     );
     assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
@@ -1156,10 +1152,7 @@ fn the_strip_scrollbar_fades_in_out_and_pins_while_dragged(cx: &mut TestAppConte
     cx.update_window_entity(&view, |shell, _, _| {
         shell.tab_scrollbar_hover(false, 9_000);
     });
-    assert_eq!(
-        fade(&view, cx, 9_000 + super::geometry::TAB_SCROLLBAR_FADE_MS),
-        0.0
-    );
+    assert_eq!(fade(&view, cx, 9_000 + super::scroll::FADE_MS), 0.0);
     pump(cx);
     assert!(cx.debug_bounds("tab-scrollbar").is_none());
     assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
@@ -2369,7 +2362,7 @@ fn the_scrollbar_fades_after_a_drag_that_ended_outside_the_strip(cx: &mut TestAp
     let at_release = view.update(cx, |shell, _| shell.tab_scrollbar_opacity());
     assert_eq!(at_release, 1.0, "no jump on release");
     let midway = view.update(cx, |shell, _| {
-        shell.pin_tab_clock(100_000 + super::geometry::TAB_SCROLLBAR_FADE_MS / 2);
+        shell.pin_tab_clock(100_000 + super::scroll::FADE_MS / 2);
         shell.tab_scrollbar_opacity()
     });
     assert!(
@@ -2377,7 +2370,7 @@ fn the_scrollbar_fades_after_a_drag_that_ended_outside_the_strip(cx: &mut TestAp
         "the bar fades after the drag ended outside: {midway}"
     );
     let settled = view.update(cx, |shell, _| {
-        shell.pin_tab_clock(100_000 + super::geometry::TAB_SCROLLBAR_FADE_MS * 2);
+        shell.pin_tab_clock(100_000 + super::scroll::FADE_MS * 2);
         shell.tab_scrollbar_opacity()
     });
     assert_eq!(
@@ -2431,4 +2424,50 @@ fn dropping_in_a_gap_applies_the_marked_reorder(cx: &mut TestAppContext) {
         "a release in the gap applies the reorder"
     );
     assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+}
+
+/// A window that loses activation cannot keep a drag alive: the tab drag and the strip's thumb
+/// drag are both dropped, and the bar returns to the real pointer state without animating.
+#[gpui::test]
+fn losing_window_activation_clears_both_drags(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    hover("tab-scroll", cx);
+    view.update(cx, |shell, _| shell.show_tab_scrollbar());
+    let id = view.read_with(cx, |shell, _| shell.tab_ids()[1]);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.drag_tab(id, window, cx);
+        shell.set_thumb_dragging(gpui::Axis::Horizontal, true, cx);
+        shell.end_drags_on_blur(window, cx);
+    });
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert_eq!(
+        view.update(cx, |shell, _| shell.tab_scrollbar_opacity()),
+        0.0,
+        "blur drops the hover and drag visibility"
+    );
+    assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
+}
+
+/// Reduced motion is honored: the bar is shown at once and never requests animation frames.
+#[gpui::test]
+fn reduced_motion_shows_the_bar_without_animating(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click(selector(format!("repo-row-{index}")), cx);
+    }
+    cx.update(|_window, cx| cx.set_reduce_motion(true));
+    hover("tab-scroll", cx);
+    assert_eq!(
+        view.update(cx, |shell, _| shell.tab_scrollbar_opacity()),
+        1.0,
+        "the fade jumps straight to visible"
+    );
+    assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
 }

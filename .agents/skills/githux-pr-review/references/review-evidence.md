@@ -17,7 +17,7 @@
 
 CI 汇总始终必需；追加检查仅来自该 workflow。只 completed + success 通过，汇总 skipped/neutral/cancelled 等失败。已结束却缺少必要 job 属于证据问题，不无限等。实际执行的成功 jobs 都需解析 actions/checkout 输出的 `git log -1 --format=%H`（含 Windows 引号路径），用提交 API 校验 merge parents = 当前目标分支 SHA + 请求 head。无法取到日志或格式变化返回 ci_unverified。
 
-目标分支 SHA 来自 `git/ref/heads/...`，不信任可能滞后的 PR base.sha，也不把当前合并预览 ref 当作旧 CI 的实际 checkout。记录保留两种值以及测试 merge SHA/parents；最终复核 head、目标 ref、最新 run/attempt。Draft、blocked、behind、mergeable=null 分别保留为合并阻塞；只有 mergeable=false 表示冲突。
+目标分支 SHA 来自 `git/ref/heads/...`，不信任可能滞后的 PR base.sha，也不把当前合并预览 ref 当作旧 CI 的实际 checkout。记录保留两种值以及测试 merge SHA/parents；最终复核 head、目标 ref、最新 run/attempt。Draft、mergeable_state=blocked、behind、mergeable=null 分别保留为合并阻塞；只有 mergeable=false 表示冲突。PR REST 响应的 labels 必须为完整有效数组：首读、最终复核、自动重审前均检查名称是否精确匹配 blocked（不区分大小写）。匹配则立即返回 merge_blocked/blocked_label，不请求自动重审；缺失/无效标签报错。它与 GitHub 的 mergeable_state 独立，pending 不等于 blocked。独立 `PR` workflow 的规模检查由 `Check` required check 强制，不能追加为 CI workflow 的同名 job。
 
 官方接口依据：[workflow runs](https://docs.github.com/en/rest/actions/workflow-runs)、[workflow jobs / attempts / logs](https://docs.github.com/en/rest/actions/workflow-jobs)、[check-runs](https://docs.github.com/en/rest/checks/runs)。这些 API 的成功响应不单独证明项目审批完成。
 

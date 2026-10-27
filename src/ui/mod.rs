@@ -29,10 +29,10 @@ pub mod fixtures;
 pub(crate) mod geometry;
 mod page;
 mod palette;
+mod scroll;
 pub(crate) mod scrolling;
 mod sidebar;
 mod sidebar_state;
-mod tab_scrollbar;
 mod tabs;
 
 #[cfg(test)]
@@ -76,8 +76,8 @@ pub struct Shell {
     /// The strip's scrollable reach as of the last frame, so a newly overflowing (or no longer
     /// overflowing) strip repaints once to show or hide the scrollbar.
     tab_reach: gpui::Pixels,
-    /// The strip scrollbar's hover/drag fade.
-    tab_fade: tab_scrollbar::Fade,
+    /// The strip scrollbar's state: the hover/drag/hold fade, owned only by this region.
+    tab_bars: scroll::Bars,
     /// A tab drag in progress: the session being carried and the slot it would land on.
     tab_drag: Option<TabDragState>,
     /// Monotonic start for the strip fade's clock. Read once per frame; the fade itself takes an
@@ -92,8 +92,6 @@ pub struct Shell {
     /// check does not cancel it before the test can drop it.
     #[cfg(test)]
     tab_drag_pinned: bool,
-    /// Whether the scrollbar's thumb is the drag currently in progress.
-    thumb_dragging: bool,
     sidebar_state: sidebar_state::SidebarState,
     sidebar_activation: gpui::Subscription,
     sidebar_keys: gpui::Subscription,
@@ -113,6 +111,8 @@ pub struct Shell {
     sidebar_menu: bool,
     /// Keyboard highlight inside the collapsed More menu.
     sidebar_menu_cursor: usize,
+    /// Ends tab drags and scrollbar visibility when the window loses activation.
+    _window_activation: Option<gpui::Subscription>,
 }
 
 /// One in-flight tab drag.
@@ -223,7 +223,7 @@ impl Shell {
                 }
             });
         });
-        Self {
+        let mut this = Self {
             sidebar_keys,
             sidebar_bounds,
             sidebar_more_focus: cx.focus_handle(),
@@ -248,7 +248,7 @@ impl Shell {
             revealed_tab: None,
             focused_tab: None,
             tab_reach: gpui::Pixels::ZERO,
-            tab_fade: tab_scrollbar::Fade::default(),
+            tab_bars: scroll::Bars::new(),
             tab_drag: None,
             tab_clock: std::time::Instant::now(),
             #[cfg(test)]
@@ -256,8 +256,26 @@ impl Shell {
             tab_strip_owner: cx.entity_id(),
             #[cfg(test)]
             tab_drag_pinned: false,
-            thumb_dragging: false,
-        }
+            _window_activation: None,
+        };
+        // A window that loses activation cannot keep delivering a drag, and the pointer's
+        // hover is stale too; drop both instead of leaving a pinned bar behind.
+        this._window_activation =
+            Some(cx.observe_window_activation(window, |shell, window, cx| {
+                if !window.is_window_active() {
+                    shell.end_drags_on_blur(window, cx);
+                }
+            }));
+        this
+    }
+
+    /// Ends the tab drag and the thumb drag without a drop, and lets the bar fade back to the
+    /// real pointer state.
+    fn end_drags_on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_tab_drag(window, cx);
+        let target = self.tab_scroll.clone();
+        self.tab_bars.cancel(&target);
+        cx.notify();
     }
 
     /// The current page, inspected by the routing tests.
@@ -428,7 +446,8 @@ impl Shell {
         // whichever tab now sits at that index.
         if self.tab_drag.as_ref().is_some_and(|drag| drag.id == id) {
             self.tab_drag = None;
-            self.tab_fade.set_dragging(false, self.tab_now_ms());
+            self.tab_bars
+                .hold(false, self.tab_now_ms(), cx.reduce_motion());
             #[cfg(test)]
             {
                 self.tab_drag_pinned = false;
@@ -1123,26 +1142,28 @@ impl Shell {
             })
         };
         let owner = self.tab_strip_owner;
-        let opacity = self.tab_fade.opacity(self.tab_now_ms());
-        let min_thumb: f32 = cx
-            .theme()
-            .scrollbar_min_thumb()
-            .to_pixels(window.rem_size())
-            .into();
-        let on_thumb_drag = {
+        let opacity = self.tab_bars.opacity(self.tab_now_ms());
+        let on_thumb_drag: scroll::OnDragging = {
             let this = cx.entity();
-            std::rc::Rc::new(move |dragging: bool, _window: &mut Window, cx: &mut App| {
-                this.update(cx, |shell, cx| shell.set_thumb_dragging(dragging, cx));
-            })
+            std::rc::Rc::new(
+                move |axis: gpui::Axis, dragging: bool, _window: &mut Window, cx: &mut App| {
+                    this.update(cx, |shell, cx| shell.set_thumb_dragging(axis, dragging, cx));
+                },
+            )
         };
-        let scrollbar = tab_scrollbar::render(
-            &self.tab_scroll,
+        let scrollbar = scroll::Bar {
+            target: &self.tab_scroll,
+            id: scroll::BarId {
+                owner,
+                name: "tab-scrollbar",
+                axis: gpui::Axis::Horizontal,
+            },
+            placement: scroll::Placement::BAND,
+            style: scroll::Style::DEFAULT,
             opacity,
-            owner,
-            min_thumb,
-            on_thumb_drag,
-            cx,
-        );
+            on_drag: on_thumb_drag,
+        }
+        .render(cx);
         let view = tabs::View {
             entries,
             scroll: self.tab_scroll.clone(),
@@ -1175,26 +1196,26 @@ impl Shell {
     /// The strip scrollbar's painted opacity, for the fade tests.
     #[cfg(test)]
     pub fn tab_scrollbar_opacity(&mut self) -> f32 {
-        self.tab_fade.opacity(self.tab_now_ms())
+        self.tab_bars.opacity(self.tab_now_ms())
     }
 
     /// Drives the strip scrollbar's hover state at an explicit clock value, so the fade can be
     /// stepped without sleeping.
     #[cfg(test)]
     pub fn tab_scrollbar_hover(&mut self, hovered: bool, now: u64) -> bool {
-        self.tab_fade.set_hovered(hovered, now)
+        self.tab_bars.hover(hovered, now, false)
     }
 
     /// Makes the strip scrollbar fully visible at once, for tests that only need it to exist.
     /// The fade itself is covered by its own test and by the module's unit tests.
     #[cfg(test)]
     pub fn show_tab_scrollbar(&mut self) {
-        self.tab_fade.snap(true);
+        self.tab_bars.snap(true);
     }
 
     #[cfg(test)]
     pub fn tab_scrollbar_animating(&self) -> bool {
-        self.tab_fade.is_animating()
+        self.tab_bars.is_animating()
     }
 
     /// The tab being dragged, if any.
@@ -1250,7 +1271,10 @@ impl Shell {
     /// Records whether the pointer is over the strip, which is the only thing that shows the
     /// strip's scrollbar.
     pub(crate) fn set_tab_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if self.tab_fade.set_hovered(hovered, self.tab_now_ms()) {
+        if self
+            .tab_bars
+            .hover(hovered, self.tab_now_ms(), cx.reduce_motion())
+        {
             cx.notify();
         }
     }
@@ -1258,9 +1282,15 @@ impl Shell {
     /// The scrollbar thumb being dragged pins the bar on. The render loop clears it once the
     /// platform drag is over, so a drag that ends anywhere (including outside the strip) hands
     /// visibility back to the hover state.
-    fn set_thumb_dragging(&mut self, dragging: bool, cx: &mut Context<Self>) {
-        self.thumb_dragging = dragging;
-        if self.tab_fade.set_dragging(dragging, self.tab_now_ms()) {
+    fn set_thumb_dragging(&mut self, axis: gpui::Axis, dragging: bool, cx: &mut Context<Self>) {
+        let target = self.tab_scroll.clone();
+        if self.tab_bars.drag(
+            &target,
+            axis,
+            dragging,
+            self.tab_now_ms(),
+            cx.reduce_motion(),
+        ) {
             cx.notify();
         }
     }
@@ -1279,9 +1309,12 @@ impl Shell {
         // under the pointer.
         self.revealed_tab = None;
         self.focused_tab = None;
-        // The fade keeps the bar visible for the whole drag through its dragging flag, which is
-        // independent of the pointer's real hover state.
-        if self.tab_fade.set_dragging(true, self.tab_now_ms()) {
+        // The fade keeps the bar visible for the whole tab drag through its hold flag, which is
+        // independent of the pointer's real hover state and is not a thumb drag.
+        if self
+            .tab_bars
+            .hold(true, self.tab_now_ms(), cx.reduce_motion())
+        {
             cx.notify();
         }
         let _ = window;
@@ -1385,11 +1418,15 @@ impl Shell {
     /// were. Also the path for Escape, a lost window focus and a drop outside a valid target.
     fn finish_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
-        if self.tab_drag.take().is_none() {
-            return;
+        let dragging = self.tab_drag.take().is_some();
+        // Released even when no tab drag was recorded any more, so a stale hold can never keep the
+        // bar on after a close, a lost activation or a drop outside.
+        let held = self
+            .tab_bars
+            .hold(false, self.tab_now_ms(), cx.reduce_motion());
+        if dragging || held {
+            cx.notify();
         }
-        self.tab_fade.set_dragging(false, self.tab_now_ms());
-        cx.notify();
     }
 
     /// Makes an already open session active, following focus that lived in the previous page and
@@ -1487,7 +1524,7 @@ impl Render for Shell {
         );
         // One clock read per frame: the strip's fade and a scrollbar that just became necessary
         // (or unnecessary) both advance from it, so no timer of their own is needed.
-        if self.tab_fade.is_animating() {
+        if self.tab_bars.is_animating() {
             window.request_animation_frame();
         }
         // A drag that ended without a drop (released outside, window focus lost, or the tab was
@@ -1500,8 +1537,14 @@ impl Render for Shell {
             self.finish_tab_drag(window, cx);
         }
         // A thumb drag ends wherever the pointer is released; visibility then follows hover again.
-        if self.thumb_dragging && !cx.has_active_drag() {
-            self.set_thumb_dragging(false, cx);
+        if self.tab_bars.dragging().is_some() && !cx.has_active_drag() {
+            let target = self.tab_scroll.clone();
+            if self
+                .tab_bars
+                .settle(&target, self.tab_now_ms(), cx.reduce_motion())
+            {
+                cx.notify();
+            }
         }
         // Keep edge auto-scroll advancing while the pointer is held still in an edge zone, and
         // repaint so the moved row and its landing marker are drawn.

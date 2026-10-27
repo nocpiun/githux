@@ -29,6 +29,8 @@ jobs:
           package-manager-cache: false
       - name: Test CI scope and aggregate policy
         run: node --test .github/scripts/ci-scope.test.mjs
+      - name: Test PR metadata policy
+        run: node --test .github/scripts/pr-policy.test.mjs
       - name: Classify changed files
         id: scope
         run: node .github/scripts/ci-scope.mjs detect
