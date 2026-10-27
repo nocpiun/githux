@@ -225,3 +225,7 @@ Codex 针对公共 motion 首版（`d629d0e`，P2）指出：tabs 的公共 over
 新增测试：rail 右拖逐像素（每点两次）到明显展开，模式不回落、footer 只切换一次；expanded 左拖对称；过渡中间帧、完成后、临界处释放都保持 More；真实 GPUI 事件序列中每步只有一套入口，且 expanded-but-compact 的 More 可操作。旧测试中与该滞回冲突的“折叠过渡中继续向左仍保持中间帧”断言已按新语义更新。
 
 验证：fmt、locked all-target check、clippy `-D warnings`、**415 tests**、build、diff check 通过（`CARGO_BUILD_JOBS=1`）。真实拖动与临界停靠观感仍待负责人验收。
+
+### 审查修复：离开 compact footer 时丢弃隐藏的 More 菜单
+
+Codex 针对 `638b702`（P2）指出：展开过渡期间 More 仍可用，若在过渡结束前打开，`footer_compact()` 随后变假会直接卸载 trigger 和面板，却没有清 `sidebar_menu` 或归还焦点；shell 的 Tab 拦截器仍认为菜单打开，键盘导航被卡住。已在 footer 从 compact 切到四按钮的同一渲染路径中关闭菜单并把焦点移到已挂载的根焦点；新增 `leaving_compact_presentation_drops_an_open_more_menu`，验证隐藏面板撤销、菜单状态清理且 Tab 恢复移动焦点。全量 **416 tests**、clippy、fmt 通过。

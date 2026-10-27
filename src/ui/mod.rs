@@ -898,6 +898,13 @@ impl Shell {
         // One presentation decision for the whole footer: the compact More entries during the
         // critical band and during mode transitions, the four entries once clearly expanded.
         let footer_compact = self.sidebar_state.footer_compact();
+        // Leaving the compact presentation unmounts both the More trigger and its panel. Drop the
+        // menu state and put focus on a control that stays mounted, or the shell's Tab interceptor
+        // would keep treating an invisible menu as open.
+        if !footer_compact && self.sidebar_menu {
+            self.close_sidebar_menu(window, cx);
+            window.focus(&self.root_focus, cx);
+        }
         let frame = self.sidebar_state.frame;
         let nav_metrics = sidebar::nav_metrics(frame.expansion, window.rem_size(), cx);
 

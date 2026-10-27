@@ -1705,3 +1705,36 @@ fn compact_footer_in_the_critical_band_keeps_more_working(cx: &mut TestAppContex
     assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
     assert!(cx.debug_bounds("menu-panel-0").is_none());
 }
+
+/// If the footer leaves the compact presentation while More is still open, the shell must close
+/// the now-hidden menu and keep Tab usable instead of leaving an invisible modal behind.
+#[gpui::test]
+fn leaving_compact_presentation_drops_an_open_more_menu(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("sidebar-toggle", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    click("sidebar-more", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    // Force the same state an animation-completed expansion would produce: compact no longer.
+    view.update(cx, |s, cx| {
+        s.sidebar_state.collapsed = false;
+        s.sidebar_state.expanded_width = SIDEBAR_MIN_WIDTH + 120.0;
+        s.sidebar_state.settle(1200.0);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("quarter-row").is_some(),
+        "four entries are shown"
+    );
+    assert!(
+        !view.read_with(cx, |s, _| s.sidebar_menu_open()),
+        "the hidden menu is closed, not left open"
+    );
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+    let before = cx.update(|window, cx| window.focused(cx));
+    press("tab", cx);
+    let after = cx.update(|window, cx| window.focused(cx));
+    assert!(after.is_some());
+    assert_ne!(before, after, "Tab moves focus after the menu is gone");
+}
