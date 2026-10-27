@@ -626,6 +626,120 @@ impl MarkdownView {
                 .border_t_1()
                 .border_color(colors.border_strong)
                 .into_any_element(),
+            Block::Quote { kind, body: inner } => {
+                let mut quote = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pl_4()
+                    .border_l_2()
+                    .border_color(colors.border_strong);
+                if let Some(kind) = kind {
+                    quote = quote.child(
+                        div()
+                            .text_size(gpui::px(body))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(colors.fg_muted)
+                            .child(kind.title()),
+                    );
+                }
+                quote
+                    .children(
+                        inner
+                            .iter()
+                            .enumerate()
+                            .map(|(at, block)| {
+                                self.nested_keyed(
+                                    (id.0, format!("{}-quote-{at}", id.1)),
+                                    block,
+                                    colors,
+                                    body,
+                                    mono,
+                                    radius,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_any_element()
+            }
+            Block::Table { aligns, head, rows } => {
+                let cell = |this: &Self, inline: &Inline, row: usize, column: usize| {
+                    let mut cell =
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_3()
+                            .py_2()
+                            .child(this.paragraph_keyed(
+                                gpui::ElementId::Name(
+                                    format!("reader-nested-cell-{}-{row}-{column}", id.1).into(),
+                                ),
+                                inline,
+                            ));
+                    if aligns.get(column) == Some(&ast::Align::Right) {
+                        cell = cell.text_right();
+                    } else if aligns.get(column) == Some(&ast::Align::Center) {
+                        cell = cell.text_center();
+                    }
+                    cell
+                };
+                let mut table = div()
+                    .flex()
+                    .flex_col()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(colors.border)
+                    .overflow_hidden();
+                table = table.child(
+                    div().flex().children(
+                        head.iter()
+                            .enumerate()
+                            .map(|(column, inline)| cell(self, inline, 0, column))
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+                for (row, cells) in rows.iter().enumerate() {
+                    table = table.child(
+                        div()
+                            .flex()
+                            .border_t_1()
+                            .border_color(colors.border)
+                            .children(
+                                cells
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(column, inline)| cell(self, inline, row + 1, column))
+                                    .collect::<Vec<_>>(),
+                            ),
+                    );
+                }
+                table.into_any_element()
+            }
+            Block::Footnote { label, body: inner } => div()
+                .flex()
+                .gap_2()
+                .text_size(gpui::px(body))
+                .text_color(colors.fg_muted)
+                .child(div().flex_none().child(format!("[{label}]")))
+                .child(
+                    div().flex_1().flex().flex_col().children(
+                        inner
+                            .iter()
+                            .enumerate()
+                            .map(|(at, block)| {
+                                self.nested_keyed(
+                                    (id.0, format!("{}-fn-{at}", id.1)),
+                                    block,
+                                    colors,
+                                    body,
+                                    mono,
+                                    radius,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+                .into_any_element(),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
@@ -634,12 +748,8 @@ impl MarkdownView {
                     Block::Html(text) => text.clone(),
                     Block::Math { tex, .. } => tex.clone(),
                     Block::Heading(_, inline) => inline.text.clone(),
-                    Block::Quote { .. } | Block::Table { .. } | Block::Footnote { .. } => {
-                        String::new()
-                    }
-                    Block::Paragraph(_) | Block::Code { .. } | Block::List { .. } | Block::Rule => {
-                        String::new()
-                    }
+                    Block::Paragraph(inline) => inline.text.clone(),
+                    _ => String::new(),
                 })
                 .into_any_element(),
         }
@@ -668,5 +778,19 @@ impl Render for MarkdownView {
             .py_3()
             .child(list)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::item_marker;
+
+    #[test]
+    fn every_nesting_level_uses_the_same_item_marker() {
+        assert_eq!(item_marker(Some(3), None, 0), "3.");
+        assert_eq!(item_marker(Some(3), None, 2), "5.");
+        assert_eq!(item_marker(None, Some(false), 0), "☐");
+        assert_eq!(item_marker(None, Some(true), 0), "☑");
+        assert_eq!(item_marker(None, None, 0), "•");
     }
 }

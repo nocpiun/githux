@@ -173,6 +173,11 @@ impl Building {
                     let alt = self.inline.text[start..end].to_string();
                     self.notes.push(Block::Image { alt, url });
                     self.inline.text.truncate(start);
+                    // The description's formatting belongs to the removed
+                    // text. Keeping it would style the following text with
+                    // stale ranges, or even cut a multibyte character.
+                    self.inline.styles.retain(|(range, _)| range.end <= start);
+                    self.inline.links.retain(|(range, _)| range.end <= start);
                 }
             }
         }
@@ -450,6 +455,33 @@ pub fn parse(markdown: &str) -> Document {
                 stack.push(Container::Cell(Building::default()));
             }
             Event::End(TagEnd::TableCell) => {
+                // `open()` may have started a separate builder for emphasis or
+                // a link. Flush it into the cell before collecting the cell,
+                // otherwise its text and link are lost with the builder.
+                if let Some(Container::Cell(cell)) = stack.last_mut()
+                    && let Some((_, mut pending)) = inline.take()
+                {
+                    while !pending.open.is_empty() {
+                        let end = pending.inline.text.len();
+                        pending.close(end);
+                    }
+                    let at = cell.inline.text.len();
+                    cell.inline.text.push_str(&pending.inline.text);
+                    cell.inline.styles.extend(
+                        pending
+                            .inline
+                            .styles
+                            .into_iter()
+                            .map(|(range, style)| (range.start + at..range.end + at, style)),
+                    );
+                    cell.inline.links.extend(
+                        pending
+                            .inline
+                            .links
+                            .into_iter()
+                            .map(|(range, url)| (range.start + at..range.end + at, url)),
+                    );
+                }
                 let Some(Container::Cell(mut building)) = stack.pop() else {
                     continue;
                 };
@@ -701,5 +733,52 @@ mod extra_tests {
             })
             .expect("nested list");
         assert_eq!(nested[0].0, None, "child is an ordinary bullet");
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn a_table_cell_keeps_emphasis_and_links() {
+        let doc = parse(
+            "| a | b |
+|---|---|
+| [Guide](guide.md) | **bold** tail |",
+        );
+        let (head, rows) = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { head, rows, .. } => Some((head, rows)),
+                _ => None,
+            })
+            .expect("table");
+        let _ = head;
+        assert_eq!(rows[0][0].text, "Guide");
+        assert_eq!(rows[0][0].links, vec![(0..5, "guide.md".to_string())]);
+        assert_eq!(rows[0][1].text, "bold tail");
+        assert!(rows[0][1].styles.contains(&(0..4, Style::Strong)));
+    }
+
+    #[test]
+    fn a_formatted_image_description_cannot_style_or_split_following_text() {
+        let doc = parse("![**alt**](img.png)plain é");
+        let text = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Paragraph(inline) => Some(inline.clone()),
+                _ => None,
+            })
+            .expect("paragraph");
+        assert_eq!(text.text, "plain é");
+        assert!(text.styles.is_empty(), "{:?}", text.styles);
+        for (range, _) in &text.styles {
+            assert!(
+                text.text.is_char_boundary(range.start) && text.text.is_char_boundary(range.end)
+            );
+        }
     }
 }

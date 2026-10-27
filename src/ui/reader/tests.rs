@@ -1329,3 +1329,24 @@ fn nested_lists_keep_ordered_and_unchecked_markers() {
     });
     let _ = (items, task);
 }
+
+#[gpui::test]
+fn nested_quote_and_table_show_their_contents(cx: &mut TestAppContext) {
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "> > important warning\n>\n> | a | b |\n> |---|---|\n> | 1 | 2 |".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let quote = cx
+        .debug_bounds("markdown-block-0")
+        .expect("the quote draws");
+    assert!(
+        quote.size.height > px(40.0),
+        "nested quote and table occupy their parsed height: {:?}",
+        quote.size
+    );
+}
