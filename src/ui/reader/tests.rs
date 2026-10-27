@@ -2027,3 +2027,28 @@ fn scrolled_away_rows_do_not_win_pointer_hits(cx: &mut TestAppContext) {
     let text = selected(&reader, cx);
     assert!(text.starts_with("Section 0"), "{text:?}");
 }
+
+#[gpui::test]
+fn a_link_in_a_row_after_an_empty_cell_still_opens(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| a | b |\n|---|---|\n|  | [x](guide.md) |".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(500.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, "x");
+    let link = layout.pieces[0].text_bounds.center();
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            reader.read_with(cx, |r, _| r.last_action().cloned()),
+            Some(ReaderAction::Link(LinkTarget::Repository(_)))
+        ),
+        "the link after an empty cell resolves against its own unit"
+    );
+}

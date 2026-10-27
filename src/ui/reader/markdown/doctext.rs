@@ -156,10 +156,10 @@ impl DocText {
                 }
             }
             Block::Table { head, rows, .. } => {
+                // Every cell is a unit, including an empty one: both table
+                // renderers consume one unit per cell, so skipping an empty
+                // cell here would shift every later cell's range.
                 for cell in head.iter().chain(rows.iter().flatten()) {
-                    if cell.text.is_empty() {
-                        continue;
-                    }
                     self.push_with_separator(&cell.text, cell.links.clone(), "	");
                 }
             }
@@ -187,9 +187,8 @@ impl DocText {
     }
 
     fn inline(&mut self, inline: &Inline) {
-        if inline.text.is_empty() {
-            return;
-        }
+        // Empty inline text still registers: callers consume one unit per
+        // block or cell in render order.
         self.push(&inline.text, inline.links.clone());
     }
 }
@@ -274,6 +273,22 @@ next"
             ),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn an_empty_table_cell_keeps_the_following_cells_in_step() {
+        let doc = parse(
+            "| a | b |
+|---|---|
+|  | [x](guide.md) |",
+        );
+        let model = DocText::build(&doc.blocks);
+        // Header row (2), then the body row's empty cell and link cell.
+        let cells: Vec<_> = model.units.iter().map(|unit| unit.at.clone()).collect();
+        assert_eq!(cells.len(), 4, "{cells:?}");
+        let at = model.text().find('x').unwrap();
+        assert_eq!(model.link_at(at).as_deref(), Some("guide.md"));
+        assert!(model.slice(cells[2].clone()).is_empty(), "{:?}", cells[2]);
     }
 
     #[test]
