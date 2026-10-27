@@ -131,4 +131,5 @@ let element = bar.render(cx);
 - 公共模块对真实 GPUI 测试窗口自建的探针覆盖：无溢出时不绘制且不拦截输入、纵向拖动改变真实 `UniformListScrollHandle::base_handle`、真实非均匀 `ListState` 的原生拖动与结束清理、双轴与双区域互不干扰、角落避让、拖动中 range 缩小仍 clamp、取消后清理、平台释放后只结束本区域拖动、`Placement` 与 `Style` 分离。
 - 标签条既有关键用例（滚轮、`Shift`+wheel、reveal、拖拽排序、边缘自动滚动、关闭/切换、toolbar 固定、hover/拖动淡入淡出、外部释放淡出）全部保留并通过。
 - 历史真实 Windows 窗口自测（2026-10-26 旧依赖 head，144 DPI，1942×1241 物理像素，11 个标签）：闲置 `(84,83,83)`、thumb hover `(120,119,119)` 对 `(44,44,44)` 背景，滑块 4 物理像素高且无实体轨道；一次真实拖动把滑块从 `1010..1871` 移到 `510..1371` 并移动标签条；移出后该行回到背景色。这些是旧 head 的自测证据，不代替迁移后 head 的预览，更不是负责人视觉验收。
+- 迁移后 head（`683b69e`，官方 Ely 固定提交 + GPUI 0.3.10）本机 `fmt` / `check --locked --all-targets` / `clippy -D warnings` / `test --locked`（359 项）/ `build --locked` / `git diff --check` 全部通过；`cargo run --locked` 启动成功且 `PrintWindow` 取到真实渲染帧，但桌面处于锁屏、输入未送达，未取得迁移后 head 的交互像素。
 - 未覆盖：负责人对真实 Windows 窗口外观/DPI 的观感确认与动画流畅度、真实 IME 与触控板手势、sidebar 与 reader 接线后的组合效果、Markdown 列表（接口未就绪）。
