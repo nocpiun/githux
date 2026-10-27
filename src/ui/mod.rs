@@ -29,6 +29,7 @@ pub mod fixtures;
 pub(crate) mod geometry;
 mod page;
 mod palette;
+pub mod reader;
 mod scroll;
 mod sidebar;
 mod tabs;
