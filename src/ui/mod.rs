@@ -104,6 +104,9 @@ pub struct Shell {
     /// Pointer events report window positions, while a band built from the shell body's local
     /// origin would be off by the title bar inset; this keeps both in one space.
     sidebar_resize_band: Option<gpui::Bounds<gpui::Pixels>>,
+    /// The shell body's left edge in window coordinates, so pointer positions can be converted to
+    /// the container space the sidebar geometry uses (title-bar/DPI safe).
+    sidebar_body_left: Option<gpui::Pixels>,
     /// The collapse/expand toggle's own focus. Keyboard activation must keep focus here so a
     /// second Enter/Space reverses the mode instead of dropping into the shell root.
     sidebar_toggle_focus: FocusHandle,
@@ -254,6 +257,7 @@ impl Shell {
             sidebar_bounds,
             sidebar_more_focus: cx.focus_handle(),
             sidebar_resize_band: None,
+            sidebar_body_left: None,
             sidebar_toggle_focus: cx.focus_handle(),
             sidebar_menu_focus: cx.focus_handle(),
             sidebar_menu: false,
@@ -1746,9 +1750,16 @@ impl Render for Shell {
                                     {
                                         return;
                                     }
-                                    shell.sidebar_state.resize_pointer(
-                                        f32::from(event.event.position.x),
+                                    // One coordinate space for the whole gesture: the pointer's
+                                    // window x minus the body's own left edge. The sash anchor is
+                                    // the presented sidebar width in that same space.
+                                    let body_left =
+                                        shell.sidebar_body_left.map(f32::from).unwrap_or(0.0);
+                                    shell.sidebar_state.resize_pointer_at(
+                                        f32::from(event.event.position.x) - body_left,
+                                        cx.background_executor().now(),
                                         window.viewport_size().width.into(),
+                                        cx.theme().reduced_motion || cx.reduce_motion(),
                                     );
                                     // The gesture itself keeps the line visible. Pointer hover is
                                     // still recorded for the moment the drag ends, so a release

@@ -82,6 +82,7 @@ impl super::Shell {
                     move |bounds, _, cx| {
                         band_bounds.update(cx, |shell, _| {
                             shell.sidebar_resize_band = Some(bounds);
+                            shell.sidebar_body_left = Some(bounds.left() - gpui::px(width));
                         });
                     },
                     |_, _, _, _| {},
@@ -109,15 +110,24 @@ impl super::Shell {
                     start_x: std::cell::Cell::new(_window.mouse_position().x),
                 },
                 move |drag, _, window, cx| {
-                    // The payload anchors at press; the current pointer may already be a few pixels
-                    // further, so hand both over to keep that first movement as real travel.
+                    // Everything here is in the shell body's coordinates: the sash anchor is the
+                    // width of the column, and the pointer is converted from window coordinates by
+                    // the caller. Only the real few-pixel grab offset inside the band is kept.
                     let press = f32::from(drag.start_x.get());
                     let now = f32::from(window.mouse_position().x);
                     this.update(cx, |shell, cx| {
-                        shell.sidebar_state.begin_resize(press);
                         shell
                             .sidebar_state
-                            .start_at(now - press, window.viewport_size().width.into());
+                            .begin_resize(press, shell.sidebar_state.frame.width);
+                        // `press` is already the pointer in window coordinates; the sash sits at
+                        // `frame.width` inside the shell body, so the offset between them is the
+                        // real grab position and no title-bar/DPI conversion is needed here.
+                        shell.sidebar_state.start_at(
+                            now,
+                            cx.background_executor().now(),
+                            window.viewport_size().width.into(),
+                            cx.theme().reduced_motion || cx.reduce_motion(),
+                        );
                         shell.sidebar_state.note_drag(
                             cx.background_executor().now(),
                             cx.theme().reduced_motion || cx.reduce_motion(),

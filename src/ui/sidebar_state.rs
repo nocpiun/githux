@@ -35,13 +35,16 @@ pub(super) struct SidebarState {
     sash_target: f32,
     sash_opacity: f32,
     sash_since: Instant,
-    /// Pointer anchor and width baseline of the current resize gesture, reset on every mode
-    /// switch so one continuous drag cannot bounce across the threshold.
-    drag_base_width: f32,
-    drag_offset_base: f32,
-    /// Press position and last pointer sample of the current gesture.
-    drag_press_x: f32,
-    drag_last_pointer: f32,
+    /// Where inside the sash hit band the gesture grabbed, in sidebar-container coordinates.
+    /// Expanded drags bind absolutely to `pointer - grab_offset`; only a few pixels of real grab
+    /// difference remain, never the jump caused by restoring a remembered width.
+    drag_grab_offset: f32,
+    /// Current pointer in the same container coordinates, and the total travel from press.
+    drag_pointer_x: f32,
+    drag_travel: f32,
+    /// Press pointer captured at `begin_resize`; travel is measured from here for the entire
+    /// gesture, so mode switches never rebase it.
+    press_pointer_at_begin: f32,
     /// Whether this gesture started on the rail (rather than merely being mid-collapse).
     drag_from_rail: bool,
 }
@@ -62,10 +65,10 @@ impl Default for SidebarState {
             sash_target: 0.0,
             sash_opacity: 0.0,
             sash_since: Instant::now(),
-            drag_base_width: SIDEBAR_WIDTH,
-            drag_offset_base: 0.0,
-            drag_press_x: 0.0,
-            drag_last_pointer: 0.0,
+            drag_grab_offset: SIDEBAR_RESIZE_HIT_WIDTH / 2.0,
+            drag_pointer_x: 0.0,
+            drag_travel: 0.0,
+            press_pointer_at_begin: 0.0,
             drag_from_rail: false,
         }
     }
@@ -93,11 +96,14 @@ impl SidebarState {
     /// Returns whether another animation frame is needed. No timer or retained callback.
     pub fn sample(&mut self, now: Instant, window_width: f32, reduced: bool) -> bool {
         let target = self.target(window_width);
+        // A drag keeps its own transition while the pointer retargets it; only an external change
+        // (window resize, toggle, settle) drops it. `retarget_transition` handles the drag case.
         if reduced
-            || self
-                .transition
-                .as_ref()
-                .is_some_and(|t| t.to.width != target.width)
+            || (!self.dragging
+                && self
+                    .transition
+                    .as_ref()
+                    .is_some_and(|t| t.to.width != target.width))
         {
             self.transition = None;
         }
@@ -205,24 +211,18 @@ impl SidebarState {
 
     /// Starts a resize gesture in whichever mode is currently shown, anchored at the pointer's
     /// press position. Entering a drag on the rail must not silently expand it.
-    pub fn begin_resize(&mut self, press_x: f32) {
-        self.transition = None;
-        self.drag_press_x = press_x;
-        self.drag_last_pointer = press_x;
-        // Baseline is the frame on screen, but never narrower than the legal minimum: a drag that
-        // interrupts a collapsing animation must dock at 200 rather than continue below it.
+    pub fn begin_resize(&mut self, press_pointer: f32, press_sash_left: f32) {
+        self.drag_grab_offset =
+            (press_pointer - press_sash_left).clamp(0.0, SIDEBAR_RESIZE_HIT_WIDTH);
+        self.drag_pointer_x = press_pointer;
+        self.press_pointer_at_begin = press_pointer;
+        self.drag_travel = 0.0;
         // A drag that interrupts a collapse is still an expanded-mode drag: the sidebar is wider
         // than the rail on screen, so dropping straight to the rail branch would be wrong.
         self.drag_from_rail = self.collapsed && self.frame.width <= SIDEBAR_COLLAPSED_WIDTH + 0.5;
-        self.drag_base_width = if self.drag_from_rail {
-            SIDEBAR_COLLAPSED_WIDTH
-        } else {
-            self.frame.width.max(SIDEBAR_MIN_WIDTH)
-        };
         // A mid-animation collapse is frozen as expanded so the threshold logic starts from the
         // presented width rather than the already-flipped mode flag.
         self.collapsed = self.drag_from_rail;
-        self.drag_offset_base = 0.0;
         self.dragging = true;
     }
 
@@ -237,9 +237,9 @@ impl SidebarState {
 
     /// Starts judging the line from the pointer during a drag, where the element's hover lifecycle
     /// is suppressed. The pointer is still inside the band at drag start.
-    /// Applies the displacement already travelled when the platform drag finally started.
-    pub fn start_at(&mut self, total: f32, window_width: f32) {
-        self.resize(total, window_width);
+    /// Applies the pointer position at which the platform drag actually started.
+    pub fn start_at(&mut self, pointer_x: f32, now: Instant, window_width: f32, reduced: bool) {
+        self.resize_pointer_at(pointer_x, now, window_width, reduced);
     }
 
     pub fn note_drag(&mut self, now: Instant, reduced: bool) {
@@ -251,51 +251,71 @@ impl SidebarState {
         self.transition = None;
         self.frame = self.target(window_width);
     }
-    /// Applies the gesture's total horizontal displacement. Expanded mode shrinks continuously and
-    /// docks at the minimum width; only further overshoot of the threshold collapses. Collapsed
-    /// mode holds the rail until the same overshoot to the right, then expands with the remembered,
-    /// window-clamped width. A switch rebases the displacement baseline so one gesture cannot
-    /// oscillate against its own layout changes.
-    pub fn resize_pointer(&mut self, pointer_x: f32, window_width: f32) {
-        self.drag_last_pointer = pointer_x;
-        self.resize(pointer_x - self.drag_press_x, window_width);
-    }
 
-    pub fn resize(&mut self, total: f32, window_width: f32) {
+    /// Retargets an in-flight transition from the frame currently presented, so a moving pointer
+    /// bends the same curve instead of restarting or snapping.
+    fn retarget_transition(&mut self, now: Instant, window_width: f32, reduced: bool) {
+        let to = self.target(window_width);
+        if reduced {
+            self.frame = to;
+            self.transition = None;
+            return;
+        }
+        self.transition = Some(Transition {
+            from: self.frame,
+            to,
+            since: now,
+        });
+    }
+    /// Absolute pointer tracking for the current gesture. `pointer_x` is in sidebar-container
+    /// coordinates, so width comes from where the pointer is rather than from a remembered width
+    /// or an accumulated relative baseline.
+    pub fn resize_pointer_at(
+        &mut self,
+        pointer_x: f32,
+        now: Instant,
+        window_width: f32,
+        reduced: bool,
+    ) {
         if !self.dragging {
             return;
         }
-        let travel = total - self.drag_offset_base;
+        self.drag_pointer_x = pointer_x;
+        self.drag_travel = pointer_x - self.press_pointer_at_begin;
+        let requested = pointer_x - self.drag_grab_offset;
+        let min = SIDEBAR_MIN_WIDTH;
+        let limit = Self::limit(window_width);
+
         if self.drag_from_rail {
-            if travel >= SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
+            // Returning from a collapse: once the pointer has travelled the expand threshold the
+            // mode switches; the expanded width is then simply where the pointer is, so a short
+            // drag produces the narrow critical width rather than the remembered wide one.
+            if self.drag_travel >= SIDEBAR_DRAG_EXPAND_THRESHOLD {
                 self.drag_from_rail = false;
                 self.collapsed = false;
-                self.expanded_width = self
-                    .expanded_width
-                    .clamp(SIDEBAR_MIN_WIDTH, Self::limit(window_width));
-                self.settle(window_width);
-                self.drag_base_width = self.frame.width;
-                self.drag_offset_base = total;
+                // The expanded width is the pointer's own position, bounded only by the legal
+                // range and the window budget. It must not snap to a remembered or minimum width.
+                self.expanded_width = requested.clamp(min, limit);
+                self.retarget_transition(now, window_width, reduced);
             }
             return;
         }
-        let requested = self.drag_base_width + travel;
-        if requested > SIDEBAR_MIN_WIDTH {
-            self.expanded_width = requested.clamp(SIDEBAR_MIN_WIDTH, Self::limit(window_width));
-            self.settle(window_width);
+
+        // Collapsing: dock at the minimum, then collapse only past the extra overshoot.
+        if requested >= min {
+            self.expanded_width = requested.clamp(min, limit);
+            self.transition = None;
+            self.frame = self.target(window_width);
             return;
         }
-        // Never expose a width narrower than the minimum, even on a frame between the plateau and
-        // the collapse switch.
-        self.expanded_width = SIDEBAR_MIN_WIDTH;
-        self.expanded_width = SIDEBAR_MIN_WIDTH;
-        self.settle(window_width);
-        if SIDEBAR_MIN_WIDTH - requested >= SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
+        self.expanded_width = min;
+        if min - requested >= SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
             self.collapsed = true;
             self.drag_from_rail = true;
-            self.settle(window_width);
-            self.drag_base_width = SIDEBAR_COLLAPSED_WIDTH;
-            self.drag_offset_base = total;
+            self.retarget_transition(now, window_width, reduced);
+        } else {
+            self.transition = None;
+            self.frame = self.target(window_width);
         }
     }
 }

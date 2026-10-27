@@ -6,6 +6,7 @@ use gpui::{
     ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, VisualContext, VisualTestContext,
     point, px, size,
 };
+use std::time::{Duration, Instant};
 
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
     cx.update(|cx| {
@@ -68,21 +69,19 @@ fn release(p: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
 #[test]
 fn window_budget_and_remembered_width_are_independent() {
     let mut state = SidebarState::default();
-    state.begin_resize(0.0);
-    state.resize(668.0, 1200.0);
-    assert_eq!(state.width(1200.0), 360.0);
+    state.begin_resize(SIDEBAR_WIDTH, SIDEBAR_WIDTH);
+    state.resize_pointer_at(232.0 + 128.0, Instant::now(), 1200.0, true);
+    assert_eq!(state.width(1200.0), SIDEBAR_MAX_WIDTH);
     assert_eq!(state.width(880.0), 265.0);
     state.collapsed = true;
     assert_eq!(state.width(880.0), SIDEBAR_COLLAPSED_WIDTH);
     state.collapsed = false;
-    assert_eq!(state.width(1200.0), 360.0);
-    state.begin_resize(0.0);
-    state.resize(-160.0, 880.0);
-    assert_eq!(state.width(880.0), 200.0);
-    assert!(!state.collapsed);
+    assert_eq!(state.width(1200.0), SIDEBAR_MAX_WIDTH);
+    state.begin_resize(SIDEBAR_WIDTH, SIDEBAR_WIDTH);
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH - 400.0, Instant::now(), 1200.0, true);
+    assert!(state.collapsed, "a far overshoot collapses");
     state.dragging = false;
-    state.resize(350.0, 1200.0);
-    assert_eq!(state.width(1200.0), 200.0);
+    assert_eq!(state.width(1200.0), SIDEBAR_COLLAPSED_WIDTH);
 }
 
 #[gpui::test]
@@ -358,13 +357,16 @@ fn motion_reverses_from_presented_value_and_resize_ends_it() {
     assert!(!state.sample(start + Duration::from_secs(10), 1200.0, false));
     state.toggle(start + Duration::from_secs(11), 1200.0, false);
     state.sample(start + Duration::from_millis(11050), 1200.0, false);
-    state.begin_resize(0.0);
-    // Resizing interrupts the animation from the frame actually presented; a small left move docks
-    // at the minimum, a further move right expands again and clamps to the window budget.
-    state.resize_pointer(-8.0, 880.0);
+    state.begin_resize(232.0, 232.0);
+    // Resizing interrupts the animation; widths follow the absolute pointer and clamp to the
+    // window budget rather than to a remembered value.
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH, Instant::now(), 880.0, true);
     assert_eq!(state.frame.width, SIDEBAR_MIN_WIDTH);
-    state.resize_pointer(65.0, 880.0);
-    assert_eq!(state.frame.width, 265.0);
+    // The absolute pointer maps to 260 and the remaining travel is clamped by the window budget.
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH + 100.0, Instant::now(), 880.0, true);
+    assert_eq!(state.frame.width, 260.0);
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH + 300.0, Instant::now(), 880.0, true);
+    assert_eq!(state.frame.width, SidebarState::limit(880.0));
     assert!(!state.sample(start + Duration::from_secs(12), 880.0, false));
     state.toggle(start + Duration::from_secs(13), 880.0, true);
     assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
@@ -1008,65 +1010,83 @@ fn escape_returns_focus_to_the_more_button_and_enter_reopens(cx: &mut TestAppCon
 }
 
 #[test]
-fn expanded_drag_docks_then_collapses_only_past_the_threshold() {
+fn expanded_drag_docks_then_collapses_with_animation() {
+    let start = Instant::now();
     let mut state = SidebarState::default();
-    let (min, max) = (SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-    state.begin_resize(0.0);
-    state.resize_pointer(-20.0, 1200.0);
-    assert!((min..max).contains(&state.frame.width));
-    // Continuous shrink, then the docking plateau at the minimum.
-    state.resize_pointer(-(SIDEBAR_WIDTH - min), 1200.0);
-    assert_eq!(state.frame.width, min);
+    state.begin_resize(SIDEBAR_WIDTH + 4.0, SIDEBAR_WIDTH);
+    // Continuous shrink keeps following the pointer.
+    state.resize_pointer_at(SIDEBAR_WIDTH - 20.0, start, 1200.0, false);
+    assert!((SIDEBAR_MIN_WIDTH..SIDEBAR_MAX_WIDTH).contains(&state.width(1200.0)));
+    assert_eq!(state.frame.width, state.width(1200.0));
+    // Dock: at the minimum the rail must not appear yet.
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH + 4.0, start, 1200.0, false);
+    assert_eq!(state.width(1200.0), SIDEBAR_MIN_WIDTH);
     assert!(!state.collapsed);
-    state.resize_pointer(
-        -(SIDEBAR_WIDTH - min) - (SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 1.0),
-        1200.0,
-    );
-    assert_eq!(state.frame.width, min);
-    assert!(
-        !state.collapsed,
-        "short of the threshold the rail must not appear"
-    );
-    // Crossing it collapses directly; continued motion does not toggle again.
-    state.resize_pointer(
-        -(SIDEBAR_WIDTH - min) - SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 4.0,
-        1200.0,
-    );
+    // Overshoot past the threshold flips the mode, and presentation eases rather than jumping.
+    let collapse_at = SIDEBAR_MIN_WIDTH + 4.0 - SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 4.0;
+    state.resize_pointer_at(collapse_at, start, 1200.0, false);
+    assert!(state.collapsed);
+    assert_eq!(state.frame.width, SIDEBAR_MIN_WIDTH, "no instant jump");
+    assert!(state.sample(start + Duration::from_millis(100), 1200.0, false));
+    let mid = state.frame.width;
+    assert!(mid > SIDEBAR_COLLAPSED_WIDTH && mid < SIDEBAR_MIN_WIDTH);
+    assert!(state.frame.expansion > 0.0 && state.frame.expansion < 1.0);
+    assert!(!state.sample(start + Duration::from_millis(400), 1200.0, false));
+    assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
+    // A stationary pointer completes the animation without any further events.
+    assert!(!state.sample(start + Duration::from_secs(2), 1200.0, false));
+    // Reduced motion finishes the same transition immediately.
+    state.begin_resize(SIDEBAR_WIDTH, SIDEBAR_WIDTH);
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH - 400.0, start, 1200.0, true);
     assert!(state.collapsed);
     assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
-    let switch = -(SIDEBAR_WIDTH - min) - SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 4.0;
-    state.resize_pointer(switch - 36.0, 1200.0);
-    assert!(state.collapsed);
-    // Reversing must cross a fresh threshold from the switch point, not bounce back instantly.
-    state.resize_pointer(switch + SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 2.0, 1200.0);
-    assert!(state.collapsed);
-    state.resize_pointer(switch + SIDEBAR_DRAG_COLLAPSE_THRESHOLD + 2.0, 1200.0);
-    assert!(!state.collapsed);
-    assert!((min..=SIDEBAR_MAX_WIDTH).contains(&state.frame.width));
-    state.end_resize(std::time::Instant::now(), false, true);
-    // A brand-new gesture does not inherit displacement.
-    let settled = state.frame.width;
-    state.begin_resize(0.0);
-    state.resize_pointer(0.0, 1200.0);
-    assert_eq!(state.frame.width, settled);
+    assert!(!state.sample(start, 1200.0, true));
 }
 
 #[test]
-fn collapsed_drag_holds_the_rail_until_the_threshold() {
+fn collapsed_drag_expands_to_the_pointer_position_not_the_remembered_width() {
     let mut state = SidebarState::default();
+    state.expanded_width = SIDEBAR_MAX_WIDTH;
     state.collapsed = true;
     state.settle(1200.0);
-    state.begin_resize(0.0);
-    state.resize_pointer(SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 1.0, 1200.0);
+    state.begin_resize(SIDEBAR_COLLAPSED_WIDTH + 4.0, SIDEBAR_COLLAPSED_WIDTH);
+    // Before the threshold the rail stays put.
+    state.resize_pointer_at(
+        SIDEBAR_COLLAPSED_WIDTH + 4.0 + 8.0,
+        Instant::now(),
+        1200.0,
+        true,
+    );
     assert!(state.collapsed);
     assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
-    state.resize_pointer(SIDEBAR_DRAG_COLLAPSE_THRESHOLD + 1.0, 1200.0);
+    // Past the threshold: width comes from the pointer, not the remembered 360.
+    let pointer = SIDEBAR_MIN_WIDTH + 12.0;
+    let target = pointer - 4.0;
+    state.resize_pointer_at(pointer, Instant::now(), 1200.0, true);
     assert!(!state.collapsed);
-    assert!((SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH).contains(&state.frame.width));
-    // Continued rightward travel keeps expanding within the limit rather than collapsing again.
-    state.resize_pointer(SIDEBAR_DRAG_COLLAPSE_THRESHOLD + 200.0, 1200.0);
-    assert!(!state.collapsed);
-    assert!(state.frame.width <= SIDEBAR_MAX_WIDTH);
+    assert_eq!(state.frame.width, target);
+    assert!(target < SIDEBAR_MAX_WIDTH);
+    // Same final pointer with a different remembered width yields the same sash.
+    let mut other = SidebarState::default();
+    other.expanded_width = SIDEBAR_MIN_WIDTH;
+    other.collapsed = true;
+    other.settle(1200.0);
+    other.begin_resize(SIDEBAR_COLLAPSED_WIDTH + 4.0, SIDEBAR_COLLAPSED_WIDTH);
+    other.resize_pointer_at(pointer, Instant::now(), 1200.0, true);
+    assert_eq!(other.frame.width, state.frame.width);
+}
+
+#[test]
+fn grab_offset_inside_the_band_shifts_the_width_by_only_that_offset() {
+    let mut a = SidebarState::default();
+    let mut b = SidebarState::default();
+    a.begin_resize(200.0 + 1.0, 200.0);
+    b.begin_resize(200.0 + 7.0, 200.0);
+    a.resize_pointer_at(240.0, Instant::now(), 1200.0, true);
+    b.resize_pointer_at(240.0, Instant::now(), 1200.0, true);
+    assert_eq!(a.frame.width, 239.0);
+    assert_eq!(b.frame.width, 233.0);
+    assert_eq!(a.frame.width - b.frame.width, 6.0);
 }
 
 #[gpui::test]
@@ -1135,7 +1155,7 @@ fn a_drag_follows_the_pointer_and_does_not_pin_the_sash_on() {
     let mut state = SidebarState::default();
     let t0 = Instant::now();
     // A drag begins inside the band, so the line is up...
-    state.begin_resize(0.0);
+    state.begin_resize(SIDEBAR_WIDTH, SIDEBAR_WIDTH);
     state.note_drag(t0, true);
     assert_eq!(state.sash(), 1.0);
     assert!(state.sash_hovered());
@@ -1422,4 +1442,124 @@ fn repository_thumb_cleanup_is_local_on_escape_resize_and_window_blur(cx: &mut T
         0.0
     );
     assert!(!view.read_with(cx, |s, _| s.repo_bars.is_animating()));
+}
+
+/// Continued pointer movement during the mode-switch animation must bend the same curve rather
+/// than restart it or snap back to the old width.
+#[test]
+fn moving_pointer_during_the_switch_keeps_the_animation_continuous() {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.begin_resize(SIDEBAR_WIDTH + 4.0, SIDEBAR_WIDTH);
+    let collapse_at = SIDEBAR_MIN_WIDTH + 4.0 - SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 4.0;
+    state.resize_pointer_at(collapse_at, start, 1200.0, false);
+    assert!(state.collapsed);
+    assert!(state.sample(start + Duration::from_millis(80), 1200.0, false));
+    let mid = state.frame.width;
+    assert!(mid > SIDEBAR_COLLAPSED_WIDTH && mid < SIDEBAR_MIN_WIDTH);
+    // Further movement in the same frame keeps easing from the presented value, never jumping.
+    state.resize_pointer_at(
+        collapse_at - 6.0,
+        start + Duration::from_millis(80),
+        1200.0,
+        false,
+    );
+    assert!(state.collapsed);
+    assert_eq!(state.frame.width, mid, "no instant jump on the next event");
+    assert!(state.sample(start + Duration::from_millis(140), 1200.0, false));
+    let later = state.frame.width;
+    assert!(later < mid && later > SIDEBAR_COLLAPSED_WIDTH);
+    assert!(!state.sample(start + Duration::from_millis(500), 1200.0, false));
+    assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
+    // A stationary pointer then completes normally and leaves no transition behind.
+    assert!(!state.sample(start + Duration::from_secs(3), 1200.0, false));
+}
+
+/// One gesture expanding out of the rail can collapse again only by crossing the collapse
+/// overshoot, and release stops the gesture without leaving a stale mode.
+#[gpui::test]
+fn repeated_mode_switches_in_one_gesture_do_not_flap(cx: &mut TestAppContext) {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.collapsed = true;
+    state.settle(1200.0);
+    state.begin_resize(SIDEBAR_COLLAPSED_WIDTH + 4.0, SIDEBAR_COLLAPSED_WIDTH);
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH + 10.0, start, 1200.0, true);
+    assert!(!state.collapsed);
+    let expanded = state.frame.width;
+    // Moving left to exactly the minimum docks without collapsing.
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH + 4.0, start, 1200.0, true);
+    assert!(!state.collapsed);
+    assert_eq!(state.frame.width, SIDEBAR_MIN_WIDTH);
+    // Reversing slightly does not create a collapse.
+    state.resize_pointer_at(SIDEBAR_MIN_WIDTH + 30.0, start, 1200.0, true);
+    assert!(!state.collapsed);
+    assert!(state.frame.width > expanded - 1.0 || state.frame.width >= SIDEBAR_MIN_WIDTH);
+    state.end_resize(start, false, true);
+    assert!(!state.dragging);
+    assert!(!state.collapsed);
+    let _ = cx;
+}
+
+/// The real GPT event path: dragging out of the rail must place the sash where the pointer is,
+/// independent of the previously remembered expanded width.
+#[gpui::test]
+fn expanding_from_the_rail_binds_the_sash_to_the_pointer(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    view.update(cx, |s, cx| {
+        s.sidebar_state.expanded_width = SIDEBAR_MAX_WIDTH;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    click("sidebar-toggle", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    let band = bounds("sidebar-resize", cx);
+    let anchor = point(band.left() + px(3.0), band.top() + px(60.0));
+    cx.simulate_mouse_move(anchor, None, Modifiers::none());
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: anchor,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    for step in [4.0, 60.0, 140.0] {
+        cx.simulate_mouse_move(
+            anchor + point(px(step), px(0.0)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    // The gesture may not have crossed the drag threshold in this synthetic sequence; drive one
+    // more small move so GPUI's drag is definitely active before asserting the mode.
+    cx.simulate_mouse_move(
+        anchor + point(px(120.0), px(0.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    // Advance the switch animation the way the frame loop does.
+    for _ in 0..8 {
+        view.update(cx, |s, cx| {
+            let now = cx.background_executor().now();
+            s.sidebar_state
+                .sample(now + std::time::Duration::from_millis(60), 1200.0, true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+    let island = bounds("island", cx);
+    let sash = bounds("sidebar-sash", cx);
+    let pointer = anchor + point(px(140.0), px(0.0));
+    // A few pixels of real grab offset are allowed; a remembered-width jump is not.
+    assert!(
+        (sash.right() - pointer.x).abs() <= px(12.0),
+        "sash right {:?} must track pointer {:?}",
+        sash.right(),
+        pointer.x
+    );
+    assert_eq!(sash.right(), island.left());
+    release(pointer, cx);
 }

@@ -9,7 +9,9 @@ pub const SIDEBAR_WIDTH: f32 = 232.0;
 
 /// Client-edge inset. The island gap supplies the matching right inset for sidebar rows.
 pub const SIDEBAR_PADDING: f32 = 8.0;
-pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
+/// Narrowest expanded width. Lowered from 200 for the narrower critical width the owner asked for
+/// (Chrome vertical-tabs scale); it is still an implementation starting point, not a fixed rule.
+pub const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 pub const SIDEBAR_MAX_WIDTH: f32 = 360.0;
 /// The rail owns the left inset; ISLAND_GAP supplies the matching right inset.
 pub const SIDEBAR_RAIL_ITEM_SIZE: f32 = 28.0;
@@ -41,10 +43,13 @@ pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
 pub const SIDEBAR_SASH_LEFT: f32 = (SIDEBAR_RESIZE_HIT_WIDTH - 2.0) / 2.0;
 pub const SIDEBAR_SASH_WIDTH: f32 = SIDEBAR_RESIZE_HIT_WIDTH - SIDEBAR_SASH_LEFT;
 pub const SIDEBAR_SASH_FADE_MS: u64 = 140;
-/// Extra pointer travel past the minimum width (or past the start of a rail drag) before a resize
-/// gesture switches between expanded and collapsed. It is an implementation starting point for
-/// acceptance, not a fixed product number.
+/// Extra pointer travel past the minimum width before an expanded drag collapses. It also acts as
+/// the hysteresis that stops one gesture flapping between modes at the same point.
 pub const SIDEBAR_DRAG_COLLAPSE_THRESHOLD: f32 = 32.0;
+/// How far the pointer must move off the rail before an expansion starts. It is smaller than the
+/// collapse overshoot because the target width itself must also be legal, so the two conditions
+/// together keep the rail stable without a fake multi-hundred-pixel dead zone.
+pub const SIDEBAR_DRAG_EXPAND_THRESHOLD: f32 = 12.0;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
 pub const REPO_LEFT_PADDING: f32 = 4.0;
 

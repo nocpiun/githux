@@ -200,3 +200,15 @@ Codex 针对公共 motion 首版（`d629d0e`，P2）指出：tabs 的公共 over
 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（**407 passed**）、`cargo build --locked`、`git diff --check` 通过，均 `CARGO_BUILD_JOBS=1`、本 worktree target。旧测试中“拖出命中带即灭线”“收起态禁止 resize”等与新契约冲突的断言已按本轮明确要求更新，其余侧栏与公共 scroll 回归保留。
 
 未验证边界：GPUI 测试平台不经过 Windows 原生输入分发。真实拖动跨越阈值的手感、sash 新宽度观感、toggle 无边框后的焦点可辨度、最大化/还原与多 DPI 下的表现仍需负责人真实窗口验收；本轮不据此宣称验收通过。
+
+## 第十一轮：切换动画、160px 临界宽度、展开后 sash 跟随指针
+
+负责人 2026-10-27 三项反馈。基线 `942a315`，保留 sash 右贴 island、拖动全程高亮、toggle 无边框与公共 `scroll::Motion`。
+
+1. **模式切换走动画**：`resize` 不再在阈值处 `settle()`。折叠/展开触发时用既有 `Transition`（约 200ms ease-out、共享时钟与 reduced-motion）从当前呈现帧过渡到目标；拖动继续收到的 move 通过 `retarget_transition` 从当前帧重新衔接，静止指针也能完成动画。`sample()` 只在非拖动状态下因外部目标变化丢弃 transition，避免下一个鼠标事件抹掉动画。普通跟手缩放仍是即时的，只有模式切换需要过渡。
+2. **更窄临界宽度**：`SIDEBAR_MIN_WIDTH` 从 200 调到 **160** logical px。折叠仍需要越过额外 32px 超程；从 rail 展开另用 12px 的 `SIDEBAR_DRAG_EXPAND_THRESHOLD`，避免“只动一点就跳到远处记忆宽度”。两者都保留为可调常量。
+3. **展开后按指针对齐**：删除“恢复 `expanded_width` 再重建相对基准”的做法。宽度统一由 `pointer - grab_offset` 的绝对位置决定，`grab_offset` 只是按下点在命中带内的真实偏移（clamp 到 8px），模式切换不再重设位移基准。因此同一指针位置不因旧记忆宽度或事件序列不同而得到不同宽度；展开过渡完成后 sash 落在指针处，之后左右移动直接跟手。
+
+修复的真实缺陷：rail 展开在 reduced-motion 下未即时落到目标；展开目标被 clamp 到最小值导致 sash 停在 160 不跟手。新增测试覆盖切换中间帧/完成帧、reduced-motion、静止指针收敛、持续 move 不抹动画、不同记忆宽度同一指针结果相同、命中带内不同抓取点只差该偏移、同一手势重复切换不抖动，以及真实 GPUI 事件下从 rail 展开后 sash 右缘跟随指针。
+
+验证：fmt、locked all-target check、clippy `-D warnings`、**411 tests**、build、diff check 通过（`CARGO_BUILD_JOBS=1`、本 worktree target）。阈值 160/32/12 是验收起点，不是永久产品硬规定；真实拖动观感与动画流畅度待负责人确认。
