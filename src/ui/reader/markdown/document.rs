@@ -217,8 +217,8 @@ impl MarkdownView {
 
     /// A paragraph with a key unique within the document. Selection and focus
     /// live in the keyed state, so every selectable paragraph needs its own:
-    /// sharing a key between table cells would apply one cell's byte offsets
-    /// to another cell's text.
+    /// sharing a key between table cells or nested blocks would apply one
+    /// byte range to another string.
     fn paragraph_keyed(&self, key: gpui::ElementId, inline: &Inline) -> ParagraphView {
         let on_link = self.on_link.clone();
         let view = ParagraphView::new(key, inline.clone());
@@ -542,9 +542,9 @@ impl MarkdownView {
         mono: &SharedString,
         radius: gpui::Rems,
     ) -> AnyElement {
-        // The key is the complete nesting path, so two paragraphs in one item
-        // (or in sibling items) never share selection or focus state. The
-        // caller always supplies the child block index in `id.1`.
+        // The complete nesting path includes every child block index, so two
+        // paragraphs in one item (or in sibling items) never share selection
+        // or focus state.
         self.nested_keyed(id, block, colors, body, mono, radius)
     }
 
