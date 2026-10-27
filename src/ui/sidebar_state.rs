@@ -17,6 +17,7 @@ struct Transition {
     from: SidebarFrame,
     to: SidebarFrame,
     since: Instant,
+    duration: Duration,
 }
 
 pub(super) struct SidebarState {
@@ -100,7 +101,7 @@ impl SidebarState {
     pub fn sample(&mut self, now: Instant, window_width: f32, reduced: bool) -> bool {
         let target = self.target(window_width);
         // A drag keeps its own transition while the pointer retargets it; only an external change
-        // (window resize, toggle, settle) drops it. `retarget_transition` handles the drag case.
+        // (window resize, toggle, settle) drops it. `update_resize_target` handles the drag case.
         if reduced
             || (!self.dragging
                 && self
@@ -114,8 +115,8 @@ impl SidebarState {
             self.frame = target;
             return false;
         };
-        let progress = now.saturating_duration_since(t.since).as_secs_f32()
-            / Duration::from_millis(SIDEBAR_ANIMATION_MS).as_secs_f32();
+        let progress =
+            now.saturating_duration_since(t.since).as_secs_f32() / t.duration.as_secs_f32();
         if progress >= 1.0 {
             self.frame = target;
             self.transition = None;
@@ -137,6 +138,7 @@ impl SidebarState {
             from: self.frame,
             to: self.target(window_width),
             since: now,
+            duration: Duration::from_millis(SIDEBAR_ANIMATION_MS),
         });
         if reduced {
             self.sample(now, window_width, true);
@@ -171,13 +173,13 @@ impl SidebarState {
     /// is clearly wider than the minimum. It never forces `collapsed` itself, so the rest of the
     /// sidebar keeps animating by its real width.
     pub fn footer_compact(&self) -> bool {
+        if self.collapsed || self.transition.is_some() {
+            return true;
+        }
         if self.dragging {
             // During a gesture the width follows the pointer, so transient widths must not flip
             // the footer. A latched decision, taken once per crossing, keeps one presentation.
             return self.footer_latched_compact;
-        }
-        if self.collapsed || self.transition.is_some() {
-            return true;
         }
         self.frame.width < SIDEBAR_MIN_WIDTH + SIDEBAR_FOOTER_COMPACT_MARGIN
     }
@@ -255,6 +257,9 @@ impl SidebarState {
         // A mid-animation collapse is frozen as expanded so the threshold logic starts from the
         // presented width rather than the already-flipped mode flag.
         self.collapsed = self.drag_from_rail;
+        // A new manual gesture takes over any earlier toggle animation. Only mode switches
+        // started within this gesture keep animating through its subsequent pointer events.
+        self.transition = None;
         self.dragging = true;
     }
 
@@ -284,9 +289,8 @@ impl SidebarState {
         self.frame = self.target(window_width);
     }
 
-    /// Retargets an in-flight transition from the frame currently presented, so a moving pointer
-    /// bends the same curve instead of restarting or snapping.
-    fn retarget_transition(&mut self, now: Instant, window_width: f32, reduced: bool) {
+    /// A mode change (including a reversal) starts from the current presented frame.
+    fn start_transition(&mut self, now: Instant, window_width: f32, reduced: bool) {
         let to = self.target(window_width);
         if reduced {
             self.frame = to;
@@ -297,8 +301,32 @@ impl SidebarState {
             from: self.frame,
             to,
             since: now,
+            duration: Duration::from_millis(SIDEBAR_ANIMATION_MS),
         });
     }
+    /// Pointer movement within the same mode keeps the switch animation's deadline. Sampling
+    /// before changing the target gives a continuous starting frame; only the remaining time is
+    /// reused, so frequent mouse events cannot keep the animation alive indefinitely.
+    fn update_resize_target(&mut self, now: Instant, window_width: f32) {
+        let to = self.target(window_width);
+        if let Some(t) = &self.transition {
+            if t.to.width != to.width || t.to.expansion != to.expansion {
+                let remaining = t
+                    .duration
+                    .saturating_sub(now.saturating_duration_since(t.since));
+                self.transition = Some(Transition {
+                    from: self.frame,
+                    to,
+                    since: now,
+                    duration: remaining,
+                });
+            }
+        } else {
+            // Normal resizing stays directly attached to the pointer once the mode has settled.
+            self.frame = to;
+        }
+    }
+
     /// Absolute pointer tracking for the current gesture. `pointer_x` is in sidebar-container
     /// coordinates, so width comes from where the pointer is rather than from a remembered width
     /// or an accumulated relative baseline.
@@ -312,6 +340,9 @@ impl SidebarState {
         if !self.dragging {
             return;
         }
+        // Advance the old curve before mutating its target or reversing the mode. Further mouse
+        // events must not erase a switch transition started by the preceding threshold event.
+        self.sample(now, window_width, reduced);
         self.drag_pointer_x = pointer_x;
         self.drag_travel = pointer_x - self.press_pointer_at_begin;
         let requested = pointer_x - self.drag_grab_offset;
@@ -332,19 +363,17 @@ impl SidebarState {
                 // The expanded width is the pointer's own position, bounded only by the legal
                 // range and the window budget. It must not snap to a remembered or minimum width.
                 self.expanded_width = requested.clamp(min, limit);
-                self.retarget_transition(now, window_width, reduced);
+                self.start_transition(now, window_width, reduced);
             } else {
-                // Still inside the rail zone: stay on the rail and keep the animation quiescent.
-                self.transition = None;
-                self.frame = self.target(window_width);
+                // Staying in the rail zone must not cancel an in-flight collapse.
+                self.update_resize_target(now, window_width);
             }
             return;
         }
 
         if requested >= min {
             self.expanded_width = requested.clamp(min, limit);
-            self.transition = None;
-            self.frame = self.target(window_width);
+            self.update_resize_target(now, window_width);
             return;
         }
         // Docked at the minimum while the pointer is in the hysteresis band.
@@ -352,10 +381,9 @@ impl SidebarState {
         if requested <= min - SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
             self.collapsed = true;
             self.drag_from_rail = true;
-            self.retarget_transition(now, window_width, reduced);
+            self.start_transition(now, window_width, reduced);
         } else {
-            self.transition = None;
-            self.frame = self.target(window_width);
+            self.update_resize_target(now, window_width);
         }
     }
 }

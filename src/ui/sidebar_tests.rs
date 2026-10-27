@@ -1738,3 +1738,160 @@ fn leaving_compact_presentation_drops_an_open_more_menu(cx: &mut TestAppContext)
     assert!(after.is_some());
     assert_ne!(before, after, "Tab moves focus after the menu is gone");
 }
+
+// Unlike settled-layout tests, these keep motion enabled and deliver further pointer events
+// inside the 200ms transition. A single threshold event alone did not expose the regression.
+fn assert_resize_switch_survives_moves(expanding: bool) {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.collapsed = expanding;
+    state.settle(1200.0);
+    let initial = state.frame.width;
+    state.begin_resize(initial + 4.0, initial);
+    let mut pointer = if expanding {
+        SIDEBAR_MIN_WIDTH + 4.0
+    } else {
+        SIDEBAR_MIN_WIDTH - SIDEBAR_DRAG_COLLAPSE_THRESHOLD
+    };
+    state.resize_pointer_at(pointer, start, 1200.0, false);
+    assert_eq!(
+        state.frame.width, initial,
+        "switch starts at the presented width"
+    );
+    // Keep moving all the way to the original deadline. Updating the target must neither snap
+    // the frame nor postpone completion until the mouse stops.
+    for elapsed in (16..SIDEBAR_ANIMATION_MS).step_by(16) {
+        let now = start + Duration::from_millis(elapsed);
+        assert!(state.sample(now, 1200.0, false));
+        let before = state.frame;
+        pointer += if expanding { 3.0 } else { -1.0 };
+        state.resize_pointer_at(pointer, now, 1200.0, false);
+        assert!(
+            (state.frame.width - before.width).abs() < 0.001,
+            "move must not snap width"
+        );
+        assert!((state.frame.expansion - before.expansion).abs() < 0.001);
+        assert!(state.frame.expansion > 0.0 && state.frame.expansion < 1.0);
+        assert!(
+            state.footer_compact(),
+            "mode transition keeps More even if target is roomy"
+        );
+    }
+    assert!(!state.sample(
+        start + Duration::from_millis(SIDEBAR_ANIMATION_MS),
+        1200.0,
+        false
+    ));
+    let expected = if expanding {
+        pointer - 4.0
+    } else {
+        SIDEBAR_COLLAPSED_WIDTH
+    };
+    assert!((state.frame.width - expected).abs() < 0.001);
+    assert_eq!(state.frame.expansion, if expanding { 1.0 } else { 0.0 });
+    assert_eq!(state.footer_compact(), !expanding);
+    assert!(!state.sample(start + Duration::from_secs(1), 1200.0, false));
+}
+
+#[test]
+fn resize_collapse_survives_continued_pointer_events() {
+    assert_resize_switch_survives_moves(false);
+}
+
+#[test]
+fn resize_expand_survives_continued_pointer_events() {
+    assert_resize_switch_survives_moves(true);
+}
+
+#[test]
+fn resize_reversal_and_release_keep_the_presented_animation() {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.begin_resize(SIDEBAR_WIDTH + 4.0, SIDEBAR_WIDTH);
+    state.resize_pointer_at(100.0, start, 1200.0, false);
+    let reverse_at = start + Duration::from_millis(60);
+    assert!(state.sample(reverse_at, 1200.0, false));
+    let mid = state.frame;
+    state.resize_pointer_at(180.0, reverse_at, 1200.0, false);
+    assert_eq!(
+        state.frame.width, mid.width,
+        "reversal starts at the current frame"
+    );
+    assert_eq!(state.frame.expansion, mid.expansion);
+    let next = reverse_at + Duration::from_millis(40);
+    assert!(state.sample(next, 1200.0, false));
+    let before_move = state.frame;
+    state.resize_pointer_at(200.0, next, 1200.0, false);
+    assert!((state.frame.width - before_move.width).abs() < 0.001);
+    state.end_resize(next, false, false);
+    assert!(!state.dragging);
+    assert!(state.sample(next + Duration::from_millis(40), 1200.0, false));
+    assert!(state.footer_compact());
+    assert!(!state.sample(
+        reverse_at + Duration::from_millis(SIDEBAR_ANIMATION_MS),
+        1200.0,
+        false
+    ));
+    assert_eq!(state.frame.width, 196.0);
+    assert_eq!(state.frame.expansion, 1.0);
+    assert!(!state.footer_compact());
+}
+
+#[gpui::test]
+fn resize_switch_animation_survives_real_drag_events_and_layout_frames(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    for expanding in [false, true] {
+        view.update(cx, |s, cx| {
+            s.sidebar_state.collapsed = expanding;
+            s.sidebar_state.expanded_width = SIDEBAR_WIDTH;
+            s.sidebar_state.settle(1200.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
+        let press = drag_start(cx);
+        let initial = bounds("sidebar", cx).size.width;
+        let mut pointer = point(px(if expanding { 200.0 } else { 120.0 }), press.y);
+        cx.simulate_mouse_move(pointer, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(bounds("sidebar", cx).size.width, initial);
+        assert_eq!(
+            view.read_with(cx, |s, _| s.sidebar_state.collapsed),
+            !expanding
+        );
+        for _ in 0..3 {
+            cx.update(|_, cx| {
+                cx.background_executor()
+                    .advance_clock(Duration::from_millis(40))
+            });
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            let before_move = bounds("sidebar", cx).size.width;
+            let expansion = view.read_with(cx, |s, _| s.sidebar_state.frame.expansion);
+            assert!(expansion > 0.0 && expansion < 1.0);
+            pointer.x += px(if expanding { 6.0 } else { -6.0 });
+            cx.simulate_mouse_move(pointer, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+            assert!((bounds("sidebar", cx).size.width - before_move).abs() < px(0.1));
+            assert_eq!(bounds("island", cx).left(), before_move + px(ISLAND_GAP));
+            assert_eq!(bounds("sidebar-resize", cx).left(), before_move);
+            assert!(cx.debug_bounds("sidebar-more").is_some());
+            assert!(cx.debug_bounds("quarter-row").is_none());
+        }
+        cx.update(|_, cx| {
+            cx.background_executor()
+                .advance_clock(Duration::from_millis(80))
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let width = bounds("sidebar", cx).size.width;
+        if expanding {
+            assert_eq!(width, pointer.x - px(SIDEBAR_RESIZE_HIT_WIDTH / 2.0));
+            assert!(bounds("sidebar-resize", cx).contains(&pointer));
+            assert!(cx.debug_bounds("quarter-row").is_some());
+        } else {
+            assert_eq!(width, px(SIDEBAR_COLLAPSED_WIDTH));
+        }
+        release(pointer, cx);
+    }
+}

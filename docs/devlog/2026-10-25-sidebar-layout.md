@@ -229,3 +229,12 @@ Codex 针对公共 motion 首版（`d629d0e`，P2）指出：tabs 的公共 over
 ### 审查修复：离开 compact footer 时丢弃隐藏的 More 菜单
 
 Codex 针对 `638b702`（P2）指出：展开过渡期间 More 仍可用，若在过渡结束前打开，`footer_compact()` 随后变假会直接卸载 trigger 和面板，却没有清 `sidebar_menu` 或归还焦点；shell 的 Tab 拦截器仍认为菜单打开，键盘导航被卡住。已在 footer 从 compact 切到四按钮的同一渲染路径中关闭菜单并把焦点移到已挂载的根焦点；新增 `leaving_compact_presentation_drops_an_open_more_menu`，验证隐藏面板撤销、菜单状态清理且 Tab 恢复移动焦点。全量 **416 tests**、clippy、fmt 通过。
+
+
+## 第十三轮：持续 resize 不再截断模式切换动画
+
+负责人确认其余侧栏行为基本符合要求，但通过 sash 触发折叠/展开时动画再次消失，本轮由主 Agent 直接修复。根因是模式切换事件创建了 transition，随后的普通 move 在 rail、展开或停靠分支又清掉 transition 并直接写入目标 frame。前轮防抖修复没有覆盖“触发后连续输入”的动画行为；只发送一次阈值事件或开启 reduced-motion 的测试无法发现它。
+
+同一手势的每个 move 先采样当前动画：模式没变时保留 transition，目标改变则从当前呈现帧衔接、仅使用原动画的剩余时间。因此连续 move 不会让侧栏瞬移，也不会无限延后完成时间；模式反向切换才重新开始约200ms过渡。普通 resize 仍立即跟手；重新按下 sash 的新手势仍接管先前按钮动画。切换动画期间 More 优先于 footer 的宽度锁存结果，结束后按原临界区规则恢复四按钮，阈值/几何/命中和公共滚动均未改动。
+
+新增三条受控时间回归，旧代码上全部失败，分别覆盖 collapse 后连续 move、expand 后持续改变目标（仍在原200ms期限内完成）、反向后继续 move 并释放。新增启用动画的 GPUI 真实事件与布局测试，检查连续鼠标事件前后没有跳帧、中间 expansion、sidebar/island/sash 同步、只有 More、完成后指针与 sash 命中带对齐。原有重新抓取中断按钮动画的测试保留，全量420 tests通过。`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo build --locked -j 1` 和 `git diff --check` 均通过。本机桌面自动验证通道连接失败，备用通道选择应用时授权等待超时，未完成 Windows 原生拖动视觉复测；上述 GPUI 事件/布局证据不替代负责人真机验收。旧预览占用 exe 时已核对其 worktree 路径和 PID+系统创建时间后关闭，再成功构建。
