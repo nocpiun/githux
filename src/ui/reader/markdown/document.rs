@@ -1230,12 +1230,11 @@ impl MarkdownView {
     ) -> (usize, std::ops::Range<usize>) {
         let at = cursor.get();
         cursor.set(at + 1);
+        // The global index already addresses the unit directly, so a wide
+        // table does not rescan every preceding cell.
         let global = self.parsed.doctext.unit_index(ix, at);
-        let range = self
-            .parsed
-            .doctext
-            .units_of(ix)
-            .nth(at)
+        let range = global
+            .and_then(|index| self.parsed.doctext.unit(index))
             .map(|unit| unit.at.clone())
             .unwrap_or(0..0);
         (global.unwrap_or(usize::MAX), range)

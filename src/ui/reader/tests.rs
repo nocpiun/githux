@@ -253,6 +253,53 @@ fn a_large_source_only_draws_visible_rows(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn dragging_a_source_selection_across_a_scroll_keeps_the_row_it_is_on(cx: &mut TestAppContext) {
+    let (harness, cx) = open(
+        cx,
+        fixtures::large_source(),
+        DocumentKind::Source { language: None },
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+    frames(cx);
+    let frame = cx.debug_bounds("reader-source").unwrap();
+    let start = cx
+        .debug_bounds("reader-source-body-1")
+        .expect("the second line draws")
+        .left_center()
+        + point(px(4.0), px(0.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    // Scroll while the button is held, then keep dragging over the row now
+    // under the pointer.
+    cx.simulate_event(ScrollEvent {
+        position: frame.center(),
+        delta: ScrollDelta::Lines(point(0.0, -12.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: gpui::ScrollSource::Pointer,
+    });
+    frames(cx);
+    let moved = frame.center();
+    cx.simulate_mouse_move(moved, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(moved, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(moved, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let copied = harness
+        .read_with(cx, |reader, cx| {
+            reader.source().unwrap().read(cx).selected_text()
+        })
+        .unwrap_or_default();
+    assert!(!copied.is_empty(), "the drag still selects real text");
+    assert!(
+        copied.starts_with("fn generated_1"),
+        "the selection follows the row the press began on: {copied:?}"
+    );
+}
+
+#[gpui::test]
 fn empty_unsupported_and_too_large_draw_a_status(cx: &mut TestAppContext) {
     let (harness, cx) = open(cx, fixtures::empty(), DocumentKind::Markdown);
     assert!(harness.read_with(cx, |reader, _| reader.is_status()));
@@ -1150,6 +1197,47 @@ fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn a_wide_table_keeps_every_cell_range_distinct(cx: &mut TestAppContext) {
+    // Many columns, few rows: virtualization limits rows, not columns, so
+    // each cell must reach its own unit instead of rescanning the block.
+    let columns = 1_200;
+    let mut body = String::new();
+    body.push_str(&"| h |".repeat(columns));
+    body.push(char::from(10));
+    body.push_str(&"|---|".repeat(columns));
+    body.push(char::from(10));
+    for column in 0..columns {
+        body.push_str(&format!("| c{column} |"));
+    }
+    body.push(char::from(10));
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let start = std::time::Instant::now();
+    cx.simulate_resize(gpui::size(px(500.0), px(500.0)));
+    frames(cx);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "a {columns}-column table took {:?}",
+        start.elapsed()
+    );
+    let text = reader.read_with(cx, |r, cx| {
+        r.markdown().unwrap().read(cx).text().to_string()
+    });
+    assert!(
+        text.contains("c0") && text.contains("c1199"),
+        "every cell is modelled"
+    );
+    // Each cell maps to its own document offset, so a copy is not shifted.
+    let first = text.find("c0").unwrap();
+    assert_eq!(&text[first..first + 2], "c0");
+}
 #[gpui::test]
 fn a_tall_center_aligned_cell_lays_out_within_budget(cx: &mut TestAppContext) {
     let cell = "word ".repeat(20_000);

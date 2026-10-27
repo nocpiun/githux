@@ -62,10 +62,6 @@ pub struct SourceView {
     /// Body bounds and shaped layout of each row actually painted this frame,
     /// so a drag over trailing whitespace still maps to a real column.
     rows: std::collections::HashMap<usize, (gpui::Bounds<Pixels>, gpui::TextLayout)>,
-    /// Rows recorded by the prepaint that is running now. They replace `rows`
-    /// once the frame's prepaint ends, so a scrolled-away line can never keep
-    /// winning a hit test at its old screen position.
-    painting: std::cell::RefCell<Vec<(usize, gpui::Bounds<Pixels>, gpui::TextLayout)>>,
     #[cfg(test)]
     pinned_clock: Option<u64>,
     /// The widest row observed so far; visible rows can extend this after layout.
@@ -95,7 +91,6 @@ impl SourceView {
             clock: std::time::Instant::now(),
             last_reach: Default::default(),
             rows: std::collections::HashMap::new(),
-            painting: Default::default(),
             #[cfg(test)]
             pinned_clock: None,
             widest,
@@ -354,7 +349,9 @@ impl SourceView {
                         view.widest = ix;
                         cx.notify();
                     }
-                    view.painting.borrow_mut().push((ix, bounds, layout));
+                    // Publish immediately: a drag in this frame must use the
+                    // row just laid out, not a previous frame's position.
+                    view.rows.insert(ix, (bounds, layout));
                 });
             })
             .id(("reader-source-body", ix))
@@ -424,17 +421,10 @@ impl Render for SourceView {
         let gutter_gap = gutter_gap(rem_size);
         let count = self.line_starts.len();
         let widest = self.widest;
-        // Rows recorded by the *previous* frame's prepaint were complete by the
-        // time this render ran, so swapping here always matches what is on
-        // screen and drops rows that scrolled away.
-        if !self.painting.borrow().is_empty() {
-            self.rows = self
-                .painting
-                .borrow_mut()
-                .drain(..)
-                .map(|(ix, bounds, layout)| (ix, (bounds, layout)))
-                .collect();
-        }
+        // A new frame starts from an empty map and every prepainted row
+        // publishes itself as it is laid out, so pointer handling in this
+        // frame never reads a previous frame's row positions.
+        self.rows.clear();
         let reduce = cx.reduce_motion();
         if self.bars.dragging().is_some() && !cx.has_active_drag() {
             let base = self.scroll.0.borrow().base_handle.clone();

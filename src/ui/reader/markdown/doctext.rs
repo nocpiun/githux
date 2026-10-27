@@ -85,6 +85,11 @@ impl DocText {
         self.by_block.get(block)?.get(at).copied()
     }
 
+    /// One unit by global index, in O(1).
+    pub fn unit(&self, index: usize) -> Option<&Unit> {
+        self.units.get(index)
+    }
+
     /// The units of one top-level block, in render order.
     pub fn units_of(&self, block: usize) -> impl Iterator<Item = &Unit> + '_ {
         self.by_block
