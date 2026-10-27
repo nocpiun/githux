@@ -292,7 +292,7 @@ impl MarkdownView {
                                 .enumerate()
                                 .map(|(at, block)| {
                                     self.nested(
-                                        ("quote", ix, at),
+                                        ("quote", format!("{ix}-{at}")),
                                         block,
                                         &colors,
                                         body,
@@ -385,7 +385,7 @@ impl MarkdownView {
                                         .enumerate()
                                         .map(|(sub, block)| {
                                             self.nested(
-                                                ("list", ix, at * 16 + sub),
+                                                ("list", format!("{ix}-{at}-{sub}")),
                                                 block,
                                                 &colors,
                                                 body,
@@ -511,7 +511,7 @@ impl MarkdownView {
                             .enumerate()
                             .map(|(at, block)| {
                                 self.nested(
-                                    ("footnote", ix, at),
+                                    ("footnote", format!("{ix}-{at}")),
                                     block,
                                     &colors,
                                     body,
@@ -535,14 +535,29 @@ impl MarkdownView {
     /// A block nested inside a quote, list item or footnote.
     fn nested(
         &self,
-        id: (&'static str, usize, usize),
+        id: (&'static str, String),
         block: &Block,
         colors: &ely_core::theme::Palette,
         body: f32,
         mono: &SharedString,
         radius: gpui::Rems,
     ) -> AnyElement {
-        let key = (id.0, id.1 * 1024 + id.2);
+        // The key is the complete nesting path, so two paragraphs in one item
+        // (or in sibling items) never share selection or focus state. The
+        // caller always supplies the child block index in `id.1`.
+        self.nested_keyed(id, block, colors, body, mono, radius)
+    }
+
+    fn nested_keyed(
+        &self,
+        id: (&'static str, String),
+        block: &Block,
+        colors: &ely_core::theme::Palette,
+        body: f32,
+        mono: &SharedString,
+        radius: gpui::Rems,
+    ) -> AnyElement {
+        let key = gpui::ElementId::Name(format!("reader-{}-{}", id.0, id.1).into());
         match block {
             Block::Paragraph(inline) => {
                 let on_link = self.on_link.clone();
@@ -587,9 +602,10 @@ impl MarkdownView {
                                     div().flex_1().min_w_0().children(
                                         blocks
                                             .iter()
-                                            .map(|block| {
-                                                self.nested(
-                                                    (id.0, id.1, id.2 + at + 1),
+                                            .enumerate()
+                                            .map(|(sub, block)| {
+                                                self.nested_keyed(
+                                                    (id.0, format!("{}-{at}-{sub}", id.1)),
                                                     block,
                                                     colors,
                                                     body,
