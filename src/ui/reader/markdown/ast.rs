@@ -153,6 +153,8 @@ struct Building {
     notes: Vec<Block>,
     /// A task list marker waiting for this item's first block.
     task: Option<bool>,
+    /// True while this builder belongs to a table cell.
+    in_cell: bool,
 }
 
 enum Open {
@@ -175,6 +177,18 @@ impl Building {
                     let start = start.min(end);
                     let alt = self.inline.text[start..end].to_string();
                     self.notes.push(Block::Image { alt, url });
+                    if self.in_cell {
+                        // A cell has no block list for notes, and images are
+                        // never loaded: the description is the only readable
+                        // stand-in, so it stays exactly where the image was.
+                        self.inline
+                            .styles
+                            .retain(|(range, _)| range.end <= start || range.start >= end);
+                        self.inline
+                            .links
+                            .retain(|(range, _)| range.end <= start || range.start >= end);
+                        return;
+                    }
                     self.inline.text.truncate(start);
                     // The description's formatting belongs to the removed
                     // text. Keeping it would style the following text with
@@ -278,6 +292,9 @@ pub fn parse(markdown: &str) -> Document {
     }
 
     for event in Parser::new_ext(markdown, options) {
+        // Inside a table cell an image note has nowhere to go, so the alt
+        // text must stay in place instead of being moved after the cell.
+        let in_cell = matches!(stack.last(), Some(Container::Cell(_)));
         match event {
             Event::Start(Tag::Paragraph) => inline = Some((None, Building::default())),
             Event::End(TagEnd::Paragraph) => finish_inline(&mut inline, &mut stack),
@@ -285,11 +302,13 @@ pub fn parse(markdown: &str) -> Document {
                 inline = Some((Some(level(l)), Building::default()))
             }
             Event::End(TagEnd::Heading(_)) => finish_inline(&mut inline, &mut stack),
-            Event::Start(Tag::Emphasis) => open(&mut inline, Open::Style(Style::Emphasis)),
-            Event::Start(Tag::Strong) => open(&mut inline, Open::Style(Style::Strong)),
-            Event::Start(Tag::Strikethrough) => open(&mut inline, Open::Style(Style::Strike)),
+            Event::Start(Tag::Emphasis) => open(&mut inline, Open::Style(Style::Emphasis), in_cell),
+            Event::Start(Tag::Strong) => open(&mut inline, Open::Style(Style::Strong), in_cell),
+            Event::Start(Tag::Strikethrough) => {
+                open(&mut inline, Open::Style(Style::Strike), in_cell)
+            }
             Event::Start(Tag::Link { dest_url, .. }) => {
-                open(&mut inline, Open::Link(dest_url.to_string()))
+                open(&mut inline, Open::Link(dest_url.to_string()), in_cell)
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 let start = inline.as_ref().map_or(0, |(_, b)| b.inline.text.len());
@@ -299,6 +318,7 @@ pub fn parse(markdown: &str) -> Document {
                         url: dest_url.to_string(),
                         start,
                     },
+                    in_cell,
                 );
             }
             Event::End(TagEnd::Emphasis)
@@ -455,7 +475,10 @@ pub fn parse(markdown: &str) -> Document {
             }
             Event::Start(Tag::TableCell) => {
                 finish_inline(&mut inline, &mut stack);
-                stack.push(Container::Cell(Building::default()));
+                stack.push(Container::Cell(Building {
+                    in_cell: true,
+                    ..Building::default()
+                }));
             }
             Event::End(TagEnd::TableCell) => {
                 // `open()` may have started a separate builder for emphasis or
@@ -484,15 +507,6 @@ pub fn parse(markdown: &str) -> Document {
                             .into_iter()
                             .map(|(range, url)| (range.start + at..range.end + at, url)),
                     );
-                    // An image is never loaded, so its alternative text is
-                    // the cell's only readable content.
-                    for note in pending.notes.drain(..) {
-                        if let Block::Image { alt, .. } = note
-                            && !alt.is_empty()
-                        {
-                            cell.inline.text.push_str(&alt);
-                        }
-                    }
                 }
                 let Some(Container::Cell(mut building)) = stack.pop() else {
                     continue;
@@ -615,8 +629,9 @@ pub fn parse(markdown: &str) -> Document {
     Document { blocks, headings }
 }
 
-fn open(inline: &mut Option<(Option<u8>, Building)>, what: Open) {
+fn open(inline: &mut Option<(Option<u8>, Building)>, what: Open, in_cell: bool) {
     with_inline(inline, |building| {
+        building.in_cell |= in_cell;
         let start = building.inline.text.len();
         building.open.push((start, what));
     });
@@ -741,9 +756,15 @@ mod tests {
 
     #[test]
     fn an_image_in_a_table_cell_keeps_its_alt_text() {
-        let doc = parse("| a | b |\n|---|---|\n| ![Build status](badge.svg) | x |");
-        let text = format!("{:?}", doc.blocks);
-        assert!(text.contains("Build status"), "{text}");
+        let doc = parse("| a | b |\n|---|---|\n| ![Windows](w.svg) or ![Linux](l.svg) | x |");
+        let cells = match &doc.blocks[0] {
+            Block::Table { rows, .. } => &rows[0],
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            cells[0].text, "Windows or Linux",
+            "the alt text stays where the image was"
+        );
     }
 
     #[test]
