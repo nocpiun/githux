@@ -484,6 +484,15 @@ pub fn parse(markdown: &str) -> Document {
                             .into_iter()
                             .map(|(range, url)| (range.start + at..range.end + at, url)),
                     );
+                    // An image is never loaded, so its alternative text is
+                    // the cell's only readable content.
+                    for note in pending.notes.drain(..) {
+                        if let Block::Image { alt, .. } = note
+                            && !alt.is_empty()
+                        {
+                            cell.inline.text.push_str(&alt);
+                        }
+                    }
                 }
                 let Some(Container::Cell(mut building)) = stack.pop() else {
                     continue;
@@ -491,6 +500,17 @@ pub fn parse(markdown: &str) -> Document {
                 while !building.open.is_empty() {
                     let end = building.inline.text.len();
                     building.close(end);
+                }
+                // A cell has no block list to attach image notes to. Images
+                // are never loaded, so their alternative text is the only
+                // readable content: keep it in the cell instead of dropping
+                // it with the note.
+                for note in std::mem::take(&mut building.notes) {
+                    if let Block::Image { alt, .. } = note
+                        && !alt.is_empty()
+                    {
+                        building.inline.text.push_str(&alt);
+                    }
                 }
                 if let Some(Container::Table { row, .. }) = stack.last_mut() {
                     row.push(building.inline);
@@ -717,6 +737,13 @@ mod tests {
             "{:?}",
             doc.blocks
         );
+    }
+
+    #[test]
+    fn an_image_in_a_table_cell_keeps_its_alt_text() {
+        let doc = parse("| a | b |\n|---|---|\n| ![Build status](badge.svg) | x |");
+        let text = format!("{:?}", doc.blocks);
+        assert!(text.contains("Build status"), "{text}");
     }
 
     #[test]
