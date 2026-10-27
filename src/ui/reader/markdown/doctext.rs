@@ -48,21 +48,25 @@ pub struct DocText {
     table_final: bool,
     /// Top-level block currently being registered.
     block_ix: usize,
-    /// The next top-level block index `sequence` will hand out at this depth.
+    /// The next top-level block index a top-level `sequence` will hand out.
     next_block: usize,
+    /// True while walking the document's own top-level block list.
+    top_level: bool,
 }
 
 impl DocText {
     /// Build the model from the blocks the renderer will walk.
     pub fn build(blocks: &[Block]) -> Self {
-        let mut model = Self::default();
-        for _ in blocks {
-            model.by_block.push(Vec::new());
-        }
+        let mut model = Self {
+            by_block: vec![Vec::new(); blocks.len()],
+            // `sequence` hands out one top-level index per block at this depth.
+            next_block: 0,
+            top_level: true,
+            ..Self::default()
+        };
         model.sequence(blocks);
         model
     }
-
     /// The whole text, as Ctrl+C would copy it.
     pub fn text(&self) -> &str {
         &self.text
@@ -242,15 +246,26 @@ impl DocText {
     }
 
     fn blocks(&mut self, blocks: &[Block]) {
-        // Nested blocks belong to their top-level block: keep the index.
-        for block in blocks {
-            self.walk(block);
-        }
+        // Nested blocks keep their owner's top-level index but still need the
+        // same table endings a top-level table gets.
+        let was_top = self.top_level;
+        self.top_level = false;
+        self.sequence(blocks);
+        self.top_level = was_top;
     }
-
     /// Register one block at the current depth, advancing the top-level index
     /// only when `sequence` hands out a new top-level block.
     fn walk(&mut self, block: &Block) {
+        self.walk_with(block, false);
+    }
+
+    /// Register `block`; when it is a top-level block it takes the next
+    /// top-level index so its units land in the right `by_block` entry.
+    fn walk_with(&mut self, block: &Block, top_level: bool) {
+        if top_level {
+            self.block_ix = self.next_block;
+            self.next_block += 1;
+        }
         self.block(block);
     }
 
@@ -268,9 +283,7 @@ impl DocText {
                 })
             );
             self.table_final = final_chunk;
-            self.block_ix = self.next_block;
-            self.next_block += 1;
-            self.walk(block);
+            self.walk_with(block, self.top_level);
             if matches!(block, Block::Table { .. }) && final_chunk {
                 self.text.push_str("\n\n");
             }
@@ -463,5 +476,50 @@ after"
         let inside = text.find('🚀').unwrap() + 1;
         let sliced = model.slice(0..inside).to_string();
         assert!(text.starts_with(&sliced), "{sliced:?}");
+    }
+    #[test]
+    fn nested_blocks_keep_their_owner_and_order() {
+        let doc = parse(
+            "# T
+
+> quoted
+>
+> > inner
+
+```
+code
+```",
+        );
+        let model = DocText::build(&doc.blocks);
+        assert_eq!(model.units_of(0).count(), 1);
+        assert_eq!(model.units_of(1).count(), 2, "both quote paragraphs");
+        assert_eq!(model.units_of(2).count(), 1, "the code block");
+        assert_eq!(
+            model.text(),
+            "T
+
+quoted
+
+inner
+
+code
+
+"
+        );
+        assert_eq!(model.units_of(2).count(), 1);
+        let text = model.text();
+        assert_eq!(
+            text,
+            "T
+
+quoted
+
+inner
+
+code
+
+",
+            "{text:?}"
+        );
     }
 }

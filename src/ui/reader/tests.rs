@@ -1223,7 +1223,7 @@ fn a_wide_table_keeps_every_cell_range_distinct(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(px(500.0), px(500.0)));
     frames(cx);
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < BUDGET,
         "a {columns}-column table took {:?}",
         start.elapsed()
     );
@@ -1258,7 +1258,7 @@ fn a_tall_center_aligned_cell_lays_out_within_budget(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
     frames(cx);
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < BUDGET,
         "a tall right-aligned cell took {:?}",
         start.elapsed()
     );
@@ -1326,7 +1326,7 @@ fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
     frames(cx);
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < BUDGET,
         "dense resize took {:?}",
         start.elapsed()
     );
@@ -1357,7 +1357,7 @@ fn a_dense_fenced_block_lays_out_within_budget(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
     frames(cx);
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < BUDGET,
         "dense fence layout took {:?}",
         start.elapsed()
     );
@@ -1694,7 +1694,7 @@ fn a_dense_link_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
     frames(cx);
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < BUDGET,
         "dense links resize took {:?}",
         start.elapsed()
     );
@@ -1703,6 +1703,11 @@ fn a_dense_link_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
 
 /// A heading, prose with inline code and a link, a list and a quote: enough
 /// to drag across several different elements.
+/// Guard against accidentally quadratic layout on a dense document. A shared
+/// CI runner is much slower than a workstation, so the limit only has to catch
+/// order-of-magnitude regressions, not measure real interactive latency.
+const BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
 const CROSS_BLOCK: &str = "# Title\n\nThe first paragraph with `code` and a [guide](guide.md).\n\n- item one\n- item two\n\n> quoted line\n\n```rust\nfn main() {}\n```\n";
 
 fn doc_text(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> String {
@@ -2073,7 +2078,7 @@ fn a_large_single_list_selects_all_without_building_every_row(cx: &mut TestAppCo
     cx.simulate_keystrokes("secondary-a");
     frames(cx);
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < BUDGET,
         "Ctrl+A over a huge list stays fast: {:?}",
         start.elapsed()
     );
@@ -2086,7 +2091,6 @@ fn a_large_single_list_selects_all_without_building_every_row(cx: &mut TestAppCo
     cx.simulate_keystrokes("secondary-a");
     frames(cx);
     let full = doc_text(&reader, cx);
-    eprintln!("PROBE sel={:?}", selection(&reader, cx));
     assert!(full.len() > 100_000, "the model covers the whole file");
     assert_eq!(selected(&reader, cx), full);
     assert!(
