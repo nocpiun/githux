@@ -1350,3 +1350,26 @@ fn nested_quote_and_table_show_their_contents(cx: &mut TestAppContext) {
         quote.size
     );
 }
+
+#[gpui::test]
+fn a_large_list_splits_into_virtualized_rows(cx: &mut TestAppContext) {
+    let source = "- item\n".repeat(20_000);
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let count = reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).block_count());
+    assert!(
+        count > 1,
+        "one huge list is split so only visible rows are built: {count}"
+    );
+    assert!(
+        cx.debug_bounds("markdown-block-400").is_none(),
+        "far list rows are not built"
+    );
+}

@@ -127,3 +127,5 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 审查复核又发现嵌套列表 marker 丢失编号/未勾选语义；顶层与嵌套现共用 `item_marker`（勾选、未勾选、有序起始号、圆点），并加入 `nested_lists_keep_ordered_and_unchecked_markers` 解析回归。主程序 409、reader 71 项通过。
 
 审查又指出表格单元格内格式内容未 flush、嵌套容器被空字符串替代、图片 alt 的样式区间残留，以及代码续行 padding。已修复：单元格先 flush 独立的 inline builder；嵌套引用/表格/脚注递归渲染并沿用同一 marker 逻辑；移除图片描述时同步删除其 styles/links；换行代码每个 piece 都预算左 inset。新增单元格链接/粗体、格式图片后 Unicode 文本、嵌套引用表格、marker 单测；主程序 413、reader 75 项通过。
+
+审查指出单个超大列表/表格只算一个顶层 block，子项会在可见时一次性全部构建。`flatten` 现把超过 64 个条目的列表按块切分（起点编号连续）和表格按行切分（表头逐段重复），每段成为独立虚拟行；`a_large_list_splits_into_virtualized_rows` 用 20,000 项验证列表被切分且远处行未构建。主程序再增该项后 414 项、reader 76 项通过。

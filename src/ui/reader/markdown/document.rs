@@ -44,6 +44,12 @@ struct Parsed {
 /// A link pressed in the document; the owner resolves it.
 pub type OnLink = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>;
 
+/// How many children of one container may be built before the container is
+/// split across independently virtualized rows. Below this, a nested layout
+/// keeps its visual grouping; above it, one large list or table must not build
+/// every child in a single item.
+const LAZY_CHILDREN: usize = 64;
+
 /// The marker of one list item: a checkbox, an ordered number or a bullet.
 fn item_marker(start: Option<u64>, task: Option<bool>, at: usize) -> String {
     match (task, start) {
@@ -194,10 +200,11 @@ impl MarkdownView {
         self.on_link = Some(std::rc::Rc::new(handler));
     }
 
-    fn adopt(&mut self, read: Parsed, generation: u64, cx: &mut Context<Self>) {
+    fn adopt(&mut self, mut read: Parsed, generation: u64, cx: &mut Context<Self>) {
         if generation != self.generation {
             return;
         }
+        read.blocks = flatten(read.blocks);
         let old = self.parsed.blocks.len();
         let new = read.blocks.len();
         if old == 0 && new > 0 {
@@ -754,6 +761,39 @@ impl MarkdownView {
                 .into_any_element(),
         }
     }
+}
+
+/// Split only over-large containers into several virtualized blocks. A list
+/// keeps its own numbering by carrying the original first number and index.
+fn flatten(blocks: Vec<Block>) -> Vec<Block> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            Block::List { start, items } if items.len() > LAZY_CHILDREN => {
+                for (chunk, group) in items.chunks(LAZY_CHILDREN).enumerate() {
+                    let first = chunk * LAZY_CHILDREN;
+                    out.push(Block::List {
+                        // Numbering continues across the split rows.
+                        start: start.map(|first_number| first_number + first as u64),
+                        items: group.to_vec(),
+                    });
+                }
+            }
+            Block::Table { aligns, head, rows } if rows.len() > LAZY_CHILDREN => {
+                for group in rows.chunks(LAZY_CHILDREN) {
+                    out.push(Block::Table {
+                        aligns: aligns.clone(),
+                        // The header repeats on each virtual row, as a table
+                        // header does on a long printed page.
+                        head: head.clone(),
+                        rows: group.to_vec(),
+                    });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 impl Render for MarkdownView {
