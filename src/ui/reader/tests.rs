@@ -1163,3 +1163,29 @@ fn replacing_markdown_rejects_previous_background_results(cx: &mut TestAppContex
         "# Latest document"
     );
 }
+
+#[test]
+fn replacement_text_cannot_synthesize_a_markdown_image() {
+    let inputs = [
+        "!<i>(file://attacker.example/share/image.png)",
+        "!<!--x-->(file:///C:/secret.png)",
+        "![x][ref]\n\n[ref]: file:///secret",
+        "text `![x](data:image/png;base64,AAAA)` tail",
+    ];
+    fn images(n: &ely_documents::mdast::Node) -> usize {
+        usize::from(matches!(
+            n,
+            ely_documents::mdast::Node::Image(_)
+                | ely_documents::mdast::Node::ImageReference(_)
+                | ely_documents::mdast::Node::Html(_)
+        )) + n.children().map_or(0, |c| c.iter().map(images).sum())
+    }
+    for input in inputs {
+        let safe = super::markdown::safe_markdown(input);
+        assert_eq!(
+            images(&ely_documents::markdown_tree(&safe)),
+            0,
+            "{input:?} -> {safe:?}"
+        );
+    }
+}
