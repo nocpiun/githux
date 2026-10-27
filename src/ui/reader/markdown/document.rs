@@ -412,16 +412,34 @@ impl MarkdownView {
 
     /// The document offset and link under a pointer, through the real layout
     /// of whichever visible paragraph contains it.
+    /// A hit against the live layout maps, read at event time.
+    fn hit_at_live(&self, position: Point<Pixels>) -> Option<Hit> {
+        self.hit_in(
+            position,
+            &self.paragraphs.borrow(),
+            &self.visible_units.borrow(),
+        )
+    }
+
+    /// A hit against explicit maps (used by tests and the drag fallback).
     fn hit_at(
         &self,
         position: Point<Pixels>,
         layouts: &std::collections::HashMap<usize, Rc<RefCell<LocalLayout>>>,
-        order: &[usize],
+        visible: &std::collections::HashSet<usize>,
+    ) -> Option<Hit> {
+        self.hit_in(position, layouts, visible)
+    }
+
+    fn hit_in(
+        &self,
+        position: Point<Pixels>,
+        layouts: &std::collections::HashMap<usize, Rc<RefCell<LocalLayout>>>,
+        visible: &std::collections::HashSet<usize>,
     ) -> Option<Hit> {
         let ranges = self.paragraph_ranges.borrow();
-        let visible = self.visible_units.borrow();
-        let mut order: Vec<usize> = order
-            .iter()
+        let mut order: Vec<usize> = layouts
+            .keys()
             .copied()
             .filter(|index| visible.contains(index))
             .collect();
@@ -490,6 +508,38 @@ impl MarkdownView {
     /// extends to the last block above (forward) or first block below
     /// (backward), which also covers dragging past the viewport.
     fn edge_offset(&self, position: Point<Pixels>) -> usize {
+        // Beside a visible paragraph's rows: use its nearest row end/start, so
+        // dragging into the trailing whitespace of a wrapped line does not
+        // swallow the rest of the block.
+        {
+            let layouts = self.paragraphs.borrow();
+            let visible = self.visible_units.borrow();
+            let ranges = self.paragraph_ranges.borrow();
+            let mut best: Option<(f32, usize)> = None;
+            for (index, layout) in layouts.iter() {
+                if !visible.contains(index) {
+                    continue;
+                }
+                let layout = layout.borrow();
+                let Some(doc) = ranges.get(index) else {
+                    continue;
+                };
+                if position.y < layout.bounds().top() || position.y > layout.bounds().bottom() {
+                    continue;
+                }
+                let Some(local) = layout.nearest_index(position) else {
+                    continue;
+                };
+                let distance = f32::from(position.x - layout.bounds().left()).abs();
+                let at = (doc.start + local).min(doc.end);
+                if best.is_none_or(|(known, _)| distance < known) {
+                    best = Some((distance, at));
+                }
+            }
+            if let Some((_, at)) = best {
+                return at;
+            }
+        }
         let bounds = self.block_bounds.borrow();
         let mut blocks: Vec<(usize, Bounds<Pixels>)> =
             bounds.iter().map(|(ix, b)| (*ix, *b)).collect();
@@ -1194,12 +1244,9 @@ impl Render for MarkdownView {
         // Pointer positions inside a visible paragraph map through that
         // paragraph's real layout to document offsets; positions on blank
         // reader space (padding, gaps, after the last block) clear selection.
-        let layouts = self.paragraphs.clone();
-        let mut order: Vec<usize> = layouts.borrow().keys().copied().collect();
-        order.sort_unstable();
-        let (down_layouts, move_layouts, up_layouts) =
-            (layouts.clone(), layouts.clone(), layouts.clone());
-        let (down_order, move_order) = (order.clone(), order.clone());
+        // Hit testing reads the live maps inside each event: the list's layout
+        // callback can register new paragraphs after `render()` builds these
+        // closures, and those units must be clickable immediately.
         div()
             .id("reader-markdown")
             .debug_selector(|| "reader-markdown".to_string())
@@ -1216,7 +1263,7 @@ impl Render for MarkdownView {
                 MouseButton::Left,
                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                     window.focus(&view.focus, cx);
-                    let hit = view.hit_at(event.position, &down_layouts.borrow(), &down_order);
+                    let hit = view.hit_at_live(event.position);
                     match hit {
                         Some(hit) => {
                             if !event.modifiers.shift {
@@ -1247,7 +1294,7 @@ impl Render for MarkdownView {
                         return;
                     }
                     let position = event.event.position;
-                    if let Some(hit) = view.hit_at(position, &move_layouts.borrow(), &move_order) {
+                    if let Some(hit) = view.hit_at_live(position) {
                         view.extend(hit.at, cx);
                     } else {
                         view.extend(view.edge_offset(position), cx);
@@ -1259,7 +1306,6 @@ impl Render for MarkdownView {
                 cx.listener(move |view, _, window, cx| {
                     view.end_drag(cx);
                     view.click(window, cx);
-                    let _ = &up_layouts;
                 }),
             )
             .on_mouse_up_out(

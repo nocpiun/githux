@@ -2052,3 +2052,73 @@ fn a_link_in_a_row_after_an_empty_cell_still_opens(cx: &mut TestAppContext) {
         "the link after an empty cell resolves against its own unit"
     );
 }
+
+#[gpui::test]
+fn dragging_into_a_wrapped_line_gap_selects_only_that_row(cx: &mut TestAppContext) {
+    let body = "first row text that wraps a lot 中文 emoji 🚀 and keeps going for width. tail row";
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(360.0), px(400.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, body);
+    assert!(layout.pieces.len() > 1, "the paragraph wraps");
+    let first_row = &layout.pieces[0].text_bounds;
+    let start = point(first_row.left(), first_row.center().y);
+    // Beside the first row, past its last glyph.
+    let end = point(layout.bounds.right() - px(1.0), first_row.center().y);
+    drag(cx, &[start, end]);
+    frames(cx);
+    let copied = copy_selection(&reader, cx);
+    assert!(!copied.is_empty(), "{copied:?}");
+    assert!(
+        !copied.contains("tail row"),
+        "a drag beside the first row must not swallow later rows: {copied:?}"
+    );
+}
+
+#[gpui::test]
+fn a_newly_scrolled_in_link_is_clickable(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(700.0), px(320.0)));
+    frames(cx);
+    let frame = cx.debug_bounds("reader-markdown").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    for _ in 0..4 {
+        cx.simulate_event(ScrollEvent {
+            position: frame.center(),
+            delta: ScrollDelta::Lines(point(0.0, -40.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source: gpui::ScrollSource::Pointer,
+        });
+        frames(cx);
+    }
+    // A paragraph built by this scroll (not present before) must take presses.
+    let paragraph = (1..80).find_map(|ix| {
+        let key: &'static str = Box::leak(format!("markdown-paragraph-{ix}").into_boxed_str());
+        cx.debug_bounds(key)
+    });
+    let paragraph = paragraph.expect("a scrolled-in paragraph draws");
+    let layout = inline_snapshot(
+        cx,
+        "A paragraph with 中文 and emoji 🚀 that pads the document so the reader has to virtualize it. code and a link.",
+    );
+    let _ = layout;
+    cx.simulate_click(
+        point(paragraph.left() + px(24.0), paragraph.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    assert!(
+        selection(&reader, cx).start == 0,
+        "the press landed in the document, not on stale geometry"
+    );
+}

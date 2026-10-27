@@ -88,6 +88,52 @@ impl LocalLayout {
         Some(self.index(position))
     }
 
+    /// The nearest local byte offset for a pointer beside this paragraph's
+    /// text: same row when the pointer is beside it, else the first/last row's
+    /// nearest end. Used for whitespace inside a wrapped paragraph so a drag
+    /// does not collapse to the whole block.
+    pub fn nearest_index(&self, position: Point<Pixels>) -> Option<usize> {
+        if self.pieces.is_empty() {
+            return None;
+        }
+        let local = position - self.bounds.origin;
+        let row = (local.y / self.line_height).floor().max(0.0);
+        let mut rows: Vec<f32> = self
+            .pieces
+            .iter()
+            .map(|piece| (piece.origin.y / self.line_height).floor())
+            .collect();
+        rows.sort_unstable_by(|a, b| a.total_cmp(b));
+        rows.dedup();
+        let nearest_row = rows
+            .iter()
+            .copied()
+            .min_by(|a, b| (a - row).abs().total_cmp(&(b - row).abs()))
+            .unwrap_or(row);
+        let pieces: Vec<&Piece> = self
+            .pieces
+            .iter()
+            .filter(|piece| (piece.origin.y / self.line_height).floor() == nearest_row)
+            .collect();
+        let first = pieces.first()?;
+        let last = pieces.last()?;
+        if local.x < first.origin.x {
+            return Some(first.range.start);
+        }
+        if local.x > last.origin.x + last.line.width() {
+            return Some(last.range.end);
+        }
+        Some(
+            self.index(point(
+                local
+                    .x
+                    .max(first.origin.x)
+                    .min(last.origin.x + last.line.width()),
+                local.y,
+            )),
+        )
+    }
+
     /// The glyph byte under `position`; None when it is not over a glyph.
     pub fn glyph_at(&self, position: Point<Pixels>) -> Option<usize> {
         let local = position - self.bounds.origin;
