@@ -41,10 +41,9 @@ use ely_core::{
     primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, TextSize},
 };
-use ely_documents::{MarkdownDocument, MarkdownMode};
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, Styled, Subscription, Task, WeakEntity, Window, div,
+    Render, StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, div,
 };
 
 use crate::content::{PreparedBody, PreparedContent, UnsupportedContent};
@@ -148,7 +147,7 @@ enum ReaderState {
     Empty,
     Unsupported(UnsupportedContent),
     TooLarge { size: u64, limit: usize },
-    Markdown(Entity<MarkdownDocument>),
+    Markdown(Entity<markdown::MarkdownView>),
     Source(Entity<SourceView>),
 }
 
@@ -161,6 +160,12 @@ pub struct ReaderView {
     on_action: Option<OnAction>,
     _document_observer: Option<Subscription>,
     pending_markdown: Option<Task<()>>,
+    /// Hover/drag fade for the Markdown bar, shared with Source and tabs.
+    scroll_fade: crate::ui::scrollbar::Fade,
+    scroll_clock: std::time::Instant,
+    thumb_dragging: bool,
+    #[cfg(test)]
+    pinned_clock: Option<u64>,
 }
 
 impl ReaderView {
@@ -182,6 +187,11 @@ impl ReaderView {
             on_action: None,
             _document_observer: observer,
             pending_markdown: pending,
+            scroll_fade: Default::default(),
+            scroll_clock: std::time::Instant::now(),
+            thumb_dragging: false,
+            #[cfg(test)]
+            pinned_clock: None,
         }
     }
 
@@ -219,6 +229,8 @@ impl ReaderView {
         self._document_observer = observer;
         self.pending_markdown = pending;
         self.last_action = None;
+        self.thumb_dragging = false;
+        self.scroll_fade = Default::default();
         cx.notify();
     }
 
@@ -244,7 +256,7 @@ impl ReaderView {
     }
 
     /// The markdown document, when markdown is shown.
-    pub fn markdown(&self) -> Option<&Entity<MarkdownDocument>> {
+    pub fn markdown(&self) -> Option<&Entity<markdown::MarkdownView>> {
         match &self.state {
             ReaderState::Markdown(document) => Some(document),
             _ => None,
@@ -303,28 +315,9 @@ fn build_state(
         PreparedBody::Utf8 { text, .. } => match kind {
             DocumentKind::Markdown => {
                 let context = context.clone();
-                let document = cx.new(|cx| {
-                    MarkdownDocument::new(String::new(), MarkdownMode::Preview, window, cx)
-                });
-                let target = document.downgrade();
-                let pending = Some(cx.spawn_in(window, async move |reader, cx| {
-                    let safe = cx
-                        .background_spawn(async move { markdown::safe_markdown(&text) })
-                        .await;
-                    let _ = reader.update_in(cx, |reader, window, cx| {
-                        if let Some(document) = target.upgrade() {
-                            if reader
-                                .markdown()
-                                .is_none_or(|current| current.entity_id() != document.entity_id())
-                            {
-                                return;
-                            }
-                            document.update(cx, |document, cx| document.reset(safe, cx));
-                        }
-                        window.refresh();
-                        cx.notify();
-                    });
-                }));
+                let document = cx.new(|cx| markdown::MarkdownView::new(window, cx));
+                document.update(cx, |document, cx| document.reset(text, cx));
+                let pending: Option<Task<()>> = None;
                 document.update(cx, |document, _| {
                     document.on_link(move |url, window, cx| {
                         let target = links::resolve(url, &context);
@@ -387,6 +380,28 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+impl ReaderView {
+    fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(ms) = self.pinned_clock {
+            return ms;
+        }
+        self.scroll_clock.elapsed().as_millis() as u64
+    }
+
+    /// Freezes the Markdown bar's fade clock for tests.
+    #[cfg(test)]
+    pub fn pin_scrollbar_clock(&mut self, ms: u64) {
+        self.pinned_clock = Some(ms);
+    }
+
+    /// Shows the Markdown bar without waiting for a hover fade.
+    #[cfg(test)]
+    pub fn show_scrollbar(&mut self) {
+        self.scroll_fade.snap(true);
+    }
+}
+
 impl Render for ReaderView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -423,12 +438,48 @@ impl Render for ReaderView {
             ),
             ReaderState::Markdown(document) => {
                 let document = document.clone();
+                let state = document.read(cx).list_state().clone();
+                // The list's own drag height is released when GPUI drops the
+                // gesture, so the fade falls back to hover.
+                if self.thumb_dragging && !cx.has_active_drag() {
+                    self.thumb_dragging = false;
+                    self.scroll_fade.set_dragging(false, self.now_ms());
+                    state.scrollbar_drag_ended();
+                }
+                let opacity = self.scroll_fade.opacity(self.now_ms());
+                if self.scroll_fade.is_animating() {
+                    _window.request_animation_frame();
+                }
+                let owner = cx.entity_id();
+                let this = cx.entity().downgrade();
+                let on_dragging =
+                    std::rc::Rc::new(move |dragging: bool, _: &mut Window, cx: &mut App| {
+                        let _ = this.update(cx, |view, cx| {
+                            view.thumb_dragging = dragging;
+                            view.scroll_fade.set_dragging(dragging, view.now_ms());
+                            cx.notify();
+                        });
+                    });
+                let bar = scrollbar::render_list(
+                    &state,
+                    opacity,
+                    owner,
+                    "reader-markdown-scrollbar",
+                    on_dragging,
+                    cx,
+                );
                 div()
                     .id("reader-markdown-root")
                     .debug_selector(|| "reader-markdown".to_string())
                     .relative()
                     .size_full()
+                    .on_hover(cx.listener(|view, hovered, _, cx| {
+                        if view.scroll_fade.set_hovered(*hovered, view.now_ms()) {
+                            cx.notify();
+                        }
+                    }))
                     .child(document)
+                    .child(bar)
                     .into_any_element()
             }
             // Keep the source root's overlay siblings direct: an extra

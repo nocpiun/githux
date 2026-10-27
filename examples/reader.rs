@@ -224,8 +224,6 @@ fn main() {
         .with_assets(Assets)
         .run(|cx: &mut App| {
             ely_core::init(cx).expect("Ely failed to start");
-            ely_editor::bind_keys(cx);
-            ely_documents::bind_keys(cx);
             fonts::register(cx).expect("the bundled fonts failed to register");
             Theme::set_mode_now(Mode::Dark, cx);
             Theme::update(cx, |theme| {

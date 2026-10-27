@@ -66,13 +66,15 @@ view.update(cx, |view, _| {
 
 **已定位的 Ely 行为边界：** 若把长文本直接传给 `MarkdownDocument::new(text, ..)`，其异步读取会 splice 进一个「已经按 0 项测量过」的列表，结果**一个块都不绘制**。在测试平台上以 130 KiB 起稳定复现（独立于本模块，直接用 `MarkdownDocument` 也复现）。`new(String::new(), ..)` 后再 `reset(text, cx)` 会请求在读取落地后定位到首行，列表仍锚定在 block 0，因此能正常绘制到 2 MiB。本模块因此采用后者，并在注释与开发日志里记录原因。这是上游行为观察，不是本仓库的补丁，也不改 Ely revision。
 
-## Markdown 阅读与上游文档
+## Markdown 阅读（本地维护组件）
 
-Markdown 使用官方 `ely-documents`（固定 SHA）的 `MarkdownDocument` Preview。文档自行虚拟化布局、解析并提供真实滚动条；Source 仍为 reader 的只读虚拟列表。初始化同时绑定 `ely-editor` / `ely-documents` 的按键，主题字体仍为 Noto Sans / Google Sans Code。
+Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组件（来源、映射与维护规则见 [Markdown 组件边界](content-reader-markdown-patch.md)）：公开 API 仍使用官方 `ely-core` 的主题/字体/图标/代码着色，解析使用 `pulldown-cmark`。Source 仍是 reader 的只读虚拟列表。
 
-仓库内容的图片和 HTML 在后台用公开 mdast 树移除后才交给文档，避免上游文件/data 图片路径；异步完成后校验当前文档实体，旧内容不会覆盖新内容。链接仍解析为版本化 `ReaderAction`，危险 scheme 拒绝；选择复制、2 MiB 上限和状态面板保持不变。
-
-**未完成视觉：** fence 标签上移、inline code 圆角/小 padding/代码字体、Markdown 3 px hover fade 滚动条需要固定上游未公开的文档扩展点；Source gutter 0.75rem+6px 已保留。原测试明确保留这些失败，详见 [上游接口边界](content-reader-markdown-patch.md)。本 PR 不再 vendor 或修改 Cargo 缓存。
+- 文档使用真实 `gpui::ListState` 虚拟化块；只有可见块被构建。公开 `list_state()` 是真实滚动源，当前由 reader 的 3px 圆角半透明滚动条读取，hover/拖动使用 140ms 双向 `Fade`；无溢出时不构建条。
+- inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
+- fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
+- 图片不加载，HTML 惰性显示，链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，2 MiB 边界保持在内容层。
+- Source gutter 仍为原 0.75rem 加 6px。
 
 ## 共享滚动条
 

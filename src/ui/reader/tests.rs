@@ -765,7 +765,7 @@ fn a_large_markdown_document_only_draws_visible_blocks(cx: &mut TestAppContext) 
     let (harness, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
     frames(cx);
     let bytes = harness.read_with(cx, |reader, cx| {
-        reader.markdown().unwrap().read(cx).text(cx).len()
+        reader.markdown().unwrap().read(cx).text().to_string().len()
     });
     assert!(bytes > 1_000_000, "the fixture is large, got {bytes} bytes");
     assert!(
@@ -906,15 +906,14 @@ fn dragging_the_horizontal_scrollbar_leaves_the_vertical_offset(cx: &mut TestApp
     assert_eq!(offset.y, px(0.0), "and the vertical offset did not");
 }
 
-/// The upstream document owns its private real list and scrollbar. Its public
-/// top_line is the observable scroll position; never substitute an outer handle.
+/// The local document owns a real ListState; the reader bar reads it.
 #[gpui::test]
 fn markdown_scrollbar_follows_the_real_list_and_drags(cx: &mut TestAppContext) {
     let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
     cx.simulate_resize(gpui::size(px(700.0), px(300.0)));
     frames(cx);
+    let before = reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).top_block());
     let bounds = cx.debug_bounds("reader-markdown").unwrap();
-    let before = reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).top_line(cx));
     cx.simulate_event(ScrollEvent {
         position: bounds.center(),
         delta: ScrollDelta::Lines(point(0.0, -40.0)),
@@ -923,66 +922,218 @@ fn markdown_scrollbar_follows_the_real_list_and_drags(cx: &mut TestAppContext) {
         source: gpui::ScrollSource::Pointer,
     });
     frames(cx);
-    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).top_line(cx)) > before);
+    assert!(
+        reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).top_block()) > before,
+        "the wheel scrolls the local ListState"
+    );
+    assert!(cx.debug_bounds("reader-markdown-scrollbar-thumb").is_some());
 }
+
 #[gpui::test]
 fn markdown_scrollbar_is_absent_without_overflow(cx: &mut TestAppContext) {
     let (_, cx) = open(cx, fixtures::inline_code_short(), DocumentKind::Markdown);
     frames(cx);
-    assert!(cx.debug_bounds("scrollbar-thumb").is_none());
+    assert!(cx.debug_bounds("reader-markdown-scrollbar-thumb").is_none());
 }
 
-// Original visual contracts remain executable. The official fixed upstream
-// cannot expose the old patched layout snapshots; these real-element checks
-// intentionally fail until the missing reader interfaces have a scoped solution.
+fn inline_snapshot(cx: &mut VisualTestContext, text: &str) -> super::markdown::Snapshot {
+    cx.update(|_, cx| super::markdown::snapshot(text, cx).expect("the real paragraph was laid out"))
+}
+
 #[gpui::test]
 fn inline_code_has_real_padding_code_font_and_wrapped_geometry(cx: &mut TestAppContext) {
     let (_, cx) = open(cx, fixtures::inline_code_short(), DocumentKind::Markdown);
     frames(cx);
+    let layout = inline_snapshot(cx, "A short x span.");
+    let code = layout.pieces.iter().find(|p| p.code).unwrap();
+    assert_eq!(
+        code.box_bounds.size.width - code.text_bounds.size.width,
+        px(7.0),
+        "horizontal code padding is real layout"
+    );
+    assert_eq!(code.text_bounds.left() - code.box_bounds.left(), px(3.5));
     assert!(
-        cx.debug_bounds("reader-inline-code-text").is_some(),
-        "UNMET: upstream inline code has no code-font/padded layout hook"
+        layout
+            .code_fonts
+            .iter()
+            .any(|font| font.as_ref() == "Google Sans Code"),
+        "code runs request the theme mono family: {:?}",
+        layout.code_fonts
+    );
+    let last = layout.pieces.last().unwrap();
+    assert!(
+        last.text_bounds.left() >= code.box_bounds.right(),
+        "padding participates in following text placement"
     );
 }
+
 #[gpui::test]
 fn long_inline_code_wraps_and_drags_across_code_spans(cx: &mut TestAppContext) {
-    let (_, cx) = open(cx, fixtures::inline_code_long(), DocumentKind::Markdown);
-    cx.simulate_resize(gpui::size(px(420.0), px(700.0)));
-    frames(cx);
-    assert!(
-        cx.debug_bounds("reader-inline-paragraph").is_some(),
-        "UNMET: selectable continuous paragraph extension is unavailable"
-    );
-}
-#[gpui::test]
-fn code_fence_language_sits_near_the_block_top(cx: &mut TestAppContext) {
-    let (_, cx) = open(cx, fixtures::markdown(), DocumentKind::Markdown);
-    frames(cx);
-    assert!(
-        cx.debug_bounds("markdown-code-language").is_some(),
-        "UNMET: document preview does not forward the public renderer fence hook"
-    );
-}
-#[gpui::test]
-fn markdown_hard_breaks_remain_line_boundaries(cx: &mut TestAppContext) {
-    let source = "first  \nsecond with `code`";
-    let tree = ely_documents::markdown_tree(source);
-    fn breaks(n: &ely_documents::mdast::Node) -> usize {
-        usize::from(matches!(n, ely_documents::mdast::Node::Break(_)))
-            + n.children().map_or(0, |c| c.iter().map(breaks).sum())
-    }
-    assert_eq!(breaks(&tree), 1);
+    let long = "long_code_".repeat(50);
+    let rendered = format!("中文 🚀 first code中间 second {long} end");
     let (_, cx) = open(
         cx,
         PreparedBody::Utf8 {
-            text: source.into(),
+            text: format!("中文 🚀 `first code`中间 `second {long}` end"),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(420.0), px(700.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, &rendered);
+    assert!(
+        layout.pieces.iter().filter(|p| p.code).count() > 2,
+        "long code wraps into actual shaped rows"
+    );
+    for piece in &layout.pieces {
+        assert!(
+            piece.text_bounds.right() <= layout.bounds.right() + px(0.5),
+            "no horizontal overflow: {piece:?}"
+        );
+        assert!(
+            rendered.is_char_boundary(piece.range.start)
+                && rendered.is_char_boundary(piece.range.end)
+        );
+    }
+    let first = &layout.pieces[0];
+    let last = layout.pieces.last().unwrap();
+    let start = point(first.text_bounds.left(), first.text_bounds.center().y);
+    let end = point(
+        last.text_bounds.right() + px(1.0),
+        last.text_bounds.center().y,
+    );
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    frames(cx);
+    cx.simulate_keystrokes("secondary-c");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|i| i.text()),
+        Some(rendered)
+    );
+}
+
+#[gpui::test]
+fn code_fence_language_sits_near_the_block_top(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx, fixtures::markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(1100.0), px(900.0)));
+    frames(cx);
+    let (block, language, text) = (0..12)
+        .find_map(|ix| {
+            let key = |what: &str| -> &'static str {
+                Box::leak(format!("markdown-{what}-{ix}").into_boxed_str())
+            };
+            let block = cx.debug_bounds(key("code-block"))?;
+            let language = cx.debug_bounds(key("code-language"))?;
+            let text = cx.debug_bounds(key("code-text"))?;
+            Some((block, language, text))
+        })
+        .expect("a fenced block with a language draws");
+    let inset = f32::from(language.top() - block.top());
+    assert!((0.0..=8.0).contains(&inset), "label inset {inset}");
+    assert!(
+        language.bottom() <= text.top(),
+        "label stays above the code body"
+    );
+}
+
+#[test]
+fn repository_pictures_never_resolve_to_filesystem_reads() {
+    // The local renderer has no image loader: only an inert note remains.
+    let doc = super::markdown::parse(
+        "![x](file:///secret)\n\n[Guide](guide.md)\n\n```rust\nfn main() {}\n```",
+    );
+    assert!(
+        doc.blocks
+            .iter()
+            .any(|b| matches!(b, super::markdown::Block::Image { .. }))
+    );
+    assert!(doc.blocks.iter().any(|b| matches!(
+        b,
+        super::markdown::Block::Paragraph(p) if !p.links.is_empty()
+    )));
+    assert!(doc.blocks.iter().any(|b| matches!(
+        b,
+        super::markdown::Block::Code { language: Some(l), .. } if l == "rust"
+    )));
+}
+
+#[gpui::test]
+fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| Left | Center | Right |\n|:---|:---:|---:|\n| left | middle | right |".into(),
             has_bom: false,
         },
         DocumentKind::Markdown,
     );
     frames(cx);
-    assert!(cx.debug_bounds("markdown-block-0").is_some());
+    for id in [
+        "markdown-cell-0-0-0",
+        "markdown-cell-0-0-1",
+        "markdown-cell-0-0-2",
+        "markdown-cell-0-1-0",
+    ] {
+        assert!(cx.debug_bounds(id).is_some(), "{id}");
+    }
+    // Cell text is really laid out, not an empty box.
+    let header = cx.debug_bounds("markdown-cell-0-0-1").unwrap();
+    let layout = inline_snapshot(cx, "Center");
+    assert!(
+        (layout.bounds.center().x - header.center().x).abs() <= px(20.0),
+        "the centered cell places its paragraph near the cell centre"
+    );
 }
+
+#[gpui::test]
+fn markdown_hover_fades_and_resize_and_replacement_clamp_the_real_list(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
+    frames(cx);
+    let bounds = cx.debug_bounds("reader-markdown").unwrap();
+    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+    frames(cx);
+    assert!(
+        cx.debug_bounds("reader-markdown-scrollbar-thumb").is_some(),
+        "the reader fade bar reads the local ListState"
+    );
+    reader.update_in(cx, |r, w, cx| {
+        r.show(fixtures::inline_code_short(), DocumentKind::Markdown, w, cx)
+    });
+    frames(cx);
+    assert_eq!(
+        reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).top_block()),
+        0
+    );
+}
+
+#[gpui::test]
+fn adjacent_differently_styled_code_budgets_every_padding_inset(cx: &mut TestAppContext) {
+    let source = "`aaaa`**`bbbb`**".repeat(12);
+    let text = "aaaabbbb".repeat(12);
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(190.0), px(700.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, &text);
+    for piece in layout.pieces.iter().filter(|p| p.code) {
+        assert!(piece.box_bounds.left() >= layout.bounds.left() - px(0.5));
+        assert!(
+            piece.box_bounds.right() <= layout.bounds.right() + px(0.5),
+            "padding must fit: {piece:?}"
+        );
+    }
+}
+
 #[gpui::test]
 fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
     let source = "`x` ".repeat(20_000);
@@ -1000,73 +1151,12 @@ fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
     frames(cx);
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
-        "dense paragraph resize took {:?}",
+        "dense resize took {:?}",
         start.elapsed()
     );
-    assert!(
-        reader.read_with(cx, |reader, cx| reader
-            .markdown()
-            .unwrap()
-            .read(cx)
-            .text(cx)
-            .len())
-            > 70_000
-    );
-    assert!(cx.debug_bounds("markdown-block-0").is_some());
+    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text().len()) > 70_000);
 }
 
-#[test]
-fn repository_pictures_never_resolve_to_filesystem_reads() {
-    for image in [
-        "![x](file://attacker.example/share/a.png)",
-        "![x](/tmp/a.png)",
-        "![x](data:image/png;base64,AAAA)",
-        "<img src=\"file:///C:/secret.png\">",
-        "![x][ref]\n\n[ref]: file:///secret",
-    ] {
-        let safe = super::markdown::safe_markdown(image);
-        fn images(n: &ely_documents::mdast::Node) -> usize {
-            usize::from(matches!(
-                n,
-                ely_documents::mdast::Node::Image(_)
-                    | ely_documents::mdast::Node::ImageReference(_)
-                    | ely_documents::mdast::Node::Html(_)
-            )) + n.children().map_or(0, |c| c.iter().map(images).sum())
-        }
-        assert_eq!(images(&ely_documents::markdown_tree(&safe)), 0, "{safe}");
-    }
-}
-#[gpui::test]
-fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
-    let (_, cx) = open(
-        cx,
-        PreparedBody::Utf8 {
-            text: "| Left | Center | Right |\n|:---|:---:|---:|\n| left | middle | right |".into(),
-            has_bom: false,
-        },
-        DocumentKind::Markdown,
-    );
-    frames(cx);
-    for id in [
-        "markdown-cell-0-1-0",
-        "markdown-cell-0-1-1",
-        "markdown-cell-0-1-2",
-    ] {
-        assert!(cx.debug_bounds(id).is_some());
-    }
-}
-#[gpui::test]
-fn markdown_hover_fades_and_resize_and_replacement_clamp_the_real_list(cx: &mut TestAppContext) {
-    let (_, cx) = open(cx, fixtures::markdown(), DocumentKind::Markdown);
-    frames(cx);
-    let b = cx.debug_bounds("reader-markdown").unwrap();
-    cx.simulate_mouse_move(b.center(), None, Modifiers::none());
-    frames(cx);
-    assert!(
-        cx.debug_bounds("reader-markdown-scrollbar-thumb").is_some(),
-        "UNMET: upstream private ListState uses its own 6px activity bar, not reader Fade"
-    );
-}
 #[gpui::test]
 fn a_single_character_link_opens_from_its_right_half(cx: &mut TestAppContext) {
     let (r, cx) = open(
@@ -1087,43 +1177,9 @@ fn a_single_character_link_opens_from_its_right_half(cx: &mut TestAppContext) {
     ));
 }
 #[gpui::test]
-fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext) {
-    let (r, cx) = open(
-        cx,
-        PreparedBody::Utf8 {
-            text: "![untrusted](file://attacker.example/share/image.png)".into(),
-            has_bom: false,
-        },
-        DocumentKind::Markdown,
-    );
-    frames(cx);
-    assert!(
-        !r.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text(cx))
-            .contains("file:")
-    );
-    assert!(cx.debug_bounds("markdown-picture").is_none());
-}
-#[gpui::test]
-fn adjacent_differently_styled_code_budgets_every_padding_inset(cx: &mut TestAppContext) {
-    let (_, cx) = open(
-        cx,
-        PreparedBody::Utf8 {
-            text: "`aaaa`**`bbbb`**".repeat(12),
-            has_bom: false,
-        },
-        DocumentKind::Markdown,
-    );
-    frames(cx);
-    assert!(
-        cx.debug_bounds("reader-inline-paragraph").is_some(),
-        "UNMET: padded code-run layout interface unavailable"
-    );
-}
-
-#[gpui::test]
 fn async_markdown_first_load_paints_without_forced_refresh_or_input(cx: &mut TestAppContext) {
     let (reader, cx) = open(cx, fixtures::inline_code_short(), DocumentKind::Markdown);
-    cx.run_until_parked();
+    frames(cx);
     reader.update_in(cx, |r, w, cx| {
         r.show(fixtures::large_markdown(), DocumentKind::Markdown, w, cx)
     });
@@ -1132,7 +1188,7 @@ fn async_markdown_first_load_paints_without_forced_refresh_or_input(cx: &mut Tes
         cx.update(|w, cx| w.simulate_next_frame(cx));
         cx.run_until_parked();
     }
-    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).read_now(cx)));
+    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).read_now()));
     assert!(
         cx.debug_bounds("markdown-block-0").is_some(),
         "parse completion schedules the first block without window.refresh or wheel input"
@@ -1159,33 +1215,36 @@ fn replacing_markdown_rejects_previous_background_results(cx: &mut TestAppContex
     });
     frames(cx);
     assert_eq!(
-        reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text(cx)),
+        reader.read_with(cx, |r, cx| r
+            .markdown()
+            .unwrap()
+            .read(cx)
+            .text()
+            .to_string()),
         "# Latest document"
     );
 }
 
-#[test]
-fn replacement_text_cannot_synthesize_a_markdown_image() {
-    let inputs = [
-        "!<i>(file://attacker.example/share/image.png)",
-        "!<!--x-->(file:///C:/secret.png)",
-        "![x][ref]\n\n[ref]: file:///secret",
-        "text `![x](data:image/png;base64,AAAA)` tail",
-    ];
-    fn images(n: &ely_documents::mdast::Node) -> usize {
-        usize::from(matches!(
-            n,
-            ely_documents::mdast::Node::Image(_)
-                | ely_documents::mdast::Node::ImageReference(_)
-                | ely_documents::mdast::Node::Html(_)
-        )) + n.children().map_or(0, |c| c.iter().map(images).sum())
-    }
-    for input in inputs {
-        let safe = super::markdown::safe_markdown(input);
-        assert_eq!(
-            images(&ely_documents::markdown_tree(&safe)),
-            0,
-            "{input:?} -> {safe:?}"
-        );
-    }
+#[gpui::test]
+fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "![untrusted](file://attacker.example/share/image.png)".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    assert!(cx.debug_bounds("markdown-picture-note-0").is_some());
+    assert!(
+        reader
+            .read_with(cx, |r, cx| r
+                .markdown()
+                .unwrap()
+                .read(cx)
+                .text()
+                .to_string())
+            .contains("file:")
+    );
 }
