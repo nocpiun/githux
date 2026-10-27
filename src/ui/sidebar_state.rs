@@ -35,6 +35,15 @@ pub(super) struct SidebarState {
     sash_target: f32,
     sash_opacity: f32,
     sash_since: Instant,
+    /// Pointer anchor and width baseline of the current resize gesture, reset on every mode
+    /// switch so one continuous drag cannot bounce across the threshold.
+    drag_base_width: f32,
+    drag_offset_base: f32,
+    /// Press position and last pointer sample of the current gesture.
+    drag_press_x: f32,
+    drag_last_pointer: f32,
+    /// Whether this gesture started on the rail (rather than merely being mid-collapse).
+    drag_from_rail: bool,
 }
 
 impl Default for SidebarState {
@@ -53,6 +62,11 @@ impl Default for SidebarState {
             sash_target: 0.0,
             sash_opacity: 0.0,
             sash_since: Instant::now(),
+            drag_base_width: SIDEBAR_WIDTH,
+            drag_offset_base: 0.0,
+            drag_press_x: 0.0,
+            drag_last_pointer: 0.0,
+            drag_from_rail: false,
         }
     }
 }
@@ -126,13 +140,15 @@ impl SidebarState {
         self.retarget_sash(now, reduced);
     }
 
-    /// Recomputes the sash target from the real pointer position alone. Reversing mid-fade
-    /// continues from the presented opacity, so a quick in/out never jumps.
-    ///
-    /// A drag does not pin the line on: the agreed behaviour is "only while hovered", so holding
-    /// the button and moving onto the sidebar or the island must fade it out like any other leave.
+    /// Recomputes the sash target. Outside a drag only real pointer hover shows the line; a valid
+    /// resize drag keeps it visible for the whole gesture, even when the pointer outruns the band
+    /// that is moving under it. Reversing mid-fade continues from the presented opacity.
     fn retarget_sash(&mut self, now: Instant, reduced: bool) {
-        let target = if self.sash_pointer_inside { 1.0 } else { 0.0 };
+        let target = if self.dragging || self.sash_pointer_inside {
+            1.0
+        } else {
+            0.0
+        };
         self.sash_since = now;
         self.sash_target = target;
         if reduced {
@@ -187,14 +203,45 @@ impl SidebarState {
         self.retarget_sash(now, reduced);
     }
 
-    pub fn begin_resize(&mut self) {
+    /// Starts a resize gesture in whichever mode is currently shown, anchored at the pointer's
+    /// press position. Entering a drag on the rail must not silently expand it.
+    pub fn begin_resize(&mut self, press_x: f32) {
         self.transition = None;
-        self.collapsed = false;
-        self.expanded_width = self.frame.width.max(SIDEBAR_MIN_WIDTH);
+        self.drag_press_x = press_x;
+        self.drag_last_pointer = press_x;
+        // Baseline is the frame on screen, but never narrower than the legal minimum: a drag that
+        // interrupts a collapsing animation must dock at 200 rather than continue below it.
+        // A drag that interrupts a collapse is still an expanded-mode drag: the sidebar is wider
+        // than the rail on screen, so dropping straight to the rail branch would be wrong.
+        self.drag_from_rail = self.collapsed && self.frame.width <= SIDEBAR_COLLAPSED_WIDTH + 0.5;
+        self.drag_base_width = if self.drag_from_rail {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            self.frame.width.max(SIDEBAR_MIN_WIDTH)
+        };
+        // A mid-animation collapse is frozen as expanded so the threshold logic starts from the
+        // presented width rather than the already-flipped mode flag.
+        self.collapsed = self.drag_from_rail;
+        self.drag_offset_base = 0.0;
         self.dragging = true;
     }
+
+    /// Records the real pointer position during a gesture without taking visibility away from the
+    /// drag; after release it is the only input to the hover fade.
+    pub fn note_pointer(&mut self, inside: bool, now: Instant, reduced: bool) {
+        self.sash_pointer_inside = inside;
+        if !self.dragging {
+            self.retarget_sash(now, reduced);
+        }
+    }
+
     /// Starts judging the line from the pointer during a drag, where the element's hover lifecycle
     /// is suppressed. The pointer is still inside the band at drag start.
+    /// Applies the displacement already travelled when the platform drag finally started.
+    pub fn start_at(&mut self, total: f32, window_width: f32) {
+        self.resize(total, window_width);
+    }
+
     pub fn note_drag(&mut self, now: Instant, reduced: bool) {
         self.sash_pointer_inside = true;
         self.retarget_sash(now, reduced);
@@ -204,16 +251,56 @@ impl SidebarState {
         self.transition = None;
         self.frame = self.target(window_width);
     }
-    pub fn resize(&mut self, requested: f32, window_width: f32) {
-        if !self.collapsed && self.dragging {
+    /// Applies the gesture's total horizontal displacement. Expanded mode shrinks continuously and
+    /// docks at the minimum width; only further overshoot of the threshold collapses. Collapsed
+    /// mode holds the rail until the same overshoot to the right, then expands with the remembered,
+    /// window-clamped width. A switch rebases the displacement baseline so one gesture cannot
+    /// oscillate against its own layout changes.
+    pub fn resize_pointer(&mut self, pointer_x: f32, window_width: f32) {
+        self.drag_last_pointer = pointer_x;
+        self.resize(pointer_x - self.drag_press_x, window_width);
+    }
+
+    pub fn resize(&mut self, total: f32, window_width: f32) {
+        if !self.dragging {
+            return;
+        }
+        let travel = total - self.drag_offset_base;
+        if self.drag_from_rail {
+            if travel >= SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
+                self.drag_from_rail = false;
+                self.collapsed = false;
+                self.expanded_width = self
+                    .expanded_width
+                    .clamp(SIDEBAR_MIN_WIDTH, Self::limit(window_width));
+                self.settle(window_width);
+                self.drag_base_width = self.frame.width;
+                self.drag_offset_base = total;
+            }
+            return;
+        }
+        let requested = self.drag_base_width + travel;
+        if requested > SIDEBAR_MIN_WIDTH {
             self.expanded_width = requested.clamp(SIDEBAR_MIN_WIDTH, Self::limit(window_width));
             self.settle(window_width);
+            return;
+        }
+        // Never expose a width narrower than the minimum, even on a frame between the plateau and
+        // the collapse switch.
+        self.expanded_width = SIDEBAR_MIN_WIDTH;
+        self.expanded_width = SIDEBAR_MIN_WIDTH;
+        self.settle(window_width);
+        if SIDEBAR_MIN_WIDTH - requested >= SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
+            self.collapsed = true;
+            self.drag_from_rail = true;
+            self.settle(window_width);
+            self.drag_base_width = SIDEBAR_COLLAPSED_WIDTH;
+            self.drag_offset_base = total;
         }
     }
 }
 
 pub(super) struct SidebarDrag {
     pub owner: gpui::EntityId,
-    pub start_width: f32,
     pub start_x: Cell<gpui::Pixels>,
 }

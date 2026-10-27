@@ -1746,19 +1746,17 @@ impl Render for Shell {
                                     {
                                         return;
                                     }
-                                    let width = drag.start_width
-                                        + f32::from(event.event.position.x - drag.start_x.get());
-                                    shell
-                                        .sidebar_state
-                                        .resize(width, window.viewport_size().width.into());
-                                    // `on_hover` is suppressed during an active drag, so decide the
-                                    // sash from the pointer itself. The measured hitbox is already
-                                    // in window coordinates, which `event.position` also uses; the
-                                    // body-local band would be off by the title bar inset.
+                                    shell.sidebar_state.resize_pointer(
+                                        f32::from(event.event.position.x),
+                                        window.viewport_size().width.into(),
+                                    );
+                                    // The gesture itself keeps the line visible. Pointer hover is
+                                    // still recorded for the moment the drag ends, so a release
+                                    // outside fades out and a release inside stays lit.
                                     let hovered = shell
                                         .sidebar_resize_band
                                         .is_some_and(|band| band.contains(&event.event.position));
-                                    shell.sidebar_state.set_sash_hover(
+                                    shell.sidebar_state.note_pointer(
                                         hovered,
                                         cx.background_executor().now(),
                                         cx.theme().reduced_motion || cx.reduce_motion(),

@@ -187,3 +187,16 @@ account-ui / content-reader 的独立 worktree 未修改，文档给出真实 Sc
 ### 审查修复：tabs 的 wheel overlay 不能随滚动内容移动
 
 Codex 针对公共 motion 首版（`d629d0e`，P2）指出：tabs 的公共 overlay 被放在 `view.scroll` 所属的横向滚动行内，滚动后 overlay 随内容左移，右侧可见区域失去命中，滚轮退回 GPUI 立即滚动，导致平滑依赖指针位置且可能打断在途动画。已把 overlay 移入不滚动的 `tab-wheel-viewport` 包裹层，行内容仍在内层滚动；新增 `tab_wheel_stays_smooth_after_the_strip_scrolls_a_full_viewport`，先滚满一个视口再在可见右缘发送 wheel，确认仍由公共 motion 接管并可反向移动。全量 **404 tests**、clippy、check 通过。
+
+## 第十轮：sash 宽度/拖动可见性、toggle 去边框、阈值折叠与展开
+
+负责人 2026-10-27 的真实窗口反馈四项。基线 `1c127f9`，保留公共 `scroll::Motion` 与全部既有侧栏约束。
+
+1. **sash 向右加宽**：原实现用 `(hit_width - sash_width) / 2` 的居中式定位，直接加宽会让左缘左移。现在把左侧锚点与绘制宽度分开：`SIDEBAR_SASH_LEFT` 固定为旧 2px 线的中心位置，`SIDEBAR_SASH_WIDTH` 扩展到命中带末端；右缘在布局上等于 island 外框左缘，上下端仍与 island 等高。collapsed/expanded、动画与 resize 各帧都由同一组几何常量推导；toggle 仍在上层且命中独立。测试按实际 bounds 断言左缘不动、右缘贴 island、上下等高。
+2. **拖动全程可见**：`retarget_sash` 现在由“有效 resize 手势进行中或真实 hover”决定，不再只看 hover。拖拽事件仍记录真实指针是否在带内，供释放瞬间交还 fade 使用。因此快速拖动时指针多次跑出移动中的旧带，线也不闪；释放在外侧渐隐、在内侧保持、移开后消失；Esc、失焦、窗口变化仍走同一 `end_resize` 清理路径，reduced-motion 保持即时。
+3. **toggle 去边框**：移除 `.border_1` + `.focus(border_color)`；尺寸、位置、图标、圆形背景与点击范围不变，键盘焦点保留在同一 focus handle 上，仅不再绘制边框环。覆盖旧的“不要改 toggle 样式”，本轮授权范围仅去边框。
+4. **阈值折叠/展开**：拖动基线改为“按下点 + 本次手势宽度”，模式切换时重设位移基准。展开态连续缩到 200px 停靠，再越过 `SIDEBAR_DRAG_COLLAPSE_THRESHOLD = 32` 才折叠；收起态 rail 保持到同一阈值后直接展开到记住的展开宽度（窗口预算 clamp）。阈值 32 是本轮可调实现起点，供负责人验收，不是永久产品硬规定。修复了三个真实缺陷：折叠动画中途开始拖动时会误走 rail 分支、连续拖动可能暴露窄于 200px 的宽度、切换后位移未重设导致来回抖动。
+
+验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（**407 passed**）、`cargo build --locked`、`git diff --check` 通过，均 `CARGO_BUILD_JOBS=1`、本 worktree target。旧测试中“拖出命中带即灭线”“收起态禁止 resize”等与新契约冲突的断言已按本轮明确要求更新，其余侧栏与公共 scroll 回归保留。
+
+未验证边界：GPUI 测试平台不经过 Windows 原生输入分发。真实拖动跨越阈值的手感、sash 新宽度观感、toggle 无边框后的焦点可辨度、最大化/还原与多 DPI 下的表现仍需负责人真实窗口验收；本轮不据此宣称验收通过。

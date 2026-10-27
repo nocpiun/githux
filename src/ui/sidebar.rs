@@ -69,7 +69,9 @@ impl super::Shell {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px((SIDEBAR_RESIZE_HIT_WIDTH - SIDEBAR_SASH_WIDTH) / 2.0))
+                    // Anchor and width are separate: the left edge keeps its historical position,
+                    // while the right edge grows to the band end (the island's outer frame).
+                    .left(px(SIDEBAR_SASH_LEFT))
                     .w(px(SIDEBAR_SASH_WIDTH))
                     .bg(fg.opacity(sash_opacity)),
             )
@@ -100,30 +102,34 @@ impl super::Shell {
                 );
                 cx.notify();
             }))
-            .when(!self.sidebar_state.collapsed, |handle| {
-                handle.on_drag(
-                    SidebarDrag {
-                        owner: cx.entity_id(),
-                        start_width: width,
-                        start_x: std::cell::Cell::new(_window.mouse_position().x),
-                    },
-                    move |drag, _, window, cx| {
-                        drag.start_x.set(window.mouse_position().x);
-                        this.update(cx, |shell, cx| {
-                            shell.sidebar_state.begin_resize();
-                            shell.sidebar_state.note_drag(
-                                cx.background_executor().now(),
-                                cx.theme().reduced_motion || cx.reduce_motion(),
-                            );
-                            cx.notify();
-                        });
-                        cx.set_active_drag_cursor_style(gpui::CursorStyle::ResizeLeftRight, window);
-                        // A drag uses GPUI capture and an empty drag image; no page can receive a click.
-                        window.prevent_default();
-                        cx.new(|_| gpui::EmptyView)
-                    },
-                )
-            });
+            // Dragging is valid from the rail too: the same gesture expands after its threshold.
+            .on_drag(
+                SidebarDrag {
+                    owner: cx.entity_id(),
+                    start_x: std::cell::Cell::new(_window.mouse_position().x),
+                },
+                move |drag, _, window, cx| {
+                    // The payload anchors at press; the current pointer may already be a few pixels
+                    // further, so hand both over to keep that first movement as real travel.
+                    let press = f32::from(drag.start_x.get());
+                    let now = f32::from(window.mouse_position().x);
+                    this.update(cx, |shell, cx| {
+                        shell.sidebar_state.begin_resize(press);
+                        shell
+                            .sidebar_state
+                            .start_at(now - press, window.viewport_size().width.into());
+                        shell.sidebar_state.note_drag(
+                            cx.background_executor().now(),
+                            cx.theme().reduced_motion || cx.reduce_motion(),
+                        );
+                        cx.notify();
+                    });
+                    cx.set_active_drag_cursor_style(gpui::CursorStyle::ResizeLeftRight, window);
+                    // A drag uses GPUI capture and an empty drag image; no page can receive a click.
+                    window.prevent_default();
+                    cx.new(|_| gpui::EmptyView)
+                },
+            );
         // The toggle owns its focus handle across mode changes: activating it by keyboard must
         // leave focus on the same actionable button.
         let toggle_focus = self.sidebar_toggle_focus.clone();
@@ -155,9 +161,6 @@ impl super::Shell {
             })
             .tab_index(0)
             .cursor_pointer()
-            .border_1()
-            .border_color(transparent_black())
-            .focus(move |style| style.border_color(fg))
             .hover(move |style| style.bg(hover))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();

@@ -26,9 +26,6 @@ pub const SIDEBAR_INDICATOR_MAX_HEIGHT: f32 = 24.0;
 pub const FOOTER_DIVIDER_HEIGHT: f32 = 1.0;
 /// The sidebar column's row gap.
 pub const SIDEBAR_ROW_GAP: f32 = 4.0;
-/// Space above and below the footer rule, measured from the repository viewport's edge to the
-/// account row. The column gap does not participate here: the divider owns its whole band so the
-/// rule is visually centred in both collapsed and expanded layouts.
 /// Space above and below the footer rule. The column gap adds below this band's own content, so
 /// the band is sized to absorb it: the rule ends up equally spaced from the list and identity.
 pub const FOOTER_DIVIDER_SPACE: f32 = 8.0;
@@ -37,8 +34,17 @@ pub const STATUS_BUTTON_SIZE: f32 = 24.0;
 pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
 pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
 /// The visible sash line inside the resize hit band, and how long it takes to fade.
-pub const SIDEBAR_SASH_WIDTH: f32 = 2.0;
+///
+/// The left edge is the historical centre of the old 2px line and stays put; the right edge grows
+/// out to the band's own end, which is the island's outer frame. Widening must not re-centre the
+/// line, so the anchor and the painted width are separate values.
+pub const SIDEBAR_SASH_LEFT: f32 = (SIDEBAR_RESIZE_HIT_WIDTH - 2.0) / 2.0;
+pub const SIDEBAR_SASH_WIDTH: f32 = SIDEBAR_RESIZE_HIT_WIDTH - SIDEBAR_SASH_LEFT;
 pub const SIDEBAR_SASH_FADE_MS: u64 = 140;
+/// Extra pointer travel past the minimum width (or past the start of a rail drag) before a resize
+/// gesture switches between expanded and collapsed. It is an implementation starting point for
+/// acceptance, not a fixed product number.
+pub const SIDEBAR_DRAG_COLLAPSE_THRESHOLD: f32 = 32.0;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
 pub const REPO_LEFT_PADDING: f32 = 4.0;
 
