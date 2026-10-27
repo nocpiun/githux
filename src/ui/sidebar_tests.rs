@@ -388,6 +388,15 @@ fn animated_layout_uses_one_width_for_sidebar_island_and_divider(cx: &mut TestAp
     cx.run_until_parked();
     assert_eq!(bounds("sidebar", cx).size.width, px(SIDEBAR_WIDTH));
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
+    // Expanding under a stationary pointer can start the independent repository-bar fade.
+    // Move outside that region and settle its clock before asserting that all motion is idle.
+    let header = bounds("titlebar", cx).center();
+    cx.simulate_mouse_move(header, None, Modifiers::none());
+    view.update(cx, |s, cx| {
+        s.pin_tab_clock(s.tab_now_ms() + super::scroll::FADE_MS + 1);
+        cx.notify();
+    });
+    cx.run_until_parked();
     // Drain the one callback already requested by the preceding frame. Settled renders
     // must not install another callback; there is no perpetual animation timer.
     cx.update(|window, cx| {
@@ -629,6 +638,7 @@ fn one_wheel_notch_is_consumed_once_and_settles_at_that_delta(cx: &mut TestAppCo
 #[gpui::test]
 fn touch_pan_applies_directly_without_a_second_inertia(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
     let scroll = bounds("repo-scroll", cx);
     cx.simulate_mouse_move(scroll.center(), None, Modifiers::none());
     let before = view.read_with(cx, |s, _| s.repo_offset());
@@ -1200,4 +1210,180 @@ fn releasing_the_drag_outside_the_band_clears_the_sash_target(cx: &mut TestAppCo
     assert!(!view.read_with(cx, |s, _| s.sidebar_state.dragging));
     assert!(!view.read_with(cx, |s, _| s.sidebar_state.sash_hovered()));
     assert_eq!(view.read_with(cx, |s, _| s.sidebar_state.sash()), 0.0);
+}
+
+#[gpui::test]
+fn repository_bar_drags_real_content_and_cancels_pending_wheel(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let region = bounds("repo-scroll", cx);
+    let footer = bounds("account-row", cx);
+    let tabs_before = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    let page_before = view.read_with(cx, |s, _| s.page_offset());
+    assert!(cx.debug_bounds("repo-scrollbar").is_none());
+    cx.simulate_mouse_move(region.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    let line = bounds("repo-scrollbar-line", cx);
+    let thumb = bounds("repo-scrollbar-thumb", cx);
+    assert_eq!(line.size.width, px(super::scroll::THICKNESS));
+    assert!(thumb.top() >= region.top() && thumb.bottom() <= region.bottom());
+
+    // Leave an actual discrete wheel target pending, then hand control to the thumb immediately.
+    view.update(cx, |s, _| {
+        assert!(
+            s.repo_smooth
+                .wheel(std::time::Instant::now(), -2000.0, false, false)
+        );
+    });
+    cx.simulate_mouse_down(thumb.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        thumb.center() + point(px(0.0), px(8.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |s, _| s.repo_bars.dragging()),
+        Some(gpui::Axis::Vertical)
+    );
+    assert!(
+        !view.read_with(cx, |s, _| s
+            .repo_smooth
+            .tick(std::time::Instant::now(), false)),
+        "the thumb must cancel the wheel target at drag start"
+    );
+    cx.simulate_mouse_move(
+        thumb.center() + point(px(0.0), px(150.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let dragged = view.read_with(cx, |s, _| s.repo_offset());
+    assert!(
+        dragged.y < px(-100.0),
+        "thumb moves the real rows: {dragged:?}"
+    );
+    assert!(bounds("repo-row-0", cx).top() < region.top());
+    let outside = bounds("island", cx).center();
+    release(outside, cx);
+    cx.simulate_mouse_move(outside, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.repo_bars.dragging().is_none()));
+    view.update(cx, |s, _| {
+        assert!(!s.repo_smooth.tick(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            false
+        ));
+    });
+    assert_eq!(
+        view.read_with(cx, |s, _| s.repo_offset()),
+        dragged,
+        "release must not spring back"
+    );
+    assert!(cx.debug_bounds("repo-scrollbar").is_none());
+    assert_eq!(bounds("account-row", cx), footer);
+    assert_eq!(
+        view.read_with(cx, |s, _| s.tab_scroll.offset()),
+        tabs_before
+    );
+    assert_eq!(view.read_with(cx, |s, _| s.page_offset()), page_before);
+}
+
+#[gpui::test]
+fn repository_bar_hover_fades_reversibly_and_tracks_collapse_and_resize(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    view.update(cx, |s, _| s.pin_tab_clock(0));
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
+    let enter = bounds("repo-scroll", cx).center();
+    cx.simulate_mouse_move(enter, None, Modifiers::none());
+    cx.run_until_parked();
+    view.update(cx, |s, cx| {
+        s.pin_tab_clock(70);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let mid = view.update(cx, |s, _| s.repo_bars.opacity(70));
+    assert!(mid > 0.0 && mid < 1.0);
+    let away = bounds("island", cx).center();
+    cx.simulate_mouse_move(away, None, Modifiers::none());
+    view.update(cx, |s, cx| {
+        s.pin_tab_clock(105);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let out = view.update(cx, |s, _| s.repo_bars.opacity(105));
+    assert!(out < mid);
+    cx.simulate_mouse_move(enter, None, Modifiers::none());
+    assert_eq!(
+        view.update(cx, |s, _| s.repo_bars.opacity(105)),
+        out,
+        "reversal is continuous"
+    );
+    view.update(cx, |s, cx| {
+        s.pin_tab_clock(250);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(view.update(cx, |s, _| s.repo_bars.opacity(250)), 1.0);
+    assert!(!view.read_with(cx, |s, _| s.repo_bars.is_animating()));
+
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
+    click("sidebar-toggle", cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    let region = bounds("repo-scroll", cx);
+    cx.simulate_mouse_move(region.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    let track = bounds("repo-scrollbar", cx);
+    assert!(track.top() >= region.top() && track.bottom() <= region.bottom());
+    assert!(track.right() <= region.right());
+    let away = bounds("account-row", cx).center();
+    cx.simulate_mouse_move(away, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("repo-scrollbar").is_none(),
+        "footer is outside the hover region"
+    );
+}
+
+#[gpui::test]
+fn repository_thumb_cleanup_is_local_on_escape_resize_and_window_blur(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let start_thumb = |cx: &mut VisualTestContext| {
+        let region = bounds("repo-scroll", cx);
+        cx.simulate_mouse_move(region.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let thumb = bounds("repo-scrollbar-thumb", cx).center();
+        cx.simulate_mouse_down(thumb, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            thumb + point(px(0.0), px(8.0)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |s, _| s.repo_bars.dragging()),
+            Some(gpui::Axis::Vertical)
+        );
+        assert!(view.read_with(cx, |s, _| s.tab_bars.dragging().is_none()));
+        assert!(!view.read_with(cx, |s, _| s.sidebar_state.dragging));
+    };
+    start_thumb(cx);
+    press("escape", cx);
+    assert!(view.read_with(cx, |s, _| s.repo_bars.dragging().is_none()));
+    release(bounds("island", cx).center(), cx);
+    start_thumb(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.repo_bars.dragging().is_none()));
+    release(bounds("island", cx).center(), cx);
+    start_thumb(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |s, _| s.repo_bars.dragging().is_none()));
+    assert_eq!(
+        view.update(cx, |s, _| s.repo_bars.opacity(s.tab_now_ms())),
+        0.0
+    );
+    assert!(!view.read_with(cx, |s, _| s.repo_bars.is_animating()));
 }

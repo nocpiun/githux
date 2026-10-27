@@ -153,3 +153,15 @@ Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` �
 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（**383 passed**）、`cargo build --locked`、`git diff --check` 通过，均使用 `CARGO_BUILD_JOBS=1` 与本 worktree 的 `target/`。
 
 **未验证边界**：测试平台不经过 Windows 原生输入分发，触屏 `ScrollSource::Touch` 只有事件级回归，没有真实触屏设备证据；真实窗口的滚轮/触控板/触屏手感、IME、多 DPI 与原生窗口按钮仍待负责人验收。迁移不等于原侧栏视觉或交互已验收。
+
+## 第八轮：同步统一滚动条与 PR 门槛，接入仓库 viewport
+
+起点为协调者已完成的 main 合并 `f0fbcb0`；核对 main `0014d6c` 为祖先、工作树干净。main 已包含 PR #29 的公共 `src/ui/scroll/**` 与 PR #31 的标签/规模门槛。本轮不沿用第七轮“PR29 未接入”的历史状态，标签条采用 main 的 `Bars`，不恢复已删除的 `tab_scrollbar.rs`。
+
+仓库列表新增独立 `repo_bars`，通过纵向 `BarId`、`Style::DEFAULT`、`Placement::overlay(4, 8)` 绘制公共条。hover 只绑定真实仓库 viewport，账号/footer/More 不参与。公共 `Bar` 保留唯一几何/拖动/Fade，侧栏仅接线，原行高与布局不变；resizer sash 仍独立。
+
+内容平滑与条显隐分别维护。`SmoothScroll` 适配 `ScrollTarget`，读写原 `repo_scroll`；thumb 的 start/write/end 钩子取消旧 wheel 目标，拖动期间禁止建立竞争目标，松手后不弹回。捕获阶段 wheel overlay 仍只消费一次，条最后绘制以保留 thumb 命中；触控板 precise Pointer 和 Touch 直通、约 130ms 离散 wheel、页面与 palette 平滑都保留。外部释放只 settle 本区域的已知 thumb drag；Esc、窗口失活与尺寸变化清理仓库条，main 的 tabs 失活订阅与 sidebar resize/menu 订阅并存。失活时也清除非拖动中的 sash hover。
+
+新增真实 GPUI 事件/布局测试：拖动公共 thumb 改变仓库内容并取消待完成 wheel；释放后不弹回；footer、tabs、page 偏移不变；3px 可见线；快速进出可逆 fade、收起/矮窗口范围；Esc、窗口尺寸变化、窗口失活清理仓库拖动且不误记为 tab/resizer drag。既有“折叠动画终点停帧”测试现在先让新增的独立 hover fade 结束，继续断言零常驻帧请求；Touch 直通测试关闭 reduced-motion，防止 reduced-motion 掩盖误加惯性。
+
+本机 fmt、locked all-target check、clippy `-D warnings`、400 项测试、preview build 与 diff check 通过，重型 Cargo 使用 `CARGO_BUILD_JOBS=1`。最终 CI/review 证据随 PR 交付记录绑定当前 head。一次全量运行中既有网络 mock 的 malformed framing 用例返回传输错误，单独复核通过；没有改网络代码或降低它的断言。真实滚动条外观、动画流畅度、原生输入/DPI 与此前全部侧栏视觉仍需负责人验收，测试平台不代替 Windows GUI。PR 保留 pending / OPEN / coordinator，不合并或启用 auto-merge。

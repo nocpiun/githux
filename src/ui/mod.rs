@@ -58,6 +58,8 @@ pub struct Shell {
     root_focus: FocusHandle,
     repo_scroll: ScrollHandle,
     repo_smooth: scrolling::SmoothScroll,
+    /// Visibility and thumb drag belong only to the repository viewport.
+    repo_bars: scroll::Bars,
     /// One tab stop per repository row.
     repo_focus: Vec<FocusHandle>,
     /// The repository row last scrolled into view, so a still focus does not scroll every frame.
@@ -177,23 +179,35 @@ impl Shell {
             .map(|_| cx.focus_handle().tab_stop(true))
             .collect::<Vec<_>>();
         let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
-            if !window.is_window_active() && shell.sidebar_state.dragging {
+            if !window.is_window_active() {
+                shell.repo_bars.cancel(&shell.repo_smooth);
+                shell.repo_smooth.cancel();
+                shell.close_sidebar_menu(window, cx);
+                let resizing = shell.sidebar_state.dragging;
                 shell.sidebar_state.end_resize(
                     cx.background_executor().now(),
                     false,
                     cx.theme().reduced_motion || cx.reduce_motion(),
                 );
-                cx.stop_active_drag(window);
+                if resizing {
+                    cx.stop_active_drag(window);
+                }
                 cx.notify();
             }
         });
         // A changed window is not a new drag. The remembered expanded width is kept and
         // clamped only when used, so widening the window again restores the user's choice.
         let sidebar_bounds = cx.observe_window_bounds(window, |shell, window, cx| {
-            if shell.sidebar_state.dragging {
-                shell.sidebar_state.dragging = false;
+            if shell.sidebar_state.dragging || shell.repo_bars.dragging().is_some() {
                 cx.stop_active_drag(window);
             }
+            shell.repo_bars.cancel(&shell.repo_smooth);
+            shell.repo_smooth.cancel();
+            shell.sidebar_state.end_resize(
+                cx.background_executor().now(),
+                false,
+                cx.theme().reduced_motion || cx.reduce_motion(),
+            );
             // Ely closes its menu when focus leaves. Keep it anchored safely when the
             // viewport changes, including maximize/restore, without retaining a stale panel.
             shell.close_sidebar_menu(window, cx);
@@ -211,6 +225,11 @@ impl Shell {
                 } else if event.keystroke.key == "escape" && shell.sidebar_menu {
                     cx.stop_propagation();
                     shell.close_sidebar_menu(window, cx);
+                } else if event.keystroke.key == "escape" && shell.repo_bars.dragging().is_some() {
+                    shell.repo_bars.cancel(&shell.repo_smooth);
+                    cx.stop_active_drag(window);
+                    cx.stop_propagation();
+                    cx.notify();
                 } else if event.keystroke.key == "escape" && shell.sidebar_state.dragging {
                     shell.sidebar_state.end_resize(
                         cx.background_executor().now(),
@@ -238,6 +257,7 @@ impl Shell {
             repositories,
             root_focus,
             repo_smooth: scrolling::SmoothScroll::new(repo_scroll.clone()),
+            repo_bars: scroll::Bars::new(),
             repo_scroll,
             repo_focus,
             revealed_row: None,
@@ -931,8 +951,53 @@ impl Shell {
                 )
             })
             .collect::<Vec<_>>();
-        let repositories =
-            sidebar::repository_group(rows, &self.repo_scroll, self.repo_smooth.clone(), cx);
+        let repo_bar = scroll::Bar {
+            target: &self.repo_smooth,
+            id: scroll::BarId {
+                owner: cx.entity_id(),
+                name: "repo-scrollbar",
+                axis: gpui::Axis::Vertical,
+            },
+            placement: scroll::Placement::overlay(4.0, 8.0),
+            style: scroll::Style::DEFAULT,
+            opacity: self.repo_bars.opacity(self.tab_now_ms()),
+            on_drag: {
+                let this = cx.entity();
+                Rc::new(move |axis, dragging, _, cx| {
+                    this.update(cx, |shell, cx| {
+                        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                        if shell.repo_bars.drag(
+                            &shell.repo_smooth,
+                            axis,
+                            dragging,
+                            shell.tab_now_ms(),
+                            reduced,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+        }
+        .render(cx);
+        let repositories = sidebar::repository_group(
+            rows,
+            &self.repo_scroll,
+            self.repo_smooth.clone(),
+            repo_bar,
+            {
+                let this = cx.entity();
+                move |hovered, cx| {
+                    this.update(cx, |shell, cx| {
+                        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                        if shell.repo_bars.hover(hovered, shell.tab_now_ms(), reduced) {
+                            cx.notify();
+                        }
+                    });
+                }
+            },
+            cx,
+        );
 
         let account = {
             let this = this.clone();
@@ -1492,6 +1557,15 @@ impl Render for Shell {
         }
         let now = std::time::Instant::now();
         if self.sidebar_state.sample_sash(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self.repo_bars.dragging().is_some() && !cx.has_active_drag() {
+            self.repo_bars
+                .settle(&self.repo_smooth, self.tab_now_ms(), reduced);
+        }
+        // Sample before testing is_animating, so the last fade frame retires immediately.
+        self.repo_bars.opacity(self.tab_now_ms());
+        if self.repo_bars.is_animating() {
             window.request_animation_frame();
         }
         if self.repo_smooth.tick(now, reduced) {

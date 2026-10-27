@@ -982,11 +982,15 @@ pub(super) fn repository_group(
     rows: Vec<AnyElement>,
     scroll: &ScrollHandle,
     smooth: SmoothScroll,
+    scrollbar: AnyElement,
+    on_hover: impl Fn(bool, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let gap = cx.theme().control_height(ely_core::theme::ControlSize::Sm) / 12.0;
     div()
+        .id("repo-scroll-region")
         .debug_selector(|| "repo-scroll-region".to_string())
+        .on_hover(move |hovered, _, cx| on_hover(*hovered, cx))
         .relative()
         .flex_1()
         .min_h_0()
@@ -1005,6 +1009,8 @@ pub(super) fn repository_group(
                 .children(rows),
         )
         .child(scrolling::wheel_overlay("repo", smooth))
+        // Painted last: the thumb keeps its own hit target above the transparent wheel listener.
+        .child(scrollbar)
         .into_any_element()
 }
 

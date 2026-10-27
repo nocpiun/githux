@@ -1,6 +1,6 @@
 # 统一滚动与滚动条
 
-更新：2026-10-27。状态：公共滚动条已实现并由应用标签条（workspace-tabs）实际接入；sidebar-layout 与 content-reader 仍各自保留旧实现，尚未接线。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。新版 GPUI `ListState` 已有真实适配和测试；`MarkdownDocument` 的私有内层列表仍不能从外部接入，见下文。
+更新：2026-10-27。状态：公共滚动条已实现，应用标签条（workspace-tabs）与 sidebar-layout 仓库 viewport 已实际接入；content-reader 尚未接线。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。新版 GPUI `ListState` 已有真实适配和测试；`MarkdownDocument` 的私有内层列表仍不能从外部接入，见下文。
 
 本主题是滚动条外观、几何、拖动、淡入淡出与 `ScrollMotion` 边界的唯一维护位置。视觉基准来自 content-reader 当前实现（负责人 2026-10-26 明确以它为准）：细、两头圆、半透明、出现/消失渐变、无实体轨道。
 
@@ -102,15 +102,13 @@ let element = bar.render(cx);
 
 `Shell::tab_strip` 用 `Placement::BAND` + `Style::DEFAULT` 渲染标签条滚动条，`Bars` 由 `Shell` 持有；`hover` 来自标签条本身，`hold` 来自标签重排，`drag` 来自本区域拖动。原有滚轮/`Shift`+wheel 映射、边缘自动滚动、标签排序/关闭/切换、会话独立 scroll/focus、固定 toolbar 与 Refresh 间距均未改变。
 
-### 未接入：sidebar-layout
+### 已接入：sidebar-layout 仓库 viewport
 
-侧栏仓库组目前是 `ScrollHandle` + 既有滚动。接入步骤：
+`Shell::repo_bars` 独立持有仓库组的显隐与 thumb drag；hover 绑定真实 `repo-scroll-region`，纵向 `BarId` 为 `repo-scrollbar`，使用 `Style::DEFAULT` 与 `Placement::overlay(4, 8)`。条在透明 wheel overlay 之后绘制，不改变列表行高、账号/footer 的位置。固定导航、账号、More 和底部四入口不参与滚动或共享该 `Bars`。
 
-1. 引用 `src/ui/scroll`，不要复制几何或拖动。
-2. 侧栏持有自己的 `Bars`，`hover` 绑定仓库组区域，`drag` 回调走 `Bars::drag(&handle, Axis::Vertical, …)`。
-3. 用 `Placement::overlay(inset, hit)` 贴在仓库组右侧；`inset` 与侧栏内边距保持一致，不要挤压已验收行高。
-4. 桌面其余固定行不参与滚动，也不共享该 `Bars`。
-5. 侧栏的 resizer 是分界线高亮，不是滚动条，不纳入本模块。
+目标是 `scrolling::SmoothScroll` 的 `ScrollTarget` 适配，所有 viewport/offset/max-offset 与写入均转到原来的真实 `repo_scroll`。`drag_started`、每次 `set_axis_offset`、`drag_ended` 取消旧的 130ms wheel 目标；thumb 拖动期间 wheel 不建立竞争目标，释放后不弹回。内容平滑保留独立的 precise Pointer / Touch 直通规则，不增加全局 ScrollMotion。
+
+外部释放只 settle 仓库 `Bars` 已记录的拖动；Esc、窗口失活和尺寸变化会清理仓库条与平滑目标，tabs 的重排/横轴拖动不被当成仓库 thumb drag。resizer sash 仍是独立的分界高亮，不纳入滚动条。组合测试覆盖真实内容拖动、待完成 wheel 的取消、区域隔离、快速 hover 反向、收起/矮窗口与清理；最终外观与真机手感仍待负责人验收。
 
 ### 未接入：content-reader（源码 / Markdown）
 
@@ -132,4 +130,4 @@ let element = bar.render(cx);
 - 标签条既有关键用例（滚轮、`Shift`+wheel、reveal、拖拽排序、边缘自动滚动、关闭/切换、toolbar 固定、hover/拖动淡入淡出、外部释放淡出）全部保留并通过。
 - 历史真实 Windows 窗口自测（2026-10-26 旧依赖 head，144 DPI，1942×1241 物理像素，11 个标签）：闲置 `(84,83,83)`、thumb hover `(120,119,119)` 对 `(44,44,44)` 背景，滑块 4 物理像素高且无实体轨道；一次真实拖动把滑块从 `1010..1871` 移到 `510..1371` 并移动标签条；移出后该行回到背景色。这些是旧 head 的自测证据，不代替迁移后 head 的预览，更不是负责人视觉验收。
 - 迁移后 head（`683b69e`，官方 Ely 固定提交 + GPUI 0.3.10）本机 `fmt` / `check --locked --all-targets` / `clippy -D warnings` / `test --locked`（359 项）/ `build --locked` / `git diff --check` 全部通过；`cargo run --locked` 启动成功且 `PrintWindow` 取到真实渲染帧，但桌面处于锁屏、输入未送达，未取得迁移后 head 的交互像素。
-- 未覆盖：负责人对真实 Windows 窗口外观/DPI 的观感确认与动画流畅度、真实 IME 与触控板手势、sidebar 与 reader 接线后的组合效果、Markdown 列表（接口未就绪）。
+- 未覆盖：负责人对真实 Windows 窗口外观/DPI 的观感确认与动画流畅度、真实 IME 与触控板手势、sidebar 接线后的真实 GUI 观感、reader 接线后的组合效果、Markdown 列表（接口未就绪）。

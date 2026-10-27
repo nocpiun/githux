@@ -116,6 +116,7 @@ impl SmoothState {
 pub(crate) struct SmoothScroll {
     scroll: ScrollHandle,
     state: Rc<SmoothState>,
+    thumb_dragging: Rc<Cell<bool>>,
 }
 
 impl SmoothScroll {
@@ -123,6 +124,7 @@ impl SmoothScroll {
         Self {
             scroll,
             state: Rc::new(SmoothState::default()),
+            thumb_dragging: Rc::new(Cell::new(false)),
         }
     }
 
@@ -133,6 +135,11 @@ impl SmoothScroll {
 
     /// Apply one wheel event to the handle. Returns whether the region consumed it.
     pub(crate) fn wheel(&self, now: Instant, delta_y: f32, precise: bool, reduced: bool) -> bool {
+        // The thumb owns the handle until release. Consume wheel input here without creating a
+        // competing motion target; ordinary wheel/trackpad handling resumes after drag_ended.
+        if self.thumb_dragging.get() {
+            return true;
+        }
         let current = f32::from(self.scroll.offset().y);
         let max = f32::from(self.scroll.max_offset().y).max(0.0);
         if max <= 0.0 {
@@ -161,6 +168,33 @@ impl SmoothScroll {
     fn set_y(&self, y: f32) {
         let x = self.scroll.offset().x;
         self.scroll.set_offset(Point::new(x, px(y)));
+    }
+}
+
+/// Bind the shared scrollbar to the same handle as the content, with motion cancellation at
+/// every thumb write and both drag hooks. Geometry and dragging remain in `ui::scroll`.
+impl super::scroll::ScrollTarget for SmoothScroll {
+    fn viewport_bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+        self.scroll.bounds()
+    }
+    fn offset(&self) -> Point<gpui::Pixels> {
+        self.scroll.offset()
+    }
+    fn max_offset(&self) -> Point<gpui::Pixels> {
+        self.scroll.max_offset()
+    }
+    fn set_axis_offset(&self, axis: gpui::Axis, offset: gpui::Pixels) {
+        self.cancel();
+        super::scroll::ScrollTarget::set_axis_offset(&self.scroll, axis, offset);
+        self.cancel();
+    }
+    fn drag_started(&self, _: gpui::Axis) {
+        self.cancel();
+        self.thumb_dragging.set(true);
+    }
+    fn drag_ended(&self, _: gpui::Axis) {
+        self.thumb_dragging.set(false);
+        self.cancel();
     }
 }
 
