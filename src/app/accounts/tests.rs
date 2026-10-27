@@ -20,7 +20,7 @@ use crate::storage::accounts::AccountDatabaseConfig;
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        ely_gpui_component::init_for_tests(cx);
+        ely_core::init_for_tests(cx);
         crate::platform::fonts::register(cx).expect("test fonts");
     });
 }
@@ -786,6 +786,48 @@ fn the_keystroke_subscription_does_not_retain_the_preview(cx: &mut TestAppContex
         weak.upgrade().is_none(),
         "the interceptor must hold a weak reference, not the entity"
     );
+}
+
+/// The migrated Ely field must still accept pasted and CJK text, keep it
+/// masked, and expose the same value to the service on submit.
+#[gpui::test]
+fn paste_and_cjk_text_stay_masked_and_submit(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    // Focus the masked field and paste from the clipboard, as Ctrl+V does.
+    cx.update(|window, cx| {
+        let input = view.read(cx).input.clone();
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    cx.update(|_, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("ghp_pasted".into()));
+    });
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update_window_entity(&view, |view, _, cx| {
+        let input = view.input.read(cx);
+        assert_eq!(input.text(), "ghp_pasted", "paste reaches the field");
+        assert!(input.is_masked(), "the field stays masked after pasting");
+    });
+    // A CJK composition replaces the value through the same input handler.
+    cx.simulate_input("中文口令");
+    cx.update_window_entity(&view, |view, _, cx| {
+        let input = view.input.read(cx);
+        assert!(input.text().contains("中文口令"), "CJK text is accepted");
+        assert!(input.is_masked(), "the field stays masked with CJK text");
+    });
+    // No unmasked copy path: the field never renders the value as aria text.
+    view.update(cx, |view, cx| {
+        view.input
+            .update(cx, |input, cx| input.set_text("ghp_final", cx));
+    });
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    assert!(view.read_with(cx, |view, cx| view.input.read(cx).is_empty()));
 }
 
 #[gpui::test]

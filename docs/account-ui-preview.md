@@ -66,21 +66,18 @@ cargo run -- --account-preview
 
 正式接入仍需决定（不在本任务内）：切账户时标签如何处理、账户移除 UI、私有内容保留政策、正式仓库列表组件与头像下载（本预览用名字 fallback，没有用 fixture 冒充真实头像）。
 
+## 依赖基线
+
+预览跟随主线 Ely 迁移（2026-10-27）：官方仓库 `https://github.com/ELY-Open-Source/Ely-GPUI-Components`，pin `30c66fe1d5d23db769a6c834b771d054d7f288cf`，只依赖 `ely-core`（regular/dev 均 `default-features=false`，保留 `runtime_shaders` / `test-support`），GPUI 与 platform 统一 `=0.3.10`，Rust 1.98.1。本任务代码全部使用 `ely_core::*` 与 `ely_core::init_for_tests`，不再引用旧 `ely-gpui-component` facade；没有 vendor、fork、Cargo patch 或本地缓存修改。
+
+迁移没有改动业务层：登录、目录持久化/恢复、切换/替换/重验证、仓库读取、旧响应隔离、取消与退出收尾仍是迁移前已验证的实现。GPUI 0.3.10 的 `ScrollEvent`、`KeyBinding::load`、`Keystroke::parse` 变化只影响外壳（PR #30）；预览自身使用的输入、订阅、拦截器与 `cx.spawn` 形态在新版本下保持同等行为，并有测试覆盖。
+
 ## 验证
 
-已执行（本机 Windows）：
+已执行（本机 Windows，HEAD 含 main 迁移）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（362 passed，其中本任务 17 项）、`cargo build --locked -j 1`、`git diff --check`。
 
-```sh
-cargo fmt --all -- --check
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo build --locked
-git diff --check
-```
-
-`src/app/accounts/tests.rs` 用**可注入服务/传输/临时 SQLite/内存凭据**覆盖：合成 PAT 登录→真实仓库结果进入视图、掩码与提交后清空、Tab 到提交、重复提交不推进、替换/切换/重验证/重启恢复、401 与限流不冒充空列表、Partial 保留已取数据、取消后旧 generation 不覆盖新结果、请求期间切账户丢弃旧仓库结果、取消已提交变更后对账权威账户、取消 revalidate 不发布其迟到成功、视图关闭后不再发布。
+`src/app/accounts/tests.rs` 用**可注入服务/传输/临时 SQLite/内存凭据**覆盖：合成 PAT 登录→真实仓库结果进入视图、掩码与提交后清空、粘贴与中文文本仍保持掩码后提交、输入后按钮可用、Tab 到提交、重复提交不推进、替换/切换/重验证/重启恢复、401 与限流不冒充空列表、Partial 保留已取数据、取消后旧 generation 不覆盖新结果、请求期间切账户丢弃旧仓库结果、取消已提交变更后对账权威账户、取消 revalidate 不发布其迟到成功、多个取消独立对账并各自作废仓库结果、错误操作保留自身错误、视图释放不泄漏、退出前等待收尾。
 
 **未执行**：真实 PAT 登录与真实 GitHub 私有仓库联调。该项须由负责人在预览窗口自行输入 token；本任务没有读取 `gh`、环境变量、日志或任何真实凭据，也没有对 `api.github.com` 发起带真实 token 的请求。真实窗口中文本输入法、粘贴与焦点行为同样需要负责人在预览里确认。
 
-真实窗口启动已核实：`--account-preview` 在本机启动并保持窗口运行，默认无参数启动仍进入原 Shell（两者均随后正常关闭）。
+真实窗口启动已核实（迁移后 HEAD）：`--account-preview` 在本机启动，窗口标题 `Githux · Account wiring preview`、进程 Responding；无参数启动仍进入原 Shell（标题 `Githux`）。两者均按 PID 与启动时间核对后由本任务主动关闭。这只能证明启动路径，不构成视觉或真实登录验收。

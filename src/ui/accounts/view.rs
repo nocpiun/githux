@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use ely_gpui_component::{
+use ely_core::{
     buttons::Button,
     data_display::Avatar,
     forms::{PasswordInput, TextInput},
@@ -76,7 +76,7 @@ pub(crate) fn render(view: AccountsView, cx: &App) -> AnyElement {
         )
         .child(
             Button::new("pat-help", "Create a Classic PAT on GitHub")
-                .variant(ely_gpui_component::buttons::ButtonVariant::Link)
+                .variant(ely_core::buttons::ButtonVariant::Link)
                 .on_click(move |_, window, cx| (callbacks.open_pat_help)(window, cx))
         );
 

@@ -97,8 +97,33 @@ Codex 第七轮 P2：关闭预览时 `app::run` 立即退出，而 SQLite/凭据
 
 预览套件 16 项，全仓 205 项。
 
+## 第 9 轮：Ely / GPUI 0.3.10 迁移（同步 main 后）
+
+负责人在 PR #30 合并主线迁移后授权原 Agent 完成本任务剩余迁移；本地先由主 Agent 合入 main `7ed70cda`（merge commit `c650e80a`），未推送。
+
+改动范围只有本任务文件：
+
+- `src/app/accounts/mod.rs`、`src/ui/accounts/view.rs`、`src/app/accounts/tests.rs` 的旧 `ely_gpui_component::*` 全部改为 `ely_core::*`；测试初始化改用 `ely_core::init_for_tests`。
+- 未新增依赖：Cargo 已是官方仓库 pin `30c66fe1` + `ely-core`（`default-features=false`，保留 `runtime_shaders`）+ GPUI `=0.3.10`；没有 vendor、fork、patch 或缓存修改。
+- 业务层（`data`/`auth`/`github`/`network`/`storage`）未改动；`src/app/mod.rs` 保留主线的 `ely_core::init`、`move` 闭包与 account-preview 分支，仅核对完整启动路径。
+
+迁移做了行为核对，不只是改 import：
+
+| 关注点 | 结论 |
+| --- | --- |
+| 掩码输入 | `TextInput::masked()` / `is_masked()` / `set_text` 在新版本签名不变；提交后重建实体仍清空旧值与撤销历史 |
+| 粘贴 | 新版本仍用 `secondary-v` 绑定 `Paste` 读取剪贴板；新增 `paste_and_cjk_text_stay_masked_and_submit` 用真实剪贴板与 `ctrl-v` 验证，粘贴后仍为掩码 |
+| 中文输入 | 同一测试经 `simulate_input` 输入中日韩文本，断言文本被接受且仍掩码；组合态 Enter 仍由按键拦截器让给候选列表 |
+| Tab / Enter | `PasswordInput` + 提交按钮的焦点顺序未变，`tab_reaches_the_submit_button_and_enter_submits` 仍通过 |
+| 事件/按键 API | 预览使用 `cx.spawn`、`intercept_keystrokes`、`Keystroke::parse` 静态字面量，不受 `ScrollEvent`/`KeyBinding::load` 迁移影响 |
+| 取消/回写隔离 | 16 项既有回归全部保持通过，没有为升级放宽任何断言 |
+
+本机检查（`-j 1`，独立 target）：fmt、locked all-target check、`clippy -D warnings`、`cargo test --locked`（**362 passed**，其中本任务 17 项）、`cargo build --locked`、`git diff --check` 全部为 0 退出码。
+
+真实 GUI 证据只到启动路径：`--account-preview` 启动后窗口标题为 `Githux · Account wiring preview` 且 Responding，默认启动标题为 `Githux`；两者按 PID/创建时间核对后由本任务关闭，未触碰其他任务进程。**真实 PAT 仍未验证**，没有读取任何凭据。
+
 ## 剩余问题
 
-- 真实 PAT、真实组织 SSO、私有仓库可见性与中文输入法/粘贴/焦点，须由负责人在预览窗口确认。
+- 真实 PAT、真实组织 SSO、私有仓库可见性，以及真实 Windows 输入法候选、实际粘贴与焦点观感，须由负责人在预览窗口确认（模拟覆盖不等同）。
 - 正式 Shell 接入：切账户时标签处理、移除账户 UI、私有缓存保留政策、正式仓库列表组件与头像下载仍未定。
 - 本预览的仓库区只是接线验收，不是正式侧栏组件。

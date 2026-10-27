@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ely_gpui_component::{
+use ely_core::{
     forms::{InputEvent, TextInput},
     theme::ActiveTheme,
 };
