@@ -64,14 +64,9 @@ pub const TAB_ICON_GAP: f32 = 7.0;
 /// The gap between two tabs in the strip.
 pub const TAB_GAP: f32 = 4.0;
 
-/// Visible thickness of the strip's own scrollbar thumb. It is a hairline compared with the
-/// theme's default thickness, and it is the implementation starting point rather than a signed-off
-/// value.
-pub const TAB_SCROLLBAR_THICKNESS: f32 = 3.0;
-
-/// Height of the band the scrollbar paints in. It is reserved whether or not the scrollbar is
-/// visible, so fading it in or out never moves the tabs.
-pub const TAB_SCROLLBAR_BAND: f32 = TAB_SCROLLBAR_THICKNESS + 2.0;
+/// Height of the band the strip's scrollbar paints in. It is reserved whether or not the scrollbar
+/// is visible, so fading it in or out never moves the tabs.
+pub const TAB_SCROLLBAR_BAND: f32 = super::scroll::THICKNESS + 2.0;
 
 /// The strip's total height: the inset, the tabs, then the scrollbar band.
 pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;
@@ -79,6 +74,3 @@ pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_B
 /// Width of the toolbar pinned to the strip's right edge, outside the scrolling viewport. It is one
 /// square slot matching the tab height, so its centered icon has equal top and right gaps.
 pub const TAB_TOOLBAR_WIDTH: f32 = TAB_HEIGHT;
-
-/// How long the strip's scrollbar takes to fade in or out.
-pub const TAB_SCROLLBAR_FADE_MS: u64 = 140;

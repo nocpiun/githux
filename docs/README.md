@@ -9,6 +9,7 @@
 | 产品范围、UI 与未定选择 | [产品约定](product.md) |
 | 首版开发顺序、依赖与验收讨论稿 | [开发路线图](roadmap.md) |
 | 模块职责、状态归属与实现提案 | [架构方案](architecture.md) |
+| 统一滚动条外观、几何、拖动、淡入淡出与后续接入 | [统一滚动](scrolling.md) |
 | 各类数据如何存储、刷新、失效 | [缓存策略](cache-strategy.md) |
 | PAT 认证、凭据存储、账户代次与可取消的 GitHub 读取服务 | [认证与网络](auth-and-network.md) |
 | 账户与仓库读取预览：启动命令、结果类型、正式接入接口 | [账户预览](account-ui-preview.md) |

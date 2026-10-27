@@ -1,0 +1,64 @@
+name: PR
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr:
+    name: Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Metadata only: do not check out or execute pull-request code.
+      - name: Check labels
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.issue.number,
+            });
+            // Re-runs must use live labels, not the original event snapshot.
+            if (pr.state !== 'open' || pr.head?.sha !== context.payload.pull_request.head.sha ||
+                pr.base?.ref !== context.payload.pull_request.base.ref) {
+              throw new Error('PR head/base/state changed; use the run for the current PR.');
+            }
+            if (!Array.isArray(pr.labels) || pr.labels.some(label => typeof label?.name !== 'string')) {
+              throw new Error('PR labels are missing or invalid.');
+            }
+            if (pr.labels.some(label => label.name.toLowerCase() === 'blocked')) {
+              core.setFailed('PR has the owner-managed blocked label.');
+            }
+      - name: Check change size
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.issue.number,
+            });
+            // Re-runs must use live counts, not the original event snapshot.
+            if (pr.state !== 'open' || pr.head?.sha !== context.payload.pull_request.head.sha ||
+                pr.base?.ref !== context.payload.pull_request.base.ref) {
+              throw new Error('PR head/base/state changed; use the run for the current PR.');
+            }
+            for (const key of ['additions', 'deletions']) {
+              if (!Number.isSafeInteger(pr[key]) || pr[key] < 0) {
+                throw new Error(`PR ${key} is missing or invalid.`);
+              }
+            }
+            const failures = [];
+            for (const key of ['additions', 'deletions']) {
+              if (pr[key] > 20000) failures.push(`${key}: ${pr[key]} exceeds 20000 lines.`);
+            }
+            core.info(`PR #${context.issue.number}: +${pr.additions} / -${pr.deletions} (each limit: 20000).`);
+            if (failures.length) core.setFailed(failures.join('\n'));
