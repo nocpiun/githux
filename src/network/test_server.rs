@@ -8,7 +8,7 @@
 
 #![cfg(test)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -36,11 +36,14 @@ impl ScriptedResponse {
     }
 }
 
-/// A recorded inbound request: method, target, header names/values.
+/// A recorded inbound request: method, target, header names/values and body.
 #[derive(Debug, Clone, Default)]
 pub struct RecordedRequest {
     pub request_line: String,
     pub headers: Vec<(String, String)>,
+    /// Request body when one was framed by `Content-Length` (POST). Empty for
+    /// GET requests.
+    pub body: String,
 }
 
 impl RecordedRequest {
@@ -156,9 +159,20 @@ fn serve_one(
         }
     }
 
-    // GET requests have no body; do not read to EOF here or we would block
-    // until the client closes the connection (which it does only after reading
-    // our response).
+    // GET requests have no body. For a framed POST body, read exactly the
+    // declared `Content-Length` bytes so the request completes before the
+    // response is written; never read to EOF (the client keeps the connection
+    // open until it has read our response).
+    let content_length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body_bytes = vec![0u8; content_length];
+    if content_length > 0 {
+        let _ = reader.read_exact(&mut body_bytes);
+    }
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
     recorded
         .lock()
@@ -166,6 +180,7 @@ fn serve_one(
         .push(RecordedRequest {
             request_line: request_line.trim_end().to_string(),
             headers,
+            body,
         });
 
     let reason = status_reason(response.status);

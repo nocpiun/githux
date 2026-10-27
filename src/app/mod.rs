@@ -1,13 +1,13 @@
 //! Application startup and composition. Business services are not implemented yet.
 
-use ely_gpui_component::{
+use ely_core::{
     Assets,
     theme::{Mode, Theme},
 };
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 #[cfg(target_os = "windows")]
-use ely_gpui_component::theme::ActiveTheme;
+use ely_core::theme::ActiveTheme;
 
 use crate::{platform, ui::Shell};
 
@@ -18,7 +18,7 @@ pub fn run() {
     gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            ely_gpui_component::init(cx).expect("failed to initialize Ely");
+            ely_core::init(cx).expect("failed to initialize Ely");
             platform::fonts::register(cx).expect("failed to register bundled fonts");
             Theme::set_mode_now(Mode::Dark, cx);
             Theme::update(cx, |theme| {

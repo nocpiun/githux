@@ -98,6 +98,8 @@ host 判定使用**与 reqwest 相同的标准 URL 解析器**（`reqwest::Url`�
 
 **重定向的 origin 判定同样使用 `reqwest::Url`**，且 `Location` 用标准的 URL join 解析：`https://evil.example\@api.github.com/steal` 在 WHATWG 规则下宿主是 `evil.example`（反斜杠是特殊 scheme 的路径分隔符），手写解析器会误判为 `api.github.com` 并把 Authorization 重新发给外域。回归测试为 `network::transport::tests::origin_comparison_uses_reqwest_url_semantics` 与 `redirect_with_backslash_does_not_forward_credentials`（后者用真实 socket 确认攻击目标从未被连接）。
 
+**只读 GraphQL POST（R4 新增）**：`HttpRequest` 增加 `Post` 方法与可选 body，`GitHubClient::build_post` 生成 `POST {base}graphql`（`Accept`/`Content-Type: application/json`，仅可信 origin 注入 Authorization），供 Profile 的 Pinned/Popular 与贡献热力图使用。它只发送 query，没有 mutation 入口；走 `execute_bounded` 的接收上限，复用取消与超时。**POST 一律不跟随重定向**（同源也不跟随）：避免 302/303 把方法降级为 GET，或 307/308 把含变量的 query body 重发到别处；3xx 由 GraphQL 层判为错误。`HttpRequest::Debug` 对手写 body 也脱敏。GET 的同源跳转与既有 `execute`/`execute_bounded`/blob 接口保持兼容。详见 [Profile 数据适配服务](profile-api-service.md)。
+
 ## 5. GitHub 读取
 
 **固定请求头**：`User-Agent: githux/0.1 (+https://github.com/nocpiun/githux)`、`Accept: application/vnd.github+json`、`X-GitHub-Api-Version: 2022-11-28`。
