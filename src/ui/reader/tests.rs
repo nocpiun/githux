@@ -1427,3 +1427,26 @@ fn a_linked_heading_inside_a_quote_keeps_its_link(cx: &mut TestAppContext) {
         Some(ReaderAction::Link(LinkTarget::Repository(_)))
     ));
 }
+
+#[gpui::test]
+fn a_markdown_link_is_visibly_styled(cx: &mut TestAppContext) {
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "Read the [installation guide](guide.md) now".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let parsed = super::markdown::parse("Read the [installation guide](guide.md) now");
+    let links = match &parsed.blocks[0] {
+        super::markdown::Block::Paragraph(inline) => inline.links.clone(),
+        _ => panic!("paragraph"),
+    };
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].1, "guide.md");
+    // The laid-out text still contains the label where the link range points.
+    let text = "Read the installation guide now";
+    assert_eq!(&text[links[0].0.clone()], "installation guide");
+}

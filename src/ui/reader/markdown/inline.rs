@@ -289,9 +289,17 @@ impl IntoElement for Paragraph {
 
 /// The styled runs for one paragraph: prose keeps the inherited style, code
 /// pieces take the theme's code font.
-fn runs(inline: &Inline, style: &gpui::TextStyle, mono: &SharedString) -> Vec<gpui::TextRun> {
+fn runs(
+    inline: &Inline,
+    style: &gpui::TextStyle,
+    mono: &SharedString,
+    link_color: gpui::Hsla,
+) -> Vec<gpui::TextRun> {
     let mut edges = vec![0, inline.text.len()];
     for (range, _) in &inline.styles {
+        edges.extend([range.start, range.end]);
+    }
+    for (range, _) in &inline.links {
         edges.extend([range.start, range.end]);
     }
     edges.sort_unstable();
@@ -322,6 +330,23 @@ fn runs(inline: &Inline, style: &gpui::TextStyle, mono: &SharedString) -> Vec<gp
             if !matches!(kind, Style::Code | Style::Math) {
                 run_style = run_style.highlight(highlight(*kind));
             }
+        }
+        // A link range is drawn like the rest of the document's links: the
+        // theme's link colour and a thin underline, so navigation is visible.
+        if inline
+            .links
+            .iter()
+            .any(|(link, _)| link.start <= edge[0] && edge[1] <= link.end)
+        {
+            run_style = run_style.highlight(HighlightStyle {
+                color: Some(link_color),
+                underline: Some(gpui::UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(link_color.opacity(0.4)),
+                    wavy: false,
+                }),
+                ..HighlightStyle::default()
+            });
         }
         let mut run = run_style.to_run(edge[1] - edge[0]);
         if active
@@ -381,7 +406,8 @@ impl Element for Paragraph {
         let theme = cx.theme();
         let mono = theme.mono_family.clone();
         let inline = self.inline.clone();
-        let shaped_runs = runs(&inline, &style, &mono);
+        let link_color = cx.theme().colors.link;
+        let shaped_runs = runs(&inline, &style, &mono, link_color);
         let layout = self.layout.clone();
         let code_fonts = shaped_runs
             .iter()
