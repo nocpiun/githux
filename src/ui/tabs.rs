@@ -138,15 +138,27 @@ pub(super) fn strip(
             }
             on_drop(drag.id, window, cx);
         })
-        .children(entries.iter().map(|entry| tab(entry, &view, owner, cx)))
-        // Capture the wheel before GPUI's immediate jump. The scrollbar band and thumb are
-        // outside this overlay; tab clicks and middle-button behavior still use their own nodes.
-        .child(wheel_overlay);
+        .children(entries.iter().map(|entry| tab(entry, &view, owner, cx)));
 
     let marker = view
         .dragging
         .zip(view.drop_at)
         .map(|(_, slot)| insertion_marker(slot, view.scroll.offset().x, cx));
+
+    // The overlay belongs to the non-scrolling viewport, not the row: as a row child it would
+    // travel with the content and leave the visible right side uncovered once the strip scrolls.
+    // It sits above the scrollbar band's siblings only in paint order, so the thumb keeps its own
+    // hit target below and tab clicks still reach their own nodes.
+    let wheel_viewport = div()
+        .debug_selector(|| "tab-wheel-viewport".to_string())
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w_full()
+        .h(px(TAB_HEIGHT))
+        .child(rows)
+        .child(wheel_overlay);
 
     let scrollbar_band = div()
         .debug_selector(|| "tab-scrollbar-band".to_string())
@@ -163,7 +175,7 @@ pub(super) fn strip(
         .min_w_0()
         .min_h_0()
         .relative()
-        .child(rows)
+        .child(wheel_viewport)
         .children(marker)
         .child(scrollbar_band);
 

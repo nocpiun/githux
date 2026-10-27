@@ -182,4 +182,8 @@ Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` �
 
 account-ui / content-reader 的独立 worktree 未修改，文档给出真实 ScrollHandle / UniformList / ListState 最小接线与输入所有权要求；它们尚待协调者同步，不宣称未合并 UI 已迁移。正式应用无新增调试入口、examples、vendor、fork、依赖升级或 Cargo 缓存补丁。
 
-本机 fmt、locked all-target check、clippy `-D warnings`、403 tests、preview build 与 diff 检查的最终结果在 PR/任务状态绑定本轮 head；GPUI 事件测试不替代真实 Windows 滚轮/触控板/触屏手感、IME、多 DPI 及原侧栏视觉验收。PR 保持 OPEN / coordinator，人工验收未通过，不合并或启用 auto-merge。
+本机 fmt、locked all-target check、clippy `-D warnings`、404 tests、preview build 与 diff 检查的最终结果在 PR/任务状态绑定本轮 head；GPUI 事件测试不替代真实 Windows 滚轮/触控板/触屏手感、IME、多 DPI 及原侧栏视觉验收。PR 保持 OPEN / coordinator，人工验收未通过，不合并或启用 auto-merge。
+
+### 审查修复：tabs 的 wheel overlay 不能随滚动内容移动
+
+Codex 针对公共 motion 首版（`d629d0e`，P2）指出：tabs 的公共 overlay 被放在 `view.scroll` 所属的横向滚动行内，滚动后 overlay 随内容左移，右侧可见区域失去命中，滚轮退回 GPUI 立即滚动，导致平滑依赖指针位置且可能打断在途动画。已把 overlay 移入不滚动的 `tab-wheel-viewport` 包裹层，行内容仍在内层滚动；新增 `tab_wheel_stays_smooth_after_the_strip_scrolls_a_full_viewport`，先滚满一个视口再在可见右缘发送 wheel，确认仍由公共 motion 接管并可反向移动。全量 **404 tests**、clippy、check 通过。

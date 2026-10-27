@@ -2572,3 +2572,53 @@ fn tabs_use_shared_motion_for_discrete_precise_touch_and_programmatic_actions(
     cx.update_window_entity(&view, |s, window, cx| s.end_drags_on_blur(window, cx));
     assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
 }
+
+#[gpui::test]
+fn tab_wheel_stays_smooth_after_the_strip_scrolls_a_full_viewport(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click_repo_row(&view, index, cx);
+    }
+    let strip = bounds("tab-scroll", cx);
+    // Scroll the content a full viewport so a wheel overlay that travelled with the row would be
+    // entirely clipped and miss the pointer on the visible right side.
+    let max = view.read_with(cx, |s, _| s.tab_scroll_max().x);
+    view.update(cx, |s, _| {
+        let at = s.tab_scroll.offset().x;
+        s.scroll_tabs_by(-max - at);
+    });
+    pump(cx);
+    let probe = gpui::point(strip.right() - px(20.0), strip.center().y);
+    cx.simulate_mouse_move(probe, None, Modifiers::none());
+    let before = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    cx.simulate_event(ScrollEvent {
+        position: probe,
+        delta: ScrollDelta::Pixels(gpui::point(px(0.0), px(-60.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
+    });
+    cx.run_until_parked();
+    let after = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    // Already at the tail, so a further negative delta clamps rather than jumping; move the other
+    // way with a positive delta to prove the overlay is still receiving input there.
+    assert_eq!(after, before);
+    cx.simulate_event(ScrollEvent {
+        position: probe,
+        delta: ScrollDelta::Pixels(gpui::point(px(0.0), px(60.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
+    });
+    cx.run_until_parked();
+    let moved = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    assert_eq!(moved.x, before.x + px(60.0));
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    assert!(!view.read_with(cx, |s, _| {
+        s.tab_motion
+            .tick(Instant::now() + Duration::from_secs(1), false)
+    }));
+}
