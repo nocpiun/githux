@@ -1182,6 +1182,37 @@ fn a_dense_inline_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_dense_fenced_block_lays_out_within_budget(cx: &mut TestAppContext) {
+    let mut source = String::from(
+        "```rust
+",
+    );
+    source.push_str(&"x=1;".repeat(20_000));
+    source.push_str(
+        "
+```
+",
+    );
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let start = std::time::Instant::now();
+    cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
+    frames(cx);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "dense fence layout took {:?}",
+        start.elapsed()
+    );
+    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text().len()) > 80_000);
+}
+
+#[gpui::test]
 fn a_single_character_link_opens_from_its_right_half(cx: &mut TestAppContext) {
     let (r, cx) = open(
         cx,

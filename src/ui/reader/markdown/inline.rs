@@ -314,6 +314,11 @@ fn runs(
     let mut links = inline.links.clone();
     links.sort_unstable_by_key(|(range, _)| range.start);
     let mut link = 0;
+    // Syntax runs are also sorted and disjoint in a fenced block: advance a
+    // cursor instead of rescanning all of them for every run.
+    let mut syntax = syntax.to_vec();
+    syntax.sort_unstable_by_key(|(range, _)| range.start);
+    let mut syntax_at = 0;
     let mut runs = Vec::with_capacity(edges.len());
     for edge in edges.windows(2) {
         while event < events.len() && events[event].0 <= edge[0] {
@@ -353,11 +358,17 @@ fn runs(
                 ..HighlightStyle::default()
             });
         }
-        for (range, highlight) in syntax {
-            if range.start <= edge[0] && edge[1] <= range.end {
-                run_style = run_style.highlight(*highlight);
-                break;
-            }
+        while syntax
+            .get(syntax_at)
+            .is_some_and(|(range, _)| range.end <= edge[0])
+        {
+            syntax_at += 1;
+        }
+        if let Some((_, highlight)) = syntax
+            .get(syntax_at)
+            .filter(|(range, _)| range.start <= edge[0] && edge[1] <= range.end)
+        {
+            run_style = run_style.highlight(*highlight);
         }
         let mut run = run_style.to_run(edge[1] - edge[0]);
         if mono_all

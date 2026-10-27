@@ -180,11 +180,29 @@ impl DocText {
                 } else {
                     head.iter().collect()
                 };
-                for cell in header_cells {
-                    self.push_with_separator(&cell.text, cell.links.clone(), "	");
-                }
-                for cell in rows.iter().flatten() {
-                    self.push_with_separator(&cell.text, cell.links.clone(), "	");
+                // A table copies as rows: tabs between cells of one row, a
+                // newline after a row, and a block gap after the last row.
+                // Separators follow their cell, so they never shift offsets.
+                let mut grid: Vec<Vec<&Inline>> = vec![header_cells];
+                grid.extend(rows.iter().map(|cells| cells.iter().collect()));
+                let last_row = grid.len().saturating_sub(1);
+                for (row, cells) in grid.iter().enumerate() {
+                    let last_cell = cells.len().saturating_sub(1);
+                    for (index, cell) in cells.iter().enumerate() {
+                        let separator = if index == last_cell {
+                            if row == last_row {
+                                "
+
+"
+                            } else {
+                                "
+"
+                            }
+                        } else {
+                            "	"
+                        };
+                        self.push_with_separator(&cell.text, cell.links.clone(), separator);
+                    }
                 }
             }
             Block::Math { tex, .. } => {
@@ -313,6 +331,39 @@ next"
         let at = model.text().find('x').unwrap();
         assert_eq!(model.link_at(at).as_deref(), Some("guide.md"));
         assert!(model.slice(cells[2].clone()).is_empty(), "{:?}", cells[2]);
+    }
+
+    #[test]
+    fn a_table_copies_as_rows_not_one_line() {
+        let doc = parse(
+            "| a | b |
+|---|---|
+| c | d |
+| e | f |
+
+after",
+        );
+        let model = DocText::build(&doc.blocks);
+        let text = model.text();
+        assert!(
+            text.contains(
+                "a	b
+c	d
+e	f"
+            ),
+            "{text:?}"
+        );
+        assert!(
+            text.contains(
+                "e	f
+
+after"
+            ),
+            "{text:?}"
+        );
+        // Offsets still point at the original bytes.
+        let at = text.find('d').unwrap();
+        assert!(model.slice(at..at + 1) == "d");
     }
 
     #[test]
