@@ -28,7 +28,7 @@
 | `ScrollArea` | 不能替代 tabs viewport | 它重组内容、溢出与滚动行为，并把固定 overlay 条和自身 activity 状态一起组合；tabs 的预留 band、固定 toolbar、滚轮映射、reveal 与排序是已验收外壳职责。 |
 | `ScrollSource::Handle/List/Model` | 作为上游概念核对过，不能直接当本模块目标 trait | `offset/place/set/end` 方法均为 crate 私有；外部调用方不能仅复用这些方法来获得几何/写入。`ScrollModel::place/set/offset` 公开，可供未来自定义内容 owner 实现自己的模型，但不能读取 `MarkdownDocument` 的私有列表。 |
 | 上游 thumb 圆角与 GPUI drag | 已沿用的框架能力 | 上游本身使用 `rounded_full` 与 GPUI `on_drag`/`on_drag_move`，说明基础能力足够；Githux 的额外 owner/region/axis、drag hooks、外部释放/取消清理仍需本地实现。 |
-| GPUI `ListState` 原生 scrollbar API | **已直接复用** | `ScrollTarget for ListState` 使用公开的 `viewport_bounds`、`scroll_px_offset_for_scrollbar`、`max_offset_for_scrollbar`、`set_offset_from_scrollbar` 和 `scrollbar_drag_started/ended`。原生 adapter 是纵向，不把横向假称为已支持。 |
+| GPUI `ListState` 原生 scrollbar API | **已直接复用** | `ScrollTarget for ListState` 使用公开的 `viewport_bounds`、`scroll_px_offset_for_scrollbar`、`max_offset_for_scrollbar`、`set_offset_from_scrollbar` 和 `scrollbar_drag_started/ended`。列表只有纵向，横向调用被忽略而不是 panic，也不把横向假称为已支持。 |
 | GPUI `UniformListScrollHandle::base_handle` | **已直接复用** | 它是公开的真实 `ScrollHandle`，覆盖纵/横两轴；不需要复制列表几何。 |
 
 因此本 PR 不关闭、也不因上游出现同名控件就宣称所有局部实现必须永久保留。最小保留边界是：3px / 0.20 / 0.38 外观、band/overlay/corner placement、140ms 可逆 fade、独立区域与另一轴保留、drag 生命周期、隐藏不拦输入，以及对应测试。普通滚动目标与原生列表生命周期则直接复用公开 API，不修改全局 theme/rem、缩放/裁剪容器、缓存、fork 或 vendor。
@@ -122,7 +122,7 @@ let element = bar.render(cx);
 4. 纵向用 `Placement::overlay`，横向用 `Placement::overlay(...).clear_of(&vertical, gap)` 让出右下角。
 5. 删除 `reader/scrollbar.rs` 的独立 geometry/drag 与 `ui/scrollbar.rs` 的 re-export，改指向本模块。
 
-如果消费者使用 GPUI 非均匀 `ListState`，可直接把该状态作为 `ScrollTarget`：本模块已实现纵向 offset/max offset、原生拖动开始/结束和内容高度冻结。`native_list_tests::native_list_state_drags_and_uses_its_drag_hooks` 用真实窗口和真实列表验证了它，不是理论适配。该实现不支持横向；需要横向的 Source 应继续使用 `UniformListScrollHandle::base_handle`。
+如果消费者使用 GPUI 非均匀 `ListState`，可直接把该状态作为 `ScrollTarget`：本模块已实现纵向 offset/max offset、原生拖动开始/结束和内容高度冻结。`native_list_tests::native_list_state_drags_and_uses_its_drag_hooks` 用真实窗口和真实列表验证了它，不是理论适配；`a_list_state_ignores_the_axis_it_cannot_scroll` 固定了“纵向以外不动作、不 panic”的边界。该实现不支持横向；需要横向的 Source 应继续使用 `UniformListScrollHandle::base_handle`。
 
 **Markdown 的真实限制（固定新版源码复核）**：新版 `MarkdownDocument` 自带 `Scrollbar::auto()`，在 Preview/Visual 模式内部使用 `ScrollSource::List(self.list.clone())`，Source 模式使用编辑器的 `ScrollHandle`。但其私有 `list: ListState` 没有公开 accessor；上游 `ScrollModel` 虽允许自定义模型，也不能从外部取得这个列表的 viewport/offset/max offset 来构造模型。因此仅增加 `ely-documents` 依赖或调用 `ScrollModel` 不能把本模块接到 Markdown 内部列表，仍需一个公开最小 facade/accessor（另立任务讨论，不在本 PR 修改 Ely）。新版的 `ListState` 纵向原生 API 已就绪，但不能绕过该私有字段。
 

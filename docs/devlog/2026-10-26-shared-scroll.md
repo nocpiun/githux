@@ -73,11 +73,13 @@ git diff --check
 
 - `src/ui/scroll` 的核心 imports 改为 `ely_core::theme::ActiveTheme`，测试初始化改为 `ely_core::init_for_tests`；外层 main 已使用 `ScrollEvent`、`ScrollSource::Pointer` 与新按键加载 API。Rust 保持 1.98.1，所有 Ely crate 固定官方提交 `30c66fe1d5d23db769a6c834b771d054d7f288cf`，GPUI / platform 固定 0.3.10，未把旧仓库源码或单 crate vendor 引入。
 - 逐项读取新版 `Scrollbar`、`ScrollArea`、`ScrollSource` / `ScrollModel`：`presence` 可接外部 opacity，普通 handle/ListState/自定义 model 都有上游入口；但 6px、固定 overlay/track、0.22/0.42 颜色、activity 显隐和 crate 私有 `offset/place/set/end` 不能保持已确认样式/布局与生命周期。上游 900ms idle + 320ms 线性淡出也不是本项目的双向 140ms 可逆 fade。因此保留最小局部绘制，而不是用 theme/rem、缩放、裁剪或上游补丁伪装。
-- `ScrollTarget` 新增真实 `gpui::ListState` 纵向实现，直接调用公开 viewport/offset/max-offset/set-offset 和 drag start/end；非均匀列表测试 `native_list_tests::native_list_state_drags_and_uses_its_drag_hooks` 验证拖动真实 offset，且释放后 `is_scrollbar_dragging()` 为 false。Source 的 UniformList 真实 `base_handle` 适配保持。
+- `ScrollTarget` 新增真实 `gpui::ListState` 纵向实现，直接调用公开 viewport/offset/max-offset/set-offset 和 drag start/end；非均匀列表测试 `native_list_tests::native_list_state_drags_and_uses_its_drag_hooks` 验证拖动真实 offset，且释放后 `is_scrollbar_dragging()` 为 false。列表不支持的横向调用被忽略（`a_list_state_ignores_the_axis_it_cannot_scroll`），不会在调试构建 panic。Source 的 UniformList 真实 `base_handle` 适配保持。
 - 新版 `MarkdownDocument` 内部已经有 `ScrollSource::List(self.list.clone())` + `Scrollbar::auto()`，Source 模式用编辑器 handle；但 `list` 仍私有。外部 `ScrollModel` 不能凭类型声明读到这个列表，故 Markdown 接入仍需最小公开 facade/accessor，不能把“上游已支持 model”写成“本模块已接 Markdown”。
 - 本轮不做全局滚轮平滑、不修改 sidebar/reader worktree、不把其未合并消费者并入 PR29。具体复用比较和迁移清单见 [统一滚动](../scrolling.md#固定上游复用评估2026-10-27)。
 
-迁移后本机以 `CARGO_BUILD_JOBS=1` / `-j 1` 验证：`cargo check --locked --all-targets`、公共 scroll 15 项与全量 `cargo test --locked`（**358 passed，0 failed**）通过。其余 clippy/build/真实 GUI 证据随本轮完成后记录，不把同步提交本身当构建验证。
+迁移后本机以 `CARGO_BUILD_JOBS=1` / `-j 1` 验证：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、全量 `cargo test --locked`（**359 passed，0 failed**，含公共 scroll 16 项）与 `git diff --check` 全部通过。同步提交本身没有被当作构建验证。
+
+**真实 GUI 边界（本轮未完成）：** 新 head 的 binary 已用 `cargo run --locked` 启动，Windows App SDK app-local runtime 准备成功，窗口进程存在且 `PrintWindow` 能取到真实渲染帧（Home、侧栏、标签条与固定 toolbar 都正常，未出现启动 panic 或布局错位）。但当前桌面处于锁屏会话：前台窗口是 `Windows 默认锁屏界面`，`SetForegroundWindow`/`SwitchToThisWindow` 都返回 `fg=0` 或锁屏句柄，`AttachThreadInput` 失败，鼠标 hover/按下都没有送达应用。因此本轮没有取到迁移后 head 的滚动条出现/淡出/拖动像素证据，也不把这些静态帧当作交互或观感验收。
 
 ## 后续
 

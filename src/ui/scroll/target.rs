@@ -38,6 +38,9 @@ impl ScrollTarget for ScrollHandle {
 
 /// GPUI's native non-uniform-list adapter: lazy measurement stays in `ListState`, and
 /// drag hooks freeze its measured content height rather than being simulated by Githux.
+///
+/// GPUI lists scroll vertically only; an axis they do not support is ignored instead of
+/// panicking, so a mis-wired consumer sees no movement rather than a crash.
 impl ScrollTarget for ListState {
     fn viewport_bounds(&self) -> Bounds<Pixels> {
         self.viewport_bounds()
@@ -49,23 +52,16 @@ impl ScrollTarget for ListState {
         self.max_offset_for_scrollbar()
     }
     fn set_axis_offset(&self, axis: Axis, offset: Pixels) {
-        debug_assert_eq!(
-            axis,
-            Axis::Vertical,
-            "GPUI ListState only supports vertical scrolling"
-        );
         if axis == Axis::Vertical {
             self.set_offset_from_scrollbar(Point::new(Pixels::ZERO, offset));
         }
     }
     fn drag_started(&self, axis: Axis) {
-        debug_assert_eq!(axis, Axis::Vertical);
         if axis == Axis::Vertical {
             self.scrollbar_drag_started();
         }
     }
     fn drag_ended(&self, axis: Axis) {
-        debug_assert_eq!(axis, Axis::Vertical);
         if axis == Axis::Vertical {
             self.scrollbar_drag_ended();
         }

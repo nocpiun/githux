@@ -721,3 +721,25 @@ mod native_list_tests {
         assert!(!view.read_with(cx, |view, _| view.state.is_scrollbar_dragging()));
     }
 }
+
+#[test]
+fn a_list_state_ignores_the_axis_it_cannot_scroll() {
+    let state = ListState::new(10, ListAlignment::Top, px(20.0));
+    // Nothing measured yet: the calls must be no-ops, not panics.
+    state.set_axis_offset(Axis::Horizontal, px(-40.0));
+    state.drag_started(Axis::Horizontal);
+    assert!(
+        !state.is_scrollbar_dragging(),
+        "a horizontal drag opens no list drag"
+    );
+    state.drag_started(Axis::Vertical);
+    assert!(state.is_scrollbar_dragging(), "the vertical drag opens it");
+    state.drag_ended(Axis::Horizontal);
+    assert!(
+        state.is_scrollbar_dragging(),
+        "the wrong axis does not close it"
+    );
+    state.drag_ended(Axis::Vertical);
+    assert!(!state.is_scrollbar_dragging());
+    assert_eq!(state.scroll_px_offset_for_scrollbar().x, Pixels::ZERO);
+}
