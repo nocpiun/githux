@@ -1127,6 +1127,33 @@ fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_tall_center_aligned_cell_lays_out_within_budget(cx: &mut TestAppContext) {
+    let cell = "word ".repeat(20_000);
+    let body = format!(
+        "| a | b |
+|---|---:|
+| {cell} | x |"
+    );
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let start = std::time::Instant::now();
+    cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
+    frames(cx);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "a tall right-aligned cell took {:?}",
+        start.elapsed()
+    );
+    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text().len()) > 90_000);
+}
+
+#[gpui::test]
 fn markdown_hover_fades_and_resize_and_replacement_clamp_the_real_list(cx: &mut TestAppContext) {
     let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
     frames(cx);

@@ -396,6 +396,17 @@ fn runs(
     runs
 }
 
+/// How far a row of `width` shifts inside a `box_width` box.
+fn row_shift(align: TextAlign, box_width: Pixels, row_width: Option<Pixels>) -> Pixels {
+    let row = row_width.unwrap_or(Pixels::ZERO);
+    let space = (box_width - row).max(Pixels::ZERO);
+    match align {
+        TextAlign::Left => Pixels::ZERO,
+        TextAlign::Right => space,
+        TextAlign::Center => space / 2.0,
+    }
+}
+
 fn highlight(style: Style) -> HighlightStyle {
     match style {
         Style::Strong => HighlightStyle {
@@ -592,21 +603,17 @@ impl Element for Paragraph {
                 }
                 // Alignment is applied to the real shaped rows, so painting,
                 // selection and hit testing all agree. `width` is the box the
-                // rows were wrapped into.
+                // rows were wrapped into. Rows and pieces are both in body
+                // order, so one pass over the pieces applies every shift.
                 if align != TextAlign::Left {
-                    for (row, range) in rows.iter().enumerate() {
-                        let shift = match align {
-                            TextAlign::Right => (width - row_widths[row]).max(Pixels::ZERO),
-                            TextAlign::Center => {
-                                ((width - row_widths[row]) / 2.0).max(Pixels::ZERO)
-                            }
-                            TextAlign::Left => Pixels::ZERO,
-                        };
-                        for piece in pieces.iter_mut().filter(|piece| {
-                            piece.range.start < range.end && piece.range.end > range.start
-                        }) {
-                            piece.origin.x += shift;
+                    let mut shift = row_shift(align, width, row_widths.first().copied());
+                    let mut row = 0;
+                    for piece in &mut pieces {
+                        while row + 1 < rows.len() && piece.range.start >= rows[row].end {
+                            row += 1;
+                            shift = row_shift(align, width, row_widths.get(row).copied());
                         }
+                        piece.origin.x += shift;
                     }
                 }
                 let height = line_height * rows.len().max(1);
