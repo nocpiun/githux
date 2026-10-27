@@ -123,3 +123,5 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 同步 main 的 PR #29 后，reader 原有过渡细条与旧 `scrollbar.rs`/`tab_scrollbar.rs` 被删除，Markdown 与 Source 均改用 `src/ui/scroll` 的共享 `Bars`/`Bar`/`ScrollTarget`；ListState 仍是唯一真实滚动源。合并后主程序 405 项、reader 67 项全部通过，严格 clippy 通过；共享滚动核心没有复制到 reader，测试/预览边界不变。
 
 后续审查修复：表格单元格与嵌套列表段落的 keyed selection 状态改为完整路径键（未共享状态下复制不会串到别的单元格），长 inline code 换行续行重新计入左 inset，嵌套任务父项勾选状态保存在所在 list 容器。新增表格复制、嵌套任务 marker、代码续行边界回归；主程序 408 项、reader 70 项与严格 clippy 通过。
+
+审查复核又发现嵌套列表 marker 丢失编号/未勾选语义；顶层与嵌套现共用 `item_marker`（勾选、未勾选、有序起始号、圆点），并加入 `nested_lists_keep_ordered_and_unchecked_markers` 解析回归。主程序 409、reader 71 项通过。

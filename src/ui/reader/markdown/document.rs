@@ -44,6 +44,16 @@ struct Parsed {
 /// A link pressed in the document; the owner resolves it.
 pub type OnLink = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>;
 
+/// The marker of one list item: a checkbox, an ordered number or a bullet.
+fn item_marker(start: Option<u64>, task: Option<bool>, at: usize) -> String {
+    match (task, start) {
+        (Some(true), _) => "☑".to_string(),
+        (Some(false), _) => "☐".to_string(),
+        (None, Some(first)) => format!("{}.", first + at as u64),
+        (None, None) => "•".to_string(),
+    }
+}
+
 /// A read-only Markdown reading surface.
 pub struct MarkdownView {
     parsed: Arc<Parsed>,
@@ -366,12 +376,7 @@ impl MarkdownView {
             Block::List { start, items } => {
                 let mut list = div().flex().flex_col().gap_2();
                 for (at, (task, blocks)) in items.iter().enumerate() {
-                    let marker = match (start, task) {
-                        (_, Some(true)) => "☑".to_string(),
-                        (_, Some(false)) => "☐".to_string(),
-                        (Some(first), None) => format!("{}.", first + at as u64),
-                        (None, None) => "•".to_string(),
-                    };
+                    let marker = item_marker(*start, *task, at);
                     list = list.child(
                         div()
                             .flex()
@@ -580,7 +585,7 @@ impl MarkdownView {
                 .font_family(mono.clone())
                 .child(text.clone())
                 .into_any_element(),
-            Block::List { items, .. } => div()
+            Block::List { start, items } => div()
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -589,15 +594,11 @@ impl MarkdownView {
                         .iter()
                         .enumerate()
                         .map(|(at, (task, blocks))| {
+                            let marker = item_marker(*start, *task, at);
                             div()
                                 .flex()
                                 .gap_2()
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(colors.fg_muted)
-                                        .child(if task == &Some(true) { "☑" } else { "•" }),
-                                )
+                                .child(div().flex_none().text_color(colors.fg_muted).child(marker))
                                 .child(
                                     div().flex_1().min_w_0().children(
                                         blocks

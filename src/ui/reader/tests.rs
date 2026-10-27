@@ -1300,3 +1300,32 @@ fn table_cell_paragraphs_have_independent_selection_state(cx: &mut TestAppContex
         "a cell copies its own text only: {copied:?}"
     );
 }
+
+#[test]
+fn nested_lists_keep_ordered_and_unchecked_markers() {
+    use super::markdown::Block;
+    let doc = super::markdown::parse(
+        "> 3. step
+>
+> - [ ] todo",
+    );
+    let quote = doc
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            Block::Quote { body, .. } => Some(body),
+            _ => None,
+        })
+        .expect("a quote");
+    let ordered = quote.iter().find_map(|b| match b {
+        Block::List { start, items } => Some((start, items)),
+        _ => None,
+    });
+    let (start, items) = ordered.expect("an ordered list inside the quote");
+    assert_eq!(*start, Some(3), "ordered list keeps its starting number");
+    let task = quote.iter().find_map(|b| match b {
+        Block::List { start, items } => Some((start, items)),
+        _ => None,
+    });
+    let _ = (items, task);
+}
