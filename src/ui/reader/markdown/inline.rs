@@ -314,6 +314,11 @@ fn runs(
     events.sort_by_key(|(at, enters, _)| (*at, !*enters));
     let mut active: Vec<Style> = Vec::new();
     let mut event = 0;
+    // Link ranges are sorted and disjoint in an `Inline`; advance through them
+    // with the run cursor instead of rescanning all links per run.
+    let mut links = inline.links.clone();
+    links.sort_unstable_by_key(|(range, _)| range.start);
+    let mut link = 0;
     let mut runs = Vec::with_capacity(edges.len());
     for edge in edges.windows(2) {
         while event < events.len() && events[event].0 <= edge[0] {
@@ -331,12 +336,17 @@ fn runs(
                 run_style = run_style.highlight(highlight(*kind));
             }
         }
+        while links
+            .get(link)
+            .is_some_and(|(range, _)| range.end <= edge[0])
+        {
+            link += 1;
+        }
         // A link range is drawn like the rest of the document's links: the
         // theme's link colour and a thin underline, so navigation is visible.
-        if inline
-            .links
-            .iter()
-            .any(|(link, _)| link.start <= edge[0] && edge[1] <= link.end)
+        if links
+            .get(link)
+            .is_some_and(|(range, _)| range.start <= edge[0] && edge[1] <= range.end)
         {
             run_style = run_style.highlight(HighlightStyle {
                 color: Some(link_color),

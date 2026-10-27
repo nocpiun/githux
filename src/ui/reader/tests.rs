@@ -1450,3 +1450,26 @@ fn a_markdown_link_is_visibly_styled(cx: &mut TestAppContext) {
     let text = "Read the installation guide now";
     assert_eq!(&text[links[0].0.clone()], "installation guide");
 }
+
+#[gpui::test]
+fn a_dense_link_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
+    let source = "[x](guide.md) ".repeat(20_000);
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let start = std::time::Instant::now();
+    cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
+    frames(cx);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "dense links resize took {:?}",
+        start.elapsed()
+    );
+    assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text().len()) > 70_000);
+}
