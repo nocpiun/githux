@@ -1,10 +1,10 @@
 //! The tab strip's own horizontal scrollbar.
 //!
-//! Ely's `Scrollbar` is the right shape (an overlay thumb bound to a `ScrollHandle` that can be
-//! dragged), but it paints at the theme's thickness and stays at full opacity while there is
-//! something to scroll. The strip needs a hairline that appears only while the pointer is over the
-//! strip, so this module keeps Ely's interaction model in a thinner, lighter thumb and owns the
-//! fade locally instead of changing the shared theme.
+//! Ely's `Scrollbar` supports both explicit presence and activity-driven visibility. Its fixed
+//! theme thickness is 6 logical pixels and its activity policy appears immediately, then fades
+//! after idle. The accepted strip uses a 3-pixel thumb in a reserved band and a reversible fade
+//! on both hover edges. Keep this adapter until upstream exposes those styling/placement hooks;
+//! changing the dependency must not silently change the strip's interaction or hit area.
 //!
 //! Fade behaviour: entering fades in, leaving fades out, each over
 //! [`TAB_SCROLLBAR_FADE_MS`]. A reversal starts from the opacity currently painted rather than from
@@ -13,7 +13,7 @@
 //! there is no standing timer, and no element is built at all while the bar is fully hidden — a
 //! hidden bar can neither take a press nor a drag.
 
-use ely_gpui_component::theme::ActiveTheme;
+use ely_core::theme::ActiveTheme;
 use gpui::{
     AnyElement, App, EmptyView, IntoElement, ScrollHandle, Styled, Window, div, point, prelude::*,
     px,

@@ -12,7 +12,7 @@
 
 use std::rc::Rc;
 
-use ely_gpui_component::{
+use ely_core::{
     forms::TextInput,
     primitives::{Backdrop, FocusScope, Icon, IconName},
     theme::{ActiveTheme, ControlSize, Elevation, IconSize, Radius, TextSize},

@@ -8,8 +8,8 @@
 //! or native IME delivery; those remain pending manual checks and are recorded as such.
 
 use gpui::{
-    Bounds, KeyUpEvent, Keystroke, Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent,
-    TestAppContext, VisualContext, VisualTestContext, px, size,
+    Bounds, KeyUpEvent, Keystroke, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
+    ScrollSource, TestAppContext, VisualContext, VisualTestContext, px, size,
 };
 
 use super::Shell;
@@ -22,7 +22,7 @@ fn selector(name: String) -> &'static str {
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        ely_gpui_component::init_for_tests(cx);
+        ely_core::init_for_tests(cx);
         Shell::bind_keys(cx);
     });
 }
@@ -33,7 +33,7 @@ fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContex
 }
 
 /// A press and release, as a real keyboard delivers them.
-fn press(key: &str, cx: &mut VisualTestContext) {
+fn press(key: &'static str, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes(key);
     cx.run_until_parked();
     cx.simulate_event(KeyUpEvent {
@@ -214,11 +214,12 @@ fn the_repository_group_scrolls_without_moving_the_island_page(cx: &mut TestAppC
     let (view, cx) = shell(cx);
     let scroll = bounds("repo-scroll", cx);
     cx.simulate_mouse_move(scroll.center(), None, Modifiers::none());
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: scroll.center(),
         delta: ScrollDelta::Lines(gpui::point(0.0, -12.0)),
         modifiers: Modifiers::none(),
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
     // The wheel now eases over real time; let the smoothing settle before reading the offset.
@@ -645,11 +646,12 @@ fn the_wheel_keeps_the_user_position_until_the_cursor_moves(cx: &mut TestAppCont
     click("search-entry", cx);
     let list = bounds("palette-list", cx);
     cx.simulate_mouse_move(list.center(), None, Modifiers::none());
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: list.center(),
         delta: ScrollDelta::Lines(gpui::point(0.0, -8.0)),
         modifiers: Modifiers::none(),
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
     // Let the wheel easing settle before checking that a repaint keeps the user's position.
@@ -762,11 +764,12 @@ fn repositories_and_profile_keep_separate_scroll_focus_and_selection(cx: &mut Te
     assert_eq!(route(&view, cx), Route::Home);
     let page = bounds("island-page", cx);
     cx.simulate_mouse_move(page.center(), None, Modifiers::none());
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: page.center(),
         delta: ScrollDelta::Lines(gpui::point(0.0, -12.0)),
         modifiers: Modifiers::none(),
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     // The page now eases its wheel input; let it settle fully before recording the offset.
     settle_scroll(cx);
@@ -943,11 +946,12 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(strip.center(), None, Modifiers::none());
 
     // A plain vertical wheel moves the strip sideways because it is the only scrollable axis.
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: strip.center(),
         delta: ScrollDelta::Lines(gpui::point(0.0, -6.0)),
         modifiers: Modifiers::none(),
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
     let after_wheel = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
@@ -969,7 +973,7 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
 
     // Shift+wheel arrives as a horizontal delta on Windows; it moves the strip by itself.
     let before_shift = after_wheel;
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: strip.center(),
         delta: ScrollDelta::Lines(gpui::point(-3.0, 0.0)),
         modifiers: Modifiers {
@@ -977,6 +981,7 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
             ..Modifiers::none()
         },
         touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
     let after_shift = view.read_with(cx, |shell, _| shell.tab_scroll_offset());

@@ -6,7 +6,7 @@
 //! settings options, no repository reader. Leaving a page blank is the agreed behaviour until its
 //! design exists.
 
-use ely_gpui_component::{
+use ely_core::{
     data_display::Avatar,
     primitives::{Icon, IconName},
     theme::{ActiveTheme, AvatarSize, IconSize, Radius, TextSize},
