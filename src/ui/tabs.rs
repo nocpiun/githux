@@ -23,7 +23,7 @@
 
 use std::rc::Rc;
 
-use ely_gpui_component::{
+use ely_core::{
     buttons::{ButtonVariant, IconButton},
     primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},

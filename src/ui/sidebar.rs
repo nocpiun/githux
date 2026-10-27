@@ -6,7 +6,7 @@
 //! boundary of the scroll group and never the fixed parts. Rows expose accessible names and full
 //! identifiers; long names are cut inside the column instead of widening it.
 
-use ely_gpui_component::{
+use ely_core::{
     data_display::Avatar,
     navigation::NavItem,
     primitives::{Icon, IconName, Tooltip},
@@ -282,10 +282,7 @@ pub(super) fn repository_group(
     scroll: &ScrollHandle,
     cx: &App,
 ) -> AnyElement {
-    let gap = cx
-        .theme()
-        .control_height(ely_gpui_component::theme::ControlSize::Sm)
-        / 12.0;
+    let gap = cx.theme().control_height(ely_core::theme::ControlSize::Sm) / 12.0;
     div()
         .id("repo-scroll-list")
         .debug_selector(|| "repo-scroll".to_string())
