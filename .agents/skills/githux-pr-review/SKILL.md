@@ -39,7 +39,7 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --
 - `base_changed`、`merge_conflict`：核对目标分支；解决冲突或补齐组合验证，有新 head 则重新 CI/review。Draft、BLOCKED、未知 mergeability 不冒充冲突；已有人工验收限制不因同步基线解除。
 - `timeout`：读取 waiting_on/last_error/retry。`retry_uncertain`：发送可能已发生，保留意图，核对实际评论后用已确认游标只读恢复，不能删除记录来补发。
 - `merge_blocked`：检查 `integration.blockers`；`blocked_label` 必须等负责人手动移除后重查，不因标签所指问题已修复而自行撤掉。缺少/无效 labels 会报错，不能当无标签。
-- `checks_ready`：重新读取实时标签（不得有 `blocked`）、完整裁决/验收历史、milestone、独立 `PR` required check、最新 head/保护和当前基线后才能合并；review_passed=null、verdict=not_evaluated 始终保留。
+- `checks_ready`：重新读取实时标签（不得有 `blocked`）、完整裁决/验收历史、milestone、`PR` 工作流的 `Check` required check、最新 head/保护和当前基线后才能合并；review_passed=null、verdict=not_evaluated 始终保留。
 - `error`、`interrupted`、未知 Bot 消息、失败/取消：不算成功。错误输出文件若无法写入，依据 stdout 与退出码处理，不能退回读取旧成功文件。
 
 ## 反馈与交付

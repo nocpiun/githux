@@ -97,7 +97,7 @@ flowchart TD
 
 `blocked` 标签在首读、最终复核和自动重审前都独立检查：发现即返回 `merge_blocked`（退出 15、`integration.blockers=["blocked_label"]`），不继续等待或自动触发审查；缺失/无效标签数据报错，不放行。即使未传 `--wait-ci` 也不能返回 `review_completed` 来绕过它。`pending` 仅标识人工验收，具体职责及独立 `PR` 行数门槛见 [工作流](agent-workflow.md#pr-标签与规模门槛)。
 
-`checks_ready` 只代表已收集维度齐备，不授权合并。合并前再次确认实时无 `blocked`，独立 `PR` required check 通过，且 `pending` 对应的负责人验收已通过。执行者仍需核对完整裁决历史、负责人 UI 验收、milestone、最新分支保护及当前 head，并按工作流使用 squash merge 和 GitHub 默认消息。
+`checks_ready` 只代表已收集维度齐备，不授权合并。合并前再次确认实时无 `blocked`，`PR` 工作流的 `Check` required check 通过，且 `pending` 对应的负责人验收已通过。执行者仍需核对完整裁决历史、负责人 UI 验收、milestone、最新分支保护及当前 head，并按工作流使用 squash merge 和 GitHub 默认消息。
 
 ## 一小时超时恢复
 
