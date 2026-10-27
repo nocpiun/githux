@@ -384,6 +384,11 @@ impl MarkdownView {
 
     /// A drag moved to document offset `at`.
     fn extend(&mut self, at: usize, cx: &mut Context<Self>) {
+        // Moving the pointer at all makes this a selection gesture, even when
+        // it later returns to the press position: a link must not open.
+        if self.dragging {
+            self.pressed_link = None;
+        }
         if self.dragging && self.head != at {
             self.head = at;
             cx.notify();

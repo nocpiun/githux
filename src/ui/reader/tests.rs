@@ -1086,6 +1086,30 @@ fn repository_pictures_never_resolve_to_filesystem_reads() {
 }
 
 #[gpui::test]
+fn dragging_a_link_back_to_its_start_does_not_open_it(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "[x](guide.md) tail".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    // Same geometry the single-glyph link click test uses.
+    let block = cx.debug_bounds("markdown-block-0").unwrap();
+    let start = point(block.left() + px(18.0), block.center().y);
+    drag(cx, &[start, start + point(px(90.0), px(0.0)), start]);
+    cx.run_until_parked();
+    assert!(
+        !matches!(
+            reader.read_with(cx, |r, _| r.last_action().cloned()),
+            Some(ReaderAction::Link(_))
+        ),
+        "a cancelled selection gesture must not navigate"
+    );
+}
+#[gpui::test]
 fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
     let (_, cx) = open(
         cx,
