@@ -143,6 +143,208 @@ fn pat_submit_is_masked_cleared_and_real_repos_reach_gpui(cx: &mut TestAppContex
     assert!(!debug.contains("synthetic-never-real"));
 }
 
+fn frames(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+    }
+}
+
+fn bounds(selector: &'static str, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not drawn"))
+}
+
+fn drag_outside(
+    cx: &mut VisualTestContext,
+    start: gpui::Point<gpui::Pixels>,
+    delta: gpui::Point<gpui::Pixels>,
+) {
+    cx.simulate_mouse_move(start, None, gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    for step in 1..=5 {
+        let at = gpui::point(
+            start.x + delta.x * step as f32,
+            start.y + delta.y * step as f32,
+        );
+        cx.simulate_mouse_move(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+    let end = gpui::point(start.x + delta.x * 5.0, start.y + delta.y * 5.0);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn no_overflow_draws_no_scrollbar_and_keeps_pat_input_usable(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    view.update(cx, |view, _| view.bars.snap(true));
+    frames(cx);
+    assert!(cx.debug_bounds("account-preview-scrollbar-y").is_none());
+    put_token(&view, cx, "synthetic");
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.input.read(cx).text().to_string()),
+        "synthetic"
+    );
+}
+
+#[gpui::test]
+fn preview_scrollbar_drags_real_content_and_cleans_up(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let names = (0..100)
+        .map(|index| format!("repository-{index}"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    host_runtime().block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &names))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["short"]))).await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, cx) = preview(cx, runtime);
+    put_token(&view, cx, "synthetic");
+    submit(&view, cx);
+    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    view.update(cx, |view, cx| view.refresh(cx));
+    wait_for(
+        &view,
+        cx,
+        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 100),
+    );
+    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(500.0)));
+    view.update(cx, |view, _| {
+        view.clock_pinned = Some(0);
+        view.bars.snap(true);
+    });
+    frames(cx);
+    // A long result overflows for real: the last row is laid out and the
+    // region reports a reach beyond the viewport.
+    assert!(cx.debug_bounds("repository-preview-row-99").is_some());
+    let reach = view.read_with(cx, |view, _| view.scroll.max_offset());
+    assert!(
+        reach.y > gpui::px(400.0),
+        "100 rows must overflow the viewport: {reach:?}"
+    );
+    let thumb = bounds("account-preview-scrollbar-y-thumb", cx);
+    assert!(thumb.size.height > gpui::px(0.0));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.scroll.offset().y),
+        gpui::px(0.0)
+    );
+
+    // Dragging the shared thumb moves the real content, and releasing outside
+    // ends the drag.
+    drag_outside(
+        cx,
+        thumb.center(),
+        gpui::point(gpui::px(500.0), gpui::px(100.0)),
+    );
+    frames(cx);
+    let offset = view.read_with(cx, |view, _| view.scroll.offset());
+    assert!(offset.y < gpui::px(0.0), "real content moved: {offset:?}");
+    assert_eq!(offset.x, gpui::px(0.0));
+    assert!(view.read_with(cx, |view, _| view.bars.dragging().is_none()));
+
+    // Leaving the region fades the bar out within its 140 ms fade.
+    view.update(cx, |view, cx| {
+        view.bars.hover(false, 0, false);
+        cx.notify();
+    });
+    view.update(cx, |view, _| view.clock_pinned = Some(140));
+    frames(cx);
+    assert_eq!(view.update(cx, |view, _| view.bars.opacity(140)), 0.0);
+
+    // A shorter result re-measures the same handle; the old offset must stay
+    // inside the new range instead of pointing past the shorter content.
+    let previous = view.read_with(cx, |view, _| view.scroll.offset().y);
+    view.update(cx, |view, cx| view.refresh(cx));
+    wait_for(
+        &view,
+        cx,
+        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1),
+    );
+    for _ in 0..12 {
+        frames(cx);
+        let reach = view.read_with(cx, |view, _| view.scroll.max_offset().y);
+        if view.read_with(cx, |view, _| view.scroll.offset().y) >= -reach {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (offset, reach) = view.read_with(cx, |view, _| {
+        (view.scroll.offset().y, view.scroll.max_offset().y)
+    });
+    assert!(
+        previous < -reach,
+        "the previous offset must have been outside the shorter range: {previous:?} vs {reach:?}"
+    );
+    assert!(
+        offset >= -reach && offset <= gpui::px(0.0),
+        "the shorter range must clamp the offset: {offset:?} vs {reach:?}"
+    );
+    assert!(cx.debug_bounds("repository-preview-row-99").is_none());
+
+    // Once nothing overflows, the bar is not built at all and input still works.
+    let (empty_runtime, _) = {
+        let mock = Arc::new(MockTransport::new());
+        let store = Arc::new(InMemoryCredentialStore::new());
+        open(
+            &temp.path().join("empty.sqlite3"),
+            store,
+            mock as Arc<dyn Transport>,
+        )
+    };
+    let (short_view, short_cx) = preview(cx, empty_runtime);
+    short_cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(1200.0)));
+    short_view.update(short_cx, |view, _| {
+        view.clock_pinned = Some(0);
+        view.bars.snap(true);
+    });
+    frames(short_cx);
+    let short_state = short_view.read_with(short_cx, |view, _| {
+        (view.scroll.offset(), view.scroll.max_offset())
+    });
+    assert_eq!(
+        short_state.1,
+        gpui::point(gpui::px(0.0), gpui::px(0.0)),
+        "the empty preview must fit the tall window"
+    );
+    assert!(
+        short_cx
+            .debug_bounds("account-preview-scrollbar-y")
+            .is_none(),
+        "a region without overflow draws no bar"
+    );
+    put_token(&short_view, short_cx, "still-editable");
+    assert_eq!(
+        short_view.read_with(short_cx, |view, cx| {
+            view.input.read(cx).text().to_string()
+        }),
+        "still-editable",
+        "a hidden bar must not block the PAT field"
+    );
+
+    // Cancel clears hover and drag without a fade; blur does the same.
+    view.update(cx, |view, cx| {
+        view.bars.snap(true);
+        view.cancel_scroll(cx);
+    });
+    assert_eq!(view.update(cx, |view, _| view.bars.opacity(140)), 0.0);
+    cx.deactivate_window();
+    assert!(view.read_with(cx, |view, _| view.bars.dragging().is_none()));
+    assert_eq!(view.update(cx, |view, _| view.bars.opacity(140)), 0.0);
+}
+
 #[gpui::test]
 fn replace_switch_and_restart_restore_use_the_persistent_service(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();

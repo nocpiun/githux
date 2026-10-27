@@ -122,6 +122,16 @@ Codex 第七轮 P2：关闭预览时 `app::run` 立即退出，而 SQLite/凭据
 
 真实 GUI 证据只到启动路径：`--account-preview` 启动后窗口标题为 `Githux · Account wiring preview` 且 Responding，默认启动标题为 `Githux`；两者按 PID/创建时间核对后由本任务关闭，未触碰其他任务进程。**真实 PAT 仍未验证**，没有读取任何凭据。
 
+## 第 10 轮：同步 main（统一滚动条、PR 门槛）并接入公共 scroll
+
+负责人授权同步 main 后由原 Agent 完成适配。本地 main 同步提交 `9d91eb7`（合入 `0014d6c`：PR #29 统一滚动条、PR #31 PR 标签/规模门槛），未推送；分支、原 PR 与裁决历史保留。
+
+**接入方式**：预览原本已有真实 `ScrollHandle` 的纵向溢出区域，直接把该区域接到 `ui::scroll`：预览持有自己的 `Bars`，`hover` 绑定整个区域，`drag` 交给 `Bars::drag`，窗口失活与视图释放走 `Bars::cancel`，外观用 `Style::DEFAULT` + `Placement::overlay(4.0, 8.0)`。没有复制几何/拖动/Fade，没有为仓库行另建滚动区，`ui/scroll` 只把模块入口放宽为 `pub(crate)`。
+
+**排查与结论**：过程中多次把“内容变短后 offset 未归零”当成缺陷，逐层验证后确认是实现正确的表现——缩短后仍溢出 98px，因此 reach 仍为 98px，GPUI 已把 offset 从 −70.5 收敛到合法范围，滚动条仍应显示。我据此把测试断言改为验收真正要求的“offset 不越界 + 末行消失”，而不是错误地要求归零；无溢出场景改用宽窗口下的空预览单独验证不绘制条。整个过程没有保留临时调试输出，也没有为让测试变绿放宽断言。
+
+**验证**：fmt / check --locked --all-targets / clippy -D warnings / `cargo test --locked`（378 passed，本任务 19 项）/ build / `git diff --check` 全部通过（`-j 1`，本 worktree 独立 target）。真实窗口按 PID 与创建时间核对：预览标题 `Githux · Account wiring preview`、默认外壳标题 `Githux`，均 Responding，随后由本任务关闭。
+
 ## 剩余问题
 
 - 真实 PAT、真实组织 SSO、私有仓库可见性，以及真实 Windows 输入法候选、实际粘贴与焦点观感，须由负责人在预览窗口确认（模拟覆盖不等同）。

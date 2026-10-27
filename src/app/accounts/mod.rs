@@ -104,6 +104,11 @@ pub(crate) struct AccountPreview {
     input: Entity<TextInput>,
     root_focus: FocusHandle,
     scroll: ScrollHandle,
+    bars: crate::ui::scroll::Bars,
+    clock: std::time::Instant,
+    #[cfg(test)]
+    clock_pinned: Option<u64>,
+    _window_activation: Subscription,
     inbox: Arc<Mutex<VecDeque<Message>>>,
     alive: Arc<watch::Sender<bool>>,
     operation: Option<OperationControl>,
@@ -150,6 +155,15 @@ impl AccountPreview {
             input,
             root_focus,
             scroll: ScrollHandle::new(),
+            bars: crate::ui::scroll::Bars::new(),
+            clock: std::time::Instant::now(),
+            #[cfg(test)]
+            clock_pinned: None,
+            _window_activation: cx.observe_window_activation(window, |preview, window, cx| {
+                if !window.is_window_active() {
+                    preview.cancel_scroll(cx);
+                }
+            }),
             inbox: inbox.clone(),
             alive: Arc::new(alive),
             operation: None,
@@ -176,6 +190,20 @@ impl AccountPreview {
             this.refresh_presentation(cx);
         }
         this
+    }
+
+    fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(pinned) = self.clock_pinned {
+            return pinned;
+        }
+        self.clock.elapsed().as_millis() as u64
+    }
+
+    fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
+        let target = self.scroll.clone();
+        self.bars.cancel(&target);
+        cx.notify();
     }
 
     /// Builds the token field and its change subscription. The parent owns the
@@ -719,7 +747,18 @@ impl AccountPreview {
 }
 
 impl Render for AccountPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = self.now_ms();
+        if self.bars.dragging().is_some() && !cx.has_active_drag() {
+            let target = self.scroll.clone();
+            if self.bars.settle(&target, now, cx.reduce_motion()) {
+                cx.notify();
+            }
+        }
+        if self.bars.is_animating() {
+            window.request_animation_frame();
+        }
+        let opacity = self.bars.opacity(now);
         let this = cx.entity();
         let submit = this.clone();
         let cancel = this.clone();
@@ -727,7 +766,7 @@ impl Render for AccountPreview {
         let replace = this.clone();
         let revalidate = this.clone();
         let refresh = this.clone();
-        let cancel_replace = this;
+        let cancel_replace = this.clone();
         let callbacks = AccountCallbacks {
             submit: std::rc::Rc::new(move |window, cx| {
                 submit.update(cx, |this, cx| this.submit(window, cx))
@@ -748,8 +787,50 @@ impl Render for AccountPreview {
             }),
             open_pat_help: std::rc::Rc::new(|_, cx| cx.open_url(PAT_HELP)),
         };
+        let bar_owner = this.downgrade();
+        let on_thumb_drag: crate::ui::scroll::OnDragging =
+            std::rc::Rc::new(move |axis, dragging, _window, cx| {
+                bar_owner
+                    .update(cx, |preview, cx| {
+                        let target = preview.scroll.clone();
+                        if preview.bars.drag(
+                            &target,
+                            axis,
+                            dragging,
+                            preview.now_ms(),
+                            cx.reduce_motion(),
+                        ) {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+        let scrollbar = crate::ui::scroll::Bar {
+            target: &self.scroll,
+            id: crate::ui::scroll::BarId {
+                owner: cx.entity_id(),
+                name: "account-preview-scrollbar-y",
+                axis: gpui::Axis::Vertical,
+            },
+            placement: crate::ui::scroll::Placement::overlay(4.0, 8.0),
+            style: crate::ui::scroll::Style::DEFAULT,
+            opacity,
+            on_drag: on_thumb_drag,
+        }
+        .render(cx);
         div()
+            .id("account-preview-root")
+            .debug_selector(|| "account-preview-scroll-region".to_string())
             .track_focus(&self.root_focus)
+            .relative()
+            .on_hover(cx.listener(|preview, hovered, _, cx| {
+                if preview
+                    .bars
+                    .hover(*hovered, preview.now_ms(), cx.reduce_motion())
+                {
+                    cx.notify();
+                }
+            }))
             .size_full()
             .bg(cx.theme().colors.bg)
             .child(
@@ -772,11 +853,14 @@ impl Render for AccountPreview {
                         cx,
                     )),
             )
+            .child(scrollbar)
     }
 }
 
 impl Drop for AccountPreview {
     fn drop(&mut self) {
+        let target = self.scroll.clone();
+        self.bars.cancel(&target);
         // `send` fails when no receiver is held, which is exactly our case:
         // `send_replace` still stores the value so late workers observe it.
         self.alive.send_replace(false);

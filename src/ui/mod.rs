@@ -30,7 +30,7 @@ pub mod fixtures;
 pub(crate) mod geometry;
 mod page;
 mod palette;
-mod scroll;
+pub(crate) mod scroll;
 mod sidebar;
 mod tabs;
 

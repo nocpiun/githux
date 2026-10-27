@@ -72,12 +72,23 @@ cargo run -- --account-preview
 
 迁移没有改动业务层：登录、目录持久化/恢复、切换/替换/重验证、仓库读取、旧响应隔离、取消与退出收尾仍是迁移前已验证的实现。GPUI 0.3.10 的 `ScrollEvent`、`KeyBinding::load`、`Keystroke::parse` 变化只影响外壳（PR #30）；预览自身使用的输入、订阅、拦截器与 `cx.spawn` 形态在新版本下保持同等行为，并有测试覆盖。
 
+## 滚动区域接入公共 scroll
+
+预览原有的纵向溢出区域（`account-preview-scroll`，持有真实 `ScrollHandle`）现在接入 main 的统一滚动条（[统一滚动与滚动条](scrolling.md)，PR #29），不新增第二套几何/拖动/Fade：
+
+- 预览自己持有 `Bars`，`hover` 绑定整个预览区域，`drag` 走 `Bars::drag(&scroll, Axis::Vertical, …)`，窗口失活与视图释放调用 `Bars::cancel`。
+- 用 `Placement::overlay(4.0, 8.0)` + `Style::DEFAULT` 贴在右侧，外观仍是细 3px 圆头半透明、140ms 双向淡出。
+- 只有 `ScrollHandle` 这一处滚动目标；没有为每个仓库行另建滚动区，也没有在消费者里重算 thumb 几何。
+- `ui::scroll` 仅把模块入口放宽为 `pub(crate)`，未改 Shell 布局、侧栏或公共算法。
+
 ## 验证
 
-已执行（本机 Windows，HEAD 含 main 迁移）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（362 passed，其中本任务 17 项）、`cargo build --locked -j 1`、`git diff --check`。
+已执行（本机 Windows，HEAD 含 main 同步与统一滚动的组合）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（**378 passed**，其中本任务 19 项）、`cargo build --locked -j 1`、`git diff --check`。默认外壳的标签条滚动/排序/toolbar 既有测试保持通过。
+
+新增 `preview_scrollbar_drags_real_content_and_cleans_up` 用真实 100 条仓库结果验证：长内容确有溢出（末行已布局、reach 超出视口）、拖动公共 thumb 移动真实 `ScrollHandle`、外部释放结束拖动、离开区域 140ms 淡出、内容变短后 offset 收敛到新范围内且不再显示末行、无溢出窗口不绘制条、隐藏条不阻挡 PAT 输入、取消与窗口失活立即清理。
 
 `src/app/accounts/tests.rs` 用**可注入服务/传输/临时 SQLite/内存凭据**覆盖：合成 PAT 登录→真实仓库结果进入视图、掩码与提交后清空、粘贴与中文文本仍保持掩码后提交、输入后按钮可用、Tab 到提交、重复提交不推进、替换/切换/重验证/重启恢复、401 与限流不冒充空列表、Partial 保留已取数据、取消后旧 generation 不覆盖新结果、请求期间切账户丢弃旧仓库结果、取消已提交变更后对账权威账户、取消 revalidate 不发布其迟到成功、多个取消独立对账并各自作废仓库结果、错误操作保留自身错误、视图释放不泄漏、退出前等待收尾。
 
 **未执行**：真实 PAT 登录与真实 GitHub 私有仓库联调。该项须由负责人在预览窗口自行输入 token；本任务没有读取 `gh`、环境变量、日志或任何真实凭据，也没有对 `api.github.com` 发起带真实 token 的请求。真实窗口中文本输入法、粘贴与焦点行为同样需要负责人在预览里确认。
 
-真实窗口启动已核实（迁移后 HEAD）：`--account-preview` 在本机启动，窗口标题 `Githux · Account wiring preview`、进程 Responding；无参数启动仍进入原 Shell（标题 `Githux`）。两者均按 PID 与启动时间核对后由本任务主动关闭。这只能证明启动路径，不构成视觉或真实登录验收。
+真实窗口启动已核实（当前 HEAD）：`--account-preview` 在本机启动，窗口标题 `Githux · Account wiring preview`、进程 Responding；无参数启动仍进入原 Shell（标题 `Githux`），标签条与固定 toolbar 未回退。两者均按 PID 与启动时间核对后由本任务主动关闭。这只能证明启动路径，不构成视觉、滚动条观感或真实登录验收。
