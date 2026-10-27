@@ -2194,6 +2194,57 @@ fn a_fenced_code_block_can_be_dragged_and_copied(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_repeated_chunk_header_never_opens_the_next_rows_link(cx: &mut TestAppContext) {
+    let mut body = String::from(
+        "| [Docs](docs.md) | b |
+|---|---|
+",
+    );
+    for row in 0..70 {
+        body.push_str(&format!(
+            "| [body{row}](wrong{row}.md) | d{row} |
+"
+        ));
+    }
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+    frames(cx);
+    // Scroll to the second chunk so its repeated header is on screen.
+    let frame = cx.debug_bounds("reader-markdown").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    for _ in 0..30 {
+        cx.simulate_event(ScrollEvent {
+            position: frame.center(),
+            delta: ScrollDelta::Lines(point(0.0, -30.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source: gpui::ScrollSource::Pointer,
+        });
+        frames(cx);
+    }
+    let header = cx
+        .debug_bounds("markdown-cell-1-0-0")
+        .expect("the second chunk's header is on screen");
+    cx.simulate_click(
+        header.left_center() + point(px(16.0), px(0.0)),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let action = reader.read_with(cx, |r, _| r.last_action().cloned());
+    assert!(
+        !matches!(action, Some(ReaderAction::Link(_))),
+        "a presentation-only repeated header must not resolve a body link: {action:?}"
+    );
+}
+
+#[gpui::test]
 fn a_long_table_copies_its_header_once(cx: &mut TestAppContext) {
     let mut body = String::from("| a | b |\n|---|---|\n");
     for row in 0..80 {

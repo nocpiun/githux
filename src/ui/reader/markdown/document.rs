@@ -797,8 +797,12 @@ impl MarkdownView {
                 list.into_any_element()
             }
             Block::Table {
-                aligns, head, rows, ..
+                aligns,
+                head,
+                rows,
+                repeated_head,
             } => {
+                let repeated = *repeated_head;
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
                         let mut cell = div()
@@ -807,7 +811,14 @@ impl MarkdownView {
                             .min_w_0()
                             .px_3()
                             .py_2()
-                            .child(
+                            .child(if repeated && header {
+                                // A repeated chunk header is presentation only:
+                                // its document range is empty, so it must not
+                                // take part in offset hit testing. It still
+                                // consumes its unit to keep the cursor in step.
+                                let _ = this.next_unit(ix, &unit_cursor);
+                                div().child(inline.text.clone()).into_any_element()
+                            } else {
                                 this.paragraph_unit(
                                     gpui::ElementId::Name(
                                         format!("reader-cell-{ix}-{row}-{column}").into(),
@@ -815,8 +826,9 @@ impl MarkdownView {
                                     inline,
                                     this.next_unit(ix, &unit_cursor),
                                 )
-                                .align(table_align(aligns, column)),
-                            );
+                                .align(table_align(aligns, column))
+                                .into_any_element()
+                            });
                         if header {
                             cell = cell
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -1062,20 +1074,35 @@ impl MarkdownView {
                     .into_any_element()
             }
             Block::Table {
-                aligns, head, rows, ..
+                aligns,
+                head,
+                rows,
+                repeated_head,
             } => {
-                let cell = |this: &Self, inline: &Inline, row: usize, column: usize| {
-                    div().flex_1().min_w_0().px_3().py_2().child(
-                        this.paragraph_unit(
-                            gpui::ElementId::Name(
-                                format!("reader-nested-cell-{}-{row}-{column}", id.1).into(),
-                            ),
-                            inline,
-                            this.next_unit(ix, units),
-                        )
-                        .align(table_align(aligns, column)),
-                    )
-                };
+                let repeated = *repeated_head;
+                let cell =
+                    |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_3()
+                            .py_2()
+                            .child(if repeated && header {
+                                let _ = this.next_unit(ix, units);
+                                div().child(inline.text.clone()).into_any_element()
+                            } else {
+                                this.paragraph_unit(
+                                    gpui::ElementId::Name(
+                                        format!("reader-nested-cell-{}-{row}-{column}", id.1)
+                                            .into(),
+                                    ),
+                                    inline,
+                                    this.next_unit(ix, units),
+                                )
+                                .align(table_align(aligns, column))
+                                .into_any_element()
+                            })
+                    };
                 let mut table = div()
                     .flex()
                     .flex_col()
@@ -1087,7 +1114,7 @@ impl MarkdownView {
                     div().flex().children(
                         head.iter()
                             .enumerate()
-                            .map(|(column, inline)| cell(self, inline, 0, column))
+                            .map(|(column, inline)| cell(self, inline, 0, column, true))
                             .collect::<Vec<_>>(),
                     ),
                 );
@@ -1101,7 +1128,9 @@ impl MarkdownView {
                                 cells
                                     .iter()
                                     .enumerate()
-                                    .map(|(column, inline)| cell(self, inline, row + 1, column))
+                                    .map(|(column, inline)| {
+                                        cell(self, inline, row + 1, column, false)
+                                    })
                                     .collect::<Vec<_>>(),
                             ),
                     );
