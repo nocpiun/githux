@@ -82,6 +82,7 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - 文档使用真实 `gpui::ListState` 虚拟化块；只有可见块被构建。公开 `list_state()` 是真实滚动源，当前由 reader 的 3px 圆角半透明滚动条读取，hover/拖动使用 140ms 双向 `Fade`；无溢出时不构建条。
 - inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
 - fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
+- 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding、边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
 - 图片不加载，HTML 惰性显示，链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，2 MiB 边界保持在内容层。
 - Source gutter 仍为原 0.75rem 加 6px。
 

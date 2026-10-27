@@ -841,9 +841,14 @@ impl MarkdownView {
                         }
                         cell
                     };
+                // Table text uses the same body size and line height as prose:
+                // cells inherit it, so the shaped runs, selection, links and
+                // wrapped heights all agree with the surrounding document.
                 let mut table = div()
                     .flex()
                     .flex_col()
+                    .text_size(gpui::px(body))
+                    .line_height(gpui::px(body * 1.6))
                     .rounded(radius)
                     .border_1()
                     .border_color(colors.border)
@@ -1108,9 +1113,13 @@ impl MarkdownView {
                                 .into_any_element()
                             })
                     };
+                // Same body size and line height as prose, so a nested table
+                // is not larger than the text around it.
                 let mut table = div()
                     .flex()
                     .flex_col()
+                    .text_size(gpui::px(body))
+                    .line_height(gpui::px(body * 1.6))
                     .rounded(radius)
                     .border_1()
                     .border_color(colors.border)

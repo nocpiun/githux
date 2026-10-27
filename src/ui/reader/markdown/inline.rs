@@ -47,6 +47,8 @@ pub struct LocalLayout {
     code_fonts: Vec<SharedString>,
     /// Alignment applied to the shaped rows (table columns).
     align: TextAlign,
+    /// The font size these rows were shaped at.
+    font_size: Pixels,
 }
 
 impl LocalLayout {
@@ -623,6 +625,7 @@ impl Element for Paragraph {
                     line_height,
                     code_fonts: code_fonts.clone(),
                     align,
+                    font_size,
                 };
                 size(known.width.unwrap_or(measured.ceil().min(width)), height)
             },
@@ -647,6 +650,7 @@ impl Element for Paragraph {
             let snapshot = Snapshot {
                 text: self.inline.text.clone(),
                 bounds,
+                font_size: layout.font_size,
                 line_height: layout.line_height,
                 code_fonts: layout.code_fonts.clone(),
                 pieces: layout
@@ -765,6 +769,7 @@ pub struct PieceSnapshot {
 pub struct Snapshot {
     pub text: String,
     pub bounds: Bounds<Pixels>,
+    pub font_size: Pixels,
     pub line_height: Pixels,
     pub code_fonts: Vec<SharedString>,
     pub pieces: Vec<PieceSnapshot>,

@@ -173,3 +173,5 @@ Source 行号左侧 padding 由 0.5rem 增至 0.75rem（`gutter_left` 常量）�
 再一条审查修复：表格单元格里的图片（图片不加载，alt 是唯一可读内容）其 alt 此前存在 builder 的 `notes` 里，单元格结束时只搬运正文/样式/链接，notes 被丢弃，导致整格为空。现在单元格结束会把 alt 作为普通文本并入单元格，复制与渲染都不再丢失 `![Build status](...)` 的可读描述。新增“单元格图片保留 alt”测试，并确认移除修复后该测试失败；主程序 454、reader 116 通过。
 
 再一条审查修复：上一版的 alt 是“追加到单元格末尾”，当图片前还有文字（`![W](w.svg) or ![L](l.svg)`）顺序就变成 ` or WL`。现在单元格内的图片在 `close()` 里就地保留 alt（清掉覆盖它的样式/链接区间），不再搬到末尾，显示与复制都保持原始顺序。回归改为断言单元格文本恰为 `Windows or Linux`，并确认退回旧实现时得到 `" or "`。主程序 454、reader 116 通过。
+
+负责人 2026-10-28 反馈：Markdown 表格文字明显比周围正文/列表/引用大。根因是顶层与嵌套两个 `Block::Table` 分支都没有显式字号，单元格的 `ParagraphView` 继承窗口默认样式（实测 16px），而正文用 `theme.text_size(TextSize::Base)` 换算出 13px；`Paragraph::request_layout` 读 `window.text_style()`/`window.line_height()`，所以绘制和几何同时被放大。修复是在两个表格的公共父容器上显式设置 `text_size(px(body))` 与 `line_height(px(body * 1.6))`，与正文同源，覆盖顶层、引用/列表/脚注内嵌套表格和分块重复表头；表头 `MEDIUM`/`fg_muted`、单元格 padding、边框、列对齐与宽度策略不变，inline code 仍用代码字体。新增两条真实布局回归：`table_text_uses_the_body_size_of_the_surrounding_prose` 断言单元格 shaped 字号/行高等于同屏正文（移除修复后实测 16px vs 13px 失败），`a_chunked_long_table_keeps_one_header_size_and_wraps_when_narrow` 覆盖滚到第二块重复表头后的高度一致与窄窗换行。主程序 456、reader 118 通过。

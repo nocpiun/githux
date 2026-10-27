@@ -1157,6 +1157,141 @@ fn dragging_a_link_back_to_its_start_does_not_open_it(cx: &mut TestAppContext) {
     );
 }
 #[gpui::test]
+fn table_text_uses_the_body_size_of_the_surrounding_prose(cx: &mut TestAppContext) {
+    // A top-level table, a table nested in a quote, and a table long enough to
+    // be split into virtualized chunks: all must shape at the prose size.
+    let mut body = String::from(
+        "Prose paragraph around the tables.
+
+| a | b |
+|---|---|
+| c | d |
+
+",
+    );
+    body.push_str(
+        "> | q | r |
+> |---|---|
+> | s | t |
+
+",
+    );
+    body.push_str(
+        "| h |
+|---|
+",
+    );
+    for row in 0..80 {
+        body.push_str(&format!(
+            "| row{row} |
+"
+        ));
+    }
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    frames(cx);
+    let prose = inline_snapshot(cx, "Prose paragraph around the tables.");
+    for text in ["a", "b", "c", "d", "q", "s", "h", "row0"] {
+        let cell = inline_snapshot(cx, text);
+        assert_eq!(
+            cell.font_size, prose.font_size,
+            "cell {text:?} must shape at the prose size"
+        );
+        assert_eq!(
+            cell.line_height, prose.line_height,
+            "cell {text:?} must use the prose line height"
+        );
+    }
+}
+#[gpui::test]
+fn a_chunked_long_table_keeps_one_header_size_and_wraps_when_narrow(cx: &mut TestAppContext) {
+    let mut body = String::from(
+        "Before the table.
+
+| Column | Meaning |
+|---|---|
+",
+    );
+    for row in 0..80 {
+        body.push_str(&format!(
+            "| value{row} | a meaning for {row} |
+"
+        ));
+    }
+    let (_, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+    frames(cx);
+    let prose = inline_snapshot(cx, "Before the table.");
+    let frame = cx.debug_bounds("reader-markdown").unwrap();
+    cx.simulate_mouse_move(frame.center(), None, Modifiers::none());
+    let scroll = |cx: &mut VisualTestContext, times: usize| {
+        for _ in 0..times {
+            cx.simulate_event(ScrollEvent {
+                position: frame.center(),
+                delta: ScrollDelta::Lines(point(0.0, -30.0)),
+                modifiers: Modifiers::none(),
+                touch_phase: Default::default(),
+                source: gpui::ScrollSource::Pointer,
+            });
+            frames(cx);
+        }
+    };
+    // Walk down until the real header is on screen, then keep going to the
+    // repeated header of a later virtualized chunk. Block 0 is the prose, so
+    // the first table chunk is block 1 and the next chunk is block 2.
+    let mut first_header = None;
+    for _ in 0..40 {
+        if let Some(bounds) = cx.debug_bounds("markdown-cell-1-0-0") {
+            first_header = Some(bounds);
+            break;
+        }
+        scroll(cx, 1);
+    }
+    let first_header = first_header.expect("the real header draws while scrolling");
+    let repeat_header = loop {
+        if let Some(bounds) = cx.debug_bounds("markdown-cell-2-0-0") {
+            break Some(bounds);
+        }
+        scroll(cx, 3);
+        if cx.debug_bounds("markdown-block-1").is_none()
+            && cx.debug_bounds("markdown-block-2").is_none()
+        {
+            break None;
+        }
+    };
+    let repeat_header = repeat_header.expect("the repeated chunk header draws");
+    assert_eq!(
+        repeat_header.size.height, first_header.size.height,
+        "the repeated header keeps the header height"
+    );
+    // Narrowing only rewraps the cells: same shaped size and line height.
+    cx.simulate_resize(gpui::size(px(320.0), px(600.0)));
+    frames(cx);
+    let narrow = inline_snapshot(cx, "Before the table.");
+    assert_eq!(
+        narrow.font_size, prose.font_size,
+        "narrowing keeps the size"
+    );
+    assert_eq!(
+        narrow.line_height, prose.line_height,
+        "narrowing keeps the line height"
+    );
+}
+#[gpui::test]
 fn table_cells_preserve_center_and_right_alignment(cx: &mut TestAppContext) {
     let (_, cx) = open(
         cx,
