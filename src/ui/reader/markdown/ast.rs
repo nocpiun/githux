@@ -782,3 +782,29 @@ mod review_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod quote_heading_test {
+    use super::*;
+    #[test]
+    fn a_heading_inside_a_quote_keeps_its_link_ranges() {
+        let doc = parse("> # [Guide](guide.md)");
+        let quote = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Quote { body, .. } => Some(body),
+                _ => None,
+            })
+            .expect("quote");
+        let heading = quote
+            .iter()
+            .find_map(|b| match b {
+                Block::Heading(1, inline) => Some(inline),
+                _ => None,
+            })
+            .expect("heading");
+        assert_eq!(heading.text, "Guide");
+        assert_eq!(heading.links, vec![(0..5, "guide.md".to_string())]);
+    }
+}

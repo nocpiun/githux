@@ -69,8 +69,10 @@ impl Layout {
             .map_or(0, |piece| piece.range.end)
     }
 
-    /// Byte position of the glyph under a pointer, for link presses.
-    fn glyph_index(&self, position: Point<Pixels>) -> usize {
+    /// The glyph byte under a pointer, for link presses. None outside the
+    /// row's actual glyphs: falling back to a caret would land on the next
+    /// row's first byte and open a link the pointer never touched.
+    fn glyph_at(&self, position: Point<Pixels>) -> Option<usize> {
         let local = position - self.bounds.origin;
         let row = (local.y / self.line_height).floor().max(0.0);
         for piece in self
@@ -78,15 +80,16 @@ impl Layout {
             .iter()
             .filter(|piece| (piece.origin.y / self.line_height).floor() == row)
         {
-            if local.x < piece.origin.x + piece.line.width() {
-                return piece.range.start
-                    + piece
-                        .line
-                        .index_for_x(local.x - piece.origin.x)
-                        .unwrap_or(piece.line.len());
+            let x = local.x - piece.origin.x;
+            if x >= Pixels::ZERO && x < piece.line.width() {
+                return piece
+                    .line
+                    .index_for_x(x)
+                    .map(|index| piece.range.start + index)
+                    .or(Some(piece.range.end));
             }
         }
-        self.index(position)
+        None
     }
 }
 
@@ -218,7 +221,7 @@ impl RenderOnce for ParagraphView {
                     .min_w_0()
                     .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         let at = down_layout.borrow().index(event.position);
-                        let glyph = link_layout.borrow().glyph_index(event.position);
+                        let glyph = link_layout.borrow().glyph_at(event.position);
                         down.update(cx, |state, cx| {
                             window.focus(&state.focus, cx);
                             if !event.modifiers.shift {
@@ -226,10 +229,12 @@ impl RenderOnce for ParagraphView {
                             }
                             state.head = at;
                             state.dragging = true;
-                            state.pressed_link = links
-                                .iter()
-                                .find(|(range, _)| range.contains(&glyph))
-                                .map(|(_, url)| url.clone());
+                            state.pressed_link = glyph.and_then(|glyph| {
+                                links
+                                    .iter()
+                                    .find(|(range, _)| range.contains(&glyph))
+                                    .map(|(_, url)| url.clone())
+                            });
                             cx.notify();
                         });
                     })
@@ -395,10 +400,13 @@ impl Element for Paragraph {
                     .unwrap_or(px(100_000.0))
                     .max(px(1.0));
                 // `shape_line` is single-line: hard breaks are kept as row
-                // boundaries by the wrapper below, not by the shaper.
+                // boundaries by the wrapper below, not by the shaper. Replacing
+                // each newline with one space keeps byte offsets identical, so
+                // rows, selection and links still index the original text.
                 let text = inline.text.trim_end_matches('\n').to_string();
+                let shaped_text = text.replace('\n', " ");
                 let shaped = window.text_system().shape_line(
-                    SharedString::from(text.clone()),
+                    SharedString::from(shaped_text),
                     font_size,
                     &shaped_runs,
                     None,

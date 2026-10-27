@@ -1373,3 +1373,57 @@ fn a_large_list_splits_into_virtualized_rows(cx: &mut TestAppContext) {
         "far list rows are not built"
     );
 }
+
+#[gpui::test]
+fn clicking_blank_row_space_does_not_open_the_next_rows_link(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "plain  \n[Guide](guide.md)".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(700.0), px(400.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, "plain\nGuide");
+    let first = &layout.pieces[0];
+    // Far right of the first row, beyond its glyphs but above the link row.
+    let blank = point(
+        layout.bounds.right() - px(2.0),
+        first.text_bounds.center().y,
+    );
+    cx.simulate_click(blank, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        reader
+            .read_with(cx, |r, _| r.last_action().cloned())
+            .is_none(),
+        "a press beyond the row's glyphs must not open the next row's link"
+    );
+}
+
+#[gpui::test]
+fn a_linked_heading_inside_a_quote_keeps_its_link(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "> # [Guide](guide.md)".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    assert!(
+        cx.debug_bounds("markdown-block-0").is_some(),
+        "the quote draws"
+    );
+    let layout = inline_snapshot(cx, "Guide");
+    let guide = layout.pieces[0].text_bounds;
+    cx.simulate_click(guide.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        reader.read_with(cx, |r, _| r.last_action().cloned()),
+        Some(ReaderAction::Link(LinkTarget::Repository(_)))
+    ));
+}

@@ -747,6 +747,20 @@ impl MarkdownView {
                     ),
                 )
                 .into_any_element(),
+            Block::Heading(level, inline) => {
+                // A nested heading keeps its selectable formatting and link
+                // ranges; only its size follows the heading level.
+                let view = self.paragraph_keyed(
+                    gpui::ElementId::Name(format!("reader-nested-{}-{}", id.0, id.1).into()),
+                    inline,
+                );
+                div()
+                    .text_size(gpui::px(body * (1.0 + f32::from(6 - level) * 0.15)))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(colors.fg)
+                    .child(view)
+                    .into_any_element()
+            }
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
@@ -754,7 +768,6 @@ impl MarkdownView {
                     Block::Image { alt, .. } => format!("{alt} — picture not loaded"),
                     Block::Html(text) => text.clone(),
                     Block::Math { tex, .. } => tex.clone(),
-                    Block::Heading(_, inline) => inline.text.clone(),
                     Block::Paragraph(inline) => inline.text.clone(),
                     _ => String::new(),
                 })
