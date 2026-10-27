@@ -7,17 +7,20 @@
 //! what reading a repository file needs: background parsing, only visible
 //! blocks built, selection in prose, real scrolling and link callbacks.
 
-use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use ely_core::theme::{ActiveTheme, Radius, TextSize};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ListAlignment, ListState, Render, SharedString, Task, Window, div, list, prelude::*, relative,
+    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, EmptyView, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, ListAlignment, ListState, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled, Task, Window, div,
+    list, prelude::*, relative,
 };
 
 use super::{
     ast::{self, Block, Inline},
-    inline::ParagraphView,
+    doctext::DocText,
+    inline::{LocalLayout, ParagraphView},
 };
 
 /// Texts this long parse at once; longer ones parse in the background.
@@ -39,6 +42,30 @@ struct Parsed {
     text: String,
     blocks: Vec<Block>,
     headings: Vec<ast::Heading>,
+    /// Read-order text and the unit table for document-wide selection.
+    doctext: DocText,
+}
+
+/// Marker type for a text-selection drag in the reading area.
+struct SelectDrag;
+
+/// The drawing context shared by every nested block of one item.
+#[derive(Clone, Copy)]
+struct NestedStyle<'a> {
+    colors: &'a ely_core::theme::Palette,
+    body: f32,
+    mono: &'a SharedString,
+    radius: gpui::Rems,
+}
+
+/// One pointer hit inside a paragraph.
+struct Hit {
+    /// Document offset under the pointer.
+    at: usize,
+    /// The link under the pointer's glyph, if any.
+    link: Option<String>,
+    /// Start of the paragraph's document range.
+    start: usize,
 }
 
 /// A link pressed in the document; the owner resolves it.
@@ -73,6 +100,22 @@ pub struct MarkdownView {
     /// Scroll to the top once the first read lands.
     pending_top: bool,
     hovered: bool,
+    /// The document-wide selection, in document text offsets.
+    anchor: usize,
+    head: usize,
+    dragging: bool,
+    /// A link pressed on the last press, opened only on a click without drag.
+    pressed_link: Option<String>,
+    /// Top-level block the press landed in, so a drag maps hits in order.
+    anchor_block: Option<usize>,
+    /// Real layouts of visible paragraphs, keyed by their unit index in the
+    /// document model (never by document start: two units can share one).
+    paragraphs: Rc<RefCell<std::collections::HashMap<usize, Rc<RefCell<LocalLayout>>>>>,
+    /// Unit index -> its document range, for pointer mapping.
+    paragraph_ranges: Rc<RefCell<std::collections::HashMap<usize, std::ops::Range<usize>>>>,
+    /// Painted bounds of visible top-level blocks, by block index.
+    block_bounds: Rc<RefCell<std::collections::HashMap<usize, Bounds<Pixels>>>>,
+    _focus_loss: Option<gpui::Subscription>,
 }
 
 impl EventEmitter<DocumentEvent> for MarkdownView {}
@@ -89,7 +132,7 @@ impl MarkdownView {
         let overdraw = window.rem_size() * 40.0;
         let list = ListState::new(0, ListAlignment::Top, overdraw);
         let focus = cx.focus_handle();
-        let view = Self {
+        let mut view = Self {
             parsed: Arc::new(Parsed::default()),
             text: String::new(),
             list,
@@ -99,7 +142,20 @@ impl MarkdownView {
             parsing: None,
             pending_top: false,
             hovered: false,
+            anchor: 0,
+            head: 0,
+            dragging: false,
+            pressed_link: None,
+            anchor_block: None,
+            paragraphs: Default::default(),
+            paragraph_ranges: Default::default(),
+            block_bounds: Default::default(),
+            _focus_loss: None,
         };
+        // Losing focus ends the gesture: a later move must not keep extending
+        // an old selection.
+        let focus = view.focus.clone();
+        view._focus_loss = Some(cx.on_blur(&focus, window, |view, _, cx| view.end_drag(cx)));
         // The list owns its offset; the overlay scrollbar lives outside it and
         // needs a frame whenever the list scrolls.
         let this = cx.entity().downgrade();
@@ -117,6 +173,9 @@ impl MarkdownView {
         self.generation += 1;
         self.text = text.into();
         self.pending_top = true;
+        // Old offsets belong to the old document.
+        self.clear_selection(cx);
+        self.paragraphs.borrow_mut().clear();
         let generation = self.generation;
         let text = self.text.clone();
         if text.len() > LARGEST_READ {
@@ -139,6 +198,7 @@ impl MarkdownView {
                     text,
                     blocks: read.blocks,
                     headings: read.headings,
+                    doctext: DocText::default(),
                 },
                 generation,
                 cx,
@@ -154,12 +214,19 @@ impl MarkdownView {
                         text,
                         blocks: read.blocks,
                         headings: read.headings,
+                        doctext: DocText::default(),
                     },
                     generation,
                     cx,
                 );
             });
         }));
+    }
+
+    /// Gives the document keyboard focus, as a press in the reading area does.
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// The text as last set.
@@ -196,15 +263,30 @@ impl MarkdownView {
         self.list.item_count()
     }
 
-    pub fn on_link(&mut self, handler: impl Fn(&str, &mut Window, &mut App) + 'static) {
-        self.on_link = Some(std::rc::Rc::new(handler));
-    }
-
+    /// Takes a completed read, unless a newer document replaced it. The
+    /// selection is cleared because old offsets belong to the old text.
     fn adopt(&mut self, mut read: Parsed, generation: u64, cx: &mut Context<Self>) {
         if generation != self.generation {
             return;
         }
         read.blocks = flatten(read.blocks);
+        read.doctext = DocText::build(&read.blocks);
+        #[cfg(test)]
+        if std::env::var_os("GITHUX_MD_DEBUG").is_some() {
+            for ix in 0..read.blocks.len() {
+                eprintln!(
+                    "block {ix}: units {:?}",
+                    read.doctext
+                        .units_of(ix)
+                        .map(|u| u.at.clone())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        self.clear_selection(cx);
+        self.paragraphs.borrow_mut().clear();
+        self.paragraph_ranges.borrow_mut().clear();
+        self.block_bounds.borrow_mut().clear();
         let old = self.parsed.blocks.len();
         let new = read.blocks.len();
         if old == 0 && new > 0 {
@@ -225,30 +307,238 @@ impl MarkdownView {
         cx.notify();
     }
 
-    fn paragraph(&self, ix: usize, inline: &Inline) -> ParagraphView {
-        self.paragraph_keyed(
-            gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
-            inline,
-        )
+    pub fn on_link(&mut self, handler: impl Fn(&str, &mut Window, &mut App) + 'static) {
+        self.on_link = Some(std::rc::Rc::new(handler));
     }
 
-    /// A paragraph with a key unique within the document. Selection and focus
-    /// live in the keyed state, so every selectable paragraph needs its own:
-    /// sharing a key between table cells or nested blocks would apply one
-    /// byte range to another string.
-    fn paragraph_keyed(&self, key: gpui::ElementId, inline: &Inline) -> ParagraphView {
-        let on_link = self.on_link.clone();
-        let view = ParagraphView::new(key, inline.clone());
-        match on_link {
-            Some(on_link) => view.on_link(on_link),
-            None => view,
+    /// The document-wide selection, in offsets of [`Self::selected_text`]'s
+    /// source. Empty when nothing is selected.
+    pub fn selection(&self) -> std::ops::Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+
+    /// The text a copy takes: the model in reading order, never the visible
+    /// blocks only.
+    pub fn selected_text(&self) -> String {
+        let range = self.selection();
+        self.parsed.doctext.slice(range).to_string()
+    }
+
+    /// The whole document's selectable text, for Ctrl+A and tests.
+    pub fn document_text(&self) -> &str {
+        self.parsed.doctext.text()
+    }
+
+    /// Selects the whole document, including blocks outside the viewport.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.anchor = 0;
+        self.head = self.parsed.doctext.range().end;
+        self.dragging = false;
+        self.pressed_link = None;
+        cx.notify();
+    }
+
+    /// Drops the selection and any drag, without touching scroll position.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.anchor != self.head || self.dragging || self.pressed_link.is_some() {
+            self.anchor = 0;
+            self.head = 0;
+            self.dragging = false;
+            self.pressed_link = None;
+            cx.notify();
         }
+    }
+
+    /// Copies the selection; false when there is nothing to copy.
+    pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
+        let text = self.selected_text();
+        if text.is_empty() {
+            return false;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
+    /// A press started a drag at document offset `at`.
+    fn press(
+        &mut self,
+        at: usize,
+        shift: bool,
+        link: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        if !shift {
+            self.anchor = at;
+        }
+        self.head = at;
+        self.dragging = true;
+        self.pressed_link = link;
+        cx.notify();
+    }
+
+    /// A drag moved to document offset `at`.
+    fn extend(&mut self, at: usize, cx: &mut Context<Self>) {
+        if self.dragging && self.head != at {
+            self.head = at;
+            cx.notify();
+        }
+    }
+
+    /// Ends a drag, including one released outside the viewport.
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.dragging = false;
+            cx.notify();
+        }
+    }
+
+    /// Opens the link recorded by the press, if the gesture stayed a click.
+    fn click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.anchor != self.head {
+            return;
+        }
+        if let Some(url) = self.pressed_link.take()
+            && let Some(on_link) = &self.on_link
+        {
+            on_link(&url, window, cx);
+        }
+    }
+
+    /// The document offset and link under a pointer, through the real layout
+    /// of whichever visible paragraph contains it.
+    fn hit_at(
+        &self,
+        position: Point<Pixels>,
+        layouts: &std::collections::HashMap<usize, Rc<RefCell<LocalLayout>>>,
+        order: &[usize],
+    ) -> Option<Hit> {
+        let ranges = self.paragraph_ranges.borrow();
+        let mut order = order.to_vec();
+        order.sort_unstable();
+        let mut best: Option<(usize, usize, Option<String>)> = None;
+        for index in order {
+            let Some(layout) = layouts.get(&index) else {
+                continue;
+            };
+            let layout = layout.borrow();
+            let Some(local) = layout.index_at(position) else {
+                continue;
+            };
+            let Some(doc) = ranges.get(&index) else {
+                continue;
+            };
+            let at = (doc.start + local).min(doc.end);
+            // Table cells and tight list items can share painted rows. In a
+            // forward drag keep the furthest hit, in a reverse drag the
+            // earliest, so the selection head keeps moving the way the
+            // pointer is travelling.
+            let forward = self.head >= self.anchor;
+            let replace = match &best {
+                None => true,
+                Some((known, _, _)) => {
+                    if forward {
+                        at > *known
+                    } else {
+                        at < *known
+                    }
+                }
+            };
+            if replace {
+                let link = layout
+                    .glyph_at(position)
+                    .and_then(|glyph| self.parsed.doctext.link_at(doc.start + glyph));
+                best = Some((at, at, link));
+            }
+        }
+        best.map(|(_, at, link)| Hit {
+            at,
+            link,
+            start: at,
+        })
+    }
+
+    /// The top-level block whose document units contain `start`.
+    fn block_of(&self, start: usize) -> Option<usize> {
+        (0..self.parsed.blocks.len()).find(|ix| {
+            self.parsed
+                .doctext
+                .units_of(*ix)
+                .any(|unit| unit.at.start <= start && start <= unit.at.end)
+        })
+    }
+
+    /// A document offset for a pointer outside any paragraph's glyphs.
+    ///
+    /// If the pointer is inside a visible block, its padding or its row gaps
+    /// still belong to that block: forward drags take the block's end and
+    /// backward drags its start. Outside every block, the same direction rule
+    /// extends to the last block above (forward) or first block below
+    /// (backward), which also covers dragging past the viewport.
+    fn edge_offset(&self, position: Point<Pixels>) -> usize {
+        let bounds = self.block_bounds.borrow();
+        let mut blocks: Vec<(usize, Bounds<Pixels>)> =
+            bounds.iter().map(|(ix, b)| (*ix, *b)).collect();
+        blocks.sort_by_key(|(ix, _)| *ix);
+        if blocks.is_empty() {
+            return self.head;
+        }
+        let forward = self.head >= self.anchor;
+        if let Some((ix, _)) = blocks
+            .iter()
+            .find(|(_, block)| position.y >= block.top() && position.y <= block.bottom())
+        {
+            return if forward {
+                self.block_end(*ix)
+            } else {
+                self.block_start(*ix)
+            };
+        }
+        if forward {
+            let mut chosen = blocks[0].0;
+            for (ix, block) in &blocks {
+                if block.top() <= position.y {
+                    chosen = *ix;
+                }
+            }
+            self.block_end(chosen)
+        } else {
+            let mut chosen = blocks[blocks.len() - 1].0;
+            for (ix, block) in blocks.iter().rev() {
+                if block.bottom() >= position.y {
+                    chosen = *ix;
+                }
+            }
+            self.block_start(chosen)
+        }
+    }
+
+    /// The document offset of the first selectable unit of block `ix`.
+    fn block_start(&self, ix: usize) -> usize {
+        self.parsed
+            .doctext
+            .units_of(ix)
+            .next()
+            .map_or(self.head, |unit| unit.at.start)
+    }
+
+    /// The document offset of the last selectable unit end of block `ix`.
+    fn block_end(&self, ix: usize) -> usize {
+        self.parsed
+            .doctext
+            .units_of(ix)
+            .last()
+            .map_or(self.head, |unit| unit.at.end)
     }
 
     fn item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(block) = self.parsed.blocks.get(ix) else {
             return div().into_any_element();
         };
+        // Consumed in exactly the order `DocText` registered units, so nested
+        // containers map to the right document offsets without path matching.
+        let unit_cursor = std::cell::Cell::new(0usize);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let mono = theme.mono_family.clone();
@@ -256,13 +546,23 @@ impl MarkdownView {
         let sm = f32::from(theme.text_size(TextSize::Sm).to_pixels(window.rem_size()));
         let xs = f32::from(theme.text_size(TextSize::Xs).to_pixels(window.rem_size()));
         let radius = theme.radius(Radius::Md);
+        let nested_style = NestedStyle {
+            colors: &colors,
+            body,
+            mono: &mono,
+            radius,
+        };
         let element = match block {
             Block::Paragraph(inline) => div()
                 .debug_selector(move || format!("markdown-paragraph-{ix}"))
                 .text_size(gpui::px(body))
                 .line_height(gpui::px(body * 1.6))
                 .text_color(colors.fg)
-                .child(self.paragraph(ix, inline))
+                .child(self.paragraph_unit(
+                    gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
+                    inline,
+                    self.next_unit(ix, &unit_cursor),
+                ))
                 .into_any_element(),
             Block::Heading(level, inline) => {
                 let scale = match level {
@@ -283,7 +583,11 @@ impl MarkdownView {
                     } else {
                         colors.fg
                     })
-                    .child(self.paragraph(ix, inline))
+                    .child(self.paragraph_unit(
+                        gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
+                        inline,
+                        self.next_unit(ix, &unit_cursor),
+                    ))
                     .into_any_element()
             }
             Block::Quote { kind, body: inner } => {
@@ -309,12 +613,11 @@ impl MarkdownView {
                                 .enumerate()
                                 .map(|(at, block)| {
                                     self.nested(
+                                        ix,
+                                        &unit_cursor,
                                         ("quote", format!("{ix}-{at}")),
                                         block,
-                                        &colors,
-                                        body,
-                                        &mono,
-                                        radius,
+                                        nested_style,
                                     )
                                 })
                                 .collect::<Vec<_>>(),
@@ -397,12 +700,11 @@ impl MarkdownView {
                                         .enumerate()
                                         .map(|(sub, block)| {
                                             self.nested(
+                                                ix,
+                                                &unit_cursor,
                                                 ("list", format!("{ix}-{at}-{sub}")),
                                                 block,
-                                                &colors,
-                                                body,
-                                                &mono,
-                                                radius,
+                                                nested_style,
                                             )
                                         })
                                         .collect::<Vec<_>>(),
@@ -421,11 +723,12 @@ impl MarkdownView {
                             .min_w_0()
                             .px_3()
                             .py_2()
-                            .child(this.paragraph_keyed(
+                            .child(this.paragraph_unit(
                                 gpui::ElementId::Name(
                                     format!("reader-cell-{ix}-{row}-{column}").into(),
                                 ),
                                 inline,
+                                this.next_unit(ix, &unit_cursor),
                             ));
                         if aligns.get(column) == Some(&ast::Align::Right) {
                             cell = cell.text_right();
@@ -523,12 +826,11 @@ impl MarkdownView {
                             .enumerate()
                             .map(|(at, block)| {
                                 self.nested(
+                                    ix,
+                                    &unit_cursor,
                                     ("footnote", format!("{ix}-{at}")),
                                     block,
-                                    &colors,
-                                    body,
-                                    &mono,
-                                    radius,
+                                    nested_style,
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -536,54 +838,59 @@ impl MarkdownView {
                 )
                 .into_any_element(),
         };
+        // Record the painted block bounds so a drag can locate blocks even
+        // over blank space or outside the viewport.
+        let bounds = self.block_bounds.clone();
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
             .px_3()
             .py_1()
+            .on_children_prepainted(move |painted, _, _| {
+                if let Some(painted) = painted.first().copied() {
+                    bounds.borrow_mut().insert(ix, painted);
+                }
+            })
             .child(element)
             .into_any_element()
     }
 
     /// A block nested inside a quote, list item or footnote.
+    ///
+    /// `ix` and `units` are the owning top-level block and its render-order
+    /// unit cursor, so this paragraph maps to the matching document range.
     fn nested(
         &self,
+        ix: usize,
+        units: &std::cell::Cell<usize>,
         id: (&'static str, String),
         block: &Block,
-        colors: &ely_core::theme::Palette,
-        body: f32,
-        mono: &SharedString,
-        radius: gpui::Rems,
+        style: NestedStyle<'_>,
     ) -> AnyElement {
-        // The complete nesting path includes every child block index, so two
-        // paragraphs in one item (or in sibling items) never share selection
-        // or focus state.
-        self.nested_keyed(id, block, colors, body, mono, radius)
+        self.nested_keyed(ix, units, id, block, style)
     }
 
     fn nested_keyed(
         &self,
+        ix: usize,
+        units: &std::cell::Cell<usize>,
         id: (&'static str, String),
         block: &Block,
-        colors: &ely_core::theme::Palette,
-        body: f32,
-        mono: &SharedString,
-        radius: gpui::Rems,
+        style: NestedStyle<'_>,
     ) -> AnyElement {
+        let NestedStyle {
+            colors,
+            body,
+            mono,
+            radius,
+        } = style;
         let key = gpui::ElementId::Name(format!("reader-{}-{}", id.0, id.1).into());
         match block {
-            Block::Paragraph(inline) => {
-                let on_link = self.on_link.clone();
-                let mut view = ParagraphView::new(key, inline.clone());
-                if let Some(on_link) = on_link {
-                    view = view.on_link(on_link);
-                }
-                div()
-                    .text_size(gpui::px(body))
-                    .line_height(gpui::px(body * 1.6))
-                    .text_color(colors.fg)
-                    .child(view)
-                    .into_any_element()
-            }
+            Block::Paragraph(inline) => div()
+                .text_size(gpui::px(body))
+                .line_height(gpui::px(body * 1.6))
+                .text_color(colors.fg)
+                .child(self.paragraph_unit(key, inline, self.next_unit(ix, units)))
+                .into_any_element(),
             Block::Code { text, .. } => div()
                 .px_3()
                 .py_2()
@@ -613,12 +920,11 @@ impl MarkdownView {
                                             .enumerate()
                                             .map(|(sub, block)| {
                                                 self.nested_keyed(
+                                                    ix,
+                                                    units,
                                                     (id.0, format!("{}-{at}-{sub}", id.1)),
                                                     block,
-                                                    colors,
-                                                    body,
-                                                    mono,
-                                                    radius,
+                                                    style,
                                                 )
                                             })
                                             .collect::<Vec<_>>(),
@@ -657,12 +963,11 @@ impl MarkdownView {
                             .enumerate()
                             .map(|(at, block)| {
                                 self.nested_keyed(
+                                    ix,
+                                    units,
                                     (id.0, format!("{}-quote-{at}", id.1)),
                                     block,
-                                    colors,
-                                    body,
-                                    mono,
-                                    radius,
+                                    style,
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -677,11 +982,12 @@ impl MarkdownView {
                             .min_w_0()
                             .px_3()
                             .py_2()
-                            .child(this.paragraph_keyed(
+                            .child(this.paragraph_unit(
                                 gpui::ElementId::Name(
                                     format!("reader-nested-cell-{}-{row}-{column}", id.1).into(),
                                 ),
                                 inline,
+                                this.next_unit(ix, units),
                             ));
                     if aligns.get(column) == Some(&ast::Align::Right) {
                         cell = cell.text_right();
@@ -735,12 +1041,11 @@ impl MarkdownView {
                             .enumerate()
                             .map(|(at, block)| {
                                 self.nested_keyed(
+                                    ix,
+                                    units,
                                     (id.0, format!("{}-fn-{at}", id.1)),
                                     block,
-                                    colors,
-                                    body,
-                                    mono,
-                                    radius,
+                                    style,
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -750,9 +1055,10 @@ impl MarkdownView {
             Block::Heading(level, inline) => {
                 // A nested heading keeps its selectable formatting and link
                 // ranges; only its size follows the heading level.
-                let view = self.paragraph_keyed(
+                let view = self.paragraph_unit(
                     gpui::ElementId::Name(format!("reader-nested-{}-{}", id.0, id.1).into()),
                     inline,
+                    self.next_unit(ix, units),
                 );
                 div()
                     .text_size(gpui::px(body * (1.0 + f32::from(6 - level) * 0.15)))
@@ -773,6 +1079,50 @@ impl MarkdownView {
                 })
                 .into_any_element(),
         }
+    }
+}
+
+impl MarkdownView {
+    /// A paragraph drawn from one unit of the document model.
+    ///
+    /// The paragraph paints the document's selection, registers its real
+    /// layout for pointer mapping, and keeps a key unique per nesting path.
+    fn paragraph_unit(
+        &self,
+        key: gpui::ElementId,
+        inline: &Inline,
+        unit: (usize, std::ops::Range<usize>),
+    ) -> ParagraphView {
+        let (index, doc) = unit;
+        self.paragraph_ranges
+            .borrow_mut()
+            .insert(index, doc.clone());
+        let layout = self
+            .paragraphs
+            .borrow_mut()
+            .entry(index)
+            .or_insert_with(|| Rc::new(RefCell::new(LocalLayout::default())))
+            .clone();
+        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout)
+    }
+
+    /// The next unit of block `ix`: its global unit index and document range.
+    fn next_unit(
+        &self,
+        ix: usize,
+        cursor: &std::cell::Cell<usize>,
+    ) -> (usize, std::ops::Range<usize>) {
+        let at = cursor.get();
+        cursor.set(at + 1);
+        let global = self.parsed.doctext.unit_index(ix, at);
+        let range = self
+            .parsed
+            .doctext
+            .units_of(ix)
+            .nth(at)
+            .map(|unit| unit.at.clone())
+            .unwrap_or(0..0);
+        (global.unwrap_or(usize::MAX), range)
     }
 }
 
@@ -819,10 +1169,20 @@ impl Render for MarkdownView {
             }),
         )
         .size_full();
+        // Pointer positions inside a visible paragraph map through that
+        // paragraph's real layout to document offsets; positions on blank
+        // reader space (padding, gaps, after the last block) clear selection.
+        let layouts = self.paragraphs.clone();
+        let mut order: Vec<usize> = layouts.borrow().keys().copied().collect();
+        order.sort_unstable();
+        let (down_layouts, move_layouts, up_layouts) =
+            (layouts.clone(), layouts.clone(), layouts.clone());
+        let (down_order, move_order) = (order.clone(), order.clone());
         div()
             .id("reader-markdown")
             .debug_selector(|| "reader-markdown".to_string())
             .track_focus(&self.focus)
+            .key_context("ReaderMarkdown")
             .relative()
             .size_full()
             .min_h_0()
@@ -830,6 +1190,74 @@ impl Render for MarkdownView {
             .px_2()
             .py_3()
             .child(list)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    window.focus(&view.focus, cx);
+                    let hit = view.hit_at(event.position, &down_layouts.borrow(), &down_order);
+                    match hit {
+                        Some(hit) => {
+                            if !event.modifiers.shift {
+                                view.anchor_block = view.block_of(hit.start);
+                            }
+                            view.press(hit.at, event.modifiers.shift, hit.link, window, cx)
+                        }
+                        // Blank space anywhere in the reading area starts a
+                        // fresh gesture and drops the previous selection.
+                        None => {
+                            view.anchor = 0;
+                            view.head = 0;
+                            view.dragging = true;
+                            view.pressed_link = None;
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
+            // A drag started in the reading area keeps receiving moves even
+            // when the pointer leaves this element, so selection can cross
+            // blocks and the viewport. `on_drag_move` is the capture-phase
+            // channel gpui provides for exactly this (see the scrollbar).
+            .on_drag(SelectDrag, |_, _, _, cx| cx.new(|_| EmptyView))
+            .on_drag_move(cx.listener(
+                move |view, event: &gpui::DragMoveEvent<SelectDrag>, _, cx| {
+                    if !view.dragging {
+                        return;
+                    }
+                    let position = event.event.position;
+                    if let Some(hit) = view.hit_at(position, &move_layouts.borrow(), &move_order) {
+                        view.extend(hit.at, cx);
+                    } else {
+                        view.extend(view.edge_offset(position), cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |view, _, window, cx| {
+                    view.end_drag(cx);
+                    view.click(window, cx);
+                    let _ = &up_layouts;
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| view.end_drag(cx)),
+            )
+            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                let keystroke = &event.keystroke;
+                if !keystroke.modifiers.secondary(cx) {
+                    return;
+                }
+                match keystroke.key.as_str() {
+                    "a" => {
+                        view.select_all(cx);
+                        cx.stop_propagation();
+                    }
+                    "c" if view.copy(cx) => cx.stop_propagation(),
+                    _ => {}
+                }
+            }))
             .into_any_element()
     }
 }

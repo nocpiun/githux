@@ -303,6 +303,7 @@ impl SourceView {
         line_height: Pixels,
         size: Pixels,
         gutter_gap: Pixels,
+        rem_size: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let line = self.line_text(ix);
@@ -322,13 +323,18 @@ impl SourceView {
         let gutter = div()
             .flex_none()
             .debug_selector(move || format!("reader-source-gutter-{ix}"))
-            .pl_2()
-            // Real layout space, never typed spaces: the original 0.75rem gap
-            // plus 6px, and the body's `TextLayout` keeps this same origin so
-            // selection and horizontal scrolling stay aligned.
+            // Real layout space, never typed spaces: 0.75rem from the left
+            // edge, then the original 0.75rem gap plus 6px before the text.
+            // The body's `TextLayout` keeps this same origin so selection and
+            // horizontal scrolling stay aligned.
+            .pl(gutter_left_padding(rem_size))
             .pr(gutter_gap)
             .text_color(colors.fg_subtle)
-            .child(format!("{:>width$}", ix + 1, width = digits));
+            .child(
+                div()
+                    .debug_selector(move || format!("reader-source-number-{ix}"))
+                    .child(format!("{:>width$}", ix + 1, width = digits)),
+            );
         let view = cx.entity().downgrade();
         let row_layout = layout.clone();
         let row_layout_for_paint = row_layout.clone();
@@ -414,7 +420,8 @@ impl Render for SourceView {
         let mono = theme.mono_family.clone();
         let size = theme.text_size(TextSize::Sm).to_pixels(window.rem_size());
         let line_height = (size * 1.6).round();
-        let gutter_gap = gutter_gap(window.rem_size());
+        let rem_size = window.rem_size();
+        let gutter_gap = gutter_gap(rem_size);
         let count = self.line_starts.len();
         let widest = self.widest;
         // Rows recorded by the *previous* frame's prepaint were complete by the
@@ -448,7 +455,7 @@ impl Render for SourceView {
             count,
             cx.processor(move |view: &mut Self, range: Range<usize>, _window, cx| {
                 range
-                    .map(|ix| view.row(ix, line_height, size, gutter_gap, cx))
+                    .map(|ix| view.row(ix, line_height, size, gutter_gap, rem_size, cx))
                     .collect::<Vec<_>>()
             }),
         )
@@ -556,6 +563,22 @@ impl SourceView {
         }
         .render(cx)
     }
+}
+
+/// The real left inset of the line-number gutter: the theme's 0.75rem step.
+///
+/// Twelve logical pixels at the default 16px rem, and it scales with the
+/// window's rem size like every other spacing value in the app.
+fn gutter_left_padding(rem: Pixels) -> Pixels {
+    gutter_left(rem)
+}
+
+/// The inset from the source view's left edge to the line number.
+///
+/// `pl_3` is the theme's 0.75rem step; it is spelled out here so the real
+/// layout value is testable rather than implied by a style class.
+pub fn gutter_left(rem: Pixels) -> Pixels {
+    rem * 0.75
 }
 
 /// The gap between the gutter's number and the source text.

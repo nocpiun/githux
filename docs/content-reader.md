@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-26（第二轮真实窗口反馈）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成 Ely 的 Markdown 预览或本模块的只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
+更新：2026-10-27（文档级选择与行号左距）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -22,7 +22,7 @@ view.update(cx, |view, _| {
 });
 ```
 
-- `PreparedBody::Utf8 { text, .. }` → `DocumentKind::Markdown` 走 Ely 的 `MarkdownDocument`（`Preview` 模式）；`DocumentKind::Source { language }` 走 [`SourceView`](../src/ui/reader/source.rs)。`DocumentKind::for_path` 只按文件名判断 README / `*.md` / `*.markdown` / `*.mdx`，集成层可覆盖。
+- `PreparedBody::Utf8 { text, .. }` → `DocumentKind::Markdown` 走 `src/ui/reader/markdown/` 内的本地组件（解析、布局、选择、滚动都由本模块持有）；`DocumentKind::Source { language }` 走 [`SourceView`](../src/ui/reader/source.rs)。`DocumentKind::for_path` 只按文件名判断 README / `*.md` / `*.markdown` / `*.mdx`，集成层可覆盖。
 - `Empty` / `Unsupported(..)` / `TooLarge { .. }` → 居中状态面板，分别是「文件为空」「无法作为文本显示」「超出读取上限」；这些是阅读器的实际结果，不是给未设计页面用的占位卡片。
 - `ReaderView::show(body, kind, window, cx)` 在同一上下文里替换正文；`ReaderView::handle_link(url, ...)` 供集成层或测试直接投递一次链接动作。
 

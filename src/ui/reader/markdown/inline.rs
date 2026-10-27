@@ -3,19 +3,18 @@
 //!
 //! Code padding is a layout advance and participates in wrapping, painting and
 //! pointer hit testing, so the box can never overlap its neighbours and a copy
-//! never contains padding characters. Selection, links and code share the same
-//! shaped glyph positions. The approach follows Ely's reader paragraph
-//! (`ely-documents` @ `30c66fe1`, MIT), rewritten here so the reader owns the
-//! wrapping, the style box and the test hooks.
+//! never contains padding characters. Selection is owned by the document: a
+//! paragraph receives the document-wide range to paint and reports pointer
+//! positions as document offsets, so a drag can cross blocks. The paragraph
+//! therefore keeps no selection of its own.
 
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use ely_core::theme::ActiveTheme;
 use gpui::{
-    App, AvailableSpace, Bounds, ClipboardItem, Element, ElementId, Entity, FocusHandle,
-    GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    MouseButton, ParentElement, Pixels, Point, RenderOnce, ShapedLine, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, fill, point, prelude::*, px, size,
+    App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, HighlightStyle,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Point, RenderOnce, ShapedLine, SharedString,
+    Styled, Window, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -38,8 +37,9 @@ struct Piece {
     closes: bool,
 }
 
+/// One paragraph's real layout, shared with the document that owns selection.
 #[derive(Default)]
-struct Layout {
+pub struct LocalLayout {
     pieces: Vec<Piece>,
     bounds: Bounds<Pixels>,
     line_height: Pixels,
@@ -47,7 +47,68 @@ struct Layout {
     code_fonts: Vec<SharedString>,
 }
 
-impl Layout {
+impl LocalLayout {
+    /// Where this paragraph was painted last frame.
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds
+    }
+
+    /// The local byte offset under `position`, or None outside the text.
+    ///
+    /// Hits use the real shaped rows, not the paragraph's padding box: a point
+    /// in the gap below a line, or to the right of a short line, belongs to
+    /// blank reader space so the document can clear or extend consistently.
+    pub fn index_at(&self, position: Point<Pixels>) -> Option<usize> {
+        if self.bounds.size.height <= Pixels::ZERO || !self.bounds.contains(&position) {
+            return None;
+        }
+        let local = position - self.bounds.origin;
+        let row = (local.y / self.line_height).floor().max(0.0);
+        let mut rows: Vec<f32> = self
+            .pieces
+            .iter()
+            .map(|piece| (piece.origin.y / self.line_height).floor())
+            .collect();
+        rows.sort_unstable_by(|a, b| a.total_cmp(b));
+        rows.dedup();
+        if !rows.contains(&row) {
+            return None;
+        }
+        // The row ends after its last glyph: a press in the trailing space of
+        // a short line is blank reader space, not that line's end.
+        let right = self
+            .pieces
+            .iter()
+            .filter(|piece| (piece.origin.y / self.line_height).floor() == row)
+            .map(|piece| piece.origin.x + piece.line.width())
+            .fold(Pixels::ZERO, Pixels::max);
+        if local.x > right + px(PAD_X) {
+            return None;
+        }
+        Some(self.index(position))
+    }
+
+    /// The glyph byte under `position`; None when it is not over a glyph.
+    pub fn glyph_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let local = position - self.bounds.origin;
+        let row = (local.y / self.line_height).floor().max(0.0);
+        for piece in self
+            .pieces
+            .iter()
+            .filter(|piece| (piece.origin.y / self.line_height).floor() == row)
+        {
+            let x = local.x - piece.origin.x;
+            if x >= Pixels::ZERO && x < piece.line.width() {
+                return piece
+                    .line
+                    .index_for_x(x)
+                    .map(|index| piece.range.start + index)
+                    .or(Some(piece.range.end));
+            }
+        }
+        None
+    }
+
     /// Byte position of a pointer, snapped to the nearest grapheme boundary.
     fn index(&self, position: Point<Pixels>) -> usize {
         let local = position - self.bounds.origin;
@@ -68,72 +129,38 @@ impl Layout {
             .find(|piece| (piece.origin.y / self.line_height).floor() <= row)
             .map_or(0, |piece| piece.range.end)
     }
-
-    /// The glyph byte under a pointer, for link presses. None outside the
-    /// row's actual glyphs: falling back to a caret would land on the next
-    /// row's first byte and open a link the pointer never touched.
-    fn glyph_at(&self, position: Point<Pixels>) -> Option<usize> {
-        let local = position - self.bounds.origin;
-        let row = (local.y / self.line_height).floor().max(0.0);
-        for piece in self
-            .pieces
-            .iter()
-            .filter(|piece| (piece.origin.y / self.line_height).floor() == row)
-        {
-            let x = local.x - piece.origin.x;
-            if x >= Pixels::ZERO && x < piece.line.width() {
-                return piece
-                    .line
-                    .index_for_x(x)
-                    .map(|index| piece.range.start + index)
-                    .or(Some(piece.range.end));
-            }
-        }
-        None
-    }
 }
 
-/// Selection and the link the last press landed on.
-struct State {
-    focus: FocusHandle,
-    anchor: usize,
-    head: usize,
-    dragging: bool,
-    pressed_link: Option<String>,
-}
-
-impl State {
-    fn range(&self) -> Range<usize> {
-        self.anchor.min(self.head)..self.anchor.max(self.head)
-    }
-}
-
-/// Callback for a pressed link.
-pub type OnLink = Rc<dyn Fn(&str, &mut Window, &mut App)>;
-
-/// A read-only paragraph that can be selected and copied.
+/// A read-only paragraph drawn inside a document that owns selection.
 #[derive(IntoElement)]
 pub struct ParagraphView {
     id: ElementId,
     inline: Inline,
-    on_link: Option<OnLink>,
+    /// This paragraph's range in the document text model.
+    doc: Range<usize>,
+    /// The document's current selection, in document offsets.
+    selection: Range<usize>,
+    layout: Rc<RefCell<LocalLayout>>,
     /// Shown before the inline text, such as a list bullet.
     prefix: Option<SharedString>,
 }
 
 impl ParagraphView {
-    pub fn new(id: impl Into<ElementId>, inline: Inline) -> Self {
+    pub fn new(
+        id: impl Into<ElementId>,
+        inline: Inline,
+        doc: Range<usize>,
+        selection: Range<usize>,
+        layout: Rc<RefCell<LocalLayout>>,
+    ) -> Self {
         Self {
             id: id.into(),
             inline,
-            on_link: None,
+            doc,
+            selection,
+            layout,
             prefix: None,
         }
-    }
-
-    pub fn on_link(mut self, on_link: OnLink) -> Self {
-        self.on_link = Some(on_link);
-        self
     }
 
     pub fn prefix(mut self, prefix: impl Into<SharedString>) -> Self {
@@ -143,22 +170,8 @@ impl ParagraphView {
 }
 
 impl RenderOnce for ParagraphView {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| State {
-            focus: cx.focus_handle(),
-            anchor: 0,
-            head: 0,
-            dragging: false,
-            pressed_link: None,
-        });
-        let focus = state.read(cx).focus.clone();
-        let layout = Rc::new(RefCell::new(Layout::default()));
-        let (down, moving, up, keys) = (state.clone(), state.clone(), state.clone(), state.clone());
-        let (down_layout, move_layout, link_layout) =
-            (layout.clone(), layout.clone(), layout.clone());
-        let text = self.inline.text.clone();
-        let links = self.inline.links.clone();
-        let on_link = self.on_link;
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
         let prefix = self.prefix;
         div()
             .id(self.id)
@@ -167,116 +180,29 @@ impl RenderOnce for ParagraphView {
             .items_start()
             .gap_2()
             .w_full()
-            .track_focus(&focus)
-            .cursor_text()
-            .on_key_down({
-                let keys = keys.clone();
-                let text = text.clone();
-                move |event, _, cx| {
-                    if !event.keystroke.modifiers.secondary(cx) {
-                        return;
-                    }
-                    match event.keystroke.key.as_str() {
-                        "c" => {
-                            let range = keys.read(cx).range();
-                            if !range.is_empty() {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    text[range].to_string(),
-                                ));
-                                cx.stop_propagation();
-                            }
-                        }
-                        "a" => keys.update(cx, |state, cx| {
-                            state.anchor = 0;
-                            state.head = text.len();
-                            cx.notify();
-                        }),
-                        _ => {}
-                    }
-                }
-            })
             .when_some(prefix, |row, prefix| {
                 row.child(
                     div()
                         .flex_none()
-                        .text_color(cx.theme().colors.fg_muted)
+                        .text_color(theme.colors.fg_muted)
                         .child(prefix),
                 )
             })
-            .on_click({
-                let state = state.clone();
-                move |_, window, cx| {
-                    let state = state.read(cx);
-                    if state.anchor == state.head
-                        && let Some(url) = state.pressed_link.clone()
-                        && let Some(on_link) = &on_link
-                    {
-                        on_link(&url, window, cx);
-                    }
-                }
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                        let at = down_layout.borrow().index(event.position);
-                        let glyph = link_layout.borrow().glyph_at(event.position);
-                        down.update(cx, |state, cx| {
-                            window.focus(&state.focus, cx);
-                            if !event.modifiers.shift {
-                                state.anchor = at;
-                            }
-                            state.head = at;
-                            state.dragging = true;
-                            state.pressed_link = glyph.and_then(|glyph| {
-                                links
-                                    .iter()
-                                    .find(|(range, _)| range.contains(&glyph))
-                                    .map(|(_, url)| url.clone())
-                            });
-                            cx.notify();
-                        });
-                    })
-                    .on_mouse_move(move |event, _, cx| {
-                        if moving.read(cx).dragging && event.dragging() {
-                            let at = move_layout.borrow().index(event.position);
-                            moving.update(cx, |state, cx| {
-                                if state.head != at {
-                                    state.head = at;
-                                    cx.notify();
-                                }
-                            });
-                        }
-                    })
-                    .on_mouse_up(MouseButton::Left, {
-                        let up = up.clone();
-                        move |_, _, cx| {
-                            up.update(cx, |state, cx| {
-                                state.dragging = false;
-                                cx.notify();
-                            })
-                        }
-                    })
-                    .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                        up.update(cx, |state, cx| {
-                            state.dragging = false;
-                            cx.notify();
-                        })
-                    })
-                    .child(Paragraph {
-                        inline: self.inline,
-                        layout,
-                        selection: state,
-                    }),
-            )
+            .child(div().flex_1().min_w_0().child(Paragraph {
+                inline: self.inline,
+                doc: self.doc,
+                selection: self.selection,
+                layout: self.layout,
+            }))
+            .into_any_element()
     }
 }
 
 struct Paragraph {
     inline: Inline,
-    layout: Rc<RefCell<Layout>>,
-    selection: Entity<State>,
+    doc: Range<usize>,
+    selection: Range<usize>,
+    layout: Rc<RefCell<LocalLayout>>,
 }
 
 impl IntoElement for Paragraph {
@@ -562,7 +488,7 @@ impl Element for Paragraph {
                     measured = measured.max(x);
                 }
                 let height = line_height * rows.len().max(1);
-                *layout.borrow_mut() = Layout {
+                *layout.borrow_mut() = LocalLayout {
                     pieces,
                     bounds: Bounds::default(),
                     line_height,
@@ -628,7 +554,14 @@ impl Element for Paragraph {
         cx: &mut App,
     ) {
         let layout = self.layout.borrow();
-        let selected = self.selection.read(cx).range();
+        // The document's selection, translated into this paragraph's bytes.
+        let selected =
+            self.selection.start.max(self.doc.start)..self.selection.end.min(self.doc.end);
+        let selected = if selected.start < selected.end {
+            selected.start - self.doc.start..selected.end - self.doc.start
+        } else {
+            0..0
+        };
         let (box_color, selection) = {
             let theme = cx.theme();
             (theme.colors.sunken, theme.colors.selection)
@@ -674,7 +607,7 @@ impl Element for Paragraph {
     }
 }
 
-fn code_box(origin: Point<Pixels>, piece: &Piece, layout: &Layout) -> Bounds<Pixels> {
+fn code_box(origin: Point<Pixels>, piece: &Piece, layout: &LocalLayout) -> Bounds<Pixels> {
     Bounds::new(
         origin - point(px(PAD_X), px(-PAD_Y)),
         size(

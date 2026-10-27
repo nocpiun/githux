@@ -9,6 +9,7 @@
 //! `docs/content-reader-markdown-patch.md` and never copied over as a whole.
 
 mod ast;
+mod doctext;
 mod document;
 mod inline;
 

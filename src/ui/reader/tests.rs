@@ -484,15 +484,39 @@ fn gutter_padding_keeps_selection_coordinates_aligned(cx: &mut TestAppContext) {
             .width
             .into()
     });
-    let gap = f32::from(gutter.size.width) - 8.0 - number;
+    let gap =
+        f32::from(gutter.size.width) - f32::from(super::source::gutter_left(px(16.0))) - number;
+    assert_eq!(
+        super::source::gutter_left(px(16.0)),
+        px(12.0),
+        "line numbers start 0.75rem from the left edge"
+    );
+    // The number itself is inset by that real padding: the number box starts
+    // 12px after the gutter's left edge, and the body still starts after the
+    // number plus the unchanged right gap.
+    let number_box = cx
+        .debug_bounds("reader-source-number-0")
+        .expect("the number box draws");
+    // 1-digit and 5-digit rows share the same left inset and text column.
+    for ix in [0usize, 1] {
+        let key: &'static str = Box::leak(format!("reader-source-number-{ix}").into_boxed_str());
+        let box_of = cx.debug_bounds(key).expect("number draws");
+        let inset = f32::from(box_of.left() - gutter.left());
+        assert!((inset - 12.0).abs() <= 1.0, "row {ix} inset {inset}");
+    }
+    let left_inset = f32::from(number_box.left() - gutter.left());
+    assert!(
+        (left_inset - 12.0).abs() <= 1.0,
+        "the line number starts 0.75rem from the left edge: {left_inset}"
+    );
     assert!(
         (gap - f32::from(expected)).abs() <= 1.0,
-        "the gutter gap is the original 0.75rem plus 6px: {gap} vs {}",
+        "the right gap is still the original 0.75rem plus 6px: {gap} vs {}",
         f32::from(expected)
     );
     assert!(
         gap > 12.0,
-        "the gap grew past the original 0.75rem baseline: {gap}"
+        "the right gap stayed past the original 0.75rem baseline: {gap}"
     );
     cx.simulate_click(
         point(body.left() + px(2.0), body.center().y),
@@ -971,7 +995,7 @@ fn inline_code_has_real_padding_code_font_and_wrapped_geometry(cx: &mut TestAppC
 fn long_inline_code_wraps_and_drags_across_code_spans(cx: &mut TestAppContext) {
     let long = "long_code_".repeat(50);
     let rendered = format!("中文 🚀 first code中间 second {long} end");
-    let (_, cx) = open(
+    let (reader, cx) = open(
         cx,
         PreparedBody::Utf8 {
             text: format!("中文 🚀 `first code`中间 `second {long}` end"),
@@ -1003,16 +1027,16 @@ fn long_inline_code_wraps_and_drags_across_code_spans(cx: &mut TestAppContext) {
         last.text_bounds.right() + px(1.0),
         last.text_bounds.center().y,
     );
-    cx.simulate_mouse_move(start, None, Modifiers::none());
-    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    // Selection is document-wide now: drag from the paragraph start to its
+    // end and copy. The copied text must be the same read-order text the
+    // model holds, with inline-code padding absent.
+    drag(cx, &[start, end]);
     frames(cx);
-    cx.simulate_keystrokes("secondary-c");
-    cx.run_until_parked();
-    assert_eq!(
-        cx.read_from_clipboard().and_then(|i| i.text()),
-        Some(rendered)
+    let copied = copy_selection(&reader, cx);
+    assert_eq!(copied, rendered, "cross-code-span selection copies exactly");
+    assert!(
+        !copied.contains("  "),
+        "no padding was inserted: {copied:?}"
     );
 }
 
@@ -1274,8 +1298,8 @@ fn wrapped_code_continuation_keeps_its_left_inset(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn table_cell_paragraphs_have_independent_selection_state(cx: &mut TestAppContext) {
-    let (_, cx) = open(
+fn table_cells_keep_unique_keys_but_share_document_selection(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
         cx,
         PreparedBody::Utf8 {
             text: "| one | two |\n|---|---|\n| alpha | beta |".into(),
@@ -1284,8 +1308,23 @@ fn table_cell_paragraphs_have_independent_selection_state(cx: &mut TestAppContex
         DocumentKind::Markdown,
     );
     frames(cx);
+    // Each cell is its own element and its own unit, so a press in one cell
+    // cannot borrow another cell's key or text offsets.
+    for id in ["markdown-cell-0-1-0", "markdown-cell-0-1-1"] {
+        assert!(cx.debug_bounds(id).is_some(), "{id} draws");
+    }
     let cell = cx.debug_bounds("markdown-cell-0-1-0").unwrap();
-    cx.simulate_click(cell.center(), Modifiers::none());
+    cx.simulate_click(
+        point(cell.left() + px(30.0), cell.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    // Selection is document-wide: Ctrl+A takes the whole model in read order,
+    // never one cell's private range.
+    reader.update_in(cx, |r, w, cx| {
+        let document = r.markdown().unwrap().clone();
+        document.update(cx, |document, cx| document.focus(w, cx));
+    });
     frames(cx);
     cx.simulate_keystrokes("secondary-a");
     frames(cx);
@@ -1295,9 +1334,14 @@ fn table_cell_paragraphs_have_independent_selection_state(cx: &mut TestAppContex
         .read_from_clipboard()
         .and_then(|i| i.text())
         .unwrap_or_default();
+    let expected = reader.read_with(cx, |r, cx| {
+        r.markdown().unwrap().read(cx).document_text().to_string()
+    });
+    assert!(!expected.is_empty());
+    assert_eq!(copied, expected, "Ctrl+A copies the whole document");
     assert!(
-        copied.is_empty() || copied == "alpha" || copied == "alpha | beta",
-        "a cell copies its own text only: {copied:?}"
+        copied.contains("alpha") && copied.contains("beta"),
+        "{copied:?}"
     );
 }
 
@@ -1472,4 +1516,445 @@ fn a_dense_link_paragraph_lays_out_within_budget(cx: &mut TestAppContext) {
         start.elapsed()
     );
     assert!(reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).text().len()) > 70_000);
+}
+
+/// A heading, prose with inline code and a link, a list and a quote: enough
+/// to drag across several different elements.
+const CROSS_BLOCK: &str = "# Title\n\nThe first paragraph with `code` and a [guide](guide.md).\n\n- item one\n- item two\n\n> quoted line\n\n```rust\nfn main() {}\n```\n";
+
+fn doc_text(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> String {
+    reader.read_with(cx, |r, cx| {
+        r.markdown().unwrap().read(cx).document_text().to_string()
+    })
+}
+
+fn selection(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> std::ops::Range<usize> {
+    reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).selection())
+}
+
+fn selected(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> String {
+    reader.read_with(cx, |r, cx| r.markdown().unwrap().read(cx).selected_text())
+}
+
+fn copy_selection(_reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> String {
+    cx.read_from_clipboard();
+    cx.simulate_keystrokes("secondary-c");
+    cx.run_until_parked();
+    cx.read_from_clipboard()
+        .and_then(|i| i.text())
+        .unwrap_or_default()
+}
+
+fn drag(cx: &mut VisualTestContext, points: &[gpui::Point<gpui::Pixels>]) {
+    let Some((start, rest)) = points.split_first() else {
+        return;
+    };
+    cx.simulate_mouse_move(*start, None, Modifiers::none());
+    cx.simulate_mouse_down(*start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    for point in rest {
+        // gpui creates the drag on the first move past the threshold and only
+        // dispatches from the next one, so a drag needs a second move.
+        cx.simulate_mouse_move(*point, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(*point, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    if let Some(end) = points.last() {
+        cx.simulate_mouse_up(*end, MouseButton::Left, Modifiers::none());
+    }
+}
+
+#[gpui::test]
+fn dragging_from_a_heading_into_prose_selects_across_elements(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: CROSS_BLOCK.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    frames(cx);
+    let heading = cx.debug_bounds("markdown-block-0").unwrap();
+    let prose = cx.debug_bounds("markdown-block-1").unwrap();
+    drag(
+        cx,
+        &[
+            point(heading.left() + px(12.0), heading.center().y),
+            point(prose.left() + px(120.0), prose.center().y),
+        ],
+    );
+    frames(cx);
+    let range = selection(&reader, cx);
+    assert!(
+        range.start < range.end,
+        "a cross-block drag selects: {range:?}"
+    );
+    let text = selected(&reader, cx);
+    assert!(
+        text.contains("Title"),
+        "selection covers the heading: {text:?}"
+    );
+    assert!(
+        text.contains("first para"),
+        "and reaches the prose: {text:?}"
+    );
+    assert_eq!(
+        copy_selection(&reader, cx),
+        text,
+        "copy matches the selection"
+    );
+}
+
+#[gpui::test]
+fn dragging_backwards_from_prose_into_a_heading_works_too(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: CROSS_BLOCK.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    frames(cx);
+    let heading = cx.debug_bounds("markdown-block-0").unwrap();
+    let prose = cx.debug_bounds("markdown-block-1").unwrap();
+    drag(
+        cx,
+        &[
+            point(prose.left() + px(300.0), prose.center().y),
+            point(heading.left() + px(18.0), heading.center().y),
+        ],
+    );
+    frames(cx);
+    let text = selected(&reader, cx);
+    assert!(
+        text.contains("Title"),
+        "reverse drag reaches the heading: {text:?}"
+    );
+    assert_eq!(copy_selection(&reader, cx), text);
+}
+
+#[gpui::test]
+fn dragging_across_blocks_and_blank_gaps_keeps_extending(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: CROSS_BLOCK.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    frames(cx);
+    let prose = cx.debug_bounds("markdown-block-1").unwrap();
+    let list = cx.debug_bounds("markdown-block-2").unwrap();
+    let quote = cx.debug_bounds("markdown-block-3").unwrap();
+    // The second point sits in the blank gap between prose and list.
+    drag(
+        cx,
+        &[
+            point(prose.left() + px(10.0), prose.top() + px(6.0)),
+            point(prose.center().x, prose.bottom() + px(2.0)),
+            point(list.left() + px(40.0), list.center().y),
+            point(quote.left() + px(220.0), quote.center().y),
+            point(quote.left() + px(220.0), quote.center().y),
+        ],
+    );
+    frames(cx);
+    let text = selected(&reader, cx);
+    assert!(text.contains("first paragraph"), "{text:?}");
+    assert!(
+        text.contains("item one"),
+        "the selection crossed the list: {text:?}"
+    );
+    assert!(text.contains("quoted"), "and reached the quote: {text:?}");
+    assert!(
+        !text.contains("fn main"),
+        "it stops before the code block: {text:?}"
+    );
+    assert_eq!(copy_selection(&reader, cx), text);
+}
+
+#[gpui::test]
+fn ctrl_a_selects_the_whole_document_including_unrendered_blocks(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(700.0), px(400.0)));
+    frames(cx);
+    assert!(
+        cx.debug_bounds("markdown-block-200").is_none(),
+        "far blocks are virtualized"
+    );
+    let body = cx.debug_bounds("markdown-block-0").unwrap();
+    cx.simulate_click(
+        point(body.left() + px(20.0), body.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let full = doc_text(&reader, cx);
+    assert_eq!(
+        selection(&reader, cx),
+        0..full.len(),
+        "Ctrl+A covers the model, not one block"
+    );
+    assert!(
+        full.contains("Section 5000"),
+        "the model includes off-screen content"
+    );
+    assert_eq!(selected(&reader, cx), full);
+    assert_eq!(copy_selection(&reader, cx), full);
+}
+
+#[gpui::test]
+fn pressing_blank_reader_space_clears_the_selection(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: CROSS_BLOCK.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    frames(cx);
+    let body = cx.debug_bounds("markdown-block-1").unwrap();
+    cx.simulate_click(
+        point(body.left() + px(20.0), body.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let before = selection(&reader, cx);
+    assert!(before.start < before.end);
+    let viewport = cx.debug_bounds("reader-markdown").unwrap();
+    // The reading area's right padding is blank space, not a text element.
+    cx.simulate_click(
+        point(viewport.right() - px(1.0), viewport.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    assert_eq!(
+        selection(&reader, cx),
+        0..0,
+        "blank space clears the selection"
+    );
+    assert!(selected(&reader, cx).is_empty());
+    let _ = copy_selection(&reader, cx);
+    assert!(
+        cx.read_from_clipboard()
+            .and_then(|i| i.text())
+            .unwrap_or_default()
+            .is_empty(),
+        "an empty selection writes nothing"
+    );
+}
+
+#[gpui::test]
+fn dragging_past_the_viewport_keeps_selecting_and_release_ends_it(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::large_markdown(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(700.0), px(320.0)));
+    frames(cx);
+    let body = cx.debug_bounds("markdown-block-0").unwrap();
+    let start = point(body.left() + px(12.0), body.center().y);
+    let outside = point(start.x, body.bottom() + px(400.0));
+    cx.simulate_mouse_move(start, None, Modifiers::none());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    // First move arms the drag, the second one is dispatched to it.
+    cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
+    frames(cx);
+    cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
+    frames(cx);
+    let grown = selection(&reader, cx);
+    assert!(
+        grown.start < grown.end,
+        "a drag beyond the viewport still selects"
+    );
+    cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+    frames(cx);
+    let after_release = selection(&reader, cx);
+    cx.simulate_mouse_move(
+        point(start.x, body.top() + px(4.0)),
+        None,
+        Modifiers::none(),
+    );
+    frames(cx);
+    assert_eq!(
+        selection(&reader, cx),
+        after_release,
+        "moving without a button no longer extends the old selection"
+    );
+}
+
+#[gpui::test]
+fn a_drag_that_crosses_a_link_does_not_open_it(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: CROSS_BLOCK.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    frames(cx);
+    let prose = cx.debug_bounds("markdown-block-1").unwrap();
+    drag(
+        cx,
+        &[
+            point(prose.left() + px(10.0), prose.center().y),
+            point(prose.right() - px(20.0), prose.center().y),
+        ],
+    );
+    frames(cx);
+    assert!(
+        reader
+            .read_with(cx, |r, _| r.last_action().cloned())
+            .is_none(),
+        "a selection drag never opens a link"
+    );
+    assert!(selection(&reader, cx).start < selection(&reader, cx).end);
+}
+
+#[gpui::test]
+fn replacing_the_document_drops_the_old_selection(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: CROSS_BLOCK.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let body = cx.debug_bounds("markdown-block-0").unwrap();
+    cx.simulate_click(
+        point(body.left() + px(20.0), body.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    reader.update_in(cx, |r, w, cx| {
+        let document = r.markdown().unwrap().clone();
+        document.update(cx, |document, cx| document.focus(w, cx));
+    });
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    assert!(selection(&reader, cx).start < selection(&reader, cx).end);
+    reader.update_in(cx, |r, w, cx| {
+        r.show(
+            PreparedBody::Utf8 {
+                text: "# Replaced".into(),
+                has_bom: false,
+            },
+            DocumentKind::Markdown,
+            w,
+            cx,
+        )
+    });
+    frames(cx);
+    assert_eq!(
+        selection(&reader, cx),
+        0..0,
+        "old offsets belonged to the old text"
+    );
+    assert!(!selected(&reader, cx).contains("Title"));
+}
+
+#[gpui::test]
+fn a_large_single_list_selects_all_without_building_every_row(cx: &mut TestAppContext) {
+    let source = "- item text\n".repeat(20_000);
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    frames(cx);
+    let body = cx.debug_bounds("markdown-block-0").unwrap();
+    // The list is split into virtualized rows; the first row is on screen.
+    cx.simulate_click(
+        point(body.left() + px(20.0), body.center().y),
+        Modifiers::none(),
+    );
+    frames(cx);
+    let start = std::time::Instant::now();
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "Ctrl+A over a huge list stays fast: {:?}",
+        start.elapsed()
+    );
+    // Ctrl+A must work from the document focus alone.
+    reader.update_in(cx, |r, w, cx| {
+        let document = r.markdown().unwrap().clone();
+        document.update(cx, |document, cx| document.focus(w, cx));
+    });
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let full = doc_text(&reader, cx);
+    eprintln!("PROBE sel={:?}", selection(&reader, cx));
+    assert!(full.len() > 100_000, "the model covers the whole file");
+    assert_eq!(selected(&reader, cx), full);
+    assert!(
+        cx.debug_bounds("markdown-block-400").is_none(),
+        "rows stay virtualized"
+    );
+}
+
+#[gpui::test]
+fn line_number_left_inset_holds_for_one_to_five_digits(cx: &mut TestAppContext) {
+    // A file with 12,000 lines uses five digits from the first row, so the
+    // widest number width and the gutter's left inset are exercised together.
+    // The same invariant is checked on a small file for one digit.
+    for (lines, expected_digits) in [(1usize, 1usize), (12_000usize, 5usize)] {
+        let mut text = String::new();
+        for n in 0..lines {
+            text.push_str(&format!("line {n}\n"));
+        }
+        let (_, cx) = open(
+            cx,
+            PreparedBody::Utf8 {
+                text,
+                has_bom: false,
+            },
+            DocumentKind::Source { language: None },
+        );
+        cx.simulate_resize(gpui::size(px(900.0), px(420.0)));
+        frames(cx);
+        let row = cx.debug_bounds("reader-source-row-0").unwrap();
+        let number = cx
+            .debug_bounds("reader-source-number-0")
+            .expect("the number draws");
+        let body = cx
+            .debug_bounds("reader-source-body-0")
+            .expect("the body draws");
+        let inset = f32::from(number.left() - row.left());
+        assert!(
+            (inset - 12.0).abs() <= 1.0,
+            "{expected_digits} digits: the number starts 0.75rem from the left ({inset})"
+        );
+        let gap = f32::from(body.left() - number.right());
+        assert!(
+            (gap - 18.0).abs() <= 1.5,
+            "{expected_digits} digits: the right gap stays 0.75rem+6px ({gap})"
+        );
+        // Right-aligned numbers: the body column is the same for both widths.
+        let body_offset = f32::from(body.left() - row.left());
+        let digits = expected_digits as f32;
+        assert!(
+            body_offset >= 12.0 + digits * 4.0,
+            "{expected_digits} digits: the text column leaves room for the number"
+        );
+    }
 }

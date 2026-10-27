@@ -135,3 +135,13 @@ PR #27 保持人工 hold，原 head `25e9e19` 未合并。本轮按反馈处理�
 链接可发现性审查也成立：此前链接只记录动作、没有可见样式。本地 inline 排版现把 link ranges 纳入同一字形的样式切分，使用主题 link 色与下划线；命中、选择仍共用同一排版坐标。新增链接范围回归；主程序 418、reader 80 项和严格 clippy 通过。
 
 链接的每一种 run 都扫描整条 link 列表会再次形成平方级开销。`runs()` 现在把排序后的 link ranges 用单调游标前进，与样式事件共用同一次边界遍历；新增 20,000 个链接段落的真实 resize 预算回归。reader 81 项通过。主程序全量运行时曾有一个本地网络 bounded 用例失败，模块单独重跑 5 项通过，按既有基线记录为并发环境偶发，不修改无关网络实现。
+
+## 2026-10-27 文档级选择与行号左距
+
+负责人反馈：README 无法跨不同文字元素拖选，标题↔正文/正文↔标题会停在起始元素，Ctrl+A 只选最后点击的元素，点阅读区空白也只有元素内部才取消选区。根因确认在 `inline.rs`：每个 `ParagraphView` 各自持有 anchor/head 与 Ctrl+A/C 处理。
+
+现在选择所有权移到 `MarkdownView`：新增 `doctext.rs` 在解析后按渲染顺序建立文档文本与单元表，段落只做真实布局到文档偏移的映射并绘制文档选区交集。跨块拖动使用 `on_drag`/`on_drag_move`（GPUI 在全拖动期间跨元素分发），方向由 head 相对 anchor 决定；空白处按下清空整篇选区。`Ctrl+A`/`Ctrl+C` 作用于全模型，包括未实例化的可见块之外内容。单元 key 仍按完整嵌套路径唯一。
+
+Source 行号左侧 padding 由 0.5rem 增至 0.75rem（`gutter_left` 常量），右侧 0.75rem+6px 保持不变，新增 `reader-source-number-*` 选择器以便测试读取真实内距。
+
+验证：`cargo fmt --all -- --check`、locked all-target `check`、`clippy -D warnings`、`cargo test --locked` 主程序 432 项、reader 94 项均通过。新增用例覆盖标题↔正文双向跨块、跨空白与三块、Ctrl+A 含视口外、空白清选区、越界拖动、拖过链接不打开、换文档清选区、超大单列表 Ctrl+A 与虚拟化、行号左内距。真实窗口交互仍待负责人验收。
