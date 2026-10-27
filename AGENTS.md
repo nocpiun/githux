@@ -23,6 +23,7 @@
 - 分支为 `<type>/<branch-name>`，通过 PR 合入 `main`。
 - 已确认的首版功能及其直接配套工作，创建 PR 时必须关联 [First Release（milestone #1）](https://github.com/nocpiun/githux/milestone/1)；范围及核验方法见 [首版 Milestone](docs/agent-workflow.md#首版-milestone)。
 - **保持 Git 提交历史线性整洁：合并 PR 必须使用 squash merge，并保留 GitHub 默认生成的 commit message（标题与正文），不得自行改写。** 执行命令见 [Agent 工作流](docs/agent-workflow.md#提交历史与合并方式)。
+- 需要负责人手动验收时，Agent 添加 `pending` 标签；验收通过后由协调者移除。`blocked` 由负责人手动管理，存在时禁止合并，Agent 不得自行添加或移除。`PR` 工作流的 `Check` 检查还要求新增、删除行数分别不超过 20,000；标签与配置说明见 [Agent 工作流](docs/agent-workflow.md#pr-标签与规模门槛)。
 - 首次建 PR 自动触发 Codex review；以后每次 push 新提交都须通过 `gh` 评论 `@codex review`。
 - **只有当前最后一次提交的 CI/CD 和针对该提交触发的审查都通过，才可合并。** 收到审查、没有回复、检查缺失均不等于通过。
 - **全程未出现待裁决事项的 PR，基层 Agent 可以自行合并。任何一轮出现待裁决事项，该 PR 此后只能由负责人或主 Agent 合并。** 处理完争议、换 Agent 或产生新提交不重置此记录。详细记录和核验方法见工作流。
