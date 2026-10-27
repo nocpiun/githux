@@ -212,3 +212,16 @@ Codex 针对公共 motion 首版（`d629d0e`，P2）指出：tabs 的公共 over
 修复的真实缺陷：rail 展开在 reduced-motion 下未即时落到目标；展开目标被 clamp 到最小值导致 sash 停在 160 不跟手。新增测试覆盖切换中间帧/完成帧、reduced-motion、静止指针收敛、持续 move 不抹动画、不同记忆宽度同一指针结果相同、命中带内不同抓取点只差该偏移、同一手势重复切换不抖动，以及真实 GPUI 事件下从 rail 展开后 sash 右缘跟随指针。
 
 验证：fmt、locked all-target check、clippy `-D warnings`、**411 tests**、build、diff check 通过（`CARGO_BUILD_JOBS=1`、本 worktree target）。阈值 160/32/12 是验收起点，不是永久产品硬规定；真实拖动观感与动画流畅度待负责人确认。
+
+## 第十二轮：临界区 footer 稳定性
+
+负责人反馈 resize 到 collapse/expand 临界状态时底部四按钮与 More 反复闪。主 Agent 只读定位到两个叠加原因：Footer 直接按 `collapsed` 选择入口；`resize_pointer_at` 的 rail 分支按 12px 位移展开，而展开分支按“低于最小宽度 32px”折叠，二者可在同一指针位置同时成立。
+
+修复：
+- 删除 12px 的独立展开判定，改为在**同一指针派生宽度**上定义互斥滞回：`requested >= 160` 才从 rail 展开，`requested <= 128` 才折叠，128–160 为停靠带并保持当前模式。重复坐标与小幅抖动幂等。
+- 新增派生 `footer_compact()`：收起、停靠/临界带、切换动画期间统一 More；只有明确宽于 `160 + 24` 才切回四按钮。拖动中该决定按明确边界锁存，瞬时宽度不会翻转呈现。
+- Footer 渲染从 `collapsed` 改为 `footer_compact`，expanded-but-compact 时 More 菜单正常打开、键盘导航、关闭并返回焦点；同一帧只渲染一套入口。
+
+新增测试：rail 右拖逐像素（每点两次）到明显展开，模式不回落、footer 只切换一次；expanded 左拖对称；过渡中间帧、完成后、临界处释放都保持 More；真实 GPUI 事件序列中每步只有一套入口，且 expanded-but-compact 的 More 可操作。旧测试中与该滞回冲突的“折叠过渡中继续向左仍保持中间帧”断言已按新语义更新。
+
+验证：fmt、locked all-target check、clippy `-D warnings`、**415 tests**、build、diff check 通过（`CARGO_BUILD_JOBS=1`）。真实拖动与临界停靠观感仍待负责人验收。

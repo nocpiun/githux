@@ -895,7 +895,9 @@ impl Shell {
     fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let this = cx.entity();
         let route = self.workspace.route().clone();
-        let collapsed = self.sidebar_state.collapsed;
+        // One presentation decision for the whole footer: the compact More entries during the
+        // critical band and during mode transitions, the four entries once clearly expanded.
+        let footer_compact = self.sidebar_state.footer_compact();
         let frame = self.sidebar_state.frame;
         let nav_metrics = sidebar::nav_metrics(frame.expansion, window.rem_size(), cx);
 
@@ -1072,7 +1074,7 @@ impl Shell {
                 cx,
             )
         };
-        let quarters = if collapsed {
+        let quarters = if footer_compact {
             sidebar::overflow(
                 sidebar::OverflowMenuView {
                     shell: this.clone(),

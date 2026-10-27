@@ -47,6 +47,8 @@ pub(super) struct SidebarState {
     press_pointer_at_begin: f32,
     /// Whether this gesture started on the rail (rather than merely being mid-collapse).
     drag_from_rail: bool,
+    /// Footer presentation latched for the current gesture, so transient widths cannot flip it.
+    footer_latched_compact: bool,
 }
 
 impl Default for SidebarState {
@@ -70,6 +72,7 @@ impl Default for SidebarState {
             drag_travel: 0.0,
             press_pointer_at_begin: 0.0,
             drag_from_rail: false,
+            footer_latched_compact: true,
         }
     }
 }
@@ -162,6 +165,34 @@ impl SidebarState {
         }
     }
 
+    /// Whether the bottom entries must render compact (the More menu). This is derived from the
+    /// presented frame, not from the `collapsed` flag alone: the critical/docking band and any
+    /// collapse/expand transition stay compact, and the four entries appear only once the sidebar
+    /// is clearly wider than the minimum. It never forces `collapsed` itself, so the rest of the
+    /// sidebar keeps animating by its real width.
+    pub fn footer_compact(&self) -> bool {
+        if self.dragging {
+            // During a gesture the width follows the pointer, so transient widths must not flip
+            // the footer. A latched decision, taken once per crossing, keeps one presentation.
+            return self.footer_latched_compact;
+        }
+        if self.collapsed || self.transition.is_some() {
+            return true;
+        }
+        self.frame.width < SIDEBAR_MIN_WIDTH + SIDEBAR_FOOTER_COMPACT_MARGIN
+    }
+
+    /// Updates the per-gesture footer presentation latch from the pointer-derived width. Outside a
+    /// drag the value is irrelevant; inside it the footer changes only on a clear crossing.
+    fn latch_footer(&mut self, requested_width: f32) {
+        let roomy = requested_width >= SIDEBAR_MIN_WIDTH + SIDEBAR_FOOTER_COMPACT_MARGIN;
+        if roomy {
+            self.footer_latched_compact = false;
+        } else if requested_width <= SIDEBAR_MIN_WIDTH {
+            self.footer_latched_compact = true;
+        }
+    }
+
     pub fn sash(&self) -> f32 {
         self.sash_opacity
     }
@@ -217,6 +248,7 @@ impl SidebarState {
         self.drag_pointer_x = press_pointer;
         self.press_pointer_at_begin = press_pointer;
         self.drag_travel = 0.0;
+        self.footer_latched_compact = self.footer_compact();
         // A drag that interrupts a collapse is still an expanded-mode drag: the sidebar is wider
         // than the rail on screen, so dropping straight to the rail branch would be wrong.
         self.drag_from_rail = self.collapsed && self.frame.width <= SIDEBAR_COLLAPSED_WIDTH + 0.5;
@@ -283,33 +315,41 @@ impl SidebarState {
         self.drag_pointer_x = pointer_x;
         self.drag_travel = pointer_x - self.press_pointer_at_begin;
         let requested = pointer_x - self.drag_grab_offset;
+        self.latch_footer(requested);
         let min = SIDEBAR_MIN_WIDTH;
         let limit = Self::limit(window_width);
 
+        // Hysteresis is expressed on the same pointer-derived width for both directions, so the
+        // two entry conditions can never both hold at one pointer position:
+        //   rail  -> expanded : requested >= min            (pointer reached the sash position)
+        //   expanded -> rail  : requested <= min - 32       (full overshoot past the minimum)
+        // Between them (min - 32 .. min) the current mode is docked and kept, so repeated or
+        // slightly jittering pointer events are idempotent instead of alternating.
         if self.drag_from_rail {
-            // Returning from a collapse: once the pointer has travelled the expand threshold the
-            // mode switches; the expanded width is then simply where the pointer is, so a short
-            // drag produces the narrow critical width rather than the remembered wide one.
-            if self.drag_travel >= SIDEBAR_DRAG_EXPAND_THRESHOLD {
+            if requested >= min {
                 self.drag_from_rail = false;
                 self.collapsed = false;
                 // The expanded width is the pointer's own position, bounded only by the legal
                 // range and the window budget. It must not snap to a remembered or minimum width.
                 self.expanded_width = requested.clamp(min, limit);
                 self.retarget_transition(now, window_width, reduced);
+            } else {
+                // Still inside the rail zone: stay on the rail and keep the animation quiescent.
+                self.transition = None;
+                self.frame = self.target(window_width);
             }
             return;
         }
 
-        // Collapsing: dock at the minimum, then collapse only past the extra overshoot.
         if requested >= min {
             self.expanded_width = requested.clamp(min, limit);
             self.transition = None;
             self.frame = self.target(window_width);
             return;
         }
+        // Docked at the minimum while the pointer is in the hysteresis band.
         self.expanded_width = min;
-        if min - requested >= SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
+        if requested <= min - SIDEBAR_DRAG_COLLAPSE_THRESHOLD {
             self.collapsed = true;
             self.drag_from_rail = true;
             self.retarget_transition(now, window_width, reduced);

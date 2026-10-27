@@ -1457,22 +1457,24 @@ fn moving_pointer_during_the_switch_keeps_the_animation_continuous() {
     assert!(state.sample(start + Duration::from_millis(80), 1200.0, false));
     let mid = state.frame.width;
     assert!(mid > SIDEBAR_COLLAPSED_WIDTH && mid < SIDEBAR_MIN_WIDTH);
-    // Further movement in the same frame keeps easing from the presented value, never jumping.
+    // Moving back out of the overshoot zone during the transition keeps the expanded mode and
+    // eases from the presented frame instead of jumping back to the old width.
     state.resize_pointer_at(
-        collapse_at - 6.0,
+        SIDEBAR_MIN_WIDTH + 4.0,
         start + Duration::from_millis(80),
         1200.0,
         false,
     );
-    assert!(state.collapsed);
-    assert_eq!(state.frame.width, mid, "no instant jump on the next event");
+    assert!(!state.collapsed);
+    assert!(
+        state.frame.width >= mid,
+        "reversal continues from the presented frame"
+    );
     assert!(state.sample(start + Duration::from_millis(140), 1200.0, false));
-    let later = state.frame.width;
-    assert!(later < mid && later > SIDEBAR_COLLAPSED_WIDTH);
     assert!(!state.sample(start + Duration::from_millis(500), 1200.0, false));
-    assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
     // A stationary pointer then completes normally and leaves no transition behind.
     assert!(!state.sample(start + Duration::from_secs(3), 1200.0, false));
+    assert_eq!(state.frame.width, SIDEBAR_MIN_WIDTH);
 }
 
 /// One gesture expanding out of the rail can collapse again only by crossing the collapse
@@ -1562,4 +1564,144 @@ fn expanding_from_the_rail_binds_the_sash_to_the_pointer(cx: &mut TestAppContext
     );
     assert_eq!(sash.right(), island.left());
     release(pointer, cx);
+}
+
+/// The old bug: from the rail, a pointer just past the old 12px expand threshold produced an
+/// expanded-but-below-minimum state whose next event immediately collapsed again, so the footer
+/// flipped between More and the four entries. Repeated identical or 1px-jittering positions must
+/// now be idempotent, and the footer must stay compact throughout the critical band.
+#[test]
+fn critical_band_is_idempotent_and_keeps_the_footer_compact() {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.expanded_width = SIDEBAR_MAX_WIDTH;
+    state.collapsed = true;
+    state.settle(1200.0);
+    let press = SIDEBAR_COLLAPSED_WIDTH + 4.0;
+    state.begin_resize(press, SIDEBAR_COLLAPSED_WIDTH);
+    let mut modes = Vec::new();
+    let mut compact = Vec::new();
+    // Move right in 1px steps from the rail, across the whole band up to a clearly wide sidebar,
+    // repeating each position twice to make a flapping mode visible.
+    let stop = (SIDEBAR_MIN_WIDTH + 80.0 - press).ceil() as i32;
+    for step in 1..=stop {
+        for _ in 0..2 {
+            state.resize_pointer_at(press + step as f32, start, 1200.0, true);
+            modes.push(state.collapsed);
+            compact.push(state.footer_compact());
+        }
+    }
+    // Once out of the rail the mode never flips back while the pointer keeps moving right.
+    let first_expanded = modes.iter().position(|collapsed| !*collapsed).unwrap();
+    assert!(modes[first_expanded..].iter().all(|collapsed| !*collapsed));
+    // The footer changes presentation exactly once on the way out, with no alternation.
+    let switches = compact.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert_eq!(switches, 1, "footer sequence: {compact:?}");
+    assert!(*compact.first().unwrap(), "starts compact on the rail");
+    assert!(
+        !state.footer_compact(),
+        "ends on the four entries once clearly wide"
+    );
+}
+
+/// Same from the expanded side: shrinking alone must keep one footer presentation per band and
+/// never alternate, including at the docking plateau.
+#[test]
+fn shrinking_into_the_critical_band_does_not_alternate_the_footer() {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    let press = SIDEBAR_WIDTH + 4.0;
+    state.begin_resize(press, SIDEBAR_WIDTH);
+    let mut compact = Vec::new();
+    for step in (0..=110).rev() {
+        state.resize_pointer_at(press - step as f32, start, 1200.0, true);
+        compact.push(state.footer_compact());
+    }
+    // Shrinking yields exactly one switch into the compact presentation, with no alternation.
+    let switches = compact.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert_eq!(switches, 1, "one switch while shrinking, got {compact:?}");
+}
+
+/// Collapse/expand transitions themselves are compact, and a release inside the critical band
+/// keeps More after all animation frames have finished.
+#[test]
+fn transition_and_release_in_the_critical_band_stay_compact() {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    let press = SIDEBAR_WIDTH + 4.0;
+    state.begin_resize(press, SIDEBAR_WIDTH);
+    let collapse_at =
+        press - (SIDEBAR_WIDTH - (SIDEBAR_MIN_WIDTH - SIDEBAR_DRAG_COLLAPSE_THRESHOLD - 2.0));
+    state.resize_pointer_at(collapse_at, start, 1200.0, false);
+    assert!(state.collapsed);
+    assert!(state.footer_compact(), "compact during the transition");
+    assert!(state.sample(start + Duration::from_millis(80), 1200.0, false));
+    assert!(state.footer_compact(), "compact on an animation mid-frame");
+    assert!(!state.sample(start + Duration::from_millis(400), 1200.0, false));
+    assert!(
+        state.footer_compact(),
+        "compact after the animation finished"
+    );
+    state.end_resize(start, false, true);
+    assert!(state.footer_compact(), "compact after release at the rail");
+    assert!(!state.sample(start + Duration::from_secs(2), 1200.0, false));
+    assert!(
+        state.footer_compact(),
+        "staying still must not bring the four entries back"
+    );
+}
+
+/// Real GPUI events through the critical band: the footer keeps exactly one presentation, and
+/// expanded-but-compact still gives a working More menu (open, keyboard, close, focus restored).
+#[gpui::test]
+fn compact_footer_in_the_critical_band_keeps_more_working(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let band = bounds("sidebar-resize", cx);
+    let anchor = point(band.center().x, band.top() + px(60.0));
+    cx.simulate_mouse_move(anchor, None, Modifiers::none());
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: anchor,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    // Drag far left to the rail, then walk back right through the critical band, repeating each
+    // position so a flapping presentation would be visible.
+    for step in [-600.0, -300.0, -120.0] {
+        cx.simulate_mouse_move(
+            anchor + point(px(step), px(0.0)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert!(view.read_with(cx, |s, _| s.sidebar_state.collapsed));
+    assert!(cx.debug_bounds("sidebar-more").is_some());
+    assert!(
+        cx.debug_bounds("quarter-row").is_none(),
+        "only More while on the rail"
+    );
+    for step in 1..=40 {
+        let at = anchor + point(px(-120.0 + step as f32), px(0.0));
+        for _ in 0..2 {
+            cx.simulate_mouse_move(at, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+        // Exactly one footer presentation is drawn at every point of the sequence.
+        let more = cx.debug_bounds("sidebar-more").is_some();
+        let four = cx.debug_bounds("quarter-row").is_some();
+        assert!(more ^ four, "both or neither footer drawn at step {step}");
+    }
+    release(anchor + point(px(-80.0), px(0.0)), cx);
+    // Landed in the compact/docking band: More, and it must actually work.
+    assert!(cx.debug_bounds("sidebar-more").is_some());
+    assert!(cx.debug_bounds("quarter-row").is_none());
+    click("sidebar-more", cx);
+    assert!(view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    press("down", cx);
+    press("enter", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Issues);
+    assert!(!view.read_with(cx, |s, _| s.sidebar_menu_open()));
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
 }

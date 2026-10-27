@@ -12,7 +12,15 @@ Home/Settings、仓库和 Profile 的活动行从客户区可绘制左缘 x=0 �
 
 账号区不是整行 button：外层 `account-row` 不 hover 点亮、不响应空白右侧；只有头像 + 显示名 + `@ID` 组成的紧凑身份控件（`account-identity`）打开 Profile，保留可访问名称、Tab 焦点与 Enter/Space。身份控件本身也没有整块 hover 背景：悬停时只显示 pointer 光标，并让 `@ID` 出现下划线。展开时右侧另有独立 emoji 状态按钮（占位示例 💻 / `Coding`），hover tooltip 为 `Coding`，点击不导航 Profile 且停止冒泡；本轮无编辑弹窗、无网络、无写状态。收起时状态按钮隐藏，状态文字并入头像 tooltip。账号外层活动 indicator 仍按上面的贴边规则，不把状态操作标成 Profile 点击。
 
-标题栏以下分界区域垂直中央的 24px 圆按钮负责收起/展开，其水平中心落在 island 的左边框线（`width + ISLAND_GAP + ISLAND_BORDER_WIDTH/2`），垂直中心对齐 island 自身高度中点（扣除底部 inset）；两个轴都从与 island 相同的几何常量推导，动画、resize、最大化和窗口化都跟随。分界 gap 提供 8px 横向 resize 命中带，无需拖圆按钮。sash 只在指针位于热区、或一次有效 resize 手势进行中时显示；手势从按下到释放全程保持可见（即使指针短暂跑出正在移动的旧命中带），释放后立即按真实 hover 决定淡出或继续。淡入淡出约 140ms ease-out、可逆续接并遵循 reduced-motion。sash 左侧锚点固定为原 2px 线的中心位置，只向右加宽，右缘与 island 外框左缘重合；上下端仍与 island 外框等高，toggle 在其上层且命中独立。竖线的纵向范围与主页面 island 的完整外框等高：顶端对齐 island 顶边，底端对齐 island 底边（命中带本身用 `ISLAND_INSET` 作为底部内缩，与其上层 island 的底部留白同源，不再叠加第二个 inset），因此不铺满侧栏、也不进入标题栏或窗口底部，且随展开/收起、宽度变化、矮窗口、最大化和窗口化一起跟随。中部的圆 toggle 在其上层绘制，线可被它遮挡但不会覆盖按钮。GPUI drag 捕获负责跨命中带拖动。拖动宽度由指针的绝对位置决定（`width = pointer - grab_offset`，grab offset 只是命中带内的真实几像素差），不再恢复记忆宽度，因此展开后 sash 与指针保持对齐。展开态向左连续缩小到 160px 停靠，再越过 `SIDEBAR_DRAG_COLLAPSE_THRESHOLD`（32 logical px）才折叠；收起态先保持 rail，指针移动超过 `SIDEBAR_DRAG_EXPAND_THRESHOLD`（12 logical px）后进入展开，宽度按指针位置（在 160–360 与窗口预算内）取值。两个阈值只用于决定模式切换时机，宽度本身始终跟随指针。
+标题栏以下分界区域垂直中央的 24px 圆按钮负责收起/展开，其水平中心落在 island 的左边框线（`width + ISLAND_GAP + ISLAND_BORDER_WIDTH/2`），垂直中心对齐 island 自身高度中点（扣除底部 inset）；两个轴都从与 island 相同的几何常量推导，动画、resize、最大化和窗口化都跟随。分界 gap 提供 8px 横向 resize 命中带，无需拖圆按钮。sash 只在指针位于热区、或一次有效 resize 手势进行中时显示；手势从按下到释放全程保持可见（即使指针短暂跑出正在移动的旧命中带），释放后立即按真实 hover 决定淡出或继续。淡入淡出约 140ms ease-out、可逆续接并遵循 reduced-motion。sash 左侧锚点固定为原 2px 线的中心位置，只向右加宽，右缘与 island 外框左缘重合；上下端仍与 island 外框等高，toggle 在其上层且命中独立。竖线的纵向范围与主页面 island 的完整外框等高：顶端对齐 island 顶边，底端对齐 island 底边（命中带本身用 `ISLAND_INSET` 作为底部内缩，与其上层 island 的底部留白同源，不再叠加第二个 inset），因此不铺满侧栏、也不进入标题栏或窗口底部，且随展开/收起、宽度变化、矮窗口、最大化和窗口化一起跟随。中部的圆 toggle 在其上层绘制，线可被它遮挡但不会覆盖按钮。GPUI drag 捕获负责跨命中带拖动。拖动宽度由指针的绝对位置决定（`width = pointer - grab_offset`，grab offset 只是命中带内的真实几像素差），不再恢复记忆宽度，因此展开后 sash 与指针保持对齐。两个方向的模式切换用**同一个指针派生宽度**表达互斥滞回：
+
+- rail → expanded：指针请求宽度达到 `SIDEBAR_MIN_WIDTH`（160）。
+- expanded → rail：请求宽度不超过 `160 - SIDEBAR_DRAG_COLLAPSE_THRESHOLD`（即 128）。
+- 128–160 之间是停靠带，保持当前模式不变，因此重复同一坐标或 ±1px 抖动是幂等的，不会在两个布局间来回切换。
+
+宽度本身始终跟随指针（160–360 与窗口预算内 clamp）。
+
+底部四入口的呈现由独立的 `footer_compact` 派生状态决定，而不是直接看 `collapsed`：收起、临界/停靠带以及模式切换动画期间统一显示 More，只有明确宽于 `SIDEBAR_MIN_WIDTH + SIDEBAR_FOOTER_COMPACT_MARGIN`（24px）后才一次切回四按钮。拖动期间该决定在越过明确边界时锁存，瞬时宽度抖动不会让它反复切换；其他侧栏元素仍按真实动画宽度绘制。expanded-but-compact 时 More 菜单同样可打开、键盘操作并返回焦点，同一帧只渲染一套入口。
 
 模式切换复用既有约 200ms ease-out transition：触发阈值时从当前呈现帧过渡到目标，而不是瞬间跳变；拖动继续收到的事件会从当前呈现值重新衔接同一动画，静止指针也会正常完成。reduced-motion 下直接落到目标。`.when(!collapsed)` 的限制已移除，rail 上也能开始拖动。最大 360px 与窗口内容预算不变；按钮点击展开仍使用记住的展开宽度。释放、Esc、失焦与窗口尺寸变化终止拖动并清理高亮。圆按钮独立命中，不启动 resize；拖动不改变路由。原生窗口边缘缩放和标题栏实现没有改变。
 

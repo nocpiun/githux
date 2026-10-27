@@ -46,10 +46,10 @@ pub const SIDEBAR_SASH_FADE_MS: u64 = 140;
 /// Extra pointer travel past the minimum width before an expanded drag collapses. It also acts as
 /// the hysteresis that stops one gesture flapping between modes at the same point.
 pub const SIDEBAR_DRAG_COLLAPSE_THRESHOLD: f32 = 32.0;
-/// How far the pointer must move off the rail before an expansion starts. It is smaller than the
-/// collapse overshoot because the target width itself must also be legal, so the two conditions
-/// together keep the rail stable without a fake multi-hundred-pixel dead zone.
-pub const SIDEBAR_DRAG_EXPAND_THRESHOLD: f32 = 12.0;
+/// Footer hysteresis: below this presented width the bottom entries stay compact (More) even when
+/// the state is technically expanded. It keeps the critical/docking band on one presentation and
+/// gives the four entries room once the sidebar is clearly wider than the minimum.
+pub const SIDEBAR_FOOTER_COMPACT_MARGIN: f32 = 24.0;
 pub const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
 pub const REPO_LEFT_PADDING: f32 = 4.0;
 
