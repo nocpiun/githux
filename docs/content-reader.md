@@ -80,7 +80,7 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 
 main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、半透明、140ms 可反向淡出的细条，以及只读 `ScrollTarget`（`ScrollHandle` 与真实 `ListState` 适配，拖动开始/结束冻结列表测量）。Reader 直接使用这套共享实现，没有复制第二套样式或通用 scroll 子系统：
 
-- Markdown 纵向条绑定本地 `MarkdownView::list_state()` 的真实 `ListState`；滚轮、thumb 拖拽、范围更新、长文异步落地均作用于同一个列表。无溢出时 `Bar::render` 不构建元素，也不保留透明拦截区域。
+- Markdown 纵向条绑定本地 `MarkdownView::list_state()` 的真实 `ListState`（PR #29 的 `ScrollTarget for ListState` 适配）；滚轮、thumb 拖拽、范围更新、长文异步落地均作用于同一个列表。无溢出时 `Bar::render` 不构建元素，也不保留透明拦截区域。
 - Source 纵/横条沿用同一 `Bars`/`Bar`/`Style`，绑定 `UniformListScrollHandle.base_handle`，两轴独立、互不抢角落。
 - hover 入场、快速反向和拖动移出后释放都由 `Bars`/`Fade` 处理；拖动期间保持可见，结束后回到 hover 状态。
 
