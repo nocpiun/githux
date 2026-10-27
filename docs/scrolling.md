@@ -1,6 +1,6 @@
 # 统一滚动与滚动条
 
-更新：2026-10-27。状态：公共滚动条已实现，应用标签条（workspace-tabs）与 sidebar-layout 仓库 viewport 已实际接入；content-reader 尚未接线。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。新版 GPUI `ListState` 已有真实适配和测试；`MarkdownDocument` 的私有内层列表仍不能从外部接入，见下文。
+更新：2026-10-27。状态：公共滚动条与公共 wheel motion 已实现。标签条、仓库 viewport 使用统一 Bar/Bars；标签条、仓库、每会话页面、palette 全部使用同一 `Motion<T>` / 输入路径。account-ui 与 content-reader 的独立消费者尚待协调者同步接线。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。新版 GPUI `ListState` 已有真实适配和测试；`MarkdownDocument` 的私有内层列表仍不能从外部接入，见下文。
 
 本主题是滚动条外观、几何、拖动、淡入淡出与 `ScrollMotion` 边界的唯一维护位置。视觉基准来自 content-reader 当前实现（负责人 2026-10-26 明确以它为准）：细、两头圆、半透明、出现/消失渐变、无实体轨道。
 
@@ -11,6 +11,7 @@
 | [`src/ui/scroll/mod.rs`](../src/ui/scroll/mod.rs) | 唯一的外观（`Style`）、放置（`Placement`）、单帧绘制（`Bar`）与区域状态（`Bars`） |
 | [`src/ui/scroll/geometry.rs`](../src/ui/scroll/geometry.rs) | 唯一的 thumb 长度/位置/拖动换算（`Thumb`） |
 | [`src/ui/scroll/fade.rs`](../src/ui/scroll/fade.rs) | 唯一的淡入淡出状态（`Fade`） |
+| [`src/ui/scroll/motion.rs`](../src/ui/scroll/motion.rs) | 唯一的约 130ms wheel easing、轴选择、输入适配与 thumb/程序滚动协作（`Motion<T>`、`wheel_overlay`） |
 | [`src/ui/scroll/target.rs`](../src/ui/scroll/target.rs) | 真实滚动目标契约（`ScrollTarget`）与 `gpui::ScrollHandle`、`gpui::ListState` 实现 |
 | [`src/ui/tabs.rs`](../src/ui/tabs.rs) | 标签条自身布局；只保留 `TAB_*` 布局常量与预留 band |
 | [`src/ui/geometry.rs`](../src/ui/geometry.rs) | `TAB_SCROLLBAR_BAND = scroll::THICKNESS + 2`，其余标签间距/高度仍在原处 |
@@ -81,13 +82,36 @@ let element = bar.render(cx);
 
 `Thumb::new` 的边界：视口或范围为 0、非有限值、track 过短（移动距离 ≤ 0）时返回 `None`，不绘制、不拦截输入；range 变小或窗口变大时 thumb 位置随 `-offset/reach` 重新 clamp，拖动中 range 变化以“按下时 thumb 比例 + 指针位移”重算，不会跳到端点外。长度计算只用 `viewport`、`reach`、`track` 三个标量，不遍历或测量列表行。
 
-## 与滚轮平滑（ScrollMotion）的边界
+## 公共内容平滑（已实现）
 
-本轮不改变标签条已验收的滚轮手感，也不启用任何全局惯性。未来 `ScrollMotion` 与滚动条保持职责独立：
+`scroll::Motion<T>` 包装真实 `ScrollTarget + Clone`，横纵轴各有独立目标/呈现/时间。它不依赖 Shell、repo、固定 region 名或某一种句柄。`ScrollHandle` 两轴可用；UniformList 用公开 `base_handle`；`ListState` 只支持纵向，`supports_axis` 令横轴 wheel/写入/drag 安全 no-op，并保留其原生 `scrollbar_drag_started/ended`。不重建列表，也不全量 measure_all。
 
-- 滚轮/触控板：离散 wheel 走 130 ms ease-out，precise（高精度）delta 直通；同一帧内一次输入只消费一次，标签条的 `Shift`+wheel 与原生横向 delta 映射保持现状，不新增二次转换。
-- 滚动条 thumb 拖动、区域 reveal 和程序化跳转必须即时生效，并在开始时取消在途平滑动画。`ScrollTarget::drag_started` / `drag_ended` 就是给 `ScrollMotion` 挂取消钩子的位置。
-- 平滑状态与淡入淡出状态互相独立；动画结束即停止请求帧（`Fade::is_animating`），`App::reduce_motion()` 为真时渐变跳变、不请求帧。
+- 离散 wheel 累加目标，约 130ms `ease_out_cubic`；新输入从当前呈现位置继续，反向不会回到旧起点。范围收缩同时 clamp 存储目标；静止后 `tick` 返回 false，不启动 timer。
+- precise Pointer（触控板像素）与 Touch（含 GPUI 自带动量）即时应用，不追加缓动。reduced-motion 同样直接落点；另一轴 offset 保留。
+- `wheel_overlay(id, axis, motion)` 是统一的区域输入路径：Horizontal 优先原生 x，否则用 y；Vertical 反之；Shift+wheel 已由 Windows 提供的横轴 delta 不再转换。只有该区域有 reach 才消费，捕获阶段 stop propagation 防止 GPUI 内建 jump 把同一事件加第二遍。
+- 透明输入层没有点击/拖动命中处理；将其放在相应 viewport 内、公共 Bar 之前。嵌套公共区域按内层优先消费一次；modal/独立原生输入面板用自己的 occluding hitbox 取得输入所有权，公共路径沿用 GPUI `should_handle_scroll`，不穿透该 hitbox。不要把整个页面的输入层跨过标签条、PAT 字段或其它独立滚动面板。
+- `Bar.target` 与 wheel 必须使用**同一个 `Motion` 实例或其 clone**。thumb 的 start/write/end 转调原生目标 hook，同时取消旧 wheel 目标；thumb 拖动期间不积累本轴竞争 wheel。`Bars::settle` 处理外部释放，`cancel_region` 用于失活/卸载；不把所有 GPUI drag 都当本区域 thumb。
+- reveal、键盘导航、路由/会话切换、排序边缘自动滚动、程序跳转先 `cancel()` 或调用 motion 的 `set_offset/set_axis_offset`，即时写原句柄。程序 reveal 可能早于新范围布局，不能用前一帧 max-offset 把新标签裁掉；新布局由原生 target clamp。直接修改原句柄的外部变化也会在 tick 被采用，但明确调用取消可避免小幅改动与旧目标竞争。
+- owner 每帧用同一时间源 `tick(now, reduced)`，仅 true 时请求帧；关闭/失活/隐藏会话取消 motion。没有后台动画任务，最后一个 clone 释放即释放状态。内容 motion 与 `Bars` 的 140ms smoothstep fade 分开，各按自己的生命周期推进。
+
+最小接线（真实 ScrollHandle、UniformList base_handle 或 ListState 均可作为 target）：
+
+```rust
+// owner 构造时保存，不能每帧重新创建。
+let motion = scroll::Motion::new(real_handle.clone());
+let mut bars = scroll::Bars::new();
+// render: 一次采样，每帧仅在未完成时请求后续帧。
+if motion.tick(now, reduced) { window.request_animation_frame(); }
+// viewport 内：内容 -> wheel_overlay -> Bar，保持 Bar 的 thumb 命中。
+let input = scroll::wheel_overlay("reader-y", Axis::Vertical, motion.clone());
+// Bar { target: &motion, ... }；on_drag 调 bars.drag(&motion, axis, active, now_ms, reduced)。
+// 程序化 reveal / 键盘跳转之前：
+motion.cancel();
+// 失活/关闭时：
+scroll::cancel_region(&mut bars, &motion);
+```
+
+未来 account-ui/content-reader：每个真实区域保存自己的 Motion 与 Bars，传入原 ScrollHandle / UniformList base_handle / 纵向 ListState；滚轮输入、thumb 目标和 owner 的 frame tick 使用同一 motion。双轴区域可对同一 `Motion` 选择两轴，各自的 wheel 所有权需由区域明确映射。本分支不修改其它 worktree，也不声称其真实 UI 已迁移。Markdown 私有列表的接口限制仍见下文。
 
 ## 动画与输入边界（已实现）
 
@@ -100,13 +124,13 @@ let element = bar.render(cx);
 
 ### 已接入：应用标签条
 
-`Shell::tab_strip` 用 `Placement::BAND` + `Style::DEFAULT` 渲染标签条滚动条，`Bars` 由 `Shell` 持有；`hover` 来自标签条本身，`hold` 来自标签重排，`drag` 来自本区域拖动。原有滚轮/`Shift`+wheel 映射、边缘自动滚动、标签排序/关闭/切换、会话独立 scroll/focus、固定 toolbar 与 Refresh 间距均未改变。
+`Shell::tab_strip` 用 `Placement::BAND` + `Style::DEFAULT` 渲染标签条滚动条，`Bars` 由 `Shell` 持有；`hover` 来自标签条本身，`hold` 来自标签重排，`drag` 来自本区域拖动。滚轮/`Shift`+wheel 的轴映射保留，离散输入现走同一公共 Motion；边缘自动滚动、标签排序/关闭/切换、会话独立 scroll/focus、固定 toolbar 与 Refresh 间距均未改变。
 
 ### 已接入：sidebar-layout 仓库 viewport
 
 `Shell::repo_bars` 独立持有仓库组的显隐与 thumb drag；hover 绑定真实 `repo-scroll-region`，纵向 `BarId` 为 `repo-scrollbar`，使用 `Style::DEFAULT` 与 `Placement::overlay(4, 8)`。条在透明 wheel overlay 之后绘制，不改变列表行高、账号/footer 的位置。固定导航、账号、More 和底部四入口不参与滚动或共享该 `Bars`。
 
-目标是 `scrolling::SmoothScroll` 的 `ScrollTarget` 适配，所有 viewport/offset/max-offset 与写入均转到原来的真实 `repo_scroll`。`drag_started`、每次 `set_axis_offset`、`drag_ended` 取消旧的 130ms wheel 目标；thumb 拖动期间 wheel 不建立竞争目标，释放后不弹回。内容平滑保留独立的 precise Pointer / Touch 直通规则，不增加全局 ScrollMotion。
+目标是 `scroll::Motion<ScrollHandle>` 的 `ScrollTarget` 适配，所有 viewport/offset/max-offset 与写入均转到原来的真实 `repo_scroll`。`drag_started`、每次 `set_axis_offset`、`drag_ended` 取消旧的 130ms wheel 目标；thumb 拖动期间 wheel 不建立竞争目标，释放后不弹回。内容平滑与 tabs/page/palette 共用同一公共实现，保留 precise Pointer / Touch 直通。
 
 外部释放只 settle 仓库 `Bars` 已记录的拖动；Esc、窗口失活和尺寸变化会清理仓库条与平滑目标，tabs 的重排/横轴拖动不被当成仓库 thumb drag。resizer sash 仍是独立的分界高亮，不纳入滚动条。组合测试覆盖真实内容拖动、待完成 wheel 的取消、区域隔离、快速 hover 反向、收起/矮窗口与清理；最终外观与真机手感仍待负责人验收。
 

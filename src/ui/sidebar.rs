@@ -25,7 +25,7 @@ use super::{
         SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_RADIUS, SIDEBAR_INDICATOR_WIDTH,
         SIDEBAR_PADDING, SIDEBAR_RAIL_ITEM_SIZE, SIDEBAR_ROW_GAP, STATUS_BUTTON_SIZE,
     },
-    scrolling::{self, SmoothScroll},
+    scroll::{self, Motion},
     sidebar_state::SidebarFrame,
 };
 
@@ -981,7 +981,7 @@ pub(super) fn reveal_row(scroll: &ScrollHandle, row: gpui::Bounds<gpui::Pixels>)
 pub(super) fn repository_group(
     rows: Vec<AnyElement>,
     scroll: &ScrollHandle,
-    smooth: SmoothScroll,
+    smooth: Motion<ScrollHandle>,
     scrollbar: AnyElement,
     on_hover: impl Fn(bool, &mut App) + 'static,
     cx: &App,
@@ -1008,7 +1008,7 @@ pub(super) fn repository_group(
                 .track_scroll(scroll)
                 .children(rows),
         )
-        .child(scrolling::wheel_overlay("repo", smooth))
+        .child(scroll::wheel_overlay("repo", gpui::Axis::Vertical, smooth))
         // Painted last: the thumb keeps its own hit target above the transparent wheel listener.
         .child(scrollbar)
         .into_any_element()

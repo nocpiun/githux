@@ -20,12 +20,12 @@ Home/Settings、仓库和 Profile 的活动行从客户区可绘制左缘 x=0 �
 
 ## 平滑滚动
 
-`src/ui/scrolling.rs` 提供最小共享滚动适配：离散鼠标滚轮累加进目标偏移，按真实时间用 `ely_core::motion::ease_out_cubic`（约 130ms）缓动；触控板/高精度像素滚动直接应用，不做二次惯性；GPUI 0.3.10 新增的触屏 `ScrollSource::Touch`（含手指抬起后 GPUI 合成的动量）也走直通，避免叠加第二层惯性；边界 clamp 到 GPUI 的 `[-max, 0]`，内容变短时同样收敛；无动画时不请求帧，遵循 reduced-motion。透明 `wheel_overlay` 在捕获阶段拦截指针所在区域，只消费一次并抑制 GPUI 内建的逐事件跳变；键盘 reveal、路由重置和 palette 光标移动会取消在途缓动。
+`src/ui/scroll/motion.rs` 提供项目公共滚动平滑：离散鼠标滚轮累加进目标偏移，按真实时间用 `ely_core::motion::ease_out_cubic`（约 130ms）缓动；触控板/高精度像素滚动直接应用，不做二次惯性；GPUI 0.3.10 新增的触屏 `ScrollSource::Touch`（含手指抬起后 GPUI 合成的动量）也走直通，避免叠加第二层惯性；边界 clamp 到 GPUI 的 `[-max, 0]`，内容变短时同样收敛；无动画时不请求帧，遵循 reduced-motion。透明 `wheel_overlay` 在捕获阶段拦截指针所在区域，只消费一次并抑制 GPUI 内建的逐事件跳变；键盘 reveal、路由重置和 palette 光标移动会取消在途缓动。
 
-内容平滑已接入：侧栏仓库 viewport、每会话 island 页面 viewport、palette 结果列表。每个区域各有独立 `SmoothScroll`/`ScrollHandle`，互不串扰；嵌套区域只消费一次。页面 `wheel_overlay` 只覆盖标签条以下的区域，不抢标签条的横向滚轮事件。精确 Pointer 与 Touch 直通，程序化 reveal 取消旧目标。
+内容平滑已接入：侧栏仓库 viewport、每会话 island 页面 viewport、palette 结果列表及横向 workspace tabs。每个区域各有独立 `Motion<ScrollHandle>`/真实 `ScrollHandle`，互不串扰；嵌套区域只消费一次。页面 `wheel_overlay` 只覆盖标签条以下的区域，不抢标签条的横向滚轮事件。精确 Pointer 与 Touch 直通，程序化 reveal 取消旧目标。
 
 仓库 viewport 与应用级标签条现已接入 PR #29 的统一 [滚动条](scrolling.md)。侧栏持有独立 `repo_bars`，以纵轴 `BarId`、`Style::DEFAULT`、`Placement::overlay(4, 8)` 贴在仓库区域右侧，不挤压行高。样式、几何、拖动、140ms 双向可逆 fade 均来自 `src/ui/scroll/**`；`tab_scrollbar.rs` 已删除，不保留副本。仓库条 hover 绑定真实仓库区域，footer、账号与快捷按钮不参与；折叠/展开与窗口变化沿用真实 scroll viewport 重新计算。
 
-`SmoothScroll` 实现公共 `ScrollTarget`，仍读写原来的 `repo_scroll`。thumb 开始拖动和每次写入都取消平滑目标，拖动中不建立新的 wheel 目标，释放后继续从当前位置处理输入，防止拖后弹回；条绘制在透明 wheel overlay 之后，保留 thumb 命中。外部释放只 settle 本区域已记录的拖动，Esc、窗口失活与尺寸变化清理仓库条状态；tabs 的横轴、重排 hold 与侧栏 resizer sash 仍分别拥有自己的状态。
+`Motion<T>` 实现公共 `ScrollTarget`，仍读写原来的 `repo_scroll`。thumb 开始拖动和每次写入都取消平滑目标，拖动中不建立新的 wheel 目标，释放后继续从当前位置处理输入，防止拖后弹回；条绘制在透明 wheel overlay 之后，保留 thumb 命中。外部释放只 settle 本区域已记录的拖动，Esc、窗口失活与尺寸变化清理仓库条状态；tabs 的横轴、重排 hold 与侧栏 resizer sash 仍分别拥有自己的状态。
 
-滚动条显隐与内容平滑是两个机制：本轮只把仓库滚动条接到公共组件，没有实现新的全局 `ScrollMotion`，也不宣称 reader 或其他 viewport 的滚动条已接入。此前已合入的 workspace tabs、More、sash、分割线、身份与 indicator 约束保留。验证与预览边界见 [开发日志](devlog/2026-10-25-sidebar-layout.md)。
+滚动条显隐与内容平滑是两个机制，同属 `src/ui/scroll`：`Bars` 负责显隐、`Motion<T>` 负责内容 offset。旧 `ui::scrolling` 已删除；tabs、repo、page、palette 都使用公共 motion，但 account-ui/content-reader 的独立工作树尚待同步接线，不能据接口可用宣称其 UI 已迁移。此前已合入的 workspace tabs、More、sash、分割线、身份与 indicator 约束保留。验证与预览边界见 [开发日志](devlog/2026-10-25-sidebar-layout.md)。

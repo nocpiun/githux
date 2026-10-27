@@ -67,7 +67,7 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 
 `storage/content` 仍是边界说明，无业务实现。`domain/auth/network/github/data/diagnostics` 已有本切片的真实实现（见 [认证与网络](auth-and-network.md)），但**UI 与 app 入口尚未调用**，binary 里这些模块暂时是未使用代码，各自带一个写明原因的模块级 `dead_code` 允许，不是 crate 级屏蔽；接入 UI 后应移除。HTTP 与运行时已选定 `reqwest` + `tokio`（理由见同文）；数据库仍未选择。现有依赖中曾出现的相关库是框架传递依赖，不作为采用依据。
 
-侧栏尺寸与收起状态由 `Shell::sidebar_state` 持有（`src/ui/sidebar_state.rs`），本次运行记住展开宽度，渲染按当前窗口预算 clamp；GPUI drag 生命周期与 Ely 菜单焦点同属视图，不进入路由、账户或存储。`src/ui/scrolling.rs` 提供共享的滚轮平滑适配（离散滚轮缓动、精确滚动直通、捕获阶段只消费一次），已接入侧栏仓库、island 页面与 palette 列表；它只持有各区域的 `ScrollHandle` 与呈现偏移，不进入数据层。几何与交互契约见 [侧栏布局](sidebar-layout.md)。
+侧栏尺寸与收起状态由 `Shell::sidebar_state` 持有（`src/ui/sidebar_state.rs`），本次运行记住展开宽度，渲染按当前窗口预算 clamp；GPUI drag 生命周期与 Ely 菜单焦点同属视图，不进入路由、账户或存储。`src/ui/scroll/motion.rs` 提供基于真实 `ScrollTarget` 的公共 `Motion<T>`（受控横纵轴、130ms 离散 wheel、precise Pointer/Touch 直通、捕获阶段只消费一次），已接入侧栏仓库、每会话 island 页面、palette 与横向 tabs；原 `ui::scrolling` 已删除。每区域 motion 独立，thumb/程序 reveal/切换/排序边缘滚动取消或即时接管旧目标，失活与关闭清理，无后台 timer；不进入数据层。几何与交互契约见 [侧栏布局](sidebar-layout.md)。
 
 本轮状态归属：窗口持有 `workspace::Workspace` 的有序 `Session` 集合与唯一活动标签；`Workspace::open` 按 `Route::key()` 打开或激活，`close` 选择邻居并在关闭最后一个标签时新建 Home，打开数量不设上限。每个 `Session` 拥有真实的 `ScrollHandle`、页面 `FocusHandle`、标签条 `FocusHandle` 与仓库会话选择（branch/file，R3 阅读器填充）；关闭会话即释放这些状态。标签条自身的横向偏移是 `Shell` 的视图局部状态（一个 `ScrollHandle`），由 GPUI 的横向溢出、`src/ui/scroll/` 的统一滚动条（外观/几何/拖动/淡入淡出集中一套，`Bars` 状态按区域独立持有，不改共享主题）、滚轮、中键关闭与拖拽排序驱动，与页面滚动、侧栏滚动互不影响。拖拽只是按稳定 `TabId` 移动 `Session` 在集合中的位置（`Workspace::reorder`），不关闭、不重建会话，也不改变活动标签；落地槽位由滚动视口的实际偏移与宽度算出，工具栏在视口之外，因此不可能是投放目标。`Shell` 的侧栏滚动、浮层与根焦点同样是视图局部状态，不进入将来的数据层。fixture 是布局验证数据，不是缓存或 API 模型，也没有任何网络、凭据或存储路径读取它。账户切换时如何处理标签仍未决定。
 

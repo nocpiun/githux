@@ -2,10 +2,10 @@
 //!
 //! Every tab is one workspace session. Tabs keep one readable width and never compress: once they
 //! no longer fit, the scrolling viewport scrolls horizontally instead of shrinking labels, wrapping
-//! or widening the island. The scrolling is GPUI's own horizontal overflow on a [`ScrollHandle`],
-//! so the wheel path is the framework's: a vertical wheel maps onto the only scrollable axis,
-//! Windows already turns Shift+wheel into a horizontal delta, and a device's native horizontal
-//! delta arrives as one, so nothing is converted twice.
+//! or widening the island. The real horizontal `ScrollHandle` is driven by shared `scroll::Motion`:
+//! discrete wheel input eases, while precise pointer and touch input apply directly. A native
+//! horizontal delta wins; vertical wheel is the fallback, and Windows Shift+wheel is not remapped
+//! a second time.
 //!
 //! Layout: one inset on every edge of the strip's own box, then a row that holds the scrolling
 //! viewport and a pinned toolbar. The toolbar sits outside the viewport, so it neither scrolls nor
@@ -106,6 +106,7 @@ pub(super) fn strip(
     view: View,
     owner: gpui::EntityId,
     scrollbar: AnyElement,
+    wheel_overlay: AnyElement,
     cx: &App,
 ) -> AnyElement {
     let entries = &view.entries;
@@ -119,6 +120,7 @@ pub(super) fn strip(
     let rows = div()
         .id("tab-scroll")
         .debug_selector(|| "tab-scroll".to_string())
+        .relative()
         .flex()
         .flex_row()
         .flex_none()
@@ -136,7 +138,10 @@ pub(super) fn strip(
             }
             on_drop(drag.id, window, cx);
         })
-        .children(entries.iter().map(|entry| tab(entry, &view, owner, cx)));
+        .children(entries.iter().map(|entry| tab(entry, &view, owner, cx)))
+        // Capture the wheel before GPUI's immediate jump. The scrollbar band and thumb are
+        // outside this overlay; tab clicks and middle-button behavior still use their own nodes.
+        .child(wheel_overlay);
 
     let marker = view
         .dragging

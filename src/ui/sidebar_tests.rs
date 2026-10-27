@@ -493,53 +493,6 @@ fn resizing_interrupts_animation_and_restores_clamped_user_width(cx: &mut TestAp
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
 }
 
-#[test]
-fn smooth_state_eases_reverses_clamps_and_stops() {
-    use super::scrolling::SmoothState;
-    use std::time::{Duration, Instant};
-    let s = SmoothState::default();
-    let t0 = Instant::now();
-    // A discrete notch starts easing rather than jumping.
-    assert_eq!(s.wheel(t0, 0.0, 1000.0, -120.0, false, false), None);
-    assert!(s.is_animating());
-    let mid = s
-        .tick(t0 + Duration::from_millis(65), 0.0, 1000.0, false)
-        .unwrap();
-    assert!(mid < 0.0 && mid > -120.0, "mid={mid}");
-    // Reverse mid-flight: the next target is above the presented value, and the tick continues
-    // from where it was rather than jumping back to the original start.
-    assert_eq!(
-        s.wheel(
-            t0 + Duration::from_millis(65),
-            mid,
-            1000.0,
-            40.0,
-            false,
-            false
-        ),
-        None
-    );
-    let reversed = s
-        .tick(t0 + Duration::from_millis(80), mid, 1000.0, false)
-        .unwrap();
-    assert!(reversed > mid, "reverse must move up: {reversed} vs {mid}");
-    // Settle exactly on the accumulated target and stop asking for frames.
-    let end = s
-        .tick(t0 + Duration::from_millis(400), reversed, 1000.0, false)
-        .unwrap();
-    assert_eq!(end, -80.0);
-    assert!(!s.is_animating());
-    assert!(
-        s.tick(t0 + Duration::from_millis(500), -80.0, 1000.0, false)
-            .is_none()
-    );
-    // Precise input applies at once.
-    assert_eq!(s.wheel(t0, 0.0, 1000.0, -50.0, true, false), Some(-50.0));
-    // A content shrink clamps the presented value into the valid [-max, 0] range.
-    assert_eq!(s.wheel(t0, -500.0, 100.0, 0.0, true, false), Some(-100.0));
-    assert!(!s.is_animating());
-}
-
 #[gpui::test]
 fn wheel_overlay_is_painted_over_the_repository_viewport(cx: &mut TestAppContext) {
     let (_, cx) = shell(cx);
@@ -692,92 +645,6 @@ fn wheel_over_the_palette_scrolls_the_palette_not_the_page(cx: &mut TestAppConte
     assert!(
         view.read_with(cx, |s, _| s.palette_scroll_offset()).y < px(0.0),
         "the palette itself must scroll"
-    );
-}
-
-#[test]
-fn shrinking_range_clamps_target_so_reverse_scroll_still_moves() {
-    use super::scrolling::SmoothState;
-    use std::time::{Duration, Instant};
-    let s = SmoothState::default();
-    let t0 = Instant::now();
-    s.wheel(t0, 0.0, 1000.0, -600.0, false, false);
-    let first = s
-        .tick(t0 + Duration::from_millis(10), 0.0, 1000.0, false)
-        .unwrap();
-    assert!(first < 0.0 && first > -600.0, "easing has begun: {first}");
-    // Content/viewport shrinks before the next frame: the stored target must be clamped too.
-    // `current` is what the previous tick actually presented, so this is not an external jump.
-    let at_shrink = s
-        .tick(t0 + Duration::from_millis(20), first, 100.0, false)
-        .unwrap();
-    assert!(
-        at_shrink < 0.0 && at_shrink > -100.0,
-        "presentation still animates within the new range: {at_shrink}"
-    );
-    let settled = s
-        .tick(t0 + Duration::from_millis(400), at_shrink, 100.0, false)
-        .unwrap();
-    assert_eq!(settled, -100.0);
-    assert!(!s.is_animating());
-    // Reverse now: must move immediately, not accumulate against the old -600 target.
-    let reverse = s
-        .wheel(
-            t0 + Duration::from_millis(500),
-            -100.0,
-            100.0,
-            120.0,
-            true,
-            false,
-        )
-        .unwrap();
-    assert_eq!(reverse, 0.0);
-    // Also exercise a discrete reverse after a range shrink.
-    let s2 = SmoothState::default();
-    s2.wheel(t0, 0.0, 1000.0, -600.0, false, false);
-    let first2 = s2
-        .tick(t0 + Duration::from_millis(10), 0.0, 1000.0, false)
-        .unwrap();
-    let _ = s2.tick(t0 + Duration::from_millis(400), first2, 100.0, false);
-    s2.wheel(
-        t0 + Duration::from_millis(500),
-        -100.0,
-        100.0,
-        120.0,
-        false,
-        false,
-    );
-    let moved = s2
-        .tick(t0 + Duration::from_millis(600), -100.0, 100.0, false)
-        .unwrap();
-    assert!(moved > -100.0, "reverse must move toward zero: {moved}");
-}
-
-#[test]
-fn reduced_motion_range_shrink_is_clamped_immediately() {
-    use super::scrolling::SmoothState;
-    use std::time::{Duration, Instant};
-    let s = SmoothState::default();
-    let t0 = Instant::now();
-    s.wheel(t0, 0.0, 1000.0, -600.0, false, false);
-    let first = s
-        .tick(t0 + Duration::from_millis(10), 0.0, 1000.0, false)
-        .unwrap();
-    let next = s
-        .tick(t0 + Duration::from_millis(20), first, 100.0, true)
-        .unwrap();
-    assert_eq!(next, -100.0);
-    assert!(!s.is_animating());
-    assert_eq!(
-        s.wheel(
-            t0 + Duration::from_millis(30),
-            -100.0,
-            100.0,
-            120.0,
-            true,
-            true
-        ),
-        Some(0.0)
     );
 }
 
@@ -1229,10 +1096,13 @@ fn repository_bar_drags_real_content_and_cancels_pending_wheel(cx: &mut TestAppC
 
     // Leave an actual discrete wheel target pending, then hand control to the thumb immediately.
     view.update(cx, |s, _| {
-        assert!(
-            s.repo_smooth
-                .wheel(std::time::Instant::now(), -2000.0, false, false)
-        );
+        assert!(s.repo_smooth.wheel(
+            std::time::Instant::now(),
+            -2000.0,
+            gpui::Axis::Vertical,
+            false,
+            false
+        ));
     });
     cx.simulate_mouse_down(thumb.center(), MouseButton::Left, Modifiers::none());
     cx.simulate_mouse_move(

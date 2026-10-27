@@ -29,8 +29,7 @@ pub mod fixtures;
 pub(crate) mod geometry;
 mod page;
 mod palette;
-mod scroll;
-pub(crate) mod scrolling;
+pub(crate) mod scroll;
 mod sidebar;
 mod sidebar_state;
 mod tabs;
@@ -57,7 +56,7 @@ pub struct Shell {
     repositories: Vec<fixtures::RepoFixture>,
     root_focus: FocusHandle,
     repo_scroll: ScrollHandle,
-    repo_smooth: scrolling::SmoothScroll,
+    repo_smooth: scroll::Motion<gpui::ScrollHandle>,
     /// Visibility and thumb drag belong only to the repository viewport.
     repo_bars: scroll::Bars,
     /// One tab stop per repository row.
@@ -70,6 +69,8 @@ pub struct Shell {
     /// The strip's horizontal offset. One handle for the whole row, so the drag, the wheel and the
     /// scrollbar all move the same scroll position.
     tab_scroll: ScrollHandle,
+    /// Horizontal wheel motion belongs to the strip and shares the same target as its Bar.
+    tab_motion: scroll::Motion<ScrollHandle>,
     /// A tab the strip still has to bring into view, resolved in render once its bounds exist.
     revealed_tab: Option<TabId>,
     /// The tab whose strip entry last took keyboard focus, so Tab onto an offscreen tab reveals it
@@ -180,8 +181,7 @@ impl Shell {
             .collect::<Vec<_>>();
         let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
             if !window.is_window_active() {
-                shell.repo_bars.cancel(&shell.repo_smooth);
-                shell.repo_smooth.cancel();
+                scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
                 shell.close_sidebar_menu(window, cx);
                 let resizing = shell.sidebar_state.dragging;
                 shell.sidebar_state.end_resize(
@@ -201,8 +201,14 @@ impl Shell {
             if shell.sidebar_state.dragging || shell.repo_bars.dragging().is_some() {
                 cx.stop_active_drag(window);
             }
-            shell.repo_bars.cancel(&shell.repo_smooth);
-            shell.repo_smooth.cancel();
+            scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
+            scroll::cancel_region(&mut shell.tab_bars, &shell.tab_motion);
+            for session in shell.workspace.sessions() {
+                session.state().smooth.cancel();
+            }
+            if let Some(palette) = &shell.palette {
+                palette.smooth.cancel();
+            }
             shell.sidebar_state.end_resize(
                 cx.background_executor().now(),
                 false,
@@ -216,6 +222,7 @@ impl Shell {
                 .settle(window.viewport_size().width.into());
             cx.notify();
         });
+        let tab_scroll = ScrollHandle::new();
         let this = cx.entity();
         let sidebar_keys = cx.intercept_keystrokes(move |event, window, cx| {
             this.update(cx, |shell, cx| {
@@ -226,7 +233,7 @@ impl Shell {
                     cx.stop_propagation();
                     shell.close_sidebar_menu(window, cx);
                 } else if event.keystroke.key == "escape" && shell.repo_bars.dragging().is_some() {
-                    shell.repo_bars.cancel(&shell.repo_smooth);
+                    scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
                     cx.stop_active_drag(window);
                     cx.stop_propagation();
                     cx.notify();
@@ -256,7 +263,7 @@ impl Shell {
             workspace: Workspace::new(cx),
             repositories,
             root_focus,
-            repo_smooth: scrolling::SmoothScroll::new(repo_scroll.clone()),
+            repo_smooth: scroll::Motion::new(repo_scroll.clone()),
             repo_bars: scroll::Bars::new(),
             repo_scroll,
             repo_focus,
@@ -264,10 +271,11 @@ impl Shell {
             palette: None,
             restore_focus: false,
             search_focus,
-            tab_scroll: ScrollHandle::new(),
+            tab_scroll: tab_scroll.clone(),
             revealed_tab: None,
             focused_tab: None,
             tab_reach: gpui::Pixels::ZERO,
+            tab_motion: scroll::Motion::new(tab_scroll.clone()),
             tab_bars: scroll::Bars::new(),
             tab_drag: None,
             tab_clock: std::time::Instant::now(),
@@ -293,8 +301,13 @@ impl Shell {
     /// real pointer state.
     fn end_drags_on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_tab_drag(window, cx);
-        let target = self.tab_scroll.clone();
-        self.tab_bars.cancel(&target);
+        scroll::cancel_region(&mut self.tab_bars, &self.tab_motion);
+        for session in self.workspace.sessions() {
+            session.state().smooth.cancel();
+        }
+        if let Some(palette) = &self.palette {
+            palette.smooth.cancel();
+        }
         cx.notify();
     }
 
@@ -425,7 +438,7 @@ impl Shell {
     #[cfg(test)]
     pub fn scroll_tabs_by(&self, dx: gpui::Pixels) {
         let offset = self.tab_scroll.offset();
-        self.tab_scroll
+        self.tab_motion
             .set_offset(gpui::point(offset.x + dx, offset.y));
     }
 
@@ -434,6 +447,7 @@ impl Shell {
     /// here, so reuse rules live in one place, and the resulting tab is brought into view.
     pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.close_palette(cx);
+        self.tab_motion.cancel();
         let previous = self.workspace.active_id();
         let id = match self.workspace.open(route, cx) {
             OpenResult::Opened(id) | OpenResult::Activated(id) => id,
@@ -459,9 +473,13 @@ impl Shell {
                 focused.as_ref() == Some(&state.focus) || state.focus.contains_focused(window, cx);
             (strip, page)
         });
+        if let Some(session) = self.workspace.session(id) {
+            session.state().smooth.cancel();
+        }
         let Some(result) = self.workspace.close(id, cx) else {
             return;
         };
+        self.tab_motion.cancel();
         // A drag of the tab that just closed is over: keeping it would let a stale slot move
         // whichever tab now sits at that index.
         if self.tab_drag.as_ref().is_some_and(|drag| drag.id == id) {
@@ -488,13 +506,14 @@ impl Shell {
     /// Keeps the strip's offset inside its content. Called after a close so the tail never leaves
     /// a blank stretch, and harmless when nothing was clamped.
     fn clamp_tab_scroll(&self) {
+        self.tab_motion.cancel();
         let max = self.tab_scroll.max_offset();
         let offset = self.tab_scroll.offset();
         let x = offset
             .x
             .clamp(-max.x.max(gpui::Pixels::ZERO), gpui::Pixels::ZERO);
         if x != offset.x {
-            self.tab_scroll.set_offset(gpui::point(x, offset.y));
+            self.tab_motion.set_offset(gpui::point(x, offset.y));
         }
     }
 
@@ -502,6 +521,7 @@ impl Shell {
     /// that frame's measured bounds, and only once per newly revealed tab so a manual scroll is
     /// never overridden on later frames.
     fn reveal_tab(&mut self, id: TabId) {
+        self.tab_motion.cancel();
         self.revealed_tab = Some(id);
     }
 
@@ -559,7 +579,7 @@ impl Shell {
         // Never past the row's left edge; the lower end is left to GPUI's own clamp, which runs
         // against this frame's freshly laid out content and is therefore not a frame behind.
         let x = target.min(0.0);
-        self.tab_scroll
+        self.tab_motion
             .set_offset(gpui::point(gpui::px(x), gpui::Pixels::ZERO));
         true
     }
@@ -585,6 +605,7 @@ impl Shell {
         if self.palette.is_some() {
             return;
         }
+        self.tab_motion.cancel();
         let previous = self.workspace.active_id();
         if let Some(next) = self.workspace.cycle(by) {
             self.follow_page_focus(previous, next, window, cx);
@@ -613,9 +634,15 @@ impl Shell {
         if previous == next {
             return;
         }
+        // Switching freezes both session positions at their current presentation, rather than
+        // letting a hidden page's old wheel target resume when it is reopened.
+        if let Some(session) = self.workspace.session(next) {
+            session.state().smooth.cancel();
+        }
         let Some(previous) = self.workspace.session(previous) else {
             return;
         };
+        previous.state().smooth.cancel();
         let focused = window.focused(cx);
         let in_previous_page = focused.as_ref() == Some(&previous.state().focus)
             || previous.state().focus.contains_focused(window, cx);
@@ -729,6 +756,9 @@ impl Shell {
     }
 
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_motion.cancel();
+        self.repo_smooth.cancel();
+        self.workspace.active().state().smooth.cancel();
         if self.palette.is_some() {
             return;
         }
@@ -822,9 +852,10 @@ impl Shell {
     /// Closes the palette. Focus returns to the search entry on the next frame, so it is never
     /// left on a card that just left the tree.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
-        if self.palette.take().is_none() {
+        let Some(session) = self.palette.take() else {
             return;
-        }
+        };
+        session.smooth.cancel();
         self.restore_focus = true;
         cx.notify();
     }
@@ -1136,7 +1167,7 @@ impl Shell {
                             .track_focus(&focus)
                             .child(body),
                     )
-                    .child(scrolling::wheel_overlay("page", smooth)),
+                    .child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth)),
             )
             .into_any_element()
     }
@@ -1217,7 +1248,7 @@ impl Shell {
             )
         };
         let scrollbar = scroll::Bar {
-            target: &self.tab_scroll,
+            target: &self.tab_motion,
             id: scroll::BarId {
                 owner,
                 name: "tab-scrollbar",
@@ -1240,7 +1271,13 @@ impl Shell {
             on_drag_move,
             on_drop,
         };
-        tabs::strip(view, owner, scrollbar, cx)
+        tabs::strip(
+            view,
+            owner,
+            scrollbar,
+            scroll::wheel_overlay("tabs", gpui::Axis::Horizontal, self.tab_motion.clone()),
+            cx,
+        )
     }
 
     /// Milliseconds since the shell started, the clock the strip's scrollbar fade runs on.
@@ -1348,7 +1385,7 @@ impl Shell {
     /// platform drag is over, so a drag that ends anywhere (including outside the strip) hands
     /// visibility back to the hover state.
     fn set_thumb_dragging(&mut self, axis: gpui::Axis, dragging: bool, cx: &mut Context<Self>) {
-        let target = self.tab_scroll.clone();
+        let target = self.tab_motion.clone();
         if self.tab_bars.drag(
             &target,
             axis,
@@ -1361,6 +1398,7 @@ impl Shell {
     }
 
     fn start_tab_drag(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_motion.cancel();
         let Some(index) = self.workspace.position(id) else {
             return;
         };
@@ -1442,7 +1480,7 @@ impl Shell {
             let max: f32 = self.tab_scroll.max_offset().x.into();
             let next = (offset + step).clamp(-max, 0.0);
             if next != offset {
-                self.tab_scroll
+                self.tab_motion
                     .set_offset(gpui::point(gpui::px(next), gpui::Pixels::ZERO));
             }
         }
@@ -1469,6 +1507,7 @@ impl Shell {
         if drag.id != id {
             return;
         }
+        self.tab_motion.cancel();
         let target = drag.target;
         // Re-checked here rather than trusting the slot: a closed tab is ignored, and the session
         // keeps its own id, state and route either way.
@@ -1501,6 +1540,7 @@ impl Shell {
         if !self.workspace.activate(id) {
             return;
         }
+        self.tab_motion.cancel();
         self.follow_page_focus(previous, id, window, cx);
         self.reveal_tab(id);
         cx.notify();
@@ -1571,6 +1611,9 @@ impl Render for Shell {
         if self.repo_smooth.tick(now, reduced) {
             window.request_animation_frame();
         }
+        if self.tab_motion.tick(now, reduced) {
+            window.request_animation_frame();
+        }
         if self.workspace.active().state().smooth.tick(now, reduced) {
             window.request_animation_frame();
         }
@@ -1612,7 +1655,7 @@ impl Render for Shell {
         }
         // A thumb drag ends wherever the pointer is released; visibility then follows hover again.
         if self.tab_bars.dragging().is_some() && !cx.has_active_drag() {
-            let target = self.tab_scroll.clone();
+            let target = self.tab_motion.clone();
             if self
                 .tab_bars
                 .settle(&target, self.tab_now_ms(), cx.reduce_motion())

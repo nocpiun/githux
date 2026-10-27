@@ -165,3 +165,21 @@ Codex 针对 `c2fa641`（P3）指出：拖出 resize 带后松开，`dragging` �
 新增真实 GPUI 事件/布局测试：拖动公共 thumb 改变仓库内容并取消待完成 wheel；释放后不弹回；footer、tabs、page 偏移不变；3px 可见线；快速进出可逆 fade、收起/矮窗口范围；Esc、窗口尺寸变化、窗口失活清理仓库拖动且不误记为 tab/resizer drag。既有“折叠动画终点停帧”测试现在先让新增的独立 hover fade 结束，继续断言零常驻帧请求；Touch 直通测试关闭 reduced-motion，防止 reduced-motion 掩盖误加惯性。
 
 本机 fmt、locked all-target check、clippy `-D warnings`、400 项测试、preview build 与 diff check 通过，重型 Cargo 使用 `CARGO_BUILD_JOBS=1`。最终 CI/review 证据随 PR 交付记录绑定当前 head。一次全量运行中既有网络 mock 的 malformed framing 用例返回传输错误，单独复核通过；没有改网络代码或降低它的断言。真实滚动条外观、动画流畅度、原生输入/DPI 与此前全部侧栏视觉仍需负责人验收，测试平台不代替 Windows GUI。PR 保留 pending / OPEN / coordinator，不合并或启用 auto-merge。
+
+## 第九轮：平滑滚动归入公共 scroll，并实际接入横向 tabs
+
+负责人明确扩展范围：平滑不能继续另放 `ui::scrolling` 或只服务 repo，必须成为统一 scroll 的公共能力。以 `30e9d50` 为起点，PR 上负责人管理的 blocked 保留；旧 CI/Check/review 为历史证据，不作为本轮放行。
+
+实现位于 `src/ui/scroll/motion.rs`，由 scroll 入口导出 `Motion<T>`、`wheel_overlay`、`cancel_region`。旧 `src/ui/scrolling.rs` 与旧 mod/调用路径删除，无兼容壳。Motion 基于真实 `ScrollTarget + Clone`，每区域独立状态、横纵轴各自目标/呈现/时钟；约 130ms 离散 wheel 累加与反向缓动，precise Pointer 与 Touch（含系统动量）直通，reduced-motion 即时。保留 `Bars` / `Bar` 的 140ms fade、样式和几何，不复制公共条，也不把 resizer sash 纳入内容 motion。
+
+所有现有消费者已迁移：仓库 viewport、每个 workspace Session 的页面、palette 列表，以及横向 workspace tabs。tabs 不再依赖 GPUI 即时 wheel 跳变：公共 overlay 选横轴，原生 x（含 Windows Shift+wheel）优先，否则以 y 为 fallback；每事件捕获消费一次，另一轴 offset 保留。Bar 与 wheel 传同一个 motion clone；thumb start/write/end 取消本轴目标并转调原生 target 生命周期，拖动期间不累加竞争目标，松手不弹回。
+
+程序化 reveal、切换/关闭标签、键盘导航、palette 查询重置、排序边缘自动滚动即时接管旧目标；会话切换冻结离开与进入页面的当前呈现位置，失活、窗口变化、palette 关闭和 session 释放不留旧动画。无后台 timer；owner 仅在 `tick` 表示未完成时请求后续帧。公共接口不依赖 Shell/sidebar/固定名字，也不固定为纵向 ScrollHandle。
+
+测试先后发现并修复了两个真实边界：新标签 reveal 发生在下一帧范围布局之前，过早按旧 max-offset clamp 会让末尾新标签被裁掉，故程序写入取消目标后交原生新布局 clamp；原生 ListState 初始 reach 只有已测部分，测试应验证真实 clamp，不能通过 measure_all 伪造全量范围。ListState 纵向保留原生 drag hook，不支持的横轴安全 no-op。
+
+公共测试使用可控 Instant 与真实窗口布局，覆盖 ScrollHandle 横纵轴/多区域、累积反向、range shrink、reduced-motion、thumb 接管与即时程序跳转；真实 UniformList base_handle 与 ListState、原生拖动开始/结束；嵌套区域单次消费且子控件点击可达。tabs 真实 ScrollEvent 回归验证离散中间帧/最终九个 line delta、横轴优先、Pointer pixels/Touch 直通、reveal/切换/失活取消；旧立即 wheel 的静止断言改为等待公共 motion 完成后继续验证原来的交互。
+
+account-ui / content-reader 的独立 worktree 未修改，文档给出真实 ScrollHandle / UniformList / ListState 最小接线与输入所有权要求；它们尚待协调者同步，不宣称未合并 UI 已迁移。正式应用无新增调试入口、examples、vendor、fork、依赖升级或 Cargo 缓存补丁。
+
+本机 fmt、locked all-target check、clippy `-D warnings`、403 tests、preview build 与 diff 检查的最终结果在 PR/任务状态绑定本轮 head；GPUI 事件测试不替代真实 Windows 滚轮/触控板/触屏手感、IME、多 DPI 及原侧栏视觉验收。PR 保持 OPEN / coordinator，人工验收未通过，不合并或启用 auto-merge。

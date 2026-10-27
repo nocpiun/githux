@@ -990,8 +990,21 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
         "a native horizontal delta scrolls the strip once: {after_shift:?}"
     );
 
-    // Manual scrolling is not undone by later frames.
-    let held = after_shift;
+    // Discrete input continues through the shared 130ms motion; after settling the accumulated
+    // target must equal exactly nine line deltas (the capture path consumes each wheel once).
+    view.update(cx, |shell, _| {
+        shell.tab_motion.tick(
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+            false,
+        );
+    });
+    let held = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    let line = cx.update(|window, _| window.line_height());
+    assert!(
+        (held.x - line * -9.0).abs() <= px(1.0),
+        "accumulated wheel target: {held:?}"
+    );
+    // A settled position is not undone by later frames.
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(
@@ -2470,4 +2483,92 @@ fn reduced_motion_shows_the_bar_without_animating(cx: &mut TestAppContext) {
         "the fade jumps straight to visible"
     );
     assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
+}
+
+#[gpui::test]
+fn tabs_use_shared_motion_for_discrete_precise_touch_and_programmatic_actions(
+    cx: &mut TestAppContext,
+) {
+    use std::time::{Duration, Instant};
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click_repo_row(&view, index, cx);
+    }
+    view.update(cx, |s, _| {
+        let at = s.tab_scroll.offset();
+        s.scroll_tabs_by(-at.x);
+    });
+    pump(cx);
+    let strip = bounds("tab-scroll", cx);
+    let send = |cx: &mut VisualTestContext, delta, source| {
+        cx.simulate_mouse_move(strip.center(), None, Modifiers::none());
+        cx.simulate_event(ScrollEvent {
+            position: strip.center(),
+            delta,
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source,
+        });
+        cx.run_until_parked();
+    };
+    send(
+        cx,
+        ScrollDelta::Lines(gpui::point(0.0, -4.0)),
+        ScrollSource::Pointer,
+    );
+    assert!(view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    let line = cx.update(|window, _| window.line_height());
+    let target = line * -4.0;
+    assert!(view.read_with(cx, |s, _| s.tab_scroll.offset()).x > target);
+    view.update(cx, |s, _| {
+        s.tab_motion
+            .tick(Instant::now() + Duration::from_millis(200), false);
+    });
+    assert!((view.read_with(cx, |s, _| s.tab_scroll.offset()).x - target).abs() <= px(1.0));
+    let at = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    // Native horizontal delta wins over simultaneous vertical movement, and pixel input is direct.
+    send(
+        cx,
+        ScrollDelta::Pixels(gpui::point(px(-35.0), px(-90.0))),
+        ScrollSource::Pointer,
+    );
+    assert_eq!(
+        view.read_with(cx, |s, _| s.tab_scroll.offset()).x,
+        at.x - px(35.0)
+    );
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    let at = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    send(
+        cx,
+        ScrollDelta::Pixels(gpui::point(px(-45.0), px(0.0))),
+        ScrollSource::Touch,
+    );
+    assert_eq!(
+        view.read_with(cx, |s, _| s.tab_scroll.offset()).x,
+        at.x - px(45.0)
+    );
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    send(
+        cx,
+        ScrollDelta::Lines(gpui::point(0.0, -4.0)),
+        ScrollSource::Pointer,
+    );
+    click("nav-home", cx);
+    let revealed = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    view.update(cx, |s, _| {
+        assert!(
+            !s.tab_motion
+                .tick(Instant::now() + Duration::from_secs(1), false)
+        );
+    });
+    assert_eq!(view.read_with(cx, |s, _| s.tab_scroll.offset()), revealed);
+    send(
+        cx,
+        ScrollDelta::Lines(gpui::point(0.0, -4.0)),
+        ScrollSource::Pointer,
+    );
+    cx.update_window_entity(&view, |s, window, cx| s.end_drags_on_blur(window, cx));
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
 }

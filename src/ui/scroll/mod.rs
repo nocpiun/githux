@@ -13,6 +13,7 @@
 
 mod fade;
 mod geometry;
+mod motion;
 mod target;
 
 #[cfg(test)]
@@ -20,6 +21,7 @@ mod tests;
 
 pub use fade::Fade;
 pub use geometry::Thumb;
+pub use motion::{Motion, cancel_region, wheel_overlay};
 pub use target::ScrollTarget;
 
 use std::cell::Cell;

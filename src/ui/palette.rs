@@ -192,7 +192,7 @@ pub(super) struct Session {
     pub input: Entity<TextInput>,
     pub focus: FocusHandle,
     pub scroll: ScrollHandle,
-    pub smooth: super::scrolling::SmoothScroll,
+    pub smooth: super::scroll::Motion<ScrollHandle>,
     pub cursor: usize,
     pub commands: Vec<Command>,
     /// The query the highlight was last reset for.
@@ -213,7 +213,7 @@ impl Session {
         let field = input.read(cx).focus_handle(cx);
         window.focus(&field, cx);
         let scroll = ScrollHandle::new();
-        let smooth = super::scrolling::SmoothScroll::new(scroll.clone());
+        let smooth = super::scroll::Motion::new(scroll.clone());
         Self {
             input,
             focus,
@@ -276,7 +276,7 @@ pub(super) struct View {
     pub input: Entity<TextInput>,
     pub focus: FocusHandle,
     pub scroll: ScrollHandle,
-    pub smooth: super::scrolling::SmoothScroll,
+    pub smooth: super::scroll::Motion<ScrollHandle>,
     pub cursor: usize,
     pub commands: Vec<Command>,
     pub on_close: Run,
@@ -445,8 +445,9 @@ pub(super) fn render(view: View, cx: &mut App) -> AnyElement {
                         .track_scroll(&view.scroll)
                         .children(rows),
                 )
-                .child(super::scrolling::wheel_overlay(
+                .child(super::scroll::wheel_overlay(
                     "palette",
+                    gpui::Axis::Vertical,
                     view.smooth.clone(),
                 )),
         )
