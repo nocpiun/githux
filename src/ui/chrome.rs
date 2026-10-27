@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use ely_gpui_component::{
+use ely_core::{
     primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
 };
