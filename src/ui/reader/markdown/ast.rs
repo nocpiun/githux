@@ -549,9 +549,23 @@ pub fn parse(markdown: &str) -> Document {
                 finish_inline(&mut inline, &mut stack);
                 html.clear();
             }
-            Event::Html(text) | Event::InlineHtml(text) => match &mut inline {
+            // Block HTML is buffered until its closing event. Inline HTML
+            // belongs to the surrounding paragraph, tight list item or cell,
+            // so it must reach a builder even when none exists yet: those
+            // contexts never emit `End(HtmlBlock)`.
+            Event::Html(text) => match &mut inline {
                 Some((_, building)) => building.push_text(&text),
                 None => html.push_str(&text),
+            },
+            Event::InlineHtml(text) => match &mut inline {
+                Some((_, building)) => building.push_text(&text),
+                None => {
+                    if let Some(Container::Cell(cell)) = stack.last_mut() {
+                        cell.inline.text.push_str(&text);
+                    } else {
+                        with_inline(&mut inline, |building| building.push_text(&text));
+                    }
+                }
             },
             Event::End(TagEnd::HtmlBlock) => {
                 let text = std::mem::take(&mut html);
@@ -703,6 +717,26 @@ mod tests {
             "{:?}",
             doc.blocks
         );
+    }
+
+    #[test]
+    fn inline_html_keeps_its_tags_in_a_tight_item() {
+        let doc = parse(
+            "- <kbd>Ctrl</kbd>
+- plain
+
+| <b>h</b> |
+|---|
+| <i>x</i> |",
+        );
+        let text: String = doc
+            .blocks
+            .iter()
+            .map(|block| format!("{block:?}"))
+            .collect();
+        assert!(text.contains("<kbd>Ctrl</kbd>"), "{text}");
+        assert!(text.contains("<b>h</b>"), "{text}");
+        assert!(text.contains("<i>x</i>"), "{text}");
     }
 }
 
