@@ -2,7 +2,7 @@
 
 - 日期：2026-10-26；任务 ID：shared-scroll；执行者：基层 Agent。
 - 目标与状态：把散落在 workspace-tabs 与 content-reader 分支里的滚动条几何、拖动与淡入淡出收拢成项目内唯一实现，并以负责人指定的 reader 视觉标准接入 main 上已合并的标签条。**实现与本地验证完成，进入 PR 流程**；sidebar-layout / content-reader 的消费者接线由各自任务后续进行。
-- 交付范围：`src/ui/scroll/**`（新）、`src/ui/tab_scrollbar.rs`（删除）、`src/ui/mod.rs` 最小接线、`src/ui/geometry.rs` 常量归属调整、对应 GPUI 测试、`docs/scrolling.md`。不改 Ely/GPUI/Rust 版本、不改 Cargo 缓存、不修改 sidebar 与 reader 的 worktree。
+- 交付范围：`src/ui/scroll/**`（新）、`src/ui/tab_scrollbar.rs`（删除）、`src/ui/mod.rs` 最小接线、`src/ui/geometry.rs` 常量归属调整、对应 GPUI 测试、`docs/scrolling.md`。首轮不改 Ely/GPUI/Rust 版本、不改 Cargo 缓存、不修改 sidebar 与 reader 的 worktree；后续 2026-10-27 按负责人授权随 main 完成官方 Ely / GPUI 0.3.10 迁移，仍不使用 vendor/fork/缓存补丁。
 - 基线：`84b029e63b9ca28dfc9d1abf7d8aed7795684c0e`（main，含 PR #16 workspace-tabs）。
 
 ## 改动与决定
@@ -66,6 +66,18 @@ git diff --check
 - 触控板横向手势与真实 `Shift`+wheel 分发（沿用既有实现，未改逻辑，本轮未在真机重测）。
 - sidebar / reader 接线后的组合效果与 Markdown 列表（接口未就绪，另立任务）。
 - macOS/Linux 未做原生验收。
+
+## 2026-10-27：官方 Ely / GPUI 0.3.10 迁移与复用边界
+
+负责人授权在原 PR 内同步 main `7ed70cda44c2f3ba36eeb740fd0925f20f5882b8`，主 Agent 的本地合并提交为 `5b2b6becbe70c7c005ab8331264f4bf476161d71`。开始已核对祖先关系与工作区干净，`tab_scrollbar.rs` 仍按本任务意图删除。原人工视觉 hold 保留，合并权限改为 coordinator，本轮及后续都不自动合并。
+
+- `src/ui/scroll` 的核心 imports 改为 `ely_core::theme::ActiveTheme`，测试初始化改为 `ely_core::init_for_tests`；外层 main 已使用 `ScrollEvent`、`ScrollSource::Pointer` 与新按键加载 API。Rust 保持 1.98.1，所有 Ely crate 固定官方提交 `30c66fe1d5d23db769a6c834b771d054d7f288cf`，GPUI / platform 固定 0.3.10，未把旧仓库源码或单 crate vendor 引入。
+- 逐项读取新版 `Scrollbar`、`ScrollArea`、`ScrollSource` / `ScrollModel`：`presence` 可接外部 opacity，普通 handle/ListState/自定义 model 都有上游入口；但 6px、固定 overlay/track、0.22/0.42 颜色、activity 显隐和 crate 私有 `offset/place/set/end` 不能保持已确认样式/布局与生命周期。上游 900ms idle + 320ms 线性淡出也不是本项目的双向 140ms 可逆 fade。因此保留最小局部绘制，而不是用 theme/rem、缩放、裁剪或上游补丁伪装。
+- `ScrollTarget` 新增真实 `gpui::ListState` 纵向实现，直接调用公开 viewport/offset/max-offset/set-offset 和 drag start/end；非均匀列表测试 `native_list_tests::native_list_state_drags_and_uses_its_drag_hooks` 验证拖动真实 offset，且释放后 `is_scrollbar_dragging()` 为 false。Source 的 UniformList 真实 `base_handle` 适配保持。
+- 新版 `MarkdownDocument` 内部已经有 `ScrollSource::List(self.list.clone())` + `Scrollbar::auto()`，Source 模式用编辑器 handle；但 `list` 仍私有。外部 `ScrollModel` 不能凭类型声明读到这个列表，故 Markdown 接入仍需最小公开 facade/accessor，不能把“上游已支持 model”写成“本模块已接 Markdown”。
+- 本轮不做全局滚轮平滑、不修改 sidebar/reader worktree、不把其未合并消费者并入 PR29。具体复用比较和迁移清单见 [统一滚动](../scrolling.md#固定上游复用评估2026-10-27)。
+
+迁移后本机以 `CARGO_BUILD_JOBS=1` / `-j 1` 验证：`cargo check --locked --all-targets`、公共 scroll 15 项与全量 `cargo test --locked`（**358 passed，0 failed**）通过。其余 clippy/build/真实 GUI 证据随本轮完成后记录，不把同步提交本身当构建验证。
 
 ## 后续
 

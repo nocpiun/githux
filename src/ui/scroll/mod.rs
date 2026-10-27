@@ -25,7 +25,7 @@ pub use target::ScrollTarget;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use ely_gpui_component::theme::ActiveTheme;
+use ely_core::theme::ActiveTheme;
 use gpui::{
     AnyElement, App, Axis, EmptyView, EntityId, Hsla, IntoElement, StatefulInteractiveElement,
     Styled, Window, div, prelude::*, px,

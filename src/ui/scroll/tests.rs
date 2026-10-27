@@ -4,9 +4,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    Axis, Context, Modifiers, MouseButton, Pixels, Render, ScrollHandle, Size, TestAppContext,
-    UniformListScrollHandle, VisualTestContext, Window, div, point, prelude::*, px, size,
-    uniform_list,
+    Axis, Context, ListAlignment, ListState, Modifiers, MouseButton, Pixels, Render, ScrollHandle,
+    Size, TestAppContext, UniformListScrollHandle, VisualTestContext, Window, div, list, point,
+    prelude::*, px, size, uniform_list,
 };
 
 use super::*;
@@ -264,7 +264,7 @@ impl Render for Probe {
 }
 
 fn probe(cx: &mut TestAppContext) -> (gpui::Entity<Probe>, &mut VisualTestContext) {
-    cx.update(ely_gpui_component::init_for_tests);
+    cx.update(ely_core::init_for_tests);
     cx.add_window_view(Probe::new)
 }
 
@@ -638,4 +638,86 @@ fn bars_report_drag_hooks_once_per_axis_and_cancel_clears_everything() {
     target.set_axis_offset(Axis::Vertical, px(-30.0));
     target.set_axis_offset(Axis::Horizontal, px(-10.0));
     assert_eq!(target.offset(), point(px(-10.0), px(-30.0)));
+}
+
+mod native_list_tests {
+    use super::*;
+
+    struct NativeList {
+        state: ListState,
+        bars: Bars,
+    }
+
+    impl NativeList {
+        fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+            Self {
+                state: ListState::new(200, ListAlignment::Top, px(40.0)),
+                bars: Bars::new(),
+            }
+        }
+    }
+
+    impl Render for NativeList {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.bars.dragging().is_some() && !cx.has_active_drag() {
+                let state = self.state.clone();
+                self.bars.settle(&state, 0, false);
+            }
+            let state = self.state.clone();
+            let drag_state = state.clone();
+            let this = cx.entity().downgrade();
+            let on_drag: OnDragging = Rc::new(move |axis, dragging, _window, cx| {
+                let state = drag_state.clone();
+                let _ = this.update(cx, |view, cx| {
+                    if view.bars.drag(&state, axis, dragging, 0, false) {
+                        cx.notify();
+                    }
+                });
+            });
+            let bar = Bar {
+                target: &state,
+                id: BarId {
+                    owner: cx.entity_id(),
+                    name: "native-list-v",
+                    axis: Axis::Vertical,
+                },
+                placement: Placement::overlay(4.0, 8.0),
+                style: Style::DEFAULT,
+                opacity: self.bars.opacity(0),
+                on_drag,
+            }
+            .render(cx);
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    list(state, |ix, _window, _cx| {
+                        div()
+                            .h(px(24.0))
+                            .child(format!("native row {ix}"))
+                            .into_any_element()
+                    })
+                    .size_full(),
+                )
+                .child(bar)
+        }
+    }
+
+    #[gpui::test]
+    fn native_list_state_drags_and_uses_its_drag_hooks(cx: &mut TestAppContext) {
+        cx.update(ely_core::init_for_tests);
+        let (view, cx) = cx.add_window_view(NativeList::new);
+        cx.simulate_resize(size(px(300.0), px(240.0)));
+        cx.run_until_parked();
+        view.update(cx, |view, _| view.bars.snap(true));
+        frames(cx);
+        assert!(view.read_with(cx, |view, _| view.state.max_offset_for_scrollbar().y) > px(0.0));
+        let thumb = bounds("native-list-v-thumb", cx).center();
+        drag(cx, thumb, point(px(0.0), px(20.0)));
+        frames(cx);
+        let offset = view.read_with(cx, |view, _| view.state.scroll_px_offset_for_scrollbar());
+        assert!(offset.y < px(0.0), "native ListState moved: {offset:?}");
+        assert_eq!(offset.x, Pixels::ZERO);
+        assert!(!view.read_with(cx, |view, _| view.state.is_scrollbar_dragging()));
+    }
 }

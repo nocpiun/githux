@@ -1,6 +1,6 @@
 # 统一滚动与滚动条
 
-更新：2026-10-26。状态：公共滚动条已实现并由应用标签条（workspace-tabs）实际接入；sidebar-layout 与 content-reader 仍各自保留旧实现，尚未接线。Markdown 的内层列表接口仍缺最小访问器，见下文。
+更新：2026-10-27。状态：公共滚动条已实现并由应用标签条（workspace-tabs）实际接入；sidebar-layout 与 content-reader 仍各自保留旧实现，尚未接线。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。新版 GPUI `ListState` 已有真实适配和测试；`MarkdownDocument` 的私有内层列表仍不能从外部接入，见下文。
 
 本主题是滚动条外观、几何、拖动、淡入淡出与 `ScrollMotion` 边界的唯一维护位置。视觉基准来自 content-reader 当前实现（负责人 2026-10-26 明确以它为准）：细、两头圆、半透明、出现/消失渐变、无实体轨道。
 
@@ -11,11 +11,27 @@
 | [`src/ui/scroll/mod.rs`](../src/ui/scroll/mod.rs) | 唯一的外观（`Style`）、放置（`Placement`）、单帧绘制（`Bar`）与区域状态（`Bars`） |
 | [`src/ui/scroll/geometry.rs`](../src/ui/scroll/geometry.rs) | 唯一的 thumb 长度/位置/拖动换算（`Thumb`） |
 | [`src/ui/scroll/fade.rs`](../src/ui/scroll/fade.rs) | 唯一的淡入淡出状态（`Fade`） |
-| [`src/ui/scroll/target.rs`](../src/ui/scroll/target.rs) | 真实滚动目标契约（`ScrollTarget`）与 `gpui::ScrollHandle` 实现 |
+| [`src/ui/scroll/target.rs`](../src/ui/scroll/target.rs) | 真实滚动目标契约（`ScrollTarget`）与 `gpui::ScrollHandle`、`gpui::ListState` 实现 |
 | [`src/ui/tabs.rs`](../src/ui/tabs.rs) | 标签条自身布局；只保留 `TAB_*` 布局常量与预留 band |
 | [`src/ui/geometry.rs`](../src/ui/geometry.rs) | `TAB_SCROLLBAR_BAND = scroll::THICKNESS + 2`，其余标签间距/高度仍在原处 |
 
-`src/ui/tab_scrollbar.rs` 已删除。不得再新增第二份几何、拖动或 Fade 实现；缺口应在此模块补齐，而不是在消费者里复制。
+`src/ui/tab_scrollbar.rs` 已删除。不得再新增第二份项目自绘的几何、拖动或 Fade 实现；缺口应在此模块补齐，而不是在消费者里复制。
+
+## 固定上游复用评估（2026-10-27）
+
+逐项读取了 Ely 固定提交 `30c66fe1d5d23db769a6c834b771d054d7f288cf` 的 `layout/scroll.rs` 与 `layout/scroll/source.rs`，以及 GPUI 0.3.10 的列表 API。上游已提供不少真实能力，但没有公开到足以保持本项目已确认外观和布局的组合：
+
+| 上游能力 | 可否直接用于本项目 | 事实与最小边界 |
+| --- | --- | --- |
+| `Scrollbar::new(id, source, axis)` | 不能直接替换 `Bar` | 可接 `ScrollHandle`、`ListState`、`Rc<dyn ScrollModel>`；但绘制固定主题 6px、固定 overlay 与 2× 厚度 track、颜色 0.22/0.42，没有 style/placement setter。 |
+| `Scrollbar::presence(f32)` | 只能接收显隐数值，不能替代 `Fade` | 它能驱动外部算出的 opacity，但 `auto()` 是活动立即显示、idle 900ms 后按 320ms 线性淡出，不能保持 hover 进入/离开各 140ms smoothstep、快速反向从当前值继续。 |
+| `ScrollArea` | 不能替代 tabs viewport | 它重组内容、溢出与滚动行为，并把固定 overlay 条和自身 activity 状态一起组合；tabs 的预留 band、固定 toolbar、滚轮映射、reveal 与排序是已验收外壳职责。 |
+| `ScrollSource::Handle/List/Model` | 作为上游概念核对过，不能直接当本模块目标 trait | `offset/place/set/end` 方法均为 crate 私有；外部调用方不能仅复用这些方法来获得几何/写入。`ScrollModel::place/set/offset` 公开，可供未来自定义内容 owner 实现自己的模型，但不能读取 `MarkdownDocument` 的私有列表。 |
+| 上游 thumb 圆角与 GPUI drag | 已沿用的框架能力 | 上游本身使用 `rounded_full` 与 GPUI `on_drag`/`on_drag_move`，说明基础能力足够；Githux 的额外 owner/region/axis、drag hooks、外部释放/取消清理仍需本地实现。 |
+| GPUI `ListState` 原生 scrollbar API | **已直接复用** | `ScrollTarget for ListState` 使用公开的 `viewport_bounds`、`scroll_px_offset_for_scrollbar`、`max_offset_for_scrollbar`、`set_offset_from_scrollbar` 和 `scrollbar_drag_started/ended`。原生 adapter 是纵向，不把横向假称为已支持。 |
+| GPUI `UniformListScrollHandle::base_handle` | **已直接复用** | 它是公开的真实 `ScrollHandle`，覆盖纵/横两轴；不需要复制列表几何。 |
+
+因此本 PR 不关闭、也不因上游出现同名控件就宣称所有局部实现必须永久保留。最小保留边界是：3px / 0.20 / 0.38 外观、band/overlay/corner placement、140ms 可逆 fade、独立区域与另一轴保留、drag 生命周期、隐藏不拦输入，以及对应测试。普通滚动目标与原生列表生命周期则直接复用公开 API，不修改全局 theme/rem、缩放/裁剪容器、缓存、fork 或 vendor。
 
 ## 外观参数（已实现）
 
@@ -57,7 +73,7 @@ let element = bar.render(cx);
 | `ScrollTarget::viewport_bounds` | 内容视口（不是整块区域）的四边，供几何与拖动坐标使用 |
 | `ScrollTarget::offset` / `max_offset` | 负方向 offset / 非负 reach；与 GPUI 一致 |
 | `ScrollTarget::set_axis_offset` | 仅设置指定轴，值已 clamp，另一轴不变 |
-| `ScrollTarget::drag_started` / `drag_ended` | 默认空实现；`UniformListScrollHandle` 的 `base_handle` 可通过包装转调列表的手势钩子 |
+| `ScrollTarget::drag_started` / `drag_ended` | `ScrollHandle` 默认空实现；`ListState` 实现直接转调原生手势钩子 |
 | `ScrollTarget::redraw` | 默认 `window.refresh()` |
 | `Placement::BAND` | 标签条：无 inset、命中区等于线宽，画在预留 band 顶部 |
 | `Placement::overlay(inset, hit)` | 内容区：贴尾侧（纵向在右、横向在下）浮层 |
@@ -84,7 +100,7 @@ let element = bar.render(cx);
 
 ### 已接入：应用标签条
 
-`Shell::tab_strip` 用 `Placement::BAND` + `Style::DEFAULT` 渲染标签条滚动条，`Bars` 由 `Shell` 持有；`hover` 来自标签条本身，`hold` 来自标签重排，`thumb` 来自本区域拖动。原有滚轮/`Shift`+wheel 映射、边缘自动滚动、标签排序/关闭/切换、会话独立 scroll/focus、固定 toolbar 与 Refresh 间距均未改变。
+`Shell::tab_strip` 用 `Placement::BAND` + `Style::DEFAULT` 渲染标签条滚动条，`Bars` 由 `Shell` 持有；`hover` 来自标签条本身，`hold` 来自标签重排，`drag` 来自本区域拖动。原有滚轮/`Shift`+wheel 映射、边缘自动滚动、标签排序/关闭/切换、会话独立 scroll/focus、固定 toolbar 与 Refresh 间距均未改变。
 
 ### 未接入：sidebar-layout
 
@@ -98,19 +114,21 @@ let element = bar.render(cx);
 
 ### 未接入：content-reader（源码 / Markdown）
 
-源码视图已有真实的 `UniformListScrollHandle`。接入步骤：
+源码视图已有真实的 `UniformListScrollHandle`。后续消费者任务按以下清单接线（本 PR 不代替它完成）：
 
-1. 区域持有自己的 `Bars`，纵向与横向各一个 `BarId`（同一 owner、不同轴与名字）。
-2. 用 `handle.0.borrow().base_handle.clone()` 作为 `ScrollTarget`；不要建立外层空 `ScrollHandle` 伪造位置，也不要重建列表或 `measure_all` 长文。
-3. 纵向用 `Placement::overlay`，横向用 `Placement::overlay(...).clear_of(&vertical, gap)` 让出右下角。
-4. 需要冻结拖动期间内容高度时，在 `ScrollTarget` 包装里把 `drag_started`/`drag_ended` 转调 GPUI `ListState` 已有的 `scrollbar_drag_started` / `scrollbar_drag_ended`（`gpui-pre 0.3.8` 已公开），不要自行记录高度。
+1. 统一先使用官方 `ely-core` 与 GPUI / platform 0.3.10，事件使用 `ScrollEvent`，普通鼠标/触控板测试来源明确为 `ScrollSource::Pointer`。
+2. 区域持有自己的 `Bars`，纵向与横向各一个 `BarId`（同一 owner、不同轴与名字）。
+3. 用 `handle.0.borrow().base_handle.clone()` 作为 `ScrollTarget`；不要建立外层空 `ScrollHandle` 伪造位置，也不要重建列表或 `measure_all` 长文。
+4. 纵向用 `Placement::overlay`，横向用 `Placement::overlay(...).clear_of(&vertical, gap)` 让出右下角。
 5. 删除 `reader/scrollbar.rs` 的独立 geometry/drag 与 `ui/scrollbar.rs` 的 re-export，改指向本模块。
 
-**Markdown 的限制**：`MarkdownDocument` 的内部 `ListState` 是私有的，`gpui-pre 0.3.8` 只公开了它的纵向 `viewport_bounds`、`max_offset_for_scrollbar`、`scroll_px_offset_for_scrollbar`、`set_offset_from_scrollbar`、`scrollbar_drag_started/ended`，没有横向，也没有草案里提到的 `track_scroll`。因此 Markdown 需要未来一个最小访问器/facade（另立任务，不实施 Ely 补丁），不能在这轮用外层假句柄顶替。
+如果消费者使用 GPUI 非均匀 `ListState`，可直接把该状态作为 `ScrollTarget`：本模块已实现纵向 offset/max offset、原生拖动开始/结束和内容高度冻结。`native_list_tests::native_list_state_drags_and_uses_its_drag_hooks` 用真实窗口和真实列表验证了它，不是理论适配。该实现不支持横向；需要横向的 Source 应继续使用 `UniformListScrollHandle::base_handle`。
+
+**Markdown 的真实限制（固定新版源码复核）**：新版 `MarkdownDocument` 自带 `Scrollbar::auto()`，在 Preview/Visual 模式内部使用 `ScrollSource::List(self.list.clone())`，Source 模式使用编辑器的 `ScrollHandle`。但其私有 `list: ListState` 没有公开 accessor；上游 `ScrollModel` 虽允许自定义模型，也不能从外部取得这个列表的 viewport/offset/max offset 来构造模型。因此仅增加 `ely-documents` 依赖或调用 `ScrollModel` 不能把本模块接到 Markdown 内部列表，仍需一个公开最小 facade/accessor（另立任务讨论，不在本 PR 修改 Ely）。新版的 `ListState` 纵向原生 API 已就绪，但不能绕过该私有字段。
 
 ## 验证现状
 
-- 公共模块对真实 GPUI 测试窗口自建的探针覆盖：无溢出时不绘制且不拦截输入、纵向拖动改变真实 `UniformListScrollHandle::base_handle`、双轴与双区域互不干扰、角落避让、拖动中 range 缩小仍 clamp、取消后清理、平台释放后只结束本区域拖动、`Placement` 与 `Style` 分离。
+- 公共模块对真实 GPUI 测试窗口自建的探针覆盖：无溢出时不绘制且不拦截输入、纵向拖动改变真实 `UniformListScrollHandle::base_handle`、真实非均匀 `ListState` 的原生拖动与结束清理、双轴与双区域互不干扰、角落避让、拖动中 range 缩小仍 clamp、取消后清理、平台释放后只结束本区域拖动、`Placement` 与 `Style` 分离。
 - 标签条既有关键用例（滚轮、`Shift`+wheel、reveal、拖拽排序、边缘自动滚动、关闭/切换、toolbar 固定、hover/拖动淡入淡出、外部释放淡出）全部保留并通过。
-- 真实 Windows 窗口（144 DPI，1942×1241 物理像素，11 个标签）像素抽查：闲置 `(84,83,83)`、thumb hover `(120,119,119)` 对 `(44,44,44)` 背景，滑块 4 物理像素高且无实体轨道；一次真实拖动把滑块从 `1010..1871` 移到 `510..1371` 并移动标签条；移出后该行回到背景色。这只是当前 head 的自测证据，不是负责人视觉验收。
+- 历史真实 Windows 窗口自测（2026-10-26 旧依赖 head，144 DPI，1942×1241 物理像素，11 个标签）：闲置 `(84,83,83)`、thumb hover `(120,119,119)` 对 `(44,44,44)` 背景，滑块 4 物理像素高且无实体轨道；一次真实拖动把滑块从 `1010..1871` 移到 `510..1371` 并移动标签条；移出后该行回到背景色。这些是旧 head 的自测证据，不代替迁移后 head 的预览，更不是负责人视觉验收。
 - 未覆盖：负责人对真实 Windows 窗口外观/DPI 的观感确认与动画流畅度、真实 IME 与触控板手势、sidebar 与 reader 接线后的组合效果、Markdown 列表（接口未就绪）。
