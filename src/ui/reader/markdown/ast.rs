@@ -85,6 +85,9 @@ pub enum Block {
         aligns: Vec<Align>,
         head: Vec<Inline>,
         rows: Vec<Vec<Inline>>,
+        /// Drawn as a repeated page-like header for a virtualized chunk. It is
+        /// presentation only, so copying does not repeat it.
+        repeated_head: bool,
     },
     Rule,
     Math {
@@ -508,7 +511,15 @@ pub fn parse(markdown: &str) -> Document {
                     aligns, head, rows, ..
                 }) = stack.pop()
                 {
-                    push_block(&mut stack, Block::Table { aligns, head, rows });
+                    push_block(
+                        &mut stack,
+                        Block::Table {
+                            aligns,
+                            head,
+                            rows,
+                            repeated_head: false,
+                        },
+                    );
                 }
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {

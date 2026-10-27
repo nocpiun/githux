@@ -2122,3 +2122,64 @@ fn a_newly_scrolled_in_link_is_clickable(cx: &mut TestAppContext) {
         "the press landed in the document, not on stale geometry"
     );
 }
+
+#[gpui::test]
+fn a_fenced_code_block_can_be_dragged_and_copied(cx: &mut TestAppContext) {
+    let body = "lead paragraph before the code.\n\n```rust\nlet alpha = 1;\nlet beta = 2;\n```\n\ntail paragraph after the code.";
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body.into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+    frames(cx);
+    let layout = inline_snapshot(cx, "let alpha = 1;\nlet beta = 2;");
+    let start = layout.pieces[0].text_bounds.left_center() + point(px(1.0), px(0.0));
+    let last = layout.pieces.last().unwrap().text_bounds.right_center();
+    drag(cx, &[start, point(last.x - px(1.0), last.y)]);
+    frames(cx);
+    let copied = copy_selection(&reader, cx);
+    assert!(copied.contains("let alpha = 1;"), "{copied:?}");
+    assert!(
+        !copied.contains("lead paragraph"),
+        "a code drag must not fall back to preceding prose: {copied:?}"
+    );
+}
+
+#[gpui::test]
+fn a_long_table_copies_its_header_once(cx: &mut TestAppContext) {
+    let mut body = String::from("| a | b |\n|---|---|\n");
+    for row in 0..80 {
+        body.push_str(&format!("| c{row} | d{row} |\n"));
+    }
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: body,
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+    frames(cx);
+    // Focus the table, then Ctrl+A for the whole document, including
+    // virtualized table chunks.
+    let cell = inline_snapshot(cx, "c0").pieces[0].text_bounds.center();
+    cx.simulate_click(cell, Modifiers::none());
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let copied = copy_selection(&reader, cx);
+    assert_eq!(
+        copied.matches("a\tb").count(),
+        1,
+        "the repeated chunk header is presentation only: {copied:?}"
+    );
+    assert!(
+        copied.contains("c0") && copied.contains("c79"),
+        "{copied:?}"
+    );
+}

@@ -10,6 +10,13 @@ use std::ops::Range;
 
 use super::ast::{Block, Inline};
 
+/// A placeholder cell for a repeated, presentation-only table header.
+static EMPTY: Inline = Inline {
+    text: String::new(),
+    styles: Vec::new(),
+    links: Vec::new(),
+};
+
 /// One selectable unit: paragraph, heading, table cell, code block or maths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit {
@@ -155,11 +162,28 @@ impl DocText {
                     self.blocks(blocks);
                 }
             }
-            Block::Table { head, rows, .. } => {
+            Block::Table {
+                head,
+                rows,
+                repeated_head,
+                ..
+            } => {
                 // Every cell is a unit, including an empty one: both table
                 // renderers consume one unit per cell, so skipping an empty
                 // cell here would shift every later cell's range.
-                for cell in head.iter().chain(rows.iter().flatten()) {
+                //
+                // A chunk's repeated header is presentation only: it gets an
+                // empty placeholder unit (so the unit cursor stays in step)
+                // but contributes no text to a copy.
+                let header_cells: Vec<&Inline> = if *repeated_head {
+                    head.iter().map(|_| &EMPTY).collect()
+                } else {
+                    head.iter().collect()
+                };
+                for cell in header_cells {
+                    self.push_with_separator(&cell.text, cell.links.clone(), "	");
+                }
+                for cell in rows.iter().flatten() {
                     self.push_with_separator(&cell.text, cell.links.clone(), "	");
                 }
             }

@@ -712,9 +712,18 @@ impl MarkdownView {
                     }
                     (range, style)
                 });
-                let code = gpui::StyledText::new(text.clone()).with_highlights(highlights);
-                // The label is a real element above the code body. Shifting it
-                // up fixes the old centred gap without moving the code rows.
+                // A code block is selectable like prose: its own unit range,
+                // real glyph layout, and the document's selection drawn over
+                // it. No padding is inserted into the copied bytes.
+                let unit = self.next_unit(ix, &unit_cursor);
+                let code_inline = Inline {
+                    text: text.clone(),
+                    styles: Vec::new(),
+                    links: Vec::new(),
+                };
+                // The language label is a real element above the code body.
+                // Shifting it up fixes the old centred gap without moving the
+                // code rows.
                 div()
                     .debug_selector(move || format!("markdown-code-block-{ix}"))
                     .flex()
@@ -724,7 +733,7 @@ impl MarkdownView {
                     .px_3()
                     .pb_3()
                     .pt_2()
-                    .font_family(mono)
+                    .font_family(mono.clone())
                     .text_size(gpui::px(sm))
                     .text_color(colors.syntax.variable)
                     .when_some(language.clone(), |block, language| {
@@ -742,7 +751,17 @@ impl MarkdownView {
                     .child(
                         div()
                             .debug_selector(move || format!("markdown-code-text-{ix}"))
-                            .child(code),
+                            .child(
+                                // Syntax colours come from the same run
+                                // builder as prose, so selection coordinates
+                                // and glyph positions stay shared.
+                                self.paragraph_unit(
+                                    gpui::ElementId::Name(format!("reader-code-{ix}").into()),
+                                    &code_inline,
+                                    unit,
+                                )
+                                .code(highlights.collect()),
+                            ),
                     )
                     .into_any_element()
             }
@@ -777,7 +796,9 @@ impl MarkdownView {
                 }
                 list.into_any_element()
             }
-            Block::Table { aligns, head, rows } => {
+            Block::Table {
+                aligns, head, rows, ..
+            } => {
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
                         let mut cell = div()
@@ -1042,7 +1063,9 @@ impl MarkdownView {
                     )
                     .into_any_element()
             }
-            Block::Table { aligns, head, rows } => {
+            Block::Table {
+                aligns, head, rows, ..
+            } => {
                 let cell = |this: &Self, inline: &Inline, row: usize, column: usize| {
                     let mut cell =
                         div()
@@ -1212,14 +1235,18 @@ fn flatten(blocks: Vec<Block>) -> Vec<Block> {
                     });
                 }
             }
-            Block::Table { aligns, head, rows } if rows.len() > LAZY_CHILDREN => {
-                for group in rows.chunks(LAZY_CHILDREN) {
+            Block::Table {
+                aligns, head, rows, ..
+            } if rows.len() > LAZY_CHILDREN => {
+                for (chunk, group) in rows.chunks(LAZY_CHILDREN).enumerate() {
                     out.push(Block::Table {
                         aligns: aligns.clone(),
                         // The header repeats on each virtual row, as a table
-                        // header does on a long printed page.
+                        // header does on a long printed page. Only the first
+                        // chunk owns the real header for copying.
                         head: head.clone(),
                         rows: group.to_vec(),
+                        repeated_head: chunk > 0,
                     });
                 }
             }

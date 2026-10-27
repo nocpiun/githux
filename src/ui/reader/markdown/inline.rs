@@ -182,6 +182,10 @@ impl LocalLayout {
 pub struct ParagraphView {
     id: ElementId,
     inline: Inline,
+    /// Syntax colours for a fenced code block; empty for prose.
+    syntax: Vec<(Range<usize>, gpui::HighlightStyle)>,
+    /// Draw every run in the code font (a fenced code block).
+    mono: bool,
     /// This paragraph's range in the document text model.
     doc: Range<usize>,
     /// The document's current selection, in document offsets.
@@ -206,7 +210,17 @@ impl ParagraphView {
             selection,
             layout,
             prefix: None,
+            syntax: Vec::new(),
+            mono: false,
         }
+    }
+
+    /// Draw this paragraph as a fenced code block: code font for every run and
+    /// the given syntax colours, without inline-code padding.
+    pub fn code(mut self, syntax: Vec<(Range<usize>, gpui::HighlightStyle)>) -> Self {
+        self.syntax = syntax;
+        self.mono = true;
+        self
     }
 
     pub fn prefix(mut self, prefix: impl Into<SharedString>) -> Self {
@@ -239,6 +253,8 @@ impl RenderOnce for ParagraphView {
                 doc: self.doc,
                 selection: self.selection,
                 layout: self.layout,
+                syntax: self.syntax,
+                mono: self.mono,
             }))
             .into_any_element()
     }
@@ -249,6 +265,8 @@ struct Paragraph {
     doc: Range<usize>,
     selection: Range<usize>,
     layout: Rc<RefCell<LocalLayout>>,
+    syntax: Vec<(Range<usize>, gpui::HighlightStyle)>,
+    mono: bool,
 }
 
 impl IntoElement for Paragraph {
@@ -266,8 +284,13 @@ fn runs(
     style: &gpui::TextStyle,
     mono: &SharedString,
     link_color: gpui::Hsla,
+    syntax: &[(Range<usize>, gpui::HighlightStyle)],
+    mono_all: bool,
 ) -> Vec<gpui::TextRun> {
     let mut edges = vec![0, inline.text.len()];
+    for (range, _) in syntax {
+        edges.extend([range.start, range.end]);
+    }
     for (range, _) in &inline.styles {
         edges.extend([range.start, range.end]);
     }
@@ -330,10 +353,17 @@ fn runs(
                 ..HighlightStyle::default()
             });
         }
+        for (range, highlight) in syntax {
+            if range.start <= edge[0] && edge[1] <= range.end {
+                run_style = run_style.highlight(*highlight);
+                break;
+            }
+        }
         let mut run = run_style.to_run(edge[1] - edge[0]);
-        if active
-            .iter()
-            .any(|kind| matches!(kind, Style::Code | Style::Math))
+        if mono_all
+            || active
+                .iter()
+                .any(|kind| matches!(kind, Style::Code | Style::Math))
         {
             run.font.family = mono.clone();
         }
@@ -389,7 +419,7 @@ impl Element for Paragraph {
         let mono = theme.mono_family.clone();
         let inline = self.inline.clone();
         let link_color = cx.theme().colors.link;
-        let shaped_runs = runs(&inline, &style, &mono, link_color);
+        let shaped_runs = runs(&inline, &style, &mono, link_color, &self.syntax, self.mono);
         let layout = self.layout.clone();
         let code_fonts = shaped_runs
             .iter()
