@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use ely_gpui_component::{
+use ely_core::{
     forms::InputEvent,
     primitives::{FocusScope, IconName},
     theme::ActiveTheme,
@@ -110,9 +110,28 @@ impl Shell {
     /// avoid Enter/Escape/arrows, so they never race input-method candidate confirmation or text
     /// entry; while the palette is open the shell leaves the keyboard to it.
     pub fn bind_keys(cx: &mut App) {
+        // Static KeyBinding::new no longer resolves `secondary`; load it with the app's OS.
+        let open_palette = gpui::KeyBinding::load(
+            "secondary-k",
+            Box::new(OpenCommandPalette),
+            None,
+            false,
+            None,
+            cx,
+        )
+        .expect("valid command palette binding");
+        let close_tab = gpui::KeyBinding::load(
+            "secondary-w",
+            Box::new(CloseActiveTab),
+            None,
+            false,
+            None,
+            cx,
+        )
+        .expect("valid close tab binding");
         cx.bind_keys([
-            gpui::KeyBinding::new("secondary-k", OpenCommandPalette, None),
-            gpui::KeyBinding::new("secondary-w", CloseActiveTab, None),
+            open_palette,
+            close_tab,
             gpui::KeyBinding::new("ctrl-tab", NextTab, None),
             gpui::KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
             // Escape only does something while a tab is being carried; the palette intercepts
@@ -478,7 +497,7 @@ impl Shell {
     }
 
     #[cfg(test)]
-    pub fn palette_input(&self) -> gpui::Entity<ely_gpui_component::forms::TextInput> {
+    pub fn palette_input(&self) -> gpui::Entity<ely_core::forms::TextInput> {
         self.palette
             .as_ref()
             .expect("the palette is open")
