@@ -105,3 +105,14 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 - **图片**：仓库模式不允许本地文件/data 图片，图片/HTML 在交给上游文档前被移除；没有网络下载、资产缓存或受控版本化 resolver。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 表格布局、脚注样式、绝对 URL 重写）。无法支持的语法按 Ely 的现有行为显示或按文本显示，不在本模块另造。
 - **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有。本轮的预览与 fixture 只用于验收，不冒充真实数据。
+
+
+## Repository 专用正文留白配置（2026-10-28）
+
+`ReaderView::set_markdown_layout(MarkdownLayout::Repository, cx)` 是小型宿主配置；默认 `Default` 保留原有外层px_2/py_3，Profile/Home/reader example及源码默认表现不变。repository在reader构造时设置一次，其他Markdown文件同样沿用；相同配置重复设置no-op，不重建ReaderView/MarkdownView、不reset正文/选区/滚动。`show`替换正文时保留宿主配置。source/非文本状态不应用该布局，不改行号padding/字号。
+
+Repository模式下Markdown根无固定上下padding，真实ListState视口从标题栏下缘延伸至底部可用区域；水平由原0.5rem增加4px，每侧只加一层。原0.75rem量级上下内容inset加入真实首块/末块的布局padding，在item测量总高度内滚动；不添加假AST/文字/列表项，不改变block/selection索引。短文末尾也保留这份真实内容布局空间。
+
+**为何不用list.py_3**：锁定GPUI的native wheel及set_offset会考虑list padding，但公开`max_offset_for_scrollbar()`忽略它；共享Motion/Bar据较小reach clamp会截掉底部inset。这一中间实现已被实际反馈否定，现改为首尾真实块测量，wheel/thumb/程序跳转共同看到包含inset的item总高度。`scroll_to_end()`临时使用item_count末尾锚点；repository模式在其反向惰性测量前不按旧reach clamp，待真实list布局后继续Motion tick。未改共享scroll或依赖缓存。
+
+回归验证全高viewport、AST块数不变、重复layout不丢选区、上下空白点击清选、段落/列表/代码/表格末块各由wheel和同一thumb target到底，正文bounds下方仍有inset，以及source实体/gutter不变。原生长README的段落/列表/表格wheel末尾截图已实际查看；最终code在实际HWND投递native wheel及mouse drag消息后取帧，代码容器下方到语言条之间有明确留白；这是Windows消息驱动验证，实体设备thumb手感仍受前台/Access denied限制，未冒充负责人原生验收。

@@ -93,6 +93,7 @@ pub struct MarkdownView {
     text: String,
     list: ListState,
     motion: crate::ui::scroll::Motion<ListState>,
+    layout: crate::ui::reader::MarkdownLayout,
     focus: FocusHandle,
     on_link: Option<OnLink>,
     /// Bumped for every read, so an older background read lapses.
@@ -140,6 +141,7 @@ impl MarkdownView {
             parsed: Arc::new(Parsed::default()),
             text: String::new(),
             motion: crate::ui::scroll::Motion::new(list.clone()),
+            layout: crate::ui::reader::MarkdownLayout::Default,
             list,
             focus,
             on_link: None,
@@ -171,6 +173,20 @@ impl MarkdownView {
             }
         });
         view
+    }
+
+    pub(crate) fn set_layout(
+        &mut self,
+        layout: crate::ui::reader::MarkdownLayout,
+        cx: &mut Context<Self>,
+    ) {
+        if self.layout == layout {
+            return;
+        }
+        self.layout = layout;
+        self.motion.cancel();
+        self.list.remeasure();
+        cx.notify();
     }
 
     /// Replaces the text; short texts parse at once, longer ones in the
@@ -272,6 +288,11 @@ impl MarkdownView {
     /// How many blocks the list holds (only visible ones are built).
     pub fn block_count(&self) -> usize {
         self.list.item_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn painted_content_bounds(&self, index: usize) -> Option<Bounds<Pixels>> {
+        self.block_bounds.borrow().get(&index).copied()
     }
 
     /// Takes a completed read, unless a newer document replaced it. The
@@ -960,10 +981,21 @@ impl MarkdownView {
         // Record the painted block bounds so a drag can locate blocks even
         // over blank space or outside the viewport.
         let bounds = self.block_bounds.clone();
+        let inset = self.layout == crate::ui::reader::MarkdownLayout::Repository;
+        let vertical = window.rem_size() * 0.75;
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
             .px_3()
             .py_1()
+            // Include real content insets in first/last block measurements.
+            // ListState's scrollbar reach excludes list-level padding, so using
+            // list.py here would let Motion/thumb clamp away the bottom inset.
+            .when(inset && ix == 0, |block| {
+                block.pt(window.rem_size() * 0.25 + vertical)
+            })
+            .when(inset && ix + 1 == self.parsed.blocks.len(), |block| {
+                block.pb(window.rem_size() * 0.25 + vertical)
+            })
             .on_children_prepainted(move |painted, _, _| {
                 if let Some(painted) = painted.first().copied() {
                     bounds.borrow_mut().insert(ix, painted);
@@ -1312,8 +1344,15 @@ fn flatten(blocks: Vec<Block>) -> Vec<Block> {
 }
 
 impl Render for MarkdownView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors.clone();
+        let repository_layout = self.layout == crate::ui::reader::MarkdownLayout::Repository;
+        let horizontal = window.rem_size() * 0.5
+            + if repository_layout {
+                gpui::px(4.0)
+            } else {
+                gpui::px(0.0)
+            };
         // A new frame: only paragraphs laid out below are hit-testable.
         self.visible_units.borrow_mut().clear();
         let list = list(
@@ -1322,6 +1361,7 @@ impl Render for MarkdownView {
                 view.item(ix, window, cx)
             }),
         )
+        // Content insets belong to real first/last item measurements (see item).
         .size_full();
         // Pointer positions inside a visible paragraph map through that
         // paragraph's real layout to document offsets; positions on blank
@@ -1338,8 +1378,8 @@ impl Render for MarkdownView {
             .size_full()
             .min_h_0()
             .bg(colors.surface)
-            .px_2()
-            .py_3()
+            .px(horizontal)
+            .when(!repository_layout, |root| root.py_3())
             .child(list)
             .on_mouse_down(
                 MouseButton::Left,

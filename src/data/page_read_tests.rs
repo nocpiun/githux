@@ -915,3 +915,32 @@ async fn cancelled_load_does_not_send_and_worker_failure_after_switch_is_stale()
         assert_eq!(transport.count(), 1);
     }
 }
+
+#[tokio::test]
+async fn repository_open_counts_reject_in_flight_success_and_error_after_account_aba() {
+    for status in [200, 403] {
+        let temp = tempfile::tempdir().unwrap();
+        let transport = Arc::new(Controlled::default());
+        let accounts = service(&temp, transport.clone(), 4).await;
+        login(&accounts, &transport, 1, "alice", "synthetic-a").await;
+        let session = accounts.page_session().unwrap();
+        let repo = identity();
+        let (entered,release)=transport.block(status,json!({"data":{"repository":{"databaseId":42,"issues":{"totalCount":3},"pullRequests":{"totalCount":1}}}}));
+        let pending = tokio::spawn(async move {
+            session
+                .repository_counts(&repo, CancellationToken::default())
+                .await
+        });
+        ready(entered).await;
+        login(&accounts, &transport, 2, "bob", "synthetic-b").await;
+        accounts.set_active(key(1)).await.unwrap();
+        release.send(()).unwrap();
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(crate::domain::repository_counts::CountsError::Read(
+                ProfileError::GitHub(GitHubError::StaleContext)
+            ))
+        ));
+        accounts.close().await.unwrap();
+    }
+}

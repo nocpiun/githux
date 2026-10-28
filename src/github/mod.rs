@@ -29,6 +29,7 @@ pub mod profile;
 pub mod readme;
 pub mod repos;
 pub mod repository;
+pub mod repository_counts;
 pub mod repository_extras;
 pub mod revision;
 pub mod tree;

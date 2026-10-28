@@ -25,6 +25,8 @@
 #![allow(dead_code)]
 
 pub mod fixtures;
+#[cfg(test)]
+mod layout_tests;
 mod links;
 mod markdown;
 #[cfg(test)]
@@ -216,10 +218,22 @@ enum ReaderState {
     Source(Entity<SourceView>),
 }
 
+/// Host-specific Markdown spacing; source and status presentations are unaffected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownLayout {
+    /// Existing hosts keep the original fixed outer spacing.
+    #[default]
+    Default,
+    /// Full-height repository viewport, scrolling top/bottom content inset,
+    /// and four additional logical pixels of horizontal spacing per side.
+    Repository,
+}
+
 /// The reader view.
 pub struct ReaderView {
     context: ResourceContext,
     kind: DocumentKind,
+    markdown_layout: MarkdownLayout,
     state: ReaderState,
     last_action: Option<ReaderAction>,
     on_action: Option<OnAction>,
@@ -249,6 +263,7 @@ impl ReaderView {
         Self {
             context,
             kind,
+            markdown_layout: MarkdownLayout::Default,
             state,
             last_action: None,
             on_action: None,
@@ -301,10 +316,28 @@ impl ReaderView {
             cx,
         );
         self.state = state;
+        if let Some(document) = self.markdown().cloned() {
+            let layout = self.markdown_layout;
+            document.update(cx, |document, cx| document.set_layout(layout, cx));
+        }
         self._document_observer = observer;
         self.pending_markdown = pending;
         self.last_action = None;
         self.bars = crate::ui::scroll::Bars::new();
+        cx.notify();
+    }
+
+    /// Changes Markdown layout without replacing the document, selection or reader entity.
+    /// Repeated application of the same value is a no-op. Other hosts default to
+    /// their previous spacing; the repository host sets this once at construction.
+    pub fn set_markdown_layout(&mut self, layout: MarkdownLayout, cx: &mut Context<Self>) {
+        if self.markdown_layout == layout {
+            return;
+        }
+        self.markdown_layout = layout;
+        if let Some(document) = self.markdown().cloned() {
+            document.update(cx, |document, cx| document.set_layout(layout, cx));
+        }
         cx.notify();
     }
 
@@ -546,7 +579,20 @@ impl Render for ReaderView {
                 let state = document.read(cx).motion().clone();
                 let now = self.now_ms();
                 let reduce = cx.reduce_motion() || cx.theme().reduced_motion;
-                let moving = state.tick(self.scroll_clock.now(), reduce);
+                // A programmatic end anchor uses item_count as a sentinel until
+                // the list measures backwards from its lazy tail. Clamping that
+                // provisional offset through Motion before layout would replace
+                // the sentinel with an earlier measured row and miss the end.
+                let measuring_tail = self.markdown_layout == MarkdownLayout::Repository
+                    && document.read(cx).block_count() > 0
+                    && document.read(cx).list_state().logical_scroll_top().item_ix
+                        >= document.read(cx).block_count();
+                let moving = if measuring_tail {
+                    state.cancel();
+                    true
+                } else {
+                    state.tick(self.scroll_clock.now(), reduce)
+                };
                 // The platform may end a thumb drag outside the region; settle
                 // it so the bar returns to its hover resting state.
                 if self.bars.dragging().is_some() && !cx.has_active_drag() {

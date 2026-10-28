@@ -67,6 +67,23 @@ impl AccountService {
 }
 
 impl PageReadSession {
+    /// Independent OPEN connections at the current captured account context.
+    pub async fn repository_counts(
+        &self,
+        repository: &RepositoryIdentity,
+        cancel: CancellationToken,
+    ) -> Result<
+        Scoped<crate::domain::repository_counts::RepositoryCounts>,
+        crate::domain::repository_counts::CountsError,
+    > {
+        self.repository
+            .read(cancel, async move |pat, cancel| {
+                crate::github::repository_counts::fetch(&self.client, &pat, repository, cancel)
+                    .await
+            })
+            .await
+    }
+
     pub fn context(&self) -> &RepositoryReadContext {
         self.repository.context()
     }
