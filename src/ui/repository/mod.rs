@@ -699,7 +699,10 @@ impl RepositoryPage {
     pub fn retry_reader(&mut self, cx: &mut Context<Self>) {
         if self.selection == Selection::Readme
             && self.branch.as_ref().is_some_and(|branch| {
-                matches!(branch.readme, ReadmeState::Failed(_) | ReadmeState::Unknown)
+                matches!(
+                    branch.readme,
+                    ReadmeState::Failed(_) | ReadmeState::Unknown | ReadmeState::Uncertain
+                )
             })
         {
             self.retry_readme(cx);

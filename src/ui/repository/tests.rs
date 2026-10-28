@@ -1701,3 +1701,31 @@ fn retries_do_not_overlap_enumeration_or_reset_successful_repository_data(cx: &m
     );
     assert_eq!(fixture.transport.count("/releases/latest"), 1);
 }
+
+#[gpui::test]
+fn uncertain_readme_retry_only_restarts_discovery(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::ReadmeUncertain);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::ReadmeUncertain
+    });
+    let overview = page.read_with(cx, |p, _| p.overview().unwrap().entity_id());
+    let root = page.read_with(cx, |p, _| p.tree("").unwrap().clone());
+    fixture.switch_scene(Scene::Normal);
+    frames(cx);
+    let bounds = cx
+        .debug_bounds("repository-retry-readme-discovery")
+        .expect("scoped retry visible");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+    assert_eq!(
+        overview,
+        page.read_with(cx, |p, _| p.overview().unwrap().entity_id())
+    );
+    assert_eq!(root, page.read_with(cx, |p, _| p.tree("").unwrap().clone()));
+    assert_eq!(fixture.transport.count("/commits/"), 0);
+    assert_eq!(fixture.transport.count("/releases/latest"), 0);
+    assert_eq!(fixture.transport.count("/readme?"), 1);
+}

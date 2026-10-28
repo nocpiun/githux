@@ -994,13 +994,18 @@ fn no_readme_panel(cx: &App) -> AnyElement {
     )
 }
 
-fn readme_uncertain_panel(cx: &App) -> AnyElement {
-    plain_panel(
-        "repository-readme-uncertain",
-        "README not confirmed",
-        "GitHub answered 404 for the README and this is not a confirmed empty tree. The repository may have no README, or this token may not see it. This is not evidence of an empty repository.",
-        cx,
-    )
+fn readme_uncertain_panel(cx: &mut Context<RepositoryPage>) -> AnyElement {
+    let owner = cx.weak_entity();
+    div().debug_selector(||"repository-readme-uncertain".into())
+        .flex().flex_col().items_center().justify_center().gap_2().px_8().size_full()
+        .child("README not confirmed")
+        .child(div().text_color(cx.theme().colors.fg_muted).text_center()
+            .child("The README may be absent or not visible to this account. You can browse files or retry discovery."))
+        .child(div().debug_selector(||"repository-retry-readme-discovery".into())
+            .child(Button::new("repository-retry-readme-discovery","Retry README")
+                .size(ControlSize::Sm)
+                .on_click(move |_,_,cx| {let _=owner.update(cx,|page,cx|page.retry_readme(cx));})))
+        .into_any_element()
 }
 
 fn plain_panel(id: &'static str, title: &str, detail: &str, cx: &App) -> AnyElement {

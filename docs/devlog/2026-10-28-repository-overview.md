@@ -94,3 +94,7 @@ branch从标题右上角移到Tabs右侧；顶部删除stars/forks/REST issue+PR
 本轮实际查看DPI-aware desktop和880×560截图，布局符合新结构，底条横跨树+reader且不占文本行；原生hover时当前前台被外部窗口占用，未可靠送达，未据截图声称tooltip已真机通过。GPUI实际事件测试确认Rust tooltip在560px窗口内向上出现、移开消失；Star鼠标与Enter/Space各一次，旧binding拒绝，preview无mutation。最终完整checks与PID/head见PR35交接。
 
 四项修订最终验证：指定串行 helper / own target / jobs1，fmt、locked all-target check、clippy -- -D warnings、完整 tests（541 product /324 account /54 Home /152 Profile /131 reader /478 repository /14 overview）、product/repository example build、git diff --check 全部通过。计数data门控验证响应暂停期间A→B→A使旧成功/403均StaleContext；Long场景含大badge和可选择的长分支。最终审查/CI/PID/head以PR35交接为准。
+
+本轮a0b369c审查追加修复：README uncertain面板新增Retry README，retry_reader也将Uncertain路由到发现接口；只重试readme，不清空树/overview或重新解析commit。回归验证成功恢复及其他资源请求不增加。
+
+README uncertain修复后完整复跑：541/324/54/152/131/479/14项全部通过，repository单独再跑479项通过。仍仅PR35待负责人验收，blocked不移除、不合并。
