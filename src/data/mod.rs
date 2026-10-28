@@ -31,6 +31,9 @@ mod account_concurrency_tests;
 #[cfg(test)]
 mod account_tests;
 mod accounts;
+#[cfg(test)]
+mod page_read_tests;
+mod page_reads;
 pub mod repository;
 #[cfg(test)]
 mod repository_content_tests;
@@ -41,6 +44,8 @@ use crate::network::executor::BackgroundExecutor;
 use crate::storage::accounts::StorageError;
 #[allow(unused_imports)]
 pub use accounts::AccountError;
+#[allow(unused_imports)]
+pub use page_reads::{PageReadSession, ProfileReadme, ProfileReadmeIneligible};
 #[allow(unused_imports)]
 pub use repository::{RepositoryReadContext, RepositorySession, Scoped};
 use std::sync::Arc;
