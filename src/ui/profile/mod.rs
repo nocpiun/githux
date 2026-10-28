@@ -8,6 +8,7 @@
 
 #![allow(dead_code)] // The future Shell adapter owns mounting this component.
 
+mod header;
 mod heatmap;
 mod model;
 mod render;

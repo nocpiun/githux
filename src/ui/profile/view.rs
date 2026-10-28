@@ -34,6 +34,9 @@ pub struct ProfileView {
     pub(super) repository_focus: FocusHandle,
     pub(super) heatmap_focus: FocusHandle,
     pub(super) selected_repository: usize,
+    pub(super) content_width: f32,
+    pub(super) repository_keyboard_focus: bool,
+    pub(super) heatmap_keyboard_focus: bool,
     pub(super) selected_day: Option<usize>,
     pub(super) page_scroll: ScrollHandle,
     pub(super) heatmap_scroll: ScrollHandle,
@@ -82,6 +85,9 @@ impl ProfileView {
             repository_focus: cx.focus_handle().tab_stop(true),
             heatmap_focus: cx.focus_handle().tab_stop(true),
             selected_repository: 0,
+            content_width: 880.0,
+            repository_keyboard_focus: false,
+            heatmap_keyboard_focus: false,
             selected_day: None,
             page_scroll,
             heatmap_scroll,
@@ -117,6 +123,7 @@ impl ProfileView {
         self.repositories = SectionState::Loading;
         self.contributions = SectionState::Loading;
         self.readme = SectionState::Loading;
+        self.cancel_reader(cx);
         self.reader = None;
         self.selected_repository = 0;
         self.selected_day = None;
@@ -281,6 +288,7 @@ impl ProfileView {
             .checked_add(1)
             .expect("profile README generation exhausted");
         let reader_generation = self.reader_generation;
+        self.cancel_reader(cx);
         self.reader = None;
         self.readme = match state {
             SectionState::Loading => SectionState::Loading,
@@ -311,6 +319,12 @@ impl ProfileView {
         };
         cx.notify();
         true
+    }
+
+    fn cancel_reader(&self, cx: &mut Context<Self>) {
+        if let Some(reader) = &self.reader {
+            reader.update(cx, |reader, cx| reader.cancel_interactions(cx));
+        }
     }
 
     pub fn on_action(&mut self, handler: OnProfileAction) {
@@ -357,6 +371,10 @@ impl ProfileView {
                 .nth(selected)
                 .map(|day| day.detail())
         })
+    }
+
+    pub(super) fn repository_columns(&self) -> usize {
+        if self.content_width < 700.0 { 1 } else { 2 }
     }
 
     pub(super) fn now_ms(&self) -> u64 {

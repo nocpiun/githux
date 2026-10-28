@@ -1,5 +1,4 @@
 use ely_core::{
-    buttons::{Button, ButtonVariant},
     primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
     typography::Ellipsis,
@@ -7,7 +6,7 @@ use ely_core::{
 use gpui::{
     AnyElement, App, Axis, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
-    Window, div, prelude::*, px, rgb,
+    Window, div, prelude::*, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -24,7 +23,7 @@ use super::{
     model::repository_presentation,
 };
 
-const CELL: f32 = 11.0;
+const CELL: f32 = 12.0;
 const CELL_GAP: f32 = 3.0;
 
 fn section_heading(title: &'static str, detail: Option<String>, cx: &App) -> AnyElement {
@@ -66,7 +65,7 @@ fn panel(child: AnyElement, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
+pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
         .debug_selector(|| "profile-section-error".to_string())
@@ -83,7 +82,7 @@ fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn loading(label: &'static str, cx: &App) -> AnyElement {
+pub(super) fn loading(label: &'static str, cx: &App) -> AnyElement {
     div()
         .debug_selector(|| "profile-section-loading".to_string())
         .p_3()
@@ -93,7 +92,7 @@ fn loading(label: &'static str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn clean(value: &Option<String>) -> Option<&str> {
+pub(super) fn clean(value: &Option<String>) -> Option<&str> {
     value.as_deref().map(str::trim).filter(|v| !v.is_empty())
 }
 
@@ -115,19 +114,28 @@ pub(super) fn initials(basic: &ProfileBasic) -> String {
     }
 }
 
-fn meta_text(text: String, cx: &App) -> AnyElement {
-    div()
-        .min_w_0()
-        .text_size(cx.theme().text_size(TextSize::Xs))
-        .child(Ellipsis::new(text))
-        .into_any_element()
-}
-
 impl Render for ProfileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let background = cx.theme().colors.bg;
+        let measure_owner = cx.entity().downgrade();
+        let measure = gpui::canvas(
+            move |bounds, _, cx| {
+                let _ = measure_owner.update(cx, |view, cx| {
+                    let width = f32::from(bounds.size.width);
+                    if (view.content_width - width).abs() > 0.5 {
+                        view.content_width = width;
+                        cx.notify();
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         self.tick_scroll(window, cx.reduce_motion());
-        let header = self.render_header(cx);
+        self.repository_keyboard_focus = self.repository_focus.is_focused(window);
+        self.heatmap_keyboard_focus = self.heatmap_focus.is_focused(window);
+        let header = self.identity_header(cx);
         let readme = self.render_readme(cx);
         let repositories = self.render_repositories(cx);
         let contributions = self.render_contributions(window, cx);
@@ -171,6 +179,7 @@ impl Render for ProfileView {
             .debug_selector(|| "profile-overview".to_string())
             .relative()
             .size_full()
+            .min_w_0()
             .min_h_0()
             .overflow_hidden()
             .bg(background)
@@ -192,16 +201,16 @@ impl Render for ProfileView {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(1120.0))
+                            .max_w_full()
                             .overflow_hidden()
                             .min_w_0()
-                            .mx_auto()
-                            .px_5()
-                            .py_5()
+                            .px_6()
+                            .py_4()
                             .flex()
                             .flex_col()
-                            .gap_5()
+                            .gap_3()
                             .child(header)
+                            .child(self.overview_marker(cx))
                             .child(readme)
                             .child(repositories)
                             .child(contributions),
@@ -213,145 +222,32 @@ impl Render for ProfileView {
                 self.page_motion.clone(),
             ))
             .child(page_bar)
+            .child(measure)
     }
 }
 
 impl ProfileView {
-    fn render_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let colors = &theme.colors;
-        let SectionState::Ready(basic) = self.basic.clone() else {
-            return match &self.basic {
-                SectionState::Loading => panel(loading("Loading public profile…", cx), cx),
-                SectionState::Error(error) => panel(state_panel(error, cx), cx),
-                SectionState::Ready(_) => unreachable!(),
-            };
-        };
-        let display = clean(&basic.name).unwrap_or(basic.login.trim()).to_string();
-        let avatar = div()
-            .debug_selector(|| "profile-avatar-initials".to_string())
-            .flex_none()
-            .size(px(80.0))
-            .rounded_full()
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.hover)
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(theme.text_size(TextSize::Xl))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(colors.fg)
-            .child(initials(&basic));
-        let name = div()
-            .min_w_0()
-            .text_size(theme.text_size(TextSize::Xl))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(Ellipsis::new(display));
-        let login = div()
-            .text_size(theme.text_size(TextSize::Base))
-            .text_color(colors.fg_subtle)
-            .child(format!("@{}", basic.login));
-        let profile_request = self.request();
-        let profile_button = Button::new("profile-open", "Open profile")
-            .variant(ButtonVariant::Link)
-            .on_click(cx.listener(move |view, _, window, cx| {
-                if view.accepts(&profile_request) {
-                    view.emit(ProfileActionKind::Profile, window, cx);
-                }
-            }));
-        let mut metadata = Vec::new();
-        for value in [clean(&basic.company), clean(&basic.location)]
-            .into_iter()
-            .flatten()
-        {
-            metadata.push(meta_text(value.to_string(), cx));
-        }
-        for (label, value) in [
-            ("followers", basic.followers),
-            ("following", basic.following),
-            ("public repos", basic.public_repos),
-            ("public gists", basic.public_gists),
-        ] {
-            if let Some(value) = value {
-                metadata.push(meta_text(format!("{value} {label}"), cx));
-            }
-        }
-        if let Some(created) = clean(&basic.created_at) {
-            metadata.push(meta_text(format!("Joined {created}"), cx));
-        }
-        let website_request = self.request();
-        let website = clean(&basic.website_url).map(|url| {
-            let url = url.to_string();
-            Button::new("profile-website", "Website")
-                .variant(ButtonVariant::Link)
-                .on_click(cx.listener(move |view, _, window, cx| {
-                    if view.accepts(&website_request) {
-                        view.emit(
-                            ProfileActionKind::ExternalLink { url: url.clone() },
-                            window,
-                            cx,
-                        );
-                    }
-                }))
-        });
-        panel(
-            div()
-                .debug_selector(|| "profile-basic".to_string())
-                .flex()
-                .items_start()
-                .gap_4()
-                .min_w_0()
-                .child(avatar)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .flex_wrap()
-                                .gap_x_3()
-                                .gap_y_1()
-                                .min_w_0()
-                                .child(name)
-                                .child(login),
-                        )
-                        .children(clean(&basic.bio).map(|bio| {
-                            div()
-                                .w_full()
-                                .text_size(theme.text_size(TextSize::Sm))
-                                .child(bio.to_string())
-                        }))
-                        .child(
-                            div()
-                                .debug_selector(|| "profile-public-metadata".to_string())
-                                .w_full()
-                                .min_w_0()
-                                .grid()
-                                .grid_cols(2)
-                                .gap_x_4()
-                                .gap_y_1()
-                                .text_size(theme.text_size(TextSize::Xs))
-                                .text_color(colors.fg_subtle)
-                                .children(metadata),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_3()
-                                .child(profile_button)
-                                .children(website),
-                        ),
-                )
-                .into_any_element(),
-            cx,
-        )
+    fn overview_marker(&self, cx: &App) -> AnyElement {
+        div()
+            .w_full()
+            .border_b_1()
+            .border_color(cx.theme().colors.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .py_2()
+                    .px_2()
+                    .border_b_2()
+                    .border_color(cx.theme().colors.accent)
+                    .w(px(112.0))
+                    .text_size(cx.theme().text_size(TextSize::Sm))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(Icon::new(IconName::BookOpen).size(IconSize::Sm))
+                    .child("Overview"),
+            )
+            .into_any_element()
     }
 
     fn render_readme(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -364,22 +260,36 @@ impl ProfileView {
                 .max_w_full()
                 .min_w_0()
                 .flex_none()
+                // Legacy viewport pending the coordinated Reader Flow API.
+                // This does not satisfy the rework's intrinsic README acceptance.
                 .h(px(280.0))
                 .overflow_hidden()
-                .rounded(cx.theme().radius(Radius::Md))
-                .border_1()
-                .border_color(cx.theme().colors.border)
                 .child(self.reader.clone().expect("ready README owns a ReaderView"))
                 .into_any_element(),
         };
+        let identity = self.reader.as_ref().map(|reader| {
+            let context = reader.read(cx).context();
+            format!("{} / {}", context.owner(), context.path())
+        });
         div()
             .debug_selector(|| "profile-readme-section".to_string())
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
-            .gap_2()
-            .min_w_0()
-            .child(section_heading("README", None, cx))
-            .child(panel(body, cx))
+            .gap_1()
+            .p_3()
+            .rounded(cx.theme().radius(Radius::Md))
+            .border_1()
+            .border_color(cx.theme().colors.border)
+            .children(identity.map(|identity| {
+                div()
+                    .font_family(cx.theme().mono_family.clone())
+                    .text_size(cx.theme().text_size(TextSize::Xs))
+                    .text_color(cx.theme().colors.fg_muted)
+                    .child(identity)
+            }))
+            .child(body)
             .into_any_element()
     }
 
@@ -425,8 +335,8 @@ impl ProfileView {
                 .focus(|style| style.border_1().border_color(cx.theme().colors.focus))
                 .rounded(cx.theme().radius(Radius::Md))
                 .grid()
-                .grid_cols(2)
-                .gap_3()
+                .grid_cols(self.repository_columns() as u16)
+                .gap_2()
                 .children(cards)
                 .on_key_down(
                     cx.listener(|view, event, window, cx| view.repository_key(event, window, cx)),
@@ -451,7 +361,7 @@ impl ProfileView {
                     .text_color(cx.theme().colors.fg_subtle)
                     .child(note)
             }))
-            .child(panel(body, cx))
+            .child(body)
             .into_any_element()
     }
 
@@ -462,43 +372,59 @@ impl ProfileView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let selected = self.selected_repository == index;
         let request = self.request();
         let target = RepositoryTarget::from_repo(repo);
         let name = target.name_with_owner.clone();
-        let description = clean(&repo.description)
-            .unwrap_or("No public description supplied.")
-            .to_string();
-        let language = clean(&repo.primary_language).map(str::to_string);
-        let stats = [
-            repo.stargazer_count.map(|count| format!("{count} stars")),
-            repo.fork_count.map(|count| format!("{count} forks")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
+        let focused = self.repository_keyboard_focus;
+        let description = clean(&repo.description).unwrap_or("").to_string();
+        let visibility = repo
+            .is_private
+            .map(|private| if private { "Private" } else { "Public" });
+        let mut stats = Vec::new();
+        if let Some(language) = clean(&repo.primary_language) {
+            stats.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(theme.colors.fg_subtle),
+                    )
+                    .child(language.to_string())
+                    .into_any_element(),
+            );
+        }
+        if let Some(stars) = repo.stargazer_count {
+            stats.push(stat(IconName::Star, compact_count(stars), cx));
+        }
+        if let Some(forks) = repo.fork_count.filter(|count| *count > 0) {
+            stats.push(stat(IconName::GitBranch, compact_count(forks), cx));
+        }
         div()
-            .debug_selector(move || format!("profile-repository-{index}"))
             .id(("profile-repository", index))
+            .debug_selector(move || format!("profile-repository-{index}"))
             .role(Role::Button)
             .aria_label(format!("Open repository {name}"))
             .cursor_pointer()
             .min_w_0()
-            .h(px(112.0))
+            .h(px(94.0))
             .p_3()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .rounded(theme.radius(Radius::Md))
             .border_1()
-            .border_color(if selected {
+            .border_color(if focused && self.selected_repository == index {
                 theme.colors.focus
             } else {
                 theme.colors.border
             })
-            .bg(theme.colors.bg)
-            .hover(|style| style.bg(theme.colors.hover))
+            .bg(theme.colors.surface.opacity(0.35))
+            .hover(|s| s.bg(theme.colors.hover.opacity(0.5)))
+            .tooltip(Tooltip::text(name.clone()))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(move |view, _, window, cx| {
                 if view.accepts(&request) {
@@ -515,36 +441,50 @@ impl ProfileView {
                     .child(
                         Icon::new(IconName::BookOpen)
                             .size(IconSize::Sm)
-                            .color(theme.colors.fg_subtle),
+                            .color(theme.colors.fg_muted),
                     )
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.colors.fg)
+                            .text_size(theme.text_size(TextSize::Sm))
+                            .text_color(theme.colors.link)
                             .child(Ellipsis::new(name)),
-                    ),
+                    )
+                    .children(visibility.map(|label| {
+                        div()
+                            .flex_none()
+                            .px_1p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.colors.border)
+                            .text_size(theme.text_size(TextSize::Xs))
+                            .text_color(theme.colors.fg_muted)
+                            .child(label)
+                    })),
             )
             .child(
                 div()
+                    .id(("profile-repository-description", index))
                     .debug_selector(move || format!("profile-repository-description-{index}"))
-                    .h(px(34.0))
-                    .overflow_hidden()
+                    .tooltip(Tooltip::text(description.clone()))
+                    .pl(px(24.0))
+                    .min_w_0()
                     .text_size(theme.text_size(TextSize::Sm))
-                    .text_color(theme.colors.fg_subtle)
-                    .child(description),
+                    .text_color(theme.colors.fg_muted)
+                    .child(Ellipsis::new(description)),
             )
             .child(
                 div()
                     .mt_auto()
+                    .pl(px(24.0))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .min_w_0()
+                    .gap_4()
                     .text_size(theme.text_size(TextSize::Xs))
-                    .text_color(theme.colors.fg_subtle)
-                    .children(language.map(|language| div().child(Ellipsis::new(language))))
-                    .child(Ellipsis::new(stats)),
+                    .text_color(theme.colors.fg_muted)
+                    .children(stats),
             )
             .into_any_element()
     }
@@ -563,27 +503,29 @@ impl ProfileView {
             return;
         }
         let key = event.keystroke.key.as_str();
+        let columns = self.repository_columns();
         match key {
             "right" => {
-                if self.selected_repository.is_multiple_of(2)
+                if columns > 1
+                    && self.selected_repository.is_multiple_of(columns)
                     && self.selected_repository + 1 < count
                 {
                     self.selected_repository += 1;
                 }
             }
             "left" => {
-                if !self.selected_repository.is_multiple_of(2) {
+                if !self.selected_repository.is_multiple_of(columns) {
                     self.selected_repository -= 1;
                 }
             }
             "down" => {
-                if self.selected_repository + 2 < count {
-                    self.selected_repository += 2;
+                if self.selected_repository + columns < count {
+                    self.selected_repository += columns;
                 }
             }
             "up" => {
-                if self.selected_repository >= 2 {
-                    self.selected_repository -= 2;
+                if self.selected_repository >= columns {
+                    self.selected_repository -= columns;
                 }
             }
             "home" => self.selected_repository = 0,
@@ -655,26 +597,49 @@ impl ProfileView {
         if model.has_field_errors {
             notes.push("Partial data: field errors accompanied the usable calendar.".into());
         }
-        let detail = self
-            .selected_day_detail()
-            .unwrap_or_else(|| "Focus the graph and use arrow keys to inspect a day.".into());
-        let weeks = model
+        let days = model
             .weeks
             .iter()
-            .enumerate()
-            .map(|(week_index, week)| {
+            .flat_map(|week| &week.days)
+            .collect::<Vec<_>>();
+        let leading = super::heatmap::leading_days(&self.range);
+        let week_count = (leading + days.len()).div_ceil(7);
+        let markers = super::heatmap::month_markers(&self.range);
+        let weeks = (0..week_count)
+            .map(|week| {
                 div()
-                    .debug_selector(move || format!("profile-contribution-week-{week_index}"))
+                    .debug_selector(move || format!("profile-contribution-week-{week}"))
                     .flex()
                     .flex_none()
                     .w(px(CELL))
                     .flex_col()
                     .gap(px(CELL_GAP))
-                    .children(week.days.iter().enumerate().map(|(day_index, day)| {
-                        self.contribution_cell(week_index * 7 + day_index, day, cx)
+                    .children((0..7).map(|row| {
+                        let slot = week * 7 + row;
+                        match slot
+                            .checked_sub(leading)
+                            .and_then(|index| days.get(index).map(|day| (index, day)))
+                        {
+                            Some((index, day)) => self.contribution_cell(index, day, cx),
+                            None => div().size(px(CELL)).flex_none().into_any_element(),
+                        }
                     }))
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
+        let month_labels = div()
+            .relative()
+            .w(px(week_count as f32 * (CELL + CELL_GAP)))
+            .h(px(18.0))
+            .children(markers.into_iter().map(|(column, name)| {
+                div()
+                    .absolute()
+                    .left(px(column as f32 * (CELL + CELL_GAP)))
+                    .top_0()
+                    .text_size(cx.theme().text_size(TextSize::Xs))
+                    .text_color(cx.theme().colors.fg_muted)
+                    .child(name)
+            }));
         let now = self.now_ms();
         let opacity = self.heatmap_bars.opacity(now);
         if self.heatmap_bars.is_animating() {
@@ -719,7 +684,7 @@ impl ProfileView {
             .flex_none()
             .w_full()
             .min_w_0()
-            .h(px(7.0 * CELL + 6.0 * CELL_GAP + 12.0))
+            .h(px(18.0 + 7.0 * CELL + 6.0 * CELL_GAP + 10.0))
             .overflow_hidden()
             .on_hover(cx.listener(|view, hovered, _, cx| {
                 if view
@@ -733,18 +698,20 @@ impl ProfileView {
             .child(
                 div()
                     .id("profile-heatmap-scroll")
-                    .debug_selector(|| "profile-heatmap-scroll".to_string())
+                    .debug_selector(|| "profile-heatmap-scroll".into())
                     .w_full()
                     .h_full()
-                    .relative()
-                    .flex()
-                    .flex_row()
-                    .flex_none()
-                    .min_w_0()
-                    .gap(px(CELL_GAP))
                     .overflow_x_scroll()
                     .track_scroll(&self.heatmap_scroll)
-                    .children(weeks),
+                    .child(
+                        div()
+                            .w(px(week_count as f32 * (CELL + CELL_GAP) - CELL_GAP))
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .child(month_labels)
+                            .child(div().flex().flex_none().gap(px(CELL_GAP)).children(weeks)),
+                    ),
             )
             .child(scroll::wheel_overlay(
                 "profile-heatmap",
@@ -753,43 +720,109 @@ impl ProfileView {
             ))
             .child(bar)
             .into_any_element();
+        let heading = format!("{} contributions", model.total_contributions);
+        let weekday = div()
+            .flex_none()
+            .w(px(30.0))
+            .pt(px(18.0))
+            .flex()
+            .flex_col()
+            .gap(px(CELL_GAP))
+            .children(
+                ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    .into_iter()
+                    .map(|label| {
+                        div()
+                            .h(px(CELL))
+                            .text_size(cx.theme().text_size(TextSize::Xs))
+                            .text_color(cx.theme().colors.fg_muted)
+                            .child(label)
+                    }),
+            );
+        let detail = self
+            .selected_day_detail()
+            .filter(|_| self.heatmap_focus.is_focused(window));
+        let legend = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(cx.theme().text_size(TextSize::Xs))
+            .text_color(cx.theme().colors.fg_muted)
+            .child("Less")
+            .children((0..=4).map(|level| {
+                div()
+                    .size(px(CELL))
+                    .rounded(px(2.0))
+                    .bg(cell_color(Some(CellLevel::Known(level)), cx))
+            }))
+            .child("More");
         div()
-            .debug_selector(|| "profile-contributions-section".to_string())
+            .debug_selector(|| "profile-contributions-section".into())
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_2()
-            .min_w_0()
-            .child(section_heading(
-                "Contributions",
-                Some(format!("{} · {range}", model.total_contributions)),
-                cx,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(cx.theme().text_size(TextSize::Lg))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(heading),
+                    )
+                    .child(
+                        div()
+                            .text_size(cx.theme().text_size(TextSize::Xs))
+                            .text_color(cx.theme().colors.fg_muted)
+                            .child(range),
+                    ),
+            )
             .children((!notes.is_empty()).then(|| {
                 div()
-                    .debug_selector(|| "profile-heatmap-partial".to_string())
+                    .debug_selector(|| "profile-heatmap-partial".into())
                     .text_size(cx.theme().text_size(TextSize::Xs))
-                    .text_color(cx.theme().colors.fg_subtle)
+                    .text_color(cx.theme().colors.fg_muted)
                     .child(notes.join(" "))
             }))
-            .child(panel(
+            .child(
                 div()
                     .w_full()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(grid)
+                    .p_3()
+                    .rounded(cx.theme().radius(Radius::Md))
+                    .border_1()
+                    .border_color(cx.theme().colors.border)
                     .child(
                         div()
-                            .debug_selector(|| "profile-day-detail".to_string())
-                            .min_h(px(20.0))
-                            .text_size(cx.theme().text_size(TextSize::Xs))
-                            .text_color(cx.theme().colors.fg_subtle)
-                            .child(detail),
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .gap_2()
+                            .child(weekday)
+                            .child(div().flex_1().min_w_0().child(grid)),
                     )
-                    .into_any_element(),
-                cx,
-            ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .mt_1()
+                            .h(px(18.0))
+                            .child(
+                                div()
+                                    .debug_selector(|| "profile-day-detail".into())
+                                    .text_size(cx.theme().text_size(TextSize::Xs))
+                                    .text_color(cx.theme().colors.fg_muted)
+                                    .child(detail.unwrap_or_default()),
+                            )
+                            .child(legend),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -799,8 +832,8 @@ impl ProfileView {
         day: &DayPresentation,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self.selected_day == Some(index);
-        let color = cell_color(day.level());
+        let selected = self.selected_day == Some(index) && self.heatmap_keyboard_focus;
+        let color = cell_color(day.level(), cx);
         let detail = day.detail();
         div()
             .debug_selector(move || format!("profile-contribution-day-{index}"))
@@ -863,7 +896,7 @@ impl ProfileView {
         let Some(selected) = self.selected_day else {
             return;
         };
-        let week = selected / 7;
+        let week = (selected + super::heatmap::leading_days(&self.range)) / 7;
         let left = px(week as f32 * (CELL + CELL_GAP));
         let right = left + px(CELL);
         let viewport = self.heatmap_scroll.bounds();
@@ -882,14 +915,35 @@ impl ProfileView {
     }
 }
 
-fn cell_color(level: Option<CellLevel>) -> Hsla {
+fn cell_color(level: Option<CellLevel>, cx: &App) -> Hsla {
+    let colors = &cx.theme().colors;
     match level {
-        Some(CellLevel::Known(0)) => rgb(0x30353b).into(),
-        Some(CellLevel::Known(1)) => rgb(0x0e4429).into(),
-        Some(CellLevel::Known(2)) => rgb(0x006d32).into(),
-        Some(CellLevel::Known(3)) => rgb(0x26a641).into(),
-        Some(CellLevel::Known(4)) => rgb(0x39d353).into(),
-        Some(CellLevel::Known(_)) | None => rgb(0x30353b).into(),
-        Some(CellLevel::Unknown) => rgb(0x6e5494).into(),
+        Some(CellLevel::Known(0)) => colors.border,
+        Some(CellLevel::Known(level @ 1..=4)) => {
+            colors.success.opacity(0.2 + f32::from(level) * 0.18)
+        }
+        Some(CellLevel::Known(_)) | Some(CellLevel::Unknown) => colors.warning.opacity(0.65),
+        None => colors.sunken,
+    }
+}
+
+fn stat(icon: IconName, label: String, cx: &App) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .child(
+            Icon::new(icon)
+                .size(IconSize::Xs)
+                .color(cx.theme().colors.fg_muted),
+        )
+        .child(label)
+        .into_any_element()
+}
+fn compact_count(count: u64) -> String {
+    if count >= 1000 {
+        format!("{:.1}k", count as f64 / 1000.0)
+    } else {
+        count.to_string()
     }
 }

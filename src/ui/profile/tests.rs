@@ -448,7 +448,7 @@ fn repository_actions_use_typed_stable_resource_and_keyboard(cx: &mut TestAppCon
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
     cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
-    cx.run_until_parked();
+    frames(cx);
     view.update_in(cx, |view, window, cx| {
         view.repository_focus_for_test().focus(window, cx);
     });
@@ -496,20 +496,72 @@ fn repository_actions_use_typed_stable_resource_and_keyboard(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn normal_cards_reflow_and_keyboard_follow_the_actual_columns(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    view.update(cx, |view, cx| {
+        let request = view.request();
+        view.update_repositories(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos: vec![
+                    repo(1, "one"),
+                    repo(2, "two"),
+                    repo(3, "three"),
+                    repo(4, "four"),
+                ],
+                total_repos: 4,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            cx,
+        );
+    });
+    cx.simulate_resize(gpui::size(px(1100.0), px(800.0)));
+    frames(cx);
+    let first = cx.debug_bounds("profile-repository-0").unwrap();
+    let second = cx.debug_bounds("profile-repository-1").unwrap();
+    let third = cx.debug_bounds("profile-repository-2").unwrap();
+    assert_eq!(first.top(), second.top());
+    assert!(third.top() >= first.bottom());
+    assert!(
+        second.right() <= px(1100.0),
+        "first={first:?} second={second:?}"
+    );
+    cx.simulate_resize(gpui::size(px(600.0), px(560.0)));
+    frames(cx);
+    let first = cx.debug_bounds("profile-repository-0").unwrap();
+    let second = cx.debug_bounds("profile-repository-1").unwrap();
+    assert!(second.top() >= first.bottom());
+    assert!(second.right() <= px(600.0));
+    view.update_in(cx, |view, window, cx| {
+        view.repository_focus_for_test().focus(window, cx)
+    });
+    cx.simulate_keystrokes("home down enter");
+    assert!(
+        matches!(view.read_with(cx, |view, _| view.last_action().cloned()),
+        Some(action) if matches!(&action.kind, ProfileActionKind::Repository(repo) if repo.id == Some(2)))
+    );
+}
+
+#[gpui::test]
 fn public_metadata_stays_inside_the_minimum_window(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
     cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
-    cx.run_until_parked();
+    frames(cx);
     let header = cx.debug_bounds("profile-basic").unwrap();
     let metadata = cx.debug_bounds("profile-public-metadata").unwrap();
     assert!(
         metadata.right() <= header.right() + px(1.0),
         "{metadata:?} vs {header:?}"
     );
+    let name = cx.debug_bounds("profile-name").unwrap();
+    let login = cx.debug_bounds("profile-login").unwrap();
+    assert!(login.top() >= name.bottom(), "login belongs below the name");
+    assert!(metadata.top() >= login.bottom());
     assert!(
-        metadata.size.height > px(40.0),
-        "metadata uses bounded rows: {metadata:?}"
+        header.size.height < px(180.0),
+        "short identity does not become a hero card"
     );
 }
 
@@ -517,17 +569,11 @@ fn public_metadata_stays_inside_the_minimum_window(cx: &mut TestAppContext) {
 fn header_links_and_account_rebind_do_not_infer_authorization(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
-    let website = cx.debug_bounds("profile-basic").unwrap();
-    assert!(website.size.width > px(0.0));
-    view.update_in(cx, |view, window, cx| {
-        view.emit(
-            ProfileActionKind::ExternalLink {
-                url: "https://example.invalid".into(),
-            },
-            window,
-            cx,
-        )
-    });
+    cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
+    frames(cx);
+    let website = cx.debug_bounds("profile-website").unwrap();
+    cx.simulate_click(website.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
     assert!(matches!(
         view.read_with(cx, |view, _| view.last_action().cloned()),
         Some(action) if matches!(action.kind, ProfileActionKind::ExternalLink { .. })
@@ -586,7 +632,7 @@ fn page_wheel_reaches_sections_below_the_viewport(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
     cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
-    cx.run_until_parked();
+    frames(cx);
     let before = cx.debug_bounds("profile-repositories-section").unwrap();
     let header = cx.debug_bounds("profile-basic").unwrap();
     cx.simulate_mouse_move(header.center(), None, gpui::Modifiers::none());
@@ -687,18 +733,18 @@ fn long_content_and_long_ranges_stay_bounded(cx: &mut TestAppContext) {
         let _ = request;
     });
     cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
-    cx.run_until_parked();
+    frames(cx);
     assert!(cx.debug_bounds("profile-basic").is_some());
     assert!(cx.debug_bounds("profile-repositories-section").is_some());
     assert!(cx.debug_bounds("profile-readme-reader").is_some());
     let graph = cx.debug_bounds("profile-heatmap-grid").unwrap();
-    assert_eq!(
-        view.read_with(cx, |view, _| view.heatmap_scroll.max_offset().x),
-        px(0.0)
-    );
+    let wide_reach = view.read_with(cx, |view, _| view.heatmap_scroll.max_offset().x);
     cx.simulate_resize(gpui::size(px(600.0), px(560.0)));
-    cx.run_until_parked();
-    assert!(view.read_with(cx, |view, _| view.heatmap_scroll.max_offset().x > px(0.0)));
+    frames(cx);
+    assert!(
+        view.read_with(cx, |view, _| view.heatmap_scroll.max_offset().x
+            > wide_reach)
+    );
     let max = view.read_with(cx, |view, _| view.heatmap_scroll.max_offset().x);
     view.update(cx, |view, _| {
         view.heatmap_motion
@@ -747,5 +793,17 @@ fn long_content_and_long_ranges_stay_bounded(cx: &mut TestAppContext) {
             "both regions advance in the same frame"
         );
     });
-    assert!(graph.size.height <= px(110.0));
+    let day = cx.debug_bounds("profile-contribution-day-0").unwrap();
+    assert!(
+        day.top() > graph.top(),
+        "months have their own row above days"
+    );
+    assert!(day.size.height < graph.size.height / 7.0);
+}
+
+fn frames(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
 }

@@ -2,7 +2,7 @@
 
 - 日期：2026-10-28；任务 ID：profile-view；执行者：基层 Agent。
 - PR：[#36](https://github.com/nocpiun/githux/pull/36)。目标：在 committed base `913eb5eb650c83eeb4c9b5c5cf422e5c26720506` 上交付 UI-only Profile Overview、合成预览、测试与 host adapter 文档。
-- 状态：实现与本地验证完成，待 PR 审查、CI 与负责人原生窗口验收；本任务不合并。
+- 状态：**视觉返工中**。负责人否决旧交付；下列旧验证是历史，不代表新版验收。共享 Reader Flow API 待协调；blocked 保留，不添加 pending、不合并。
 
 ## 改动与决定
 
@@ -48,3 +48,13 @@ PR #36 首轮 `aba07c7` Codex 提出两项可直接修复问题：page thumb 外
 - 原执行者跟踪 PR #36 最新 head 审查/CI 并交回协调者；任务属 First Release milestone #1，保留 `pending` 等负责人验收，不自动合并。
 - 负责人验收真实 Windows 预览：880×560 与缩窗、长元数据、README 选择/滚动、pin hints、全年图、鼠标/键盘 focus、外链不自动打开。
 - 正式集成由后续 host adapter 完成，不将 fixture 当真实账户数据。
+
+## 视觉返工（负责人否决旧版后）
+
+实际读取原始 04-profile.png（忽略目录），按内容区重建：扁平横向 84px initials、name/login 上下、紧凑公共 metadata 与真实 website 文本；轻量 Overview active 栏；README 单边框和真实文件身份；四张紧凑链接/visibility/description/stats 卡片；两列/窄屏单列与对应键盘步长；贡献图 Monday-first、月份真实日期对齐、token 绿色 ramp、missing/unknown 独立、Less/More 图例。开发控件改成清晰单 Select，正常默认不再展示工程文案。生命周期、generation、typed actions、pin 语义继续保留。
+
+自然 README 尚未实现。现有 ReaderView/MarkdownView size_full + 自有虚拟 ListState/Motion 不提供外部自然流。已提交共享 ReaderLayout::Flow 最小 API 建议与影响文件/测试边界至 PR 协调评论；未改共享 Reader/scroll，也没有通过字符估高或换一个固定框冒充完成。因此永久 arbitration history 改为 true/coordinator，旧 false 仅表示当时审查轮次的历史；当前不具备最终视觉验收条件。
+
+本地新版实际 native frame：144 DPI；1100×800 client=1650×1200 physical，880×560 client=1320×840。截图存 task 忽略目录：rework-1100-800.png、rework-lower.png、rework-minimum.png、rework-minimum-lower.png。Win32 wheel 消息实际使页面滚到下方四卡与完整贡献图；Win32 点击 README Projects 与第一张卡分别报告正确 Reader External 和 RepositoryTarget(id=1)，End 键选中最后一天且显示真实日期/count；这是 Windows 消息输入验证，非人工鼠标/触控板验收。未以 PrintWindow 上半截当整页通过。整页密度仍被旧 Reader 空框阻塞。
+
+新增 GPUI 行为覆盖 name/login 上下、资料边界、卡片两列/单列边界和键盘、月份跨年/闰年星期、真实 website 点击动作。既有身份/旧响应/Reader stale callback/partial/pin/scroll 回归保留。最终同步 main 8de1959（已接受 Home/Feed PR #34），无冲突；组合树 fmt/check/clippy -D warnings、完整 suite 538 + 321 + 54 + 152 + 131、product/example build 与 diff check 均通过。最终 head/CI/review 与 preview PID 放 PR/本地交接，不为补 SHA 再造提交。

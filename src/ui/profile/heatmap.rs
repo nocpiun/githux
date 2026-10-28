@@ -97,11 +97,11 @@ pub struct HeatmapPresentation {
 }
 
 /// Number of days in an already validated inclusive range.
-fn interval_days(range: &ContributionRange) -> i64 {
+pub(super) fn interval_days(range: &ContributionRange) -> i64 {
     day_number(range.to()) - day_number(range.from()) + 1
 }
 
-fn day_number(date: &str) -> i64 {
+pub(super) fn day_number(date: &str) -> i64 {
     // `ContributionRange` is the sole constructor of the interval, so its
     // private validation has already established the exact ISO shape.
     let year: i64 = date[0..4].parse().expect("validated year");
@@ -229,6 +229,31 @@ pub fn heatmap_presentation(
     }
 }
 
+/// Monday-first position in the first rendered week.
+pub(super) fn leading_days(range: &ContributionRange) -> usize {
+    (day_number(range.from()) + 3).rem_euclid(7) as usize
+}
+
+pub(super) fn month_markers(range: &ContributionRange) -> Vec<(usize, String)> {
+    let names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut markers = Vec::new();
+    let mut date = range.from().to_string();
+    for index in 0..interval_days(range) as usize {
+        if index == 0 || &date[8..10] == "01" {
+            let month = date[5..7].parse::<usize>().expect("validated month");
+            let column = (leading_days(range) + index) / 7;
+            // Two month starts can share the first week in very short ranges.
+            if markers.last().is_none_or(|(last, _)| *last != column) {
+                markers.push((column, names[month - 1].to_string()));
+            }
+        }
+        date = next_date(&date);
+    }
+    markers
+}
+
 fn same_civil_date(actual: &str, expected: &str) -> bool {
     actual == expected
 }
@@ -332,6 +357,19 @@ mod tests {
             view.weeks[0].days[1].detail(),
             "2024-01-02: contribution data missing"
         );
+    }
+
+    #[test]
+    fn month_labels_and_weekdays_follow_the_explicit_calendar() {
+        let range = ContributionRange::new("2023-12-31", "2024-03-02").unwrap();
+        assert_eq!(leading_days(&range), 6); // Sunday in a Monday-first grid.
+        let labels = month_markers(&range);
+        assert_eq!(labels[0], (0, "Dec".into()));
+        assert_eq!(labels[1], (1, "Jan".into()));
+        assert!(labels.contains(&(5, "Feb".into())));
+        assert!(labels.contains(&(9, "Mar".into())));
+        let leap = ContributionRange::new("2024-02-29", "2024-03-01").unwrap();
+        assert_eq!(leading_days(&leap), 3);
     }
 
     #[test]
