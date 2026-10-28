@@ -28,8 +28,8 @@ use crate::domain::repository_extras::{
 use crate::ui::scroll;
 
 use super::{
-    ContributorsState, LanguagesState, OnAction, OverviewAction, OverviewBinding, OverviewSection,
-    OverviewUpdate, ReleasesData, ReleasesState, SectionState,
+    ContributorsState, LanguagesState, LatestReleaseState, OnAction, OverviewAction,
+    OverviewBinding, OverviewSection, OverviewUpdate, ReleasesData, ReleasesState, SectionState,
 };
 
 /// How many rows each section may draw. Narrow windows stack the sections, so they get a smaller
@@ -61,6 +61,7 @@ fn row_limits(viewport: gpui::Size<Pixels>) -> RowLimits {
 pub struct RepositoryOverview {
     binding: OverviewBinding,
     releases: ReleasesState,
+    latest: Option<LatestReleaseState>,
     contributors: ContributorsState,
     languages: LanguagesState,
     on_action: Option<OnAction>,
@@ -70,11 +71,17 @@ pub struct RepositoryOverview {
     notes_scroll: ScrollHandle,
     notes_motion: scroll::Motion<ScrollHandle>,
     notes_bars: scroll::Bars,
+    /// The TOP region's own bounded overflow, used when a short window stacks the three cards.
+    sections_scroll: ScrollHandle,
+    sections_motion: scroll::Motion<ScrollHandle>,
+    sections_bars: scroll::Bars,
     open_release: Option<u64>,
     /// Last painted bounds of the component, in window coordinates. The popover anchors to its
     /// bottom-left so it does not cover the section that opened it.
     bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     clock: Instant,
+    _keys: gpui::Subscription,
+    _activation: gpui::Subscription,
     #[cfg(test)]
     pinned_clock: Option<u64>,
 }
@@ -82,9 +89,33 @@ pub struct RepositoryOverview {
 impl RepositoryOverview {
     pub fn new(binding: OverviewBinding, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let notes_scroll = ScrollHandle::new();
+        let sections_scroll = ScrollHandle::new();
+        let weak = cx.entity().downgrade();
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                if view.open_release.is_some() {
+                    match event.keystroke.key.as_str() {
+                        "tab" => cx.stop_propagation(),
+                        "escape" => {
+                            view.close_notes(window, cx);
+                            cx.stop_propagation();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
+        let activation = cx.observe_window_activation(_window, |view, window, cx| {
+            if !window.is_window_active() {
+                scroll::cancel_region(&mut view.notes_bars, &view.notes_motion);
+                scroll::cancel_region(&mut view.sections_bars, &view.sections_motion);
+                view.close_notes(window, cx);
+            }
+        });
         Self {
             binding,
             releases: SectionState::Idle,
+            latest: None,
             contributors: SectionState::Idle,
             languages: SectionState::Idle,
             on_action: None,
@@ -94,9 +125,14 @@ impl RepositoryOverview {
             notes_scroll: notes_scroll.clone(),
             notes_motion: scroll::Motion::new(notes_scroll),
             notes_bars: scroll::Bars::new(),
+            sections_scroll: sections_scroll.clone(),
+            sections_motion: scroll::Motion::new(sections_scroll),
+            sections_bars: scroll::Bars::new(),
             open_release: None,
             bounds: Rc::new(RefCell::new(None)),
             clock: Instant::now(),
+            _keys: keys,
+            _activation: activation,
             #[cfg(test)]
             pinned_clock: None,
         }
@@ -143,9 +179,11 @@ impl RepositoryOverview {
         }
         self.binding = binding;
         self.releases = SectionState::Idle;
+        self.latest = None;
         self.contributors = SectionState::Idle;
         self.languages = SectionState::Idle;
         self.last_action = None;
+        scroll::cancel_region(&mut self.sections_bars, &self.sections_motion);
         self.close_notes(window, cx);
         cx.notify();
     }
@@ -158,7 +196,15 @@ impl RepositoryOverview {
         state: ReleasesState,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.binding.matches(binding) {
+        if !self.binding.matches(binding)
+            || state.value().is_some_and(|data| {
+                data.list.repository != binding.repository
+                    || data
+                        .latest
+                        .as_ref()
+                        .is_some_and(|latest| latest.repository != binding.repository)
+            })
+        {
             return false;
         }
         self.releases = state;
@@ -173,7 +219,11 @@ impl RepositoryOverview {
         state: ContributorsState,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.binding.matches(binding) {
+        if !self.binding.matches(binding)
+            || state
+                .value()
+                .is_some_and(|value| value.repository != binding.repository)
+        {
             return false;
         }
         self.contributors = state;
@@ -188,10 +238,33 @@ impl RepositoryOverview {
         state: LanguagesState,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.binding.matches(binding) {
+        if !self.binding.matches(binding)
+            || state
+                .value()
+                .is_some_and(|value| value.repository != binding.repository)
+        {
             return false;
         }
         self.languages = state;
+        cx.notify();
+        true
+    }
+
+    /// Applies the latest endpoint independently of the release list request.
+    pub fn apply_latest_release(
+        &mut self,
+        binding: &OverviewBinding,
+        state: LatestReleaseState,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.binding.matches(binding)
+            || state
+                .value()
+                .is_some_and(|value| value.repository != binding.repository)
+        {
+            return false;
+        }
+        self.latest = Some(state);
         cx.notify();
         true
     }
@@ -205,6 +278,7 @@ impl RepositoryOverview {
     ) -> bool {
         match update {
             OverviewUpdate::Releases(state) => self.apply_releases(binding, state, cx),
+            OverviewUpdate::LatestRelease(state) => self.apply_latest_release(binding, state, cx),
             OverviewUpdate::Contributors(state) => self.apply_contributors(binding, state, cx),
             OverviewUpdate::Languages(state) => self.apply_languages(binding, state, cx),
         }
@@ -212,6 +286,10 @@ impl RepositoryOverview {
 
     pub fn dismiss_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_notes(window, cx);
+    }
+
+    pub fn sections_offset(&self) -> Point<Pixels> {
+        self.sections_scroll.offset()
     }
 
     pub fn notes_offset(&self) -> Point<Pixels> {
@@ -272,13 +350,21 @@ impl Render for RepositoryOverview {
         let now = self.now_ms();
         let reduce = cx.reduce_motion();
 
-        if self.notes_motion.tick(Instant::now(), reduce) {
+        if !cx.has_active_drag() {
+            self.notes_bars.settle(&self.notes_motion, now, reduce);
+            self.sections_bars
+                .settle(&self.sections_motion, now, reduce);
+        }
+        let notes_animating = self.notes_motion.tick(Instant::now(), reduce);
+        let sections_animating = self.sections_motion.tick(Instant::now(), reduce);
+        if notes_animating || sections_animating {
             window.request_animation_frame();
         }
-        if self.notes_bars.is_animating() {
+        if self.notes_bars.is_animating() || self.sections_bars.is_animating() {
             window.request_animation_frame();
         }
         let notes_opacity = self.notes_bars.opacity(now);
+        let sections_opacity = self.sections_bars.opacity(now);
 
         let refresh = |section: OverviewSection, disabled: bool, this: gpui::WeakEntity<Self>| {
             let label = format!("Refresh {}", section.title().to_lowercase());
@@ -312,7 +398,13 @@ impl Render for RepositoryOverview {
         let languages_loading = self.languages.is_loading();
 
         let limits = row_limits(viewport);
-        let releases_body = releases_body(&self.releases, &this, limits.releases, cx);
+        let releases_body = releases_body(
+            &self.releases,
+            self.latest.as_ref(),
+            &this,
+            limits.releases,
+            cx,
+        );
         let contributors_body =
             contributors_body(&self.contributors, &this, limits.contributors, cx);
         let languages_body = languages_body(&self.languages, &this, limits.languages, cx);
@@ -361,15 +453,45 @@ impl Render for RepositoryOverview {
             })
         });
 
+        let sections_bar = scroll::Bar {
+            target: &self.sections_motion,
+            id: scroll::BarId {
+                owner: cx.entity_id(),
+                name: "overview-sections-scrollbar",
+                axis: gpui::Axis::Vertical,
+            },
+            placement: scroll::Placement::overlay(4.0, 8.0),
+            style: scroll::Style::DEFAULT,
+            opacity: sections_opacity,
+            on_drag: {
+                let this = this.clone();
+                Rc::new(move |axis, dragging, _window, cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        let motion = view.sections_motion.clone();
+                        if view.sections_bars.drag(
+                            &motion,
+                            axis,
+                            dragging,
+                            view.now_ms(),
+                            cx.reduce_motion(),
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+        }
+        .render(cx);
+        // Keep the TOP area to half of the window at most. When the cards wrap, this one local
+        // scroll viewport makes their overflow accessible while leaving a usable reader below.
+        let top_height = px(360.0).min(viewport.height * 0.5);
         let mut root = div()
             .id("repository-overview")
             .debug_selector(|| "repository-overview".to_string())
             .relative()
             .w_full()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_3()
+            .h(top_height)
+            .flex_none()
             .border_b_1()
             .border_color(colors.border)
             .bg(colors.surface)
@@ -388,16 +510,41 @@ impl Render for RepositoryOverview {
             )
             .child(
                 div()
-                    .debug_selector(|| "overview-sections".to_string())
-                    .flex()
-                    .flex_wrap()
-                    .items_start()
-                    .gap_3()
-                    .w_full()
-                    .child(releases_card)
-                    .child(contributors_card)
-                    .child(languages_card),
-            );
+                    .id("overview-sections-viewport")
+                    .debug_selector(|| "overview-sections-viewport".to_string())
+                    .relative()
+                    .size_full()
+                    .overflow_y_scroll()
+                    .overflow_x_hidden()
+                    .track_scroll(&self.sections_scroll)
+                    .child(
+                        div()
+                            .debug_selector(|| "overview-sections".to_string())
+                            .flex()
+                            .flex_wrap()
+                            .items_start()
+                            .gap_3()
+                            .p_3()
+                            .w_full()
+                            .child(releases_card)
+                            .child(contributors_card)
+                            .child(languages_card),
+                    ),
+            )
+            .child(scroll::wheel_overlay(
+                "overview-sections",
+                gpui::Axis::Vertical,
+                self.sections_motion.clone(),
+            ))
+            .child(sections_bar)
+            .on_hover(cx.listener(|view, hovered, _, cx| {
+                if view
+                    .sections_bars
+                    .hover(*hovered, view.now_ms(), cx.reduce_motion())
+                {
+                    cx.notify();
+                }
+            }));
 
         if let Some((id, tag_name, body)) = notes_release {
             let anchor = self
@@ -518,6 +665,7 @@ fn section_card(
 
 fn releases_body(
     state: &ReleasesState,
+    latest: Option<&LatestReleaseState>,
     this: &gpui::WeakEntity<RepositoryOverview>,
     limit: usize,
     cx: &App,
@@ -540,20 +688,58 @@ fn releases_body(
             cx,
         )),
         SectionState::Ready(data) => {
-            releases_data_body(data, None, this, limit, cx, &mut body);
+            releases_data_body(data, None, this, limit, latest.is_none(), cx, &mut body);
         }
         SectionState::Partial { value, reason } => {
-            releases_data_body(value, Some(reason), this, limit, cx, &mut body);
+            releases_data_body(
+                value,
+                Some(reason),
+                this,
+                limit,
+                latest.is_none(),
+                cx,
+                &mut body,
+            );
         }
+    }
+    if let Some(latest) = latest {
+        let element = match latest {
+            SectionState::Idle => note("Latest not loaded yet.", colors.fg_subtle, None, cx),
+            SectionState::Loading => note("Loading latest release…", colors.fg_subtle, None, cx),
+            SectionState::Error { message } => note(
+                format!("Latest release: {message}"),
+                colors.danger,
+                Some("overview-releases-latest-error"),
+                cx,
+            ),
+            SectionState::Ready(value) | SectionState::Partial { value, .. } => {
+                match &value.release {
+                    Some(release) => div()
+                        .debug_selector(|| "overview-releases-latest".to_string())
+                        .child(note("GitHub latest", colors.fg_subtle, None, cx))
+                        .child(release_heading(release, "latest", cx))
+                        .into_any_element(),
+                    None => note(
+                        latest_none_text(),
+                        colors.fg_muted,
+                        Some("overview-releases-latest-none"),
+                        cx,
+                    ),
+                }
+            }
+        };
+        body.insert(0, element);
     }
     body
 }
 
+#[allow(clippy::too_many_arguments)] // Local rendering inputs; no service or shared abstraction.
 fn releases_data_body(
     data: &ReleasesData,
     partial: Option<&Vec<ExtrasIncompleteReason>>,
     this: &gpui::WeakEntity<RepositoryOverview>,
     limit: usize,
+    show_latest: bool,
     cx: &App,
     body: &mut Vec<AnyElement>,
 ) {
@@ -607,7 +793,9 @@ fn releases_data_body(
             cx,
         ),
     };
-    body.push(latest);
+    if show_latest {
+        body.push(latest);
+    }
 
     if data.list.releases.is_empty() {
         let text = match &data.list.completeness {
@@ -647,6 +835,12 @@ fn releases_data_body(
         }
     }
 
+    let partial = partial
+        .map(Vec::as_slice)
+        .or(match &data.list.completeness {
+            ExtrasCompleteness::Partial { reasons } => Some(reasons.as_slice()),
+            ExtrasCompleteness::Complete => None,
+        });
     if let Some(reasons) = partial {
         body.push(note(
             partial_reason_text(reasons),
@@ -853,6 +1047,16 @@ fn contributors_outcome_body(
             }
         }
     }
+    body.push(note(
+        "GitHub contributor statistics may be delayed by several hours.",
+        colors.fg_subtle,
+        None,
+        cx,
+    ));
+    let partial = partial.map(Vec::as_slice).or(match &outcome.completeness {
+        ExtrasCompleteness::Partial { reasons } => Some(reasons.as_slice()),
+        ExtrasCompleteness::Complete => None,
+    });
     if let Some(reasons) = partial {
         body.push(note(
             partial_reason_text(reasons),
@@ -1283,7 +1487,12 @@ pub(crate) fn latest_none_text() -> &'static str {
 /// The label used for a contributor row. Email and raw JSON are never shown.
 pub(crate) fn contributor_display(contributor: &Contributor) -> String {
     if contributor.kind() == ContributorKind::Anonymous {
-        return "Anonymous contributor".to_string();
+        return contributor
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Anonymous contributor")
+            .to_string();
     }
     contributor
         .name

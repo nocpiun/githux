@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+#[cfg(test)]
 pub mod fixtures;
 mod view;
 
@@ -151,6 +152,7 @@ impl<T, P> SectionState<T, P> {
 }
 
 pub type ReleasesState = SectionState<ReleasesData, Vec<ExtrasIncompleteReason>>;
+pub type LatestReleaseState = SectionState<LatestReleaseOutcome, String>;
 pub type ContributorsState = SectionState<ContributorsOutcome, Vec<ExtrasIncompleteReason>>;
 pub type LanguagesState = SectionState<LanguagesOutcome, String>;
 
@@ -163,6 +165,7 @@ pub type LanguagesState = SectionState<LanguagesOutcome, String>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverviewUpdate {
     Releases(ReleasesState),
+    LatestRelease(LatestReleaseState),
     Contributors(ContributorsState),
     Languages(LanguagesState),
 }

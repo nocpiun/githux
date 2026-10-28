@@ -41,6 +41,10 @@ GPUI 测试覆盖：旧仓库/账户/generation 拒绝、单 section 失败/Part
 
 修复后新增 `notes_panel_fits_a_short_window_and_traps_tab`，覆盖 480×700 窗口下面板完整落在 viewport 内，以及 Tab 后 popover 仍打开、Escape 正常关闭。重新执行 `cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（repository_overview 45 项）与 `cargo fmt --all -- --check`，均通过。
 
+第二轮审查指出 480×480 时 row budget 不能约束堆叠后的总高度。现将 TOP 区域限制在 min(360px, 窗口高度一半)，真实 ScrollHandle 配合公共 Motion/Bar/Bars 承载溢出。测试同时覆盖 1200×800、600×480、480×480，要求阅读区至少占一半且末段可滚到。修正模拟 reader 的真实满高 viewport，避免内容高度冒充可用阅读高度。
+
+同轮核对补齐：latest endpoint 独立 typed state/update；payload 仓库身份复核；领域 Partial 与统计延迟提示；匿名名字 fallback；fixtures 仅 example/test 装配；最大 u64 语言计数和溢出错误的 UI 边界；窗口失活取消本地滚动，弱引用按键拦截包含 Tab/Shift+Tab/Escape。
+
 ## 未执行 / 后续
 
 - 未做真实 Windows 预览窗口的人工视觉、鼠标手感和多 DPI 验收；`cargo run` 启动事实不等于视觉验收。

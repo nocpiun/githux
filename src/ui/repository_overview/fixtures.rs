@@ -273,7 +273,14 @@ pub fn many_languages() -> LanguagesOutcome {
             share: Some((100 - index) as f64 / 1000.0),
         })
         .collect();
-    outcome.total_bytes = 1000;
+    outcome.total_bytes = outcome
+        .languages
+        .iter()
+        .map(|language| language.bytes)
+        .sum();
+    for language in &mut outcome.languages {
+        language.share = Some(language.bytes as f64 / outcome.total_bytes as f64);
+    }
     outcome
 }
 

@@ -69,9 +69,7 @@ impl gpui::Render for ReaderProbe {
         gpui::div()
             .id("probe-reader")
             .debug_selector(|| "probe-reader".to_string())
-            .flex_1()
-            .min_h_0()
-            .w_full()
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .track_focus(&self.focus)
@@ -348,10 +346,7 @@ fn contributor_email_and_raw_json_are_not_displayed(cx: &mut TestAppContext) {
     let secondary = view::contributor_secondary(anonymous);
     assert!(secondary.contains("anonymous"));
     assert!(!secondary.contains("anon@example.invalid"));
-    assert_eq!(
-        view::contributor_display(anonymous),
-        "Anonymous contributor"
-    );
+    assert_eq!(view::contributor_display(anonymous), "Anonymous Builder");
 
     let linked = &fixtures::ready_contributors().contributors[0];
     assert_eq!(view::contributor_display(linked), "Nocpiun");
@@ -609,7 +604,7 @@ fn notes_panel_fits_a_short_window_and_traps_tab(cx: &mut TestAppContext) {
         panel
     );
 
-    cx.simulate_keystrokes("tab");
+    cx.simulate_keystrokes("tab shift-tab");
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("overview-notes-panel").is_some(),
@@ -699,36 +694,35 @@ fn top_layout_stays_bounded_with_space_for_a_reader_at_desktop_and_narrow_widths
         cx
     ));
 
-    cx.simulate_resize(size(px(1200.0), px(800.0)));
-    cx.run_until_parked();
-    let desktop = bounds("repository-overview", cx);
-    let desktop_reader = bounds("probe-reader", cx);
-    assert_eq!(desktop.top(), px(0.0));
-    assert!(desktop.bottom() <= desktop_reader.top());
-    assert!(
-        desktop.size.height <= px(520.0),
-        "TOP strip must stay bounded, got {:?}",
-        desktop.size.height
-    );
-    assert_eq!(desktop_reader.left(), desktop.left());
-    assert_eq!(desktop_reader.size.width, desktop.size.width);
-
-    cx.simulate_resize(size(px(480.0), px(800.0)));
-    cx.run_until_parked();
-    let narrow = bounds("repository-overview", cx);
-    let narrow_reader = bounds("probe-reader", cx);
-    assert_eq!(narrow.top(), px(0.0));
-    assert!(narrow.bottom() <= narrow_reader.top());
-    assert!(
-        narrow.size.height <= px(900.0),
-        "narrow TOP strip must stay bounded, got {:?}",
-        narrow.size.height
-    );
-    assert!(cx.debug_bounds("overview-releases").is_some());
-    assert!(cx.debug_bounds("overview-contributors").is_some());
-    assert!(cx.debug_bounds("overview-languages").is_some());
-    assert_eq!(narrow_reader.left(), narrow.left());
-    assert_eq!(narrow_reader.size.width, narrow.size.width);
+    for viewport in [
+        size(px(1200.0), px(800.0)),
+        size(px(600.0), px(480.0)),
+        size(px(480.0), px(480.0)),
+    ] {
+        cx.simulate_resize(viewport);
+        cx.run_until_parked();
+        let top = bounds("repository-overview", cx);
+        let reader = bounds("probe-reader", cx);
+        assert_eq!(top.top(), px(0.0));
+        assert!(top.bottom() <= reader.top());
+        assert!(top.size.height <= viewport.height * 0.5);
+        assert!(reader.size.height >= viewport.height * 0.5);
+        assert!(reader.bottom() <= viewport.height + px(1.0));
+        assert_eq!(reader.left(), top.left());
+        assert_eq!(reader.size.width, top.size.width);
+        let reader_before = reader_offset(&harness, cx);
+        cx.update(|_, cx| {
+            ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true);
+        });
+        scroll_over("overview-sections-viewport", -120.0, cx);
+        let languages = bounds("overview-languages", cx);
+        let region = bounds("overview-sections-viewport", cx);
+        assert!(
+            languages.top() < region.bottom(),
+            "last section must be reachable"
+        );
+        assert_eq!(reader_before, reader_offset(&harness, cx));
+    }
 }
 
 #[gpui::test]
@@ -781,6 +775,90 @@ fn set_binding_clears_states_and_rejects_old_updates(cx: &mut TestAppContext) {
         },
         cx
     ));
+}
+
+#[gpui::test]
+fn independent_latest_and_domain_partial_are_preserved(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx);
+    let binding = fixtures::binding(1);
+    apply_releases(
+        &harness,
+        &binding,
+        SectionState::Ready(fixtures::partial_releases()),
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-releases-partial").is_some());
+    let entity = overview(&harness, cx);
+    entity.update(cx, |view, cx| {
+        view.apply_latest_release(
+            &binding,
+            SectionState::Ready(fixtures::latest_none_releases().latest.unwrap()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-releases-latest-none").is_some());
+    apply_releases(
+        &harness,
+        &binding,
+        SectionState::Error {
+            message: "list failed".into(),
+        },
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-releases-latest-none").is_some());
+    assert!(cx.debug_bounds("overview-releases-error").is_some());
+    let mut other = fixtures::repository();
+    other.id = 999;
+    let mut mismatch = fixtures::ready_languages();
+    mismatch.repository = other;
+    assert!(!apply_languages(
+        &harness,
+        &binding,
+        SectionState::Ready(mismatch),
+        cx
+    ));
+}
+
+#[gpui::test]
+fn maximum_language_total_and_overflow_failure_are_distinct(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx);
+    let binding = fixtures::binding(1);
+    let maximum = LanguagesOutcome::from_bytes(
+        fixtures::repository(),
+        serde_json::json!({"Rust": u64::MAX})
+            .as_object()
+            .unwrap()
+            .clone(),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(apply_languages(
+        &harness,
+        &binding,
+        SectionState::Ready(maximum),
+        cx
+    ));
+    assert!(cx.debug_bounds("overview-language-share-0").is_some());
+    let overflow = LanguagesOutcome::from_bytes(
+        fixtures::repository(),
+        serde_json::json!({"Rust": u64::MAX, "Other": 1})
+            .as_object()
+            .unwrap()
+            .clone(),
+        Default::default(),
+    )
+    .unwrap_err();
+    apply_languages(
+        &harness,
+        &binding,
+        SectionState::Error {
+            message: overflow.to_string(),
+        },
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-languages-error").is_some());
+    assert!(cx.debug_bounds("overview-languages-zero").is_none());
 }
 
 #[test]

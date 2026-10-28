@@ -32,7 +32,12 @@ use gpui::{
     size,
 };
 
-use crate::repository_overview::{OverviewAction, RepositoryOverview, SectionState, fixtures};
+// Tests exercise additional fixture variants beyond the interactive toolbar.
+#[allow(dead_code)]
+#[path = "../src/ui/repository_overview/fixtures.rs"]
+mod fixtures;
+
+use crate::repository_overview::{OverviewAction, RepositoryOverview, SectionState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {

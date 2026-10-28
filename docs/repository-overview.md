@@ -50,6 +50,8 @@ pub enum SectionState<T, P> {
 }
 ```
 
+`apply_latest_release(binding, LatestReleaseState, cx)` 可独立应用 latest endpoint 的 Idle/Loading/Ready/Partial/Error；它覆盖 `ReleasesData` 中用于成组快照的 latest 展示，列表失败也不会抹掉独立 latest。各 `apply_*` 同时校验 outcome 自带的仓库身份，拒绝绑定与 payload 不一致。领域 outcome 自身的 Partial 不会因外层使用 Ready 而丢失。
+
 `ReleasesData` 分开保存 `list: ReleasesOutcome`、`latest: Option<LatestReleaseOutcome>` 和 `latest_error: Option<String>`。latest 使用 GitHub 的 latest 语义，不由客户端排序推断；`None` 只表示 404 可见性歧义，列表仍可显示 Release。单个 section 失败不会清空另外两个。
 
 ## 动作 API
@@ -71,7 +73,7 @@ pub enum OverviewAction {
 - **Releases**：显示 GitHub latest 的 tag/name 与 `Draft` / `Pre-release` 标签；latest 404 使用“无可见 latest，不证明仓库没有 Release”的歧义文案；列表显示受服务端 draft/prerelease 可见性约束的观察值。列表最多显示有限行，更多以 `+N more` 提示；Release body 只作为 bounded plain-text popover 的输入，不渲染 Markdown，也不提供发布管理控件。
 - **Contributors**：区分 204 `EmptyRepository`、成功空内容和失败；显示 `observed_entries()` 的观察条数，不声称是完整人数；关联用户与匿名贡献者都显示 name/login 首字母（`Avatar`），不显示 email 或 raw JSON，也不下载头像。列表有界，Partial/延迟状态保留。
 - **Languages**：显示字节派生的 share，不是 LOC；`total_bytes == 0` 时不推断 `0%` 分布。每个语言行同时有文字名称、share/bytes 标签和 bar，颜色取当前主题的 chart 色板，不替换主题、不使用随机色。超长名称用省略号，列表有界，并注明舍入后不保证总和恰为 100%。
-- **布局**：三段位于 TOP 横条，宽窗口并排，窄窗口在顶部区域内换行/堆叠；不建立右侧纵栏。列表行数按窗口宽度收紧（宽窗口 3 行，窄窗口 2 行），保证组件高度有界并为下方文件阅读保留空间。溢出内容使用公共 `ui::scroll` 的 `Motion` / `Bar` / `Bars`，没有新滚动代码。
+- **布局**：三段位于 TOP 横条，宽窗口并排，窄窗口在顶部区域内换行/堆叠；不建立右侧纵栏。列表行数按窗口宽度收紧（宽窗口 3 行，窄窗口 2 行）；TOP 高度上限为 360px 与窗口高度一半的较小值，堆叠和长文案通过公共滚动 viewport 访问，为下方文件阅读保留空间。溢出内容使用公共 `ui::scroll` 的 `Motion` / `Bar` / `Bars`，没有新滚动代码。
 - **Popover**：Release notes 打开为 bounded 本地 popover；面板自身按 viewport 可用空间 clamp 宽高与位置，短/窄窗口下不会伸出窗口外。打开时焦点进入 popover，面板消费 Tab/Shift+Tab 以阻止焦点落到后方 overview 或阅读器，Escape、Close 按钮或点击外部关闭并把焦点还给组件；关闭时取消共享滚动 motion，避免与相邻阅读器竞争。popover 的滚动与相邻模拟阅读器互不影响。
 
 ## 独立预览
@@ -103,7 +105,7 @@ cargo run --example repository_overview
 - `cargo fmt --all -- --check`
 - `cargo check --locked --all-targets`
 - `cargo clippy --locked --all-targets -- -D warnings`
-- `cargo test --locked`：主 binary 519 项、account 310 项、reader 123 项、repository_overview 44 项，全部通过
+- `cargo test --locked`：主 binary 519 项、account 310 项、reader 123 项、repository_overview 47 项，全部通过
 - `cargo build --locked --example repository_overview`
 - `cargo build --locked`
 - `git diff --check`
