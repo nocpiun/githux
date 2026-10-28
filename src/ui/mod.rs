@@ -32,6 +32,7 @@ use crate::{
 
 pub mod accounts;
 pub mod avatar;
+pub(crate) mod badge;
 mod chrome;
 pub mod fixtures;
 pub(crate) mod geometry;
