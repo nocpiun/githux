@@ -56,15 +56,15 @@ let readme = pages.profile_readme(
 ).await?;
 ```
 
-helper 使用 `basic.value.login`（服务端 canonical login）定位 `/{login}/{login}` 对应的公开仓库，然后**在同一个 `PageReadSession` / `RepositorySession`** 中：读取仓库资料 → 要求 public、canonical owner/name 同名且 default branch 存在 → 把 default branch 解析为固定 commit → 发现根 README → 读取固定 blob 并生成已有 `PreparedContent`。步骤之间不重新捕获活动账户，不接收任意 download URL，不 checkout、不发现 gist、不加载图片。
+helper 使用 `basic.value.login`（服务端 canonical login）定位 `/{login}/{login}` 对应的公开仓库，然后**在同一个 `PageReadSession` / `RepositorySession`** 中：读取仓库资料 → 要求 public、canonical owner/name 同名且 default branch 存在 → 把 default branch 解析为固定 commit → 读取完整根 tree、只选择根目录普通 `README.md` 文件（不使用会优先 `.github/` 或 `docs/` 的 repository preferred-README endpoint）→ 读取固定 blob 并生成已有 `PreparedContent`。步骤之间不重新捕获活动账户，不接收任意 download URL，不 checkout、不发现 gist、不加载图片。
 
 `Scoped<ProfileReadme>` 的数据状态：
 
 | 状态 | 含义 |
 | --- | --- |
 | `Prepared { repository, commit, content }` | 已有固定 commit/blob/path 身份的准备后正文 |
-| `Missing { repository, commit }` | README 404 后，完整可读的根 tree 证明是空树；不是由 404 猜测 |
-| `Unavailable { repository, commit }` | README 404 且根发现不能证明缺失；权限/不可见与无 README 仍有歧义 |
+| `Missing { repository, commit }` | 完整、未截断的根 tree 证明根目录没有普通 `README.md`；只有 `.github/README.md`、`docs/README.md` 或其他文件也不是 Profile README |
+| `Unavailable { repository, commit }` | 根 tree 不完整、截断或发现不确定，不能证明根 README 缺失 |
 | `NotEligible { repository, reason }` | 非 public、canonical owner/name 不同名，或没有 default branch |
 
 仓库/commit/README/blob 的网络、权限、解析等失败为 `Err(RepositoryError)`，不伪装成 `Missing` 或 `NotEligible`。即使授权账户能读 private/internal 同名仓库，也不会把它选作 Profile README。旧版 “Share to profile” 标记无法由当前 API 观察，因此本 helper 不承诺识别该历史状态。

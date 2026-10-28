@@ -65,8 +65,11 @@ fn extras_details() -> Value {
 fn snapshot() -> Value {
     json!({"sha":COMMIT,"commit":{"message":"profile","tree":{"sha":ROOT},"author":null,"committer":null}})
 }
-fn readme() -> Value {
-    json!({"type":"file","path":"README.md","sha":BLOB,"size":6})
+fn root_tree(truncated: bool) -> Value {
+    json!({"sha":ROOT,"truncated":truncated,"tree":[
+        {"path":"docs","type":"tree","mode":"040000","sha":BLOB},
+        {"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":6}
+    ]})
 }
 
 type Step = (
@@ -454,7 +457,7 @@ async fn profile_readme_uses_canonical_public_target_and_fixed_commit() {
     let session = svc.page_session().unwrap();
     transport.push(200, details("Target", "public", Some("main")));
     transport.push(200, snapshot());
-    transport.push(200, readme());
+    transport.push(200, root_tree(false));
     transport.push(
         200,
         json!({"sha":BLOB,"size":6,"encoding":"base64","content":"SGVsbG8h"}),
@@ -490,7 +493,7 @@ async fn profile_readme_uses_canonical_public_target_and_fixed_commit() {
     assert!(
         requests[3]
             .url
-            .ends_with(&format!("/repos/Target/Target/readme?ref={COMMIT}"))
+            .ends_with(&format!("/repos/Target/Target/git/trees/{ROOT}"))
     );
     assert!(
         requests[4]
@@ -561,15 +564,21 @@ async fn profile_readme_distinguishes_private_no_branch_missing_uncertain_and_fa
             ..
         }
     ));
-    for empty in [true, false] {
+    for (tree, missing) in [
+        (json!({"sha":ROOT,"truncated":false,"tree":[]}), true),
+        (
+            json!({"sha":ROOT,"truncated":false,"tree":[{"path":"file","type":"blob","mode":"100644","sha":BLOB}]}),
+            true,
+        ),
+        (json!({"sha":ROOT,"truncated":true,"tree":[]}), false),
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let transport = Arc::new(Controlled::default());
         let svc = service(&temp, transport.clone(), 2).await;
         login(&svc, &transport, 1, "viewer", "token").await;
         transport.push(200, details("Target", "public", Some("main")));
         transport.push(200, snapshot());
-        transport.push(404, json!({}));
-        transport.push(200, json!({"sha":ROOT,"truncated":false,"tree":if empty { json!([]) } else { json!([{"path":"file","type":"blob","mode":"100644","sha":BLOB}]) }}));
+        transport.push(200, tree);
         let result = svc
             .page_session()
             .unwrap()
@@ -582,8 +591,11 @@ async fn profile_readme_distinguishes_private_no_branch_missing_uncertain_and_fa
             .await
             .unwrap()
             .value;
-        assert_eq!(matches!(result, ProfileReadme::Missing { .. }), empty);
-        assert_eq!(matches!(result, ProfileReadme::Unavailable { .. }), !empty);
+        assert_eq!(matches!(result, ProfileReadme::Missing { .. }), missing);
+        assert_eq!(
+            matches!(result, ProfileReadme::Unavailable { .. }),
+            !missing
+        );
     }
     let temp = tempfile::tempdir().unwrap();
     let transport = Arc::new(Controlled::default());
@@ -679,7 +691,7 @@ async fn profile_readme_auth_change_between_steps_and_pinned_partial_error_are_s
             match step {
                 "repository" => details("Target", "public", Some("main")),
                 "revision" => snapshot(),
-                _ => readme(),
+                _ => root_tree(false),
             },
         );
         let session = svc.page_session().unwrap();

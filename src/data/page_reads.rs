@@ -14,8 +14,8 @@ use crate::domain::profile::{
 };
 use crate::domain::repo::RepoVisibility;
 use crate::domain::repository::{
-    ObjectSha, ReadmeDiscovery, RepositoryError, RepositoryIdentity, RepositoryLocator,
-    RevisionSpec,
+    Completeness, ObjectSha, RepositoryError, RepositoryIdentity, RepositoryLocator, RevisionSpec,
+    SnapshotDirectory,
 };
 use crate::domain::repository_extras::{
     ContributorsOutcome, LanguagesOutcome, LatestReleaseOutcome, ReleasesOutcome,
@@ -323,34 +323,49 @@ impl PageReadSession {
             .await?;
         let identity = snapshot.value.repository().clone();
         let commit = snapshot.value.commit().clone();
-        let discovery = self
+        // The repository README endpoint prefers .github/ and docs/ over the
+        // root. Profile README eligibility requires the root README.md itself.
+        let root = self
             .repository
-            .readme(&snapshot.value, repository_limits, cancel.clone())
+            .directory(
+                &SnapshotDirectory::root(&snapshot.value),
+                repository_limits,
+                cancel.clone(),
+            )
             .await?;
-        match discovery.value {
-            ReadmeDiscovery::Found(descriptor) => {
-                let content = self
-                    .repository
-                    .content(&BlobIdentity::from_readme(&descriptor), blob_limits, cancel)
-                    .await?;
-                self.readme_outcome(ProfileReadme::Prepared {
-                    repository: identity,
-                    commit,
-                    content: content.value,
-                })
-            }
-            ReadmeDiscovery::AbsentInEmptyTree { .. } => {
-                self.readme_outcome(ProfileReadme::Missing {
-                    repository: identity,
-                    commit,
-                })
-            }
-            ReadmeDiscovery::NotFoundOrInaccessible { .. } => {
-                self.readme_outcome(ProfileReadme::Unavailable {
-                    repository: identity,
-                    commit,
-                })
-            }
+        let readme_index = root.value.entries.iter().position(|entry| {
+            entry.path.as_str().eq_ignore_ascii_case("README.md")
+                && matches!(
+                    entry.kind,
+                    crate::domain::repository::TreeEntryKind::File { .. }
+                )
+        });
+        if let Some(index) = readme_index {
+            let content = self
+                .repository
+                .content(
+                    &BlobIdentity::from_file(&root.value, index)?,
+                    blob_limits,
+                    cancel,
+                )
+                .await?;
+            self.readme_outcome(ProfileReadme::Prepared {
+                repository: identity,
+                commit,
+                content: content.value,
+            })
+        } else if root.value.completeness == Completeness::Complete
+            && root.value.truncated == Some(false)
+        {
+            self.readme_outcome(ProfileReadme::Missing {
+                repository: identity,
+                commit,
+            })
+        } else {
+            self.readme_outcome(ProfileReadme::Unavailable {
+                repository: identity,
+                commit,
+            })
         }
     }
 
@@ -375,7 +390,7 @@ pub enum ProfileReadmeIneligible {
 }
 
 /// A failed discovery/read is `Err(RepositoryError)`, never one of these data
-/// states. A 404 without complete empty-root evidence remains `Unavailable`.
+/// states. Incomplete root discovery remains `Unavailable`, never `Missing`.
 #[derive(Debug)]
 pub enum ProfileReadme {
     Prepared {
