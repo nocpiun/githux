@@ -85,7 +85,7 @@ cargo run --example account
 
 ## 验证
 
-已执行（本机 Windows，HEAD 含 content-reader 合入 main 的组合）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（主 binary 456 项、账户装配 305 项、reader 118 项，其中本任务 19 项）、`cargo build --locked --example account -j 1`、`cargo build --locked --release -j 1`、`git diff --check`。reader 的独立 example 与测试仍保留，默认外壳的标签条滚动/排序/toolbar 既有测试保持通过。
+已执行（本机 Windows，HEAD 含 content-reader 合入 main 的组合）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（主 binary 519 项、账户装配 310 项、reader 123 项，其中本任务 19 项）、`cargo build --locked --example account -j 1`、`cargo build --locked --release -j 1`、`git diff --check`。reader 的独立 example 与测试仍保留，默认外壳的标签条滚动/排序/toolbar 既有测试保持通过。
 
 新增 `preview_scrollbar_drags_real_content_and_cleans_up` 用真实 100 条仓库结果验证：长内容确有溢出（末行已布局、reach 超出视口）、拖动公共 thumb 移动真实 `ScrollHandle`、外部释放结束拖动、离开区域 140ms 淡出、内容变短后 offset 收敛到新范围内且不再显示末行、无溢出窗口不绘制条、隐藏条不阻挡 PAT 输入、取消与窗口失活立即清理。
 
@@ -93,4 +93,4 @@ cargo run --example account
 
 **未执行**：真实 PAT 登录与真实 GitHub 私有仓库联调。该项须由负责人在预览窗口自行输入 token；本任务没有读取 `gh`、环境变量、日志或任何真实凭据，也没有对 `api.github.com` 发起带真实 token 的请求。真实窗口中文本输入法、粘贴与焦点行为同样需要负责人在预览里确认。
 
-真实窗口启动已核实（当前实现）：`target/debug/examples/account.exe` 独立启动两次，窗口标题 `Githux · Account wiring preview`、进程 Responding；`target/release/githux.exe` 正常进入原 Shell（标题 `Githux`）。均按 exe 路径、PID 与创建时间核对后由本任务主动关闭，未触碰 reader/sidebar 进程。这只能证明启动路径与关闭收尾，不构成视觉、滚动条观感或真实登录验收。
+真实窗口启动已核实（最新 main 组合）：`target/debug/examples/account.exe` 独立启动，窗口标题 `Githux · Account wiring preview`、进程 Responding；`target/release/githux.exe` 正常进入原 Shell（标题 `Githux`），包含已合入 main 的 sidebar 布局。均按 exe 路径、PID 与创建时间核对后由本任务主动关闭，未触碰其他任务进程。这只能证明启动路径与关闭收尾，不构成视觉、滚动条观感或真实登录验收。

@@ -160,6 +160,12 @@ Codex 第七轮 P2：关闭预览时 `app::run` 立即退出，而 SQLite/凭据
 
 原 `cargo run -- --account-preview` 及 app 内预览分支的交付仅属历史；新命令是 `cargo run --example account`。真实 PAT、真实 Windows IME/粘贴/焦点与滚动条观感仍待负责人在新 example 中验收，不能沿用 reader 的验收。
 
+## 第 11 轮补充：sidebar-layout 合入 main 后同步
+
+首次新 head 审查返回 `base_changed`：sidebar-layout 已合入 main（`c1a4ad8`）。普通 merge 保留账户 example、正式 Shell 与 sidebar 实现，没有重放同步或强推。
+
+组合验证：主 binary 519 项、账户装配 310 项、reader 装配 123 项通过；example 与 release 均构建成功。新组合中独立 example 启动（PID 10620，2026-10-28 08:28:18），标题 `Githux · Account wiring preview`；release 产品启动（PID 75204，08:28:39），标题 `Githux`，均按 PID 关闭。没有改 sidebar 的交互。
+
 ## 剩余问题
 
 - 真实 PAT、真实组织 SSO、私有仓库可见性，以及真实 Windows 输入法候选、实际粘贴与焦点观感，须由负责人在预览窗口确认（模拟覆盖不等同）。
