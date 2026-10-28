@@ -18,17 +18,20 @@ use super::{
 
 use crate::content::PreparedBody;
 
-fn setup(cx: &mut TestAppContext) {
+pub(super) fn setup(cx: &mut TestAppContext) {
     cx.update(ely_core::init_for_tests);
     cx.update(|cx| {
         ely_core::theme::Theme::update(cx, |theme| {
+            // Existing layout/selection cases use direct scrolling. Controlled-time discrete
+            // wheel coverage lives in motion_tests, which explicitly enables motion.
+            theme.reduced_motion = true;
             theme.font_family = "Noto Sans".into();
             theme.mono_family = "Google Sans Code".into();
         })
     });
 }
 
-fn context() -> ResourceContext {
+pub(super) fn context() -> ResourceContext {
     ResourceContext::new(
         fixtures::OWNER,
         fixtures::NAME,
@@ -37,7 +40,7 @@ fn context() -> ResourceContext {
     )
 }
 
-fn open(
+pub(super) fn open(
     cx: &mut TestAppContext,
     body: PreparedBody,
     kind: DocumentKind,

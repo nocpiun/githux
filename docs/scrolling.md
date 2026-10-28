@@ -1,6 +1,6 @@
 # 统一滚动与滚动条
 
-更新：2026-10-28。状态：公共滚动条与公共 wheel motion 已实现。标签条、仓库 viewport 和已合并的 content-reader 使用统一 Bar/Bars；标签条、仓库、每会话页面、palette 使用同一 `Motion<T>` / 输入路径。content-reader 已接入共享条的样式、拖动与淡入淡出，尚未接入公共 wheel motion；account-ui 是独立未合并消费者，其接线与验收随对应任务交付。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。阅读器已改用本地 Markdown 组件及公开的真实 `ListState`，不再受上游 `MarkdownDocument` 私有列表限制。
+更新：2026-10-28。状态：公共滚动条与公共 wheel motion 已实现。标签条、仓库 viewport 和已合并的 content-reader 使用统一 Bar/Bars；标签条、仓库、每会话页面、palette 使用同一 `Motion<T>` / 输入路径。本轮 content-reader 已接入真实源码双轴与 Markdown ListState 的公共 wheel motion，原生交互验收待负责人完成；account-shell 的账户迁移是独立并行任务，其接线与验收随对应 PR 交付。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。阅读器已改用本地 Markdown 组件及公开的真实 `ListState`，不再受上游 `MarkdownDocument` 私有列表限制。
 
 本主题是滚动条外观、几何、拖动、淡入淡出与 `ScrollMotion` 边界的唯一维护位置。视觉基准来自 content-reader 当前实现（负责人 2026-10-26 明确以它为准）：细、两头圆、半透明、出现/消失渐变、无实体轨道。
 
@@ -111,7 +111,7 @@ motion.cancel();
 scroll::cancel_region(&mut bars, &motion);
 ```
 
-未来 account-ui/content-reader：每个真实区域保存自己的 Motion 与 Bars，传入原 ScrollHandle / UniformList base_handle / 纵向 ListState；滚轮输入、thumb 目标和 owner 的 frame tick 使用同一 motion。双轴区域可对同一 `Motion` 选择两轴，各自的 wheel 所有权需由区域明确映射。本分支不修改其它 worktree，也不声称其真实 UI 已迁移。Markdown 私有列表的接口限制仍见下文。
+`wheel_overlay_with(id, WheelAxes, motion, now)` 在同一公共输入路径上提供明确轴归属和 owner 时钟。`Mapped(axis)` 保留原有单轴消费者的主轴/备用轴映射；`Both` 保留原生 x/y，Shift 仅在没有原生 x 时将 y 交给横轴；`Vertical` 不把 x 转成 y，并阻止原生纵向列表把 Shift+y 再当纵向输入。双轴 precise 输入在同一事件中各应用一次。旧 `wheel_overlay` 接口保持不变。账户消费者的后续迁移由 account-shell 独立交付，本任务不修改其它 worktree。
 
 ## 动画与输入边界（已实现）
 
@@ -134,11 +134,13 @@ scroll::cancel_region(&mut bars, &motion);
 
 外部释放只 settle 仓库 `Bars` 已记录的拖动；Esc、窗口失活和尺寸变化会清理仓库条与平滑目标，tabs 的重排/横轴拖动不被当成仓库 thumb drag。resizer sash 仍是独立的分界高亮，不纳入滚动条。组合测试覆盖真实内容拖动、待完成 wheel 的取消、区域隔离、快速 hover 反向、收起/矮窗口与清理；最终外观与真机手感仍待负责人验收。
 
-### 已接入共享滚动条：content-reader（源码 / Markdown）
+### 已接入：content-reader（源码 / Markdown）
 
 PR #27 已合并。源码视图使用真实 `UniformListScrollHandle` 的 `base_handle`，Markdown 使用本地 `MarkdownView::list_state()` 的真实 `ListState`；两者通过 `Bar` / `Bars` 共用外观、几何、拖动与 Fade，没有额外自绘 scrollbar。源码视图保留双轴及右下角避让，Markdown 的 `ListState` 适配仅支持纵向。模块归属和验收边界见 [只读阅读器](content-reader.md#滚动条共享核心)。
 
-它们目前直接绑定上述目标，尚未包装 `Motion<T>`，因此不能把共享滚动条的合并描述为全部区域均已获得公共平滑 wheel。后续消费者接入仍需验证原生 precise 输入直通、thumb 拖动取消 wheel 目标、程序滚动/文档切换清理和 Markdown 虚拟化测量；不另复制 easing。上文固定上游评估记录的是 Ely 的能力边界，不再是当前本地 Markdown 阅读器的接入阻塞。
+本轮 reader-motion 将 Source 的真实 `base_handle` 包装为持久 `Motion<ScrollHandle>`，MarkdownView 的真实列表包装为持久 `Motion<ListState>`。Bar 与 wheel 使用同一实例；reader 的已有时钟同时驱动 wheel tick 和独立 fade，仅未完成时请求后续帧。Source 的 Shift/原生 x 与 y 分别归属横纵轴，Markdown 只接纵轴。当前本地 Markdown 的 code/table 采用换行布局，没有内层横向 ScrollHandle；没有为迁移新增假目标或改变表格字号/代码样式。
+
+thumb hook、程序 set-offset、选择按下、reset/adopt、正文替换、Esc、窗口失活/隐藏以及 keyed 元素状态释放会清理旧目标；真实 ListState 测量与 drag hooks 保留。宿主失效账户上下文时可调用兼容新增的 `ReaderView::cancel_interactions(cx)`。保留实体但不再渲染的宿主由 GPUI keyed-state release 清理，dispose 另有 release hook。GPUI 受控事件测试与本机原生预览的证据边界见 [本轮日志](devlog/2026-10-28-reader-motion.md)，最终手感仍须负责人验收。
 
 ## 验证现状
 
