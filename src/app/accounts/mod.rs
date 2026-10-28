@@ -317,6 +317,19 @@ impl Accounts {
         }
     }
 
+    /// Seeds the active account and the previous list, then runs the restore decision. Used only by
+    /// the unit tests for `restored_or_idle`, which is otherwise reached through a full mutation.
+    #[cfg(test)]
+    pub fn set_active_and_previous_for_test(&mut self, active: AccountKey, previous: Repositories) {
+        self.snapshot.active = Some(active);
+        self.previous_repositories = Some(previous);
+    }
+
+    #[cfg(test)]
+    pub fn restored_or_idle_for_test(&mut self) -> Repositories {
+        self.restored_or_idle()
+    }
+
     /// The cache state of one avatar without starting a fetch, for the avatar tests.
     #[cfg(test)]
     pub fn avatar_state_for_test(&self, key: &AvatarKey) -> Option<AvatarState> {
@@ -820,15 +833,20 @@ impl Accounts {
     }
 
     /// The repository list to show after a non-repository mutation settled and the authorization
-    /// did not change (for example revalidating a different account, or a rejected PAT). The list
-    /// that was on screen is still valid, so it is restored instead of leaving an idle placeholder
-    /// that `autoload_if_needed` will not refill. When the authorization did change, this returns
-    /// `None` and the automatic load takes over.
+    /// did not change (for example revalidating a different account, or a rejected PAT).
+    ///
+    /// The list that was on screen is still valid for that account, so a `Ready` list is restored
+    /// and a `Failed` one keeps its recoverable Retry. Anything else falls back to an idle
+    /// placeholder. `autoload_if_needed` will not refill an unchanged key, so dropping a failure
+    /// here would strand the sidebar with no recovery action.
     fn restored_or_idle(&mut self) -> Repositories {
         match self.previous_repositories.take() {
             Some(previous)
                 if previous.account == self.snapshot.active
-                    && matches!(previous.preview, RepositoryPreview::Ready(_)) =>
+                    && matches!(
+                        previous.preview,
+                        RepositoryPreview::Ready(_) | RepositoryPreview::Failed(_)
+                    ) =>
             {
                 previous
             }
@@ -1101,7 +1119,10 @@ impl Accounts {
         self.snapshot.repositories = match self.previous_repositories.take() {
             Some(previous)
                 if previous.account == self.snapshot.active
-                    && matches!(previous.preview, RepositoryPreview::Ready(_)) =>
+                    && matches!(
+                        previous.preview,
+                        RepositoryPreview::Ready(_) | RepositoryPreview::Failed(_)
+                    ) =>
             {
                 previous
             }

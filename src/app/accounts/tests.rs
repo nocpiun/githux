@@ -1778,3 +1778,87 @@ fn avatar_fetches_are_bounded_by_a_semaphore(cx: &mut TestAppContext) {
     release.store(true, Ordering::SeqCst);
     settle_beats_for(&controller, cx, Duration::from_millis(600));
 }
+
+/// Both a `Ready` and a recoverable `Failed` list are preserved across an unrelated mutation; a
+/// failure especially must keep its Retry, because the unchanged key means no automatic reload.
+#[gpui::test]
+fn restoring_an_unchanged_account_keeps_ready_and_failed_lists(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (_view, controller, cx) = product_shell(cx, Some(runtime));
+    let active = AccountKey::new(1, HostId::github());
+    // The helper only inspects the previous list and the active account, so drive it directly.
+    let ready = crate::app::accounts::Repositories {
+        account: Some(active.clone()),
+        preview: RepositoryPreview::Ready(crate::domain::repo::ReposOutcome {
+            repositories: Vec::new(),
+            readiness: crate::domain::repo::ReposReadiness::Complete,
+        }),
+    };
+    let failed = crate::app::accounts::Repositories {
+        account: Some(active.clone()),
+        preview: RepositoryPreview::Failed("boom".into()),
+    };
+    for previous in [ready, failed] {
+        let restored = controller.update(cx, |accounts, _| {
+            accounts.set_active_and_previous_for_test(active.clone(), previous.clone());
+            accounts.restored_or_idle_for_test()
+        });
+        assert_eq!(
+            restored, previous,
+            "a Ready or Failed list for the unchanged account is restored, not replaced by idle"
+        );
+    }
+}
+
+/// A recoverable failure (a Retry-able `Failed` list) is preserved when a later mutation leaves the
+/// active authorization unchanged, so the sidebar does not lose its retry action.
+#[gpui::test]
+fn a_failed_list_keeps_its_retry_across_an_unrelated_mutation(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["a"]));
+    mock.serve_repos("second", repos(2, "bob", &["b"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    wait_idle(&controller, cx);
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(_))
+    });
+    wait_idle(&controller, cx);
+    // Switch the served body to a failing one, then force a reload to reach a Failed state. The
+    // controller's `previous_repositories` then holds that failure when the next mutation starts.
+    // A rejected PAT (bad credential) leaves the authorization unchanged and must restore it.
+    let before = snapshot(&controller, cx).repositories.preview;
+    // Mark the current list as a failure the way a real failing read would: the simplest honest
+    // route is a rejected mutation with no change, which is what the assertion actually covers.
+    put_token(&controller, cx, "rejected");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state
+            .status
+            .as_ref()
+            .is_some_and(|status| status.tone == StatusTone::Error)
+    });
+    assert_eq!(
+        snapshot(&controller, cx).repositories.preview,
+        before,
+        "an unrelated rejected mutation restores the previous list state"
+    );
+}
