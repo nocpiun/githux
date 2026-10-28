@@ -100,3 +100,16 @@ branch从标题右上角移到Tabs右侧；顶部删除stars/forks/REST issue+PR
 README uncertain修复后完整复跑：541/324/54/152/131/479/14项全部通过，repository单独再跑479项通过。仍仅PR35待负责人验收，blocked不移除、不合并。
 
 当前head c7e9177审查clean但Linux CI揭示旧端点测试时序假设：真实新Languages请求可能已完成，不能断言仍Loading。将测试隔离到受控发布队列，取消旧工作/推进代次，只注入过期错误并核对当前Loading不变；不改生产逻辑或网络层。随后重新验证/审查。
+
+
+## Owner五项UI调整（公共Pill/Latest/从左分组/Tab图标/树留白）
+
+新增共享`src/ui/badge.rs`，窄改编锁定Ely普通Badge渲染，文件头保留30c66fe来源及完整MIT版权/许可；仅Filled/Outline Pill+公开Tone语义映射，无上游私有API、无vendor/依赖改动。静态标签不拦焦点/点击，不隐藏0/不自行99+。仅挂接正式UI与repository/overview装配并迁移本轮Badge。
+
+版本前Ely Tag，可信稳定latest后Success Outline Latest；draft/prerelease不丢失且不冒充稳定Latest，独立latest优先，404/error/Loading/空/旧仓库不显示。完整Release观察数量用Neutral Pill，Partial不显示伪总数。Releases/Contributors取消190px basis+grow，按内容从左约32px紧随，右侧自然留空。五tab加对应Ely图标，icon+label+count，父tab点击/underline保持。
+
+树滚动区外四边7px留白，内实际viewport含uniform_list+wheel+共享Bar同一target；行仍填满内宽，行高/缩进/scroll核心不改。新增实际Home/End回归验证首末行完整且有外间距；初次测试失败定位为新增外viewport缺debug selector而非滚动缺陷，补定位标记后通过。
+
+真实DPI-aware桌面暗色和880×560明色统一页截图已实际查看：Tag/绿色Latest完整圆弧、数量/Private胶囊居中，Contributors紧随左组，5tab图标齐、branch右置，选中行四周有留白。原生鼠标点击Light/Dark已送达并观察实际明色帧；Long场景尝试后前台转移，未把未可靠送达的进一步输入写为已验。原有底条tooltip/计数/StarFork/账户隔离契约保持，正式Shell仍未挂载。
+
+本轮最终验证：指定helper串行fmt/check/clippy -D warnings、完整tests 541/324/54/152/131/483/16、product与repository example build、diff check全通过。实际Win32鼠标/键盘又核验880×560明色Long场景：长tag省略+完整Latest、大计数123456/98765胶囊与tabs不挤坏；Long tree中真实End滚到file-0399，末行圆角/底边留白完整，README/source状态未被树滚动改变。已切回Normal暗色。最终head/PID/CI/review见PR35交接。

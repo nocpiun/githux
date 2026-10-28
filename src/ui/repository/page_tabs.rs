@@ -31,6 +31,17 @@ impl RepositoryTab {
         RepositoryTab::Settings,
     ];
 
+    pub fn icon(self) -> ely_core::primitives::IconName {
+        use ely_core::primitives::IconName;
+        match self {
+            Self::Code => IconName::Code,
+            Self::Issues => IconName::CircleDot,
+            Self::PullRequests => IconName::GitPullRequest,
+            Self::Releases => IconName::Tag,
+            Self::Settings => IconName::Settings,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Code => "Code",

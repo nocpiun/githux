@@ -4,9 +4,9 @@
 
 ## 已确认的展示
 
-Releases、Contributors 是一个横向自然高度摘要条，嵌在仓库 identity/description **之后、内容 tabs 之前**。沿用 Ely palette、Noto Sans / Google Sans Code。桌面一行两个小组，只有小标题和摘要；窄窗口按每组约 190px 的内容预算换行。无独立卡框、固定半窗高度、最小高度占位、内部滚动、常驻刷新图标、history、Notes/Open 按钮或 popover。下方 Code 阅读区保持主导。
+Releases、Contributors 是一个横向自然高度摘要条，嵌在仓库 identity/description **之后、内容 tabs 之前**。沿用 Ely palette、Noto Sans / Google Sans Code。桌面两个小组按内容从左紧凑排列，组间约32px，取消等宽flex-grow；长版本组宽度有界，窄窗口自然换行。无独立卡框、固定半窗高度、最小高度占位、内部滚动、常驻刷新图标、history、Notes/Open 按钮或 popover。下方 Code 阅读区保持主导。
 
-- Releases：完整 list 观察才在标题显示本次可见 Release 数；Partial 不显示伪精确总数。仅显示 supplied latest 的 version link，保留 draft/prerelease；不从列表排序推断 latest，不重复版本、名称、正文。404 显示 `Latest unavailable`，不是“仓库没有 Release”。宿主可为对应 release ID 提供相对日期；组件不制造时钟或日期。
+- Releases：完整 list 观察才在标题显示本次可见 Release 数；Partial 不显示伪精确总数。仅显示 supplied latest 的 Tag图标+version link，稳定可信latest旁为公共Success Outline胶囊Latest，保留 draft/prerelease且不冒充稳定Latest；不从列表排序推断 latest，不重复版本、名称、正文。404 显示 `Latest unavailable`，不是“仓库没有 Release”。宿主可为对应 release ID 提供相对日期；组件不制造时钟或日期。
 - Contributors：最多 5 个横向 Ely Avatar。关联用户且有 html_url 才可导航；匿名或无地址者不可点击/Tab 激活。名字置于 tooltip/accessibility，不显示 email/raw JSON、贡献次数、总人数或永久 API caveat。`+N` 只计当前观察中没画出的条目，非仓库总人数。Partial 显示短标识；204 显示 Empty repository，成功空集合是 None returned，错误是 Unavailable · Retry。
 - Languages：数据仍归同一个 RepositoryOverview state；`language_bar(cx)` 小接口由RepositoryPage在页面最底边渲染4px纯色条。顶部不再保留标题/图例/百分比或第三列占位。checked字节总和/可信total，按每种实际语言各一个比例色块，不合并Other、没有伪最小宽度；hover完整名称与比例使用Ely tooltip，零/未知/error不画条也不画文本。内部作用域重试保留，无常驻Refresh/Retry。
 - 每段状态和失败独立，Ready 不带刷新 chrome。Releases/Contributors 失败时原位 Retry 发出该段的 scoped Refresh；Languages 只保留内部真实失败与 Refresh 能力，无常驻文案；不会触发 HTTP、URL opener 或图像下载。
@@ -52,3 +52,6 @@ cargo run --locked --example repository
 GPUI 用例覆盖顶部两组、底边语言条与阅读区空间、自然高度窄布局、顶部一个 version，页面底边一个 bar、没有旧 popover/list chrome、绑定和 payload 隔离、linked/anonymous action 归属、每次点击一次、Partial/204/空/零/错误、latest 不从 list 推断、checked language overflow/逐语言identity。删除旧 popover/scroll 相关用例，因为对应交互已按负责人要求移除。
 
 本轮 fmt、locked all-target check、clippy -D warnings、相关/全套 tests、产品与 example build、diff check 的具体结果见本任务开发日志。`blocked` 由负责人管理；新预览准备后才加 pending，不合并。
+
+
+公共Badge来自`ui::badge`（见browser主题文档的API/上游归属）；Release完整观察数量采用Neutral Filled Pill，真实0不隐藏，Partial/未知不伪总数。Latest不由列表第一条/版本/日期推断，独立latest状态优先；404/Loading/error/空/旧binding无Latest，独立恢复不会遗留旧错误。它是静态标签，不额外成为按钮或焦点。

@@ -11,6 +11,8 @@
 // it is compiled only through this development-only assembly.
 #![allow(dead_code, unused_imports)]
 
+#[path = "../ui/badge.rs"]
+pub mod badge;
 #[path = "repository_fixture.rs"]
 pub mod fixture;
 #[path = "../ui/geometry.rs"]

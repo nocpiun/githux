@@ -294,6 +294,20 @@ impl Preview {
                 let _ = scene_owner.update(cx, |preview, cx| preview.choose(*scene, window, cx));
             }
         });
+        let theme_toggle = {
+            let owner = cx.weak_entity();
+            Button::new("preview-theme", "Light / Dark")
+                .size(ely_core::theme::ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let mode = if cx.theme().is_dark() {
+                        Mode::Light
+                    } else {
+                        Mode::Dark
+                    };
+                    Theme::set_mode_now(mode, cx);
+                    let _ = owner.update(cx, |_, cx| cx.notify());
+                })
+        };
         let reset = {
             let entity = cx.weak_entity();
             Button::new("scene-reset", "Reset")
@@ -348,7 +362,8 @@ impl Preview {
                     .w_full()
                     .min_w_0()
                     .child(scene_picker)
-                    .child(reset),
+                    .child(reset)
+                    .child(theme_toggle),
             )
             .child(
                 div()

@@ -24,6 +24,7 @@ use crate::{
     workspace::{OpenResult, Route, TabId, Workspace},
 };
 
+pub(crate) mod badge;
 mod chrome;
 pub mod fixtures;
 pub(crate) mod geometry;

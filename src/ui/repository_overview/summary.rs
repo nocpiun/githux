@@ -4,10 +4,12 @@ use crate::domain::repository_extras::{
     Contributor, ContributorKind, ContributorsState as DomainContributorsState, ExtrasCompleteness,
     LanguagesOutcome, Release,
 };
+use crate::ui::badge::Badge;
 use ely_core::{
     data_display::Avatar,
-    primitives::Tooltip,
-    theme::{ActiveTheme, AvatarSize, TextSize},
+    data_display::Tone,
+    primitives::{Icon, IconName, Tooltip},
+    theme::{ActiveTheme, AvatarSize, IconSize, TextSize},
     typography::Ellipsis,
 };
 use gpui::{
@@ -36,22 +38,38 @@ impl Render for RepositoryOverview {
     }
 }
 fn group(id: &'static str, title: String, content: AnyElement, cx: &App) -> AnyElement {
+    group_with_count(id, title, None, content, cx)
+}
+fn group_with_count(
+    id: &'static str,
+    title: String,
+    count: Option<String>,
+    content: AnyElement,
+    cx: &App,
+) -> AnyElement {
     div()
         .id(id)
         .debug_selector(move || id.into())
         .flex()
         .flex_col()
         .gap_1p5()
-        .w(px(190.0))
-        .flex_basis(px(190.0))
-        .flex_grow_1()
+        .max_w(px(300.0))
+        .flex_none()
         .min_w_0()
         .overflow_hidden()
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap_1p5()
                 .text_size(cx.theme().text_size(TextSize::Base))
                 .font_weight(FontWeight::MEDIUM)
-                .child(title),
+                .child(title)
+                .children(count.map(|count| {
+                    div()
+                        .debug_selector(|| "overview-release-count".into())
+                        .child(Badge::new(count))
+                })),
         )
         .child(content)
         .into_any_element()
@@ -116,10 +134,7 @@ impl RepositoryOverview {
             || data.is_some_and(|data| {
                 matches!(data.list.completeness, ExtrasCompleteness::Partial { .. })
             });
-        let title = match data {
-            Some(data) if !list_partial => format!("Releases  {}", data.list.releases.len()),
-            _ => "Releases".into(),
-        };
+        let title = "Releases".into();
         let (release, status): (Option<&Release>, &str) = match self.latest.as_ref() {
             Some(SectionState::Ready(value) | SectionState::Partial { value, .. }) => {
                 (value.release.as_ref(), "Latest unavailable")
@@ -157,8 +172,19 @@ impl RepositoryOverview {
             let version = div()
                 .id("overview-release-version")
                 .debug_selector(|| "overview-release-version".into())
+                .tooltip(Tooltip::text(tag.clone()))
                 .min_w_0()
                 .child(Ellipsis::new(tag.clone()));
+            row = row.child(
+                div()
+                    .flex_none()
+                    .debug_selector(|| "overview-release-tag-icon".into())
+                    .child(
+                        Icon::new(IconName::Tag)
+                            .size(IconSize::Xs)
+                            .color(cx.theme().colors.fg_muted),
+                    ),
+            );
             row = row.child(if url.is_some() {
                 version
                     .tab_index(0)
@@ -189,6 +215,24 @@ impl RepositoryOverview {
             } else {
                 version.into_any_element()
             });
+            let trusted_latest = match self.latest.as_ref() {
+                Some(SectionState::Ready(value)) => value.release.is_some(),
+                None => data.is_some_and(|data| {
+                    data.latest_error.is_none()
+                        && data
+                            .latest
+                            .as_ref()
+                            .is_some_and(|latest| latest.release.is_some())
+                }),
+                _ => false,
+            };
+            if trusted_latest && !release.draft && !release.prerelease {
+                row = row.child(
+                    div()
+                        .debug_selector(|| "overview-latest-badge".into())
+                        .child(Badge::new("Latest").tone(Tone::Success).outline()),
+                );
+            }
             if release.draft {
                 row = row.child(
                     div()
@@ -227,7 +271,16 @@ impl RepositoryOverview {
         if list_partial || self.latest.as_ref().is_some_and(SectionState::is_partial) {
             row = row.child(text("Partial", cx));
         }
-        group("overview-releases", title, row.into_any_element(), cx)
+        let count = data
+            .filter(|_| !list_partial)
+            .map(|data| data.list.releases.len().to_string());
+        group_with_count(
+            "overview-releases",
+            title,
+            count,
+            row.into_any_element(),
+            cx,
+        )
     }
     fn contributor_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut row = div().flex().items_center().gap_1().min_w_0();

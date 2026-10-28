@@ -111,3 +111,16 @@ Issues/Pull requests 的数字来自新增 `PageReadSession::repository_counts`�
 Languages 顶部组完全移除。底条由同一个 overview 的 languages state 渲染，页面body之后 flex_none 4px，不滚随README、不盖正文/scrollbar，切页内tab仍贴底。每个实际语言单独比例色块，不合并Other、不强制最小宽度，颜色名称稳定；checked u64总和与total匹配才画，零/错误/未知时无条无文本。hover使用Ely Tooltip显示完整语言名+比例，窗口边缘由GPUI原生tooltip fitting向上布局；小于0.5%显示<1%。
 
 官方核验：GitHub GraphQL Repository/IssueConnection/PullRequestConnection 文档与 github-ospo `open-source-health-metrics.md` 独立 OPEN issue/PR count 示例（本轮无认证只读抓取），不代表真实PAT业务联调。新增测试特意令REST合计4但query为issue3/pr1；部分错误保留issue并隐藏PR、0/未知、身份错误、陈旧计数、切分支不重复query、Star/Fork无mutation及旧binding拒绝，底条tooltip在560px窗口内向上且离开消失。
+
+
+## 2026-10-28 胶囊 Badge、Latest 与紧凑行距修订
+
+仓库/overview 统一使用小型公共 `ui::badge::Badge`：`new(label)` 默认 Filled Pill，`tone(Tone)` 用 Ely 公开语义 palette，`outline()` 为描边 Pill。文字与字符串计数原样保留，0不自行隐藏、不截断99+；静态标签没有焦点、按钮或click handler，点击计数仍属于父tab。高度/字号取Ely ControlSize::Sm和TextSize::Xs，完整圆弧、最小宽度不小于高度、横向padding与居中排版避免单数字狭长。只迁移本轮仓库visibility/Archived/Fork、Issues/PR及Release数量/Latest，其余页面不改。
+
+组件仅窄改编锁定Ely普通Badge渲染（revision `30c66fe1d5d23db769a6c834b771d054d7f288cf`，`crates/ely-core/src/data_display/badge.rs`），完整MIT版权/许可保留于 `src/ui/badge.rs` 模块头。未使用私有Tone::colors、未升级/vendor/改Cargo缓存、未复制Tag/CountBadge动画系统。正式ui与两个开发装配都挂接同一文件；挂接公共primitive不表示正式Shell已挂载仓库页。
+
+Releases版本前为Ely Tag图标，链接后为Success Outline `Latest`。仅可信latest结果存在才显示：独立latest优先，未提供才取ReleasesData.latest；Loading/404/error/空值/旧binding不显示，draft/prerelease事实保留且不冒充稳定Latest。完整list观察数量在Releases标题旁以同一Neutral Filled胶囊显示，Partial/未知隐藏数量，真实完整0保留。Releases与Contributors取消flex-grow，从左按自然内容宽度紧随，组间约32px，长tag有界省略/完整tooltip，窄窗可换行。
+
+五个页内tab均为Ely icon + label + 可用count pill：Code/CircleDot/GitPullRequest/Tag/Settings；父tab仍负责整片点击及underline。文件树实际滚动viewport外留7px四边空隙，行填满扣除inset的宽度；uniform_list、wheel和共享Bar仍在同一个内视口上，未修改row-height、scroll handle/reveal或公共scroll。
+
+统一开发预览的Light/Dark按钮仅在example工具栏，产品无主题debug开关。测试覆盖latest状态成功/404/error/恢复/旧binding/draft-prerelease、完整0与Partial数量、宽窗组不被推向半屏、点击badge切tab、长树Home/End首末行保持inset且完整可见，保留所有原计数/分支/reader/底条行为。

@@ -387,3 +387,77 @@ fn independent_latest_recovery_removes_snapshot_error(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("overview-release-version").is_some());
     assert!(cx.debug_bounds("overview-retry-releases").is_none());
 }
+
+#[gpui::test]
+fn latest_badge_follows_independent_truth_and_groups_stay_left(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    assert!(cx.debug_bounds("overview-latest-badge").is_some());
+    assert!(cx.debug_bounds("overview-release-tag-icon").is_some());
+    let view = overview(&h, cx);
+    let binding = fixtures::binding(1);
+    for width in [1100., 1600.] {
+        cx.simulate_resize(size(px(width), px(800.)));
+        cx.run_until_parked();
+        let releases = bounds("overview-releases", cx);
+        let people = bounds("overview-contributors", cx);
+        assert!(
+            people.origin.x - releases.right() < px(50.),
+            "groups remain adjacent at {width}"
+        );
+        assert!(people.right() < px(width / 2.), "right half remains free");
+    }
+    for state in [
+        SectionState::Loading,
+        SectionState::Error {
+            message: "offline".into(),
+        },
+        SectionState::Ready(fixtures::latest_none_releases().latest.unwrap()),
+    ] {
+        view.update(cx, |v, cx| {
+            v.apply_latest_release(&binding, state, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("overview-latest-badge").is_none());
+    }
+    view.update(cx, |v, cx| {
+        v.apply_latest_release(
+            &binding,
+            SectionState::Ready(fixtures::ready_releases().latest.unwrap()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-latest-badge").is_some());
+    let mut prerelease = fixtures::ready_releases().latest.unwrap();
+    prerelease.release.as_mut().unwrap().prerelease = true;
+    view.update(cx, |v, cx| {
+        v.apply_latest_release(&binding, SectionState::Ready(prerelease), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-prerelease").is_some());
+    assert!(cx.debug_bounds("overview-latest-badge").is_none());
+    cx.update_window_entity(&view, |v, w, cx| v.set_binding(fixtures::binding(2), w, cx));
+    view.update(cx, |v, cx| {
+        assert!(!v.apply_latest_release(
+            &binding,
+            SectionState::Ready(fixtures::ready_releases().latest.unwrap()),
+            cx
+        ))
+    });
+    assert!(cx.debug_bounds("overview-latest-badge").is_none());
+}
+
+#[gpui::test]
+fn complete_zero_release_count_remains_visible_but_partial_count_does_not(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = fixtures::binding(1);
+    let mut data = fixtures::ready_releases();
+    data.list.releases.clear();
+    data.latest = None;
+    apply_releases(&h, &b, SectionState::Ready(data), cx);
+    assert!(cx.debug_bounds("overview-release-count").is_some());
+    assert!(cx.debug_bounds("overview-latest-badge").is_none());
+    apply_releases(&h, &b, fixtures::partial_releases_state(), cx);
+    assert!(cx.debug_bounds("overview-release-count").is_none());
+}

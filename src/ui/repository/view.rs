@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use ely_core::{
     buttons::{Button, ButtonVariant},
-    data_display::{Badge, Tone},
+    data_display::Tone,
     forms::{Choice, Select},
     primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
@@ -30,7 +30,7 @@ use super::navigation::{
 use super::{ReaderStatus, RepositoryPage, RepositoryTab, Selection, TREE_ROW_HEIGHT, TREE_WIDTH};
 use crate::domain::repo::RepoVisibility;
 use crate::domain::repository::Completeness;
-use crate::ui::scroll;
+use crate::ui::{badge::Badge, scroll};
 
 const INDENT: f32 = 14.0;
 /// Room for the disclosure chevron, so file rows line up with directory names.
@@ -404,6 +404,7 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
                 })
                 .text_color(fg)
                 .hover(|style| style.text_color(colors.fg))
+                .child(Icon::new(tab.icon()).size(IconSize::Xs).color(fg))
                 .child(tab.label())
                 .children(
                     match tab {
@@ -610,13 +611,22 @@ fn tree_column(
                 .min_h_0()
                 .w_full()
                 .id("repository-tree-viewport")
+                .debug_selector(|| "repository-tree-viewport".into())
                 .track_focus(&page.tree_focus)
                 .on_key_down(cx.listener(|page, event, window, cx| {
                     page.press_tree_key_event(event, window, cx);
                 }))
-                .child(div().size_full().overflow_hidden().child(list))
-                .child(wheel)
-                .child(bar),
+                .p(px(7.0))
+                .child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .min_h_0()
+                        .debug_selector(|| "repository-tree-scroll-viewport".into())
+                        .child(div().size_full().overflow_hidden().child(list))
+                        .child(wheel)
+                        .child(bar),
+                ),
         )
         .into_any_element()
 }

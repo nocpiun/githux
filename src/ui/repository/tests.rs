@@ -1440,11 +1440,11 @@ fn normal_fixture_mouse_and_keyboard_events_browse_repeatably(cx: &mut TestAppCo
     let (fixture, page, cx) = normal(cx);
     cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
     frames(cx);
-    let column = cx.debug_bounds("repository-tree-column").unwrap();
+    let viewport = cx.debug_bounds("repository-tree-scroll-viewport").unwrap();
     let folder = cx.debug_bounds("repository-row-docs").unwrap();
     assert!(
-        folder.size.width > column.size.width - px(4.0),
-        "full-width row hit area"
+        (folder.size.width - viewport.size.width).abs() < px(2.0),
+        "row fills the inset scroll viewport"
     );
     let chevron = cx.debug_bounds("repository-chevron-docs").unwrap();
     cx.simulate_click(chevron.center(), Modifiers::none());
@@ -1728,4 +1728,38 @@ fn uncertain_readme_retry_only_restarts_discovery(cx: &mut TestAppContext) {
     assert_eq!(fixture.transport.count("/commits/"), 0);
     assert_eq!(fixture.transport.count("/releases/latest"), 0);
     assert_eq!(fixture.transport.count("/readme?"), 1);
+}
+
+#[gpui::test]
+fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::LongTree);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |p| p.tree("").is_some());
+    frames(cx);
+    let outer = cx.debug_bounds("repository-tree-viewport").unwrap();
+    let first = cx
+        .debug_bounds("repository-row-file-0000.txt")
+        .unwrap_or_else(|| {
+            panic!(
+                "outer={outer:?}, inner={:?}, rows={}, offset={:?}",
+                cx.debug_bounds("repository-tree-scroll-viewport"),
+                page.read_with(cx, |p, _| p.rows().len()),
+                page.read_with(cx, |p, _| p.tree_base_handle().offset())
+            )
+        });
+    assert!(first.origin.x > outer.origin.x && first.origin.y > outer.origin.y);
+    assert!(first.right() < outer.right());
+    page.update_in(cx, |p, w, cx| w.focus(&p.tree_focus.clone(), cx));
+    cx.simulate_keystrokes("end");
+    frames(cx);
+    let last = cx
+        .debug_bounds("repository-row-file-0399.txt")
+        .expect("End reveals last row");
+    assert!(last.bottom() < outer.bottom());
+    assert!(last.origin.y >= outer.origin.y);
+    cx.simulate_keystrokes("home");
+    frames(cx);
+    assert!(cx.debug_bounds("repository-row-file-0000.txt").is_some());
 }

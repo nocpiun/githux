@@ -375,3 +375,26 @@ fn bottom_language_tooltip_fits_and_disappears_on_leave(cx: &mut TestAppContext)
     frames(cx);
     assert!(cx.debug_bounds("repository-language-tooltip").is_none());
 }
+
+#[gpui::test]
+fn neutral_count_pill_stays_inside_its_tab_click_target(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = ready(cx, Scene::Normal);
+    for _ in 0..200 {
+        page.update_in(cx, |p, w, cx| p.drain(w, cx));
+        frames(cx);
+        if cx.debug_bounds("repository-badge-issues").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+    let badge = cx.debug_bounds("repository-badge-issues").unwrap();
+    cx.simulate_click(badge.center(), Modifiers::none());
+    frames(cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), RepositoryTab::Issues);
+    assert!(cx.debug_bounds("repository-tab-active-issues").is_some());
+    assert!(cx.debug_bounds("repository-body").is_none());
+    let tab = cx.debug_bounds("repository-tab-code").unwrap();
+    cx.simulate_click(tab.center(), Modifiers::none());
+    frames(cx);
+    assert!(page.read_with(cx, |p, _| p.reader().is_some()));
+}
