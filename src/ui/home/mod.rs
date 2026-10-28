@@ -361,12 +361,18 @@ impl HomeView {
             fixed_now: false,
             active: true,
             time_task: None,
+            // Observers only cancel. A retained but unmounted view must not
+            // restart its timer on window reactivation; startup belongs to render.
             _activation: cx.observe_window_activation(window, |view, window, cx| {
-                view.sync_time_task(window, cx);
+                if !window.is_window_active() {
+                    view.cancel_activity();
+                }
                 cx.notify();
             }),
-            _visibility: cx.observe_window_visibility(window, |view, _, window, cx| {
-                view.sync_time_task(window, cx);
+            _visibility: cx.observe_window_visibility(window, |view, visibility, _, cx| {
+                if !visibility.is_visible() {
+                    view.cancel_activity();
+                }
                 cx.notify();
             }),
         }

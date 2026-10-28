@@ -1150,3 +1150,24 @@ fn one_elapsed_time_task_stops_for_inactive_hidden_and_disposed_views(cx: &mut T
     cx.run_until_parked();
     assert!(weak.upgrade().is_none(), "the timer holds only a weak view");
 }
+
+#[gpui::test]
+fn a_retained_unmounted_view_does_not_restart_its_clock_on_activation(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    view.update(cx, |view, cx| view.set_now(None, cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_some()));
+    cx.replace_root_view(|_, _| gpui::EmptyView);
+    cx.run_until_parked();
+    // GPUI retains the prior frame's element state until the next paint.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+    cx.deactivate_window();
+    cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+}

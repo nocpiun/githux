@@ -95,7 +95,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 - `time.rs` 无新增依赖，校验 RFC3339 日期、闰年、UTC/显式 offset、小数秒；以 UTC elapsed time 格式化 Just now、1 minute、N minutes、1 hour、Yesterday、N days。无效/缺失为 Time unavailable，未来为 In the future，不显示负值。原始时间保留 tooltip。
 - 默认使用 `SystemTime::now()`；`set_now(Some(instant), cx)` 注入固定时间，None 恢复实际时间。每个视图只有一个 30 秒任务，不按行建 timer，不请求网络。
-- `set_active(false, cx)` 供保留页面的宿主在切 Tab 时调用；窗口失活/隐藏、view dispose、退出 rendered tree 都停止 timer 并清理 motion。重显时恢复，固定 clock 不创建 timer。
+- `set_active(false, cx)` 供保留页面的宿主在切 Tab 时调用；窗口失活/隐藏、view dispose、退出 rendered tree 都停止 timer 并清理 motion。重显时由真实 render 恢复；window observers 只取消，不为已卸载的保留实体启动任务。固定 clock 不创建 timer。
 - 刷新为 Ely `IconButton(RotateCw)`，busy 在同一固定方槽显示 Ely 动画 `Spinner`，没有独立 Refreshing 文本。Tooltip/accessibility label 保留；Loading/refreshing/cooldown 继续禁止重复动作。
 - 独立预览固定注入 2026-10-28 12:00 UTC；fixtures 包含 10 minutes、1 hour、Yesterday、2 days、missing/invalid/future，`Finish refresh` 由开发 host 应用场景结果来结束 busy。
 
@@ -103,7 +103,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本机 Windows 使用序列化 Cargo helper，独立 target/：fmt、locked all-target check、clippy -D warnings、完整测试、产品与 home example 构建、diff check。最终结果与 PR head 见 PR34 交付评论，不以旧 head 结果代替当前 head。
 
-Home 装配当前 53 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。
+Home 装配当前 54 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。
 
 本轮实际查看 Windows 原生 PrintWindow 帧：144 DPI，宽布局 2130×1425 物理像素与窄布局 990×1000；计数/列框/分割线/右侧导航按钮消失，Home icon 对齐标题，Feed 卡片 header/inset 详情及相对时间正常。通过本任务 HWND 的消息切换 Mixed/Loading-error/Large，并取得 owner-only 与 repo-only hover underline 帧。未拿源码推断或测试平台代替视觉核验。
 
