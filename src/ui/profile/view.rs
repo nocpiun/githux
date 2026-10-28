@@ -364,11 +364,15 @@ impl ProfileView {
     }
 
     pub(super) fn tick_scroll(&self, window: &mut Window, reduce: bool) {
-        if self.page_motion.tick(Instant::now(), reduce)
-            || self.heatmap_motion.tick(Instant::now(), reduce)
-        {
+        if self.advance_scroll(Instant::now(), reduce) {
             window.request_animation_frame();
         }
+    }
+
+    pub(super) fn advance_scroll(&self, now: Instant, reduce: bool) -> bool {
+        let page_moving = self.page_motion.tick(now, reduce);
+        let heatmap_moving = self.heatmap_motion.tick(now, reduce);
+        page_moving || heatmap_moving
     }
 
     #[cfg(test)]

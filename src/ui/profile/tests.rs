@@ -696,5 +696,23 @@ fn long_content_and_long_ranges_stay_bounded(cx: &mut TestAppContext) {
         view.read_with(cx, |view, _| view.selected_day_detail()),
         Some("2023-03-01: 0 contributions".into())
     );
+    view.update_in(cx, |view, _, _| {
+        let started = std::time::Instant::now() - std::time::Duration::from_millis(60);
+        assert!(
+            view.page_motion
+                .wheel(started, -50.0, gpui::Axis::Vertical, false, false)
+        );
+        assert!(
+            view.heatmap_motion
+                .wheel(started, -50.0, gpui::Axis::Horizontal, false, false)
+        );
+        view.advance_scroll(started + std::time::Duration::from_millis(60), false);
+        assert!(view.page_motion.is_animating());
+        assert!(view.page_scroll.offset().y < px(0.0));
+        assert!(
+            view.heatmap_scroll.offset().x < px(0.0),
+            "both regions advance in the same frame"
+        );
+    });
     assert!(graph.size.height <= px(110.0));
 }
