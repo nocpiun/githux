@@ -19,12 +19,17 @@ use std::sync::{Arc, Mutex, Weak, atomic::Ordering};
 #[derive(Clone, Debug)]
 pub struct RepositoryReadContext {
     auth: AuthContext,
+    active_login: String,
     registry: Weak<Mutex<crate::auth::AccountRegistry>>,
 }
 
 impl RepositoryReadContext {
     pub fn auth(&self) -> &AuthContext {
         &self.auth
+    }
+
+    pub(crate) fn active_login(&self) -> &str {
+        &self.active_login
     }
 }
 
@@ -58,14 +63,15 @@ impl RepoService {
         if self.closed.load(Ordering::Acquire) {
             return Err(GitHubError::StaleContext);
         }
-        let auth = self
-            .registry
-            .lock()
-            .expect("registry lock")
-            .active_context()
+        let registry = self.registry.lock().expect("registry lock");
+        let auth = registry.active_context().ok_or(GitHubError::StaleContext)?;
+        let active_login = registry
+            .active_summary()
+            .map(|summary| summary.identity.login)
             .ok_or(GitHubError::StaleContext)?;
         Ok(RepositoryReadContext {
             auth,
+            active_login,
             registry: Arc::downgrade(&self.registry),
         })
     }
@@ -88,7 +94,7 @@ impl RepoService {
     /// Shared authentication path for list_repos and all snapshot adapters.
     /// Every exit after an await (including cancellation, worker failure and
     /// scheduler failure) passes through the final context check.
-    pub(super) async fn read_authenticated<T, E, F, Fut>(
+    pub(in crate::data) async fn read_authenticated<T, E, F, Fut>(
         &self,
         context: &RepositoryReadContext,
         cancel: CancellationToken,
@@ -232,14 +238,15 @@ impl RepositorySession {
         (ready, release)
     }
 
-    async fn read<T, F, Fut>(
+    pub(in crate::data) async fn read<T, E, F, Fut>(
         &self,
         cancel: CancellationToken,
         read: F,
-    ) -> Result<Scoped<T>, RepositoryError>
+    ) -> Result<Scoped<T>, E>
     where
+        E: From<GitHubError>,
         F: FnOnce(Pat, CancellationToken) -> Fut,
-        Fut: Future<Output = Result<T, RepositoryError>>,
+        Fut: Future<Output = Result<T, E>>,
     {
         let value = self
             .service
