@@ -59,11 +59,15 @@ pub enum Scene {
     OverviewZero,
     OverviewLong,
     LatestUnavailable,
+    ReadmeParagraphEnd,
+    ReadmeListEnd,
+    ReadmeCodeEnd,
+    ReadmeTableEnd,
 }
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 18] = [
+    pub const ALL: [Scene; 22] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
@@ -82,6 +86,10 @@ impl Scene {
         Scene::OverviewZero,
         Scene::OverviewLong,
         Scene::LatestUnavailable,
+        Scene::ReadmeParagraphEnd,
+        Scene::ReadmeListEnd,
+        Scene::ReadmeCodeEnd,
+        Scene::ReadmeTableEnd,
     ];
 
     pub fn label(self) -> &'static str {
@@ -92,6 +100,10 @@ impl Scene {
             Scene::OverviewZero => "Overview zero",
             Scene::OverviewLong => "Overview long",
             Scene::LatestUnavailable => "Latest unavailable",
+            Scene::ReadmeParagraphEnd => "README paragraph end",
+            Scene::ReadmeListEnd => "README list end",
+            Scene::ReadmeCodeEnd => "README code end",
+            Scene::ReadmeTableEnd => "README table end",
             Scene::Normal => "Normal",
             Scene::EmptyRepository => "Empty repository",
             Scene::ReadmeUncertain => "README uncertain",
@@ -127,6 +139,12 @@ impl Scene {
             }
             Scene::LatestUnavailable => {
                 "The list contains releases but latest is 404: latest unavailable does not prove no releases."
+            }
+            Scene::ReadmeParagraphEnd
+            | Scene::ReadmeListEnd
+            | Scene::ReadmeCodeEnd
+            | Scene::ReadmeTableEnd => {
+                "Long README with a representative final block. Wheel or drag the reader thumb to the bottom; content inset must remain visible."
             }
             Scene::Normal => {
                 "Two branches, README, docs, src and a nested directory. Everything is browsable and repeatable."
@@ -674,8 +692,8 @@ impl FixtureTransport {
             );
         }
         let bytes: Vec<u8> = match sha {
-            README_BLOB => readme_text_for(true).as_bytes().to_vec(),
-            FEATURE_README_BLOB => readme_text_for(false).as_bytes().to_vec(),
+            README_BLOB => fixture_readme(scene, true).into_bytes(),
+            FEATURE_README_BLOB => fixture_readme(scene, false).into_bytes(),
             FEATURE_ONLY_BLOB => FEATURE_NOTE_TEXT.as_bytes().to_vec(),
             GUIDE_BLOB => GUIDE_TEXT.as_bytes().to_vec(),
             FEATURE_GUIDE_BLOB => FEATURE_GUIDE_TEXT.as_bytes().to_vec(),
@@ -721,7 +739,7 @@ impl FixtureTransport {
                     "type": "file",
                     "path": if scene == Scene::ReadmeInDocs { "docs/README.md" } else { "README.md" },
                     "sha": readme_blob_of(!main_branch),
-                    "size": readme_text_for(main_branch).len(),
+                    "size": fixture_readme(scene,main_branch).len(),
                     "encoding": "base64",
                 })
                 .to_string(),
@@ -878,6 +896,49 @@ fn readme_blob_of(feature: bool) -> &'static str {
 }
 
 /// The README body for the commit being browsed; the two branches differ.
+fn fixture_readme(scene: Scene, main: bool) -> String {
+    let ending = match scene {
+        Scene::ReadmeParagraphEnd => {
+            "Final paragraph: this is the last content.
+"
+        }
+        Scene::ReadmeListEnd => {
+            "- Final list item one
+- Final list item two
+"
+        }
+        Scene::ReadmeCodeEnd => {
+            "```rust
+fn final_block() { println!(\"最后一行\"); }
+```
+"
+        }
+        Scene::ReadmeTableEnd => {
+            "| Final | Value |
+| --- | --- |
+| last row | 42 |
+"
+        }
+        _ => return readme_text_for(main).to_string(),
+    };
+    let mut text = String::from(
+        "# Long repository README
+
+",
+    );
+    for i in 0..100 {
+        text.push_str(&format!(
+            "## Section {i}
+
+A paragraph with 中文 and `inline code` and **bold**.
+
+"
+        ));
+    }
+    text.push_str(ending);
+    text
+}
+
 fn readme_text_for(main_commit: bool) -> &'static str {
     match main_commit {
         true => README_TEXT,
@@ -940,7 +1001,7 @@ fn root_entries(scene: Scene, feature: bool) -> Vec<serde_json::Value> {
             "README.md",
             readme_blob_of(feature),
             EntryKind::Blob,
-            Some(readme_text_for(!feature).len() as u64),
+            Some(fixture_readme(scene, !feature).len() as u64),
         ),
         entry(
             "docs",

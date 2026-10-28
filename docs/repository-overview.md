@@ -55,3 +55,6 @@ GPUI 用例覆盖顶部两组、底边语言条与阅读区空间、自然高度
 
 
 公共Badge来自`ui::badge`（见browser主题文档的API/上游归属）；Release完整观察数量采用Neutral Filled Pill，真实0不隐藏，Partial/未知不伪总数。Latest不由列表第一条/版本/日期推断，独立latest状态优先；404/Loading/error/空/旧binding无Latest，独立恢复不会遗留旧错误。它是静态标签，不额外成为按钮或焦点。
+
+
+后续联合页的Star/Fork数量由browser有效RepositoryDetails提供，胶囊复用公共Badge，仍仅typed宿主动作。README留白修订与overview自然高度/底边language状态独立；本轮没有改变overview数据请求或来源。当前最新契约见browser与content-reader主题，旧无数字说明仅为历史。

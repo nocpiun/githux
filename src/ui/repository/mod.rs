@@ -1522,6 +1522,7 @@ impl RepositoryPage {
                 let selected_request = self.selection_request;
                 let reader = cx.new(|cx| {
                     let mut reader = ReaderView::from_prepared(content, kind, window, cx);
+                    reader.set_markdown_layout(crate::ui::reader::MarkdownLayout::Repository, cx);
                     reader.on_action(Rc::new(move |action, window, cx| {
                         // The callback runs inside ReaderView::update. Defer the
                         // host action so cancelling/replacing that reader cannot

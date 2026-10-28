@@ -398,3 +398,42 @@ fn neutral_count_pill_stays_inside_its_tab_click_target(cx: &mut TestAppContext)
     frames(cx);
     assert!(page.read_with(cx, |p, _| p.reader().is_some()));
 }
+
+#[gpui::test]
+fn action_count_pills_are_inside_one_action_and_expire_with_binding(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = ready(cx, Scene::Normal);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sink = calls.clone();
+    page.update(cx, |p, cx| {
+        p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
+        cx.notify();
+    });
+    frames(cx);
+    for (button, count) in [
+        ("repository-star", "repository-star-count"),
+        ("repository-fork", "repository-fork-count"),
+    ] {
+        let outer = cx.debug_bounds(button).unwrap();
+        let inner = cx.debug_bounds(count).unwrap();
+        assert!(inner.origin.x > outer.origin.x && inner.right() < outer.right());
+        cx.simulate_click(inner.center(), Modifiers::none());
+    }
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    page.read_with(cx, |p, _| {
+        assert_eq!(p.details().unwrap().stars, 128);
+        assert_eq!(p.details().unwrap().forks, 9);
+    });
+    page.update(cx, |p, cx| {
+        let details = p.details.as_mut().unwrap();
+        details.stars = 0;
+        details.forks = 123456;
+        cx.notify();
+    });
+    frames(cx);
+    assert!(cx.debug_bounds("repository-star-count").is_some());
+    assert!(cx.debug_bounds("repository-fork-count").is_some());
+    page.update(cx, |p, cx| p.deactivate(cx));
+    frames(cx);
+    assert!(cx.debug_bounds("repository-star-count").is_none());
+    assert!(cx.debug_bounds("repository-fork-count").is_none());
+}

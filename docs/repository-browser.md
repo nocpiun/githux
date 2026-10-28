@@ -124,3 +124,12 @@ Releases版本前为Ely Tag图标，链接后为Success Outline `Latest`。仅�
 五个页内tab均为Ely icon + label + 可用count pill：Code/CircleDot/GitPullRequest/Tag/Settings；父tab仍负责整片点击及underline。文件树实际滚动viewport外留7px四边空隙，行填满扣除inset的宽度；uniform_list、wheel和共享Bar仍在同一个内视口上，未修改row-height、scroll handle/reveal或公共scroll。
 
 统一开发预览的Light/Dark按钮仅在example工具栏，产品无主题debug开关。测试覆盖latest状态成功/404/error/恢复/旧binding/draft-prerelease、完整0与Partial数量、宽窗组不被推向半屏、点击badge切tab、长树Home/End首末行保持inset且完整可见，保留所有原计数/分支/reader/底条行为。
+
+
+## README 滚动内留白与带数量动作按钮（2026-10-28）
+
+右上Star/Fork改为单一复合按钮边框/hover/focus/hit target：Ely icon +文字+公共中性Filled Badge，直接读取有效RepositoryDetails.stars/forks（Normal128/9），真实0/大整数原样，失效/未知不伪0或残留旧数。没有嵌套button或游离badge，点击数量、文字、图标都经同一鼠标/Enter/Space处理路径，一次动作一次typed请求；无宿主handler禁用，stale binding拒绝，无写API/加一/假Starred。新数量要求覆盖先前无数字按钮约定。
+
+Repository Markdown启用`MarkdownLayout::Repository`，根不保留固定上下空带，正文首尾0.75rem量级inset属于真实块测量内容，随文档滚动且计入wheel/thumb最大reach；左右各比原间距增加4px。源码/非文本状态和其他宿主默认不变。实现与GPUI padding/reach差异的原因见[reader布局契约](content-reader.md#repository-专用正文留白配置2026-10-28)。底部语言条不盖住内容inset；没有第二滚动容器或假AST条目。
+
+统一场景新增README paragraph/list/code/table end，全部走现有真实服务fixture管线，供实际wheel/thumb到底检查。自动测试分别验证每种正文末块的内容bounds到viewport底边仍有留白，不以块自身边框或末条目存在冒充。

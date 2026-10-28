@@ -39,14 +39,14 @@ const CHEVRON_SLOT: f32 = 16.0;
 pub(super) fn render(
     page: &mut RepositoryPage,
     rows: Rc<Vec<TreeRow>>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
     let theme = cx.theme();
     let background = theme.colors.surface;
     let foreground = theme.colors.fg;
     let text_size = theme.text_size(TextSize::Sm);
-    let header = header(page, cx);
+    let header = header(page, window, cx);
     let tabs = tab_strip(page, cx);
     let browsing = page.selected_branch().is_some();
     let body: AnyElement =
@@ -109,7 +109,11 @@ pub(super) fn render(
 }
 
 /// Title, visibility, description, counters and the branch picker.
-fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
+fn header(
+    page: &RepositoryPage,
+    window: &mut Window,
+    cx: &mut Context<RepositoryPage>,
+) -> AnyElement {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let title_size = theme.text_size(TextSize::Xl);
@@ -176,7 +180,7 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
                 .children(facts),
         )
         .children(description);
-    let actions = repository_actions(page, cx);
+    let actions = repository_actions(page, window, cx);
     div()
         .debug_selector(|| "repository-header".to_string())
         .flex()
@@ -192,9 +196,19 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
         .into_any_element()
 }
 
-fn repository_actions(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
+fn repository_actions(
+    page: &RepositoryPage,
+    window: &mut Window,
+    cx: &mut Context<RepositoryPage>,
+) -> AnyElement {
     let binding = page.repository_binding();
     let enabled = page.on_action.is_some() && binding.is_some();
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let height = theme.control_height(ControlSize::Md);
+    let padding = theme.control_padding(ControlSize::Md);
+    let radius = theme.radius(Radius::Md);
+    let text_size = theme.text_size(TextSize::Sm);
     let buttons = [
         (true, "Star", IconName::Star),
         (false, "Fork", IconName::GitBranch),
@@ -203,13 +217,18 @@ fn repository_actions(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -
     .map(|(star, label, icon)| {
         let owner = cx.weak_entity();
         let key_owner = owner.clone();
-        let binding = binding.clone();
+        let click_binding = binding.clone();
         let key_binding = binding.clone();
         let focus = if star {
             &page.star_focus
         } else {
             &page.fork_focus
         };
+        // Numeric data is only drawn while its full current binding is valid.
+        let count = binding
+            .as_ref()
+            .and_then(|_| page.details())
+            .map(|details| if star { details.stars } else { details.forks });
         div()
             .id(if star {
                 "repository-star-entry"
@@ -223,7 +242,37 @@ fn repository_actions(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -
                     "repository-fork".into()
                 }
             })
-            .track_focus(focus)
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .when(enabled, |button| button.track_focus(focus))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .h(height)
+            .px(padding)
+            .rounded(radius)
+            .border_1()
+            .border_color(if enabled && focus.is_focused(window) {
+                colors.focus
+            } else {
+                colors.border_strong
+            })
+            .bg(colors.surface)
+            .text_size(text_size)
+            .text_color(if enabled {
+                colors.fg
+            } else {
+                colors.fg_disabled
+            })
+            .when(!enabled, |button| button.opacity(0.45).cursor_not_allowed())
+            .when(enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.hover))
+                    .active(|style| style.bg(colors.hover))
+            })
             .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
                 if enabled
                     && !event.is_held
@@ -238,31 +287,46 @@ fn repository_actions(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -
                     }
                 }
             })
-            .child(
-                Button::new(
-                    if star {
-                        "repository-star"
-                    } else {
-                        "repository-fork"
-                    },
-                    label,
-                )
-                .icon(icon)
-                .focus_handle(focus)
-                .size(ControlSize::Sm)
-                .disabled(!enabled)
-                .on_click(move |_, window, cx| {
-                    if let Some(binding) = binding.clone() {
-                        let _ = owner.update(cx, |page, cx| {
-                            page.repository_action(star, binding, window, cx)
-                        });
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let focus = focus.clone();
+                move |_, window, cx| {
+                    if enabled {
+                        window.focus(&focus, cx);
                     }
-                }),
-            )
+                }
+            })
+            .on_click(move |_, window, cx| {
+                if !enabled {
+                    return;
+                }
+                if let Some(binding) = click_binding.clone() {
+                    let _ = owner.update(cx, |page, cx| {
+                        page.repository_action(star, binding, window, cx)
+                    });
+                }
+            })
+            .child(Icon::new(icon).size(IconSize::Sm).color(if enabled {
+                colors.fg_muted
+            } else {
+                colors.fg_disabled
+            }))
+            .child(label)
+            .children(count.map(|count| {
+                div()
+                    .debug_selector(move || {
+                        if star {
+                            "repository-star-count".into()
+                        } else {
+                            "repository-fork-count".into()
+                        }
+                    })
+                    .child(Badge::new(count.to_string()))
+            }))
             .into_any_element()
     });
     div()
         .flex()
+        .flex_wrap()
         .flex_none()
         .gap_2()
         .items_center()

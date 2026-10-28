@@ -113,3 +113,16 @@ README uncertain修复后完整复跑：541/324/54/152/131/479/14项全部通过
 真实DPI-aware桌面暗色和880×560明色统一页截图已实际查看：Tag/绿色Latest完整圆弧、数量/Private胶囊居中，Contributors紧随左组，5tab图标齐、branch右置，选中行四周有留白。原生鼠标点击Light/Dark已送达并观察实际明色帧；Long场景尝试后前台转移，未把未可靠送达的进一步输入写为已验。原有底条tooltip/计数/StarFork/账户隔离契约保持，正式Shell仍未挂载。
 
 本轮最终验证：指定helper串行fmt/check/clippy -D warnings、完整tests 541/324/54/152/131/483/16、product与repository example build、diff check全通过。实际Win32鼠标/键盘又核验880×560明色Long场景：长tag省略+完整Latest、大计数123456/98765胶囊与tabs不挤坏；Long tree中真实End滚到file-0399，末行圆角/底边留白完整，README/source状态未被树滚动改变。已切回Normal暗色。最终head/PID/CI/review见PR35交接。
+
+
+## README容器/正文inset与Star/Fork内部计数（含现场底padding回归）
+
+保留全部未提交修改继续同一PR35。发现原Markdown根px_2/py_3使list视口固定缩小；初次把py_3移到list仍不正确：GPUI原生wheel/set_offset考虑padding，但max_offset_for_scrollbar不包括，Motion/thumb因此clamp掉底部inset。按负责人现场回归改为首尾真实AST块测量padding，完整计入item总高，不假节点/不恢复外层空带。scroll_to_end的item_count临时末锚点也在repository模式等待惰性尾测量，避免按旧reach过早clamp。左右原间距+4px。默认宿主保持原值，source行号/排版无修改。
+
+ReaderView新增MarkdownLayout Default/Repository及一次性setter，show保留配置；相同setter无动作、不重建文档/选区。Star/Fork单一复合div按Ely token绘制icon+label+公共Pill数量，有效details128/9直接读，无新请求；无callback禁用/旧binding保护、Enter/Space/数量点击一次typed action，无mutation/假成功。
+
+GPUI回归：full viewport与首尾内容bounds、无假AST块、重复配置保留选区、短文上下空白清选、段落/列表/代码/表格末块wheel与thumb target到底、source实体/gutter不变；badge count在按钮边框内/点击各一次/0及大值/失效清理，保留旧动作套件。
+
+真实最新构建PID77524（阶段性）已DPI-aware查看880×560 Star128/Fork9按钮内胶囊、README首屏。长段落真实wheel到底，最后句下方清晰留白；长列表wheel到底、表格wheel到底也实际查看。code场景后窗口被系统最小化，恢复后部分输入又遇SendWait Access denied/foreground0；最终code与thumb到底未可靠原生验完，不将中段拖条或标题栏截图当通过。共享目标模拟验证不替代负责人原生手感验收。证据保存在ignored .agents/task/tail-*。
+
+最终构建补验：在PID51648的实际HWND定向投递native wheel及按下/移动/释放消息（不需抢占其他窗口），code末块的wheel/drag到底截图均已实际查看，代码容器下方有明确内容inset再到language条。此为Windows消息驱动证据，和真实设备输入/负责人手感验收分开；此前Access denied缺口未伪造。最终全部checks为545 product/324 account/54 Home/156 Profile/135 reader/488 repository/16 overview，product+example构建通过；末次焦点小修后重跑结果以PR35交接为准。
