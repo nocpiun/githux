@@ -132,6 +132,34 @@ Codex 第七轮 P2：关闭预览时 `app::run` 立即退出，而 SQLite/凭据
 
 **验证**：fmt / check --locked --all-targets / clippy -D warnings / `cargo test --locked`（378 passed，本任务 19 项）/ build / `git diff --check` 全部通过（`-j 1`，本 worktree 独立 target）。真实窗口按 PID 与创建时间核对：预览标题 `Githux · Account wiring preview`、默认外壳标题 `Githux`，均 Responding，随后由本任务关闭。
 
+## 第 11 轮：独立 Cargo example 与正式 binary 隔离
+
+负责人合入 content-reader（`dd2b1f2`）后，要求 account-ui 按 reader 的独立 example 规范交付预览。本地同步提交 `cd7516c` 将最新 main 合入分支，未推送；本任务没有重放同步或强推。
+
+### 最终装配
+
+- 新增 `examples/account.rs`，命令改为 **`cargo run --example account`**。它使用原生标题栏、Ely Assets/init、相同深色主题与真实字体；窗口关闭后在事件循环返回处调用既有有界排空，关闭行为没有因迁移丢失。
+- 新增 `src/bin_support/account_modules.rs`，以薄 `#[path]` 模块装配复用真实账户视图、GPUI 桥接和共享滚动条；`tests/account.rs` 用同样薄入口真正执行原 19 项账户测试，没有复制测试或业务代码。
+- 正式 `src/app/mod.rs` 移除 `--account-preview` 参数识别、预览窗口分支及预览退出等待；`src/ui/mod.rs` 不再声明账户预览模块。正常产品启动没有因预览打开数据库、凭据或网络。
+- 没有新 Cargo package、通用预览注册体系、新依赖或正式调试入口；reader 的 example 和测试未被修改。
+
+### 产品与发行边界
+
+产品 binary 的模块图不再包含预览启动器；`cargo run`、`cargo build --release` 都只进入产品 Shell。标准 example 不是默认 release 构建目标。CI artifact 从 `target/<target>/debug/githux` 复制产品 exe 和必需资源，没有打包 `target/debug/examples/account.exe` 或 reader example。此结论来自实际模块装配与 CI 打包路径核对，不只是 release 字符串搜索。
+
+### 验证
+
+`-j 1`、本 worktree 独立 target：
+
+- `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings` 通过。
+- `cargo test --locked`：主 binary 456 项、账户装配 305 项、reader 装配 118 项全部通过；本任务 19 项真实运行，没有因 example 迁移丢失。
+- `cargo build --locked --example account` 与 `cargo build --locked --release` 均成功。
+- `git diff --check` 通过。
+
+真实启动：独立 `D:\githux-account-ui\target\debug\examples\account.exe` 启动两次（PID 7660，创建时间 2026-10-28 08:18:40；PID 64932，08:19:02），窗口标题 `Githux · Account wiring preview`，均 Responding 后按 PID 关闭。`target/release/githux.exe` 启动（PID 54860，08:19:21），进入标题 `Githux` 的产品 Shell 后按 PID 关闭。只操作本任务进程。
+
+原 `cargo run -- --account-preview` 及 app 内预览分支的交付仅属历史；新命令是 `cargo run --example account`。真实 PAT、真实 Windows IME/粘贴/焦点与滚动条观感仍待负责人在新 example 中验收，不能沿用 reader 的验收。
+
 ## 剩余问题
 
 - 真实 PAT、真实组织 SSO、私有仓库可见性，以及真实 Windows 输入法候选、实际粘贴与焦点观感，须由负责人在预览窗口确认（模拟覆盖不等同）。

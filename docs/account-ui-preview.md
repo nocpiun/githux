@@ -2,15 +2,17 @@
 
 更新：2026-10-25。本文件记录 R2 真实登录与 GPUI 桥接的**接线验收预览**，不是正式 Shell 账户 UI，也不代表真实 PAT 联调已完成。账户服务、SQLite 目录、系统凭据、GitHub 读取与后台执行器沿用已有实现，没有新增 HTTP、SQLite 或账户服务路径。
 
-## 启动
+## 启动与产品隔离
 
 ```sh
-cargo run -- --account-preview
+cargo run --example account
 ```
 
-不带参数时仍是原有 Shell（启动 Home、fixture 侧栏与本地导航），本任务不修改其字段与布局。预览使用系统标题栏与独立窗口，不复用其他 Agent 正在修改的自定义标题栏/sidebar/tabs。
+账户预览与 `examples/reader.rs` 一样使用标准 Cargo example，是**独立开发 target**，不是产品启动参数。它使用原生系统标题栏、Ely Assets/init、相同深色主题、Noto Sans / Google Sans Code 与共享滚动条，不复制账户服务、HTTP、存储、字体或滚动条实现。
 
-`ui/mod.rs` 只增加了 `pub mod accounts;` 声明。`app::run` 读取 `--account-preview` 后打开预览窗口并跳过 Shell 构建；默认路径代码未变。
+`examples/account.rs` 通过 `src/bin_support/account_modules.rs` 的薄 `#[path]` 模块装配直接复用 `src/ui/accounts/**`、`src/app/accounts/**` 与 `src/ui/scroll/**`。账户测试通过薄 `tests/account.rs` 真正执行；测试代码仍留在实现旁。
+
+正式 `src/app/mod.rs` 没有账户预览参数识别、预览分支或专用退出逻辑；产品 binary 的模块树不引入这些预览模块，因此正常产品启动不会因预览打开真实数据库、凭据或网络。`cargo run` 与 `cargo build --release` 只走正常 Shell 产品路径。标准 example 不属于默认 release binary；CI 的正式 artifact 只从 `target/<target>/debug/githux` 打包产品 exe 与必需字体/运行时资源，不包含 `examples/account.exe` 或 `examples/reader.exe`。
 
 ## 能做什么
 
@@ -44,7 +46,7 @@ cargo run -- --account-preview
 - 快捷键拦截器只持弱实体引用，预览不会被自己的订阅长期保留；视图释放即可执行 `Drop` 清理。
 - 关闭标志使用 `send_replace`：没有任何接收者时 `send` 不写入，会让后台任务误以为仍可回写。
 - 窗口关闭或视图释放：先停用消息入队、取消请求、中止预览任务，再在独立线程中关闭数据库并让执行器按既有契约收尾。
-- 进程退出不会截断上述收尾：`app::run` 在预览模式下于事件循环返回后等待关闭/排空完成（上限 10s），而不是让 detached 线程随进程消失。
+- 进程退出不会截断上述收尾：`examples/account.rs` 在事件循环返回后调用桥接的有界等待（上限 10s），而不是让 detached 线程随进程消失。正式 `app::run` 不包含这项预览专用逻辑。
 
 ## 线程与桥接
 
@@ -79,11 +81,11 @@ cargo run -- --account-preview
 - 预览自己持有 `Bars`，`hover` 绑定整个预览区域，`drag` 走 `Bars::drag(&scroll, Axis::Vertical, …)`，窗口失活与视图释放调用 `Bars::cancel`。
 - 用 `Placement::overlay(4.0, 8.0)` + `Style::DEFAULT` 贴在右侧，外观仍是细 3px 圆头半透明、140ms 双向淡出。
 - 只有 `ScrollHandle` 这一处滚动目标；没有为每个仓库行另建滚动区，也没有在消费者里重算 thumb 几何。
-- `ui::scroll` 仅把模块入口放宽为 `pub(crate)`，未改 Shell 布局、侧栏或公共算法。
+- 共享 `ui::scroll` 通过 example 的薄装配直接复用，未改 Shell 布局、侧栏或公共算法。
 
 ## 验证
 
-已执行（本机 Windows，HEAD 含 main 同步与统一滚动的组合）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（**378 passed**，其中本任务 19 项）、`cargo build --locked -j 1`、`git diff --check`。默认外壳的标签条滚动/排序/toolbar 既有测试保持通过。
+已执行（本机 Windows，HEAD 含 content-reader 合入 main 的组合）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（主 binary 456 项、账户装配 305 项、reader 118 项，其中本任务 19 项）、`cargo build --locked --example account -j 1`、`cargo build --locked --release -j 1`、`git diff --check`。reader 的独立 example 与测试仍保留，默认外壳的标签条滚动/排序/toolbar 既有测试保持通过。
 
 新增 `preview_scrollbar_drags_real_content_and_cleans_up` 用真实 100 条仓库结果验证：长内容确有溢出（末行已布局、reach 超出视口）、拖动公共 thumb 移动真实 `ScrollHandle`、外部释放结束拖动、离开区域 140ms 淡出、内容变短后 offset 收敛到新范围内且不再显示末行、无溢出窗口不绘制条、隐藏条不阻挡 PAT 输入、取消与窗口失活立即清理。
 
@@ -91,4 +93,4 @@ cargo run -- --account-preview
 
 **未执行**：真实 PAT 登录与真实 GitHub 私有仓库联调。该项须由负责人在预览窗口自行输入 token；本任务没有读取 `gh`、环境变量、日志或任何真实凭据，也没有对 `api.github.com` 发起带真实 token 的请求。真实窗口中文本输入法、粘贴与焦点行为同样需要负责人在预览里确认。
 
-真实窗口启动已核实（当前 HEAD）：`--account-preview` 在本机启动，窗口标题 `Githux · Account wiring preview`、进程 Responding；无参数启动仍进入原 Shell（标题 `Githux`），标签条与固定 toolbar 未回退。两者均按 PID 与启动时间核对后由本任务主动关闭。这只能证明启动路径，不构成视觉、滚动条观感或真实登录验收。
+真实窗口启动已核实（当前实现）：`target/debug/examples/account.exe` 独立启动两次，窗口标题 `Githux · Account wiring preview`、进程 Responding；`target/release/githux.exe` 正常进入原 Shell（标题 `Githux`）。均按 exe 路径、PID 与创建时间核对后由本任务主动关闭，未触碰 reader/sidebar 进程。这只能证明启动路径与关闭收尾，不构成视觉、滚动条观感或真实登录验收。

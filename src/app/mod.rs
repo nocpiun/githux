@@ -11,13 +11,10 @@ use ely_core::theme::ActiveTheme;
 
 use crate::{platform, ui::Shell};
 
-pub mod accounts;
-
 pub fn run() {
-    let account_preview = std::env::args_os().any(|arg| arg == "--account-preview");
     gpui_platform::application()
         .with_assets(Assets)
-        .run(move |cx: &mut App| {
+        .run(|cx: &mut App| {
             ely_core::init(cx).expect("failed to initialize Ely");
             platform::fonts::register(cx).expect("failed to register bundled fonts");
             Theme::set_mode_now(Mode::Dark, cx);
@@ -26,18 +23,6 @@ pub fn run() {
                 theme.mono_family = platform::fonts::CODE_FAMILY.into();
             });
             Shell::bind_keys(cx);
-
-            if account_preview {
-                accounts::open_window(cx);
-                cx.on_window_closed(|cx, _| {
-                    if cx.windows().is_empty() {
-                        cx.quit();
-                    }
-                })
-                .detach();
-                cx.activate(true);
-                return;
-            }
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
             cx.open_window(
@@ -76,9 +61,4 @@ pub fn run() {
             .detach();
             cx.activate(true);
         });
-    if account_preview {
-        // The GUI loop has returned; do not let process exit truncate a
-        // submitted SQLite/credential commit or the executor drain.
-        accounts::wait_for_shutdown();
-    }
 }
