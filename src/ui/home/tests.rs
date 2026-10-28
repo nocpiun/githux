@@ -14,7 +14,8 @@ use gpui::{
     VisualTestContext, point, px, size,
 };
 
-use super::presentation::{event_description, feed_summary, home_summary};
+use super::presentation::{feed_summary, home_summary};
+use super::rows::event_description;
 use super::*;
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
@@ -43,6 +44,12 @@ fn open(cx: &mut TestAppContext) -> (Entity<HomeView>, &mut VisualTestContext) {
         HomeView::new(RequestBinding::new("account-a/home"), 1, window, cx)
     });
     cx.update(|window, _| window.activate_window());
+    view.update(cx, |view, cx| {
+        view.set_now(
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_188_800)),
+            cx,
+        )
+    });
     cx.run_until_parked();
     (view, cx)
 }
@@ -191,12 +198,22 @@ fn click(name: &'static str, cx: &mut VisualTestContext) {
 fn two_panels_render_their_exact_titles_and_independent_rows(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     apply(&view, cx);
+    cx.simulate_resize(size(px(1180.0), px(800.0)));
+    cx.run_until_parked();
+    let root = bounds("home-view", cx);
+    let left = bounds("home-panel", cx);
+    let right = bounds("feed-panel", cx);
+    assert!(
+        (left.size.width - right.size.width).abs() < px(1.0),
+        "{left:?} {right:?}"
+    );
+    assert!(right.right() <= root.right());
     assert!(cx.debug_bounds("home-panel").is_some());
     assert!(cx.debug_bounds("feed-panel").is_some());
     assert!(cx.debug_bounds("home-item-row-0").is_some());
     assert!(cx.debug_bounds("feed-event-row-0").is_some());
-    assert!(cx.debug_bounds("home-summary").is_some());
-    assert!(cx.debug_bounds("feed-summary").is_some());
+    assert!(cx.debug_bounds("home-summary").is_none());
+    assert!(cx.debug_bounds("feed-summary").is_none());
     // The panel headers are fixed, the row area is the bounded region.
     let home_header = bounds("home-panel", cx);
     let home_rows = bounds("home-rows", cx);
@@ -305,9 +322,9 @@ fn partial_home_keeps_rows_and_explains_that_it_is_not_a_complete_history(cx: &m
         } => home_summary(outcome),
         other => panic!("expected a ready Home outcome, got {other:?}"),
     });
-    assert!(summary.count.contains("4 shown"));
-    assert!(summary.notice.contains("1,000"));
-    assert!(summary.notice.contains("not a complete history"));
+    let notice = summary.notice.unwrap();
+    assert!(notice.contains("1,000"));
+    assert!(notice.contains("not a complete history"));
 }
 
 #[gpui::test]
@@ -548,7 +565,7 @@ fn keyboard_selection_activates_the_stable_identity_once(cx: &mut TestAppContext
     let (view, cx) = open(cx);
     apply(&view, cx);
     let actions = action_sink(&view, cx);
-    click("home-item-row-0", cx);
+    click("home-title-0", cx);
     assert_eq!(actions.borrow().len(), 1, "one click is one activation");
     let first = actions.borrow()[0].clone();
     let HomeAction::ActivateWorkItem(first) = first else {
@@ -590,21 +607,19 @@ fn feed_rows_emit_stable_event_profile_and_repository_actions(cx: &mut TestAppCo
     let (view, cx) = open(cx);
     apply(&view, cx);
     let actions = action_sink(&view, cx);
-    click("feed-event-row-0", cx);
-    click("feed-profile-0", cx);
-    click("feed-repository-0", cx);
+    click("feed-actor-0", cx);
+    click("feed-avatar-0", cx);
+    click("feed-0-repository", cx);
     let actions = actions.borrow();
     assert_eq!(actions.len(), 3, "each control fires exactly once");
-    let HomeAction::ActivateFeed(event) = &actions[0] else {
-        panic!("expected a Feed activation first");
+    let HomeAction::Profile(first) = &actions[0] else {
+        panic!("expected actor profile");
     };
-    assert_eq!(event.id, "event-0");
-    assert_eq!(event.event_type, FeedEventType::Push);
-    assert_eq!(event.repository.full_name(), "owner/repo");
+    assert_eq!(first.id, Some(500));
     let HomeAction::Profile(profile) = &actions[1] else {
         panic!("expected a profile action");
     };
-    assert_eq!(profile.id, 500);
+    assert_eq!(profile.id, Some(500));
     assert_eq!(profile.login, "actor-0");
     let HomeAction::Repository(repository) = &actions[2] else {
         panic!("expected a repository action");
@@ -772,7 +787,7 @@ fn missing_feed_fields_and_unknown_events_have_safe_concise_fallbacks(cx: &mut T
         },
     );
     let description = event_description(&missing_payload);
-    assert!(description.contains("updated pull request"));
+    assert!(description.contains("updated a pull request"));
     assert!(description.contains("actor-1"));
 
     view.update(cx, |view, cx| {
@@ -876,7 +891,7 @@ fn every_typed_event_kind_has_a_concise_description() {
             merged: Some(true),
         },
     );
-    assert!(event_description(&merged).contains("merged pull request #7"));
+    assert!(event_description(&merged).contains("merged a pull request"));
 }
 
 #[test]
@@ -888,8 +903,250 @@ fn feed_summary_states_the_events_window_without_claiming_full_history() {
         },
     );
     let summary = feed_summary(&outcome);
-    assert!(summary.count.contains("1 events"));
-    assert!(summary.notice.contains("Partial"));
-    assert!(summary.notice.contains("300"));
-    assert!(summary.notice.contains("delayed"));
+    let notice = summary.notice.unwrap();
+    assert!(notice.contains("Partial"));
+    assert!(notice.contains("300"));
+    assert!(notice.contains("delayed"));
+}
+
+#[gpui::test]
+fn content_links_use_canonical_logins_and_never_double_dispatch(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    view.update(cx, |view, cx| {
+        let mut event = feed_event(
+            0,
+            FeedEventType::Issues,
+            FeedPayload::Issues {
+                action: "opened".into(),
+                number: Some(8),
+                title: Some("Actual issue title".into()),
+                html_url: None,
+                state: Some("open".into()),
+            },
+        );
+        event.actor.display_login = Some("Display Name".into());
+        view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(vec![event], FeedReadiness::Complete),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let actions = action_sink(&view, cx);
+    click("home-0-owner", cx);
+    click("home-0-repository", cx);
+    click("feed-actor-0", cx);
+    click("feed-0-owner", cx);
+    click("feed-0-repository", cx);
+    click("feed-title-0", cx);
+    let actions = actions.borrow();
+    assert_eq!(actions.len(), 6);
+    assert_eq!(
+        actions[0],
+        HomeAction::Profile(ProfileIdentity {
+            id: None,
+            login: "owner".into()
+        })
+    );
+    assert!(
+        matches!(&actions[1], HomeAction::Repository(repo) if repo.full_name() == "owner/repo-0")
+    );
+    assert_eq!(
+        actions[2],
+        HomeAction::Profile(ProfileIdentity {
+            id: Some(500),
+            login: "actor-0".into()
+        })
+    );
+    assert_eq!(
+        actions[3],
+        HomeAction::Profile(ProfileIdentity {
+            id: None,
+            login: "owner".into()
+        })
+    );
+    assert!(matches!(&actions[4], HomeAction::Repository(repo) if repo.id == Some(700)));
+    assert!(matches!(&actions[5], HomeAction::ActivateFeed(event) if event.id == "event-0"));
+}
+
+#[gpui::test]
+fn refresh_spinner_replaces_the_icon_in_the_same_slot(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let before = bounds("home-refresh-slot", cx);
+    click("home-refresh-slot", cx);
+    assert!(cx.debug_bounds("home-refresh-spinner").is_some());
+    assert_eq!(before, bounds("home-refresh-slot", cx));
+    assert!(cx.debug_bounds("feed-refresh-spinner").is_none());
+    let (home, _) = mixed();
+    view.update(cx, |view, cx| {
+        view.apply_home(&binding(), 1, home, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("home-refresh-spinner").is_none());
+    assert_eq!(before, bounds("home-refresh-slot", cx));
+}
+
+#[gpui::test]
+fn home_icon_shares_the_title_line_and_metadata_stays_below(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    for dimensions in [size(px(1180.0), px(800.0)), size(px(640.0), px(620.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let icon = bounds("home-icon-0", cx);
+        let title = bounds("home-title-0", cx);
+        let metadata = bounds("home-metadata-0", cx);
+        assert!((icon.center().y - title.center().y).abs() <= px(1.0));
+        assert!(metadata.top() >= title.bottom());
+        let owner = bounds("home-0-owner", cx);
+        let repo = bounds("home-0-repository", cx);
+        assert!(owner.right() <= repo.left());
+        assert!(cx.debug_bounds("home-summary").is_none());
+        assert!(cx.debug_bounds("feed-summary").is_none());
+        assert!(cx.debug_bounds("home-repository-0").is_none());
+    }
+}
+
+#[gpui::test]
+fn variable_feed_cards_have_details_below_header_and_last_card_is_reachable(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = open(cx);
+    view.update(cx, |view, cx| {
+        let events = (0..300)
+            .map(|index| {
+                if index % 2 == 0 {
+                    feed_event(
+                        index,
+                        FeedEventType::Push,
+                        FeedPayload::Push {
+                            git_ref: Some("refs/heads/main".into()),
+                            size: Some(2),
+                            before: Some("a".repeat(40)),
+                            head: Some("b".repeat(40)),
+                        },
+                    )
+                } else {
+                    feed_event(
+                        index,
+                        FeedEventType::Watch,
+                        FeedPayload::Watch {
+                            action: "started".into(),
+                        },
+                    )
+                }
+            })
+            .collect();
+        view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(events, FeedReadiness::Complete),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let header = bounds("feed-header-0", cx);
+    let details = bounds("feed-details-0", cx);
+    assert!(details.top() > header.bottom());
+    assert!(bounds("feed-card-0", cx).size.height > bounds("feed-card-1", cx).size.height);
+    assert!(bounds("feed-event-row-0", cx).bottom() <= bounds("feed-event-row-1", cx).top());
+    assert!(cx.debug_bounds("feed-event-row-299").is_none());
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.feed_view.focus.focus(window, cx));
+    });
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected(Column::Feed)),
+        Some(299)
+    );
+    let last = bounds("feed-card-299", cx);
+    let viewport = bounds("feed-rows", cx);
+    assert!(last.top() >= viewport.top() - px(1.0));
+    assert!(last.bottom() <= viewport.bottom() + px(1.0));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected(Column::Feed)),
+        Some(299)
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.offset(Column::Home).y),
+        px(0.0)
+    );
+}
+
+#[test]
+fn merged_status_and_missing_details_are_truthful() {
+    let event = feed_event(
+        0,
+        FeedEventType::PullRequest,
+        FeedPayload::PullRequest {
+            action: "closed".into(),
+            number: Some(12),
+            title: Some("Merge me".into()),
+            html_url: None,
+            state: Some("closed".into()),
+            merged: Some(true),
+        },
+    );
+    let details = super::rows::event_details(&event);
+    assert_eq!(details.status.as_deref(), Some("Merged"));
+    assert!(details.title.unwrap().contains("#12"));
+    assert!(details.lines.is_empty());
+}
+
+#[gpui::test]
+fn content_link_keyboard_activation_is_one_action(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let actions = action_sink(&view, cx);
+    // FocusNext walks native Tab stops. Find the owner link through activation,
+    // checking that no list-level Enter handler turns it into an item action.
+    for _ in 0..12 {
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+        if actions
+            .borrow()
+            .iter()
+            .any(|action| matches!(action, HomeAction::Profile(profile) if profile.id.is_none()))
+        {
+            break;
+        }
+    }
+    let actions = actions.borrow();
+    assert!(actions.iter().any(|action| matches!(action, HomeAction::Profile(profile) if profile.login == "owner" && profile.id.is_none())), "{actions:?}");
+}
+
+#[gpui::test]
+fn one_elapsed_time_task_stops_for_inactive_hidden_and_disposed_views(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.set_now(None, cx);
+            view.sync_time_task(window, cx);
+            assert!(view.time_task.is_some());
+            view.set_active(false, cx);
+            assert!(view.time_task.is_none());
+            view.set_active(true, cx);
+            view.sync_time_task(window, cx);
+            assert!(view.time_task.is_some());
+        })
+    });
+    cx.deactivate_window();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+    let weak = view.downgrade();
+    cx.replace_root_view(|_, _| gpui::EmptyView);
+    drop(view);
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_none(), "the timer holds only a weak view");
 }

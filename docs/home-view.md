@@ -50,7 +50,7 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 | --- | --- |
 | `Refresh(RefreshRequest)` | `column`、触发时观察到的 binding 与 generation |
 | `Repository(RepositoryIdentity)` | `id`（Feed 有，Home 搜索模型无）、owner、name |
-| `Profile(ProfileIdentity)` | actor 数字 id 与登录名 |
+| `Profile(ProfileIdentity)` | `Option<u64>` id 与 canonical 登录名；actor 保留真实 id，owner-only 为 None |
 | `ActivateWorkItem(WorkItemIdentity)` | Home 条目的全局 id、number、Issue/PR kind、仓库 |
 | `ActivateFeed(FeedIdentity)` | Feed 事件 id、typed event kind、仓库 |
 
@@ -58,20 +58,20 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 ## 呈现与失败语义
 
-- 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ScrollHandle>`。
+- 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。
 - 单栏最多同时呈现 loading、empty、error、unavailable 或 Ready 中的一种；Partial 仍保留已取条目并显示原因提示。
-- Home 行区分 Issue/PR、标题、`owner/repo #number`、state 与更新时间；标题和长元数据使用省略号，不横向撑破栏。
-- Feed 行显示真实模型的 actor、动作摘要、仓库与时间；`display_login`/`login`/仓库名/时间缺失时使用安全回退。未知类型只显示类型名和“activity”，不展开原始 payload。
+- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。owner/name 分段导航，更新时间为相对时间，标题和长名称有界截断。
+- Feed 是有间距的活动卡片：avatar、可点击 actor、动作句与相对时间组成 header，详情在下面的 inset repository panel。Issue/PR 显示可用 title/number/status（merged 优先）；Push/ref/release/member/comment/unknown 使用既有 typed payload，缺字段安全回退，不补造仓库统计或正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
-- `incomplete_results=true` 即使被外部构造成 `Complete` 也会在摘要中标注；Partial 明确说明不是完整历史或未读列表。
+- 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。
 - 窗口较窄（小于 760 logical px）时两栏改为上下堆叠；两栏始终留在视图边界内。
 
 ## 滚动与键盘
 
-- 每栏使用 `UniformListScrollHandle` 的真实 base handle、共享 `scroll::Bar`/`Bars` 与 `scroll::Motion`，只渲染可见行，不新建第二套滚动几何。
+- 每栏使用真实 GPUI `ListState`、共享 `scroll::Bar`/`Bars` 与 `scroll::Motion<ListState>`，只渲染可见行。Home 保持固定行高，Feed 自然测量可变卡片高度；不调用 measure_all，不新建滚动几何。键盘远跳使用原生 logical item anchor，在 Motion tick 后应用，避免旧范围 clamp 覆盖末项 reveal。
 - 捕获阶段 `wheel_overlay` 每区域只消费一次，测试验证一次精确滚轮只改变目标栏且偏移恰好等于输入。
-- 每栏是独立 Tab stop；指针点击行会聚焦该栏。Up/Down/Home/End 移动选择，Enter/Space 激活当前 Home 条目或 Feed 事件；指针点击与键盘激活都只发一次回调。
-- 行内 Repository、Profile 按钮阻止冒泡，避免一次点击同时激活整行和按钮。
+- 每栏是独立 Tab stop。列表根聚焦时 Up/Down/Home/End 移动选择，Enter/Space 激活所选 Home 条目或 Feed 事件；各内容链接也是独立键盘入口，键盘激活不抢回列表焦点。
+- 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。每个链接阻止冒泡，不发生卡片/列表二次激活。
 
 ## host / data 待接职责
 
@@ -91,20 +91,20 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 | `src/bin_support/home_modules.rs` | 预览/测试的薄 `#[path]` 装配 |
 | `tests/home.rs` | 集成测试入口 |
 
+## 相对时间与刷新生命周期
+
+- `time.rs` 无新增依赖，校验 RFC3339 日期、闰年、UTC/显式 offset、小数秒；以 UTC elapsed time 格式化 Just now、1 minute、N minutes、1 hour、Yesterday、N days。无效/缺失为 Time unavailable，未来为 In the future，不显示负值。原始时间保留 tooltip。
+- 默认使用 `SystemTime::now()`；`set_now(Some(instant), cx)` 注入固定时间，None 恢复实际时间。每个视图只有一个 30 秒任务，不按行建 timer，不请求网络。
+- `set_active(false, cx)` 供保留页面的宿主在切 Tab 时调用；窗口失活/隐藏、view dispose、退出 rendered tree 都停止 timer 并清理 motion。重显时恢复，固定 clock 不创建 timer。
+- 刷新为 Ely `IconButton(RotateCw)`，busy 在同一固定方槽显示 Ely 动画 `Spinner`，没有独立 Refreshing 文本。Tooltip/accessibility label 保留；Loading/refreshing/cooldown 继续禁止重复动作。
+- 独立预览固定注入 2026-10-28 12:00 UTC；fixtures 包含 10 minutes、1 hour、Yesterday、2 days、missing/invalid/future，`Finish refresh` 由开发 host 应用场景结果来结束 busy。
+
 ## 验证
 
-本机 Windows、提交时工作区执行：
+本机 Windows 使用序列化 Cargo helper，独立 target/：fmt、locked all-target check、clippy -D warnings、完整测试、产品与 home example 构建、diff check。最终结果与 PR head 见 PR34 交付评论，不以旧 head 结果代替当前 head。
 
-```sh
-cargo fmt --all -- --check
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo build --locked --example home
-cargo build --locked
-git diff --check
-```
+Home 装配当前 53 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。
 
-`tests/home.rs` 共 43 项（含共享 scroll 模块用例），本任务新增用例覆盖：两栏独立、单栏错误不擦除另一栏、真空/错误/unavailable 区分、Partial 保留条目、1,000 条 Home 与 300 条 Feed 虚拟化、精确滚轮只动目标栏一次、绑定切换清空、旧 generation 成功与错误拒绝、键盘与鼠标回调一次且身份稳定、Home/End 无选择时的绝对边界、刷新不可用/加载中/双击阻止、窄窗口堆叠、未知事件与缺字段回退、全部 typed event 描述。
+本轮实际查看 Windows 原生 PrintWindow 帧：144 DPI，宽布局 2130×1425 物理像素与窄布局 990×1000；计数/列框/分割线/右侧导航按钮消失，Home icon 对齐标题，Feed 卡片 header/inset 详情及相对时间正常。通过本任务 HWND 的消息切换 Mixed/Loading-error/Large，并取得 owner-only 与 repo-only hover underline 帧。未拿源码推断或测试平台代替视觉核验。
 
-真实窗口：`target/debug/examples/home.exe` 以标题 `Githux · Home view preview` 独立启动、Responding、按 PID 正常关闭。该检查只证明启动路径与关闭收尾；锁屏/无输入环境下未做真实键盘、IME、DPI、拖拽和视觉验收，需负责人按 `pending` 验收。未连接 GitHub，也未读取真实 PAT。
+限制：原生消息驱动不等于真人输入手感；未确认触控板、IME、多屏/DPI、原生滚轮手感或所有键盘流程。UI 未获负责人验收，PR 保持 pending；最终 exe/PID/head 记录在任务交付状态与 PR 评论。无真实 PAT/GitHub 请求，正式 data/Shell 适配仍待后续集成。

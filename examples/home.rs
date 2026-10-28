@@ -69,6 +69,7 @@ struct Preview {
     generation: u64,
     action: Rc<RefCell<Option<String>>>,
     cooldown: bool,
+    _changed: gpui::Subscription,
 }
 
 impl Preview {
@@ -77,18 +78,24 @@ impl Preview {
         let home = cx.new(|cx| HomeView::new(binding.clone(), 1, window, cx));
         let action = Rc::new(RefCell::new(None));
         let sink = action.clone();
-        home.update(cx, |home, _| {
+        home.update(cx, |home, cx| {
+            // Fixture clock: 2026-10-28 12:00 UTC, independent of wall time.
+            home.set_now(
+                Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_188_800)),
+                cx,
+            );
             home.on_action(Rc::new(move |action, _, _| {
                 *sink.borrow_mut() = Some(format!("{action:?}"));
             }));
         });
         let mut preview = Self {
-            home,
+            home: home.clone(),
             scenario: 0,
             binding,
             generation: 1,
             action,
             cooldown: false,
+            _changed: cx.observe(&home, |_, _, cx| cx.notify()),
         };
         preview.apply(window, cx);
         preview
@@ -170,6 +177,20 @@ impl Preview {
                     })
             }))
             .child(
+                Button::new("home-preview-complete", "Finish refresh").on_click({
+                    let this = cx.entity();
+                    move |_, _, cx| {
+                        this.update(cx, |preview, cx| {
+                            let (search, feed) = (SCENARIOS[preview.scenario].build)();
+                            preview.home.update(cx, |home, cx| {
+                                home.apply_home(&preview.binding, preview.generation, search, cx);
+                                home.apply_feed(&preview.binding, preview.generation, feed, cx);
+                            });
+                        });
+                    }
+                }),
+            )
+            .child(
                 Button::new("home-preview-cooldown", "Toggle Home cooldown").on_click({
                     let home = self.home.clone();
                     let binding = self.binding.clone();
@@ -203,7 +224,7 @@ impl Preview {
 }
 
 impl Render for Preview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (bg, fg, border, subtle, tiny) = {
             let theme = cx.theme();
             (
@@ -218,13 +239,24 @@ impl Render for Preview {
             "Synthetic fixture · actions are shown here; nothing is opened.".to_string()
         });
         div()
-            .size_full()
+            .w(window.viewport_size().width)
+            .h(window.viewport_size().height)
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(bg)
             .text_color(fg)
             .child(self.toolbar(cx))
-            .child(div().flex_1().min_h_0().w_full().child(self.home.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .w_full()
+                    .child(self.home.clone()),
+            )
             .child(
                 div()
                     .debug_selector(|| "home-preview-action".to_string())
@@ -236,6 +268,19 @@ impl Render for Preview {
                     .text_color(subtle)
                     .child(action),
             )
+    }
+}
+
+fn fixture_time(index: usize) -> Option<String> {
+    match index % 8 {
+        0 => Some("2026-10-28T11:50:00Z".into()),
+        1 => Some("2026-10-28T11:00:00Z".into()),
+        2 => Some("2026-10-27T12:00:00Z".into()),
+        3 => None,
+        4 => Some("2026-10-26T12:00:00Z".into()),
+        5 => Some("2026-10-28T12:01:00Z".into()),
+        6 => Some("invalid timestamp".into()),
+        _ => Some("2026-10-28T11:59:20Z".into()),
     }
 }
 
@@ -260,7 +305,7 @@ fn item(index: usize) -> HomeItem {
             "closed"
         }
         .to_string(),
-        updated_at: format!("2026-10-{:02}T12:00:00Z", (index % 28) + 1),
+        updated_at: fixture_time(index).unwrap_or_default(),
         repository: HomeRepositoryRef {
             owner: "synthetic-owner".to_string(),
             name: format!("repository-{}", index % 3),
@@ -371,11 +416,7 @@ fn event(index: usize) -> FeedEvent {
             name: "synthetic-owner/repository".into(),
             url: String::new(),
         },
-        created_at: if index == 3 {
-            None
-        } else {
-            Some("2026-10-28T12:00:00Z".into())
-        },
+        created_at: fixture_time(index),
         public: true,
         payload,
     }

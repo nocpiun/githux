@@ -10,25 +10,30 @@
 #![allow(dead_code)]
 
 mod presentation;
+mod rows;
 #[cfg(test)]
 mod tests;
+mod time;
 
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use ely_core::{
-    buttons::Button,
-    theme::{ActiveTheme, ControlSize, Radius, TextSize},
+    buttons::IconButton,
+    motion::Spinner,
+    primitives::{IconName, Tooltip},
+    theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, KeyDownEvent, Pixels, Point, Render,
-    ScrollStrategy, UniformListScrollHandle, Window, div, prelude::*, px,
+    AnyElement, App, Context, FocusHandle, Focusable, KeyDownEvent, ListAlignment, ListState,
+    Pixels, Point, Render, Subscription, Task, Window, div, prelude::*, px,
 };
 
 use crate::domain::home::{FeedOutcome, HomeError, HomeItem, HomeSearchOutcome};
-use crate::ui::scroll::{self, Bars, Motion};
+use crate::ui::scroll::{self, Bars, Motion, ScrollTarget};
 
-use presentation::{feed_row, home_row, home_summary};
+use presentation::home_summary;
+use rows::{feed_row, home_row};
 
 /// An opaque, host-selected request scope. Include the stable account/page
 /// identity; do not put a PAT or other credential in this value.
@@ -89,10 +94,11 @@ pub struct WorkItemIdentity {
     pub repository: RepositoryIdentity,
 }
 
-/// Stable profile identity. The id is included when the typed model has one.
+/// Stable profile identity. Actor ids remain real; repository-owner targets
+/// carry only their canonical login (`id: None`) when the model has no id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProfileIdentity {
-    pub id: u64,
+    pub id: Option<u64>,
     pub login: String,
 }
 
@@ -239,11 +245,12 @@ impl<T> PanelModel<T> {
 
 /// One panel's virtualized rows, selection and isolated scroll/focus state.
 struct PanelView {
-    scroll: UniformListScrollHandle,
-    motion: Motion<gpui::ScrollHandle>,
+    scroll: ListState,
+    motion: Motion<ListState>,
     bars: Bars,
     focus: FocusHandle,
     selected: Option<usize>,
+    pending_reveal: Option<usize>,
     clock: Instant,
     #[cfg(test)]
     pinned_clock: Option<u64>,
@@ -251,14 +258,15 @@ struct PanelView {
 
 impl PanelView {
     fn new(cx: &mut Context<HomeView>) -> Self {
-        let scroll = UniformListScrollHandle::new();
-        let motion = Motion::new(scroll.0.borrow().base_handle.clone());
+        let scroll = ListState::new(0, ListAlignment::Top, px(200.0));
+        let motion = Motion::new(scroll.clone());
         Self {
             scroll,
             motion,
             bars: Bars::new(),
             focus: cx.focus_handle().tab_stop(true),
             selected: None,
+            pending_reveal: None,
             clock: Instant::now(),
             #[cfg(test)]
             pinned_clock: None,
@@ -267,14 +275,15 @@ impl PanelView {
 
     fn reset(&mut self, window: &mut Window, cx: &mut App) {
         scroll::cancel_region(&mut self.bars, &self.motion);
-        if self.focus.is_focused(window) {
+        if self.focus.contains_focused(window, cx) {
             window.blur(cx);
         }
         self.selected = None;
+        self.pending_reveal = None;
         // Replacing the handle also drops native deferred reveal/drag state.
         // The new Motion wraps exactly the new list's real base handle.
-        self.scroll = UniformListScrollHandle::new();
-        self.motion = Motion::new(self.scroll.0.borrow().base_handle.clone());
+        self.scroll = ListState::new(0, ListAlignment::Top, px(200.0));
+        self.motion = Motion::new(self.scroll.clone());
     }
 
     fn now_ms(&self) -> u64 {
@@ -286,7 +295,7 @@ impl PanelView {
     }
 
     fn offset(&self) -> Point<Pixels> {
-        self.scroll.0.borrow().base_handle.offset()
+        self.motion.offset()
     }
 
     fn handles(&self) -> PanelHandles {
@@ -297,16 +306,16 @@ impl PanelView {
         }
     }
 
-    fn reveal(&self, index: usize) {
+    fn reveal(&mut self, index: usize) {
         self.motion.cancel();
-        self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
+        self.pending_reveal = Some(index);
     }
 }
 
 /// Cloneable real handles for one panel, sampled once per frame.
 struct PanelHandles {
-    scroll: UniformListScrollHandle,
-    motion: Motion<gpui::ScrollHandle>,
+    scroll: ListState,
+    motion: Motion<ListState>,
     focus: FocusHandle,
 }
 
@@ -321,6 +330,12 @@ pub struct HomeView {
     feed_view: PanelView,
     on_action: Option<OnAction>,
     last_action: Option<HomeAction>,
+    now: SystemTime,
+    fixed_now: bool,
+    active: bool,
+    time_task: Option<Task<()>>,
+    _activation: Subscription,
+    _visibility: Subscription,
 }
 
 impl HomeView {
@@ -330,7 +345,7 @@ impl HomeView {
     pub fn new(
         binding: RequestBinding,
         generation: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -342,6 +357,75 @@ impl HomeView {
             feed_view: PanelView::new(cx),
             on_action: None,
             last_action: None,
+            now: SystemTime::now(),
+            fixed_now: false,
+            active: true,
+            time_task: None,
+            _activation: cx.observe_window_activation(window, |view, window, cx| {
+                view.sync_time_task(window, cx);
+                cx.notify();
+            }),
+            _visibility: cx.observe_window_visibility(window, |view, _, window, cx| {
+                view.sync_time_task(window, cx);
+                cx.notify();
+            }),
+        }
+    }
+
+    /// Inject a fixed wall clock for previews/tests. `None` resumes real time.
+    pub fn set_now(&mut self, now: Option<SystemTime>, cx: &mut Context<Self>) {
+        self.fixed_now = now.is_some();
+        self.now = now.unwrap_or_else(SystemTime::now);
+        self.time_task = None;
+        cx.notify();
+    }
+
+    /// A retained page's host calls this when switching tabs. No elapsed-time
+    /// timer or scroll animation runs for an inactive page.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.active = active;
+        if !active {
+            self.cancel_activity();
+        }
+        cx.notify();
+    }
+
+    fn cancel_activity(&mut self) {
+        self.time_task = None;
+        for panel in [&mut self.home_view, &mut self.feed_view] {
+            scroll::cancel_region(&mut panel.bars, &panel.motion);
+        }
+    }
+
+    fn sync_time_task(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.active || !window.is_window_active() || !window.is_visible() {
+            self.cancel_activity();
+            return;
+        }
+        if self.fixed_now || self.item_count(Column::Home) + self.item_count(Column::Feed) == 0 {
+            self.time_task = None;
+            return;
+        }
+        if self.time_task.is_none()
+            && self.item_count(Column::Home) + self.item_count(Column::Feed) > 0
+        {
+            self.now = SystemTime::now();
+            self.time_task = Some(cx.spawn(async |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_secs(30))
+                        .await;
+                    if this
+                        .update(cx, |view, cx| {
+                            view.now = SystemTime::now();
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
         }
     }
 
@@ -356,6 +440,7 @@ impl HomeView {
     ) {
         self.binding = binding;
         self.generation = generation;
+        self.cancel_activity();
         self.home.reset();
         self.feed.reset();
         self.home_view.reset(window, cx);
@@ -468,6 +553,11 @@ impl HomeView {
         if !self.accepts(binding, generation) {
             return false;
         }
+        self.home_view.motion.cancel();
+        self.home_view.pending_reveal = None;
+        self.home_view
+            .scroll
+            .reset_with_uniform_height(outcome.items.len(), px(rows::HOME_ROW_HEIGHT));
         self.home.state = PanelState::Ready {
             content: PanelContent::Ready(outcome),
             refreshing: false,
@@ -487,6 +577,11 @@ impl HomeView {
         if !self.accepts(binding, generation) {
             return false;
         }
+        self.feed_view.motion.cancel();
+        self.feed_view.pending_reveal = None;
+        self.feed_view
+            .scroll
+            .reset_with_uniform_height(outcome.events.len(), px(180.0));
         self.feed.state = PanelState::Ready {
             content: PanelContent::Ready(outcome),
             refreshing: false,
@@ -738,6 +833,9 @@ impl HomeView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.panel_mut(column).focus.is_focused(window) {
+            return;
+        }
         if event.keystroke.modifiers.secondary(cx)
             || event.keystroke.modifiers.alt
             || event.keystroke.modifiers.control
@@ -782,14 +880,21 @@ impl Focusable for HomeView {
 
 impl Render for HomeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_time_task(window, cx);
         let (colors, body_size) = {
             let theme = cx.theme();
             (theme.colors.clone(), theme.text_size(TextSize::Sm))
         };
-        for panel in [&self.home_view, &self.feed_view] {
+        for panel in [&mut self.home_view, &mut self.feed_view] {
             let animating = panel.motion.tick(Instant::now(), cx.reduce_motion());
             if animating {
                 window.request_animation_frame();
+            }
+            if let Some(index) = panel.pending_reveal.take() {
+                panel.scroll.scroll_to(gpui::ListOffset {
+                    item_ix: index,
+                    offset_in_item: px(0.0),
+                });
             }
         }
         for (column, panel) in [
@@ -843,6 +948,7 @@ impl Render for HomeView {
             .text_size(body_size)
             .text_color(colors.fg)
             .child(columns)
+            .child(visible_lifetime(cx))
     }
 }
 
@@ -853,33 +959,62 @@ fn render_panel<T: PanelRows + 'static>(
     handles: &PanelHandles,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
-    let (colors, radius, heading_size, tiny, refreshing_size) = {
+    let (heading_size, side, icon_size) = {
         let theme = cx.theme();
         (
-            theme.colors.clone(),
-            theme.radius(Radius::Md),
             theme.text_size(TextSize::Lg),
-            theme.text_size(TextSize::Xs),
-            theme.text_size(TextSize::Xs),
+            theme.control_height(ControlSize::Sm),
+            IconSize::Sm,
         )
     };
     let title = match column {
         Column::Home => "Home",
         Column::Feed => "Feed",
     };
-    let root = match column {
-        Column::Home => "home-panel",
-        Column::Feed => "feed-panel",
-    };
     let body = panel_body(column, model, opacity, handles, cx);
-    let refreshing = model.state.refreshing();
-    let disabled = !model.refresh.available || model.state.is_busy();
-    let unavailable_reason = (!model.refresh.available)
-        .then(|| model.refresh.reason.clone())
-        .flatten();
+    let busy = model.state.is_busy();
+    let disabled = !model.refresh.available || busy;
+    let tooltip = if busy {
+        format!("Refreshing {title}")
+    } else if let Some(reason) = model
+        .refresh
+        .reason
+        .as_ref()
+        .filter(|_| !model.refresh.available)
+    {
+        format!("Refresh {title}: {reason}")
+    } else {
+        format!("Refresh {title}")
+    };
     let panel = cx.entity().downgrade();
+    let control = if busy {
+        div()
+            .id(format!("{}-refresh-busy", column_name(column)))
+            .debug_selector(move || format!("{}-refresh-spinner", column_name(column)))
+            .role(gpui::Role::ProgressIndicator)
+            .aria_label(tooltip.clone())
+            .tooltip(Tooltip::text(tooltip))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(side)
+            .child(Spinner::new(format!("{}-spinner", column_name(column))).size(icon_size))
+            .into_any_element()
+    } else {
+        IconButton::new(
+            format!("{}-refresh", column_name(column)),
+            IconName::RotateCw,
+        )
+        .size(ControlSize::Sm)
+        .disabled(disabled)
+        .tooltip(tooltip)
+        .on_click(move |_, window, cx| {
+            let _ = panel.update(cx, |view, cx| view.refresh(column, window, cx));
+        })
+        .into_any_element()
+    };
     div()
-        .debug_selector(move || root.to_string())
+        .debug_selector(move || format!("{}-panel", column_name(column)))
         .flex()
         .flex_col()
         .flex_1()
@@ -887,19 +1022,16 @@ fn render_panel<T: PanelRows + 'static>(
         .min_w_0()
         .min_h_0()
         .overflow_hidden()
-        .rounded(radius)
-        .border_1()
-        .border_color(colors.border)
+        .gap_2()
         .child(
             div()
+                .debug_selector(move || format!("{}-header", column_name(column)))
                 .flex_none()
                 .flex()
                 .items_center()
                 .gap_2()
-                .h(px(48.0))
-                .px_3()
-                .border_b_1()
-                .border_color(colors.border)
+                .h(px(40.0))
+                .px_2()
                 .child(
                     div()
                         .flex_1()
@@ -908,35 +1040,12 @@ fn render_panel<T: PanelRows + 'static>(
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(title),
                 )
-                .when(refreshing, |header| {
-                    header.child(
-                        div()
-                            .text_size(refreshing_size)
-                            .text_color(colors.fg_subtle)
-                            .child("Refreshing…"),
-                    )
-                })
-                .children(unavailable_reason.map(|reason| {
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(tiny)
-                        .text_color(colors.fg_subtle)
-                        .child(reason)
-                }))
                 .child(
-                    Button::new(
-                        match column {
-                            Column::Home => "home-refresh",
-                            Column::Feed => "feed-refresh",
-                        },
-                        "Refresh",
-                    )
-                    .size(ControlSize::Sm)
-                    .disabled(disabled)
-                    .on_click(move |_, window, cx| {
-                        let _ = panel.update(cx, |view, cx| view.refresh(column, window, cx));
-                    }),
+                    div()
+                        .debug_selector(move || format!("{}-refresh-slot", column_name(column)))
+                        .flex_none()
+                        .size(side)
+                        .child(control),
                 ),
         )
         .child(body)
@@ -970,7 +1079,13 @@ impl PanelRows for HomeSearchOutcome {
         cx: &mut Context<HomeView>,
     ) -> AnyElement {
         let item = view.home.state.data().unwrap().items[index].clone();
-        home_row(&item, index, view.home_view.selected == Some(index), cx)
+        home_row(
+            &item,
+            index,
+            view.home_view.selected == Some(index),
+            view.now,
+            cx,
+        )
     }
 }
 
@@ -990,7 +1105,13 @@ impl PanelRows for FeedOutcome {
         cx: &mut Context<HomeView>,
     ) -> AnyElement {
         let event = view.feed.state.data().unwrap().events[index].clone();
-        feed_row(&event, index, view.feed_view.selected == Some(index), cx)
+        feed_row(
+            &event,
+            index,
+            view.feed_view.selected == Some(index),
+            view.now,
+            cx,
+        )
     }
 }
 
@@ -1055,9 +1176,8 @@ fn panel_body<T: PanelRows + 'static>(
     };
     let empty = data.len() == 0;
     let summary = T::summary(data);
-    let partial = Some(summary.notice);
-    let header = Some(summary.count);
-    let list = uniform_rows::<T>(column, data.len(), opacity, handles, cx);
+    let partial = summary.notice;
+    let list = list_rows::<T>(column, opacity, handles, cx);
     let empty_panel = div()
         .debug_selector(move || format!("{}-empty", column_name(column)))
         .flex_1()
@@ -1079,16 +1199,6 @@ fn panel_body<T: PanelRows + 'static>(
         .flex_1()
         .min_h_0()
         .min_w_0()
-        .children(header.map(|text| {
-            div()
-                .debug_selector(move || format!("{}-summary", column_name(column)))
-                .flex_none()
-                .px_3()
-                .py_2()
-                .text_size(tiny)
-                .text_color(colors.fg_subtle)
-                .child(text)
-        }))
         .children(partial.map(|text| {
             div()
                 .debug_selector(move || format!("{}-partial", column_name(column)))
@@ -1113,9 +1223,8 @@ fn column_name(column: Column) -> &'static str {
     }
 }
 
-fn uniform_rows<T: PanelRows + 'static>(
+fn list_rows<T: PanelRows + 'static>(
     column: Column,
-    count: usize,
     opacity: f32,
     handles: &PanelHandles,
     cx: &mut Context<HomeView>,
@@ -1123,21 +1232,12 @@ fn uniform_rows<T: PanelRows + 'static>(
     let scroll = handles.scroll.clone();
     let motion = handles.motion.clone();
     let focus = handles.focus.clone();
-    let list = gpui::uniform_list(
-        match column {
-            Column::Home => "home-list",
-            Column::Feed => "feed-list",
-        },
-        count,
-        cx.processor(
-            move |view: &mut HomeView, range: std::ops::Range<usize>, window, cx| {
-                range
-                    .map(|index| T::row(view, index, window, cx))
-                    .collect::<Vec<_>>()
-            },
-        ),
+    let list = gpui::list(
+        scroll,
+        cx.processor(move |view: &mut HomeView, index: usize, window, cx| {
+            T::row(view, index, window, cx)
+        }),
     )
-    .track_scroll(&scroll)
     .size_full();
     let this = cx.entity().downgrade();
     let on_drag: scroll::OnDragging = Rc::new(move |axis, dragging, _window, cx| {
@@ -1182,13 +1282,14 @@ fn uniform_rows<T: PanelRows + 'static>(
         .min_w_0()
         .overflow_hidden()
         .child(list)
-        .child(scroll::wheel_overlay(
+        .child(scroll::wheel_overlay_with(
             match column {
                 Column::Home => "home-rows",
                 Column::Feed => "feed-rows",
             },
-            gpui::Axis::Vertical,
+            scroll::WheelAxes::Vertical,
             motion,
+            Instant::now,
         ))
         .child(bar)
         .on_hover(cx.listener(move |view, hovered, _, cx| {
@@ -1204,4 +1305,25 @@ fn uniform_rows<T: PanelRows + 'static>(
             view.key_down(column, event, window, cx);
         }))
         .into_any_element()
+}
+
+// Keyed state is released when a retained page leaves the rendered tree.
+// That cancels its one timer even if the host keeps the entity alive.
+fn visible_lifetime(cx: &Context<HomeView>) -> AnyElement {
+    let owner = cx.entity().downgrade();
+    let key = format!("home-visible-lifetime-{}", cx.entity_id().as_u64());
+    gpui::canvas(
+        move |_, window, cx| {
+            let owner = owner.clone();
+            window.use_keyed_state(key.clone(), cx, move |_, lease| {
+                lease
+                    .on_release(move |_, cx| {
+                        let _ = owner.update(cx, |view, _| view.cancel_activity());
+                    })
+                    .detach();
+            });
+        },
+        |_, _, _, _| {},
+    )
+    .into_any_element()
 }
