@@ -72,7 +72,7 @@ pub enum OverviewAction {
 - **Contributors**：区分 204 `EmptyRepository`、成功空内容和失败；显示 `observed_entries()` 的观察条数，不声称是完整人数；关联用户与匿名贡献者都显示 name/login 首字母（`Avatar`），不显示 email 或 raw JSON，也不下载头像。列表有界，Partial/延迟状态保留。
 - **Languages**：显示字节派生的 share，不是 LOC；`total_bytes == 0` 时不推断 `0%` 分布。每个语言行同时有文字名称、share/bytes 标签和 bar，颜色取当前主题的 chart 色板，不替换主题、不使用随机色。超长名称用省略号，列表有界，并注明舍入后不保证总和恰为 100%。
 - **布局**：三段位于 TOP 横条，宽窗口并排，窄窗口在顶部区域内换行/堆叠；不建立右侧纵栏。列表行数按窗口宽度收紧（宽窗口 3 行，窄窗口 2 行），保证组件高度有界并为下方文件阅读保留空间。溢出内容使用公共 `ui::scroll` 的 `Motion` / `Bar` / `Bars`，没有新滚动代码。
-- **Popover**：Release notes 打开为 bounded 本地 popover，最大高度固定；打开时焦点进入 popover，Escape、Close 按钮或点击外部关闭并把焦点还给组件；关闭时取消共享滚动 motion，避免与相邻阅读器竞争。popover 的滚动与相邻模拟阅读器互不影响。
+- **Popover**：Release notes 打开为 bounded 本地 popover；面板自身按 viewport 可用空间 clamp 宽高与位置，短/窄窗口下不会伸出窗口外。打开时焦点进入 popover，面板消费 Tab/Shift+Tab 以阻止焦点落到后方 overview 或阅读器，Escape、Close 按钮或点击外部关闭并把焦点还给组件；关闭时取消共享滚动 motion，避免与相邻阅读器竞争。popover 的滚动与相邻模拟阅读器互不影响。
 
 ## 独立预览
 
@@ -93,7 +93,7 @@ cargo run --example repository_overview
 - 匿名与大量贡献者、有界行数、email/raw JSON 不显示；
 - 204 空仓库与成功空内容、错误分离；
 - 零语言不推断 0%、长名称与舍入、有界语言行；
-- popover 打开/关闭、焦点返回、Escape 与外部点击、bounded 高度；
+- popover 打开/关闭、焦点返回、Escape 与外部点击、bounded 高度、短窗口内的 viewport 适配与 Tab 焦点保持；
 - popover 滚动/关闭不泄漏到相邻模拟阅读器；
 - 回调使用当前绑定且每次点击触发一次；
 - 桌面与窄窗口下组件保持在 TOP、有界高度、无右侧纵栏，并给阅读器留空间。

@@ -400,6 +400,24 @@ impl Render for RepositoryOverview {
             );
 
         if let Some((id, tag_name, body)) = notes_release {
+            let anchor = self
+                .bounds
+                .borrow()
+                .map(|bounds| Point::new(bounds.left(), bounds.bottom()))
+                .unwrap_or_default();
+            // Fit the real panel, not just the overlay, inside the viewport. A short window can
+            // leave less than the preferred panel height below the TOP strip.
+            let margin = px(8.0);
+            let panel_width = px(380.0).min((viewport.width - margin * 2.0).max(px(160.0)));
+            let panel_height = px(260.0).min((viewport.height - margin * 2.0).max(px(120.0)));
+            let panel_x = anchor
+                .x
+                .min((viewport.width - panel_width - margin).max(margin))
+                .max(margin);
+            let panel_y = anchor
+                .y
+                .min((viewport.height - panel_height - margin).max(margin))
+                .max(margin);
             let panel = notes_panel(
                 NotesPanel {
                     id,
@@ -410,15 +428,12 @@ impl Render for RepositoryOverview {
                     scroll_handle: &self.notes_scroll,
                     motion: &self.notes_motion,
                     opacity: notes_opacity,
+                    width: panel_width,
+                    height: panel_height,
                     this: &this,
                 },
                 cx,
             );
-            let anchor = self
-                .bounds
-                .borrow()
-                .map(|bounds| Point::new(bounds.left(), bounds.bottom()))
-                .unwrap_or_default();
             let shield_this = this.clone();
             let shield = div()
                 .id("overview-notes-dismiss")
@@ -442,7 +457,7 @@ impl Render for RepositoryOverview {
                 .w(viewport.width)
                 .h(viewport.height)
                 .child(shield)
-                .child(div().absolute().left(anchor.x).top(anchor.y).child(panel));
+                .child(div().absolute().left(panel_x).top(panel_y).child(panel));
             root = root.child(
                 gpui::deferred(gpui::anchored().position(Point::default()).child(overlay))
                     .with_priority(1),
@@ -1084,6 +1099,8 @@ struct NotesPanel<'a> {
     scroll_handle: &'a ScrollHandle,
     motion: &'a scroll::Motion<ScrollHandle>,
     opacity: f32,
+    width: Pixels,
+    height: Pixels,
     this: &'a gpui::WeakEntity<RepositoryOverview>,
 }
 
@@ -1097,6 +1114,8 @@ fn notes_panel(panel: NotesPanel<'_>, cx: &mut Context<RepositoryOverview>) -> A
         scroll_handle,
         motion,
         opacity,
+        width,
+        height,
         this,
     } = panel;
     let theme = cx.theme();
@@ -1159,7 +1178,7 @@ fn notes_panel(panel: NotesPanel<'_>, cx: &mut Context<RepositoryOverview>) -> A
         .id("overview-notes-body")
         .debug_selector(|| "overview-notes-body".to_string())
         .relative()
-        .h(px(160.0))
+        .h((height - px(80.0)).max(px(40.0)))
         .w_full()
         .overflow_y_scroll()
         .track_scroll(scroll_handle)
@@ -1189,8 +1208,8 @@ fn notes_panel(panel: NotesPanel<'_>, cx: &mut Context<RepositoryOverview>) -> A
         .debug_selector(|| "overview-notes-panel".to_string())
         .track_focus(notes_focus)
         .relative()
-        .w(px(380.0))
-        .max_h(px(260.0))
+        .w(width)
+        .max_h(height)
         .p_3()
         .flex()
         .flex_col()
@@ -1208,11 +1227,15 @@ fn notes_panel(panel: NotesPanel<'_>, cx: &mut Context<RepositoryOverview>) -> A
         })
         .on_key_down({
             let this = this.clone();
-            move |event, window, cx| {
-                if event.keystroke.key == "escape" {
+            move |event, window, cx| match event.keystroke.key.as_str() {
+                // The popover owns the keyboard while it is open: Tab and Shift+Tab must not
+                // move focus into the overview or the reader behind the shield.
+                "tab" => cx.stop_propagation(),
+                "escape" => {
                     let _ = this.update(cx, |view, cx| view.close_notes(window, cx));
                     cx.stop_propagation();
                 }
+                _ => {}
             }
         })
         .child(header)

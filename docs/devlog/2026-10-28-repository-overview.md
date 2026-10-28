@@ -32,6 +32,15 @@
 
 GPUI 测试覆盖：旧仓库/账户/generation 拒绝、单 section 失败/Partial 不影响其他段、latest 404 歧义、draft/prerelease 标签、匿名与大量贡献者及有界行、204/空内容/错误分离、零语言、长名称与舍入、popover 打开/关闭/焦点/Escape/外部点击、popover 滚动不泄漏到相邻模拟阅读器、回调使用当前绑定且每次点击一次、桌面与窄窗口 TOP 有界布局。
 
+## 审查修复轮次（PR #37）
+
+首轮 Codex 审查（commit `c90fd877c3`）提出两条 P2，均属可直接修复：
+
+1. notes popover 只按组件底边定位，短/窄窗口下可能伸出窗口；修复为按 viewport 可用空间 clamp 面板宽度、高度和左上位置，并把面板实际尺寸传入 `notes_panel`。
+2. popover 只 `track_focus`，Tab/Shift+Tab 可把焦点移出到后方 overview/阅读器；修复为在面板 `on_key_down` 中消费 `tab`，与既有 sidebar menu 的焦点包含方式一致。
+
+修复后新增 `notes_panel_fits_a_short_window_and_traps_tab`，覆盖 480×700 窗口下面板完整落在 viewport 内，以及 Tab 后 popover 仍打开、Escape 正常关闭。重新执行 `cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（repository_overview 45 项）与 `cargo fmt --all -- --check`，均通过。
+
 ## 未执行 / 后续
 
 - 未做真实 Windows 预览窗口的人工视觉、鼠标手感和多 DPI 验收；`cargo run` 启动事实不等于视觉验收。

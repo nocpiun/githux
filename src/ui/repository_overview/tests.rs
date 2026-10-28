@@ -581,6 +581,46 @@ fn popover_scrolling_and_dismissal_do_not_leak_to_the_neighbour_reader(cx: &mut 
 }
 
 #[gpui::test]
+fn notes_panel_fits_a_short_window_and_traps_tab(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx);
+    let binding = fixtures::binding(1);
+    assert!(apply_releases(
+        &harness,
+        &binding,
+        SectionState::Ready(fixtures::ready_releases()),
+        cx
+    ));
+    let viewport = size(px(480.0), px(700.0));
+    cx.simulate_resize(viewport);
+    cx.run_until_parked();
+    click("overview-release-notes-4", cx);
+    assert!(cx.debug_bounds("overview-notes-panel").is_some());
+    let panel = bounds("overview-notes-panel", cx);
+    assert!(panel.left() >= px(0.0));
+    assert!(panel.top() >= px(0.0));
+    assert!(
+        panel.right() <= viewport.width + px(1.0),
+        "panel must fit horizontally, got {:?}",
+        panel
+    );
+    assert!(
+        panel.bottom() <= viewport.height + px(1.0),
+        "panel must fit vertically, got {:?}",
+        panel
+    );
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("overview-notes-panel").is_some(),
+        "Tab must not move focus out of the open popover"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-notes-panel").is_none());
+}
+
+#[gpui::test]
 fn callbacks_use_the_current_binding_and_fire_once_per_press(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx);
     let binding = fixtures::binding(1);
