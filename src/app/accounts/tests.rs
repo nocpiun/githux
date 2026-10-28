@@ -113,15 +113,56 @@ fn wait_for(
     cx: &mut VisualTestContext,
     condition: impl Fn(&Snapshot) -> bool,
 ) {
-    for _ in 0..400 {
+    // A generous, deadline-bounded budget: each poll drives the controller's own beat, and the
+    // shared CI runner can be several times slower than a local machine under parallel load.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
         pump(controller, cx);
         std::thread::sleep(Duration::from_millis(5));
         if controller.read_with(cx, |accounts, _| condition(accounts.snapshot())) {
             return;
         }
+        if std::time::Instant::now() >= deadline {
+            let snapshot = controller.read_with(cx, |accounts, _| accounts.snapshot().clone());
+            panic!("the account controller did not settle: {snapshot:?}");
+        }
     }
-    let snapshot = controller.read_with(cx, |accounts, _| accounts.snapshot().clone());
-    panic!("the account controller did not settle: {snapshot:?}");
+}
+
+/// Drives the controller's beat for a short wall-clock window. Used where a test only needs "give
+/// any in-flight work time to land", not a specific state.
+fn settle_beats(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+    settle_beats_for(controller, cx, Duration::from_millis(600));
+}
+
+/// The same, for an explicit window; the no-retry-storm check needs to sit idle long enough that a
+/// loop would have issued several requests.
+fn settle_beats_for(controller: &Entity<Accounts>, cx: &mut VisualTestContext, window: Duration) {
+    let deadline = std::time::Instant::now() + window;
+    while std::time::Instant::now() < deadline {
+        pump(controller, cx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Drives the controller's beat until `condition` holds or a generous deadline passes. Returns
+/// whether the condition held, so a caller can assert on it.
+fn beat_until(
+    controller: &Entity<Accounts>,
+    cx: &mut VisualTestContext,
+    mut condition: impl FnMut(&Entity<Accounts>, &mut VisualTestContext) -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        pump(controller, cx);
+        std::thread::sleep(Duration::from_millis(5));
+        if condition(controller, cx) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+    }
 }
 
 fn put_token(controller: &Entity<Accounts>, cx: &mut VisualTestContext, token: &str) {
@@ -173,7 +214,8 @@ fn select(controller: &Entity<Accounts>, id: u64, cx: &mut VisualTestContext) {
 /// Waits until no account operation is in flight and no cancelled mutation is still settling, so a
 /// test can start the next mutation instead of colliding with an automatic read.
 fn wait_idle(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
-    for _ in 0..400 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
         pump(controller, cx);
         std::thread::sleep(Duration::from_millis(5));
         if controller.read_with(cx, |accounts, _| {
@@ -181,8 +223,10 @@ fn wait_idle(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
         }) {
             return;
         }
+        if std::time::Instant::now() >= deadline {
+            panic!("the account controller did not become idle");
+        }
     }
-    panic!("the account controller did not become idle");
 }
 
 fn snapshot(controller: &Entity<Accounts>, cx: &mut VisualTestContext) -> Snapshot {
@@ -595,10 +639,7 @@ fn cancelled_and_stale_replies_never_overwrite_the_new_operation(cx: &mut TestAp
     );
     // Releasing the older request afterwards must not overwrite the newer view.
     first_gate.release();
-    for _ in 0..50 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    settle_beats(&controller, cx);
     let published = snapshot(&controller, cx);
     assert!(matches!(
         &published.repositories.preview,
@@ -701,10 +742,7 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
         )
         .unwrap();
     gate.release();
-    for _ in 0..80 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    settle_beats(&controller, cx);
     let presentation = snapshot(&controller, cx);
     assert!(
         !format!("{presentation:?}").contains("old-account"),
@@ -771,22 +809,10 @@ fn cancelling_after_a_committed_mutation_reconciles_saved_accounts(cx: &mut Test
     // Cancel while the login is in flight; the login may still commit.
     controller.update(cx, |accounts, cx| accounts.cancel(cx));
     let runtime = controller.read_with(cx, |accounts, _| accounts.runtime.clone().unwrap());
-    // Drive the login to completion through the service itself, then let the
-    // view observe `Settled` and reconcile.
-    for _ in 0..200 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-        if !runtime.accounts.summaries().is_empty() {
-            break;
-        }
-    }
-    for _ in 0..200 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-        if snapshot(&controller, cx).accounts.len() == 1 {
-            break;
-        }
-    }
+    // Drive the login for a bounded while: whether it commits depends on how far it got before the
+    // cancel. Either way the view must end up reconciled with the service, which is what the
+    // assertions below check; this window only lets a commit that did land appear.
+    settle_beats_for(&controller, cx, Duration::from_millis(600));
     let presentation = snapshot(&controller, cx);
     assert_eq!(
         presentation.accounts.len(),
@@ -823,17 +849,12 @@ fn cancelling_revalidation_does_not_publish_its_late_success(cx: &mut TestAppCon
     let key = AccountKey::new(1, HostId::github());
     controller.update(cx, |accounts, cx| accounts.revalidate(key, cx));
     controller.update(cx, |accounts, cx| accounts.cancel(cx));
-    for _ in 0..200 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-        if snapshot(&controller, cx)
+    beat_until(&controller, cx, |_, cx| {
+        snapshot(&controller, cx)
             .status
             .as_ref()
             .is_some_and(|status| status.text.contains("Cancellations settled"))
-        {
-            break;
-        }
-    }
+    });
     let presentation = snapshot(&controller, cx);
     assert!(
         !presentation
@@ -872,9 +893,9 @@ fn closing_the_view_cancels_and_cannot_publish(cx: &mut TestAppContext) {
         }
     });
     gate.release();
-    for _ in 0..50 {
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Give a worker that is finishing after teardown time to try to publish; it must find no
+    // receiver. The window is generous so a slow shared runner cannot make this flaky.
+    std::thread::sleep(Duration::from_millis(300));
     // A worker that finishes after teardown has nowhere to publish a result.
     pump(&controller, cx);
     assert!(controller.read_with(cx, |accounts, _| accounts.inbox.lock().unwrap().is_empty()));
@@ -1303,10 +1324,8 @@ fn the_repository_list_loads_once_by_itself_and_never_storms(cx: &mut TestAppCon
         matches!(&state.repositories.preview, RepositoryPreview::Failed(_))
     });
     let reads_after_failure = failing.repo_reads.load(Ordering::SeqCst);
-    for _ in 0..40 {
-        pump(&controller2, cx);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Idle long enough that a retry loop would have issued several more reads.
+    settle_beats_for(&controller2, cx, Duration::from_millis(1200));
     assert_eq!(
         failing.repo_reads.load(Ordering::SeqCst),
         reads_after_failure,
@@ -1391,16 +1410,12 @@ fn avatars_load_by_identity_and_do_not_cross_accounts(cx: &mut TestAppContext) {
         AvatarState::Loading
     ));
     // Drive the controller's beat until Alice's image decodes.
-    for _ in 0..200 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-        if matches!(
+    beat_until(&controller, cx, |controller, cx| {
+        matches!(
             controller.read_with(cx, |a, _| a.avatar_state_for_test(&alice)),
             Some(AvatarState::Ready(_))
-        ) {
-            break;
-        }
-    }
+        )
+    });
     assert!(
         matches!(
             controller.read_with(cx, |a, _| a.avatar_state_for_test(&alice)),
@@ -1419,16 +1434,12 @@ fn avatars_load_by_identity_and_do_not_cross_accounts(cx: &mut TestAppContext) {
         controller.update(cx, |a, _| a.avatar(bob.clone())),
         AvatarState::Loading
     ));
-    for _ in 0..200 {
-        pump(&controller, cx);
-        std::thread::sleep(Duration::from_millis(5));
-        if matches!(
+    beat_until(&controller, cx, |controller, cx| {
+        matches!(
             controller.read_with(cx, |a, _| a.avatar_state_for_test(&bob)),
             Some(AvatarState::Failed)
-        ) {
-            break;
-        }
-    }
+        )
+    });
     assert!(matches!(
         controller.read_with(cx, |a, _| a.avatar_state_for_test(&bob)),
         Some(AvatarState::Failed)
