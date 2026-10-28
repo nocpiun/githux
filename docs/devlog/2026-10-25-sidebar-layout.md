@@ -245,3 +245,12 @@ Codex 针对 `638b702`（P2）指出：展开过渡期间 More 仍可用，若�
 负责人已验收侧栏并授权合并。同步 main `dd2b1f2`（已合并 content-reader PR #27）时，唯一冲突是 `src/ui/mod.rs` 的模块声明：同时保留 `pub mod reader` 与 `pub(crate) mod scroll`，其余 reader 代码直接采用 main；没有调整侧栏状态机、阈值、动画或布局。共享滚动文档同步为已实现的消费者状态，区分 reader 已复用的 Bar/Bars 与尚待接入的公共 wheel Motion。
 
 组合验证：fmt、locked all-target check、clippy `-D warnings`、cargo test（517 bin + 123 reader，均通过）、cargo build 与 diff check 通过，所有 Cargo 编译均使用本 worktree target、`-j 1`。第一次测试在构建产品 binary 时因旧预览占用 `githux.exe` 被系统拒绝，尚未执行用例；核对预览路径及 PID40368/系统创建时间后只关闭该旧窗口，再执行上述通过的测试。负责人验收针对此前的 `f1ccf31` 侧栏行为，组合提交仍须重新通过 CI 和审查后由主 Agent squash 合并。
+
+
+### 同步后审查：动画中重新抓取 sash 的交接帧
+
+Codex 在 `c95397f` 指出：collapse 中重新开始 resize 会取消 transition 并把模式改回 expanded，紧接着 `resize_pointer_at` 的 `sample` 将当前呈现覆盖为旧展开目标。新增回归在旧实现上复现：80ms 时约78.336px，第一次小幅移动跳到232px。
+
+修复 `sample` 的无 transition 分支：非 reduced-motion 的手动拖动期间保留当前帧，由指针输入更新；不再在重绘或第一次 move 的前置采样中恢复旧目标。普通非拖动采样、reduced-motion、窗口 settle、已有模式切换曲线继续保持原语义。两条新增回归覆盖折叠/展开动画被抓取后到首个 move 前的帧冻结，以及折叠中抓取、小幅移动、后续中间帧和释放后的正确终点。
+
+旧实现复现失败后，修复版519 bin + 123 reader tests全部通过；fmt、全目标check/clippy、普通build和diff check通过，`-j 1`。四个旧线程逐项核实收尾：阈值重叠、持续move截断动画和隐藏More菜单已有修复；旧“拖动展开恢复记忆宽度”意见按负责人后续“展开后sash对齐鼠标绝对位置”的明确要求裁决为被取代，保持true/coordinator。

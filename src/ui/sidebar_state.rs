@@ -112,7 +112,12 @@ impl SidebarState {
             self.transition = None;
         }
         let Some(t) = &self.transition else {
-            self.frame = target;
+            // After a new grab interrupts a toggle, the pointer owns the presented frame.
+            // Redraws (including the sample before its first move) must not restore the old
+            // remembered target. Resize events update the frame; reduced motion still settles.
+            if !self.dragging || reduced {
+                self.frame = target;
+            }
             return false;
         };
         let progress =

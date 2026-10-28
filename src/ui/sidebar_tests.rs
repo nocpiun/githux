@@ -1794,6 +1794,55 @@ fn assert_resize_switch_survives_moves(expanding: bool) {
 }
 
 #[test]
+fn grabbing_an_animation_keeps_its_frame_until_the_pointer_moves() {
+    for initially_collapsed in [false, true] {
+        let start = Instant::now();
+        let mut state = SidebarState::default();
+        state.collapsed = initially_collapsed;
+        state.settle(1200.0);
+        state.toggle(start, 1200.0, false);
+        let grabbed_at = start + Duration::from_millis(80);
+        assert!(state.sample(grabbed_at, 1200.0, false));
+        let presented = state.frame;
+        state.begin_resize(presented.width + 4.0, presented.width);
+        // A redraw can happen after the press and before the first drag event. It must not
+        // restore the remembered target or continue the old toggle animation underneath us.
+        assert!(!state.sample(grabbed_at + Duration::from_millis(300), 1200.0, false));
+        assert_eq!(state.frame.width, presented.width);
+        assert_eq!(state.frame.expansion, presented.expansion);
+    }
+}
+
+#[test]
+fn resizing_during_collapse_starts_from_the_grabbed_frame() {
+    let start = Instant::now();
+    let mut state = SidebarState::default();
+    state.toggle(start, 1200.0, false);
+    let grabbed_at = start + Duration::from_millis(80);
+    assert!(state.sample(grabbed_at, 1200.0, false));
+    let presented = state.frame;
+    assert!(presented.width < SIDEBAR_MIN_WIDTH - SIDEBAR_DRAG_COLLAPSE_THRESHOLD);
+    state.begin_resize(presented.width + 4.0, presented.width);
+    let moved_at = grabbed_at + Duration::from_millis(16);
+    state.resize_pointer_at(presented.width + 3.0, moved_at, 1200.0, false);
+    assert!(state.collapsed);
+    assert_eq!(state.frame.width, presented.width);
+    assert_eq!(state.frame.expansion, presented.expansion);
+    assert!(state.sample(moved_at + Duration::from_millis(40), 1200.0, false));
+    assert!(state.frame.width < presented.width);
+    assert!(state.frame.width > SIDEBAR_COLLAPSED_WIDTH);
+    assert!(state.footer_compact());
+    state.end_resize(moved_at + Duration::from_millis(40), false, false);
+    assert!(!state.sample(
+        moved_at + Duration::from_millis(SIDEBAR_ANIMATION_MS),
+        1200.0,
+        false
+    ));
+    assert_eq!(state.frame.width, SIDEBAR_COLLAPSED_WIDTH);
+    assert_eq!(state.frame.expansion, 0.0);
+}
+
+#[test]
 fn resize_collapse_survives_continued_pointer_events() {
     assert_resize_switch_survives_moves(false);
 }

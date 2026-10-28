@@ -2,7 +2,7 @@
 
 2026-10-25 sidebar-layout 实现，含负责人真实窗口反馈后的两轮修订。负责人要求真实窗口验收后再合并；当前实现及测试不构成人工视觉签字。
 
-侧栏默认展开 232 logical px，可拖动到 160–360px（`SIDEBAR_MIN_WIDTH` = 160）；上限还受窗口剩余 island 至少 600px 的预算约束（880px 窗口最多 265px）。收起宽 56px，由 28px 共同方形控件尺度加 8px 左内缩组成（右侧由 island gap 补齐）。展开/收起用约 200ms ease-out 插值呈现宽度，sidebar、island 左边界、resize 命中带与圆按钮共用同一帧值；快速反向从当前呈现值继续，手动拖动和窗口变化中断动画，终点恢复本次运行最后选择的宽度并按当前窗口限制，遵循现有 reduced-motion。宽度、收起状态和滚动仅属 `Shell` 的窗口局部状态，没有磁盘偏好或账户数据变更。参数集中在 `src/ui/geometry.rs` 的 SIDEBAR/REPO/ACCOUNT/INDICATOR 常量，状态与限制在 `src/ui/sidebar_state.rs`。
+侧栏默认展开 232 logical px，可拖动到 160–360px（`SIDEBAR_MIN_WIDTH` = 160）；上限还受窗口剩余 island 至少 600px 的预算约束（880px 窗口最多 265px）。收起宽 56px，由 28px 共同方形控件尺度加 8px 左内缩组成（右侧由 island gap 补齐）。展开/收起用约 200ms ease-out 插值呈现宽度，sidebar、island 左边界、resize 命中带与圆按钮共用同一帧值；快速反向从当前呈现值继续，手动拖动和窗口变化中断动画；新拖动接管未完成的过渡时保留抓取时的呈现帧，后续阈值过渡从该帧继续，不先恢复记忆宽度，终点恢复本次运行最后选择的宽度并按当前窗口限制，遵循现有 reduced-motion。宽度、收起状态和滚动仅属 `Shell` 的窗口局部状态，没有磁盘偏好或账户数据变更。参数集中在 `src/ui/geometry.rs` 的 SIDEBAR/REPO/ACCOUNT/INDICATOR 常量，状态与限制在 `src/ui/sidebar_state.rs`。
 
 侧栏背景、字体及控件使用 Ely 中性色主题。行背景从客户区左缘内缩 8px；行右侧与 island 间的 8px gap 补齐对称外留白。底部入口距离客户区底部也是 8px。仓库 viewport 与固定 footer 之间用一条 1px、低对比度 `colors.border` 细线分隔；线自带上下对称留白（各 8px，`FOOTER_DIVIDER_SPACE`），收起/展开两态视觉等距，不随仓库滚动。水平方向与行背景同一 lane：距客户区左缘 8px、距 island 边仍是 gap，因此线段两端在“列宽 + island gap”的可见侧栏范围内左右对称；只在列宽内做 `px(8)` 双侧内缩会相对该可见范围左偏约 4px。展开时账号头像用 Ely Md（32px），行高 48px；仓库行内左 padding 为 4px。收起时 Home/Settings、仓库、账号和 More 使用同一 28px 方形命中背景并居中，账号头像与仓库同用 Ely Xs（20px）；展开过程连续插值头像与行高，不留下宽矮矩形或高大账号块。Profile 页面中的 Ely 大头像不因此改变。头像和长标识在有界行内显示，完整名字保留为 tooltip/可访问名称。
 
