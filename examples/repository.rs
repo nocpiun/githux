@@ -7,23 +7,21 @@
 //!
 //! Everything external is deterministic and injected:
 //!
-//! * a scripted in-memory [`Transport`] that answers the exact REST calls the
-//!   page makes, so no request leaves the machine;
-//! * a temporary SQLite directory and an in-memory credential store holding one
+//! * `src/bin_support/repository_fixture.rs` answers by request identity, so the
+//!   same file, directory or branch can be opened again and again, in any order;
+//! * a temporary SQLite directory and an in-memory credential store hold one
 //!   synthetic PAT, so no real credential is read.
 //!
-//! The product binary never declares these modules or this entry point, and the
-//! release artifact contains no `examples/repository.exe`.
+//! The preview toolbar above the page is development scaffolding: it switches
+//! scenes, resets the page and reports the actions the host would take. It is
+//! not part of the product page and never appears in the release binary.
 //!
 //! ## What a production host does instead
-//!
-//! A real host owns the service and passes the already authenticated
-//! capabilities; nothing in this file is needed for production:
 //!
 //! ```ignore
 //! let services = RepositoryPageServices::new(accounts.clone(), executor.clone());
 //! let page = cx.new(|cx| {
-//!     let mut page = RepositoryPage::new(services, locator, saved_intent, cx);
+//!     let mut page = RepositoryPage::new(services, locator, saved_intent, window, cx);
 //!     page.activate(cx);            // opens a fresh, verified repository session
 //!     page
 //! });
@@ -59,36 +57,35 @@ mod repository_modules;
 #[allow(unused_imports)]
 use repository_modules as ui;
 #[allow(unused_imports)]
-use repository_modules::{reader, repository};
+use repository_modules::repository;
 
-use std::collections::VecDeque;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ely_core::{
     Assets,
-    theme::{Mode, Theme},
+    buttons::Button,
+    theme::{ActiveTheme, Mode, TextSize, Theme},
 };
-use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext, Bounds, Context, Entity, IntoElement, ParentElement, Render, SharedString,
+    Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+};
 
 use crate::auth::token::Pat;
 use crate::data::AccountService;
 use crate::domain::repository::RepositoryLocator;
 use crate::github::GitHubClient;
-use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
-use crate::network::transport::{
-    HttpRequest, HttpResponse, Transport, TransportError, json_response,
-};
-use crate::repository::navigation::RepositoryNavigation;
-use crate::repository::{PageAction, RepositoryPage, RepositoryPageServices};
+use crate::repository::{PageAction, RepositoryNavigation, RepositoryPage, RepositoryPageServices};
+use crate::repository_modules::fixture::{FixtureTransport, NAME, OWNER, Scene};
 use crate::storage::accounts::AccountDatabaseConfig;
 
 fn main() {
-    // Every external boundary is injected before the window opens: a scripted
-    // transport, a temporary account directory and one synthetic PAT.
+    // Every external boundary is injected before the window opens: the shared
+    // fixture transport, a temporary account directory and one synthetic PAT.
     let fixture = FixtureRuntime::new();
     let services = RepositoryPageServices::new(fixture.accounts.clone(), fixture.executor.clone());
+    let transport = fixture.transport.clone();
     gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
@@ -99,7 +96,7 @@ fn main() {
                 theme.font_family = fonts::UI_FAMILY.into();
                 theme.mono_family = fonts::CODE_FAMILY.into();
             });
-            let bounds = Bounds::centered(None, size(px(1180.0), px(820.0)), cx);
+            let bounds = Bounds::centered(None, size(px(1240.0), px(820.0)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(820.0), px(520.0))),
@@ -110,28 +107,9 @@ fn main() {
                 }),
                 ..Default::default()
             };
-            cx.open_window(options, |window, cx| {
-                cx.new(|cx| {
-                    let mut page = RepositoryPage::new(
-                        services.clone(),
-                        RepositoryLocator::new("octo", "demo").expect("fixture locator"),
-                        RepositoryNavigation::default(),
-                        window,
-                        cx,
-                    );
-                    page.on_action(std::rc::Rc::new(|action, _window, _cx| match action {
-                        // The preview reports actions instead of opening a
-                        // browser or navigating a different repository.
-                        PageAction::OpenExternal(url) => {
-                            eprintln!("repository preview: external link not opened: {url}");
-                        }
-                        PageAction::LinkNotFollowed { path, reason } => {
-                            eprintln!("repository preview: link {path} not followed: {reason}");
-                        }
-                    }));
-                    page.activate(cx);
-                    page
-                })
+            let transport = transport.clone();
+            cx.open_window(options, move |window, cx| {
+                cx.new(|cx| Preview::new(services.clone(), transport.clone(), window, cx))
             })
             .expect("the repository preview window failed to open");
             cx.on_window_closed(|cx, _| {
@@ -151,27 +129,30 @@ fn main() {
 struct FixtureRuntime {
     accounts: Arc<AccountService>,
     executor: Arc<BackgroundExecutor>,
+    transport: Arc<FixtureTransport>,
     _temp: tempfile::TempDir,
-    _runtime: tokio::runtime::Runtime,
 }
 
 impl FixtureRuntime {
-    /// Builds the real service stack over a scripted transport and a temporary
-    /// account directory. Nothing here reads a real credential or the network.
+    /// Builds the real service stack over the shared fixture transport and a
+    /// temporary account directory. Nothing here reads a real credential or the
+    /// network.
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("temporary account directory");
-        let transport = Arc::new(ScriptedTransport::demo());
-        let executor = Arc::new(BackgroundExecutor::new(2));
+        let transport = Arc::new(FixtureTransport::new(Scene::Normal));
+        let executor = Arc::new(BackgroundExecutor::new(4));
         let store = Arc::new(auth::InMemoryCredentialStore::new());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("fixture runtime");
+        // Opened and signed in on the throwaway runtime; every later service call
+        // runs on the `BackgroundExecutor`'s own runtime thread.
         let accounts = runtime.block_on(async {
             let accounts = AccountService::open(
                 AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
                 store,
-                Arc::new(GitHubClient::new(Default::default(), transport)),
+                Arc::new(GitHubClient::new(Default::default(), transport.clone())),
                 executor.clone(),
             )
             .await
@@ -185,188 +166,207 @@ impl FixtureRuntime {
         Self {
             accounts,
             executor,
+            transport,
             _temp: temp,
-            _runtime: runtime,
         }
     }
 }
 
-// No explicit shutdown: the executor's own `Drop` (when the last reference is
-// released) stops accepting work, drains tracked tasks and joins its thread.
-
-/// A deterministic transport: every scripted request is answered in order.
-///
-/// It is fixture material for the preview only; the production transport is the
-/// existing `ReqwestTransport` and is untouched.
-struct ScriptedTransport {
-    responses: Mutex<VecDeque<HttpResponse>>,
-    requests: Mutex<Vec<HttpRequest>>,
+/// The development shell around the page: a scene toolbar and an action log.
+struct Preview {
+    services: RepositoryPageServices,
+    transport: Arc<FixtureTransport>,
+    page: Entity<RepositoryPage>,
+    scene: Scene,
+    actions: Vec<String>,
+    mismatches: usize,
 }
 
-impl ScriptedTransport {
-    fn demo() -> Self {
-        let mut responses = VecDeque::new();
-        let commit = "c0ffee0000000000000000000000000000000000";
-        let root = "1111111111111111111111111111111111111111";
-        let docs = "2222222222222222222222222222222222222222";
-        let readme_blob = "3333333333333333333333333333333333333333";
-        // GET /user (synthetic login)
-        responses.push_back(json_response(
-            200,
-            &serde_json::json!({"id": 7, "login": "octo"}).to_string(),
-        ));
-        // GET /repos/octo/demo
-        responses.push_back(json_response(
-            200,
-            &serde_json::json!({
-                "id": 42,
-                "name": "demo",
-                "owner": {"id": 7, "login": "octo"},
-                "description": "Deterministic repository preview with no real network.",
-                "visibility": "public",
-                "private": false,
-                "default_branch": "main",
-                "fork": false,
-                "archived": false,
-                "stargazers_count": 128,
-                "forks_count": 9,
-                "open_issues_count": 4,
-                "subscribers_count": 12,
-                "size": 64,
-                "html_url": "https://example.invalid/octo/demo",
-                "clone_url": "https://example.invalid/octo/demo.git",
-                "pushed_at": "2026-10-20T10:00:00Z"
-            })
-            .to_string(),
-        ));
-        // GET /repos/octo/demo/branches
-        responses.push_back(json_response(
-            200,
-            &serde_json::json!([
-                {"name": "main", "commit": {"sha": commit}, "protected": true},
-                {"name": "docs", "commit": {"sha": "beef000000000000000000000000000000000000"}, "protected": false}
-            ])
-            .to_string(),
-        ));
-        // GET /repos/octo/demo/commits/main
-        responses.push_back(json_response(
-            200,
-            &serde_json::json!({
-                "sha": commit,
-                "commit": {
-                    "message": "Fixture commit",
-                    "tree": {"sha": root},
-                    "author": {"name": "octo", "email": null, "date": "2026-10-20T10:00:00Z"},
-                    "committer": {"name": "octo", "email": null, "date": "2026-10-20T10:00:00Z"}
-                }
-            })
-            .to_string(),
-        ));
-        // GET /repos/octo/demo/git/trees/{root}
-        responses.push_back(json_response(
-            200,
-            &serde_json::json!({
-                "sha": root,
-                "truncated": false,
-                "tree": [
-                    {"path": "README.md", "mode": "100644", "type": "blob", "sha": readme_blob, "size": README.len()},
-                    {"path": "docs", "mode": "040000", "type": "tree", "sha": docs},
-                    {"path": "src", "mode": "040000", "type": "tree", "sha": "5555555555555555555555555555555555555555"}
-                ]
-            })
-            .to_string(),
-        ));
-        // GET /repos/octo/demo/readme?ref=...
-        responses.push_back(json_response(
-            200,
-            &serde_json::json!({
-                "type": "file",
-                "path": "README.md",
-                "sha": readme_blob,
-                "size": README.len()
-            })
-            .to_string(),
-        ));
-        // GET /repos/octo/demo/git/blobs/{readme_blob}
-        responses.push_back(blob_response(readme_blob, README.as_bytes().to_vec()));
-        Self {
-            responses: Mutex::new(responses),
-            requests: Mutex::new(Vec::new()),
-        }
+impl Preview {
+    fn new(
+        services: RepositoryPageServices,
+        transport: Arc<FixtureTransport>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let page = Preview::open_page(&services, window, cx);
+        let this = Self {
+            services,
+            transport,
+            page,
+            scene: Scene::Normal,
+            actions: Vec::new(),
+            mismatches: 0,
+        };
+        this.wire_actions(cx);
+        this
     }
-}
 
-impl Transport for ScriptedTransport {
-    fn execute<'a>(
-        &'a self,
-        request: HttpRequest,
-        cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
-        Box::pin(async move {
-            if cancel.is_cancelled() {
-                return Err(TransportError::Cancelled);
-            }
-            self.requests.lock().unwrap().push(request);
-            let response = self.responses.lock().unwrap().pop_front();
-            match response {
-                Some(response) => Ok(response),
-                // The demo only scripts the first screen; a further request is a
-                // typed 404 rather than a silent empty result.
-                None => Ok(json_response(
-                    404,
-                    &serde_json::json!({"message": "not scripted in the preview"}).to_string(),
-                )),
-            }
+    fn open_page(
+        services: &RepositoryPageServices,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<RepositoryPage> {
+        let services = services.clone();
+        let locator = RepositoryLocator::new(OWNER, NAME).expect("fixture locator");
+        cx.new(|cx| {
+            let mut page = RepositoryPage::new(
+                services,
+                locator,
+                RepositoryNavigation::default(),
+                window,
+                cx,
+            );
+            page.activate(cx);
+            page
         })
     }
 
-    fn execute_bounded<'a>(
-        &'a self,
-        request: HttpRequest,
-        cancel: CancellationToken,
-        max_body_bytes: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
-        Box::pin(async move {
-            let response = self.execute(request, cancel).await?;
-            if response.body.len() > max_body_bytes {
-                return Err(TransportError::ResponseTooLarge {
-                    limit: max_body_bytes,
+    /// Reports actions instead of opening a browser or navigating elsewhere.
+    fn wire_actions(&self, cx: &mut Context<Self>) {
+        let log = cx.entity().downgrade();
+        let page = self.page.clone();
+        page.update(cx, |page, _| {
+            page.on_action(std::rc::Rc::new(move |action, _window, cx| {
+                let text = match action {
+                    PageAction::OpenExternal(url) => format!("external link (not opened): {url}"),
+                    PageAction::LinkNotFollowed { path, reason } => {
+                        format!("link not followed: {path} — {reason}")
+                    }
+                };
+                let _ = log.update(cx, |preview, cx| {
+                    preview.actions.push(text);
+                    preview.mismatches = preview.transport.mismatches().len();
+                    cx.notify();
                 });
-            }
-            Ok(response)
-        })
+            }));
+        });
+    }
+
+    /// Restarts the page under the current scene, exactly as a host would after
+    /// an account/authorization change.
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transport.set_scene(self.scene);
+        let fresh = self.page.clone();
+        fresh.update(cx, |page, cx| page.deactivate(cx));
+        self.page = Preview::open_page(&self.services, window, cx);
+        self.wire_actions(cx);
+        self.actions.clear();
+        self.mismatches = 0;
+        cx.notify();
+    }
+
+    fn choose(&mut self, scene: Scene, window: &mut Window, cx: &mut Context<Self>) {
+        self.scene = scene;
+        self.reset(window, cx);
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let small = theme.text_size(TextSize::Xs);
+        let scenes = Scene::ALL.iter().enumerate().map(|(index, &scene)| {
+            let entity = cx.entity();
+            let active = scene == self.scene;
+            Button::new(SharedString::from(format!("scene-{index}")), scene.label())
+                .variant(if active {
+                    ely_core::buttons::ButtonVariant::Primary
+                } else {
+                    ely_core::buttons::ButtonVariant::Secondary
+                })
+                .size(ely_core::theme::ControlSize::Sm)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |preview, cx| preview.choose(scene, window, cx));
+                })
+                .into_any_element()
+        });
+        let reset = {
+            let entity = cx.entity();
+            Button::new("scene-reset", "Reset")
+                .variant(ely_core::buttons::ButtonVariant::Ghost)
+                .size(ely_core::theme::ControlSize::Sm)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |preview, cx| preview.reset(window, cx));
+                })
+        };
+        let log = if self.actions.is_empty() {
+            "No page actions reported yet.".to_string()
+        } else {
+            self.actions
+                .iter()
+                .rev()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("  ·  ")
+        };
+        let mismatch = (self.mismatches > 0).then(|| {
+            div()
+                .debug_selector(|| "preview-fixture-mismatch".to_string())
+                .text_size(small)
+                .text_color(colors.danger)
+                .child(format!(
+                    "{} fixture request(s) were not modelled — see the console.",
+                    self.mismatches
+                ))
+        });
+        div()
+            .debug_selector(|| "preview-toolbar".to_string())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_none()
+            .w_full()
+            .px_3()
+            .py_2()
+            .bg(colors.bg)
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                // One row that scrolls horizontally instead of growing the
+                // window or wrapping onto several lines.
+                div()
+                    .id("preview-scenes")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .children(scenes)
+                    .child(reset),
+            )
+            .child(
+                div()
+                    .text_size(small)
+                    .text_color(colors.fg_muted)
+                    .child(self.scene.description()),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "preview-action".to_string())
+                    .text_size(small)
+                    .text_color(colors.fg_subtle)
+                    .child(log),
+            )
+            .children(mismatch)
+            .child(div().text_size(small).text_color(colors.fg_subtle).child(
+                "Development preview · deterministic local fixture, synthetic token, no network. \
+                         The toolbar is not part of the product page.",
+            ))
     }
 }
 
-fn blob_response(sha: &str, bytes: Vec<u8>) -> HttpResponse {
-    use base64::Engine;
-    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    json_response(
-        200,
-        &serde_json::json!({
-            "sha": sha,
-            "encoding": "base64",
-            "size": bytes.len(),
-            "content": content
-        })
-        .to_string(),
-    )
+impl Render for Preview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.bg)
+            .child(self.toolbar(cx))
+            .child(div().flex_1().min_h_0().w_full().child(self.page.clone()))
+    }
 }
-
-const README: &str = r#"# Repository preview
-
-This README comes from the **real** `RepositorySession` → `fetch_blob` →
-`PreparedContent` → `ReaderView` pipeline. The only fakes are the transport
-responses, the temporary account database and the synthetic PAT.
-
-- expanding `docs` loads exactly one more tree
-- selecting a file shows the read-only source view
-- [a relative link](docs/guide.md) is followed at this commit
-- [an external link](https://example.com) is reported, never opened
-
-```rust
-fn greeting() -> &'static str {
-    "你好，repository preview"
-}
-```
-"#;

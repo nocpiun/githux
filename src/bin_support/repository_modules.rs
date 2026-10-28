@@ -6,8 +6,13 @@
 // The page keeps using the real `crate::ui::...` paths, so no implementation is
 // duplicated here. The scroll module declares its own children next to it, and
 // the reader module declares its own submodules the same way.
+//
+// `fixture` is the one development fixture the preview and the tests both browse;
+// it is compiled only through this development-only assembly.
 #![allow(dead_code, unused_imports)]
 
+#[path = "repository_fixture.rs"]
+pub mod fixture;
 #[path = "../ui/geometry.rs"]
 pub mod geometry;
 #[path = "../ui/reader/mod.rs"]

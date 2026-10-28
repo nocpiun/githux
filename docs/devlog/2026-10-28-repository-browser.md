@@ -1,46 +1,76 @@
-# 仓库浏览页面：真实数据阅读切片
+# 仓库浏览页面：真实数据阅读切片（返工）
 
-更新：2026-10-28。任务 `repository-browser`，worktree `D:\githux-repository-browser`，分支 `feature/repository-browser`，基线 `913eb5e`（main，PR28，含 sidebar PR20、reader PR27）。
+更新：2026-10-28。任务 `repository-browser`，worktree `D:\githux-repository-browser`，分支 `feature/repository-browser`，PR #35。基线 `913eb5e`（main，PR28）；本轮先整合 origin/main `342e72d`（reader-motion PR32、page-data PR33）再返工。
 
-## 交付内容
+## 本轮返工背景
 
-- `src/ui/repository/**`：`navigation.rs`（纯导航状态、`TreeModel`、错误分类、分支选择与完整性说明）、`mod.rs`（页面视图、代次/授权/发布、后台任务队列）、`view.rs`（摘要、树列、阅读器列）、`tests.rs`（18 项页面测试）。
-- `examples/repository.rs`：确定性脚本传输 + 临时账户目录 + 合成凭据的独立预览，跑真实服务管线。
-- `src/bin_support/repository_modules.rs`：供 example/test 复用的薄 `#[path]` 模块装配。
-- `tests/repository.rs`：集成入口，让 `cargo test` 真正执行页面测试。
-- `docs/repository-browser.md` 与本文档。
+负责人看过首版预览后指出：示例无法理解、左侧文件列表体验差。主 Agent 只读核查确认了三类实际缺陷：预览只支持首屏、后续操作假 404；文件树是文字胶囊式行、缺少清晰导航；页面缺少页内 Tabs 层级。原任务已明确本波次由 coordinator 合并，`delivery-state.json` 的 `merge_owner` 已从 `worker` 纠正为 `coordinator`，`arbitration_ever_required` 保持 `false`（不虚构裁决记录）。
 
-未改动 `src/ui/mod.rs`、`src/app/mod.rs`、`app/accounts`、workspace、既有 reader 或共享 scroll 文件；无 Cargo.toml/Cargo.lock 变更。
+## 改动与决定
 
-## 关键实现取舍
+### 1. 示例可完整、反复浏览
 
-- 一次浏览代次 = 一个已验证 `RepositorySession` + 单调页面代次 + 分支/commit/资源身份。`RepositoryPageServices` 只注入 `Arc<AccountService>`、`Arc<BackgroundExecutor>` 与 `RepositoryLocator`；页面自身不打开数据库、不读凭据、不取 PAT。
-- 慢操作经既有 executor，结果入锁队列、GPUI 侧按 ~30ms 节拍排出（`start_receiver`/`drain`），无 `block_on`、render 内无 I/O。每条结果发布前核对页面代次、捕获的 `RepositoryReadContext`、分支、commit 与阅读目标身份；`check_authorization` 在无消息时也复核 session 的 `verify()`，所以 A→B→A 后旧数据不会残留。
-- 分支切换重新解析 `RevisionSpec::Ref` 到新固定 commit，旧树/README/正文立即作废；`TreeModel` 只保存已加载目录，展开才发一次 `git/trees/{sha}`，绝不带 `recursive`，无全树下载、无文件系统 checkout。
-- 空态诚实：完整空根树才给「No README」克制空阅读器；404 是 `ReadmeUncertain`；409 是「Git 数据为空或不可用」；截断/Partial 树与分支带独立说明；auth/SSO/限流/网络分别归类。重试只有用户点按的单次有界操作。
-- 阅读器链接由页面接管：同仓库同 commit 相对链接页内跟随；外部 URL 转交主机；跨库/跨 commit/危险 scheme 拒绝或报告。
-- 树视图用真实 `uniform_list`（只建可见行），滚动与条用共享 `ui::scroll`（`Motion`+`Bars`+`Bar`），阅读器滚动仍归 reader 自身。
+`examples/repository.rs` 原用一次性队列 `pop_front()`，耗尽后统一 404。已改为共用 `src/bin_support/repository_fixture.rs`：
+
+- 按 method / path / query / 分支 / commit / tree / blob 身份应答，同一资源可重复读取，与点击顺序和并发完成次序无关。fixture 自身测试断言“同一 blob 连读三次都成功”“脚本失败只触发一次”。
+- Normal 含两条真正不同的分支（commit、根 tree、README blob 与 `src` tree 均不同）、根 `README.md`、`docs/guide.md`、两层嵌套 `docs/guides/nested/deep-note.md`、`src/main.rs`、`assets/`（二进制 `logo.bin`、空 `empty.txt`、3 MiB `huge.log`）、symlink 与 submodule 行。所有展示的普通目录/文件都可操作。
+- 未建模请求返回 `599` 并打印开发诊断，明确写出“请补 fixture，不要当成 GitHub 权限结果”，**不再伪装成产品错误**。
+- README 正文改为小型正常仓库的说明，技术说明移到预览工具栏，不再冒充仓库简介。
+
+### 2. 预览场景与验收共用数据
+
+- 工具栏（页面之外）提供 Scene 按钮 + Reset + action 输出，默认 Normal；场景含 EmptyRepository、ReadmeUncertain、NoReadme、DirectoryFailure、FileFailure、NoBranches、TruncatedTree、LongTree。
+- 场景切换重置 fixture 与请求代次，不把前一个异常的失败计数带进下一个场景。`DirectoryFailure`/`FileFailure` 的脚本失败只消费一次，单次 Retry 即可恢复。
+- **测试改为直接使用同一 fixture**：原先测试与预览各用一套 transport 的问题已消除，`tests/repository.rs` 与 `examples/repository.rs` 现在共享 `repository_fixture.rs`。
+- 工具栏、场景数据、临时账户、合成凭据、外部链接只报告等逻辑只存在于 example 与 bin_support，产品 binary 不声明这些模块。
+
+### 3. 文件树重做为行式导航
+
+- 每行 `w_full` 填满树视口，统一行高 26px、统一左右边距；hover/选中背景覆盖整行可点击区，不再是按名称长度收缩的胶囊。
+- 选中由 `current_path()`（稳定完整路径）决定，不用父目录内 index，跨目录/跨分支都不会错选。
+- 目录有独立 16px chevron 槽位 + 目录图标 + 名称；文件在该槽位留空对齐。缩进 `INDENT * depth`，目录优先、同级稳定排序保持。
+- 单击目录行或 chevron 都只切换一次（chevron 用 `stop_propagation`），且不清空右侧已打开正文；单击文件行打开文件。
+- 长名称用 `EllipsisTooltip` 单行截断并给完整路径；键盘焦点用单独中性描边，与 hover/选中三态可区分。
+- 目录自身状态：`loading…` / `empty` / 失败原因 + 该行内 `Retry`，其他目录与正文不受影响。
+- 键盘：树聚焦后上下移动、左右展开折叠或回父节点、Home/End、Enter 打开；只消费无修饰导航键，带修饰键留给平台/IME/阅读器。行移动通过列表自身 `scroll_to_item` 滚入视口。
+- 保持惰性加载与 `uniform_list` 虚拟化，树和正文各用共享 `Bars`/`Motion`。
+
+### 4. README 去重
+
+移除混在文件列表中的伪“README”行。默认 README 成功后对应 descriptor 的真实 `path`（根 / `docs/` / `.github/` 均可）；选中视觉与手动打开同一文件一致。阅读器头部显示仓库相对路径；“Back to README”只在“有可用 README 且当前显示其他文件”时出现（`can_return_to_readme()` 读分支的 discovery 状态，文件选择不再清掉它的判断依据）。
+
+### 5. 页内 Tabs 层级
+
+新增 `page_tabs.rs`：仓库摘要 → 横向页内 Tabs（Code / Issues / Pull requests / Releases / Settings，Code 默认选中）→ Code 区域。只有 Code 有内容，其余内容区留空（`repository-tab-empty`），不加占位卡片或假设置。切出 Code 停止绘制树与正文并结束阅读器手势，切回时复核授权并恢复导航意图。commit 短号降为树列头部的小字次要信息。
+
+### 6. 错误按资源分层
+
+`PageError` 不再在描述里断言作用域；404 文案改为“该资源不存在或当前账户无法访问”，不再写“仓库对账户不可见”。仓库详情/分支/revision 失败才是页面级；目录失败定位到该行；blob/文件失败只替换阅读区；README 发现失败独立。`retry_directory` / `retry_reader` / `retry_readme` 各自只重试一个资源，不重载整页。
 
 ## 验证
 
-本机 Windows（`CARGO_BUILD_JOBS=1` / `-j 1`，独立 `target/`）：
+本机 Windows，独立 `target/`，`CARGO_BUILD_JOBS=1` / `-j 1`：
 
 - `cargo fmt --all -- --check` 通过
 - `cargo check --locked --all-targets` 通过
 - `cargo clippy --locked --all-targets -- -D warnings` 通过
-- `cargo test --locked`：main binary **519**、account 装配 **310**、reader **123**、repository **409**（含本任务 18 项页面测试 + 复用 reader/scroll 套件）全部通过
-- `cargo build --locked --example repository` 通过；`git diff --check` 通过
+- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、repository **441**（其中本任务页面测试 28 项 + fixture 自测 6 项）全部通过
+- `cargo build --locked --example repository` 通过
+- `git diff --check` 通过
 
-页面测试覆盖：真实管线渲染 README Markdown 再渲染选中源码、惰性树一次只发一个 tree 请求且不重复取根树、切换分支丢弃更慢的旧快照、放弃的文件晚完成不覆盖当前、授权变化清空且 A→B→A 不恢复、视图 drop / deactivate 后迟到成功与错误不发布、Partial 分支与截断树不冒充完整、无 README 的克制空态、README 不确定与失败分离、空/不可用仓库 409、Unsupported/TooLarge 诚实态、单次有界重试、两页独立分支/路径/树/滚动、rebind 保留导航意图并在新授权下重读、长树有界且只滚自己、行数上限、链接同 commit 跟随与外部 URL 转交。
+页面测试现在与预览共用同一 fixture，覆盖 normal 首屏、嵌套目录展开/收起/再展开只请求一次、同文件重复打开 3 次、README→源码→README、分支真实差异与切回、目录/chevron 单次切换且不清空正文、键盘导航不吞修改键、README 相对链接跟随、外部链接只报告、页内 Tab 切换清空与恢复、目录失败与文件失败的作用域与单次重试、无 README / 不确定 / 409 / 空分支 / 截断树 / 长树、场景重置恢复正常、Back to README 显示条件、慢旧请求不覆盖新选择、授权 A→B→A、失活、rebind、两页独立。
 
-真实窗口（PrintWindow 取帧）：`examples/repository.exe` 独立启动，窗口标题 `Githux · Repository page preview`、进程 Responding；取到真实渲染帧：摘要（`octo/demo`、Public、stars 128 · forks 9 · open issues & PRs 4、描述）、Files 树列（README/docs/src/README.md，README 选中）、固定 commit 短号 `c0ffee0`、README.md 头部与真实 Markdown 阅读（标题、段落、内联代码、链接、rust 代码块）。首帧曾暴露 fixture 里 README blob 的 `size` 与真实正文不一致（384 vs 实际字节），使真实 pipeline 正确报 `blob size differs from descriptor`；修正 fixture 尺寸后 README 正常渲染。这证明预览运行的是真实校验链路，不是镜像常量。
+**真实窗口**：`target/debug/examples/repository.exe` 启动，标题 `Githux · Repository page preview`、进程 Responding，`PrintWindow` 取到真实渲染帧：预览工具栏（场景按钮 + 说明 + action 行）、`octo/ledger` 摘要与描述、页内 Tabs（Code 选中并带下划线）、Files 树（assets/docs/src 目录、link-to-readme 符号链接、README.md 选中行、vendor submodule）、commit 短号 `c0ffee0`、README.md 头部与真实 Markdown 渲染。首帧曾发现 fixture 的 README blob `size` 与真实正文不一致（384 vs 实际字节），真实管线正确报 `blob size differs from descriptor`；修正后正常渲染——这证明预览走的是真实校验链路而不是镜像常量。
 
-## 未覆盖 / 待验收
+**渲染边界（未完成，不宣称通过）**：本机为 1.5 倍缩放、2560×1440 屏幕；`PrintWindow` 取帧在多倍缩放与窗口宽度较大时会裁掉右侧，属于取帧/DPI 与窗口尺寸的观测限制。GPUI 测试平台在 1400×900 与 677×545 两种尺寸下断言了实际布局：`repository-body` 1400px、树列固定 268px、阅读器列 1132px、Markdown 段落宽 1092px 且正常换行；窄窗口下阅读器列 409px、段落 369px 仍换行。真实缩放下的观感仍需负责人在预览中确认。
 
-- 真实 Windows 输入：树行点击展开/选中、分支下拉、滚轮平滑与 thumb 拖动手感、README 链接点击转交。测试平台不经过 Windows 原生输入分发，不能替代负责人真机验收。
-- 正式 Shell 接线（`src/ui/mod.rs`/`src/app`）与账户切换时标签处理仍属后续集成任务；本任务只交付可复用页面与精确的 mounting/teardown 契约（见 `docs/repository-browser.md`）。
-- macOS/Linux 原生验收未做（只保编译）；真实私有仓库/SSO/限流联调仍须负责人提供 PAT。
+## 未覆盖
+
+- 真实 Windows 指针/键盘输入（行点击、chevron、分支下拉、滚轮平滑、thumb 拖动、链接点击）未由测试平台证明，需负责人真机验收；测试平台不经过 Windows 原生输入分发。
+- 正式 Shell 接线（`src/ui/mod.rs` / `src/app`）与账户切换时标签处理仍属后续集成任务。
+- 真实私有仓库 / SSO / 限流联调需负责人提供 PAT；本轮仍只用合成凭据与本地 fixture。
+- macOS/Linux 仅保编译，未做原生验收。
 
 ## 交接
 
-后续 Shell 集成只需：打开账户服务与 executor 后构造 `RepositoryPageServices`，`cx.new` 页面并 `activate`；切账户/换授权时 `rebind`（或重建页面并传入保存的 `navigation()`）；关闭会话时 `deactivate` 后释放。公共 API 与生命周期见主题文档。
+新版预览已按最后构建启动验证并关闭；负责人可从 `cargo run --example repository` 或 `target/debug/examples/repository.exe` 打开，用工具栏逐个场景复验。PR #35 继续沿用，`pending` 用于本轮重新验收、`blocked` 保持由负责人管理，本任务不合并、不启用 auto-merge。

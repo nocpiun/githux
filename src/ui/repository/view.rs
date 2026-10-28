@@ -1,4 +1,8 @@
-//! Rendering for the repository page: summary, tree column and reader column.
+//! Rendering for the repository page: summary, in-page tabs, tree and reader.
+//!
+//! The structure follows the confirmed product layout: repository summary, then
+//! horizontal in-page content tabs, then the Code area with a bounded file tree
+//! on the left and the reader on the right.
 //!
 //! The tree is a bounded, virtualized list inside its own shared-scroll region;
 //! the reader is the existing `ReaderView` entity and keeps its own scrolling.
@@ -13,20 +17,24 @@ use ely_core::{
     forms::{Choice, Select},
     primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
-    typography::Ellipsis,
+    typography::{Ellipsis, EllipsisTooltip},
 };
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, prelude::*, px, uniform_list,
 };
 
-use super::navigation::{PageError, TreeRow, TreeRowKind, incompleteness_note, tree_incomplete};
-use super::{ReaderStatus, RepositoryPage, Selection, TREE_ROW_HEIGHT, TREE_WIDTH};
+use super::navigation::{
+    PageError, RowState, TreeRow, TreeRowKind, incompleteness_note, tree_incomplete,
+};
+use super::{ReaderStatus, RepositoryPage, RepositoryTab, Selection, TREE_ROW_HEIGHT, TREE_WIDTH};
 use crate::domain::repo::RepoVisibility;
 use crate::domain::repository::Completeness;
 use crate::ui::scroll;
 
-const INDENT: f32 = 12.0;
+const INDENT: f32 = 14.0;
+/// Room for the disclosure chevron, so file rows line up with directory names.
+const CHEVRON_SLOT: f32 = 16.0;
 
 pub(super) fn render(
     page: &mut RepositoryPage,
@@ -39,27 +47,42 @@ pub(super) fn render(
     let foreground = theme.colors.fg;
     let text_size = theme.text_size(TextSize::Sm);
     let header = header(page, cx);
+    let tabs = tab_strip(page, cx);
     let browsing = page.selected_branch().is_some();
-    let body: AnyElement = match page.error().cloned() {
-        // A page-level failure replaces the browsing area: an empty tree would
-        // read as "no files", which a failed read never proves.
-        Some(error) if !browsing => {
-            failure_panel("repository-error", &error, page.is_active(), false, cx)
-        }
-        _ => {
-            let tree = tree_column(page, rows, cx);
-            let reader = reader_column(page, cx);
+    let body: AnyElement =
+        if !RepositoryTab::Code.has_content() || page.tab() != RepositoryTab::Code {
+            // Undesigned repository tabs stay empty by product convention: no
+            // "not implemented" card, no copied GitHub feature menu.
             div()
-                .debug_selector(|| "repository-body".to_string())
-                .flex()
+                .debug_selector(|| "repository-tab-empty".to_string())
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .child(tree)
-                .child(reader)
                 .into_any_element()
-        }
-    };
+        } else {
+            match page.error().cloned() {
+                // A page-level failure replaces the browsing area: an empty tree
+                // would read as "no files", which a failed read never proves.
+                Some(error) if !browsing => {
+                    failure_panel("repository-error", &error, page.is_active(), false, cx)
+                }
+                _ => {
+                    let tree = tree_column(page, rows, cx);
+                    let reader = reader_column(page, cx);
+                    div()
+                        .debug_selector(|| "repository-body".to_string())
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(tree)
+                        .child(reader)
+                        .into_any_element()
+                }
+            }
+        };
     div()
         .id("repository-page-root")
         .debug_selector(|| "repository-page-root".to_string())
@@ -71,6 +94,7 @@ pub(super) fn render(
         .text_color(foreground)
         .text_size(text_size)
         .child(header)
+        .child(tabs)
         .child(body)
         .into_any_element()
 }
@@ -165,12 +189,16 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
         .flex_none()
         .w_full()
         .px_5()
-        .py_4()
-        .border_b_1()
-        .border_color(border)
+        .pt_4()
+        .pb_2()
         .child(summary)
         .child(picker)
+        .child(div().flex_none().h(px(0.0)).child(border_hint(border)))
         .into_any_element()
+}
+
+fn border_hint(_color: gpui::Hsla) -> AnyElement {
+    div().into_any_element()
 }
 
 /// The branch picker, plus an honest line about incomplete branch listings.
@@ -182,6 +210,7 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         return div()
             .debug_selector(|| "repository-branch-unavailable".to_string())
             .flex_none()
+            .w(px(220.0))
             .text_size(small)
             .text_color(colors.fg_subtle)
             .child(match page.selected_branch() {
@@ -249,7 +278,79 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         .into_any_element()
 }
 
-/// The bounded file tree: a README row, then the visible rows only.
+/// The in-page content tabs. Only Code has content this round; the rest keep
+/// the confirmed names and draw nothing inside.
+fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let border = colors.border;
+    let small = theme.text_size(TextSize::Sm);
+    let active = page.tab();
+    let tabs: Vec<AnyElement> = RepositoryTab::ALL
+        .iter()
+        .map(|&tab| {
+            let entity = cx.entity().downgrade();
+            let is_active = tab == active;
+            let fg = if is_active {
+                colors.fg
+            } else {
+                colors.fg_muted
+            };
+            div()
+                .id(SharedString::from(format!("repository-tab-{}", tab.id())))
+                .debug_selector(move || format!("repository-tab-{}", tab.id()))
+                .relative()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .flex_none()
+                .px_2()
+                .py_2()
+                .cursor_pointer()
+                .text_size(small)
+                .font_weight(if is_active {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(fg)
+                .hover(|style| style.text_color(colors.fg))
+                .child(tab.label())
+                .when(is_active, |entry| {
+                    entry.child(
+                        div()
+                            .debug_selector(move || format!("repository-tab-active-{}", tab.id()))
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(2.0))
+                            .bg(colors.accent),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    // A weak entity may already be released; nothing is left to notify.
+                    let _ = entity.update(cx, |page, cx| page.select_tab(tab, cx));
+                })
+                .into_any_element()
+        })
+        .collect();
+    div()
+        .debug_selector(|| "repository-tabs".to_string())
+        .flex()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .w_full()
+        .px_5()
+        .border_b_1()
+        .border_color(border)
+        .children(tabs)
+        .into_any_element()
+}
+
+/// The bounded file tree: the visible rows only, with a chevron slot, a kind
+/// icon and a full-width hit area.
 fn tree_column(
     page: &mut RepositoryPage,
     rows: Rc<Vec<TreeRow>>,
@@ -258,46 +359,14 @@ fn tree_column(
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let small = theme.text_size(TextSize::Xs);
-    let radius = theme.radius(Radius::Sm);
-    let selected = match page.selection() {
-        Selection::Readme => None,
-        Selection::File(path) => Some(path.clone()),
-    };
-    let readme_selected = matches!(page.selection(), Selection::Readme);
-    let warnings: Vec<AnyElement> = tree_warnings(page, &colors, small);
+    let border = colors.border;
+    let selected = page.current_path().map(str::to_string);
+    let cursor = page.cursor().map(str::to_string);
+    let warnings = tree_warnings(page, &colors, small);
     let count = rows.len();
     let empty = page
         .tree("")
         .is_some_and(|tree| tree.entries.is_empty() && !tree_incomplete(tree));
-    let entity = cx.entity().downgrade();
-    let readme_row = div()
-        .id("repository-readme-row")
-        .debug_selector(|| "repository-readme-row".to_string())
-        .flex()
-        .items_center()
-        .gap_2()
-        .flex_none()
-        .h(px(TREE_ROW_HEIGHT))
-        .mx_1()
-        .px_2()
-        .rounded(radius)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.hover))
-        .when(readme_selected, |row| row.bg(colors.hover))
-        .child(
-            Icon::new(IconName::BookOpen)
-                .size(IconSize::Xs)
-                .color(colors.fg_muted),
-        )
-        .child(div().min_w_0().child(Ellipsis::new("README")))
-        .on_click({
-            let entity = entity.clone();
-            move |_, _, cx| {
-                // A weak entity may already be gone; the page is released then.
-                let _ = entity.update(cx, |page, cx| page.show_readme(cx));
-            }
-        });
-
     let list = uniform_list(
         "repository-tree",
         count,
@@ -305,7 +374,9 @@ fn tree_column(
             move |page: &mut RepositoryPage, range: std::ops::Range<usize>, window, cx| {
                 range
                     .map(|index| match rows.get(index).cloned() {
-                        Some(row) => tree_row(page, row, selected.clone(), window, cx),
+                        Some(row) => {
+                            tree_row(page, row, selected.clone(), cursor.clone(), window, cx)
+                        }
                         None => div().into_any_element(),
                     })
                     .collect::<Vec<_>>()
@@ -353,7 +424,7 @@ fn tree_column(
     }
     .render(cx);
     let wheel = scroll::wheel_overlay("repository-tree", gpui::Axis::Vertical, motion);
-    let border = colors.border;
+    // The commit is secondary information: a quiet short id under the header.
     let commit = page.fixed_commit().map(|commit| {
         div()
             .debug_selector(|| "repository-commit".to_string())
@@ -411,7 +482,6 @@ fn tree_column(
                 .children(commit),
         )
         .children(warnings)
-        .child(readme_row)
         .children(empty_note)
         .child(
             div()
@@ -419,6 +489,10 @@ fn tree_column(
                 .flex_1()
                 .min_h_0()
                 .w_full()
+                .track_focus(&page.tree_focus)
+                .on_key_down(cx.listener(|page, event, window, cx| {
+                    page.press_tree_key_event(event, window, cx);
+                }))
                 .child(div().size_full().overflow_hidden().child(list))
                 .child(wheel)
                 .child(bar),
@@ -478,10 +552,13 @@ fn tree_warnings(
     warnings
 }
 
+/// One tree row. The whole row is the hit area: chevron slot, icon, name, and
+/// (for directories) an inline state or a scoped retry.
 fn tree_row(
     page: &mut RepositoryPage,
     row: TreeRow,
     selected: Option<String>,
+    cursor: Option<String>,
     _window: &mut Window,
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
@@ -497,61 +574,160 @@ fn tree_row(
         TreeRowKind::Submodule => (IconName::Package, colors.fg_subtle),
         TreeRowKind::Unknown => (IconName::File, colors.fg_subtle),
     };
-    let is_selected =
-        row.kind == TreeRowKind::File && selected.as_deref() == Some(row.path.as_str());
-    let is_directory = row.kind.is_directory();
-    let index = row.index;
     let path = row.path.clone();
     let name = row.name.clone();
-    let note = row.note;
     let depth = row.depth;
-    let entity = cx.entity();
+    let kind = row.kind;
+    let state = row.state.clone();
+    let index = row.index;
+    let is_selected = selected.as_deref() == Some(row.path.as_str());
+    let is_cursor = cursor.as_deref() == Some(row.path.as_str());
     let hover = colors.hover;
+    let focus_ring = colors.focus;
+    let entity = cx.entity();
+
+    let chevron: AnyElement = match kind {
+        TreeRowKind::Directory { expanded } => {
+            let entity = entity.clone();
+            let path = path.clone();
+            // The chevron is its own hit area, and it stops propagation so one
+            // press toggles exactly once.
+            div()
+                .id(SharedString::from(format!("repository-chevron-{path}")))
+                .debug_selector(move || {
+                    format!(
+                        "repository-chevron-{}",
+                        if expanded { "open" } else { "closed" }
+                    )
+                })
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(CHEVRON_SLOT))
+                .rounded(radius)
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.border))
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(IconSize::Xs)
+                    .color(colors.fg_muted),
+                )
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |page, cx| page.toggle_directory(&path, cx));
+                })
+                .into_any_element()
+        }
+        // Files leave the chevron slot empty so names line up under folders.
+        _ => div().flex_none().w(px(CHEVRON_SLOT)).into_any_element(),
+    };
+
+    // A directory's own state: loading, proven empty, or a scoped failure.
+    let state_element: Option<AnyElement> = match &state {
+        RowState::Normal => None,
+        RowState::Loading => Some(
+            div()
+                .debug_selector(|| "repository-row-loading".to_string())
+                .flex_none()
+                .text_size(small)
+                .text_color(colors.fg_subtle)
+                .child("loading…")
+                .into_any_element(),
+        ),
+        RowState::Empty => Some(
+            div()
+                .debug_selector(|| "repository-row-empty".to_string())
+                .flex_none()
+                .text_size(small)
+                .text_color(colors.fg_subtle)
+                .child("empty")
+                .into_any_element(),
+        ),
+        RowState::Failed(error) => {
+            let entity = entity.clone();
+            let path = path.clone();
+            let retryable = error.retryable;
+            Some(
+                div()
+                    .debug_selector(|| "repository-row-failed".to_string())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(small)
+                            .text_color(colors.danger)
+                            .child(format!("failed · {}", error.title)),
+                    )
+                    .when(retryable, |row| {
+                        row.child(
+                            Button::new(
+                                SharedString::from(format!("repository-row-retry-{path}")),
+                                "Retry",
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                entity.update(cx, |page, cx| page.retry_directory(&path, cx));
+                            }),
+                        )
+                    })
+                    .into_any_element(),
+            )
+        }
+    };
+
     div()
         .id(SharedString::from(format!("repository-row-{path}")))
         .debug_selector(move || format!("repository-tree-row-{index}"))
         .flex()
         .items_center()
-        .gap_2()
+        .gap_1p5()
         .flex_none()
+        .w_full()
         .h(px(TREE_ROW_HEIGHT))
-        .pl(px(8.0 + INDENT * depth as f32))
+        .pl(px(6.0 + INDENT * depth as f32))
         .pr_2()
-        .mx_1()
         .rounded(radius)
         .text_size(small)
         .when(is_selected, |row| row.bg(hover))
-        .when(is_directory, |row| row.cursor_pointer())
-        .hover(move |style| style.bg(hover))
+        .when(!is_selected, |row| row.hover(move |style| style.bg(hover)))
+        // Keyboard focus is a ring, distinct from hover and selection.
+        .when(is_cursor, |row| row.border_1().border_color(focus_ring))
+        .child(chevron)
         .child(Icon::new(icon).size(IconSize::Xs).color(icon_color))
-        .child(div().min_w_0().flex_1().child(Ellipsis::new(name)))
-        .children(note.map(|note| {
-            div()
-                .flex_none()
-                .text_color(colors.fg_subtle)
-                .child(note.to_string())
-        }))
-        .on_click(move |_, _, cx| {
-            entity.update(cx, |page, cx| {
-                if is_directory {
-                    page.toggle_directory(&path, cx);
-                } else {
-                    page.select_file(&path, cx);
-                }
+        .child(div().min_w_0().flex_1().child(EllipsisTooltip::new(
+            SharedString::from(format!("repository-row-label-{path}")),
+            name,
+        )))
+        .children(state_element)
+        .on_click(move |_, window, cx| {
+            // One press acts once: a directory toggles, a file opens. The reader
+            // keeps whatever it is showing when a directory is toggled.
+            let focus = entity.read(cx).tree_focus.clone();
+            window.focus(&focus, cx);
+            entity.update(cx, |page, cx| match kind {
+                TreeRowKind::Directory { .. } => page.toggle_directory(&path, cx),
+                _ => page.select_file(&path, cx),
             });
         })
         .into_any_element()
 }
 
-/// The right column: what is shown, plus the reader or an honest status.
+/// The right column: the current path, a "back to README" entry when it is
+/// useful, and the reader or an honest status.
 fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let small = theme.text_size(TextSize::Xs);
-    let path = match page.selection() {
-        Selection::Readme => page.readme_path().unwrap_or("README").to_string(),
-        Selection::File(path) => path.clone(),
-    };
+    let path = page.current_path().map(str::to_string);
     let entity = cx.entity();
     let border = colors.border;
     let header = div()
@@ -579,10 +755,14 @@ fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
                 .min_w_0()
                 .text_size(small)
                 .text_color(colors.fg_muted)
-                .child(Ellipsis::new(path)),
+                .child(match path {
+                    Some(path) => Ellipsis::new(path).into_any_element(),
+                    None => div().child("No file selected").into_any_element(),
+                }),
         )
-        .children((!matches!(page.selection(), Selection::Readme)).then(|| {
-            Button::new("repository-show-readme", "README")
+        // Only when a usable README exists and a different file is shown.
+        .children(page.can_return_to_readme().then(|| {
+            Button::new("repository-back-to-readme", "Back to README")
                 .variant(ButtonVariant::Ghost)
                 .size(ControlSize::Sm)
                 .on_click(move |_, _, cx| {
@@ -620,11 +800,16 @@ fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         .h_full()
         .child(header)
         .child(
+            // `min_w_0` + hidden overflow is what lets the reader's own content
+            // wrap inside this column instead of widening the page; the reader
+            // keeps its own scrolling and never gets a second scroll surface.
             div()
                 .debug_selector(|| "repository-reader-body".to_string())
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .w_full()
+                .overflow_hidden()
                 .child(body),
         )
         .into_any_element()
@@ -693,7 +878,8 @@ fn plain_panel(id: &'static str, title: &str, detail: &str, cx: &App) -> AnyElem
         .into_any_element()
 }
 
-/// A failure with its reason and, when it could help, one explicit retry.
+/// A failure with its reason and, when it could help, one explicit retry that
+/// re-runs only this resource.
 fn failure_panel(
     id: &'static str,
     error: &PageError,
@@ -721,8 +907,21 @@ fn failure_panel(
         .size_full()
         .px_8()
         .text_center()
-        .child(div().text_size(base).text_color(colors.fg).child(title))
-        .children(detail.map(|detail| div().text_size(small).text_color(muted).child(detail)))
+        .child(
+            div()
+                .min_w_0()
+                .text_size(base)
+                .text_color(colors.fg)
+                .child(title),
+        )
+        .children(detail.map(|detail| {
+            div()
+                .min_w_0()
+                .max_w(px(560.0))
+                .text_size(small)
+                .text_color(muted)
+                .child(detail)
+        }))
         .when(retryable, |panel| {
             panel.child(
                 Button::new("repository-retry", label)
@@ -731,7 +930,7 @@ fn failure_panel(
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |page, cx| {
                             if scoped_retry {
-                                page.retry(cx)
+                                page.retry_reader(cx)
                             } else {
                                 page.activate(cx)
                             }

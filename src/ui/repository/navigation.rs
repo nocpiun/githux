@@ -6,6 +6,11 @@
 //! directories), the lazily loaded directory model, and the honest presentation
 //! of read failures. Keeping it separate is what lets a rebind restore intent
 //! without restoring an old `RepositorySession` or its data.
+//!
+//! Failure descriptions deliberately carry no scope: the *page* decides where a
+//! failure belongs (page, one directory, the reader) and stores it there. A 404
+//! therefore never claims "this repository is not visible" when it was only one
+//! blob that could not be read.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +73,9 @@ impl RepositoryNavigation {
 }
 
 /// A failure worth showing the user, with the reason it happened.
+///
+/// It describes *one resource*. The page decides whether that resource is the
+/// whole page, one directory, or the reader.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageError {
     pub title: String,
@@ -86,7 +94,8 @@ impl PageError {
         }
     }
 
-    /// Classifies a repository-layer error without claiming an empty result.
+    /// Classifies a repository-layer error without claiming an empty result and
+    /// without over-claiming why a resource is missing.
     pub fn from_repository(error: &RepositoryError) -> Self {
         match error {
             RepositoryError::GitHub(inner) => Self::from_github(inner),
@@ -108,12 +117,16 @@ impl PageError {
             ),
             RepositoryError::LimitExceeded { resource, limit } => Self::new(
                 "This response is larger than the read limit.",
-                Some(format!("GitHub's {resource} exceeded {limit} bytes; the listing was not treated as complete.")),
+                Some(format!(
+                    "GitHub's {resource} exceeded {limit} bytes; the listing was not treated as complete."
+                )),
                 false,
             ),
             RepositoryError::InvalidInput { field } => Self::new(
-                "The repository request could not be built.",
-                Some(format!("The {field} value was rejected before any request was sent.")),
+                "The request could not be built.",
+                Some(format!(
+                    "The {field} value was rejected before any request was sent."
+                )),
                 false,
             ),
             RepositoryError::InvalidResponse { message } => Self::new(
@@ -137,7 +150,7 @@ impl PageError {
             GitHubError::RateLimited { retry } => Self::new(
                 "GitHub rate limited this request.",
                 Some(format!(
-                    "The {:?} limit is exhausted{}. This is not an empty repository result.",
+                    "The {:?} limit is exhausted{}. This is not an empty result.",
                     retry.kind,
                     retry
                         .seconds
@@ -165,9 +178,14 @@ impl PageError {
                 ),
                 false,
             ),
+            // A 404 is per-resource and ambiguous by contract: absent, or not
+            // visible to this token. It never asserts which.
             GitHubError::NotFound => Self::new(
-                "This repository is not visible to the current account.",
-                Some("GitHub answered 404: the resource is absent or not visible to this token.".to_string()),
+                "This resource was not found.",
+                Some(
+                    "GitHub answered 404: the file or repository does not exist, or this account cannot access it."
+                        .to_string(),
+                ),
                 false,
             ),
             GitHubError::UnexpectedStatus { status } => Self::new(
@@ -211,7 +229,7 @@ impl PageError {
             GitHubError::CredentialStore { message } => Self::new(
                 "The platform credential is unavailable.",
                 Some(format!(
-                    "{message}. Revalidate or replace the PAT; this is not an empty repository."
+                    "{message}. Revalidate or replace the PAT; this is not an empty result."
                 )),
                 false,
             ),
@@ -222,7 +240,10 @@ impl PageError {
     pub fn deactivated() -> Self {
         Self::new(
             "Loading stopped.",
-            Some("This page was deactivated and its requests were cancelled. Activate it again to resume.".to_string()),
+            Some(
+                "This page was deactivated and its requests were cancelled. Activate it again to resume."
+                    .to_string(),
+            ),
             true,
         )
     }
@@ -275,14 +296,18 @@ pub fn branch_choice(
             return BranchChoice::Selected(saved);
         }
     }
+    // A complete, empty branch list is positive evidence that no branch exists;
+    // an observed default-branch name in that state is contradictory and must not
+    // be used to invent a commit.
+    if branches.branches.is_empty() && branches.completeness == Completeness::Complete {
+        return BranchChoice::None { empty: true };
+    }
     if let Some(default) = default_branch {
         return BranchChoice::Selected(default.clone());
     }
     match branches.branches.first() {
         Some(branch) => BranchChoice::Selected(branch.name.clone()),
-        None => BranchChoice::None {
-            empty: branches.completeness == Completeness::Complete,
-        },
+        None => BranchChoice::None { empty: false },
     }
 }
 
@@ -358,6 +383,14 @@ impl ReadmeState {
         }
     }
 
+    /// The repository-relative path of the README, when it was found.
+    ///
+    /// A README may live at the root, under `docs/` or under `.github/`; this is
+    /// always the descriptor's own path, never a guess.
+    pub fn path(&self) -> Option<&str> {
+        self.descriptor().map(|descriptor| descriptor.path.as_str())
+    }
+
     /// Applies one discovery result.
     pub fn from_discovery(result: Result<ReadmeDiscovery, RepositoryError>) -> Self {
         match result {
@@ -382,8 +415,26 @@ pub struct TreeRow {
     pub parent: String,
     /// Index of the entry inside its parent's `DirectoryTree`.
     pub index: usize,
-    /// A short, honest suffix: still loading, or not available.
-    pub note: Option<&'static str>,
+    /// How this row is doing: normal, loading, failed, or a proven empty folder.
+    pub state: RowState,
+}
+
+/// Whether a row can be acted on, and how it is going.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowState {
+    Normal,
+    /// An expanded directory whose listing is being read.
+    Loading,
+    /// An expanded directory whose listing failed; carries the reason.
+    Failed(PageError),
+    /// An expanded directory that a complete listing proved to be empty.
+    Empty,
+}
+
+impl RowState {
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -398,6 +449,14 @@ pub enum TreeRowKind {
 impl TreeRowKind {
     pub fn is_directory(self) -> bool {
         matches!(self, Self::Directory { .. })
+    }
+
+    /// Whether pressing the row opens something (a directory or a file).
+    pub fn is_openable(self) -> bool {
+        matches!(
+            self,
+            Self::Directory { .. } | Self::File | Self::Symlink | Self::Submodule
+        )
     }
 }
 
@@ -426,9 +485,7 @@ impl TreeModel {
         self.root = Some(tree);
     }
 
-    /// Records a loaded child directory. A tree for a directory nobody asked for
-    /// any more is still stored: it is keyed by path and commit and cannot be
-    /// confused with another commit because the model is replaced on switch.
+    /// Records a loaded child directory, keyed by its fixed-commit path.
     pub fn set_children(&mut self, tree: DirectoryTree) {
         let key = directory_key(&tree.directory);
         self.loading.remove(&key);
@@ -444,6 +501,10 @@ impl TreeModel {
     pub fn fail_load(&mut self, path: &str, error: PageError) {
         self.loading.remove(path);
         self.failed.insert(path.to_string(), error);
+    }
+
+    pub fn clear_failure(&mut self, path: &str) {
+        self.failed.remove(path);
     }
 
     pub fn root(&self) -> Option<&DirectoryTree> {
@@ -486,6 +547,11 @@ impl TreeModel {
         tree.child_directory(index)
     }
 
+    /// The directory handle for the root commit, used to (re)load the root.
+    pub fn root_of(&self) -> Option<&DirectoryTree> {
+        self.root.as_ref()
+    }
+
     /// The tree entry and index for a regular file at `path`, so a
     /// `BlobIdentity` can be derived from the exact fixed-commit entry.
     pub fn locate_file(&self, path: &str) -> Option<(&DirectoryTree, usize)> {
@@ -497,6 +563,25 @@ impl TreeModel {
             .iter()
             .position(|entry| entry.path.as_str() == name)?;
         matches!(tree.entries[index].kind, TreeEntryKind::File { .. }).then_some((tree, index))
+    }
+
+    /// The kind of the entry at `path`, whether it is a file, a directory, or a
+    /// link/submodule the reader will not open as text.
+    pub fn entry_kind(&self, path: &str) -> Option<TreeRowKind> {
+        let parent = RepositoryNavigation::parent(path);
+        let name = RepositoryNavigation::name(path);
+        let tree = self.tree(parent)?;
+        let entry = tree
+            .entries
+            .iter()
+            .find(|entry| entry.path.as_str() == name)?;
+        Some(match &entry.kind {
+            TreeEntryKind::Directory => TreeRowKind::Directory { expanded: false },
+            TreeEntryKind::File { .. } => TreeRowKind::File,
+            TreeEntryKind::Symlink => TreeRowKind::Symlink,
+            TreeEntryKind::Submodule => TreeRowKind::Submodule,
+            TreeEntryKind::Unknown { .. } => TreeRowKind::Unknown,
+        })
     }
 
     /// Flattens the visible rows: root entries, then each expanded and loaded
@@ -524,7 +609,8 @@ impl TreeModel {
         let Some(tree) = self.tree(dir).cloned() else {
             return;
         };
-        // Sorted so the list is deterministic regardless of API order.
+        // Sorted so the list is deterministic regardless of API order: folders
+        // first, then a case-insensitive name, then the raw name, then API order.
         let mut order: Vec<usize> = (0..tree.entries.len()).collect();
         order.sort_by(|a, b| {
             let left = &tree.entries[*a];
@@ -562,14 +648,20 @@ impl TreeModel {
                 TreeEntryKind::Submodule => TreeRowKind::Submodule,
                 TreeEntryKind::Unknown { .. } => TreeRowKind::Unknown,
             };
-            let note = match kind {
-                TreeRowKind::Directory { expanded: true } if self.loading.contains(&path) => {
-                    Some("loading…")
-                }
-                TreeRowKind::Directory { expanded: true } if self.failed.contains_key(&path) => {
-                    Some("unavailable")
-                }
-                _ => None,
+            let state = if !kind.is_directory() || !expanded.contains(&path) {
+                RowState::Normal
+            } else if self.loading.contains(&path) {
+                RowState::Loading
+            } else if let Some(error) = self.failed.get(&path) {
+                RowState::Failed(error.clone())
+            } else if self
+                .children
+                .get(&path)
+                .is_some_and(|tree| tree.entries.is_empty())
+            {
+                RowState::Empty
+            } else {
+                RowState::Normal
             };
             out.push(TreeRow {
                 name: entry.path.as_str().to_string(),
@@ -578,9 +670,11 @@ impl TreeModel {
                 kind,
                 parent: dir.to_string(),
                 index,
-                note,
+                state,
             });
             if kind.is_directory() && expanded.contains(&path) && out.len() < MAX_TREE_ROWS {
+                // An expanded directory with a proven-empty or failed listing
+                // contributes no child rows; the parent row already says why.
                 self.push_rows(&path, depth + 1, expanded, out);
             }
         }
@@ -683,5 +777,18 @@ mod tests {
         assert_eq!(RepositoryNavigation::parent("README.md"), "");
         assert_eq!(RepositoryNavigation::name("docs/a.md"), "a.md");
         assert_eq!(RepositoryNavigation::name("a.md"), "a.md");
+    }
+
+    #[test]
+    fn a_missing_resource_never_claims_a_permission_problem() {
+        let error = PageError::from_repository(&RepositoryError::GitHub(GitHubError::NotFound));
+        assert!(error.title.contains("not found"));
+        assert!(
+            !error.title.contains("not visible"),
+            "a 404 must not assert the account lost visibility: {error:?}"
+        );
+        let detail = error.detail.unwrap_or_default();
+        assert!(detail.contains("does not exist"));
+        assert!(detail.contains("cannot access"));
     }
 }

@@ -3,18 +3,19 @@
 //! The page owns one browsing generation at a time: a verified
 //! [`RepositorySession`] captured from the host's [`AccountService`], the
 //! repository summary, the branch list, one fixed-commit snapshot, the lazily
-//! expanded directory tree and the reader showing either the default README or
-//! a selected file.
+//! expanded directory tree and the reader showing the README or a selected file.
 //!
 //! ## Integration boundary
 //!
 //! ```ignore
 //! let services = RepositoryPageServices::new(accounts.clone(), executor.clone());
 //! let page = cx.new(|cx| {
-//!     let mut page = RepositoryPage::new(services, locator, saved_navigation(), window, cx);
-//!     page.activate(cx);
+//!     let mut page = RepositoryPage::new(services, locator, saved_navigation, window, cx);
+//!     page.activate(cx);          // opens a fresh, verified repository session
 //!     page
 //! });
+//! // Teardown: `deactivate` cancels reads and keeps navigation intent;
+//! // `rebind(new_services)` restores that intent under new authorization.
 //! ```
 //!
 //! The host supplies only capabilities that already exist: `Arc<AccountService>`,
@@ -22,30 +23,21 @@
 //! database, reads a credential or fetches a PAT itself; every read goes through
 //! `AccountService::repo_service()`.
 //!
-//! Lifecycle (§ "public API" below):
+//! ## Publication
 //!
-//! * [`RepositoryPage::activate`] starts a fresh generation with a new session.
-//! * [`RepositoryPage::deactivate`] cancels in-flight work and keeps only
-//!   navigation intent; late successes and errors cannot publish.
-//! * [`RepositoryPage::rebind`] swaps the capabilities (for example after the
-//!   host restored a different account), clears data read under the old
-//!   authorization, and re-reads the saved navigation under a new session. An
-//!   old `RepositorySession` is never resurrected.
-//! * [`RepositoryPage::navigation`] returns the intent a host may save.
-//!
-//! Everything slow runs on the existing background executor; results come back
-//! through a queue drained on the GPUI thread, and every result is checked
-//! against the page generation, the captured authorization context, the fixed
-//! commit and the resource identity before it can replace what is on screen.
+//! Every background result is checked before it can change anything: the page
+//! generation, the captured authorization context, the fixed commit, and the
+//! resource identity the result belongs to. A stale success and a stale error
+//! are discarded the same way, so switching branch, account (A→B→A), replacing
+//! the PAT or hiding the page can never paste an old result over a new one.
 
-// The page is delivered before the Shell mounts it. This allowance is scoped to
-// this module tree; the product binary's other modules stay warning-clean.
-#![allow(dead_code)]
-
-pub mod navigation;
+mod navigation;
+mod page_tabs;
 #[cfg(test)]
 mod tests;
 mod view;
+
+pub use page_tabs::RepositoryTab;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
@@ -53,8 +45,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    App, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    div, prelude::*, px,
 };
 use tokio::sync::watch;
 
@@ -64,22 +57,21 @@ use crate::domain::blob::{BlobIdentity, BlobLimits};
 use crate::domain::repository::{
     BranchesOutcome, DirectoryTree, DynamicRef, ObjectSha, RepoSnapshot, RepositoryDetails,
     RepositoryError, RepositoryIdentity, RepositoryLocator, RevisionSpec, SnapshotDirectory,
+    TreeEntryKind,
 };
 use crate::github::RepositoryLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::executor::BackgroundExecutor;
 use crate::ui::reader::{DocumentKind, LinkTarget, ReaderAction, ReaderView};
 
-use navigation::{
-    BranchChoice, PageError, ReadmeState, RepositoryNavigation, TreeModel, TreeRowKind,
-    branch_choice,
-};
+use navigation::{BranchChoice, RowState, TreeModel, branch_choice};
+pub use navigation::{PageError, ReadmeState, RepositoryNavigation, TreeRow, TreeRowKind};
 
 /// Width of the bounded file tree column.
 pub const TREE_WIDTH: f32 = 268.0;
 
 /// Height of one file-tree row.
-pub const TREE_ROW_HEIGHT: f32 = 24.0;
+pub const TREE_ROW_HEIGHT: f32 = 26.0;
 
 /// The capabilities a host injects. They are the only way this page reaches
 /// GitHub; nothing here opens storage or credentials on its own.
@@ -125,19 +117,20 @@ pub enum PageAction {
     LinkNotFollowed { path: String, reason: String },
 }
 
-pub type OnPageAction = std::rc::Rc<dyn Fn(PageAction, &mut Window, &mut App)>;
+pub type OnPageAction = Rc<dyn Fn(PageAction, &mut Window, &mut App)>;
 
 /// Which document the reader shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
-    /// The repository's default README at the fixed commit.
+    /// The repository's README at the fixed commit, as identified by the
+    /// descriptor's own path (root, `docs/`, `.github/`, …).
     Readme,
     /// A file at the fixed commit.
     File(String),
 }
 
 impl Selection {
-    fn path(&self) -> Option<&str> {
+    pub fn path(&self) -> Option<&str> {
         match self {
             Self::Readme => None,
             Self::File(path) => Some(path),
@@ -165,7 +158,6 @@ pub enum ReaderStatus {
 }
 
 impl ReaderStatus {
-    /// A short, testable tag for the state that is on screen.
     pub fn tag(&self) -> &'static str {
         match self {
             Self::Loading => "loading",
@@ -241,13 +233,7 @@ enum Body {
         path: String,
         result: Result<DirectoryTree, RepositoryError>,
     },
-    Content {
-        branch: String,
-        commit: ObjectSha,
-        role: Role,
-        path: String,
-        result: Result<PreparedContent, RepositoryError>,
-    },
+    Content(ContentReply),
 }
 
 /// One content reply, bundled so the publication check reads as one step.
@@ -292,18 +278,15 @@ pub struct RepositoryPage {
     branches: Option<BranchesOutcome>,
     branches_error: Option<PageError>,
     branch: Option<BranchState>,
-    /// Flattened visible tree rows, rebuilt only when the tree or the expanded
-    /// set changes. Rendering clones an `Rc`, never the rows.
-    rows: Rc<Vec<navigation::TreeRow>>,
-    rows_dirty: bool,
-    rows_capped: bool,
     selection: Selection,
-    /// Path of the README body currently shown (the descriptor's path).
+    /// The README's own descriptor path, once discovery found one.
     readme_path: Option<String>,
     reader: Option<Entity<ReaderView>>,
     reader_status: ReaderStatus,
-    /// A page-level failure while opening or switching branches.
+    /// A page-level failure (repository summary, branch list, revision).
     error: Option<PageError>,
+    /// The in-page content tab. Only `Code` has content this round.
+    tab: RepositoryTab,
     /// True while a browsing generation is running.
     active: bool,
     /// Set when authorization changed under a running generation.
@@ -311,6 +294,13 @@ pub struct RepositoryPage {
     tree_scroll: UniformListScrollHandle,
     tree_motion: crate::ui::scroll::Motion<gpui::ScrollHandle>,
     tree_bars: crate::ui::scroll::Bars,
+    /// Flattened visible rows, rebuilt only when the tree or expansion changes.
+    rows: Rc<Vec<TreeRow>>,
+    rows_dirty: bool,
+    rows_capped: bool,
+    /// The keyboard's row, as a stable path rather than an index.
+    cursor: Option<String>,
+    tree_focus: FocusHandle,
     clock: std::time::Instant,
     #[cfg(test)]
     pinned_clock: Option<u64>,
@@ -351,25 +341,27 @@ impl RepositoryPage {
             branches: None,
             branches_error: None,
             branch: None,
-            rows: Rc::new(Vec::new()),
-            rows_dirty: false,
-            rows_capped: false,
             readme_path: None,
             reader: None,
             reader_status: ReaderStatus::Loading,
             error: None,
+            tab: RepositoryTab::Code,
             active: false,
             authorization_lost: false,
             tree_scroll,
             tree_motion: crate::ui::scroll::Motion::new(base),
             tree_bars: crate::ui::scroll::Bars::new(),
+            rows: Rc::new(Vec::new()),
+            rows_dirty: false,
+            rows_capped: false,
+            cursor: None,
+            tree_focus: cx.focus_handle().tab_stop(true),
             clock: std::time::Instant::now(),
             #[cfg(test)]
             pinned_clock: None,
             _window_activation: cx.observe_window_activation(window, |page, window, cx| {
                 if !window.is_window_active() {
-                    page.tree_bars.cancel(&page.tree_motion);
-                    cx.notify();
+                    page.cancel_scroll(cx);
                 }
             }),
             inbox: inbox.clone(),
@@ -426,6 +418,7 @@ impl RepositoryPage {
         self.reader = None;
         self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
+        self.cursor = None;
         self.invalidate_rows();
         self.work = Some(Work::new());
         self.spawn_job(Job::Repository(self.locator.clone()));
@@ -437,6 +430,7 @@ impl RepositoryPage {
     /// Nothing that finishes later can replace the page's content, because the
     /// generation has already moved on.
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.cancel_reader_interactions(cx);
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.active = false;
@@ -451,6 +445,7 @@ impl RepositoryPage {
     /// Replaces the injected capabilities and re-reads the saved navigation
     /// under a new session.
     pub fn rebind(&mut self, services: RepositoryPageServices, cx: &mut Context<Self>) {
+        self.cancel_reader_interactions(cx);
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.active = false;
@@ -466,21 +461,20 @@ impl RepositoryPage {
         self.reader_status = ReaderStatus::Loading;
         self.error = None;
         self.authorization_lost = false;
+        self.cursor = None;
         self.invalidate_rows();
         self.services = services;
         self.activate(cx);
     }
 
     /// One user-initiated retry of the failed step. There is no automatic retry
-    /// loop; each press starts a new bounded attempt.
+    /// loop; each press starts a new bounded attempt of that step only.
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         if !self.active || self.authorization_lost || self.details.is_none() {
             self.activate(cx);
             return;
         }
         let Some(branch) = self.branch.as_ref().map(|branch| branch.name.clone()) else {
-            // The branch list or the revision failed; restart from the identity
-            // the page already holds rather than opening a new session.
             if let Some(details) = self.details.clone() {
                 self.spawn_job(Job::Branches(details.identity));
             }
@@ -501,14 +495,56 @@ impl RepositoryPage {
         }
     }
 
+    /// Switches the in-page content tab.
+    ///
+    /// Leaving Code stops drawing the tree and reader for that tab but keeps the
+    /// navigation intent, so returning restores it under the still-valid session.
+    pub fn select_tab(&mut self, tab: RepositoryTab, cx: &mut Context<Self>) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        if tab != RepositoryTab::Code {
+            // Hidden content must not keep a gesture alive.
+            self.cancel_reader_interactions(cx);
+        } else {
+            // Returning to Code: if authorization was lost while hidden, the page
+            // must re-verify rather than show data from an old session.
+            self.check_authorization(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn tab(&self) -> RepositoryTab {
+        self.tab
+    }
+
     /// Expands or collapses a directory, loading it the first time it opens.
     pub fn toggle_directory(&mut self, path: &str, cx: &mut Context<Self>) {
-        if !self.intent.expanded.remove(path) {
+        if self.intent.expanded.remove(path) {
+            self.invalidate_rows();
+        } else {
             self.intent.expanded.insert(path.to_string());
+            self.invalidate_rows();
             self.load_directory(path, cx);
         }
-        self.invalidate_rows();
         cx.notify();
+    }
+
+    /// Expands a directory (no-op when already open), loading it if needed.
+    fn expand_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.intent.expanded.insert(path.to_string()) {
+            self.invalidate_rows();
+            self.load_directory(path, cx);
+            cx.notify();
+        }
+    }
+
+    fn collapse_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.intent.expanded.remove(path) {
+            self.invalidate_rows();
+            cx.notify();
+        }
     }
 
     /// Selects a file at the current fixed commit.
@@ -521,11 +557,12 @@ impl RepositoryPage {
         self.reader = None;
         self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
+        self.cursor = Some(path.to_string());
         self.resolve_selection(cx);
         cx.notify();
     }
 
-    /// Returns the reader to the repository README.
+    /// Returns the reader to the repository README (its real path, wherever it is).
     pub fn show_readme(&mut self, cx: &mut Context<Self>) {
         if self.branch.is_none() {
             return;
@@ -534,6 +571,9 @@ impl RepositoryPage {
         self.selection = Selection::Readme;
         self.reader = None;
         self.reader_status = ReaderStatus::Loading;
+        if let Some(path) = self.readme_path.clone() {
+            self.cursor = Some(path);
+        }
         self.resolve_selection(cx);
         cx.notify();
     }
@@ -549,11 +589,56 @@ impl RepositoryPage {
             state.readme = ReadmeState::Unknown;
         }
         self.reader = None;
+        self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
         self.spawn_job(Job::Readme {
             branch: name,
             snapshot,
         });
+        cx.notify();
+    }
+
+    /// Retries one failed directory only.
+    pub fn retry_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(branch) = self.branch.as_mut() else {
+            return;
+        };
+        branch.tree.clear_failure(path);
+        branch.tree.begin_load(path);
+        let branch_name = branch.name.clone();
+        let commit = branch.commit().clone();
+        let handle = match branch.tree.child_directory(path) {
+            Ok(handle) => handle,
+            Err(_) => {
+                // The parent is not loaded; the expansion replays when it is.
+                self.invalidate_rows();
+                cx.notify();
+                return;
+            }
+        };
+        self.invalidate_rows();
+        self.spawn_job(Job::Directory {
+            branch: branch_name,
+            commit,
+            path: path.to_string(),
+            handle,
+        });
+        cx.notify();
+    }
+
+    /// Retries only the currently selected document (README or file).
+    pub fn retry_reader(&mut self, cx: &mut Context<Self>) {
+        if self.selection == Selection::Readme
+            && self.branch.as_ref().is_some_and(|branch| {
+                matches!(branch.readme, ReadmeState::Failed(_) | ReadmeState::Unknown)
+            })
+        {
+            self.retry_readme(cx);
+            return;
+        }
+        self.reader = None;
+        self.reader_status = ReaderStatus::Loading;
+        self.resolve_selection(cx);
         cx.notify();
     }
 
@@ -569,6 +654,10 @@ impl RepositoryPage {
 
     pub fn branches(&self) -> Option<&BranchesOutcome> {
         self.branches.as_ref()
+    }
+
+    pub fn branches_error(&self) -> Option<&PageError> {
+        self.branches_error.as_ref()
     }
 
     pub fn selected_branch(&self) -> Option<&str> {
@@ -599,18 +688,34 @@ impl RepositoryPage {
         self.error.as_ref()
     }
 
-    pub fn branches_error(&self) -> Option<&PageError> {
-        self.branches_error.as_ref()
+    pub fn readme_state(&self) -> Option<&ReadmeState> {
+        self.branch.as_ref().map(|branch| &branch.readme)
     }
 
-    /// The visible tree rows as of the last flatten. They are rebuilt only when
-    /// the tree or the expanded set changed, so reading them is free.
-    pub fn rows(&self) -> &[navigation::TreeRow] {
+    pub fn readme_path(&self) -> Option<&str> {
+        self.readme_path.as_deref()
+    }
+
+    /// The repository-relative path of the document on screen, once known.
+    pub fn current_path(&self) -> Option<&str> {
+        match &self.selection {
+            Selection::Readme => self.readme_path.as_deref(),
+            Selection::File(path) => Some(path.as_str()),
+        }
+    }
+
+    /// A directory load failure for `path` (`""` is the root).
+    pub fn tree_failure(&self, path: &str) -> Option<&PageError> {
+        self.branch.as_ref()?.tree.failure(path)
+    }
+
+    /// The visible tree rows as of the last flatten.
+    pub fn rows(&self) -> &[TreeRow] {
         &self.rows
     }
 
     /// Rebuilds the flattened rows if the tree or the expanded set changed.
-    pub fn refresh_rows(&mut self) -> Rc<Vec<navigation::TreeRow>> {
+    pub fn refresh_rows(&mut self) -> Rc<Vec<TreeRow>> {
         if self.rows_dirty {
             self.rows_dirty = false;
             match self.branch.as_mut() {
@@ -628,9 +733,9 @@ impl RepositoryPage {
         self.rows.clone()
     }
 
-    /// Marks the flattened rows stale after a tree or expansion change.
-    fn invalidate_rows(&mut self) {
-        self.rows_dirty = true;
+    /// Whether the flattened tree stopped at the row cap.
+    pub fn tree_capped(&self) -> bool {
+        self.rows_capped
     }
 
     /// The loaded tree for `path`, for tests and the preview.
@@ -638,26 +743,35 @@ impl RepositoryPage {
         self.branch.as_ref()?.tree.tree(path)
     }
 
-    pub fn readme_state(&self) -> Option<&ReadmeState> {
-        self.branch.as_ref().map(|branch| &branch.readme)
+    /// The keyboard's current row path.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
     }
 
-    /// The path of the README currently described or shown.
-    pub fn readme_path(&self) -> Option<&str> {
-        self.readme_path.as_deref()
-    }
-
-    /// A directory load failure for `path` (`""` is the root).
-    pub fn tree_failure(&self, path: &str) -> Option<&PageError> {
-        self.branch.as_ref()?.tree.failure(path)
-    }
-
-    /// Whether the flattened tree stopped at the row cap.
-    pub fn tree_capped(&self) -> bool {
-        self.rows_capped
+    /// Moves the keyboard cursor to `path` (a tree row).
+    pub fn focus_row(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.cursor = Some(path.to_string());
+        cx.notify();
     }
 
     // ---- internals ----
+
+    fn invalidate_rows(&mut self) {
+        self.rows_dirty = true;
+    }
+
+    fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
+        self.tree_bars.cancel(&self.tree_motion);
+        cx.notify();
+    }
+
+    /// Ends the reader's own selection/scroll gesture before the page hides or
+    /// invalidates the content it belongs to. Uses the reader's public API.
+    fn cancel_reader_interactions(&mut self, cx: &mut Context<Self>) {
+        if let Some(reader) = self.reader.clone() {
+            reader.update(cx, |reader, cx| reader.cancel_interactions(cx));
+        }
+    }
 
     fn load_directory(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(branch) = self.branch.as_mut() else {
@@ -723,33 +837,12 @@ impl RepositoryPage {
     }
 
     /// Walks the ancestors of `path`, loading only the directories on the way.
-    /// Nothing recursive happens: each opened directory is one request.
     fn resolve_path(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.branch.is_none() {
             return;
         }
-        // A link can name a directory: open it rather than report a bad file.
-        if self.branch.as_ref().is_some_and(|branch| {
-            branch
-                .tree
-                .tree(RepositoryNavigation::parent(path))
-                .is_some_and(|tree| {
-                    tree.entries.iter().any(|entry| {
-                        entry.path.as_str() == RepositoryNavigation::name(path)
-                            && entry.kind == crate::domain::repository::TreeEntryKind::Directory
-                    })
-                })
-        }) {
-            self.intent.expanded.insert(path.to_string());
-            self.invalidate_rows();
-            self.intent.path = None;
-            self.selection = Selection::Readme;
-            self.load_directory(path, cx);
-            self.request_readme_content(cx);
-            return;
-        }
         for ancestor in RepositoryNavigation::ancestors(path) {
-            self.intent.expanded.insert(ancestor.clone());
+            self.intent.expanded.insert(ancestor);
         }
         self.invalidate_rows();
         let ancestors = RepositoryNavigation::ancestors(path);
@@ -779,6 +872,16 @@ impl RepositoryPage {
         let Some(branch) = self.branch.as_mut() else {
             return;
         };
+        // Following a link to a directory opens it instead of failing.
+        if branch.tree.entry_kind(path) == Some(TreeRowKind::Directory { expanded: false }) {
+            self.intent.expanded.insert(path.to_string());
+            self.intent.path = None;
+            self.selection = Selection::Readme;
+            self.invalidate_rows();
+            self.load_directory(path, cx);
+            self.request_readme_content(cx);
+            return;
+        }
         match branch.tree.locate_file(path) {
             Some((tree, index)) => match BlobIdentity::from_file(tree, index) {
                 Ok(identity) => {
@@ -803,7 +906,7 @@ impl RepositoryPage {
                 self.reader = None;
                 self.reader_status = ReaderStatus::SelectionUnavailable {
                     reason: format!(
-                        "`{path}` is not an ordinary file at this commit. Directories, symbolic links and submodules are not opened as text."
+                        "`{path}` is not an ordinary file at this commit. Symbolic links, submodules and unknown Git types are not opened as text."
                     ),
                 };
             }
@@ -867,12 +970,14 @@ impl RepositoryPage {
         let Some(details) = self.details.clone() else {
             return;
         };
+        self.cancel_reader_interactions(cx);
         self.intent.branch = Some(name.clone());
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
         self.error = None;
+        self.cursor = None;
         self.invalidate_rows();
         self.spawn_job(Job::Revision {
             branch: name,
@@ -937,6 +1042,7 @@ impl RepositoryPage {
         if self.session.as_ref().is_some_and(RepositorySession::verify) {
             return;
         }
+        self.cancel_reader_interactions(cx);
         self.authorization_lost = true;
         self.active = false;
         self.stop_work();
@@ -949,6 +1055,7 @@ impl RepositoryPage {
         self.reader = None;
         self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
+        self.cursor = None;
         self.invalidate_rows();
         self.error = Some(PageError::new(
             "The account or authorization changed.",
@@ -988,23 +1095,7 @@ impl RepositoryPage {
                 path,
                 result,
             } => self.apply_directory(branch, commit, path, result, cx),
-            Body::Content {
-                branch,
-                commit,
-                role,
-                path,
-                result,
-            } => self.apply_content(
-                ContentReply {
-                    branch,
-                    commit,
-                    role,
-                    path,
-                    result,
-                },
-                window,
-                cx,
-            ),
+            Body::Content(content) => self.apply_content(content, window, cx),
         }
     }
 
@@ -1225,7 +1316,7 @@ impl RepositoryPage {
                 let page = cx.entity().downgrade();
                 let reader = cx.new(|cx| {
                     let mut reader = ReaderView::from_prepared(content, kind, window, cx);
-                    reader.on_action(std::rc::Rc::new(move |action, window, cx| {
+                    reader.on_action(Rc::new(move |action, window, cx| {
                         let _ =
                             page.update(cx, |page, cx| page.on_reader_action(action, window, cx));
                     }));
@@ -1312,6 +1403,164 @@ impl RepositoryPage {
         }
     }
 
+    // ---- tree keyboard navigation ----
+
+    /// Moves the tree cursor by `delta` visible rows.
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let rows = self.refresh_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .cursor
+            .as_deref()
+            .and_then(|path| rows.iter().position(|row| row.path == path));
+        let next = match current {
+            Some(index) => {
+                let target = index as isize + delta;
+                target.clamp(0, rows.len() as isize - 1) as usize
+            }
+            None => 0,
+        };
+        let path = rows[next].path.clone();
+        self.cursor = Some(path.clone());
+        self.reveal_row(&path, cx);
+        cx.notify();
+    }
+
+    /// Enters the tree, starting at the current selection or the first row.
+    fn focus_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.cursor.is_none() {
+            self.cursor = self
+                .current_path()
+                .map(str::to_string)
+                .or_else(|| self.rows.first().map(|row| row.path.clone()));
+        }
+        cx.notify();
+    }
+
+    /// Left: collapse the current directory, or climb to its parent.
+    fn cursor_left(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.cursor.clone() else {
+            return;
+        };
+        let rows = self.refresh_rows();
+        let Some(row) = rows.iter().find(|row| row.path == path) else {
+            return;
+        };
+        if row.kind == (TreeRowKind::Directory { expanded: true }) {
+            self.collapse_directory(&path, cx);
+            return;
+        }
+        let parent = row.parent.clone();
+        if !parent.is_empty() {
+            self.cursor = Some(parent);
+            self.reveal_row(&self.cursor.clone().unwrap_or_default(), cx);
+            cx.notify();
+        }
+    }
+
+    /// Right: expand the current directory, or step into its first child.
+    fn cursor_right(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.cursor.clone() else {
+            return;
+        };
+        let rows = self.refresh_rows();
+        let Some(row) = rows.iter().find(|row| row.path == path) else {
+            return;
+        };
+        match row.kind {
+            TreeRowKind::Directory { expanded: false } => {
+                self.expand_directory(&path, cx);
+            }
+            TreeRowKind::Directory { expanded: true } => {
+                if let Some(index) = rows.iter().position(|row| row.path == path)
+                    && let Some(child) = rows.get(index + 1)
+                    && child.depth > row.depth
+                {
+                    let child = child.path.clone();
+                    self.cursor = Some(child.clone());
+                    self.reveal_row(&child, cx);
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter: activate the current row (toggle a directory, open a file).
+    fn cursor_activate(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.cursor.clone() else {
+            return;
+        };
+        let rows = self.refresh_rows();
+        let Some(row) = rows.iter().find(|row| row.path == path) else {
+            return;
+        };
+        match row.kind {
+            TreeRowKind::Directory { .. } => self.toggle_directory(&path, cx),
+            TreeRowKind::File => self.select_file(&path, cx),
+            TreeRowKind::Symlink | TreeRowKind::Submodule | TreeRowKind::Unknown => {
+                self.select_file(&path, cx)
+            }
+        }
+    }
+
+    /// Scrolls a row into view through the list's own scroll target.
+    fn reveal_row(&mut self, path: &str, cx: &mut Context<Self>) {
+        let rows = self.refresh_rows();
+        let Some(index) = rows.iter().position(|row| row.path == path) else {
+            return;
+        };
+        self.tree_scroll
+            .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// The tree's key handler, exposed to the view. Only plain navigation keys
+    /// are consumed so the platform, IME and the reader's text selection keep
+    /// their own events.
+    pub(crate) fn press_tree_key_event(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_tree_key(event, window, cx)
+    }
+
+    fn on_tree_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        // Only plain navigation keys; modified keys belong to the platform, the
+        // reader's selection and IME.
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        match key {
+            "down" => self.move_cursor(1, cx),
+            "up" => self.move_cursor(-1, cx),
+            "left" => self.cursor_left(cx),
+            "right" => self.cursor_right(cx),
+            "home" => {
+                if let Some(path) = self.refresh_rows().first().map(|row| row.path.clone()) {
+                    self.cursor = Some(path.clone());
+                    self.reveal_row(&path, cx);
+                    cx.notify();
+                }
+            }
+            "end" => {
+                if let Some(path) = self.refresh_rows().last().map(|row| row.path.clone()) {
+                    self.cursor = Some(path.clone());
+                    self.reveal_row(&path, cx);
+                    cx.notify();
+                }
+            }
+            "enter" | "space" => self.cursor_activate(cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
     // ---- background work ----
 
     fn spawn_job(&mut self, job: Job) {
@@ -1355,6 +1604,12 @@ impl RepositoryPage {
 
     pub(crate) fn tree_base_handle(&self) -> gpui::ScrollHandle {
         self.tree_scroll.0.borrow().base_handle.clone()
+    }
+}
+
+impl Focusable for RepositoryPage {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.tree_focus.clone()
     }
 }
 
@@ -1460,13 +1715,13 @@ async fn run_job(
         } => {
             let path = identity.path().as_str().to_string();
             let result = session.content(&identity, &limits.blob, cancel).await;
-            Body::Content {
+            Body::Content(ContentReply {
                 branch,
                 commit,
                 role,
                 path,
                 result: result.map(|Scoped { value, .. }| value),
-            }
+            })
         }
     }
 }
@@ -1481,9 +1736,12 @@ impl Render for RepositoryPage {
             window.request_animation_frame();
         }
         div()
+            .id("repository-page")
             .debug_selector(|| "repository-page".to_string())
             .size_full()
+            .min_w_0()
             .min_h_0()
+            .overflow_hidden()
             .child(view)
     }
 }
@@ -1497,5 +1755,98 @@ impl Drop for RepositoryPage {
             work.source.cancel();
         }
         self.tree_bars.cancel(&self.tree_motion);
+    }
+}
+
+/// Each visible row's kind, used by tests to assert row state without pixels.
+pub fn row_kind(rows: &[TreeRow], path: &str) -> Option<TreeRowKind> {
+    rows.iter().find(|row| row.path == path).map(|row| row.kind)
+}
+
+/// Each visible row's state, used by tests to assert loading/failed/empty rows.
+pub fn row_state(rows: &[TreeRow], path: &str) -> Option<RowState> {
+    rows.iter()
+        .find(|row| row.path == path)
+        .map(|row| row.state.clone())
+}
+
+/// A tree row's path list, for tests that assert ordering and indentation.
+pub fn row_paths(rows: &[TreeRow]) -> Vec<&str> {
+    rows.iter().map(|row| row.path.as_str()).collect()
+}
+
+impl RepositoryPage {
+    /// Whether a README is available and a different file is currently shown,
+    /// which is exactly when the "back to README" entry belongs.
+    ///
+    /// The README's own path comes from the branch's discovery state, so
+    /// selecting a file (which clears the *shown* README path) does not make a
+    /// real README disappear.
+    pub fn can_return_to_readme(&self) -> bool {
+        let Selection::File(path) = &self.selection else {
+            return false;
+        };
+        self.branch
+            .as_ref()
+            .and_then(|branch| branch.readme.path())
+            .is_some_and(|readme| readme != path.as_str())
+    }
+
+    /// The `TreeEntryKind`-independent display name for a row kind, used by the
+    /// accessibility label and by tests.
+    pub fn row_label(rows: &[TreeRow], path: &str) -> Option<String> {
+        rows.iter()
+            .find(|row| row.path == path)
+            .map(|row| row.name.clone())
+    }
+}
+
+/// Ensures `TreeEntryKind` stays referenced here for the file/directory split.
+fn _entry_kind_is_file(kind: &TreeEntryKind) -> bool {
+    matches!(kind, TreeEntryKind::File { .. })
+}
+
+#[cfg(test)]
+pub(crate) use test_support::*;
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    impl RepositoryPage {
+        /// The in-flight result count, for tests that assert no extra reads.
+        pub(crate) fn queued_results(&self) -> usize {
+            self.inbox.lock().expect("repository page inbox").len()
+        }
+
+        /// The authorization context of the current session, for rebind checks.
+        pub(crate) fn context(&self) -> Option<&RepositoryReadContext> {
+            self.context.as_ref()
+        }
+
+        /// Sends one plain navigation key to the page's tree handler, exactly as
+        /// the real key handler receives it.
+        pub(crate) fn press_tree_key(
+            &mut self,
+            key: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let event = KeyDownEvent {
+                keystroke: gpui::Keystroke {
+                    modifiers: Default::default(),
+                    key: key.to_string(),
+                    key_char: None,
+                },
+                is_held: false,
+                prefer_character_input: false,
+            };
+            self.press_tree_key_event(&event, window, cx);
+        }
+    }
+
+    /// The page's tree-focus handle, for tests that drive keyboard navigation.
+    pub(crate) fn tree_focus_handle(page: &RepositoryPage, cx: &App) -> FocusHandle {
+        page.focus_handle(cx)
     }
 }
