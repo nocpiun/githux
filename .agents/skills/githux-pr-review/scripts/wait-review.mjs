@@ -30,6 +30,7 @@ export const HELP = [
   '5 Bot消息需核实；6 CI失败；7 审查失败；8 合并冲突；9 重试发送状态不明；',
   '10 历史线程待处理；11 证据缺失；12 证据冲突；13 基线变化；14 CI待核实；',
   '15 合并阻塞；16 新触发轮次；130 中断。退出0不等于允许合并。',
+  'blocked 只禁止合并，不停止审查/CI轮询或既有有界重审。',
 ].join('\n');
 
 export function parseArgs(argv) {
@@ -218,7 +219,8 @@ export async function waitForReview(options, {
     if (found) return finish(found.status, found);
     if (!options.timeoutMs) return finish('timeout');
     const phase = [pending?.review?.state ?? 'unknown', pending?.threads?.state ?? 'unknown', pending?.ci?.state ?? 'unknown'];
-    const message = lastError ? '查询退避：' + lastError : '等待：审查=' + phase[0] + '；线程=' + phase[1] + '；CI=' + phase[2];
+    const blocker = pending?.integration?.blockers?.includes('blocked_label') ? '；合并受 blocked 标签限制' : '';
+    const message = lastError ? '查询退避：' + lastError : '等待：审查=' + phase[0] + '；线程=' + phase[1] + '；CI=' + phase[2] + blocker;
     if (message !== lastProgress) { progress(message); lastProgress = message; }
     const interval = errors ? Math.max(options.intervalMs, Math.min(120000, options.intervalMs * 2 ** Math.min(errors, 3))) : options.intervalMs;
     const remaining = Math.max(0, Math.min(deadline, softResult ? evidenceDeadline : Infinity) - now());

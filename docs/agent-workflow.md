@@ -112,7 +112,7 @@ merge_owner: coordinator
 - [PR 工作流](../.github/workflows/pr.yml) 的显示名称为 `PR`，job/check 名称为 `Check`。`Check labels` 与 `Check change size` 分步检查；标签检查失败时仍执行行数检查（取消运行除外），任一步失败都会使 job 失败。在 opened/reopened/synchronize/edited/labeled/unlabeled/ready_for_review 时执行，无路径过滤、不跳过 Draft；PR 提交或标签变动无需再推一个空提交。只用只读权限获取当前 PR 元数据，不 checkout 或执行 PR 代码。
 - 通过条件是 **无 `blocked` 标签，且 `additions <= 20000`，且 `deletions <= 20000`**。两个数字是 GitHub PR 全部 diff 的汇总，分别比较、包含边界，不按净增/合计或最近一次提交计算，不豁免锁文件、生成文件、重命名或删除。数据缺失、API 失败、head/base/state 不匹配会失败，不退回旧 webhook 数字。
 - 负责人在 GitHub 的 `main` ruleset/branch protection 中把 **`Check`（GitHub Actions 来源，`PR` 工作流）** 设置为 required status check；这是服务器强制禁止合并的必要配置，新增 YAML 本身不会改仓库保护。与现有 `CI` 一起保留，Agent 不设置绕过。工作流首次引入及旧 PR 需触发一次相关 PR 事件后才有该检查；合并冲突时 `pull_request` 工作流不能运行，不能把缺少检查当通过。
-- `githux-pr-review` 读取实时标签，开始/最终复核/自动重审前发现 `blocked` 都返回 `merge_blocked`（退出 15、`blocked_label`），停止通过与自动重审。标签缺失/格式未知报错，不猜测未阻塞。合并前还须再次核对实时标签，避免拿之前的成功结果直接合并。
+- `githux-pr-review` 在开始/最终复核/自动重审前校验实时标签。`blocked` 只禁止合并，仍继续读取和轮询 review、线程、所选 CI，并保留既有的一小时后单次自动重审；反馈、失败、证据问题、超时照常交回，同时携带 `integration.blockers` 中的 `blocked_label`。审查 clean 且所选检查就绪后，最终仍带标签则返回 `merge_blocked`（退出 15），不得返回就绪/完成来放行。标签缺失/格式未知报错，不猜测未阻塞。合并前还须再次核对实时标签，避免拿之前的成功结果直接合并。
 - 独立 `PR` 工作流不是 `CI` workflow 的追加 job，不能用 `--check Check` 代替 GitHub required check 配置。审查脚本直接强制 `blocked`；规模门槛由 `PR` 工作流及仓库保护执行。
 
 事件及统计口径依据：[GitHub pull_request 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)、[Get a pull request](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)。

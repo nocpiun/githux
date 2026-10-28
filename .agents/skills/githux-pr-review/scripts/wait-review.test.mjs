@@ -669,14 +669,16 @@ test('new gh escape gate retries a captured text GET once only when explicitly s
 });
 
 
-test('owner blocked label stops immediately even with clean CI/review and mergeable_state clean', async () => {
+test('owner blocked label collects clean evidence but prevents readiness with or without CI', async () => {
   for (const waitCi of [false, true]) for (const name of ['blocked', 'Blocked']) {
     const f = fixture({ heads: [pr({ labels: [{ name: 'pending' }, { name }] })], comments: [summary()] });
     const r = await inspectReview(options({ waitCi }), f.api);
     assert.equal(r.status, 'merge_blocked');
     assert.deepEqual(r.integration.blockers, ['blocked_label']);
-    assert.deepEqual(r.next_actions, ['wait_for_owner_unblock']);
-    assert.equal(f.calls.length, 1); // No review wait or API mutations to bypass the owner.
+    assert.ok(r.next_actions.includes('wait_for_owner_unblock'));
+    assert.equal(r.review.state, 'clean');
+    assert.equal(r.ci.state, waitCi ? 'success' : 'not_requested');
+    assert.ok(f.calls.some(c => c.path.includes('/reviews?')));
   }
 });
 
@@ -690,7 +692,7 @@ test('blocked added during evidence collection invalidates success with or witho
 });
 
 test('removing blocked permits a fresh check; pending does not mean blocked or manual acceptance', async () => {
-  assert.equal((await inspectReview(options(), fixture({ heads: [pr({ labels: [{ name: 'blocked' }] })] }).api)).status, 'merge_blocked');
+  assert.equal((await inspectReview(options(), fixture({ heads: [pr({ labels: [{ name: 'blocked' }] })], comments: [summary()] }).api)).status, 'merge_blocked');
   for (const labels of [[], [{ name: 'pending' }], [{ name: 'blocked-by-ci' }]]) {
     const r = await inspectReview(options({ waitCi: true }), fixture({ heads: [pr({ labels })], comments: [summary()] }).api);
     assert.equal(r.status, 'checks_ready');
@@ -706,11 +708,109 @@ test('missing or malformed labels fail closed on both initial and final PR reads
       await assert.rejects(inspectReview(options(), fixture({ heads, comments: [summary()] }).api), /PR labels/);
 });
 
-test('blocked at timeout prevents automatic review retry and exits with merge blocker status', async t => {
+test('blocked pending/running reviews keep polling until feedback or clean completion', async t => {
+  for (const waitCi of [false, true]) for (const feedback of [false, true]) {
+    const h = await harness(t, { waitCi });
+    const f = fixture(() => {
+      const elapsed = h.now() - Date.parse(since);
+      return { heads: [pr({ labels: [{ name: 'blocked' }] })],
+        comments: elapsed === 0 ? [] : [summary({ status: elapsed < 2000 ? 'running' : 'completed', findings: feedback })],
+        reviews: feedback && elapsed >= 2000 ? [review({ body: 'Fix the missing guard.' })] : [] };
+    });
+    const r = await waitForReview(h.opts, { ...h.deps, api: f.api });
+    assert.deepEqual(h.sleeps, [1000, 1000]);
+    assert.equal(r.status, feedback ? 'review_arrived' : 'merge_blocked');
+    assert.equal(r.review.state, feedback ? 'feedback' : 'clean');
+    assert.deepEqual(r.integration.blockers, ['blocked_label']);
+    assert.ok(r.next_actions.includes('wait_for_owner_unblock'));
+    if (feedback) assert.equal(r.review.reviews[0].body, 'Fix the missing guard.');
+    assert.equal(r.ci.state, waitCi ? 'success' : 'not_requested');
+    assert.equal(r.review_passed, null);
+  }
+});
+
+test('blocked label changes during polling do not lose review or final label state', async t => {
+  for (const removing of [false, true]) {
+    const h = await harness(t, { waitCi: true });
+    const f = fixture(() => {
+      const elapsed = h.now() - Date.parse(since);
+      const blocked = removing ? elapsed < 2000 : elapsed >= 1000;
+      return { heads: [pr({ labels: blocked ? [{ name: 'blocked' }] : [] })],
+        comments: [summary({ status: elapsed < 2000 ? 'running' : 'completed' })] };
+    });
+    const r = await waitForReview(h.opts, { ...h.deps, api: f.api });
+    assert.deepEqual(h.sleeps, [1000, 1000]);
+    assert.equal(r.status, removing ? 'checks_ready' : 'merge_blocked');
+    assert.equal(r.integration.labels.includes('blocked'), !removing);
+  }
+});
+
+test('removing blocked during final read uses fresh labels for readiness', async () => {
+  const r = await inspectReview(options({ waitCi: true }), fixture({ comments: [summary()],
+    heads: [pr({ labels: [{ name: 'blocked' }] }), pr()] }).api);
+  assert.equal(r.status, 'checks_ready');
+  assert.deepEqual(r.integration.blockers, []);
+});
+
+test('blocked clean review still waits for requested CI before reporting merge blocker', async t => {
+  const h = await harness(t, { waitCi: true, autoRetry: true });
+  const f = fixture(() => ({ heads: [pr({ labels: [{ name: 'blocked' }] })], comments: [summary()],
+    runs: [run({ status: h.now() < Date.parse(since) + 2000 ? 'in_progress' : 'completed' })] }));
+  const r = await waitForReview(h.opts, { ...h.deps, api: f.api });
+  assert.deepEqual(h.sleeps, [1000, 1000]);
+  assert.equal(r.status, 'merge_blocked');
+  assert.equal(r.ci.state, 'success');
+  assert.equal(h.posts.length, 0);
+});
+
+test('blocked does not hide failed reviews, CI failures or unresolved history', async () => {
+  const cases = [
+    { comments: [summary({ status: 'failed' })], status: 'review_failed' },
+    { comments: [summary()], jobs: [job({ conclusion: 'failure' })], status: 'ci_failed' },
+    { comments: [receipt()], inline: [comment({ commit_id: B, pull_request_review_id: 8 })], status: 'history_pending' },
+  ];
+  for (const data of cases) {
+    const r = await inspectReview(options({ waitCi: true }), fixture({ ...data, heads: [pr({ labels: [{ name: 'blocked' }] })] }).api);
+    assert.equal(r.status, data.status);
+    assert.ok(r.integration.blockers.includes('blocked_label'));
+    assert.ok(r.next_actions.includes('wait_for_owner_unblock'));
+  }
+});
+
+test('blocked pending review times out with evidence in read-only mode', async t => {
+  for (const timeoutMs of [0, 2000]) {
+    const h = await harness(t, { timeoutMs });
+    const r = await waitForReview(h.opts, { ...h.deps, api: fixture({ heads: [pr({ labels: [{ name: 'blocked' }] })] }).api });
+    assert.equal(r.status, 'timeout');
+    assert.equal(r.waiting_on, 'review');
+    assert.equal(r.review.state, 'pending');
+    assert.ok(r.integration.blockers.includes('blocked_label'));
+    assert.equal(h.now() - Date.parse(since), timeoutMs);
+    assert.equal(h.posts.length, 0);
+  }
+});
+
+test('blocked at timeout allows exactly one bounded review retry, not a merge', async t => {
   const h = await harness(t, { autoRetry: true, timeoutMs: 1000 });
   const api = fixture(() => ({ heads: [pr({ labels: h.now() >= Date.parse(since) + 1000 ? [{ name: 'blocked' }] : [] })] })).api;
   const r = await waitForReview(h.opts, { ...h.deps, api });
+  assert.equal(r.status, 'timeout');
+  assert.equal(r.review.state, 'pending');
+  assert.ok(r.integration.blockers.includes('blocked_label'));
+  assert.equal(h.posts.length, 1);
+  assert.equal(h.now() - Date.parse(since), 2000);
+  assert.equal(JSON.parse(await readFile(h.opts.retryState, 'utf8')).status, 'sent');
+});
+
+test('blocked review completing after retry returns collected clean evidence and exit 15', async t => {
+  const h = await harness(t, { autoRetry: true, timeoutMs: 1000 });
+  const api = fixture(() => ({ heads: [pr({ labels: [{ name: 'blocked' }] })],
+    comments: h.posts.length ? [summary({ at: new Date(h.now()).toISOString() })] : [] })).api;
+  const r = await waitForReview(h.opts, { ...h.deps, api });
   assert.equal(r.status, 'merge_blocked');
-  assert.equal(h.posts.length, 0);
-  await assert.rejects(readFile(h.opts.retryState), { code: 'ENOENT' });
+  assert.equal(r.review.state, 'clean');
+  assert.equal(r.review_passed, null);
+  assert.equal(h.posts.length, 1);
+  t.mock.method(process.stdout, 'write', () => true);
+  assert.equal(await main(args, { wait: async () => r }), 15);
 });
