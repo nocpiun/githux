@@ -419,8 +419,18 @@ impl Shell {
     fn end_drags_on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_tab_drag(window, cx);
         scroll::cancel_region(&mut self.tab_bars, &self.tab_motion);
-        for session in self.workspace.sessions() {
-            session.state().smooth.cancel();
+        // A lost activation also clears every page region's fade and thumb drag (the Settings
+        // region is one of these), matching the repository and tab bars.
+        for id in self
+            .workspace
+            .sessions()
+            .iter()
+            .map(|session| session.id())
+            .collect::<Vec<_>>()
+        {
+            if let Some(state) = self.workspace.state_mut(id) {
+                scroll::cancel_region(&mut state.bars, &state.smooth);
+            }
         }
         if let Some(palette) = &self.palette {
             palette.smooth.cancel();
@@ -483,6 +493,52 @@ impl Shell {
     #[cfg(test)]
     pub fn page_max_offset(&self) -> Point<gpui::Pixels> {
         self.workspace.active().state().scroll.max_offset()
+    }
+
+    /// The Settings page region's `Bars`, for the fade/drag lifecycle regression tests.
+    #[cfg(test)]
+    pub fn page_bars(&self, id: TabId) -> Option<&scroll::Bars> {
+        self.workspace.page_state(id).map(|state| &state.bars)
+    }
+
+    /// Drives the Settings region's fade clock and returns the painted opacity, mirroring the tab
+    /// strip helper so a bidirectional fade can be stepped without sleeping.
+    #[cfg(test)]
+    pub fn page_bars_hover(&mut self, id: TabId, hovered: bool, now: u64) -> bool {
+        self.workspace
+            .state_mut(id)
+            .is_some_and(|state| state.bars.hover(hovered, now, false))
+    }
+
+    #[cfg(test)]
+    pub fn page_bars_opacity(&mut self, id: TabId, now: u64) -> f32 {
+        self.workspace
+            .state_mut(id)
+            .map_or(0.0, |state| state.bars.opacity(now))
+    }
+
+    #[cfg(test)]
+    pub fn page_bars_animating(&self, id: TabId) -> bool {
+        self.workspace
+            .page_state(id)
+            .is_some_and(|state| state.bars.is_animating())
+    }
+
+    #[cfg(test)]
+    pub fn page_bars_dragging(&self, id: TabId) -> Option<gpui::Axis> {
+        self.workspace
+            .page_state(id)
+            .and_then(|state| state.bars.dragging())
+    }
+
+    /// Marks this session's page-region thumb drag as started, the way `Bars::drag(true)` would.
+    #[cfg(test)]
+    pub fn start_page_thumb_drag(&mut self, id: TabId, now: u64) {
+        if let Some(state) = self.workspace.state_mut(id) {
+            state
+                .bars
+                .drag(&state.smooth, gpui::Axis::Vertical, true, now, false);
+        }
     }
 
     /// The scroll offset of one session's page.
@@ -1981,8 +2037,32 @@ impl Render for Shell {
         if self.tab_motion.tick(now, reduced) {
             window.request_animation_frame();
         }
-        if self.workspace.active().state().smooth.tick(now, reduced) {
-            window.request_animation_frame();
+        // The Settings › Accounts region keeps its own `Bars`/`Motion` (it is the session's page
+        // region), so its fade and thumb drag need the same per-frame lifecycle as the repository
+        // and tab bars: settle a released thumb, sample the opacity before testing `is_animating`,
+        // and only request frames while the fade or the content easing is actually running.
+        {
+            let session_id = self.workspace.active_id();
+            let settings_route = self.workspace.route() == &Route::Settings;
+            let now_ms = self.tab_now_ms();
+            if let Some(state) = self.workspace.state_mut(session_id) {
+                if settings_route {
+                    if state.bars.dragging().is_some() && !cx.has_active_drag() {
+                        let target = state.smooth.clone();
+                        if state.bars.settle(&target, now_ms, reduced) {
+                            cx.notify();
+                        }
+                    }
+                    // Sample before testing is_animating, so the last fade frame retires at once.
+                    state.bars.opacity(now_ms);
+                    if state.bars.is_animating() {
+                        window.request_animation_frame();
+                    }
+                }
+                if state.smooth.tick(now, reduced) {
+                    window.request_animation_frame();
+                }
+            }
         }
         if self
             .palette

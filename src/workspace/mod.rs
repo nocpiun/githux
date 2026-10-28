@@ -288,6 +288,16 @@ impl Workspace {
             .map(|session| &mut session.state)
     }
 
+    /// The page-local state of one session for read-only access. Used by the Shell's fade/drag
+    /// lifecycle tests; production reads the same state through the borrow it already holds.
+    #[allow(dead_code)]
+    pub fn page_state(&self, id: TabId) -> Option<&PageState> {
+        self.sessions
+            .iter()
+            .find(|session| session.id == id)
+            .map(|session| &session.state)
+    }
+
     #[cfg(test)]
     pub fn session_mut(&mut self, id: TabId) -> Option<&mut Session> {
         self.sessions.iter_mut().find(|session| session.id == id)
