@@ -45,13 +45,13 @@ let page = cx.new(|cx| {
 
 文件树是清晰的行式导航：每行填满视口宽度、统一行高与左右边距；hover/选中背景覆盖整行（选中的是整行，不是文字胶囊）；键盘焦点用单独的中性描边，与 hover、选中可区分。目录有独立 chevron 槽位、目录图标与名称，文件在 chevron 槽位留空以对齐；缩进随层级统一，目录优先、同级稳定排序。单击目录行或其 chevron 都只切换一次展开状态，且不清空右侧已打开的文件；单击普通文件行打开该文件。长名称单行截断并提供完整路径 tooltip。
 
-加载中、空目录、失败目录分别可辨：目录行自身显示 `loading…` / `empty` / 失败原因，失败行内提供**该目录的**有界 Retry，其他目录与当前正文继续可用。
+加载中、空目录、失败目录分别可辨：目录行自身显示 `loading…` / `empty` / `Failed`（悬停查看原因），失败行内提供**该目录的**有界 Retry，其他目录与当前正文继续可用。截断或不完整子目录显示 `Incomplete`，即使没有保留任何条目也不标成 empty。根目录失败有独立的 `Retry files`，从当前 snapshot 派生根 handle，保留已成功的 README 和资料。
 
 树可键盘聚焦：上下移动可见行、左右展开/折叠或回到父节点、Home/End 到首末行、Enter 打开文件或切换目录，移动行时经列表自身滚动目标滚入视口。只有无修饰的导航键被消费，带修饰键的事件留给平台、输入法与阅读器文本选择。
 
 ## 代次与发布
 
-一次浏览代次持有“一个已验证 session + 页面代次 + 分支请求身份 + 分支/commit/资源身份”。分支名本身不足以区分 A→B→A 的两次同名解析，因此每次 `begin_branch` 推进单调 `branch_request`，旧身份的 Revision 结果不论成功或失败都被丢弃。`activate` 在获取 session **之前**清空一切授权绑定状态，所以获取失败时不会残留上一个账户的内容。所有慢操作在既有 `BackgroundExecutor` 的 Tokio runtime 上执行，结果经受锁队列回 GPUI，在 UI 线程排出。每条结果在应用前都核对：页面代次、捕获的 `RepositoryReadContext`、分支名、固定 commit，以及阅读目标身份；过期（切账户、替换 PAT、移除账户、A→B→A、切分支、关闭/隐藏）一律丢弃，成功与错误同等对待。失活时调用 `ReaderView::cancel_interactions`（main 新增的公开接口）结束阅读器手势，不改 reader 实现。
+一次浏览代次持有“一个已验证 session + 页面代次 + 分支请求身份 + 分支/commit/资源身份”。分支名本身不足以区分 A→B→A 的两次同名解析，因此每次 `begin_branch` 推进单调 `branch_request`，旧身份的 Revision 及其树/正文结果不论成功或失败都被丢弃。同一路径的多次打开还各有单调 `selection_request`，A→B→A 与同文件重复点击不会让旧正文成功/错误覆盖新结果。发布前直接复核服务 context；链接回调延后执行并携带页面、分支和选中代次，避免回调重入 reader 或使用失效链接。`activate` 在获取 session **之前**清空一切授权绑定状态，所以获取失败时不会残留上一个账户的内容。所有慢操作在既有 `BackgroundExecutor` 的 Tokio runtime 上执行，结果经受锁队列回 GPUI，在 UI 线程排出。每条结果在应用前都核对：页面代次、捕获的 `RepositoryReadContext`、分支名、固定 commit，以及阅读目标身份；过期（切账户、替换 PAT、移除账户、A→B→A、切分支、关闭/隐藏）一律丢弃，成功与错误同等对待。失活时调用 `ReaderView::cancel_interactions`（main 新增的公开接口）结束阅读器手势，不改 reader 实现。
 
 ## 文件树加载
 
@@ -79,9 +79,9 @@ let page = cx.new(|cx| {
 - 按 method、URL path/query、分支/commit/tree/blob 身份应答，同一资源可反复读取，**与点击顺序、并发完成次序无关**，不是一次性队列。
 - Normal 场景含两条真正不同的分支（不同 commit、不同根 tree、不同 README 与 `src`），根 `README.md`、`docs/guide.md`、`docs/guides/nested/deep-note.md`、`src/main.rs`、`assets/`（二进制、空文件、超大文件）、symlink 与 submodule 行；所有展示的普通目录/文件都可操作。
 - fixture 不建模的请求返回 `599` 并打印开发侧诊断，明确要求补 fixture，**不伪装成 GitHub 权限错误**。
-- 只有明确场景才产生失败：`EmptyRepository`（409）、`ReadmeUncertain`（404 不确定）、`NoReadme`（完整空树）、`DirectoryFailure`/`FileFailure`（只失败一次，单次 Retry 可恢复）、`NoBranches`（完整空分支列表）、`TruncatedTree`（`truncated: true` + 未知类型）、`LongTree`（400 行）。
+- 只有明确场景才产生失败：`EmptyRepository`（409）、`ReadmeUncertain`（404 不确定）、`NoReadme`（完整空树）、`DirectoryFailure`/`FileFailure`（只失败一次，单次 Retry 可恢复）、`NoBranches`（完整空分支列表）、`TruncatedTree`（`truncated: true` + 未知类型）、`LongTree`（400 行）、`Delayed`（每次读取延迟 250ms）、`ReadmeInDocs`（首选 README 在 docs/README.md）、`RootFailure`（根目录失败一次，Retry files 恢复）。
 
-`cargo run --example repository` 在页面**之外**提供紧凑的场景按钮、Reset 与 action 输出；这些脚手架不属于产品页面、不出现在 release binary。临时账户目录与合成凭据同样只存在于预览/测试。
+`cargo run --example repository` 在页面**之外**提供紧凑的场景下拉框、Reset 与 action 输出；这些脚手架不属于产品页面、不出现在 release binary。临时账户目录与合成凭据同样只存在于预览/测试。
 
 ## 验证
 

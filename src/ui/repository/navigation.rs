@@ -429,6 +429,8 @@ pub enum RowState {
     Failed(PageError),
     /// An expanded directory that a complete listing proved to be empty.
     Empty,
+    /// Files may be omitted; even zero returned entries do not prove emptiness.
+    Incomplete,
 }
 
 impl RowState {
@@ -654,6 +656,8 @@ impl TreeModel {
                 RowState::Loading
             } else if let Some(error) = self.failed.get(&path) {
                 RowState::Failed(error.clone())
+            } else if self.children.get(&path).is_some_and(tree_incomplete) {
+                RowState::Incomplete
             } else if self
                 .children
                 .get(&path)

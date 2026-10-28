@@ -19,7 +19,7 @@
 
 ### 2. 预览场景与验收共用数据
 
-- 工具栏（页面之外）提供 Scene 按钮 + Reset + action 输出，默认 Normal；场景含 EmptyRepository、ReadmeUncertain、NoReadme、DirectoryFailure、FileFailure、NoBranches、TruncatedTree、LongTree。
+- 工具栏（页面之外）提供 Scene 下拉框 + Reset + action 输出，默认 Normal；场景含 EmptyRepository、ReadmeUncertain、NoReadme、DirectoryFailure、FileFailure、NoBranches、TruncatedTree、LongTree。
 - 场景切换重置 fixture 与请求代次，不把前一个异常的失败计数带进下一个场景。`DirectoryFailure`/`FileFailure` 的脚本失败只消费一次，单次 Retry 即可恢复。
 - **测试改为直接使用同一 fixture**：原先测试与预览各用一套 transport 的问题已消除，`tests/repository.rs` 与 `examples/repository.rs` 现在共享 `repository_fixture.rs`。
 - 工具栏、场景数据、临时账户、合成凭据、外部链接只报告等逻辑只存在于 example 与 bin_support，产品 binary 不声明这些模块。
@@ -65,7 +65,7 @@
 - `cargo fmt --all -- --check` 通过
 - `cargo check --locked --all-targets` 通过
 - `cargo clippy --locked --all-targets -- -D warnings` 通过
-- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、repository **445**（其中本任务页面测试 32 项 + fixture 自测 6 项）全部通过
+- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、Home **54**、repository **451**（其中本任务页面行为测试 34 项、导航模型测试 4 项 + fixture 自测 6 项）全部通过
 - `cargo build --locked --example repository` 通过
 - `git diff --check` 通过
 
@@ -73,15 +73,37 @@
 
 **真实窗口**：`target/debug/examples/repository.exe` 启动，标题 `Githux · Repository page preview`、进程 Responding，`PrintWindow` 取到真实渲染帧：预览工具栏（场景按钮 + 说明 + action 行）、`octo/ledger` 摘要与描述、页内 Tabs（Code 选中并带下划线）、Files 树（assets/docs/src 目录、link-to-readme 符号链接、README.md 选中行、vendor submodule）、commit 短号 `c0ffee0`、README.md 头部与真实 Markdown 渲染。首帧曾发现 fixture 的 README blob `size` 与真实正文不一致（384 vs 实际字节），真实管线正确报 `blob size differs from descriptor`；修正后正常渲染——这证明预览走的是真实校验链路而不是镜像常量。
 
-**渲染边界（未完成，不宣称通过）**：本机为 1.5 倍缩放、2560×1440 屏幕；`PrintWindow` 取帧在多倍缩放与窗口宽度较大时会裁掉右侧，属于取帧/DPI 与窗口尺寸的观测限制。GPUI 测试平台在 1400×900 与 677×545 两种尺寸下断言了实际布局：`repository-body` 1400px、树列固定 268px、阅读器列 1132px、Markdown 段落宽 1092px 且正常换行；窄窗口下阅读器列 409px、段落 369px 仍换行。真实缩放下的观感仍需负责人在预览中确认。
+**原生交互补验（本轮最终修复工作区）**：采用 DPI-aware `SetThreadDpiAwarenessContext(-4)` 后取得完整 1882×1286 物理像素帧，分支下拉与 Markdown 均完整可见；此前非 DPI-aware 取帧的右侧裁切不能作为实际布局缺陷，也不能仅靠测试布局推断真机已通过。新取帧确认了真实窗口布局。只操作本任务 exe/PID，未关闭其他任务窗口。
+
+实际 Win32 鼠标/键盘输入已执行并观察帧变化：
+
+1. Normal 首屏：Code 选中、真实 README.md 单一选中、摘要正常；场景下拉与 Reset 均可见。
+2. docs chevron 连按三次（展开→收起→展开），每次只切换一次，README 保留；src 展开后 main.rs 连续点击三次均显示源码，头部路径为 src/main.rs。
+3. main→feature/docs-polish→main，feature 分支的 src/feature_note.rs 确实出现，切回消失；Markdown/文件依固定 commit 重读。
+4. README 相对链接到 docs/guide.md、再跟随 nested note 到 docs/guides/nested/deep-note.md，祖先自动展开且选中真实节点；外部 Rust 链接只在工具栏记录 `external link (not opened)`。
+5. Directory failure 场景打开 docs，行内 Retry 一次恢复子目录，README 始终保留；File failure 场景打开 main.rs 阅读区报错，Retry 一次恢复源码，摘要与树保留。
+6. 切到 Issues 内容区空白，切回 Code 恢复当前文件。
+
+截图、临时 native probe 脚本保存在被忽略的 `.agents/task/`，不进入产品或 Git；它们证明上列实际操作，不替代负责人视觉验收。
+
+### 第二轮审查与验收补齐
+
+- `selection_request` 为每次文件选择/重试提供独立单调身份，旧正文错误也不能覆盖后来同文件成功；分支身份覆盖所有后台消息，切分支取消前轮工作。
+- 根目录失败新增 `Retry files`，使用当前 snapshot 的根 handle；不重置资料或已显示 README。
+- 子目录截断/Partial 显示 `Incomplete`，只有完整空子目录才显示 empty。
+- 默认 README 若在 docs/ 下，按 descriptor.path 展开祖先并选中真实节点；新增该场景和事件测试。
+- 实际鼠标/键盘事件测试使用与 example 同一 Normal fixture，验证 chevron、整行空白点击、重复文件、键盘 dispatch；新增 binary/Empty/TooLarge 与空子目录状态验证。
+- Markdown 链接 action 在 reader update 结束后执行，并再次核对页面/分支/文件代次，避免取消 reader 手势的回调重入。
+- 工具栏改有界场景下拉框；补 Delayed、README in docs、Root failure 场景、长中文文件名与空目录。feature 的 guide 使用独立 blob/tree，正文与分支说明一致。
+- 本轮追加整合已合并 main `8de1959`（Home #34），没有从未合并分支取实现。
 
 ## 未覆盖
 
-- 真实 Windows 指针/键盘输入（行点击、chevron、分支下拉、滚轮平滑、thumb 拖动、链接点击）未由测试平台证明，需负责人真机验收；测试平台不经过 Windows 原生输入分发。
+- 未做原生长树 thumb 拖到末尾、触控板、多 DPI/跨屏与 IME 联合验收；这些继续交负责人。上列已执行的真实鼠标/键盘交互不等于负责人体验验收。
 - 正式 Shell 接线（`src/ui/mod.rs` / `src/app`）与账户切换时标签处理仍属后续集成任务。
 - 真实私有仓库 / SSO / 限流联调需负责人提供 PAT；本轮仍只用合成凭据与本地 fixture。
 - macOS/Linux 仅保编译，未做原生验收。
 
 ## 交接
 
-新版预览已按最后构建启动验证并关闭；负责人可从 `cargo run --example repository` 或 `target/debug/examples/repository.exe` 打开，用工具栏逐个场景复验。PR #35 继续沿用，`pending` 用于本轮重新验收、`blocked` 保持由负责人管理，本任务不合并、不启用 auto-merge。
+新版预览会在最终检查及提交后按最后构建启动并保持打开，PID/head 记录在 delivery-state.json；负责人也可从 `cargo run --example repository` 或 `target/debug/examples/repository.exe` 打开，用工具栏逐个场景复验。PR #35 继续沿用，`pending` 用于本轮重新验收、`blocked` 保持由负责人管理，本任务不合并、不启用 auto-merge。

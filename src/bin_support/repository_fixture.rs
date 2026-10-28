@@ -47,11 +47,17 @@ pub enum Scene {
     TruncatedTree,
     /// A very large root tree for scrolling and virtualization.
     LongTree,
+    /// Every repository read takes 250ms; useful for branch/selection race checks.
+    Delayed,
+    /// Preferred README is a real file under docs/, not at the root.
+    ReadmeInDocs,
+    /// The first root directory read fails; Retry files recovers it.
+    RootFailure,
 }
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 9] = [
+    pub const ALL: [Scene; 12] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
@@ -61,6 +67,9 @@ impl Scene {
         Scene::NoBranches,
         Scene::TruncatedTree,
         Scene::LongTree,
+        Scene::Delayed,
+        Scene::ReadmeInDocs,
+        Scene::RootFailure,
     ];
 
     pub fn label(self) -> &'static str {
@@ -74,6 +83,9 @@ impl Scene {
             Scene::NoBranches => "No branches",
             Scene::TruncatedTree => "Truncated tree",
             Scene::LongTree => "Long tree",
+            Scene::Delayed => "Delayed reads",
+            Scene::ReadmeInDocs => "README in docs",
+            Scene::RootFailure => "Root failure",
         }
     }
 
@@ -105,6 +117,15 @@ impl Scene {
                 "The root tree is truncated and carries unknown entry types; it is never shown as a complete directory."
             }
             Scene::LongTree => "400 root files for scrolling and virtualization checks.",
+            Scene::RootFailure => {
+                "The root directory fails once. Retry files restores it while keeping the repository and README."
+            }
+            Scene::Delayed => {
+                "Reads take 250ms. Switch branches or files while loading; only the current request may publish."
+            }
+            Scene::ReadmeInDocs => {
+                "The preferred README lives at docs/README.md. Its ancestor opens and its real row is selected."
+            }
         }
     }
 }
@@ -121,6 +142,8 @@ const MAIN_TREE: &str = "a000000000000000000000000000000000000001";
 const FEATURE_TREE: &str = "a000000000000000000000000000000000000002";
 /// Extra trees, all reachable from both commits.
 const DOCS_TREE: &str = "a000000000000000000000000000000000000010";
+const FEATURE_DOCS_TREE: &str = "a000000000000000000000000000000000000013";
+const FEATURE_GUIDE_BLOB: &str = "b00000000000000000000000000000000000000b";
 const DOCS_GUIDES_TREE: &str = "a000000000000000000000000000000000000011";
 const SRC_TREE: &str = "a000000000000000000000000000000000000020";
 const FEATURE_SRC_TREE: &str = "a000000000000000000000000000000000000021";
@@ -244,6 +267,7 @@ fn locator_path() -> String {
 /// Which scripted, one-shot failure a scene arms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArmedFailure {
+    Root,
     Directory,
     File,
 }
@@ -284,6 +308,7 @@ impl FixtureTransport {
         *self.scene.lock().unwrap() = scene;
         *self.armed.lock().unwrap() = armed_for(scene);
         self.requests.lock().unwrap().clear();
+        self.mismatches.lock().unwrap().clear();
     }
 
     pub fn scene(&self) -> Scene {
@@ -335,6 +360,9 @@ impl FixtureTransport {
         let scene = self.scene();
         let url = &request.url;
         self.record(url);
+        if request.method != crate::network::transport::HttpMethod::Get {
+            return Ok(self.mismatch(url));
+        }
         // The root repository path is `/repos/owner/name`; everything else hangs
         // off it, so strip the base once and dispatch on the remainder.
         let base = locator_path();
@@ -431,6 +459,9 @@ impl FixtureTransport {
     }
 
     fn tree(&self, scene: Scene, sha: &str, url: &str) -> HttpResponse {
+        if scene == Scene::RootFailure && sha == MAIN_TREE && self.take_armed(ArmedFailure::Root) {
+            return json_response(500, "{}");
+        }
         if scene == Scene::DirectoryFailure
             && sha == DOCS_TREE
             && self.take_armed(ArmedFailure::Directory)
@@ -446,6 +477,29 @@ impl FixtureTransport {
         let entries = match sha {
             MAIN_TREE => root_entries(scene, false),
             FEATURE_TREE => root_entries(scene, true),
+            FEATURE_DOCS_TREE => vec![
+                entry("guides", DOCS_GUIDES_TREE, EntryKind::Directory, None),
+                entry(
+                    "guide.md",
+                    FEATURE_GUIDE_BLOB,
+                    EntryKind::Blob,
+                    Some(FEATURE_GUIDE_TEXT.len() as u64),
+                ),
+            ],
+            DOCS_TREE if scene == Scene::ReadmeInDocs => vec![
+                entry(
+                    "README.md",
+                    README_BLOB,
+                    EntryKind::Blob,
+                    Some(README_TEXT.len() as u64),
+                ),
+                entry(
+                    "guide.md",
+                    GUIDE_BLOB,
+                    EntryKind::Blob,
+                    Some(GUIDE_TEXT.len() as u64),
+                ),
+            ],
             DOCS_TREE => vec![
                 entry("guides", DOCS_GUIDES_TREE, EntryKind::Directory, None),
                 entry(
@@ -476,6 +530,18 @@ impl FixtureTransport {
                 ),
                 entry("empty.txt", EMPTY_BLOB, EntryKind::Blob, Some(0)),
                 entry(
+                    "empty-folder",
+                    "a000000000000000000000000000000000000050",
+                    EntryKind::Directory,
+                    None,
+                ),
+                entry(
+                    "很长的文件名-中文路径和目录缩进-完整路径可以通过提示查看.txt",
+                    NESTED_BLOB,
+                    EntryKind::Blob,
+                    Some(NESTED_TEXT.len() as u64),
+                ),
+                entry(
                     "huge.log",
                     HUGE_BLOB,
                     EntryKind::Blob,
@@ -488,6 +554,7 @@ impl FixtureTransport {
                 EntryKind::Blob,
                 Some(MAIN_RS_TEXT.len() as u64),
             )],
+            "a000000000000000000000000000000000000050" => Vec::new(),
             FEATURE_SRC_TREE => vec![
                 entry(
                     "main.rs",
@@ -528,7 +595,8 @@ impl FixtureTransport {
             README_BLOB => readme_text_for(true).as_bytes().to_vec(),
             FEATURE_README_BLOB => readme_text_for(false).as_bytes().to_vec(),
             FEATURE_ONLY_BLOB => FEATURE_NOTE_TEXT.as_bytes().to_vec(),
-            GUIDE_BLOB => guide_text(self.scene()).as_bytes().to_vec(),
+            GUIDE_BLOB => GUIDE_TEXT.as_bytes().to_vec(),
+            FEATURE_GUIDE_BLOB => FEATURE_GUIDE_TEXT.as_bytes().to_vec(),
             NESTED_BLOB => NESTED_TEXT.as_bytes().to_vec(),
             MAIN_RS_BLOB => MAIN_RS_TEXT.as_bytes().to_vec(),
             BINARY_BLOB => BINARY_BYTES.to_vec(),
@@ -569,7 +637,7 @@ impl FixtureTransport {
                 200,
                 &serde_json::json!({
                     "type": "file",
-                    "path": "README.md",
+                    "path": if scene == Scene::ReadmeInDocs { "docs/README.md" } else { "README.md" },
                     "sha": readme_blob_of(!main_branch),
                     "size": readme_text_for(main_branch).len(),
                     "encoding": "base64",
@@ -594,6 +662,7 @@ impl FixtureTransport {
 fn armed_for(scene: Scene) -> Option<ArmedFailure> {
     match scene {
         Scene::DirectoryFailure => Some(ArmedFailure::Directory),
+        Scene::RootFailure => Some(ArmedFailure::Root),
         Scene::FileFailure => Some(ArmedFailure::File),
         _ => None,
     }
@@ -608,6 +677,13 @@ impl Transport for FixtureTransport {
         Box::pin(async move {
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
+            }
+            if self.scene() == Scene::Delayed {
+                tokio::select! {
+                    biased;
+                    _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                }
             }
             self.answer(&request)
         })
@@ -725,7 +801,16 @@ fn root_entries(scene: Scene, feature: bool) -> Vec<serde_json::Value> {
             EntryKind::Blob,
             Some(readme_text_for(!feature).len() as u64),
         ),
-        entry("docs", DOCS_TREE, EntryKind::Directory, None),
+        entry(
+            "docs",
+            if feature {
+                FEATURE_DOCS_TREE
+            } else {
+                DOCS_TREE
+            },
+            EntryKind::Directory,
+            None,
+        ),
         entry("src", src, EntryKind::Directory, None),
         entry(
             "assets",
@@ -751,6 +836,9 @@ fn root_entries(scene: Scene, feature: bool) -> Vec<serde_json::Value> {
             EntryKind::Unknown,
             Some(12),
         ));
+    }
+    if scene == Scene::ReadmeInDocs {
+        entries.retain(|entry| entry["path"] != "README.md");
     }
     entries
 }

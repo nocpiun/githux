@@ -15,9 +15,9 @@ use ely_core::{
     buttons::{Button, ButtonVariant},
     data_display::{Badge, Tone},
     forms::{Choice, Select},
-    primitives::{Icon, IconName},
+    primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
-    typography::{Ellipsis, EllipsisTooltip},
+    typography::Ellipsis,
 };
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -362,7 +362,7 @@ fn tree_column(
     let border = colors.border;
     let selected = page.current_path().map(str::to_string);
     let cursor = page.cursor().map(str::to_string);
-    let warnings = tree_warnings(page, &colors, small);
+    let warnings = tree_warnings(page, &colors, small, cx);
     let count = rows.len();
     let empty = page
         .tree("")
@@ -489,6 +489,7 @@ fn tree_column(
                 .flex_1()
                 .min_h_0()
                 .w_full()
+                .id("repository-tree-viewport")
                 .track_focus(&page.tree_focus)
                 .on_key_down(cx.listener(|page, event, window, cx| {
                     page.press_tree_key_event(event, window, cx);
@@ -506,6 +507,7 @@ fn tree_warnings(
     page: &RepositoryPage,
     colors: &ely_core::theme::Palette,
     small: gpui::Rems,
+    cx: &mut Context<RepositoryPage>,
 ) -> Vec<AnyElement> {
     let mut warnings = Vec::new();
     if page.tree("").is_some_and(tree_incomplete) {
@@ -531,6 +533,16 @@ fn tree_warnings(
                 .text_size(small)
                 .text_color(colors.danger)
                 .child(error.title.clone())
+                .when(error.retryable, |row| {
+                    let page = cx.weak_entity();
+                    row.child(
+                        Button::new("repository-retry-root", "Retry files")
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let _ = page.update(cx, |page, cx| page.retry_directory("", cx));
+                            }),
+                    )
+                })
                 .into_any_element(),
         );
     }
@@ -559,10 +571,9 @@ fn tree_row(
     row: TreeRow,
     selected: Option<String>,
     cursor: Option<String>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
-    let _ = page;
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let radius = theme.radius(Radius::Sm);
@@ -576,14 +587,16 @@ fn tree_row(
     };
     let path = row.path.clone();
     let name = row.name.clone();
+    let tooltip_path = row.path.clone();
+    let debug_path = row.path.clone();
     let depth = row.depth;
     let kind = row.kind;
     let state = row.state.clone();
-    let index = row.index;
     let is_selected = selected.as_deref() == Some(row.path.as_str());
-    let is_cursor = cursor.as_deref() == Some(row.path.as_str());
+    let is_cursor =
+        page.tree_focus.is_focused(window) && cursor.as_deref() == Some(row.path.as_str());
     let hover = colors.hover;
-    let focus_ring = colors.focus;
+    let focus_ring = colors.fg_subtle;
     let entity = cx.entity();
 
     let chevron: AnyElement = match kind {
@@ -594,11 +607,9 @@ fn tree_row(
             // press toggles exactly once.
             div()
                 .id(SharedString::from(format!("repository-chevron-{path}")))
-                .debug_selector(move || {
-                    format!(
-                        "repository-chevron-{}",
-                        if expanded { "open" } else { "closed" }
-                    )
+                .debug_selector({
+                    let path = path.clone();
+                    move || format!("repository-chevron-{path}")
                 })
                 .flex_none()
                 .flex()
@@ -617,9 +628,14 @@ fn tree_row(
                     .size(IconSize::Xs)
                     .color(colors.fg_muted),
                 )
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    entity.update(cx, |page, cx| page.toggle_directory(&path, cx));
+                    let focus = entity.read(cx).tree_focus.clone();
+                    window.focus(&focus, cx);
+                    entity.update(cx, |page, cx| {
+                        page.focus_row(&path, cx);
+                        page.toggle_directory(&path, cx);
+                    });
                 })
                 .into_any_element()
         }
@@ -648,12 +664,22 @@ fn tree_row(
                 .child("empty")
                 .into_any_element(),
         ),
+        RowState::Incomplete => Some(
+            div()
+                .debug_selector(|| "repository-row-incomplete".into())
+                .text_color(colors.warning)
+                .flex_none()
+                .child("Incomplete")
+                .into_any_element(),
+        ),
         RowState::Failed(error) => {
             let entity = entity.clone();
             let path = path.clone();
             let retryable = error.retryable;
             Some(
                 div()
+                    .id(SharedString::from(format!("repository-row-error-{path}")))
+                    .tooltip(Tooltip::text(error.title.clone()))
                     .debug_selector(|| "repository-row-failed".to_string())
                     .flex()
                     .flex_none()
@@ -663,7 +689,7 @@ fn tree_row(
                         div()
                             .text_size(small)
                             .text_color(colors.danger)
-                            .child(format!("failed · {}", error.title)),
+                            .child("Failed"),
                     )
                     .when(retryable, |row| {
                         row.child(
@@ -686,7 +712,8 @@ fn tree_row(
 
     div()
         .id(SharedString::from(format!("repository-row-{path}")))
-        .debug_selector(move || format!("repository-tree-row-{index}"))
+        .debug_selector(move || format!("repository-row-{debug_path}"))
+        .tooltip(Tooltip::text(tooltip_path))
         .flex()
         .items_center()
         .gap_1p5()
@@ -697,25 +724,34 @@ fn tree_row(
         .pr_2()
         .rounded(radius)
         .text_size(small)
-        .when(is_selected, |row| row.bg(hover))
+        .cursor_pointer()
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .when(is_selected, |row| row.bg(colors.border))
         .when(!is_selected, |row| row.hover(move |style| style.bg(hover)))
         // Keyboard focus is a ring, distinct from hover and selection.
-        .when(is_cursor, |row| row.border_1().border_color(focus_ring))
+        .when(is_cursor, |row| row.border_color(focus_ring))
         .child(chevron)
         .child(Icon::new(icon).size(IconSize::Xs).color(icon_color))
-        .child(div().min_w_0().flex_1().child(EllipsisTooltip::new(
-            SharedString::from(format!("repository-row-label-{path}")),
-            name,
-        )))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .child(Ellipsis::new(name)),
+        )
         .children(state_element)
         .on_click(move |_, window, cx| {
             // One press acts once: a directory toggles, a file opens. The reader
             // keeps whatever it is showing when a directory is toggled.
             let focus = entity.read(cx).tree_focus.clone();
             window.focus(&focus, cx);
-            entity.update(cx, |page, cx| match kind {
-                TreeRowKind::Directory { .. } => page.toggle_directory(&path, cx),
-                _ => page.select_file(&path, cx),
+            entity.update(cx, |page, cx| {
+                page.focus_row(&path, cx);
+                match kind {
+                    TreeRowKind::Directory { .. } => page.toggle_directory(&path, cx),
+                    _ => page.select_file(&path, cx),
+                }
             });
         })
         .into_any_element()

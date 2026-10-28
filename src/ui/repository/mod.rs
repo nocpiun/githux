@@ -206,6 +206,7 @@ impl Work {
 /// authorization context captured when the request started.
 struct Message {
     generation: u64,
+    branch_request: u64,
     context: RepositoryReadContext,
     body: Body,
 }
@@ -242,6 +243,7 @@ struct ContentReply {
     branch: String,
     commit: ObjectSha,
     role: Role,
+    selection_request: u64,
     path: String,
     result: Result<PreparedContent, RepositoryError>,
 }
@@ -283,6 +285,8 @@ pub struct RepositoryPage {
     /// page generation, so a branch name alone cannot tell an older A reply from
     /// the current one; this does.
     branch_request: u64,
+    selection_request: u64,
+    pending_content: Option<BlobIdentity>,
     selection: Selection,
     /// The README's own descriptor path, once discovery found one.
     readme_path: Option<String>,
@@ -347,6 +351,8 @@ impl RepositoryPage {
             branches_error: None,
             branch: None,
             branch_request: 0,
+            selection_request: 0,
+            pending_content: None,
             readme_path: None,
             reader: None,
             reader_status: ReaderStatus::Loading,
@@ -399,7 +405,10 @@ impl RepositoryPage {
     /// A new session is always created; a saved branch or file is restored
     /// against that new authorization and re-resolved to a fixed commit.
     pub fn activate(&mut self, cx: &mut Context<Self>) {
+        self.cancel_reader_interactions(cx);
         self.stop_work();
+        self.pending_content = None;
+        self.selection_request = self.selection_request.wrapping_add(1);
         self.generation = self.generation.wrapping_add(1);
         self.authorization_lost = false;
         // Clear every authorization-bound value *before* capturing a session:
@@ -513,6 +522,7 @@ impl RepositoryPage {
         if self.tab == tab {
             return;
         }
+        self.tree_bars.cancel(&self.tree_motion);
         self.tab = tab;
         if tab != RepositoryTab::Code {
             // Hidden content must not keep a gesture alive.
@@ -562,10 +572,12 @@ impl RepositoryPage {
         if self.branch.is_none() {
             return;
         }
+        self.cancel_reader_interactions(cx);
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.pending_content = None;
         self.intent.path = Some(path.to_string());
         self.selection = Selection::File(path.to_string());
         self.reader = None;
-        self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
         self.cursor = Some(path.to_string());
         self.resolve_selection(cx);
@@ -577,6 +589,9 @@ impl RepositoryPage {
         if self.branch.is_none() {
             return;
         }
+        self.cancel_reader_interactions(cx);
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.pending_content = None;
         self.intent.path = None;
         self.selection = Selection::Readme;
         self.reader = None;
@@ -595,6 +610,8 @@ impl RepositoryPage {
         };
         let snapshot = branch.snapshot.clone();
         let name = branch.name.clone();
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.pending_content = None;
         if let Some(state) = self.branch.as_mut() {
             state.readme = ReadmeState::Unknown;
         }
@@ -613,11 +630,14 @@ impl RepositoryPage {
         let Some(branch) = self.branch.as_mut() else {
             return;
         };
-        branch.tree.clear_failure(path);
-        branch.tree.begin_load(path);
+        let handle = if path.is_empty() {
+            Ok(SnapshotDirectory::root(&branch.snapshot))
+        } else {
+            branch.tree.child_directory(path)
+        };
         let branch_name = branch.name.clone();
         let commit = branch.commit().clone();
-        let handle = match branch.tree.child_directory(path) {
+        let handle = match handle {
             Ok(handle) => handle,
             Err(_) => {
                 // The parent is not loaded; the expansion replays when it is.
@@ -626,6 +646,7 @@ impl RepositoryPage {
                 return;
             }
         };
+        branch.tree.begin_load(path);
         self.invalidate_rows();
         self.spawn_job(Job::Directory {
             branch: branch_name,
@@ -646,8 +667,18 @@ impl RepositoryPage {
             self.retry_readme(cx);
             return;
         }
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.pending_content = None;
         self.reader = None;
         self.reader_status = ReaderStatus::Loading;
+        if let Some(path) = self.current_path().map(str::to_string) {
+            for ancestor in RepositoryNavigation::ancestors(&path) {
+                if self.tree_failure(&ancestor).is_some() {
+                    self.retry_directory(&ancestor, cx);
+                    return;
+                }
+            }
+        }
         self.resolve_selection(cx);
         cx.notify();
     }
@@ -860,7 +891,12 @@ impl RepositoryPage {
 
     /// Walks the ancestors of `path`, loading only the directories on the way.
     fn resolve_path(&mut self, path: &str, cx: &mut Context<Self>) {
-        if self.branch.is_none() {
+        if self
+            .branch
+            .as_ref()
+            .is_none_or(|branch| branch.tree.root().is_none())
+        {
+            // The root request will resume this selection, including saved paths.
             return;
         }
         for ancestor in RepositoryNavigation::ancestors(path) {
@@ -920,13 +956,18 @@ impl RepositoryPage {
         match branch.tree.locate_file(path) {
             Some((tree, index)) => match BlobIdentity::from_file(tree, index) {
                 Ok(identity) => {
+                    if self.pending_content.as_ref() == Some(&identity) {
+                        return;
+                    }
                     self.reader_status = ReaderStatus::Loading;
                     let commit = branch.commit().clone();
                     let branch_name = branch.name.clone();
+                    self.pending_content = Some(identity.clone());
                     self.spawn_job(Job::Content {
                         branch: branch_name,
                         commit,
                         role: Role::File(path.to_string()),
+                        selection_request: self.selection_request,
                         identity,
                     });
                 }
@@ -966,12 +1007,22 @@ impl RepositoryPage {
                 let identity = BlobIdentity::from_readme(&descriptor);
                 let branch_name = branch.name.clone();
                 let commit = branch.commit().clone();
-                self.readme_path = Some(path);
+                self.readme_path = Some(path.clone());
+                for ancestor in RepositoryNavigation::ancestors(&path) {
+                    self.intent.expanded.insert(ancestor);
+                }
+                self.invalidate_rows();
+                self.load_expanded(_cx);
+                if self.pending_content.as_ref() == Some(&identity) {
+                    return;
+                }
+                self.pending_content = Some(identity.clone());
                 self.reader_status = ReaderStatus::Loading;
                 self.spawn_job(Job::Content {
                     branch: branch_name,
                     commit,
                     role: Role::Readme,
+                    selection_request: self.selection_request,
                     identity,
                 });
             }
@@ -1006,6 +1057,10 @@ impl RepositoryPage {
             return;
         };
         self.cancel_reader_interactions(cx);
+        self.stop_work();
+        self.work = Some(Work::new());
+        self.pending_content = None;
+        self.selection_request = self.selection_request.wrapping_add(1);
         self.intent.branch = Some(name.clone());
         self.branch = None;
         self.reader = None;
@@ -1068,10 +1123,10 @@ impl RepositoryPage {
             let mut inbox = self.inbox.lock().expect("repository page inbox");
             inbox.drain(..).collect()
         };
+        self.check_authorization(cx);
         for message in messages {
             self.apply(message, window, cx);
         }
-        self.check_authorization(cx);
     }
 
     /// Detects an account/authorization change even when no message is pending,
@@ -1113,7 +1168,14 @@ impl RepositoryPage {
         if message.generation != self.generation || !self.active {
             return;
         }
-        if self.context.as_ref() != Some(&message.context) {
+        if self.context.as_ref() != Some(&message.context)
+            || !self
+                .services
+                .accounts
+                .repo_service()
+                .is_current(&message.context)
+            || message.branch_request != self.branch_request
+        {
             return;
         }
         match message.body {
@@ -1318,6 +1380,10 @@ impl RepositoryPage {
             return;
         }
         match result {
+            Ok(tree) if path.is_empty() => {
+                state.tree.set_root(tree);
+                self.error = None;
+            }
             Ok(tree) => state.tree.set_children(tree),
             Err(error) => state
                 .tree
@@ -1357,6 +1423,7 @@ impl RepositoryPage {
             branch,
             commit,
             role,
+            selection_request,
             path,
             result,
         } = content;
@@ -1368,9 +1435,10 @@ impl RepositoryPage {
         }
         // A result for a document the user has already moved away from must not
         // replace the current one.
-        if !role.matches(&self.selection) {
+        if selection_request != self.selection_request || !role.matches(&self.selection) {
             return;
         }
+        self.pending_content = None;
         match result {
             Ok(content) => {
                 if content.identity.path().as_str() != path {
@@ -1378,11 +1446,28 @@ impl RepositoryPage {
                 }
                 let kind = DocumentKind::for_path(&path);
                 let page = cx.entity().downgrade();
+                let generation = self.generation;
+                let branch_request = self.branch_request;
+                let selected_request = self.selection_request;
                 let reader = cx.new(|cx| {
                     let mut reader = ReaderView::from_prepared(content, kind, window, cx);
                     reader.on_action(Rc::new(move |action, window, cx| {
-                        let _ =
-                            page.update(cx, |page, cx| page.on_reader_action(action, window, cx));
+                        // The callback runs inside ReaderView::update. Defer the
+                        // host action so cancelling/replacing that reader cannot
+                        // re-enter the entity currently dispatching the link.
+                        let page = page.clone();
+                        window.defer(cx, move |window, cx| {
+                            let _ = page.update(cx, |page, cx| {
+                                if page.active
+                                    && page.generation == generation
+                                    && page.branch_request == branch_request
+                                    && page.selection_request == selected_request
+                                    && page.session.as_ref().is_some_and(RepositorySession::verify)
+                                {
+                                    page.on_reader_action(action, window, cx);
+                                }
+                            });
+                        });
                     }));
                     reader
                 });
@@ -1576,6 +1661,7 @@ impl RepositoryPage {
         let Some(index) = rows.iter().position(|row| row.path == path) else {
             return;
         };
+        self.tree_motion.cancel();
         self.tree_scroll
             .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
         cx.notify();
@@ -1640,6 +1726,7 @@ impl RepositoryPage {
         let inbox = self.inbox.clone();
         let alive = self.alive.clone();
         let generation = self.generation;
+        let branch_request = self.branch_request;
         let limits = self.services.limits.clone();
         let spawned = self.services.executor.handle().spawn(async move {
             let body = run_job(&session, job, &limits, cancel).await;
@@ -1649,6 +1736,7 @@ impl RepositoryPage {
                     .expect("repository page inbox")
                     .push_back(Message {
                         generation,
+                        branch_request,
                         context,
                         body,
                     });
@@ -1703,6 +1791,7 @@ enum Job {
         branch: String,
         commit: ObjectSha,
         role: Role,
+        selection_request: u64,
         identity: BlobIdentity,
     },
 }
@@ -1781,6 +1870,7 @@ async fn run_job(
             branch,
             commit,
             role,
+            selection_request,
             identity,
         } => {
             let path = identity.path().as_str().to_string();
@@ -1789,6 +1879,7 @@ async fn run_job(
                 branch,
                 commit,
                 role,
+                selection_request,
                 path,
                 result: result.map(|Scoped { value, .. }| value),
             })
@@ -1798,6 +1889,7 @@ async fn run_job(
 
 impl Render for RepositoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.check_authorization(cx);
         let rows = self.refresh_rows();
         let view = view::render(self, rows, window, cx);
         // Easing wheel motion and the bar's fade each ask for their own frames;

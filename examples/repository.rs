@@ -64,11 +64,12 @@ use std::sync::Arc;
 use ely_core::{
     Assets,
     buttons::Button,
+    forms::{Choice, Select},
     theme::{ActiveTheme, Mode, TextSize, Theme},
 };
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, AppContext, Bounds, Context, Entity, IntoElement, ParentElement, Render, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 
 use crate::auth::token::Pat;
@@ -265,28 +266,30 @@ impl Preview {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let small = theme.text_size(TextSize::Xs);
-        let scenes = Scene::ALL.iter().enumerate().map(|(index, &scene)| {
-            let entity = cx.entity();
-            let active = scene == self.scene;
-            Button::new(SharedString::from(format!("scene-{index}")), scene.label())
-                .variant(if active {
-                    ely_core::buttons::ButtonVariant::Primary
-                } else {
-                    ely_core::buttons::ButtonVariant::Secondary
-                })
-                .size(ely_core::theme::ControlSize::Sm)
-                .on_click(move |_, window, cx| {
-                    entity.update(cx, |preview, cx| preview.choose(scene, window, cx));
-                })
-                .into_any_element()
+        let scene_owner = cx.weak_entity();
+        let scene_picker = Select::new(
+            "preview-scene",
+            Scene::ALL
+                .iter()
+                .map(|scene| Choice::new(scene.label(), scene.label())),
+        )
+        .selected(self.scene.label())
+        .size(ely_core::theme::ControlSize::Sm)
+        .on_change(move |value, window, cx| {
+            if let Some(scene) = Scene::ALL
+                .iter()
+                .find(|scene| scene.label() == value.as_ref())
+            {
+                let _ = scene_owner.update(cx, |preview, cx| preview.choose(*scene, window, cx));
+            }
         });
         let reset = {
-            let entity = cx.entity();
+            let entity = cx.weak_entity();
             Button::new("scene-reset", "Reset")
                 .variant(ely_core::buttons::ButtonVariant::Ghost)
                 .size(ely_core::theme::ControlSize::Sm)
                 .on_click(move |_, window, cx| {
-                    entity.update(cx, |preview, cx| preview.reset(window, cx));
+                    let _ = entity.update(cx, |preview, cx| preview.reset(window, cx));
                 })
         };
         let log = if self.actions.is_empty() {
@@ -314,8 +317,9 @@ impl Preview {
             .debug_selector(|| "preview-toolbar".to_string())
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
             .flex_none()
+            .min_w_0()
             .w_full()
             .px_3()
             .py_2()
@@ -323,8 +327,7 @@ impl Preview {
             .border_b_1()
             .border_color(colors.border)
             .child(
-                // One row that scrolls horizontally instead of growing the
-                // window or wrapping onto several lines.
+                // A bounded picker keeps every scene and Reset reachable at narrow widths.
                 div()
                     .id("preview-scenes")
                     .flex()
@@ -333,14 +336,14 @@ impl Preview {
                     .flex_none()
                     .w_full()
                     .min_w_0()
-                    .overflow_x_scroll()
-                    .children(scenes)
+                    .child(scene_picker)
                     .child(reset),
             )
             .child(
                 div()
                     .text_size(small)
                     .text_color(colors.fg_muted)
+                    .min_w_0()
                     .child(self.scene.description()),
             )
             .child(

@@ -845,9 +845,9 @@ fn the_long_tree_stays_bounded_and_scrolls_only_its_own_region(cx: &mut TestAppC
     settle(&page, cx, |page| page.tree("").is_some());
     assert_eq!(rows(&page, cx).len(), LONG_TREE_FILES);
     frames(cx);
-    assert!(cx.debug_bounds("repository-tree-row-0").is_some());
+    assert!(cx.debug_bounds("repository-row-file-0000.txt").is_some());
     assert!(
-        cx.debug_bounds("repository-tree-row-300").is_none(),
+        cx.debug_bounds("repository-row-file-0300.txt").is_none(),
         "off-screen rows are not built"
     );
 
@@ -1417,4 +1417,203 @@ fn activation_clears_previous_data_even_when_the_session_cannot_be_acquired(
 /// Keeps the `TreeEntryKind` import used even when no test names it directly.
 fn _entry_kind(kind: &TreeEntryKind) -> bool {
     matches!(kind, TreeEntryKind::File { .. })
+}
+
+/// Click the right-hand blank part of a real row, beyond the label.
+fn click_row(page: &Entity<RepositoryPage>, cx: &mut VisualTestContext, selector: &'static str) {
+    frames(cx);
+    let bounds = cx.debug_bounds(selector).expect(selector);
+    cx.simulate_click(
+        gpui::point(bounds.right() - px(12.0), bounds.center().y),
+        Modifiers::none(),
+    );
+    page.update_in(cx, |page, window, cx| page.drain(window, cx));
+}
+
+#[gpui::test]
+fn normal_fixture_mouse_and_keyboard_events_browse_repeatably(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = normal(cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+    frames(cx);
+    let column = cx.debug_bounds("repository-tree-column").unwrap();
+    let folder = cx.debug_bounds("repository-row-docs").unwrap();
+    assert!(
+        folder.size.width > column.size.width - px(4.0),
+        "full-width row hit area"
+    );
+    let chevron = cx.debug_bounds("repository-chevron-docs").unwrap();
+    cx.simulate_click(chevron.center(), Modifiers::none());
+    settle(&page, cx, |p| p.tree("docs").is_some());
+    assert!(
+        page.read_with(cx, |p, _| p.expanded().contains("docs")),
+        "one click expands once"
+    );
+    click_row(&page, cx, "repository-row-docs");
+    assert!(!page.read_with(cx, |p, _| p.expanded().contains("docs")));
+    click_row(&page, cx, "repository-row-docs");
+    click_row(&page, cx, "repository-row-docs/guide.md");
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.current_path() == Some("docs/guide.md")
+    });
+    click_row(&page, cx, "repository-row-src");
+    settle(&page, cx, |p| p.tree("src").is_some());
+    for _ in 0..3 {
+        click_row(&page, cx, "repository-row-src/main.rs");
+        settle(&page, cx, |p| {
+            p.reader_status() == &ReaderStatus::Showing && p.current_path() == Some("src/main.rs")
+        });
+    }
+    // Real keyboard dispatch reaches the focused tree viewport.
+    cx.simulate_keystrokes("left left right right enter");
+    settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+    click_row(&page, cx, "repository-row-README.md");
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.current_path() == Some("README.md")
+    });
+    assert!(!page.read_with(cx, |p, _| p.can_return_to_readme()));
+    assert!(fixture.transport.mismatches().is_empty());
+}
+
+#[gpui::test]
+fn nested_preferred_readme_selects_its_real_node(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::ReadmeInDocs);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.tree("docs").is_some()
+    });
+    assert_eq!(
+        page.read_with(cx, |p, _| p.current_path().map(str::to_string)),
+        Some("docs/README.md".into())
+    );
+    assert!(rows(&page, cx).iter().any(|r| r.path == "docs/README.md"));
+    click_row(&page, cx, "repository-row-docs/README.md");
+    settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+    assert!(!page.read_with(cx, |p, _| p.can_return_to_readme()));
+}
+
+#[gpui::test]
+fn empty_binary_and_large_files_use_the_real_reader_states(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = normal(cx);
+    click_row(&page, cx, "repository-row-assets");
+    settle(&page, cx, |p| p.tree("assets").is_some());
+    for path in ["assets/empty.txt", "assets/logo.bin", "assets/huge.log"] {
+        page.update(cx, |p, cx| p.select_file(path, cx));
+        settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+        page.read_with(cx, |p, cx| {
+            assert!(p.reader().unwrap().read(cx).is_status(), "{path}")
+        });
+    }
+    assert_eq!(
+        fixture
+            .transport
+            .count("/git/blobs/b000000000000000000000000000000000000007"),
+        0
+    );
+    page.update(cx, |p, cx| p.toggle_directory("assets/empty-folder", cx));
+    settle(&page, cx, |p| p.tree("assets/empty-folder").is_some());
+    assert!(matches!(
+        rows(&page, cx)
+            .iter()
+            .find(|r| r.path == "assets/empty-folder")
+            .unwrap()
+            .state,
+        RowState::Empty
+    ));
+}
+
+#[gpui::test]
+fn root_retry_uses_the_snapshot_and_child_partial_is_never_empty(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::RootFailure);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |p| {
+        p.tree_failure("").is_some() && p.reader_status() == &ReaderStatus::Showing
+    });
+    let reader = page.read_with(cx, |p, _| p.reader().cloned()).unwrap();
+    page.update(cx, |p, cx| p.retry_directory("", cx));
+    settle(&page, cx, |p| p.tree("").is_some());
+    assert_eq!(
+        reader.entity_id(),
+        page.read_with(cx, |p, _| p.reader().unwrap().entity_id())
+    );
+    assert!(page.read_with(cx, |p, _| p.tree_failure("").is_none()));
+    fixture.switch_scene(Scene::TruncatedTree);
+    page.update(cx, |p, cx| p.toggle_directory("docs", cx));
+    settle(&page, cx, |p| p.tree("docs").is_some());
+    assert!(matches!(
+        rows(&page, cx)
+            .iter()
+            .find(|r| r.path == "docs")
+            .unwrap()
+            .state,
+        RowState::Incomplete
+    ));
+}
+
+#[gpui::test]
+fn superseded_same_file_success_and_failure_cannot_publish(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = normal(cx);
+    page.update(cx, |p, cx| p.toggle_directory("src", cx));
+    settle(&page, cx, |p| p.tree("src").is_some());
+    page.update(cx, |p, cx| p.select_file("src/main.rs", cx));
+    let old = page.read_with(cx, |p, _| p.selection_request);
+    page.update(cx, |p, cx| p.show_readme(cx));
+    page.update(cx, |p, cx| p.select_file("src/main.rs", cx));
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.current_path() == Some("src/main.rs")
+    });
+    let reader = page.read_with(cx, |p, _| p.reader().cloned()).unwrap();
+    page.update_in(cx, |p, window, cx| {
+        let branch = p.branch.as_ref().unwrap();
+        let reply = super::ContentReply {
+            branch: branch.name.clone(),
+            commit: branch.commit().clone(),
+            role: super::Role::File("src/main.rs".into()),
+            selection_request: old,
+            path: "src/main.rs".into(),
+            result: Err(GitHubError::Unauthorized.into()),
+        };
+        p.apply_content(reply, window, cx);
+    });
+    assert_eq!(
+        page.read_with(cx, |p, _| p.reader_status().clone()),
+        ReaderStatus::Showing
+    );
+    assert_eq!(
+        reader.entity_id(),
+        page.read_with(cx, |p, _| p.reader().unwrap().entity_id())
+    );
+}
+
+#[gpui::test]
+fn old_branch_identity_rejects_success_and_error_after_returning_to_same_name(
+    cx: &mut TestAppContext,
+) {
+    let (_fixture, page, cx) = normal(cx);
+    let (snapshot, old) = page.read_with(cx, |p, _| {
+        (
+            p.branch.as_ref().unwrap().snapshot.clone(),
+            p.branch_request,
+        )
+    });
+    page.update(cx, |p, cx| p.select_branch("feature/docs-polish", cx));
+    page.update(cx, |p, cx| p.select_branch("main", cx));
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.selected_branch() == Some("main")
+    });
+    let reader = page.read_with(cx, |p, _| p.reader().unwrap().entity_id());
+    page.update(cx, |p, cx| {
+        p.apply_revision("main".into(), old, Ok(snapshot), cx);
+        p.apply_revision(
+            "main".into(),
+            old,
+            Err(GitHubError::Unauthorized.into()),
+            cx,
+        );
+        assert_eq!(p.reader().unwrap().entity_id(), reader);
+        assert!(p.error().is_none());
+    });
 }
