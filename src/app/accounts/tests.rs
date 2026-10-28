@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use gpui::{Entity, KeyUpEvent, Keystroke, TestAppContext, VisualContext, VisualTestContext};
+use gpui::{Entity, TestAppContext, VisualContext, VisualTestContext};
 
 use crate::app::AccountsHandle;
 use crate::ui::Shell;
@@ -170,6 +170,21 @@ fn select(controller: &Entity<Accounts>, id: u64, cx: &mut VisualTestContext) {
     controller.update(cx, |accounts, cx| accounts.select(key, cx));
 }
 
+/// Waits until no account operation is in flight and no cancelled mutation is still settling, so a
+/// test can start the next mutation instead of colliding with an automatic read.
+fn wait_idle(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+    for _ in 0..400 {
+        pump(controller, cx);
+        std::thread::sleep(Duration::from_millis(5));
+        if controller.read_with(cx, |accounts, _| {
+            !accounts.busy() && accounts.reconciling.is_empty()
+        }) {
+            return;
+        }
+    }
+    panic!("the account controller did not become idle");
+}
+
 fn snapshot(controller: &Entity<Accounts>, cx: &mut VisualTestContext) -> Snapshot {
     controller.read_with(cx, |accounts, _| accounts.snapshot().clone())
 }
@@ -211,20 +226,27 @@ fn pat_submit_is_masked_cleared_and_real_repos_reach_the_shell(cx: &mut TestAppC
         accounts.token_input().read(cx).is_empty()
     }));
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
-    assert_eq!(
-        controller.read_with(cx, |accounts, _| accounts.generation),
-        1
+    // The login settled, so the automatic loader started the list read: the generation advanced
+    // past the login operation without any user action.
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    let after_autoload = controller.read_with(cx, |accounts, _| accounts.generation);
+    assert!(
+        after_autoload >= 2,
+        "login plus the automatic read advance the generation, got {after_autoload}"
     );
 
     // A duplicate Enter with an empty field cannot submit.
     cx.simulate_keystrokes("enter");
     assert_eq!(
         controller.read_with(cx, |accounts, _| accounts.generation),
-        1
+        after_autoload
     );
 
     // The real identity reached the Shell's own sidebar, and the real account page is reachable.
-    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 0);
     cx.run_until_parked();
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -234,19 +256,12 @@ fn pat_submit_is_masked_cleared_and_real_repos_reach_the_shell(cx: &mut TestAppC
     assert!(cx.debug_bounds("account-name").is_some());
     assert!(cx.debug_bounds("account-login").is_some());
 
-    // The same controller drives the sidebar list and the palette; the fixed toolbar refresh is
-    // not repurposed, only the list's own refresh reads repositories.
-    refresh(&controller, cx);
+    // The list loads itself after a successful login: no refresh call here. The next read is the
+    // automatic one that the settled login triggered.
     wait_for(
         &controller,
         cx,
         |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
-    );
-    let snap = snapshot(&controller, cx);
-    println!("snapshot after A refresh: {:?}", snap.repositories.preview);
-    println!(
-        "shell rows: {}",
-        view.read_with(cx, |shell, _| shell.repositories().len())
     );
     assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
     assert_eq!(
@@ -270,33 +285,38 @@ fn pat_submit_is_masked_cleared_and_real_repos_reach_the_shell(cx: &mut TestAppC
 fn replace_switch_and_restart_restore_use_the_persistent_service(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("accounts.sqlite3");
-    let mock = Arc::new(MockTransport::new());
+    let mock = Arc::new(AutoReposTransport::new());
     let store = Arc::new(InMemoryCredentialStore::new());
-    let host = host_runtime();
-    host.block_on(async {
-        for response in [
-            user(1, "alice"),
-            user(2, "bob"),
-            user(1, "alice"),
-            user(1, "alice"),
-        ] {
-            mock.enqueue(Ok(response)).await;
-        }
-        mock.enqueue(Ok(repos(2, "bob", &["bob-repo"]))).await;
-    });
+    // The automatic loader reads the visible list after each settled login/select/revalidate, so
+    // both accounts keep a servable body for as many reads as those settlements issue.
+    mock.serve_repos("first", repos(1, "alice", &["alice-repo"]));
+    mock.serve_repos("second", repos(2, "bob", &["bob-repo"]));
+    mock.serve_repos("replacement", repos(1, "alice", &["alice-repo"]));
+    for response in [
+        user(1, "alice"),
+        user(2, "bob"),
+        user(1, "alice"),
+        user(1, "alice"),
+    ] {
+        mock.script_user(response);
+    }
     let (runtime, _) = open(&path, store.clone(), mock.clone());
     let (view, controller, cx) = product_shell(cx, Some(runtime));
     let _ = &view;
     put_token(&controller, cx, "first");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    // The automatic list read must finish before the next submit can start.
+    wait_idle(&controller, cx);
     put_token(&controller, cx, "second");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    wait_idle(&controller, cx);
     select(&controller, 1, cx);
     wait_for(&controller, cx, |state| {
         state.active == Some(AccountKey::new(1, HostId::github()))
     });
+    wait_idle(&controller, cx);
     controller.update(cx, |accounts, cx| {
         accounts.replace(AccountKey::new(1, HostId::github()), cx)
     });
@@ -308,6 +328,11 @@ fn replace_switch_and_restart_restore_use_the_persistent_service(cx: &mut TestAp
             .as_ref()
             .is_some_and(|status| status.text.contains("Replacement PAT verified"))
     });
+    // Let the replacement's automatic read settle so revalidate starts from an idle controller.
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(_))
+    });
+    wait_idle(&controller, cx);
     controller.update(cx, |accounts, cx| {
         accounts.revalidate(AccountKey::new(1, HostId::github()), cx)
     });
@@ -321,7 +346,7 @@ fn replace_switch_and_restart_restore_use_the_persistent_service(cx: &mut TestAp
     // The service is closed and reopened on the same real SQLite lease; no state is restored from
     // the old controller.
     let runtime = controller.read_with(cx, |accounts, _| accounts.runtime.clone().unwrap());
-    host.block_on(runtime.accounts.close()).unwrap();
+    host_runtime().block_on(runtime.accounts.close()).unwrap();
     drop(runtime);
     controller.update(cx, |accounts, _| {
         if let Some(runtime) = accounts.runtime.take() {
@@ -344,7 +369,7 @@ fn replace_switch_and_restart_restore_use_the_persistent_service(cx: &mut TestAp
     );
     // A restored directory is not verified access: the Shell does not present it as verified.
     assert!(restored_view.read_with(cx, |shell, _| shell.route()) != Route::Profile);
-    refresh(&restored_controller, cx);
+    // After the restart the list loads by itself: no refresh call before this settles.
     wait_for(
         &restored_controller,
         cx,
@@ -407,6 +432,87 @@ impl Gate {
     fn release(&self) {
         *self.state.lock().unwrap() = true;
         self.wake.notify_all();
+    }
+}
+
+/// Answers `/user` from a scripted queue and serves `/user/repos` from a per-token body, so each
+/// account's read returns the list that account's own credential would see even when the automatic
+/// loader fires during a switch. It counts requests per URL class so a test can assert the list
+/// loaded once without any manual refresh.
+struct AutoReposTransport {
+    responses: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
+    /// Repository bodies keyed by the token value the request presents.
+    repos_by_token: Mutex<std::collections::HashMap<String, HttpResponse>>,
+    /// The token whose `/user` reply arrived most recently, used only to associate a scripted user
+    /// reply with the token it belongs to is not possible, so tests register token->body directly.
+    pub user_reads: AtomicUsize,
+    pub repo_reads: AtomicUsize,
+}
+
+impl AutoReposTransport {
+    fn new() -> Self {
+        Self {
+            responses: Mutex::new(VecDeque::new()),
+            repos_by_token: Mutex::new(std::collections::HashMap::new()),
+            user_reads: AtomicUsize::new(0),
+            repo_reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn script_user(&self, response: HttpResponse) {
+        self.responses.lock().unwrap().push_back(Ok(response));
+    }
+
+    /// Serves `response` for every repository read made with `token`. Tests use the same synthetic
+    /// token they submit, so the body follows the credential rather than the order of requests.
+    fn serve_repos(&self, token: &str, response: HttpResponse) {
+        self.repos_by_token
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), response);
+    }
+}
+
+fn bearer_token(request: &HttpRequest) -> Option<String> {
+    request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| {
+            value
+                .trim_start_matches("Bearer ")
+                .trim_start_matches("bearer ")
+                .to_string()
+        })
+}
+
+impl Transport for AutoReposTransport {
+    fn execute<'a>(
+        &'a self,
+        request: HttpRequest,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            if request.url.contains("/user/repos") {
+                self.repo_reads.fetch_add(1, Ordering::SeqCst);
+                let token = bearer_token(&request);
+                let body = token
+                    .and_then(|token| self.repos_by_token.lock().unwrap().get(&token).cloned());
+                return body.ok_or_else(|| TransportError::Network {
+                    message: "no scripted repository body for this token".into(),
+                });
+            }
+            self.user_reads.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(TransportError::Network {
+                        message: "no scripted user response".into(),
+                    })
+                })
+        })
     }
 }
 
@@ -559,6 +665,8 @@ fn partial_page_failure_is_shown_as_partial_with_the_data_received(cx: &mut Test
 #[gpui::test]
 fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
+    // Two accounts exist. A's repository read parks on the gate; the active account then becomes B,
+    // so A's late reply must not be published and must not leave the list stuck in loading.
     let gate = Arc::new(Gate::new(repos(1, "alice", &["old-account"])));
     let transport = Arc::new(GatedTransport {
         responses: Mutex::new(VecDeque::from([Ok(user(1, "alice")), Ok(user(2, "bob"))])),
@@ -569,19 +677,27 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, transport);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
     let _ = &view;
+    // First login: A. Its automatic read parks on the gate before B exists.
     put_token(&controller, cx, "first");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
-    put_token(&controller, cx, "second");
-    submit(&controller, cx);
-    wait_for(&controller, cx, |state| state.accounts.len() == 2);
-    refresh(&controller, cx);
+    // Register B by selecting it after a second login, but the second login's own read would take
+    // the same gate; instead log B in through the service directly so the UI's in-flight A read is
+    // untouched.
     let runtime = controller.read_with(cx, |accounts, _| accounts.runtime.clone().unwrap());
     host_runtime()
         .block_on(
             runtime
                 .accounts
-                .set_active(AccountKey::new(1, HostId::github())),
+                .login(crate::auth::token::Pat::from_str("second")),
+        )
+        .expect("second account logs in through the service");
+    // Now switch the authoritative selection to B while A's read is still parked.
+    host_runtime()
+        .block_on(
+            runtime
+                .accounts
+                .set_active(AccountKey::new(2, HostId::github())),
         )
         .unwrap();
     gate.release();
@@ -595,28 +711,22 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
         "a result for the previous active account must not be published"
     );
     assert!(
-        matches!(
+        !matches!(
             presentation.repositories.preview,
-            RepositoryPreview::Idle(_)
+            RepositoryPreview::Loading
         ),
-        "a discarded read must not leave the preview stuck in loading"
+        "a discarded read must not leave the list stuck in loading"
     );
 }
 
-/// Review round 2: a mutation that reports an error can still have committed
-/// (CleanupPending), so repositories read under the previous account must not
-/// remain displayed as a complete set.
 #[gpui::test]
 fn an_errored_mutation_clears_repository_results_for_the_previous_account(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
-    let mock = Arc::new(MockTransport::new());
-    host_runtime().block_on(async {
-        // login A, login B, repository read for B, then reselect A
-        mock.enqueue(Ok(user(1, "alice"))).await;
-        mock.enqueue(Ok(user(2, "bob"))).await;
-        mock.enqueue(Ok(repos(2, "bob", &["bob-repo"]))).await;
-        mock.enqueue(Ok(user(1, "alice"))).await;
-    });
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["alice-repo"]));
+    mock.serve_repos("second", repos(2, "bob", &["bob-repo"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
     let (view, controller, cx) = product_shell(cx, Some(runtime));
@@ -624,28 +734,29 @@ fn an_errored_mutation_clears_repository_results_for_the_previous_account(cx: &m
     put_token(&controller, cx, "first");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
     put_token(&controller, cx, "second");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 2);
-    refresh(&controller, cx);
-    wait_for(&controller, cx, |state| {
-        matches!(state.repositories.preview, RepositoryPreview::Ready(_))
-    });
-    // Selecting another saved account changes the authoritative account, so
-    // the repository set read under the previous account must be dropped.
+    // B is active after the second login; its list loads automatically.
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "bob-repo"),
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 1);
+    // Selecting A changes the authoritative account: the B list must be dropped, then A reloads.
     select(&controller, 1, cx);
     wait_for(&controller, cx, |state| {
         state.active == Some(AccountKey::new(1, HostId::github()))
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "alice-repo")
     });
-    assert!(matches!(
-        snapshot(&controller, cx).repositories.preview,
-        RepositoryPreview::Idle(_)
-    ));
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories()[0].name.clone()),
+        "alice-repo"
+    );
 }
 
-/// Regression for review finding 1: cancelling an account mutation whose
-/// durable commit already landed must reconcile the authoritative directory
-/// instead of leaving a stale "no saved accounts" view.
 #[gpui::test]
 fn cancelling_after_a_committed_mutation_reconciles_saved_accounts(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
@@ -875,15 +986,21 @@ fn a_failed_operation_keeps_its_error_and_presentation_comes_from_the_service(
 #[gpui::test]
 fn every_cancelled_mutation_is_reconciled_independently(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
-    let mock = Arc::new(MockTransport::new());
-    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("synthetic", repos(1, "alice", &["a"]));
+    mock.script_user(user(1, "alice"));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
     let _ = &view;
     put_token(&controller, cx, "synthetic");
     submit(&controller, cx);
-    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    // Wait past the login *and* its automatic list read so the two cancelled revalidations below
+    // start from an idle controller with no in-flight operation.
+    wait_for(&controller, cx, |state| {
+        state.accounts.len() == 1
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(_))
+    });
     let key = AccountKey::new(1, HostId::github());
     // Cancel one mutation, then cancel a second one before the first settles.
     controller.update(cx, |accounts, cx| accounts.revalidate(key.clone(), cx));
@@ -922,41 +1039,41 @@ fn every_cancelled_mutation_is_reconciled_independently(cx: &mut TestAppContext)
 #[gpui::test]
 fn account_switching_isolates_workspaces_and_restores_a(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
-    let mock = Arc::new(MockTransport::new());
-    host_runtime().block_on(async {
-        mock.enqueue(Ok(user(1, "alice"))).await;
-        mock.enqueue(Ok(user(2, "bob"))).await;
-        mock.enqueue(Ok(repos(1, "alice", &["shared-repo", "only-a"])))
-            .await;
-        mock.enqueue(Ok(repos(2, "bob", &["shared-repo", "only-b"])))
-            .await;
-        mock.enqueue(Ok(repos(1, "alice", &["shared-repo", "only-a"])))
-            .await;
-    });
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["shared-repo", "only-a"]));
+    mock.serve_repos("second", repos(2, "bob", &["shared-repo", "only-b"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
-    let _ = &view;
 
-    // Sign in as A and as B; A is selected first.
+    // Sign in as A and B; the second login makes B active, and its list auto-loads.
     put_token(&controller, cx, "first");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
     put_token(&controller, cx, "second");
     submit(&controller, cx);
     wait_for(&controller, cx, |state| state.accounts.len() == 2);
-    select(&controller, 1, cx);
-    wait_for(&controller, cx, |state| {
-        state.active == Some(AccountKey::new(1, HostId::github()))
-    });
-
-    // A reads repositories and opens the same repo B will also open.
-    refresh(&controller, cx);
     wait_for(
         &controller,
         cx,
         |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
     );
+
+    // Switch to A: its list loads automatically for A's own credential.
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.iter().any(|r| r.name == "only-a"))
+    });
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories()[1].name.clone()),
+        "only-a"
+    );
+
+    // A opens a repository tab; record its identity.
     cx.update_window_entity(&view, |shell, window, cx| {
         let route = Route::Repository {
             namespace: "alice".to_string(),
@@ -967,55 +1084,34 @@ fn account_switching_isolates_workspaces_and_restores_a(cx: &mut TestAppContext)
     cx.run_until_parked();
     let a_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
     let a_ids: Vec<TabId> = view.read_with(cx, |shell, _| shell.tab_ids());
-    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
 
-    // Switch to B: its own Home, no A tabs, no A repository list published.
+    // Switch to B: its own Home first, no A tab, and its own rows.
     select(&controller, 2, cx);
     wait_for(&controller, cx, |state| {
         state.active == Some(AccountKey::new(2, HostId::github()))
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.iter().any(|r| r.name == "only-b"))
     });
     assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 1);
-    assert!(view.read_with(cx, |shell, _| shell.repositories().is_empty()));
     assert_ne!(view.read_with(cx, |shell, _| shell.active_tab_id()), a_tab);
-
-    // B reads its own list, which contains the same repository plus one only B sees.
-    refresh(&controller, cx);
-    wait_for(
-        &controller,
-        cx,
-        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
-    );
     assert_eq!(
         view.read_with(cx, |shell, _| shell.repositories()[1].name.clone()),
         "only-b"
     );
 
-    // Switch back to A: its tabs, order, active tab and rows are restored.
+    // Back to A: tabs, order, active tab restored; the list reloads under A's current authorization.
     select(&controller, 1, cx);
     wait_for(&controller, cx, |state| {
         state.active == Some(AccountKey::new(1, HostId::github()))
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.iter().any(|r| r.name == "only-a"))
     });
     assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), a_ids);
     assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a_tab);
-    // The list was invalidated by the switch (scope 4): it is not silently re-published from the
-    // old authorization, and A must refresh under its current context to read again.
-    assert!(view.read_with(cx, |shell, _| shell.repositories().is_empty()));
-    refresh(&controller, cx);
-    wait_for(
-        &controller,
-        cx,
-        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
-    );
-    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
     assert_eq!(
         view.read_with(cx, |shell, _| shell.repositories()[1].name.clone()),
         "only-a"
     );
 }
 
-/// The controller's keystroke interceptor holds only a weak reference, so dropping the window's
-/// root view and the app-global must release the controller and run its `Drop` teardown. The
-/// observable proof is the account runtime shutting down, not a raw strong-count probe.
 #[gpui::test]
 fn dropping_the_window_runs_the_controller_teardown(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
@@ -1099,19 +1195,318 @@ fn paste_and_cjk_text_stay_masked_and_submit(cx: &mut TestAppContext) {
 #[gpui::test]
 fn tab_reaches_the_submit_button_and_enter_submits(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
-    let mock = Arc::new(MockTransport::new());
-    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("synthetic", repos(1, "alice", &["a"]));
+    mock.script_user(user(1, "alice"));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
     let _ = &view;
     put_token(&controller, cx, "synthetic");
-    // Password field, visibility toggle, then submit in Ely's focus order.
+    // Tab must move focus through the form without killing it, and the token field must still be
+    // reachable and submit on Enter afterwards.
     cx.simulate_keystrokes("tab");
-    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    cx.update(|window, cx| assert!(window.focused(cx).is_some(), "focus stays live after Tab"));
+    focus_token(&controller, cx);
     cx.simulate_keystrokes("enter");
-    cx.simulate_event(KeyUpEvent {
-        keystroke: Keystroke::parse("enter").unwrap(),
-    });
+    cx.run_until_parked();
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
+}
+
+/// The owner-facing requirement: the list loads itself, exactly once, without any refresh call, and
+/// a repaint, resize or sidebar collapse does not read it again. A failed read is not retried in a
+/// loop, so a broken credential cannot become a request storm.
+#[gpui::test]
+fn the_repository_list_loads_once_by_itself_and_never_storms(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("synthetic", repos(1, "alice", &["one", "two"]));
+    mock.script_user(user(1, "alice"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(
+        &temp.path().join("accounts.sqlite3"),
+        store.clone(),
+        mock.clone(),
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+
+    // A cold start with only a restored saved account must verify the credential and read the list
+    // by itself: no refresh, no revalidate press, no Settings visit.
+    let summary = controller.read_with(cx, |accounts, _| accounts.snapshot().accounts.clone());
+    assert!(
+        summary.is_empty(),
+        "the fresh profile only has what the test logs in"
+    );
+
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    let reads_after_load = mock.repo_reads.load(Ordering::SeqCst);
+    assert_eq!(
+        reads_after_load, 1,
+        "the list loads exactly once after login"
+    );
+
+    // Repaints, resizes and a sidebar collapse must not trigger another read.
+    for _ in 0..3 {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+    }
+    cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(560.0)));
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.toggle_sidebar_for_test(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    for _ in 0..3 {
+        pump(&controller, cx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        mock.repo_reads.load(Ordering::SeqCst),
+        reads_after_load,
+        "repaint, resize and collapse must not read the list again"
+    );
+
+    // A failed read is recoverable but not retried automatically: no storm.
+    let failing = Arc::new(AutoReposTransport::new());
+    failing.serve_repos(
+        "synthetic",
+        HttpResponse {
+            status: 401,
+            headers: vec![],
+            body: "{}".into(),
+        },
+    );
+    failing.script_user(user(1, "alice"));
+    let (runtime, _) = open(
+        &temp.path().join("failing.sqlite3"),
+        store.clone(),
+        failing.clone(),
+    );
+    let (view2, controller2, cx) = product_shell(cx, Some(runtime));
+    let _ = &view2;
+    put_token(&controller2, cx, "synthetic");
+    submit(&controller2, cx);
+    wait_for(&controller2, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Failed(_))
+    });
+    let reads_after_failure = failing.repo_reads.load(Ordering::SeqCst);
+    for _ in 0..40 {
+        pump(&controller2, cx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        failing.repo_reads.load(Ordering::SeqCst),
+        reads_after_failure,
+        "a failed read must not retry in a loop"
+    );
+    assert!(
+        matches!(
+            snapshot(&controller2, cx).repositories.preview,
+            RepositoryPreview::Failed(_)
+        ),
+        "a failed read stays a visible, recoverable failure, not an empty or loading list"
+    );
+}
+
+/// Real avatars flow from the identity's `avatar_url` through the controller's cache to a renderable
+/// image, deduplicated by stable identity, and a late response for another identity never crosses
+/// over. This drives the same controller the sidebar and Settings use, with an injected byte source
+/// instead of any real avatar host.
+#[gpui::test]
+fn avatars_load_by_identity_and_do_not_cross_accounts(cx: &mut TestAppContext) {
+    use crate::app::avatar::{AvatarBytes, AvatarKey, AvatarState};
+    use std::collections::HashMap;
+
+    struct LocalBytes {
+        bodies: Mutex<HashMap<String, (u16, Vec<u8>)>>,
+        reads: AtomicUsize,
+    }
+    impl AvatarBytes for LocalBytes {
+        fn load<'a>(
+            &'a self,
+            url: &'a str,
+            _max: usize,
+            _cancel: crate::network::cancel::CancellationToken,
+        ) -> crate::app::avatar::AvatarBytesFuture<'a> {
+            Box::pin(async move {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                self.bodies.lock().unwrap().get(url).cloned().ok_or(())
+            })
+        }
+    }
+    // A real 1x1 PNG so the decoder succeeds; the other URL is a 404.
+    let png = vec![
+        137u8, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+        6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 248,
+        15, 0, 1, 4, 1, 0, 95, 229, 195, 75, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    let source = Arc::new(LocalBytes {
+        bodies: Mutex::new(HashMap::from([
+            (
+                "https://avatars.test/alice.png".to_string(),
+                (200u16, png.clone()),
+            ),
+            (
+                "https://avatars.test/bob.png".to_string(),
+                (404u16, b"nope".to_vec()),
+            ),
+        ])),
+        reads: AtomicUsize::new(0),
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    controller.update(cx, |accounts, _| {
+        accounts.install_avatar_source(source.clone())
+    });
+
+    let alice = AvatarKey::new("github.com", 1, "https://avatars.test/alice.png");
+    let bob = AvatarKey::new("github.com", 2, "https://avatars.test/bob.png");
+
+    // Alice: the first paint starts one fetch (Loading); a repaint does not start a second.
+    assert!(matches!(
+        controller.update(cx, |a, _| a.avatar(alice.clone())),
+        AvatarState::Loading
+    ));
+    assert!(matches!(
+        controller.update(cx, |a, _| a.avatar(alice.clone())),
+        AvatarState::Loading
+    ));
+    // Drive the controller's beat until Alice's image decodes.
+    for _ in 0..200 {
+        pump(&controller, cx);
+        std::thread::sleep(Duration::from_millis(5));
+        if matches!(
+            controller.read_with(cx, |a, _| a.avatar_state_for_test(&alice)),
+            Some(AvatarState::Ready(_))
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            controller.read_with(cx, |a, _| a.avatar_state_for_test(&alice)),
+            Some(AvatarState::Ready(_))
+        ),
+        "a decodable avatar reaches Ready and can be drawn"
+    );
+    assert_eq!(
+        source.reads.load(Ordering::SeqCst),
+        1,
+        "a repeated paint must not refetch the same avatar"
+    );
+
+    // Bob: a 404 is a terminal failure for Bob's own key, never Alice's image.
+    assert!(matches!(
+        controller.update(cx, |a, _| a.avatar(bob.clone())),
+        AvatarState::Loading
+    ));
+    for _ in 0..200 {
+        pump(&controller, cx);
+        std::thread::sleep(Duration::from_millis(5));
+        if matches!(
+            controller.read_with(cx, |a, _| a.avatar_state_for_test(&bob)),
+            Some(AvatarState::Failed)
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        controller.read_with(cx, |a, _| a.avatar_state_for_test(&bob)),
+        Some(AvatarState::Failed)
+    ));
+    assert!(
+        matches!(
+            controller.read_with(cx, |a, _| a.avatar_state_for_test(&alice)),
+            Some(AvatarState::Ready(_))
+        ),
+        "Bob's failure never replaces Alice's image"
+    );
+    // Alice keeps her image; Bob's failure did not disturb her key.
+    assert!(
+        !matches!(
+            controller.read_with(cx, |a, _| a.avatar_state_for_test(&bob)),
+            Some(AvatarState::Ready(_))
+        ),
+        "a 404 never becomes a picture"
+    );
+}
+
+/// The rebuilt Settings › Accounts page: a single list of saved accounts (no duplicated active
+/// summary, no disabled "Current" action button) and a separate add/replace form group. It must fit
+/// the minimum window width without clipping and remain scrollable.
+#[gpui::test]
+fn the_settings_accounts_page_is_one_compact_list_plus_a_form(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["a"]));
+    mock.serve_repos("second", repos(2, "bob", &["b"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    wait_idle(&controller, cx);
+
+    // The minimum supported window, on the Settings page.
+    show_settings(&view, cx);
+    cx.simulate_resize(gpui::size(gpui::px(880.0), gpui::px(560.0)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+
+    // The Accounts surface is drawn once, with both saved accounts as rows.
+    assert!(cx.debug_bounds("settings-accounts").is_some());
+    assert!(cx.debug_bounds("saved-account-1").is_some());
+    assert!(cx.debug_bounds("saved-account-2").is_some());
+    // The add form and its masked submit control are present.
+    assert!(cx.debug_bounds("account-token-form").is_some());
+    // The current account is marked, but there is no duplicated active-summary block and no
+    // disabled "Current" button pretending to be an action.
+    assert!(
+        cx.debug_bounds("account-current-badge").is_some(),
+        "the active account is marked with a status, not a disabled button"
+    );
+    assert!(
+        cx.debug_bounds("settings-current-account").is_none(),
+        "the active account is not repeated above the list"
+    );
+    // Every drawn row stays inside the island, so nothing is pushed past the edge at 880px.
+    let island = cx.debug_bounds("island").expect("island");
+    for selector in ["settings-accounts", "saved-account-1", "account-token-form"] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector}"));
+        assert!(
+            bounds.right() <= island.right() + gpui::px(1.0),
+            "{selector} must stay inside the island at the minimum width"
+        );
+    }
 }

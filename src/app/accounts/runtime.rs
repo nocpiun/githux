@@ -73,6 +73,7 @@ pub(crate) struct AccountRuntime {
 }
 
 impl AccountRuntime {
+    #[allow(dead_code)] // Used by the module tests that build a runtime without a custom transport.
     pub fn new(accounts: AccountService, executor: Arc<BackgroundExecutor>) -> Self {
         Self {
             accounts: Arc::new(accounts),

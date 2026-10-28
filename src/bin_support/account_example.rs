@@ -135,9 +135,19 @@ impl Render for AccountPreview {
         let snapshot = self.accounts.read(cx).snapshot().clone();
         let busy = self.accounts.read(cx).busy();
         let replacing = self.accounts.read(cx).replacing().is_some();
-        let restored = snapshot.accounts.iter().any(|summary| {
-            summary.authorization == crate::domain::account::AuthorizationState::PendingVerification
-        });
+        // Resolve each saved account's avatar through the same controller the product uses.
+        let mut avatars = std::collections::HashMap::new();
+        for summary in &snapshot.accounts {
+            if let Some(key) = crate::ui::avatar::account_key(&summary.identity) {
+                let state = self.accounts.update(cx, |accounts, _| accounts.avatar(key));
+                if let crate::app::avatar::AvatarState::Ready(image) = state {
+                    avatars.insert(
+                        summary.identity.key.clone(),
+                        gpui::ImageSource::Image(image),
+                    );
+                }
+            }
+        }
         let callbacks = callbacks(self.accounts.clone(), snapshot.status.clone());
         let section = accounts_section(
             AccountsSection {
@@ -149,7 +159,7 @@ impl Render for AccountPreview {
                 },
                 accounts: snapshot.accounts,
                 active: snapshot.active,
-                restored,
+                avatars,
                 status: snapshot.status,
             },
             cx,

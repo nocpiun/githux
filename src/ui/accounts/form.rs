@@ -1,22 +1,29 @@
-//! The reusable account controls: a masked PAT form, the saved-account list, and the status line.
+//! The account settings surface: saved accounts, the add/replace form and their status.
 //!
 //! Two callers use this file: the product Settings page and the developer-only account example.
-//! Both hand over an `ely_core` text input they own, so nothing here constructs a service, reads a
-//! credential or keeps the token. Behaviour differences belong to the callers; appearance and the
-//! accessible names of the controls live here once.
+//! Both hand over an `ely_core` text input they own and a precomputed map of decoded avatars, so
+//! nothing here constructs a service, reads a credential, keeps the token or starts an image fetch.
+//! Behaviour belongs to the account controller; this module is presentation only.
+//!
+//! Layout follows Ely's own settings vocabulary — [`SettingsSection`] groups and [`SettingsRow`]
+//! rows — so the page reads as one compact list rather than a stack of large cards. A saved account
+//! needs an avatar beside its name, which `SettingsRow` (text title + control) cannot express, so
+//! each account uses one minimal custom row that keeps the section's theme, row height and divider.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use ely_core::{
     buttons::Button,
-    data_display::Avatar,
     forms::{PasswordInput, TextInput},
-    theme::{ActiveTheme, AvatarSize, ControlSize, Radius, TextSize},
+    primitives::{Icon, IconName},
+    theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
+use ely_settings::{SettingsRow, SettingsSection};
 use gpui::{
     AnyElement, App, Entity, FontWeight, IntoElement, ParentElement, Styled, Window, div,
-    prelude::*,
+    prelude::*, px,
 };
 
 use crate::domain::account::AuthorizationState;
@@ -55,196 +62,19 @@ pub(crate) struct AccountsSection<'a> {
     pub token: TokenForm<'a>,
     pub accounts: Vec<AccountSummary>,
     pub active: Option<AccountKey>,
-    /// Restored directories are not authorization: `PendingVerification` is called out.
-    pub restored: bool,
+    /// Decoded avatar sources keyed by account id. The caller requests the fetches; this only draws
+    /// whatever is already available and falls back to initials for the rest.
+    pub avatars: HashMap<AccountKey, gpui::ImageSource>,
     pub status: Option<StatusMessage>,
 }
 
-/// The masked input, its help link and the submit/cancel pair.
-pub(crate) fn token_form(form: TokenForm<'_>, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let colors = &theme.colors;
-    let TokenForm {
-        token_input,
-        replacing,
-        busy,
-        callbacks,
-    } = form;
-    let can_submit = !busy && !token_input.read(cx).text().trim().is_empty();
-    let submit_label = if replacing {
-        "Verify and replace PAT"
-    } else {
-        "Verify and add account"
-    };
-    let help = callbacks.open_pat_help.clone();
-    let submit = callbacks.submit.clone();
-    let cancel = callbacks.cancel.clone();
-    let cancel_replace = callbacks.cancel_replace.clone();
-    div()
-        .debug_selector(|| "account-token-form".to_string())
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            Button::new("pat-help", "Create a Classic PAT on GitHub")
-                .variant(ely_core::buttons::ButtonVariant::Link)
-                .on_click(move |_, window, cx| help(window, cx)),
-        )
-        .child(PasswordInput::new(&token_input))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    Button::new("account-token-submit", submit_label)
-                        .primary()
-                        .disabled(!can_submit)
-                        .loading(busy)
-                        .on_click(move |_, window, cx| submit(window, cx)),
-                )
-                .when(busy, |row| {
-                    row.child(
-                        Button::new("account-operation-cancel", "Cancel")
-                            .on_click(move |_, window, cx| cancel(window, cx)),
-                    )
-                })
-                .when(replacing && !busy, |row| {
-                    row.child(
-                        Button::new("account-replace-cancel", "Stop replacing")
-                            .on_click(move |_, window, cx| cancel_replace(window, cx)),
-                    )
-                }),
-        )
-        .text_size(theme.text_size(TextSize::Xs))
-        .text_color(colors.fg_subtle)
-        .into_any_element()
-}
-
-/// The saved-account rows. Each row names the stable identity state instead of implying that a
-/// restored directory is a verified authorization.
-pub(crate) fn account_list(
-    accounts: Vec<AccountSummary>,
-    active: Option<AccountKey>,
-    busy: bool,
-    callbacks: &AccountCallbacks,
-    cx: &App,
-) -> AnyElement {
-    let theme = cx.theme();
-    let colors = &theme.colors;
-    let mut rows = Vec::new();
-    if accounts.is_empty() {
-        rows.push(
-            div()
-                .debug_selector(|| "account-list-empty".to_string())
-                .text_color(colors.fg_subtle)
-                .child("No saved account yet. A restored directory entry is never presented as verified access.")
-                .into_any_element(),
-        );
-    }
-    for summary in accounts {
-        let key = summary.identity.key.clone();
-        let is_active = active.as_ref() == Some(&key);
-        let name = display_name(&summary);
-        let select = callbacks.select.clone();
-        let replace = callbacks.replace.clone();
-        let revalidate = callbacks.revalidate.clone();
-        let select_key = key.clone();
-        let replace_key = key.clone();
-        let revalidate_key = key.clone();
-        rows.push(
-            div()
-                .debug_selector(move || format!("saved-account-{}", key.id))
-                .flex()
-                .items_center()
-                .gap_3()
-                .p_2()
-                .rounded(theme.radius(Radius::Md))
-                .border_1()
-                .border_color(if is_active {
-                    colors.focus
-                } else {
-                    colors.border
-                })
-                .child(
-                    Avatar::new(("account-list-avatar", key.id), name.clone()).size(AvatarSize::Sm),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(Ellipsis::new(name)),
-                        )
-                        .child(
-                            div()
-                                .text_size(theme.text_size(TextSize::Xs))
-                                .text_color(colors.fg_subtle)
-                                .child(Ellipsis::new(format!(
-                                    "@{} · {}",
-                                    summary.identity.login,
-                                    authorization_label(&summary.authorization)
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            Button::new(
-                                ("account-select", key.id),
-                                if is_active { "Current" } else { "Use" },
-                            )
-                            .size(ControlSize::Sm)
-                            .disabled(busy || is_active)
-                            .on_click(move |_, window, cx| select(select_key.clone(), window, cx)),
-                        )
-                        .child(
-                            Button::new(("account-revalidate", key.id), "Revalidate")
-                                .size(ControlSize::Sm)
-                                .disabled(busy)
-                                .on_click(move |_, window, cx| {
-                                    revalidate(revalidate_key.clone(), window, cx)
-                                }),
-                        )
-                        .child(
-                            Button::new(("account-replace", key.id), "Replace PAT")
-                                .size(ControlSize::Sm)
-                                .disabled(busy)
-                                .on_click(move |_, window, cx| {
-                                    replace(replace_key.clone(), window, cx)
-                                }),
-                        ),
-                )
-                .into_any_element(),
-        );
-    }
-    div()
-        .debug_selector(|| "account-list".to_string())
-        .flex()
-        .flex_col()
-        .gap_2()
-        .children(rows)
-        .into_any_element()
-}
-
-/// Settings › Accounts: the minimal account management section, and the only product surface that
-/// changes accounts this round.
+/// Settings › Accounts. A compact list of saved accounts, then the add/replace form.
 pub(crate) fn accounts_section(section: AccountsSection<'_>, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let colors = &theme.colors;
     let AccountsSection {
         token,
         accounts,
         active,
-        restored,
+        avatars,
         status,
     } = section;
     let TokenForm {
@@ -253,145 +83,280 @@ pub(crate) fn accounts_section(section: AccountsSection<'_>, cx: &App) -> AnyEle
         busy,
         callbacks,
     } = token;
-    let empty = accounts.is_empty();
-    let active_summary = active.as_ref().and_then(|key| {
-        accounts
-            .iter()
-            .find(|summary| &summary.identity.key == key)
-            .cloned()
-    });
+
+    // Saved accounts: one row each, the current one marked with a light status instead of a
+    // redundant disabled button. The active account is not repeated above the list.
+    let mut list = SettingsSection::new("Accounts");
+    if accounts.is_empty() {
+        list = list.description("No account is signed in yet.");
+    }
+    for summary in &accounts {
+        let key = summary.identity.key.clone();
+        let is_active = active.as_ref() == Some(&key);
+        let avatar = avatars.get(&key).cloned();
+        list = list.row(account_row(
+            summary, &key, avatar, is_active, busy, callbacks, cx,
+        ));
+    }
+    let list = list.into_any_element();
+
+    // The form is its own group with an explicit mode, so "add" and "replace" never blur together.
+    let form_title = if replacing {
+        "Replace personal access token"
+    } else {
+        "Add account"
+    };
+    let target = active
+        .as_ref()
+        .and_then(|key| accounts.iter().find(|summary| &summary.identity.key == key));
+    let mut form = SettingsSection::new(form_title);
+    form = match (replacing, target) {
+        (true, Some(summary)) => form.description(format!(
+            "Enter a new Classic PAT for {} (@{}). A token for a different account is rejected and neither account changes.",
+            display_name(summary),
+            summary.identity.login
+        )),
+        _ => form.description(
+            "A Classic PAT is verified before it is stored. Public repositories need no extra scope; private repositories need the repo scope, which also grants write access.",
+        ),
+    };
+    form = form.row(
+        SettingsRow::new("Classic personal access token")
+            .description("Paste the token; it stays masked and is never logged.")
+            .control(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(PasswordInput::new(&token_input)),
+            ),
+    );
+    form = form.row(token_actions(token_input, replacing, busy, callbacks, cx));
+    let form = form.into_any_element();
 
     div()
         .debug_selector(|| "settings-accounts".to_string())
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_6()
         .w_full()
-        .max_w(gpui::px(720.0))
+        .max_w(px(720.0))
+        .child(list)
+        .child(form)
+        .children(status.map(|status| status_line(status, cx)))
+        .into_any_element()
+}
+
+/// One saved account: avatar, name, `@login`, a short authorization state, then its actions. The
+/// row follows the section's theme and spacing; only the avatar needs a bespoke arrangement, which
+/// `SettingsRow`'s text-only title cannot express. Actions wrap under the name in a narrow window.
+fn account_row(
+    summary: &AccountSummary,
+    key: &AccountKey,
+    avatar: Option<gpui::ImageSource>,
+    is_active: bool,
+    busy: bool,
+    callbacks: &AccountCallbacks,
+    cx: &App,
+) -> AnyElement {
+    let name = display_name(summary);
+    let login = summary.identity.login.clone();
+    let state = authorization_label(&summary.authorization);
+    let needs_attention = matches!(
+        summary.authorization,
+        AuthorizationState::PendingVerification
+            | AuthorizationState::MissingCredential
+            | AuthorizationState::CredentialUnavailable
+            | AuthorizationState::VerificationFailed(_)
+    );
+    let select = callbacks.select.clone();
+    let replace = callbacks.replace.clone();
+    let revalidate = callbacks.revalidate.clone();
+    let select_key = key.clone();
+    let replace_key = key.clone();
+    let revalidate_key = key.clone();
+    let row_id = key.id;
+
+    div()
+        .id(("saved-account", row_id))
+        .debug_selector(move || format!("saved-account-{row_id}"))
+        .role(gpui::Role::Group)
+        .aria_label(format!("{name} (@{login})"))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_x_4()
+        .gap_y_2()
+        .py_3()
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .gap_3()
+                .flex_1()
+                .min_w_0()
+                .child(crate::ui::avatar::avatar(
+                    crate::ui::avatar::AvatarView {
+                        id: &format!("account-{row_id}"),
+                        selector: &format!("settings-account-avatar-{row_id}"),
+                        image: avatar,
+                        name: &name,
+                        slot: crate::ui::avatar::AvatarSlot::Size(ely_core::theme::AvatarSize::Sm),
+                    },
+                    cx,
+                ))
                 .child(
                     div()
-                        .text_size(theme.text_size(TextSize::Xl))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Accounts"),
-                )
-                .child(
-                    div()
-                        .text_color(colors.fg_subtle)
-                        .child(if empty {
-                            "Sign in with a Classic personal access token. Public repositories need no extra scope; private repository visibility requires the repo scope, which also grants write access."
-                        } else {
-                            "One account at a time is active. Each account keeps its own open tabs, so switching back restores them."
-                        }),
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(cx.theme().text_size(TextSize::Sm))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(Ellipsis::new(name.clone())),
+                                )
+                                .when(is_active, |line| line.child(current_badge(cx))),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(cx.theme().text_size(TextSize::Xs))
+                                .text_color(if needs_attention {
+                                    cx.theme().colors.warning
+                                } else {
+                                    cx.theme().colors.fg_subtle
+                                })
+                                .child(Ellipsis::new(format!("@{login} · {state}"))),
+                        ),
                 ),
         )
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded(theme.radius(Radius::Lg))
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.surface)
-                .when_some(active_summary.map(|summary| {
-                    (
-                        display_name(&summary),
-                        summary.identity.login.clone(),
-                        authorization_label(&summary.authorization).to_string(),
-                    )
-                }), |card, (name, login, state)| {
-                    card.child(
-                        div()
-                            .debug_selector(|| "settings-current-account".to_string())
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                Avatar::new("settings-account-avatar", name.clone())
-                                    .size(AvatarSize::Md),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .min_w_0()
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(Ellipsis::new(name)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(theme.text_size(TextSize::Xs))
-                                            .text_color(colors.fg_subtle)
-                                            .child(Ellipsis::new(format!("@{login} · {state}"))),
-                                    ),
-                            ),
+                .flex_none()
+                .flex_wrap()
+                .items_center()
+                .justify_end()
+                .gap_1()
+                // Only a non-current account offers "Use"; the current one is marked, not disabled
+                // in the action slot.
+                .when(!is_active, |actions| {
+                    actions.child(
+                        Button::new(("account-select", row_id), "Use")
+                            .size(ControlSize::Sm)
+                            .disabled(busy)
+                            .on_click(move |_, window, cx| select(select_key.clone(), window, cx)),
                     )
                 })
-                .when(!empty, |card| {
-                    card.child(account_list(accounts, active, busy, callbacks, cx))
-                }),
-        )
-        .when(restored, |section| {
-            section.child(
-                div()
-                    .debug_selector(|| "settings-restored-notice".to_string())
-                    .text_color(colors.warning)
-                    .child("Restored accounts are saved identity records, not verified access. Revalidate before relying on them."),
-            )
-        })
-        .children(status.map(|status| status_line(status, cx)))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded(theme.radius(Radius::Lg))
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.surface)
                 .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(if replacing {
-                            "Replace the saved PAT for this account"
-                        } else {
-                            "Add or replace an account"
+                    Button::new(("account-revalidate", row_id), "Revalidate")
+                        .size(ControlSize::Sm)
+                        .disabled(busy)
+                        .on_click(move |_, window, cx| {
+                            revalidate(revalidate_key.clone(), window, cx)
                         }),
                 )
                 .child(
-                    div()
-                        .text_size(theme.text_size(TextSize::Xs))
-                        .text_color(colors.fg_subtle)
-                        .child(if replacing {
-                            "The replacement PAT must belong to the same account, or it is rejected and neither account changes."
-                        } else {
-                            "The PAT is verified with GET /user before anything is stored. Tokens live in the platform credential store, never in the account database."
-                        }),
-                )
-                .child(token_form(
-                    TokenForm {
-                        token_input,
-                        replacing,
-                        busy,
-                        callbacks,
-                    },
-                    cx,
-                )),
+                    Button::new(("account-replace", row_id), "Replace PAT")
+                        .size(ControlSize::Sm)
+                        .disabled(busy)
+                        .on_click(move |_, window, cx| replace(replace_key.clone(), window, cx)),
+                ),
         )
         .into_any_element()
 }
 
-/// One status message, coloured by tone. Also used by the example, so its selector stays stable.
-/// It never contains a token: messages are built from typed service outcomes only.
+/// A light "Current" marker. It is a status, not a disabled action button.
+fn current_badge(cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let accent = theme.colors.accent;
+    div()
+        .debug_selector(|| "account-current-badge".to_string())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .rounded(theme.radius(Radius::Sm))
+        .px_1()
+        .text_size(theme.text_size(TextSize::Xs))
+        .text_color(accent)
+        .child(Icon::new(IconName::Check).size(IconSize::Xs).color(accent))
+        .child("Current")
+        .into_any_element()
+}
+
+/// The submit/cancel row for the token form, with its help link.
+fn token_actions(
+    token_input: Entity<TextInput>,
+    replacing: bool,
+    busy: bool,
+    callbacks: &AccountCallbacks,
+    cx: &App,
+) -> AnyElement {
+    let help = callbacks.open_pat_help.clone();
+    let submit = callbacks.submit.clone();
+    let cancel = callbacks.cancel.clone();
+    let cancel_replace = callbacks.cancel_replace.clone();
+    let submit_label = if replacing {
+        "Verify and replace"
+    } else {
+        "Verify and add"
+    };
+    div()
+        .debug_selector(|| "account-token-form".to_string())
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .py_2()
+        .child(
+            Button::new("pat-help", "Create a Classic PAT")
+                .variant(ely_core::buttons::ButtonVariant::Link)
+                .on_click(move |_, window, cx| help(window, cx)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child({
+                    let ready = !busy && !token_input.read(cx).text().trim().is_empty();
+                    Button::new("account-token-submit", submit_label)
+                        .primary()
+                        .disabled(!ready)
+                        .loading(busy)
+                        .on_click(move |_, window, cx| submit(window, cx))
+                })
+                .when(busy, |row| {
+                    row.child(
+                        Button::new("account-operation-cancel", "Cancel")
+                            .on_click(move |_, window, cx| cancel(window, cx)),
+                    )
+                })
+                .when(replacing && !busy, |row| {
+                    row.child(
+                        Button::new("account-replace-cancel", "Cancel replacement")
+                            .on_click(move |_, window, cx| cancel_replace(window, cx)),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// The one status message for the whole account surface, shown once. Errors are not repeated as
+/// separate yellow lines elsewhere; per-account state already lives on each account's row.
 pub(crate) fn status_line(status: StatusMessage, cx: &App) -> AnyElement {
     let colors = &cx.theme().colors;
     let color = match status.tone {
@@ -424,10 +389,10 @@ pub(crate) fn display_name(summary: &AccountSummary) -> String {
 /// What the saved record currently proves. Only `Verified` is evidence of this run's access.
 pub(crate) fn authorization_label(state: &AuthorizationState) -> &'static str {
     match state {
-        AuthorizationState::PendingVerification => "saved · verification pending",
-        AuthorizationState::Verified => "verified this run",
-        AuthorizationState::MissingCredential => "saved · credential missing",
-        AuthorizationState::CredentialUnavailable => "saved · credential unavailable",
-        AuthorizationState::VerificationFailed(_) => "saved · verification failed",
+        AuthorizationState::PendingVerification => "verification pending",
+        AuthorizationState::Verified => "verified",
+        AuthorizationState::MissingCredential => "credential missing",
+        AuthorizationState::CredentialUnavailable => "credential unavailable",
+        AuthorizationState::VerificationFailed(_) => "verification failed",
     }
 }

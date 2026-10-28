@@ -28,6 +28,10 @@ Home/Settings、仓库和 Profile 的活动行从客户区可绘制左缘 x=0 �
 
 收起时 Home/Settings 保留图标，仓库保留 namespace avatar，账号保留头像；标题、计数、姓名和 ID 隐藏，完整 tooltip/可访问名仍在。仓库区域独立滚动，键盘到达屏外仓库时沿用 `reveal_row` 最小滚动（并取消在途滚轮缓动）。收起/展开不导航、不重置 repo/page 滚动。
 
+仓库 namespace 与账户头像现在是 GitHub 返回的真实图片：图片就绪时替换 initials，图片不可用时保持同尺寸 initials 占位，因此收起/展开的头像尺寸插值动画、圆形裁切与对齐不变。头像加载与缓存集中在 `app::avatar`（按 host + 稳定 owner/账户 ID + URL 去重，重复 owner 与重绘不重复下载，失败终态不重试），侧栏、Settings 账户列表与底部账户行共用同一实现，见 [账户预览](account-ui-preview.md)。
+
+`Repositories (N)` 标题不再带常驻 Refresh 按钮；列表在启动与账户 settle 后自动读取，成功非空只显示标题与行，加载中只有一个轻量指示点，真实失败时该行下才出现一次性 Retry。Partial 列表仍显示不完整原因，成功零仓库给简短空态。
+
 底部四入口（展开态）各自使用一条低对比度 Ely 中性色细边框，保持横向四等分、间距与圆角一致，不抢眼。收起模式的 More 触发按钮不再有可见边框（保留 `border_1` + 透明色以维持 28px 盒模型与键盘 focus 环），按钮槽位自身用 flex 居中其 ellipsis，使图标落在 28px 方形正中而不是左上角；外框尺寸、位置、布局占位与命中范围不变，tooltip 与可访问名称均为 “More”；菜单内仍有 Notifications、Issues、PRs、New，各有图标与标签，当前全局路由在菜单项上标记，New 继续 disabled。菜单由侧栏自绘（用 Ely 主题 token：overlay surface、border、elevation 与 menu width），打开状态、焦点归属与按键由 `Shell` 拥有：点 More 打开面板并把焦点移入，方向键移动高亮、Enter/Space 执行、Esc 关闭并把焦点交回 More 按钮（可立即再按 Enter 重开）。自绘原因见开发日志：Ely `OverflowMenu` 的私有 focus takeover 会在收起动画重绘时被重新武装，导致 Esc 或窗口变化无法关闭面板。菜单打开期间 Tab 被消费，Ctrl+K 会先关闭菜单再开 palette；侧栏专用透明 dismissal shield 阻止外点关闭同时点击背后页面。窗口 resize/maximize/restore 与展开/收起都会关闭菜单；展开时菜单节点离树并回到壳层焦点。没有引入创建资源动作或新页面。
 
 ## 平滑滚动

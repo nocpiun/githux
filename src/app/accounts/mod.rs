@@ -28,6 +28,9 @@ use ely_core::forms::{InputEvent, TextInput};
 use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window};
 use tokio::sync::watch;
 
+use crate::app::avatar::{
+    AvatarCache, AvatarFetcher, AvatarInbox, AvatarKey, AvatarRequest, AvatarState, run_fetch,
+};
 use crate::auth::token::Pat;
 use crate::data::{AccountError, LoginError, LoginOutcome, RepositoryReadContext};
 use crate::domain::error::GitHubError;
@@ -226,7 +229,42 @@ pub(crate) struct Accounts {
     snapshot: Snapshot,
     selection: u64,
     opened: bool,
+    /// The shared in-memory avatar store, so the sidebar, the account row and the account list draw
+    /// the same picture once without each owning a loader.
+    avatars: Arc<AvatarCache>,
+    /// Finished avatar fetches, drained on the same beat as account messages.
+    avatar_inbox: AvatarInbox,
+    /// Pending avatar requests the renderer asked for but the controller has not started yet. The
+    /// renderer only records intent; the launch happens off the paint path.
+    avatar_queue: Vec<AvatarRequest>,
+    /// The fetcher every avatar read runs on, built from the runtime's existing transport.
+    avatar_fetcher: Option<Arc<AvatarFetcher>>,
+    /// What the automatic loader has already satisfied. It records the `(account, auth epoch,
+    /// selection generation)` triple and the outcome kind it loaded for, so a list is fetched once
+    /// per settled authorization even though the view repaints, resizes or collapses constantly.
+    /// A failed read records its key too, so a broken credential is not retried in a loop.
+    loaded: Option<AutoLoadKey>,
     receiver_task: Option<Task<()>>,
+}
+
+/// The identity of one automatic repository read. It is deliberately not a row index or a login
+/// string: the account is the stable host+id key, the epoch advances on every PAT replacement and
+/// revalidation, and the selection generation advances on every active-account change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AutoLoadKey {
+    account: AccountKey,
+    epoch: crate::domain::AuthEpoch,
+    selection: u64,
+}
+
+impl AutoLoadKey {
+    fn of(context: &crate::auth::AuthContext) -> Self {
+        Self {
+            account: context.account.clone(),
+            epoch: context.epoch,
+            selection: context.selection,
+        }
+    }
 }
 
 impl Accounts {
@@ -248,6 +286,34 @@ impl Accounts {
     /// Whether an account operation is in flight.
     pub fn busy(&self) -> bool {
         self.operation.is_some()
+    }
+
+    /// Replaces the avatar byte source before any fetch starts. Used by tests to serve local bytes
+    /// instead of contacting an avatar host; production never calls it.
+    #[cfg(test)]
+    pub fn install_avatar_source(&mut self, bytes: Arc<dyn crate::app::avatar::AvatarBytes>) {
+        self.avatar_fetcher = Some(Arc::new(AvatarFetcher::new(bytes, true)));
+    }
+
+    /// The state of one avatar for a renderer. Reading the cache is cheap; when the key is unknown
+    /// this queues a fetch (started off the paint path) so repeated paints do not refetch.
+    pub fn avatar(&mut self, key: AvatarKey) -> AvatarState {
+        let state = self.avatars.state(&key);
+        match state {
+            AvatarState::Unknown => {
+                if let Some(request) = self.avatars.request(key) {
+                    self.avatar_queue.push(request);
+                }
+                AvatarState::Loading
+            }
+            other => other,
+        }
+    }
+
+    /// The cache state of one avatar without starting a fetch, for the avatar tests.
+    #[cfg(test)]
+    pub fn avatar_state_for_test(&self, key: &AvatarKey) -> Option<AvatarState> {
+        Some(self.avatars.state(key))
     }
 
     /// The narrow production access point: the active account's services and executor.
@@ -306,6 +372,11 @@ impl Accounts {
             },
             selection: 0,
             opened: false,
+            avatars: Arc::new(AvatarCache::new()),
+            avatar_inbox: Arc::new(Mutex::new(Vec::new())),
+            avatar_queue: Vec::new(),
+            avatar_fetcher: None,
+            loaded: None,
             receiver_task: None,
         };
         this.start_receiver(cx);
@@ -395,6 +466,39 @@ impl Accounts {
         for message in messages {
             self.receive(message, cx);
         }
+        self.drain_avatars(cx);
+    }
+
+    /// Applies finished avatar fetches and starts the ones the renderer queued. Decoding happened
+    /// on the executor; this only swaps cache entries and repaints once.
+    fn drain_avatars(&mut self, cx: &mut Context<Self>) {
+        let completions = crate::app::avatar::drain(&self.avatar_inbox);
+        let had_completions = !completions.is_empty();
+        for completion in completions {
+            self.avatars.apply(completion);
+        }
+        // Start anything the last frames asked for, but only while the runtime is alive.
+        if !self.avatar_queue.is_empty()
+            && let Some(runtime) = self.runtime.clone()
+            && let Some(fetcher) = self.avatar_fetcher.clone()
+        {
+            let queued: Vec<AvatarRequest> = std::mem::take(&mut self.avatar_queue);
+            let inbox = self.avatar_inbox.clone();
+            for request in queued {
+                let fetcher = fetcher.clone();
+                let inbox = inbox.clone();
+                // One tracked job per avatar; they share the executor's concurrency bound, so a long
+                // list cannot launch an unbounded burst.
+                let _ = runtime.spawn(
+                    crate::network::cancel::CancellationToken::new().1,
+                    || {},
+                    async move { run_fetch(fetcher, request, inbox).await },
+                );
+            }
+        }
+        if had_completions {
+            cx.notify();
+        }
     }
 
     fn open(&mut self, cx: &mut Context<Self>) {
@@ -448,6 +552,13 @@ impl Accounts {
         let Some(runtime) = self.runtime.clone() else {
             return;
         };
+        if self.avatar_fetcher.is_none() {
+            // Avatar bodies are binary, so they use a dedicated byte source rather than the
+            // JSON REST transport; production installs a reqwest client that never carries the PAT.
+            let bytes: Arc<dyn crate::app::avatar::AvatarBytes> =
+                Arc::new(crate::app::avatar::ReqwestAvatars::new().unwrap_or_default());
+            self.avatar_fetcher = Some(Arc::new(AvatarFetcher::new(bytes, false)));
+        }
         self.refresh_presentation();
         let restored = self.snapshot.accounts.iter().any(|summary| {
             summary.authorization == crate::domain::account::AuthorizationState::PendingVerification
@@ -476,11 +587,15 @@ impl Accounts {
             self.snapshot.repositories.preview,
             RepositoryPreview::Idle(_)
         ) {
+            // The list loads itself once an account is active; no "refresh to read" instruction.
             self.snapshot.repositories = Repositories::idle(
                 self.snapshot.active.clone(),
-                "Refresh to read the current account's repositories.",
+                "Loading this account's repositories…",
             );
         }
+        // A restored saved account is only a stored identity. The automatic loader below runs a
+        // real credential verification and read, so the user does not have to revalidate first.
+        self.autoload_if_needed(cx);
         // The pending-cleanup journal is a property of the directory, not of one operation, so it
         // is observed separately and reported without rewriting any operation's outcome.
         let inbox = self.inbox.clone();
@@ -507,7 +622,7 @@ impl Accounts {
             self.selection = self.selection.saturating_add(1);
             self.snapshot.repositories = Repositories::idle(
                 active.clone(),
-                "The current account changed. Refresh to read this account's repositories.",
+                "Switching to the current account's repositories…",
             );
         }
         self.snapshot.active = active;
@@ -529,7 +644,7 @@ impl Accounts {
         if previous == self.snapshot.active {
             self.snapshot.repositories = Repositories::idle(
                 self.snapshot.active.clone(),
-                "A cancelled request settled. Refresh to read repositories under the current authorization.",
+                "Reloading repositories under the settled authorization…",
             );
         }
         self.snapshot.status = Some(if self.reconciling.is_empty() {
@@ -543,6 +658,9 @@ impl Accounts {
                 "One cancelled request settled; another is still settling. Saved accounts are shown as currently stored.",
             )
         });
+        // Once every cancelled mutation has settled, load the (now final) authorization's list
+        // automatically. The discarded read is not reused: this starts a fresh one.
+        self.autoload_if_needed(cx);
         cx.notify();
     }
 
@@ -560,7 +678,7 @@ impl Accounts {
             if reply.operation == Operation::Repositories {
                 self.snapshot.repositories = Repositories::idle(
                     reply.for_account.clone(),
-                    "The account or authorization changed while this read was running; its result was discarded. Refresh to read the current account.",
+                    "The authorization changed while this read was running; its result was discarded. Reloading…",
                 );
             }
             self.snapshot.status = Some(StatusMessage::new(
@@ -578,7 +696,7 @@ impl Accounts {
             // never attributed to an account it was not requested for.
             self.snapshot.repositories = Repositories::idle(
                 Some(actual.clone()),
-                "This repository result belonged to another account and was discarded. Refresh to read the current account.",
+                "This repository result belonged to another account and was discarded. Reloading…",
             );
             self.snapshot.status = Some(StatusMessage::new(
                 StatusTone::Warning,
@@ -594,31 +712,34 @@ impl Accounts {
         let switched = previous != self.snapshot.active;
         match reply.result {
             Ok(success) => {
-                self.snapshot.status = Some(match success {
-                    Success::Added => StatusMessage::new(
-                        StatusTone::Success,
-                        "Account verified and saved; its PAT is in the platform credential store.",
-                    ),
-                    Success::Replaced => StatusMessage::new(
-                        StatusTone::Success,
-                        "Replacement PAT verified and saved.",
-                    ),
-                    Success::Selected => {
-                        StatusMessage::new(StatusTone::Success, "Current account selection saved.")
-                    }
-                    Success::Revalidated => StatusMessage::new(
-                        StatusTone::Success,
-                        "Saved credential revalidated against the current GitHub identity.",
-                    ),
-                    Success::Repositories => StatusMessage::new(
-                        StatusTone::Info,
-                        "Repository response received; completeness is shown in the sidebar.",
-                    ),
-                    Success::CleanupPending => StatusMessage::new(
-                        StatusTone::Warning,
-                        "The account change was committed, but retired credential cleanup is pending. Do not retry the same change blindly.",
-                    ),
-                });
+                // A successful repository read is the automatic consequence of an account action;
+                // it must not replace that action's own status (e.g. "revalidated") with noise.
+                if success != Success::Repositories {
+                    self.snapshot.status = Some(match success {
+                        Success::Added => StatusMessage::new(
+                            StatusTone::Success,
+                            "Account verified and saved; its PAT is in the platform credential store.",
+                        ),
+                        Success::Replaced => StatusMessage::new(
+                            StatusTone::Success,
+                            "Replacement PAT verified and saved.",
+                        ),
+                        Success::Selected => StatusMessage::new(
+                            StatusTone::Success,
+                            "Current account selection saved.",
+                        ),
+                        Success::Revalidated => StatusMessage::new(
+                            StatusTone::Success,
+                            "Saved credential revalidated against the current GitHub identity.",
+                        ),
+                        // Handled above: an automatic read never publishes its own status line.
+                        Success::Repositories => unreachable!("read status is not published"),
+                        Success::CleanupPending => StatusMessage::new(
+                            StatusTone::Warning,
+                            "The account change was committed, but retired credential cleanup is pending. Do not retry the same change blindly.",
+                        ),
+                    });
+                }
                 if matches!(success, Success::Added | Success::Replaced) {
                     self.replacing = None;
                 }
@@ -642,7 +763,7 @@ impl Accounts {
                 } else if !switched {
                     self.snapshot.repositories = Repositories::idle(
                         self.snapshot.active.clone(),
-                        "Authorization or current account changed. Refresh to read the new repository set.",
+                        "Authorization or current account changed. Reloading repositories…",
                     );
                 }
             }
@@ -668,7 +789,7 @@ impl Accounts {
                     // read under the previous account must not stay on screen.
                     self.snapshot.repositories = Repositories::idle(
                         self.snapshot.active.clone(),
-                        "An account change was attempted. Refresh to read the current account's repositories.",
+                        "An account change was in progress; reloading the current account's repositories…",
                     );
                 }
             }
@@ -676,6 +797,10 @@ impl Accounts {
         if reply.recovery_pending {
             self.append_cleanup_warning();
         }
+        // Any settled account mutation (add/select/replace/revalidate) may have changed the current
+        // authorization, so the list is loaded once for the resulting settled triple. A completed
+        // repository read is a no-op here because its key is already recorded.
+        self.autoload_if_needed(cx);
         cx.notify();
     }
 
@@ -721,6 +846,11 @@ impl Accounts {
                 account: for_account.clone(),
                 preview: RepositoryPreview::Loading,
             };
+            // Record the settled authorization this read belongs to, so a later plain
+            // `autoload_if_needed` (from a repaint-driven settlement) will not repeat it.
+            if let Some(context) = runtime.accounts.active_context() {
+                self.loaded = Some(AutoLoadKey::of(&context));
+            }
             runtime
                 .accounts
                 .repo_service()
@@ -731,7 +861,7 @@ impl Accounts {
             // An account change invalidates the previous list before anything is published.
             self.snapshot.repositories = Repositories::idle(
                 for_account.clone(),
-                "An account change is in progress. Refresh after it settles to read repositories.",
+                "An account change is in progress. Repositories load once it settles.",
             );
             None
         };
@@ -843,7 +973,7 @@ impl Accounts {
         ));
         self.snapshot.repositories = Repositories::idle(
             self.snapshot.active.clone(),
-            "An account change is in progress. Refresh after it settles to read repositories.",
+            "An account change is in progress. Repositories load once it settles.",
         );
         let pat = Pat::new(std::mem::take(&mut value));
         let accounts = runtime.accounts.clone();
@@ -924,7 +1054,7 @@ impl Accounts {
         ));
         self.snapshot.repositories = Repositories::idle(
             self.snapshot.active.clone(),
-            "Cancelled request; no repository result was applied.",
+            "Cancelled. The current authorization's repositories reload when it settles.",
         );
         self.input
             .update(cx, |input, cx| input.set_disabled(false, cx));
@@ -958,8 +1088,46 @@ impl Accounts {
         self.start(Operation::Revalidate(key.id), cx);
     }
 
+    /// Starts the current account's repository read exactly once per settled authorization.
+    ///
+    /// Called from every place where the authoritative account or its authorization may have just
+    /// settled (startup restore, login, select, replace, revalidate, cancellation reconcile, and
+    /// the end of a read). It never runs on a plain repaint, resize or sidebar collapse, because it
+    /// is only invoked from those settlements and records the triple it loaded for.
+    ///
+    /// A stored identity is not a verified authorization: when the service has not verified this
+    /// credential in this run, the read goes through the normal authenticated path, which loads the
+    /// platform credential and fails with the matching recoverable error if it is missing or bad.
+    fn autoload_if_needed(&mut self, cx: &mut Context<Self>) {
+        // Never interrupt an in-flight operation, and never act while a cancelled mutation is still
+        // settling: the authorization evidence it may change is not final yet.
+        if self.operation.is_some() || !self.reconciling.is_empty() {
+            return;
+        }
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let Some(context) = runtime.accounts.active_context() else {
+            return;
+        };
+        let key = AutoLoadKey::of(&context);
+        if self.loaded.as_ref() == Some(&key) {
+            return;
+        }
+        // Mark before starting so a repaint or a second settlement cannot queue a duplicate.
+        self.loaded = Some(key);
+        // Keep the settlement/action message the caller just set: the automatic read is a
+        // consequence of it, not a new user-visible event of its own.
+        let previous_status = self.snapshot.status.clone();
+        self.start(Operation::Repositories, cx);
+        if self.operation.is_some() {
+            self.snapshot.status = previous_status;
+        }
+    }
+
     /// Explicit refresh of the current account's repository list. Scoped to that list: it never
-    /// refreshes a page, a tab or anything global.
+    /// refreshes a page, a tab or anything global. It is reachable only from a failure's scoped
+    /// retry, not from a permanent control.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.start(Operation::Repositories, cx);
     }
@@ -971,6 +1139,10 @@ impl Accounts {
 
     /// Stops all in-flight account work when the controller is dropped.
     fn shutdown(&mut self) {
+        // Stop avatar reads first: they hold the shared transport and must not outlive teardown.
+        if let Some(fetcher) = &self.avatar_fetcher {
+            fetcher.cancel();
+        }
         // `send` fails with no receiver held, which is exactly our case: `send_replace` still
         // stores the value so late workers observe it.
         self.alive.send_replace(false);

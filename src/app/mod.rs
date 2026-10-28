@@ -18,6 +18,7 @@ use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions
 use ely_core::theme::ActiveTheme;
 
 pub mod accounts;
+pub mod avatar;
 
 use crate::{app::accounts::Accounts, platform, ui::Shell};
 

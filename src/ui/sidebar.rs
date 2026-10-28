@@ -7,7 +7,6 @@
 //! identifiers; long names are cut inside the column instead of widening it.
 
 use ely_core::{
-    data_display::Avatar,
     primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, AvatarSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
@@ -32,7 +31,7 @@ use super::{
 };
 
 type Run = Box<dyn Fn(&mut Window, &mut App) + 'static>;
-type SharedRun = std::rc::Rc<dyn Fn(&mut Window, &mut App) + 'static>;
+pub(super) type SharedRun = std::rc::Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 /// What the account row draws. Built from the real `GET /user` identity of the active account, or
 /// from nothing at all while logged out — there is no placeholder identity in the product.
@@ -349,15 +348,28 @@ fn marked(row: AnyElement, active: bool, row_height: f32, cx: &App) -> AnyElemen
 ///
 /// `focus` is the row's own tab stop. The shell subscribes to it so a row reached with Tab is
 /// scrolled into view; a row that is merely clipped would otherwise take focus invisibly.
-pub(super) fn repo_row(
-    index: usize,
-    repo: &RepoSummary,
-    focus: &FocusHandle,
-    active: bool,
-    frame: SidebarFrame,
-    run: impl Fn(&mut Window, &mut App) + 'static,
-    cx: &App,
-) -> AnyElement {
+/// A repository row's per-frame inputs. Grouping them keeps the row builder within a sane argument
+/// count while still passing exactly what the layout needs.
+pub(super) struct RepoRowView<'a> {
+    pub index: usize,
+    pub repo: &'a RepoSummary,
+    pub avatar: AnyElement,
+    pub focus: &'a FocusHandle,
+    pub active: bool,
+    pub frame: SidebarFrame,
+    pub run: Run,
+}
+
+pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
+    let RepoRowView {
+        index,
+        repo,
+        avatar,
+        focus,
+        active,
+        frame,
+        run,
+    } = view;
     let theme = cx.theme();
     let colors = &theme.colors;
     let (radius, text) = (theme.radius(Radius::Md), theme.text_size(TextSize::Sm));
@@ -372,8 +384,6 @@ pub(super) fn repo_row(
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (REPO_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
     let full_name = repo.full_name.clone();
-    let avatar_name = repo.owner.login.clone();
-    let run: Run = Box::new(run);
     let row = div()
         .id(("repo-row", index))
         .debug_selector(move || format!("repo-row-{index}"))
@@ -412,7 +422,7 @@ pub(super) fn repo_row(
             div()
                 .debug_selector(move || format!("sidebar-repo-avatar-{index}"))
                 .flex_none()
-                .child(Avatar::new(("repo-avatar", index), avatar_name).size(AvatarSize::Xs)),
+                .child(avatar),
         )
         .when(!collapsed, |row| {
             row.child(
@@ -436,6 +446,9 @@ pub(super) fn repo_row(
 /// no name, login or status, so the sidebar never shows an account that is not there.
 pub(super) fn account_row(
     account: Option<AccountDisplay>,
+    // The signed-in account's avatar at the interpolated expansion size. `None` while logged out,
+    // where the row draws its own sign-in glyph instead.
+    avatar: Option<AnyElement>,
     active: bool,
     frame: SidebarFrame,
     run: impl Fn(&mut Window, &mut App) + 'static,
@@ -562,10 +575,15 @@ pub(super) fn account_row(
         } else {
             identity_label.clone()
         }))
-        .child(SidebarAvatar {
-            name: account.name.clone().into(),
-            expansion: frame.expansion,
-        })
+        .child(avatar.unwrap_or_else(|| {
+            // Defensive: the caller always supplies one while signed in. Falling back to initials
+            // at the same interpolated size keeps the row height stable if it ever does not.
+            SidebarAvatar {
+                name: account.name.clone().into(),
+                expansion: frame.expansion,
+            }
+            .into_any_element()
+        }))
         .when(!collapsed, |identity| {
             identity.child(
                 div()
@@ -639,6 +657,12 @@ pub(super) fn account_row(
         .when(!collapsed, |row| row.child(status))
         .into_any_element();
     marked(row, active, height, cx)
+}
+
+/// The account avatar's interpolated diameter in rems, exposed so the Shell can build the real
+/// avatar at exactly the size the row's expansion implies.
+pub(super) fn account_avatar_rems(expansion: f32, cx: &App) -> gpui::Rems {
+    avatar_side(cx, expansion)
 }
 
 /// The account avatar's interpolated diameter, shared by the signed-in and signed-out rows.
@@ -767,21 +791,23 @@ pub(super) fn quarter_row(buttons: [AnyElement; 4]) -> AnyElement {
         .into_any_element()
 }
 
-/// A quiet group heading above the repository list. `Repositories (N)` keeps the accepted layout;
-/// the optional second line reports loading, partial or failed reads instead of implying an empty
-/// list, and the explicit refresh is scoped to this list only.
+/// What the repository group says below its heading. There is no permanent refresh button and no
+/// success narration: a complete list shows only `Repositories (N)` and its rows. Only a real
+/// loading, partial or failed read produces a line, and a failed one may offer a recovery action
+/// that exists only while the failure does.
 pub(super) struct RepositoryStatus {
+    /// The one line under the heading, when the current state has something the user must know.
     pub message: Option<String>,
-    /// Only a genuine incomplete read is a warning; an empty complete list is not.
-    pub incomplete: bool,
-    /// Whether a read is currently running.
+    /// Only a genuine incomplete or failed read is a warning.
+    pub warning: bool,
+    /// Whether a read is currently running (draws the light loading indicator).
     pub loading: bool,
-    /// Whether the refresh button can run.
-    pub can_refresh: bool,
-    /// Only the current account's repository read is refreshed.
-    pub on_refresh: SharedRun,
+    /// A recovery action shown only for a real failure, never as a permanent refresh control.
+    pub retry: Option<SharedRun>,
 }
 
+/// The `Repositories (N)` heading. It never carries a permanent refresh control; a loading read only
+/// adds a small spinner so the list area does not jump.
 pub(super) fn group_heading(
     text: String,
     status: Option<&RepositoryStatus>,
@@ -801,64 +827,69 @@ pub(super) fn group_heading(
         .font_weight(FontWeight::MEDIUM)
         .text_color(colors.fg_subtle)
         .child(div().min_w_0().child(text))
-        .when_some(status, |heading, status| {
+        .when(status.is_some_and(|status| status.loading), |heading| {
+            // A light, size-stable indicator instead of a "Reading…" button: the old control
+            // looked like an action and occupied the action slot even while disabled.
             heading.child(
-                div().flex_none().child(
-                    ely_core::buttons::Button::new(
-                        "repo-refresh",
-                        if status.loading {
-                            "Reading…"
-                        } else {
-                            "Refresh"
-                        },
-                    )
-                    .size(ely_core::theme::ControlSize::Sm)
-                    .disabled(!status.can_refresh || status.loading)
-                    .on_click({
-                        let run = status.on_refresh.clone();
-                        move |_, window, cx| run(window, cx)
-                    }),
-                ),
+                div()
+                    .debug_selector(|| "repo-loading".to_string())
+                    .flex_none()
+                    .size(px(10.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(colors.fg_subtle),
             )
         })
         .into_any_element()
 }
 
-/// The small status line under the heading: partial lists remain usable, but the reason they are
-/// incomplete stays visible next to them.
+/// The line under the heading for a partial, failed or reading state. A complete list shows
+/// nothing here, so no "Complete set of N repositories" text remains on a successful screen.
 pub(super) fn repository_status(status: &RepositoryStatus, cx: &App) -> Option<AnyElement> {
     let message = status.message.as_deref()?;
     let theme = cx.theme();
     let colors = &theme.colors;
+    let retry = status.retry.clone();
     Some(
         div()
             .debug_selector(|| "repo-list-status".to_string())
+            .flex()
+            .items_center()
+            .gap_2()
             .pl(px(SIDEBAR_PADDING + 8.0))
             .pr_2()
+            .py_0p5()
             .text_size(theme.text_size(TextSize::Xs))
-            .text_color(if status.incomplete {
+            .text_color(if status.warning {
                 colors.warning
             } else {
                 colors.fg_subtle
             })
-            .child(message.to_string())
+            .child(div().min_w_0().child(message.to_string()))
+            .when_some(retry, |row, retry| {
+                // Only a real failure offers this; it is not a permanent refresh control.
+                row.child(
+                    div()
+                        .debug_selector(|| "repo-list-retry".to_string())
+                        .flex_none()
+                        .child(
+                            ely_core::buttons::Button::new("repo-list-retry", "Retry")
+                                .size(ely_core::theme::ControlSize::Sm)
+                                .on_click(move |_, window, cx| retry(window, cx)),
+                        ),
+                )
+            })
             .into_any_element(),
     )
 }
 
-/// Maps the real list outcome to a small, honest status. Complete/Partial come from `/user/repos`
-/// pagination; a failure is never described as a complete empty set.
-pub(super) fn list_status(readiness: &ReposReadiness, count: usize) -> (bool, String) {
+/// Maps a partial read to the one line worth showing. A complete list returns `None`: a successful
+/// non-empty screen must not narrate completeness, and a successful empty list has its own concise
+/// empty state elsewhere.
+pub(super) fn partial_status(readiness: &ReposReadiness) -> Option<(bool, String)> {
     match readiness {
-        ReposReadiness::Complete => (
-            false,
-            if count == 0 {
-                "This account has a complete empty repository set.".to_string()
-            } else {
-                format!("Complete set of {count} repositories.")
-            },
-        ),
-        ReposReadiness::Partial { reason } => (
+        ReposReadiness::Complete => None,
+        ReposReadiness::Partial { reason } => Some((
             true,
             match reason {
                 PartialReason::PageFailed { .. } => {
@@ -869,7 +900,7 @@ pub(super) fn list_status(readiness: &ReposReadiness, count: usize) -> (bool, St
                     organizations.join(", ")
                 ),
             },
-        ),
+        )),
     }
 }
 

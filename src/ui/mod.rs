@@ -31,6 +31,7 @@ use crate::{
 };
 
 pub mod accounts;
+pub mod avatar;
 mod chrome;
 pub mod fixtures;
 pub(crate) mod geometry;
@@ -844,6 +845,19 @@ impl Shell {
             self.focus_page(next, window, cx);
         }
     }
+    /// Collapses or expands the sidebar the way the toggle does, for the layout regression tests
+    /// that must prove a collapse does not re-read the repository list.
+    #[cfg(test)]
+    pub fn toggle_sidebar_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+        self.sidebar_state.toggle(
+            cx.background_executor().now(),
+            window.viewport_size().width.into(),
+            reduced,
+        );
+        cx.notify();
+    }
+
     /// Whether the palette is open, inspected by the palette tests.
     #[cfg(test)]
     pub fn palette_open(&self) -> bool {
@@ -1087,39 +1101,109 @@ impl Shell {
     /// Maps the controller's repository state to the sidebar's status and its one explicit refresh
     /// action. The Refresh here is scoped to this list; the fixed tab-toolbar Refresh stays disabled
     /// and unrelated.
+    /// A concise empty state for a genuinely complete, empty list. It is not an error and carries
+    /// no completeness narration; it only says there is nothing to list for this account.
+    fn repository_empty_notice(&self, cx: &App) -> Option<gpui::AnyElement> {
+        // Only a genuinely complete, empty list gets this; a failed or partial read never does.
+        match &self.account_state.repositories.preview {
+            RepositoryPreview::Ready(outcome)
+                if outcome.repositories.is_empty()
+                    && outcome.readiness == crate::domain::repo::ReposReadiness::Complete => {}
+            _ => return None,
+        }
+        let theme = cx.theme();
+        Some(
+            div()
+                .debug_selector(|| "repo-empty".to_string())
+                .pl(px(geometry::SIDEBAR_PADDING + 8.0))
+                .pr_2()
+                .py_0p5()
+                .text_size(theme.text_size(ely_core::theme::TextSize::Xs))
+                .text_color(theme.colors.fg_subtle)
+                .child("No repositories are visible to this account.")
+                .into_any_element(),
+        )
+    }
+
+    /// The avatar element for one identity. It uses the decoded picture when the controller already
+    /// has it, otherwise the stable initials fallback; an unknown key queues one fetch through the
+    /// controller, so persistent repaints do not refetch. The size is passed by the caller so the
+    /// sidebar's expansion animation keeps working with a real picture.
+    fn avatar_element(
+        &mut self,
+        id: &str,
+        selector: &str,
+        name: &str,
+        key: Option<crate::app::avatar::AvatarKey>,
+        slot: avatar::AvatarSlot,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let image = match (&key, self.accounts.as_ref().and_then(|weak| weak.upgrade())) {
+            (Some(key), Some(accounts)) => {
+                let state = accounts.update(cx, |accounts, _| accounts.avatar(key.clone()));
+                match state {
+                    crate::app::avatar::AvatarState::Ready(image) => {
+                        Some(gpui::ImageSource::Image(image))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        self::avatar::avatar(
+            avatar::AvatarView {
+                id,
+                selector,
+                image,
+                name,
+                slot,
+            },
+            cx,
+        )
+    }
+
+    /// Maps the controller's repository state to the one status line the sidebar may show. A
+    /// complete list produces nothing: there is no success narration and no permanent refresh
+    /// control, because the list loads itself. Loading shows a light indicator, a partial read keeps
+    /// its reason visible, and only a real failure offers a retry that disappears with the failure.
     fn repository_list_status(
         &self,
         cx: &mut Context<Self>,
     ) -> (Option<sidebar::RepositoryStatus>, Option<gpui::AnyElement>) {
         let state = &self.account_state.repositories;
         let loading = matches!(state.preview, RepositoryPreview::Loading);
-        let can_refresh = self
-            .accounts
-            .as_ref()
-            .is_some_and(|weak| weak.upgrade().is_some())
-            && state.account.is_some()
-            && !loading;
-        let (incomplete, message) = match &state.preview {
+        let mut retry: Option<sidebar::SharedRun> = None;
+        let (message, warning) = match &state.preview {
+            // A complete list says nothing extra.
             RepositoryPreview::Ready(outcome) => {
-                sidebar::list_status(&outcome.readiness, outcome.repositories.len())
-            }
-            RepositoryPreview::Failed(message) => (true, message.clone()),
-            RepositoryPreview::Loading => {
-                (false, "Reading the visible repository set…".to_string())
-            }
-            RepositoryPreview::Idle(message) => (false, message.clone()),
-        };
-        let refresh = self.accounts.clone();
-        let status = sidebar::RepositoryStatus {
-            message: Some(message),
-            incomplete,
-            loading,
-            can_refresh,
-            on_refresh: std::rc::Rc::new(move |_, cx| {
-                if let Some(accounts) = &refresh {
-                    let _ = accounts.update(cx, |accounts, cx| accounts.refresh(cx));
+                match sidebar::partial_status(&outcome.readiness) {
+                    Some((warning, message)) => (Some(message), warning),
+                    None => (None, false),
                 }
-            }),
+            }
+            RepositoryPreview::Failed(message) => {
+                // A failed read is recoverable, so it keeps a scoped retry while it is on screen.
+                retry = self.accounts.clone().map(|accounts| {
+                    std::rc::Rc::new(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                        let _ = accounts.update(cx, |accounts, cx| accounts.refresh(cx));
+                    }) as std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>
+                });
+                (Some(message.clone()), true)
+            }
+            RepositoryPreview::Loading => (None, false),
+            // Idle after an account change or a discarded read: no action slot, just the reason the
+            // list is empty right now. The automatic load below replaces this without user input.
+            RepositoryPreview::Idle(message) => (Some(message.clone()), false),
+        };
+        let has_line = message.is_some() || loading;
+        if !has_line {
+            return (None, None);
+        }
+        let status = sidebar::RepositoryStatus {
+            message,
+            warning,
+            loading,
+            retry,
         };
         let line = sidebar::repository_status(&status, cx);
         (Some(status), line)
@@ -1187,11 +1271,13 @@ impl Shell {
             status.as_ref(),
             cx,
         );
+        let empty_notice = self.repository_empty_notice(cx);
         let heading = div()
             .flex()
             .flex_col()
             .gap_0p5()
             .child(heading)
+            .children(empty_notice)
             .children(status_line)
             .into_any_element();
         // A row reached with Tab must be visible: otherwise its focus ring and Enter's target sit
@@ -1214,6 +1300,37 @@ impl Shell {
             Some(_) => {}
         }
 
+        // Resolve every row's namespace avatar up front, so the row builder does not need a mutable
+        // controller borrow while it already holds a repository borrow. `AnyElement` is not
+        // `Clone`, so the elements are moved out in row order.
+        let row_subjects = self
+            .repositories
+            .iter()
+            .enumerate()
+            .map(|(index, repo)| {
+                let host = crate::domain::HostId::github();
+                (
+                    format!("repo-{index}"),
+                    repo.owner.login.clone(),
+                    avatar::owner_key(&repo.owner, host.as_str()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut avatars = std::collections::VecDeque::new();
+        for (row_index, (id, name, key)) in row_subjects.into_iter().enumerate() {
+            // The outer row already carries `sidebar-repo-avatar-{index}`; the avatar itself gets a
+            // distinct per-owner selector so the two do not collide.
+            let selector = format!("repo-avatar-image-{row_index}");
+            let element = self.avatar_element(
+                &id,
+                &selector,
+                &name,
+                key,
+                avatar::AvatarSlot::Size(ely_core::theme::AvatarSize::Xs),
+                cx,
+            );
+            avatars.push_back(element);
+        }
         let rows = self
             .repositories
             .iter()
@@ -1224,16 +1341,19 @@ impl Shell {
                 let active = route.is_repository(repo);
                 let focus = self.repo_focus[index].clone();
                 sidebar::repo_row(
-                    index,
-                    repo,
-                    &focus,
-                    active,
-                    frame,
-                    move |window, cx| {
-                        let target = target.clone();
-                        this.update(cx, |shell, cx| {
-                            shell.navigate(target, window, cx);
-                        });
+                    sidebar::RepoRowView {
+                        index,
+                        repo,
+                        avatar: avatars.pop_front().expect("one avatar per row"),
+                        focus: &focus,
+                        active,
+                        frame,
+                        run: Box::new(move |window, cx| {
+                            let target = target.clone();
+                            this.update(cx, |shell, cx| {
+                                shell.navigate(target, window, cx);
+                            });
+                        }),
                     },
                     cx,
                 )
@@ -1289,6 +1409,32 @@ impl Shell {
 
         // The account row is the real `/user` identity of the active account. Logged out, it is an
         // honest sign-in entry: no name, login, status or profile route is invented.
+        let display = self.active_account().map(|summary| {
+            let name = summary
+                .identity
+                .display_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&summary.identity.login)
+                .to_string();
+            sidebar::AccountDisplay::new(name, summary.identity.login.clone())
+        });
+        // The account avatar interpolates with the sidebar's expansion, so it keeps its animated
+        // size while showing the real picture once it is decoded.
+        let account_subject = self.active_account().map(|summary| {
+            let name = summary
+                .identity
+                .display_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&summary.identity.login)
+                .to_string();
+            (name, avatar::account_key(&summary.identity))
+        });
+        let account_avatar = account_subject.map(|(name, key)| {
+            let rems = avatar::AvatarSlot::Rems(sidebar::account_avatar_rems(frame.expansion, cx));
+            self.avatar_element("account", "sidebar-account-avatar", &name, key, rems, cx)
+        });
         let account = {
             let this = this.clone();
             let target = if self.active_account().is_some() {
@@ -1296,18 +1442,9 @@ impl Shell {
             } else {
                 None
             };
-            let display = self.active_account().map(|summary| {
-                let name = summary
-                    .identity
-                    .display_name
-                    .as_deref()
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or(&summary.identity.login)
-                    .to_string();
-                sidebar::AccountDisplay::new(name, summary.identity.login.clone())
-            });
             sidebar::account_row(
                 display,
+                account_avatar,
                 route == Route::Profile,
                 frame,
                 move |window, cx| {
@@ -1418,9 +1555,19 @@ impl Shell {
         let replacing =
             self.account_state.active.is_some() && controller.read(cx).replacing().is_some();
         let busy = controller.read(cx).busy();
-        let restored = snapshot.accounts.iter().any(|summary| {
-            summary.authorization == crate::domain::account::AuthorizationState::PendingVerification
-        });
+        // Resolve each saved account's avatar. An unknown key queues one fetch through the same
+        // controller the sidebar uses, so the Settings list and the footer share one loader.
+        let mut avatars = std::collections::HashMap::new();
+        for summary in &snapshot.accounts {
+            let key = summary.identity.key.clone();
+            if let Some(avatar_key) = avatar::account_key(&summary.identity) {
+                let state =
+                    controller.update(cx, |accounts, _| accounts.avatar(avatar_key.clone()));
+                if let crate::app::avatar::AvatarState::Ready(image) = state {
+                    avatars.insert(key, gpui::ImageSource::Image(image));
+                }
+            }
+        }
         let callbacks =
             crate::app::accounts::callbacks(controller.clone(), snapshot.status.clone());
         let section = crate::ui::accounts::accounts_section(
@@ -1433,7 +1580,7 @@ impl Shell {
                 },
                 accounts: snapshot.accounts,
                 active: snapshot.active,
-                restored,
+                avatars,
                 status: snapshot.status,
             },
             cx,

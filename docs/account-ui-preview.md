@@ -30,6 +30,18 @@ cargo run --example account
 
 重启后从 `accounts.sqlite3` 恢复目录，条目一律是 `PendingVerification`，不会被当作当前已验证授权。真实凭据仍在 Windows Credential Manager；其他平台仍是 `Unsupported`，没有明文回退。
 
+## 正式 Shell 的账户界面（2026-10-28 反馈后重做）
+
+负责人 2026-10-28 验收反馈要求三项调整，已在正式 Shell 落地（不是预览）：
+
+1. **真实头像**。仓库 namespace 与账户使用 GitHub 返回的 `RepoOwner.avatar_url` / `AccountIdentity.avatar_url`。`app::avatar` 是唯一加载与缓存实现：按 `AvatarKey{subject=host#id, url}` 去重，`AvatarBytes` 专用字节源只接受 https（本地测试可放开 http）且从不附 PAT，图片在 executor 上拉取、本地按内容嗅探 PNG/JPEG/WebP/GIF 解码，失败（404/坏图/超限/取消）为终态不重试。`ui::avatar` 只画已解码的图片，否则同尺寸 initials，不出现 Ely 的破图图标，也不推动布局。侧栏、Settings 账户行、账户 footer 共用；收起/展开的头像尺寸插值不变。
+
+2. **仓库列表自动加载、去掉 Complete/Refresh**。`app::accounts` 记录 `AutoLoadKey{account, epoch, selection}`：启动恢复、登录、切换、替换、revalidate 成功 settle 后各触发一次 `/user/repos` 读取；重绘、resize、折叠侧栏、打开 Settings 不再触发（已被 key 去重）。失败的 key 同样记录，因此失效凭据不会自动重试成请求风暴；失败可在面板内一次性 Retry。侧栏删除 `Complete set of N repositories.` 与常驻 Refresh；成功非空只剩 `Repositories (N)` 与行，加载中只有轻量指示点，成功零仓库给简短空态。
+
+3. **Settings › Accounts 重做为紧凑分组**。使用 `ely_settings::SettingsSection` / `SettingsRow`（与 `ely-core` 同一 git rev，仅新增 `ely-settings` + 传递 `ely-canvas`）。保存账户每个一行（头像 + 名称 + @login + 简短授权状态 + 切换/重验证/替换操作），不再有“当前账户摘要 + 内层同一账户行”的重复，当前账户用轻量 Current 标识而非禁用按钮。添加/替换是独立表单组，正常显示 “Add account”，替换时显示目标账户与取消入口；保留遮罩、可见性切换、PAT 创建链接、验证/提交/取消与 busy 禁用。删除页面上的工程说明式长段落与重复状态，真实恢复信息（凭据缺失、验证失败、SSO、cleanup pending）保留在对应账户或操作处。
+
+账户业务、凭据存储、请求代次、取消与对账仍沿用原有 controller/service，未新增第二套认证或网络。
+
 ## 安全与错误边界
 
 - PAT 只存在于掩码输入实体与提交到服务的那一份；提交后立即重建输入实体，旧文本和撤销历史一并丢弃。普通视图状态、状态消息、reply 结构和 Debug 输出都不含 token。

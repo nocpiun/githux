@@ -1,7 +1,7 @@
 # 账户服务与每账户 workspace 接入正式 Shell
 
 - 日期：2026-10-28；任务 ID：account-shell；执行者：基层 Agent。
-- 目标与状态：实现中（代码与测试完成，文档随 PR 提交；PR/审查链接待创建后补）。
+- PR：[#38](https://github.com/nocpiun/githux/pull/38)。状态：首版接线已合入本轮改动；三项负责人反馈（真实头像、自动加载去 Complete/Refresh、Settings 重做）已实现并本地验证，新 head 待推送/CI/Codex 审查与 `pending` 负责人重新验收。不合并。
 
 ## 改动与决定
 
@@ -37,3 +37,24 @@ git diff --check
 
 - 补 PR 描述、关联 First Release milestone #1、触发 Codex review；通过后加 `pending` 等待负责人原生窗口验收，本 wave 不合并、不 auto-merge。
 - 仓库页与 Shell 的最终组装是后续集成任务，依赖本 PR 与 repository-browser PR 先合入 main。
+
+## 负责人反馈轮（2026-10-28，第二轮）
+
+负责人验收后提出三项调整。原任务"不做头像下载"和"显式 Refresh 才读取"被这两项新要求覆盖，Settings 改版也由负责人追加授权给本任务。仍未合并、未验收。
+
+1. **真实头像**：新增 `src/app/avatar.rs`（`AvatarCache` / `AvatarFetcher` / `AvatarBytes` 字节源）与 `src/ui/avatar.rs`（统一头像渲染 + initials fallback）。仓库 namespace 用 `RepoOwner.avatar_url`，账户用 `AccountIdentity.avatar_url`，侧栏、Settings 账户行、footer 共用同一实现。身份为 `host#id + url`，重复 owner/重绘去重，失败终态不重试，请求不带 PAT，只接受 https（本地测试例外）。二进制图片不能走 `HttpResponse.body: String` 的 REST 传输，因此用专用 reqwest 字节客户端，未改共享传输契约。
+2. **自动加载 + 去 Complete/Refresh**：`Accounts::autoload_if_needed` 以 `AutoLoadKey{account, epoch, selection}` 去重，在启动恢复、登录、切换、替换、revalidate settle 后各读一次；重绘/resize/collapse/Settings 不触发；失败 key 也记录，避免风暴。侧栏删除 `Complete set of N repositories.` 与常驻 Refresh 按钮，改为加载轻量指示点、失败时一次性 Retry、成功零仓库简短空态。删除了指向"Refresh to read…"的过时提示。
+3. **Settings › Accounts 重做**：`Cargo.toml` 增加 `ely-settings`（同一 git URL/rev），`Cargo.lock` 仅新增 `ely-settings` 与传递 `ely-canvas`（`tempfile` 的 windows-sys 在两个允许版本间被 cargo 归一，不是升级）。`src/ui/accounts/form.rs` 改用 `SettingsSection`/`SettingsRow`，每账户一行、去掉重复当前账户摘要与禁用 Current 按钮、添加/替换独立表单组、删除工程说明式长正文。
+
+### 验证（本轮）
+
+`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（bin 567、account 装配 567、reader 131）、`cargo build --locked --example account -j 1`、`cargo build --locked --release -j 1`、`git diff --check` 全部通过。
+
+新增测试：`the_repository_list_loads_once_by_itself_and_never_storms`（登录后自动读一次；重绘/resize/collapse 不再读；失败不重试风暴）、`avatars_load_by_identity_and_do_not_cross_accounts`（注入字节源，Ready/Failed 隔离、去重、不串账户）、`the_settings_accounts_page_is_one_compact_list_plus_a_form`（最小 880×560 下账户列表与表单在岛内、无重复当前账户块、有 Current 标识）。`app::avatar` 模块测试覆盖 URL-only https 限制、按内容嗅探格式、404/坏图失败、按身份+URL 去重。
+
+原生窗口：本机启动 `target/release/githux.exe`（PID 38144，Responding，标题 `Githux`），`PrintWindow` 取到真实渲染帧：侧栏显示 `Repositories (110)`、**无 Complete 文案、无 Refresh 按钮**，且仓库行显示**真实 GitHub 头像**（nociun/githux、NriotHrreion 等）。截图 `.agents/output/account-shell-preview.png`。**未验证**：受本机桌面会话限制，模拟点击 Settings 未被接收，Settings 页面与头像加载完成态的视觉仍需负责人在原生窗口确认；真实 PAT 登录仍未执行。
+
+### 后续
+
+- 推送新 head，触发 `@codex review`，按 skill 核验当前 head 的 CI 与审查；`pending` 等待负责人重新验收；不合并、不 auto-merge；`merge_owner` 已纠正为 coordinator。
+- 三项之外的设置分类（General/Appearance/Network 等）未实现，未引入 `ely-settings` 之外的设置功能。
