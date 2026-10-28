@@ -93,8 +93,19 @@ fn scoped_retry_keeps_source_and_sibling_groups(cx: &mut TestAppContext) {
     let reader = page.read_with(cx, |p, _| p.reader().unwrap().entity_id());
     let overview = page.read_with(cx, |p, _| p.overview().unwrap().clone());
     assert!(overview.read_with(cx, |v, _| v.languages().error().is_some()));
-    let button = cx.debug_bounds("overview-retry-languages").unwrap();
-    cx.simulate_click(button.center(), Modifiers::none());
+    assert!(cx.debug_bounds("overview-retry-languages").is_none());
+    // Languages have no permanent UI chrome; the scoped host retry remains available.
+    let binding = overview.read_with(cx, |v, _| v.binding().clone());
+    page.update_in(cx, |p, w, cx| {
+        p.overview_action(
+            OverviewAction::Refresh {
+                binding,
+                section: OverviewSection::Languages,
+            },
+            w,
+            cx,
+        )
+    });
     for _ in 0..200 {
         page.update_in(cx, |p, w, cx| p.drain(w, cx));
         frames(cx);
@@ -249,4 +260,118 @@ fn old_actions_are_rejected_after_account_aba_and_rebind(cx: &mut TestAppContext
         )
     });
     assert_eq!(requests, fixture.transport.count("/languages"));
+}
+
+#[gpui::test]
+fn counts_are_independent_and_actions_are_host_entries(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = ready(cx, Scene::Normal);
+    for _ in 0..200 {
+        page.update_in(cx, |p, w, cx| p.drain(w, cx));
+        if page.read_with(cx, |p, _| p.extras.counts.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+    page.read_with(cx, |p, _| {
+        let c = p.extras.counts.as_ref().unwrap();
+        assert_eq!(c.issues, Ok(3));
+        assert_eq!(c.pull_requests, Ok(1));
+        assert_eq!(p.details().unwrap().open_issues_and_prs, 4);
+    });
+    assert!(cx.debug_bounds("repository-badge-issues").is_some());
+    assert!(cx.debug_bounds("repository-badge-pulls").is_some());
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = received.clone();
+    page.update(cx, |p, cx| {
+        p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
+        cx.notify();
+    });
+    frames(cx);
+    let star = cx.debug_bounds("repository-star").unwrap();
+    cx.simulate_click(star.center(), Modifiers::none());
+    page.update_in(cx, |p, w, cx| w.focus(&p.star_focus.clone(), cx));
+    cx.simulate_keystrokes("enter space");
+    assert_eq!(received.lock().unwrap().len(), 3);
+    let binding = page.read_with(cx, |p, _| p.repository_binding().unwrap());
+    page.update(cx, |p, cx| p.deactivate(cx));
+    page.update_in(cx, |p, w, cx| p.repository_action(false, binding, w, cx));
+    assert_eq!(received.lock().unwrap().len(), 3);
+    assert_eq!(fixture.transport.count("/graphql"), 1);
+}
+#[gpui::test]
+fn count_badges_hide_unknown_fields_and_branch_changes_do_not_refetch(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = ready(cx, Scene::OverviewPartial);
+    for _ in 0..200 {
+        page.update_in(cx, |p, w, cx| p.drain(w, cx));
+        if page.read_with(cx, |p, _| p.extras.counts.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+    frames(cx);
+    assert!(cx.debug_bounds("repository-badge-issues").is_some());
+    assert!(cx.debug_bounds("repository-badge-pulls").is_none());
+    page.update(cx, |p, cx| p.select_branch("feature/docs-polish", cx));
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing
+            && p.selected_branch() == Some("feature/docs-polish")
+    });
+    assert_eq!(fixture.transport.count("/graphql"), 1);
+    let bar = cx.debug_bounds("overview-language-bar").unwrap();
+    let root = cx.debug_bounds("repository-page-root").unwrap();
+    assert!((bar.bottom() - root.bottom()).abs() < px(1.));
+    page.update(cx, |p, cx| p.select_tab(RepositoryTab::Issues, cx));
+    frames(cx);
+    assert_eq!(
+        bar.origin.y,
+        cx.debug_bounds("overview-language-bar").unwrap().origin.y
+    );
+    fixture.login_as(8, "new");
+    page.update_in(cx, |p, w, cx| p.drain(w, cx));
+    assert!(page.read_with(cx, |p, _| p.extras.counts.is_none()));
+}
+
+#[gpui::test]
+fn real_zero_counts_are_values_and_unknown_counts_are_hidden(cx: &mut TestAppContext) {
+    for scene in [Scene::OverviewZero, Scene::OverviewError] {
+        let (_fixture, page, cx) = ready(cx, scene);
+        for _ in 0..30 {
+            page.update_in(cx, |p, w, cx| p.drain(w, cx));
+            frames(cx);
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        if scene == Scene::OverviewZero {
+            page.read_with(cx, |p, _| {
+                assert_eq!(p.extras.counts.as_ref().unwrap().issues, Ok(0));
+                assert_eq!(p.extras.counts.as_ref().unwrap().pull_requests, Ok(0));
+            });
+            assert!(cx.debug_bounds("repository-badge-issues").is_some());
+        } else {
+            assert!(cx.debug_bounds("repository-badge-issues").is_none());
+            assert!(cx.debug_bounds("repository-badge-pulls").is_none());
+        }
+        assert!(cx.debug_bounds("overview-language-bar").is_none());
+    }
+}
+
+#[gpui::test]
+fn bottom_language_tooltip_fits_and_disappears_on_leave(cx: &mut TestAppContext) {
+    let (_fixture, _page, cx) = ready(cx, Scene::Normal);
+    cx.simulate_resize(gpui::size(px(880.), px(560.)));
+    frames(cx);
+    let segment = cx.debug_bounds("overview-language-segment-0").unwrap();
+    cx.simulate_mouse_move(segment.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    frames(cx);
+    let tooltip = cx
+        .debug_bounds("repository-language-tooltip")
+        .expect("tooltip is visible at bottom");
+    assert!(tooltip.bottom() <= px(560.));
+    assert!(tooltip.origin.y < segment.origin.y);
+    cx.simulate_mouse_move(gpui::point(px(500.), px(250.)), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    frames(cx);
+    assert!(cx.debug_bounds("repository-language-tooltip").is_none());
 }

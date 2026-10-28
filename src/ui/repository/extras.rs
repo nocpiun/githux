@@ -35,6 +35,15 @@ struct Reply {
     request: u64,
     update: OverviewUpdate,
 }
+struct CountsReply {
+    binding: OverviewBinding,
+    context: RepositoryReadContext,
+    request: u64,
+    result: Result<
+        crate::domain::repository_counts::RepositoryCounts,
+        crate::domain::repository_counts::CountsError,
+    >,
+}
 #[derive(Default)]
 pub(super) struct Extras {
     pub view: Option<Entity<RepositoryOverview>>,
@@ -43,6 +52,10 @@ pub(super) struct Extras {
     requests: [u64; 4],
     work: [Option<Work>; 4],
     inbox: Arc<Mutex<VecDeque<Reply>>>,
+    pub counts: Option<crate::domain::repository_counts::RepositoryCounts>,
+    counts_work: Option<Work>,
+    counts_inbox: Arc<Mutex<VecDeque<CountsReply>>>,
+    counts_request: u64,
 }
 impl Extras {
     pub fn stop(&mut self) {
@@ -51,6 +64,11 @@ impl Extras {
                 work.source.cancel();
             }
         }
+        if let Some(work) = self.counts_work.take() {
+            work.source.cancel();
+        }
+        self.counts = None;
+        self.counts_request += 1;
         self.view = None;
         self.session = None;
         self.binding = None;
@@ -134,6 +152,7 @@ impl RepositoryPage {
                 return;
             }
         }
+        self.read_counts();
         for endpoint in [
             Endpoint::Releases,
             Endpoint::Latest,
@@ -142,6 +161,31 @@ impl RepositoryPage {
         ] {
             self.read_extra(endpoint, cx);
         }
+    }
+    fn read_counts(&mut self) {
+        let Some(session) = self.extras.session.clone() else {
+            return;
+        };
+        let binding = self.extras.binding.clone().unwrap();
+        let context = session.context().clone();
+        let inbox = self.extras.counts_inbox.clone();
+        self.extras.counts_request += 1;
+        let request = self.extras.counts_request;
+        let work = Work::new();
+        let cancel = work.token();
+        self.extras.counts_work = Some(work);
+        let _ = self.services.executor.handle().spawn(async move {
+            let result = session
+                .repository_counts(&binding.repository, cancel)
+                .await
+                .map(|value| value.value);
+            inbox.lock().expect("count inbox").push_back(CountsReply {
+                binding,
+                context,
+                request,
+                result,
+            });
+        });
     }
     fn read_extra(&mut self, endpoint: Endpoint, cx: &mut Context<Self>) {
         let Some(binding) = self.extras.binding.clone() else {
@@ -236,6 +280,30 @@ impl RepositoryPage {
         }
     }
     pub(super) fn drain_overview(&mut self, cx: &mut Context<Self>) {
+        let counts: Vec<_> = self
+            .extras
+            .counts_inbox
+            .lock()
+            .expect("count inbox")
+            .drain(..)
+            .collect();
+        for reply in counts {
+            if reply.request == self.extras.counts_request
+                && self.extras.accepts(self, &reply.binding)
+                && self.context.as_ref() == Some(&reply.context)
+                && self
+                    .services
+                    .accounts
+                    .repo_service()
+                    .is_current(&reply.context)
+            {
+                self.extras.counts = reply
+                    .result
+                    .ok()
+                    .filter(|value| value.repository == reply.binding.repository);
+                cx.notify();
+            }
+        }
         let replies: Vec<_> = self
             .extras
             .inbox
@@ -258,6 +326,8 @@ impl RepositoryPage {
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
                 view.apply(&reply.binding, reply.update, cx);
             });
+            // The language strip is composed by the page from this same state.
+            cx.notify();
         }
     }
     pub(super) fn overview_action(
@@ -320,6 +390,12 @@ impl RepositoryPage {
             }
         }
     }
+    pub(super) fn repository_binding(&self) -> Option<OverviewBinding> {
+        self.extras
+            .binding
+            .clone()
+            .filter(|binding| self.extras.accepts(self, binding))
+    }
     pub fn overview(&self) -> Option<&Entity<RepositoryOverview>> {
         self.extras.view.as_ref()
     }
@@ -335,6 +411,38 @@ mod tests {
     use super::*;
     use crate::ui::repository::tests::{frames, normal};
     use gpui::TestAppContext;
+    #[gpui::test]
+    fn stale_count_error_does_not_replace_newer_value_or_new_authorization(
+        cx: &mut TestAppContext,
+    ) {
+        let (fixture, page, cx) = normal(cx);
+        page.update(cx, |page, cx| {
+            let binding = page.extras.binding.clone().unwrap();
+            let context = page.context.clone().unwrap();
+            let value = crate::domain::repository_counts::RepositoryCounts {
+                repository: binding.repository.clone(),
+                issues: Ok(3),
+                pull_requests: Ok(1),
+            };
+            let current = page.extras.counts_request;
+            page.extras.counts = Some(value.clone());
+            page.extras
+                .counts_inbox
+                .lock()
+                .unwrap()
+                .push_back(CountsReply {
+                    binding,
+                    context,
+                    request: current - 1,
+                    result: Err(crate::domain::repository_counts::CountsError::RepositoryIdentity),
+                });
+            page.drain_overview(cx);
+            assert_eq!(page.extras.counts, Some(value));
+        });
+        fixture.login_as(8, "new");
+        page.update_in(cx, |page, w, cx| page.drain(w, cx));
+        assert!(page.read_with(cx, |page, _| page.extras.counts.is_none()));
+    }
     #[gpui::test]
     fn stale_endpoint_result_and_error_cannot_overwrite_retry_or_new_binding(
         cx: &mut TestAppContext,

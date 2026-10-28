@@ -4,7 +4,7 @@
 
 ## 统一页面与 overview 服务组合
 
-负责人将 repository-browser 与 repository-overview 合并为一个任务，唯一联合验收入口是 `cargo run --locked --example repository`（PR35）。`RepositoryPage` 拥有一个真实 `Entity<RepositoryOverview>`；identity/description → 自然高度 compact Releases/Contributors/Languages → 页内 Tabs → Code 的真实目录树与 ReaderView。没有第二个 header、模拟 reader 或并行验收页面。`repository_overview` example 仅保留为组件开发探针。
+负责人将 repository-browser 与 repository-overview 合并为一个任务，唯一联合验收入口是 `cargo run --locked --example repository`（PR35）。`RepositoryPage` 拥有一个真实 `Entity<RepositoryOverview>`；identity/description（右侧 Star/Fork）→ 自然高度 compact Releases/Contributors → 页内 Tabs（右侧 branch）→ Code 的真实目录树与 ReaderView → 页面底边 Languages 色条。没有第二个 header、模拟 reader 或并行验收页面。`repository_overview` example 仅保留为组件开发探针。
 
 仓库详情确认 canonical `RepositoryIdentity` 后，页面在现有账户服务创建 `PageReadSession`，**完整比较其 RepositoryReadContext 与该页 RepositorySession context**，包括服务实例、账户、授权 epoch 与选择代次。只有相同且仍有效才启动 releases/latest_release/contributors/languages 四个独立后台调用；不新建数据库、网络 client、登录或 PAT 路径。目录与 README 不等待它们完成。
 
@@ -12,7 +12,7 @@
 
 分支切换只取消 Code 读取，**不清除或重取同仓库的 overview**。deactivate、重绑、账户/凭据失效、释放页面会取消 extras，旧成功/失败及动作一律拒绝。`PageAction::Overview(OverviewAction)` 向宿主保留 binding、release id/tag 或 contributor login/canonical URL；页面在转发前核对当前显示目标，回调延后执行并复核上下文。预览仅报告，不自动打开 URL。版本/关联头像支持单次鼠标及 Enter/Space 激活；匿名头像不可导航。头像保留宿主 decoded-image hook，未提供时诚实使用首字母，无另一路图片网络。
 
-联合场景通过同一个有界场景选择器：Overview loading（2 秒）、partial、单组 error（Languages 失败一次，可 Retry）、zero、long、latest unavailable（list 非空但 latest404）。共享 request-routed fixture 为同一 `octo/ledger` 提供全部真实 service 管线端点。
+联合场景通过同一个有界场景选择器：Overview loading（2 秒）、partial、单组 error（Languages 失败一次，内部 scoped Retry 可恢复，无常驻文案入口）、zero、long、latest unavailable（list 非空但 latest404）。共享 request-routed fixture 为同一 `octo/ledger` 提供全部真实 service 管线端点。
 
 ## 页面结构
 
@@ -100,3 +100,14 @@ let page = cx.new(|cx| {
 ## 验证
 
 页面测试（`tests/repository.rs` → `src/ui/repository/tests.rs`）与预览使用同一 fixture，覆盖：正常首屏（摘要、Code Tab、真实 README、真实路径单一选中、无伪文件行）、两层嵌套目录展开/收起/再展开与只请求一次、同文件重复打开 3 次、README→源码→README、分支真实差异与切回、目录行与 chevron 单次切换且不清空正文、键盘导航不吞修改键、README 相对链接跟随与外部链接只报告、页内 Tab 切换清空/恢复 Code、目录失败/文件失败的作用域与单次重试、无 README / 不确定 / 409 / 空分支列表 / 截断树 / 长树、场景重置后恢复正常浏览、Back to README 的显示条件、慢旧请求不覆盖新选择、授权变化与 A→B→A、失活、rebind、两页独立。
+
+
+## 2026-10-28 四项布局修订与只读计数
+
+branch_picker 唯一实例在页内 Tabs 行最右侧，和 tab 垂直对齐，窄窗合理换行；长值截断并可悬停查看完整分支。顶部原位置为 Star/Fork 两个无数字按钮，使用 Ely icon/按钮 token；不增加 Watch 或写接口。`PageAction::StarRequested/ForkRequested { binding }` 仅是宿主动作请求，发布前核对当前完整授权/仓库 binding；无宿主回调时禁用，有回调时每次鼠标/Enter/Space 一次事件。example 输出明确标明 host entry only/no mutation；不改 Starred 状态。
+
+Issues/Pull requests 的数字来自新增 `PageReadSession::repository_counts`，复用既有 bounded GraphQL query POST / captured RepositorySession.read 授权管线，单次64KiB上限。固定 query 读取 `repository(owner,name){databaseId issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount}}`，不枚举列表、不用 Search，也不使用 REST `open_issues_count` 合计推算。databaseId 必须与 canonical RepositoryIdentity.id 相同；GraphQL errors 按 path 失效受影响字段，身份错误/未知 error path 不发布任一数值。typed CountsError 保留 GraphQL/transport 分类；成功0画0，loading/unknown/error 隐藏对应badge，无常驻错误文字。计数使用仓库级取消/请求代次，不受分支切换影响，切账户/授权失效/释放后清空，render不请求。
+
+Languages 顶部组完全移除。底条由同一个 overview 的 languages state 渲染，页面body之后 flex_none 4px，不滚随README、不盖正文/scrollbar，切页内tab仍贴底。每个实际语言单独比例色块，不合并Other、不强制最小宽度，颜色名称稳定；checked u64总和与total匹配才画，零/错误/未知时无条无文本。hover使用Ely Tooltip显示完整语言名+比例，窗口边缘由GPUI原生tooltip fitting向上布局；小于0.5%显示<1%。
+
+官方核验：GitHub GraphQL Repository/IssueConnection/PullRequestConnection 文档与 github-ospo `open-source-health-metrics.md` 独立 OPEN issue/PR count 示例（本轮无认证只读抓取），不代表真实PAT业务联调。新增测试特意令REST合计4但query为issue3/pr1；部分错误保留issue并隐藏PR、0/未知、身份错误、陈旧计数、切分支不重复query、Star/Fork无mutation及旧binding拒绝，底条tooltip在560px窗口内向上且离开消失。

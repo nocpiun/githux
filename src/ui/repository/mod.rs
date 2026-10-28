@@ -112,6 +112,12 @@ impl RepositoryPageServices {
 /// What the page asks the host to do on its behalf.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PageAction {
+    StarRequested {
+        binding: crate::ui::repository_overview::OverviewBinding,
+    },
+    ForkRequested {
+        binding: crate::ui::repository_overview::OverviewBinding,
+    },
     /// Validated repository-scoped release or contributor navigation.
     Overview(crate::ui::repository_overview::OverviewAction),
     /// An absolute `http(s)` URL the user pressed. The page never opens it.
@@ -289,6 +295,7 @@ pub struct RepositoryPage {
     /// page generation, so a branch name alone cannot tell an older A reply from
     /// the current one; this does.
     branch_request: u64,
+    branches_loading: bool,
     selection_request: u64,
     pending_content: Option<BlobIdentity>,
     selection: Selection,
@@ -314,6 +321,8 @@ pub struct RepositoryPage {
     /// The keyboard's row, as a stable path rather than an index.
     cursor: Option<String>,
     tree_focus: FocusHandle,
+    star_focus: FocusHandle,
+    fork_focus: FocusHandle,
     clock: std::time::Instant,
     #[cfg(test)]
     pinned_clock: Option<u64>,
@@ -356,6 +365,7 @@ impl RepositoryPage {
             branches_error: None,
             branch: None,
             branch_request: 0,
+            branches_loading: false,
             selection_request: 0,
             pending_content: None,
             readme_path: None,
@@ -373,6 +383,8 @@ impl RepositoryPage {
             rows_capped: false,
             cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
+            star_focus: cx.focus_handle().tab_stop(true),
+            fork_focus: cx.focus_handle().tab_stop(true),
             clock: std::time::Instant::now(),
             #[cfg(test)]
             pinned_clock: None,
@@ -411,6 +423,7 @@ impl RepositoryPage {
     /// against that new authorization and re-resolved to a fixed commit.
     pub fn activate(&mut self, cx: &mut Context<Self>) {
         self.extras.stop();
+        self.branches_loading = false;
         self.cancel_reader_interactions(cx);
         self.stop_work();
         self.pending_content = None;
@@ -501,6 +514,12 @@ impl RepositoryPage {
             return;
         }
         let Some(branch) = self.branch.as_ref().map(|branch| branch.name.clone()) else {
+            if self.branches.is_some()
+                && let Some(name) = self.intent.branch.clone()
+            {
+                self.begin_branch(name, cx);
+                return;
+            }
             if let Some(details) = self.details.clone() {
                 self.spawn_job(Job::Branches(details.identity));
             }
@@ -512,6 +531,10 @@ impl RepositoryPage {
 
     /// Refreshes branch enumeration without replacing the displayed snapshot.
     pub fn retry_branches(&mut self, cx: &mut Context<Self>) {
+        if self.branches_loading {
+            return;
+        }
+        self.branches_loading = true;
         if let Some(details) = &self.details {
             self.spawn_job(Job::Branches(details.identity.clone()));
             cx.notify();
@@ -1194,7 +1217,8 @@ impl RepositoryPage {
                 .accounts
                 .repo_service()
                 .is_current(&message.context)
-            || message.branch_request != self.branch_request
+            || (message.branch_request != self.branch_request
+                && !matches!(&message.body, Body::Branches(_)))
         {
             return;
         }
@@ -1251,6 +1275,7 @@ impl RepositoryPage {
         result: Result<BranchesOutcome, RepositoryError>,
         cx: &mut Context<Self>,
     ) {
+        self.branches_loading = false;
         let Some(details) = self.details.clone() else {
             return;
         };
@@ -1589,6 +1614,23 @@ impl RepositoryPage {
         }
     }
 
+    pub(super) fn repository_action(
+        &mut self,
+        star: bool,
+        binding: crate::ui::repository_overview::OverviewBinding,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.repository_binding().as_ref() != Some(&binding) {
+            return;
+        }
+        let action = if star {
+            PageAction::StarRequested { binding }
+        } else {
+            PageAction::ForkRequested { binding }
+        };
+        self.emit(action, window, cx);
+    }
     fn emit(&mut self, action: PageAction, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handler) = self.on_action.clone() {
             handler(action, window, cx);

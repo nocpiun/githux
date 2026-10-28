@@ -19,7 +19,6 @@ impl Render for RepositoryOverview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let releases = self.release_summary(cx);
         let contributors = self.contributor_summary(cx);
-        let languages = self.language_summary(cx);
         div()
             .id("repository-overview")
             .debug_selector(|| "repository-overview".into())
@@ -34,7 +33,6 @@ impl Render for RepositoryOverview {
             .text_size(cx.theme().text_size(TextSize::Base))
             .child(releases)
             .child(contributors)
-            .child(languages)
     }
 }
 fn group(id: &'static str, title: String, content: AnyElement, cx: &App) -> AnyElement {
@@ -322,78 +320,44 @@ impl RepositoryOverview {
             cx,
         )
     }
-    fn language_summary(&self, cx: &mut Context<Self>) -> AnyElement {
-        let content = if let Some(outcome) = self.languages.value() {
-            match language_segments(outcome) {
-                Some(segments) if !segments.is_empty() => {
-                    let mut bar = div()
-                        .debug_selector(|| "overview-language-bar".into())
-                        .flex()
-                        .w_full()
-                        .h(px(6.0))
-                        .rounded_full()
-                        .overflow_hidden();
-                    let mut legend = div()
-                        .flex()
-                        .gap_2()
-                        .min_w_0()
-                        .text_size(cx.theme().text_size(TextSize::Sm));
-                    for (index, segment) in segments.into_iter().enumerate() {
-                        let label = format!("{} {}", segment.name, format_share(segment.share));
-                        bar = bar.child(
-                            div()
-                                .id(("overview-language-segment", index))
-                                .w(relative(segment.share as f32))
-                                .h_full()
-                                .flex_none()
-                                .bg(cx.theme().colors.chart[segment.color])
-                                .aria_label(label.clone()),
-                        );
-                        legend = legend.child(
-                            div()
-                                .id(("overview-language-legend", index))
-                                .min_w_0()
-                                .flex_shrink_1()
-                                .max_w(relative(0.4))
-                                .when(segment.name == "Other", |item| item.flex_none())
-                                .flex()
-                                .gap_1()
-                                .aria_label(label.clone())
-                                .tooltip(Tooltip::text(label))
-                                .child(div().min_w_0().child(Ellipsis::new(segment.name)))
-                                .child(div().flex_none().child(format_share(segment.share))),
-                        );
-                    }
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1p5()
-                        .w_full()
-                        .child(bar)
-                        .child(legend)
-                        .when(self.languages.is_partial(), |row| {
-                            row.child(text("Partial", cx))
-                        })
-                        .into_any_element()
-                }
-                Some(_) => text("No language data", cx),
-                None => text("Unavailable", cx),
-            }
-        } else if let Some(error) = self.languages.error() {
-            self.retry(OverviewSection::Languages, error, cx)
-        } else {
-            text(
-                if self.languages.is_loading() {
-                    "Loading…"
-                } else {
-                    "Not loaded"
-                },
-                cx,
-            )
+    /// Uses the same languages state as the repository service composition.
+    /// The host places this at the page bottom; no title, legend or text row.
+    pub fn language_bar(&self, cx: &App) -> AnyElement {
+        let Some(segments) = self.languages.value().and_then(language_segments) else {
+            return div().into_any_element();
         };
-        group("overview-languages", "Languages".into(), content, cx)
+        if segments.is_empty() {
+            return div().into_any_element();
+        }
+        div()
+            .id("overview-language-bar")
+            .debug_selector(|| "overview-language-bar".into())
+            .flex()
+            .flex_none()
+            .w_full()
+            .h(px(4.0))
+            .overflow_hidden()
+            .children(segments.into_iter().enumerate().map(|(index, segment)| {
+                let label = format!("{} {}", segment.name, format_share(segment.share));
+                div()
+                    .id(("overview-language-segment", index))
+                    .debug_selector(move || format!("overview-language-segment-{index}"))
+                    .w(relative(segment.share as f32))
+                    .h_full()
+                    .flex_none()
+                    .bg(cx.theme().colors.chart[segment.color])
+                    .aria_label(label.clone())
+                    .tooltip(Tooltip::rich(move |_, _| {
+                        div()
+                            .debug_selector(|| "repository-language-tooltip".into())
+                            .child(label.clone())
+                            .into_any_element()
+                    }))
+            }))
+            .into_any_element()
     }
 }
+
 pub(crate) fn contributor_display(contributor: &Contributor) -> String {
     contributor
         .name
@@ -427,31 +391,14 @@ pub(crate) fn language_segments(outcome: &LanguagesOutcome) -> Option<Vec<Segmen
         .filter(|item| item.bytes > 0)
         .collect();
     languages.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(&b.name)));
-    let named = if languages.len() > 3 {
-        2
-    } else {
-        languages.len()
-    };
-    let mut result: Vec<_> = languages
+    let result: Vec<_> = languages
         .iter()
-        .take(named)
         .map(|item| Segment {
             name: item.name.clone(),
             share: item.bytes as f64 / total as f64,
             color: language_color(&item.name),
         })
         .collect();
-    if languages.len() > named {
-        let bytes = languages
-            .iter()
-            .skip(named)
-            .try_fold(0u64, |sum, item| sum.checked_add(item.bytes))?;
-        result.push(Segment {
-            name: "Other".into(),
-            share: bytes as f64 / total as f64,
-            color: 2,
-        });
-    }
     Some(result)
 }
 fn language_color(name: &str) -> usize {

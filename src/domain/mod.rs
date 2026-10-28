@@ -21,6 +21,7 @@ pub mod home;
 pub mod profile;
 pub mod repo;
 pub mod repository;
+pub mod repository_counts;
 pub mod repository_extras;
 
 // Re-exported surface for the pending UI integration; see docs/auth-and-network.md

@@ -124,3 +124,16 @@
 
 
 组合最终验证（本机 Windows、独立 target、指定 run-additional-cargo.ps1 串行 helper）：fmt/check --locked --all-targets/clippy -- -D warnings 通过；全套测试 538 product / 321 account / 54 Home / 152 Profile / 131 reader / 469 combined repository / 14 overview 全部通过。产品与 repository example 构建、diff check 结果记录于 PR35 最终交接。只启动统一 repository.exe，不启动独立 overview 验收窗口。负责人联合视觉验收仍待进行；blocked/pending 不变，无 merge/auto-merge。
+
+
+## Owner 四项布局修订（PR35，后续统一验收）
+
+branch从标题右上角移到Tabs右侧；顶部删除stars/forks/REST issue+PR合计，原位置改Ely Star/Fork无数字按钮，仅typed binding宿主动作入口（无写API，未提供callback时禁用）。Issues与Pull requests分别紧邻badge，数据是独立的bounded GraphQL OPEN connections.totalCount，校验databaseId；复用既有query/账户scope，部分错误按字段失效，未知/loading/error隐藏badge，真实0保留。固定query排除closed/merged且open PR含draft，未用列表枚举/Search/合计相减。相邻只读模块为domain/github repository_counts及PageReadSession最小方法，未扩展Issue/PR列表或mutation。
+
+顶部overview现在只画Releases/Contributors；同一languages数据改页面底边4px纯条，每语言独立色块+完整名/比例tooltip，取消Other/legend/标题/常驻重试。零/无数据/失败不画假分布，checked总量保持。focused example同步接口但联合验收仍只有repository.exe。
+
+适用review同步修复：Retry branches运行中禁用以防重叠；revision失败的页面Retry复用已有details/overview，仅重试revision。回归保证同一reader和overview未被重建。
+
+本轮实际查看DPI-aware desktop和880×560截图，布局符合新结构，底条横跨树+reader且不占文本行；原生hover时当前前台被外部窗口占用，未可靠送达，未据截图声称tooltip已真机通过。GPUI实际事件测试确认Rust tooltip在560px窗口内向上出现、移开消失；Star鼠标与Enter/Space各一次，旧binding拒绝，preview无mutation。最终完整checks与PID/head见PR35交接。
+
+四项修订最终验证：指定串行 helper / own target / jobs1，fmt、locked all-target check、clippy -- -D warnings、完整 tests（541 product /324 account /54 Home /152 Profile /131 reader /478 repository /14 overview）、product/repository example build、git diff --check 全部通过。计数data门控验证响应暂停期间A→B→A使旧成功/403均StaleContext；Long场景含大badge和可选择的长分支。最终审查/CI/PID/head以PR35交接为准。

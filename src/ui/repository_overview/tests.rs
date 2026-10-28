@@ -56,7 +56,7 @@ impl gpui::Render for Harness {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
-        _cx: &mut gpui::Context<Self>,
+        cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
         gpui::div()
             .debug_selector(|| "harness".to_string())
@@ -71,6 +71,7 @@ impl gpui::Render for Harness {
                     .w_full()
                     .child(self.reader.clone()),
             )
+            .child(self.overview.read(cx).language_bar(cx))
     }
 }
 
@@ -158,9 +159,9 @@ fn compact_ready_has_one_version_avatars_and_one_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("overview-release-version").is_some());
     assert!(cx.debug_bounds("overview-avatar-0").is_some());
     assert!(cx.debug_bounds("overview-language-bar").is_some());
-    let language = bounds("overview-languages", cx);
-    assert!(language.right() <= top.right());
-    assert!(language.left() >= bounds("overview-contributors", cx).right());
+    assert!(cx.debug_bounds("overview-languages").is_none());
+    let language = bounds("overview-language-bar", cx);
+    assert!(language.origin.y >= bounds("probe-reader", cx).bottom());
     for obsolete in [
         "overview-release-4",
         "overview-notes-panel",
@@ -204,14 +205,8 @@ fn actions_are_scoped_and_anonymous_is_not_navigable(cx: &mut TestAppContext) {
         },
         cx,
     );
-    click("overview-retry-languages", cx);
-    assert!(matches!(
-        h.read_with(cx, |h, _| h.last_action.clone()),
-        Some(OverviewAction::Refresh {
-            section: OverviewSection::Languages,
-            ..
-        })
-    ));
+    assert!(cx.debug_bounds("overview-retry-languages").is_none());
+    assert!(cx.debug_bounds("overview-language-bar").is_none());
     assert!(cx.debug_bounds("overview-release-version").is_some());
 }
 #[gpui::test]
@@ -342,11 +337,18 @@ fn supplied_latest_flags_and_partial_do_not_disappear(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn languages_group_checked_bytes_into_three_segments() {
+fn languages_keep_every_identity_and_checked_bytes() {
     let value = fixtures::many_languages();
     let segments = language_segments(&value).unwrap();
-    assert_eq!(segments.len(), 3);
-    assert_eq!(segments[2].name, "Other");
+    assert_eq!(
+        segments.len(),
+        value.languages.iter().filter(|v| v.bytes > 0).count()
+    );
+    assert!(
+        segments
+            .iter()
+            .all(|segment| value.languages.iter().any(|v| v.name == segment.name))
+    );
     assert!((segments.iter().map(|v| v.share).sum::<f64>() - 1.0).abs() < 1e-12);
     let mut invalid = fixtures::ready_languages();
     invalid.languages[0].bytes = u64::MAX;

@@ -230,6 +230,14 @@ impl Preview {
         page.update(cx, |page, _| {
             page.on_action(std::rc::Rc::new(move |action, _window, cx| {
                 let text = match action {
+                    PageAction::StarRequested { binding } => format!(
+                        "StarRequested for {} (host entry only, no mutation)",
+                        binding.repository.locator().name()
+                    ),
+                    PageAction::ForkRequested { binding } => format!(
+                        "ForkRequested for {} (host entry only, no mutation)",
+                        binding.repository.locator().name()
+                    ),
                     PageAction::Overview(action) => {
                         format!("overview action (not opened): {action:?}")
                     }

@@ -397,6 +397,38 @@ impl FixtureTransport {
         let scene = self.scene();
         let url = &request.url;
         self.record(url);
+        if request.method == crate::network::transport::HttpMethod::Post
+            && url.ends_with("/graphql")
+        {
+            let body: serde_json::Value =
+                serde_json::from_str(request.body.as_deref().unwrap_or("")).unwrap_or_default();
+            if body["variables"]["owner"] != OWNER
+                || body["variables"]["name"] != NAME
+                || !body["query"].as_str().is_some_and(|query| {
+                    query.contains("RepositoryOpenCounts")
+                        && query.contains("states: OPEN")
+                        && !query.contains("mutation")
+                })
+            {
+                return Ok(self.mismatch(url));
+            }
+            let (issues, prs) = if scene == Scene::OverviewZero {
+                (0, 0)
+            } else if scene == Scene::OverviewLong {
+                (123456, 98765)
+            } else {
+                (3, 1)
+            };
+            let mut value = serde_json::json!({"data":{"repository":{"databaseId":42,"issues":{"totalCount":issues},"pullRequests":{"totalCount":prs}}}});
+            if scene == Scene::OverviewPartial {
+                value["errors"] =
+                    serde_json::json!([{"type":"FORBIDDEN","path":["repository","pullRequests"]}]);
+            }
+            if scene == Scene::OverviewError {
+                return Ok(json_response(500, "{}"));
+            }
+            return Ok(json_response(200, &value.to_string()));
+        }
         if request.method != crate::network::transport::HttpMethod::Get {
             return Ok(self.mismatch(url));
         }
@@ -448,8 +480,15 @@ impl FixtureTransport {
         if scene == Scene::NoBranches {
             return json_response(200, "[]");
         }
+        let names: Vec<&str> = BRANCHES
+            .iter()
+            .copied()
+            .chain((scene == Scene::OverviewLong).then_some(
+                "feature/a-very-long-branch-name-for-narrow-window-and-tooltip-acceptance",
+            ))
+            .collect();
         let value = serde_json::Value::Array(
-            BRANCHES
+            names
                 .iter()
                 .map(|name| {
                     let sha = commit_of(name);
@@ -479,6 +518,9 @@ impl FixtureTransport {
         let name = match decoded.as_str() {
             "main" => "main",
             "feature/docs-polish" => "feature/docs-polish",
+            "feature/a-very-long-branch-name-for-narrow-window-and-tooltip-acceptance" => {
+                "feature/docs-polish"
+            }
             _ => return self.mismatch(url),
         };
         let sha = commit_of(name);

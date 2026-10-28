@@ -377,6 +377,7 @@ impl Render for Preview {
                     .text_color(subtle)
                     .child(status),
             )
+            .child(self.overview.read(cx).language_bar(cx))
     }
 }
 

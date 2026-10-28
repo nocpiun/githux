@@ -51,7 +51,7 @@ fn locator() -> RepositoryLocator {
 // --------------------------------------------------------------- test setup --
 
 pub(super) struct Fixture {
-    transport: Arc<FixtureTransport>,
+    pub(super) transport: Arc<FixtureTransport>,
     accounts: Arc<AccountService>,
     executor: Arc<BackgroundExecutor>,
     _temp: tempfile::TempDir,
@@ -113,7 +113,7 @@ impl Fixture {
     }
 
     /// Signs in a *different* synthetic account, so A→B is a real change.
-    fn login_as(&self, id: u64, login: &str) {
+    pub(super) fn login_as(&self, id: u64, login: &str) {
         self.transport.set_identity(id, login);
         self._runtime.block_on(async {
             self.accounts
@@ -1670,4 +1670,34 @@ fn failed_file_stays_failed_when_an_unrelated_directory_finishes(cx: &mut TestAp
     )));
     page.update(cx, |p, cx| p.retry_reader(cx));
     settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+}
+
+#[gpui::test]
+fn retries_do_not_overlap_enumeration_or_reset_successful_repository_data(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = normal(cx);
+    let overview = page.read_with(cx, |p, _| p.overview().unwrap().entity_id());
+    page.update(cx, |p, cx| {
+        p.retry_branches(cx);
+        p.retry_branches(cx);
+    });
+    settle(&page, cx, |p| !p.branches_loading);
+    assert_eq!(
+        fixture.transport.count("/branches?"),
+        2,
+        "initial plus one bounded retry"
+    );
+    page.update(cx, |p, cx| {
+        p.branch = None;
+        p.intent.branch = Some("main".into());
+        p.error = Some(super::PageError::new("failed revision", None, true));
+        p.retry(cx);
+    });
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.branch.is_some()
+    });
+    assert_eq!(
+        overview,
+        page.read_with(cx, |p, _| p.overview().unwrap().entity_id())
+    );
+    assert_eq!(fixture.transport.count("/releases/latest"), 1);
 }

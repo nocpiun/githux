@@ -101,6 +101,10 @@ pub(super) fn render(
         )
         .child(tabs)
         .child(body)
+        .children(
+            page.overview()
+                .map(|overview| overview.read(cx).language_bar(cx)),
+        )
         .into_any_element()
 }
 
@@ -109,7 +113,6 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let title_size = theme.text_size(TextSize::Xl);
-    let small = theme.text_size(TextSize::Xs);
     let name = page
         .details()
         .map(|details| {
@@ -140,17 +143,6 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
         if details.fork {
             facts.push(Badge::new("Fork").into_any_element());
         }
-        facts.push(
-            div()
-                .debug_selector(|| "repository-counters".to_string())
-                .text_size(small)
-                .text_color(colors.fg_subtle)
-                .child(format!(
-                    "stars {} · forks {} · open issues & PRs {}",
-                    details.stars, details.forks, details.open_issues_and_prs
-                ))
-                .into_any_element(),
-        );
     }
     let description = page
         .details()
@@ -184,8 +176,7 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
                 .children(facts),
         )
         .children(description);
-    let picker = branch_picker(page, cx);
-    let border = colors.border;
+    let actions = repository_actions(page, cx);
     div()
         .debug_selector(|| "repository-header".to_string())
         .flex()
@@ -197,13 +188,86 @@ fn header(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement
         .pt_4()
         .pb_2()
         .child(summary)
-        .child(picker)
-        .child(div().flex_none().h(px(0.0)).child(border_hint(border)))
+        .child(actions)
         .into_any_element()
 }
 
-fn border_hint(_color: gpui::Hsla) -> AnyElement {
-    div().into_any_element()
+fn repository_actions(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
+    let binding = page.repository_binding();
+    let enabled = page.on_action.is_some() && binding.is_some();
+    let buttons = [
+        (true, "Star", IconName::Star),
+        (false, "Fork", IconName::GitBranch),
+    ]
+    .into_iter()
+    .map(|(star, label, icon)| {
+        let owner = cx.weak_entity();
+        let key_owner = owner.clone();
+        let binding = binding.clone();
+        let key_binding = binding.clone();
+        let focus = if star {
+            &page.star_focus
+        } else {
+            &page.fork_focus
+        };
+        div()
+            .id(if star {
+                "repository-star-entry"
+            } else {
+                "repository-fork-entry"
+            })
+            .debug_selector(move || {
+                if star {
+                    "repository-star".into()
+                } else {
+                    "repository-fork".into()
+                }
+            })
+            .track_focus(focus)
+            .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                if enabled
+                    && !event.is_held
+                    && !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    cx.stop_propagation();
+                    if let Some(binding) = key_binding.clone() {
+                        let _ = key_owner.update(cx, |page, cx| {
+                            page.repository_action(star, binding, window, cx)
+                        });
+                    }
+                }
+            })
+            .child(
+                Button::new(
+                    if star {
+                        "repository-star"
+                    } else {
+                        "repository-fork"
+                    },
+                    label,
+                )
+                .icon(icon)
+                .focus_handle(focus)
+                .size(ControlSize::Sm)
+                .disabled(!enabled)
+                .on_click(move |_, window, cx| {
+                    if let Some(binding) = binding.clone() {
+                        let _ = owner.update(cx, |page, cx| {
+                            page.repository_action(star, binding, window, cx)
+                        });
+                    }
+                }),
+            )
+            .into_any_element()
+    });
+    div()
+        .flex()
+        .flex_none()
+        .gap_2()
+        .items_center()
+        .children(buttons)
+        .into_any_element()
 }
 
 /// The branch picker, plus an honest line about incomplete branch listings.
@@ -230,6 +294,7 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
             .children(error.map(|error| {
                 div().child(error.title).child(
                     Button::new("repository-retry-branches", "Retry branches")
+                        .disabled(page.branches_loading)
                         .size(ControlSize::Sm)
                         .on_click(move |_, _, cx| {
                             let _ = retry.update(cx, |page, cx| page.retry_branches(cx));
@@ -285,6 +350,10 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
             .into_any_element()
     };
     div()
+        .id("repository-branch-container")
+        .tooltip(Tooltip::text(
+            page.selected_branch().unwrap_or("Branch").to_string(),
+        ))
         .debug_selector(|| "repository-branch".to_string())
         .flex()
         .flex_col()
@@ -305,6 +374,7 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
     let border = colors.border;
     let small = theme.text_size(TextSize::Sm);
     let active = page.tab();
+    let picker = branch_picker(page, cx);
     let tabs: Vec<AnyElement> = RepositoryTab::ALL
         .iter()
         .map(|&tab| {
@@ -335,6 +405,26 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
                 .text_color(fg)
                 .hover(|style| style.text_color(colors.fg))
                 .child(tab.label())
+                .children(
+                    match tab {
+                        RepositoryTab::Issues => page
+                            .extras
+                            .counts
+                            .as_ref()
+                            .and_then(|c| c.issues.as_ref().ok()),
+                        RepositoryTab::PullRequests => page
+                            .extras
+                            .counts
+                            .as_ref()
+                            .and_then(|c| c.pull_requests.as_ref().ok()),
+                        _ => None,
+                    }
+                    .map(|count| {
+                        div()
+                            .debug_selector(move || format!("repository-badge-{}", tab.id()))
+                            .child(Badge::new(count.to_string()))
+                    }),
+                )
                 .when(is_active, |entry| {
                     entry.child(
                         div()
@@ -357,6 +447,7 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
     div()
         .debug_selector(|| "repository-tabs".to_string())
         .flex()
+        .flex_wrap()
         .items_center()
         .gap_2()
         .flex_none()
@@ -364,7 +455,17 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
         .px_5()
         .border_b_1()
         .border_color(border)
-        .children(tabs)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .flex_wrap()
+                .gap_2()
+                .children(tabs),
+        )
+        .child(div().flex_1())
+        .child(picker)
         .into_any_element()
 }
 
@@ -987,7 +1088,7 @@ fn failure_panel(
                             if scoped_retry {
                                 page.retry_reader(cx)
                             } else {
-                                page.activate(cx)
+                                page.retry(cx)
                             }
                         });
                     }),
