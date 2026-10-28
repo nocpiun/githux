@@ -1510,3 +1510,88 @@ fn the_settings_accounts_page_is_one_compact_list_plus_a_form(cx: &mut TestAppCo
         );
     }
 }
+
+/// A rejected PAT (an unsuccessful mutation that leaves the authorization unchanged) must not drop
+/// the already-loaded list and leave an idle sidebar with no retry: the previous list is restored.
+#[gpui::test]
+fn a_rejected_pat_keeps_the_loaded_repository_list(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("good", repos(1, "alice", &["one", "two"]));
+    mock.script_user(user(1, "alice"));
+    // The second login is rejected.
+    mock.script_user(HttpResponse {
+        status: 401,
+        headers: vec![],
+        body: "{}".into(),
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    put_token(&controller, cx, "good");
+    submit(&controller, cx);
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
+    wait_idle(&controller, cx);
+
+    // A bad token is rejected; the active account and its authorization are unchanged.
+    put_token(&controller, cx, "bad");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state
+            .status
+            .as_ref()
+            .is_some_and(|status| status.tone == StatusTone::Error && status.text.contains("401"))
+    });
+    // The loaded list is restored rather than replaced by an idle "reloading" placeholder.
+    let state = snapshot(&controller, cx);
+    assert!(
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+        "a rejected PAT must not clear the already-loaded list: {:?}",
+        state.repositories.preview
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
+}
+
+/// The replacement form names the account being replaced, which may not be the active one, so the
+/// displayed instruction matches the account `replace` actually targets.
+#[gpui::test]
+fn the_replacement_form_targets_the_selected_account_not_the_active_one(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["a"]));
+    mock.serve_repos("second", repos(2, "bob", &["b"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    wait_idle(&controller, cx);
+    // Make A the active account, then start replacing B (not active).
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+    });
+    wait_idle(&controller, cx);
+    controller.update(cx, |accounts, cx| {
+        accounts.replace(AccountKey::new(2, HostId::github()), cx)
+    });
+    // The controller's replacement target is B, independent of the active account A.
+    assert_eq!(
+        controller.read_with(cx, |accounts, _| accounts.replacing().cloned()),
+        Some(AccountKey::new(2, HostId::github())),
+        "the replacement target is the account the user pressed Replace on"
+    );
+}

@@ -79,6 +79,11 @@ pub struct AvatarCache {
     entries: Mutex<HashMap<AvatarKey, AvatarState>>,
     /// The decoded images in insertion order, so the oldest can be evicted when full.
     order: Mutex<Vec<AvatarKey>>,
+    /// Every key this session has already requested. It is what keeps a large list from looping:
+    /// once an avatar has been fetched (or failed), an evicted key stays "already requested" and is
+    /// not fetched again. Without this, a list larger than the cache would evict a still-visible
+    /// avatar on each completion and refetch forever while the window sat idle.
+    requested: std::sync::Mutex<std::collections::HashSet<AvatarKey>>,
 }
 
 impl AvatarCache {
@@ -97,18 +102,22 @@ impl AvatarCache {
     }
 
     /// Marks `key` as loading, returning `true` only for the caller that actually started it. This
-    /// is what de-duplicates a burst of paints for the same owner into a single request.
+    /// is what de-duplicates a burst of paints for the same owner into a single request, and what
+    /// stops an evicted key from being fetched again on every frame.
     fn begin(&self, key: AvatarKey) -> bool {
-        let mut entries = self.entries.lock().expect("avatar cache");
-        match entries.get(&key) {
-            Some(AvatarState::Loading) | Some(AvatarState::Ready(_)) => false,
-            // A known failure is terminal: do not retry the same URL on every frame.
-            Some(AvatarState::Failed) => false,
-            None | Some(AvatarState::Unknown) => {
-                entries.insert(key, AvatarState::Loading);
-                true
-            }
+        let mut requested = self.requested.lock().expect("avatar requested");
+        if requested.contains(&key) {
+            // Already fetched or in flight at least once this session; an evicted entry reports
+            // Unknown to the renderer (initials fallback) but must not start another download.
+            return false;
         }
+        requested.insert(key.clone());
+        drop(requested);
+        self.entries
+            .lock()
+            .expect("avatar cache")
+            .insert(key, AvatarState::Loading);
+        true
     }
 
     fn finish_ready(&self, key: AvatarKey, image: Arc<Image>) {
@@ -524,6 +533,29 @@ mod tests {
         cache.apply(AvatarCompletion::Failed(b.clone()));
         assert!(matches!(cache.state(&a), AvatarState::Unknown));
         assert!(matches!(cache.state(&b), AvatarState::Failed));
+    }
+
+    /// A list larger than the cache must settle: an evicted key is not refetched, so fills do not
+    /// loop forever while the window is idle.
+    #[test]
+    fn an_evicted_avatar_is_not_requested_again() {
+        let cache = AvatarCache::new();
+        // Fill past the capacity with one-pixel images.
+        for id in 0..(CACHE_CAPACITY as u64 + 8) {
+            let key = AvatarKey::new("github.com", id, format!("https://x/{id}.png"));
+            assert!(cache.request(key.clone()).is_some());
+            cache.apply(AvatarCompletion::Failed(key));
+        }
+        // The very first key is long evicted or failed; either way it must not be requested again.
+        let first = AvatarKey::new("github.com", 0, "https://x/0.png");
+        assert!(
+            cache.request(first.clone()).is_none(),
+            "an evicted or already-fetched avatar is never refetched"
+        );
+        assert!(
+            cache.request(first).is_none(),
+            "repeated paints after eviction still do not refetch"
+        );
     }
 
     #[test]

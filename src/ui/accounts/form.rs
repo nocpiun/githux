@@ -62,6 +62,10 @@ pub(crate) struct AccountsSection<'a> {
     pub token: TokenForm<'a>,
     pub accounts: Vec<AccountSummary>,
     pub active: Option<AccountKey>,
+    /// The account whose PAT is being replaced, when the user pressed "Replace PAT" on a saved
+    /// account that may not be the active one. The form names this account, not the active one, so
+    /// the instructions match which account `replace` will actually target.
+    pub replacing_account: Option<AccountKey>,
     /// Decoded avatar sources keyed by account id. The caller requests the fetches; this only draws
     /// whatever is already available and falls back to initials for the rest.
     pub avatars: HashMap<AccountKey, gpui::ImageSource>,
@@ -74,6 +78,7 @@ pub(crate) fn accounts_section(section: AccountsSection<'_>, cx: &App) -> AnyEle
         token,
         accounts,
         active,
+        replacing_account,
         avatars,
         status,
     } = section;
@@ -106,7 +111,8 @@ pub(crate) fn accounts_section(section: AccountsSection<'_>, cx: &App) -> AnyEle
     } else {
         "Add account"
     };
-    let target = active
+    // The replacement form names the account being replaced, which need not be the active one.
+    let target = replacing_account
         .as_ref()
         .and_then(|key| accounts.iter().find(|summary| &summary.identity.key == key));
     let mut form = SettingsSection::new(form_title);

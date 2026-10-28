@@ -1580,6 +1580,7 @@ impl Shell {
                 },
                 accounts: snapshot.accounts,
                 active: snapshot.active,
+                replacing_account: controller.read(cx).replacing().cloned(),
                 avatars,
                 status: snapshot.status,
             },

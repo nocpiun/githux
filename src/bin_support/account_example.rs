@@ -159,6 +159,7 @@ impl Render for AccountPreview {
                 },
                 accounts: snapshot.accounts,
                 active: snapshot.active,
+                replacing_account: self.accounts.read(cx).replacing().cloned(),
                 avatars,
                 status: snapshot.status,
             },

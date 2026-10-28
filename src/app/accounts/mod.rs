@@ -239,6 +239,10 @@ pub(crate) struct Accounts {
     avatar_queue: Vec<AvatarRequest>,
     /// The fetcher every avatar read runs on, built from the runtime's existing transport.
     avatar_fetcher: Option<Arc<AvatarFetcher>>,
+    /// The list that was on screen before an account mutation discarded it. If the mutation fails
+    /// without changing the authorization, this is restored instead of leaving an idle placeholder
+    /// that the automatic loader will not refill (its key already matched).
+    previous_repositories: Option<Repositories>,
     /// What the automatic loader has already satisfied. It records the `(account, auth epoch,
     /// selection generation)` triple and the outcome kind it loaded for, so a list is fetched once
     /// per settled authorization even though the view repaints, resizes or collapses constantly.
@@ -376,6 +380,7 @@ impl Accounts {
             avatar_inbox: Arc::new(Mutex::new(Vec::new())),
             avatar_queue: Vec::new(),
             avatar_fetcher: None,
+            previous_repositories: None,
             loaded: None,
             receiver_task: None,
         };
@@ -787,10 +792,22 @@ impl Accounts {
                     // An errored mutation may still have committed: `CleanupPending` is returned
                     // after the directory and active selection were already persisted, so data
                     // read under the previous account must not stay on screen.
-                    self.snapshot.repositories = Repositories::idle(
-                        self.snapshot.active.clone(),
-                        "An account change was in progress; reloading the current account's repositories…",
-                    );
+                    // A failed mutation that changed nothing (e.g. a rejected PAT) leaves the
+                    // same authorization loaded, so `autoload_if_needed` below will not refetch.
+                    // Restoring the previous list is honest and keeps the sidebar usable; when the
+                    // authorization did change, the automatic load replaces this instead.
+                    self.snapshot.repositories = match self.previous_repositories.take() {
+                        Some(previous)
+                            if previous.account == self.snapshot.active
+                                && matches!(previous.preview, RepositoryPreview::Ready(_)) =>
+                        {
+                            previous
+                        }
+                        _ => Repositories::idle(
+                            self.snapshot.active.clone(),
+                            "An account change did not complete; the repository list will reload for the current account.",
+                        ),
+                    };
                 }
             }
         }
@@ -858,6 +875,9 @@ impl Accounts {
                 .ok()
                 .map(|session| session.context().clone())
         } else {
+            // Remember what was on screen before an account change discards it, so a failed
+            // mutation that leaves the authorization intact can restore it instead of going idle.
+            self.previous_repositories = Some(self.snapshot.repositories.clone());
             // An account change invalidates the previous list before anything is published.
             self.snapshot.repositories = Repositories::idle(
                 for_account.clone(),
@@ -971,6 +991,7 @@ impl Accounts {
             StatusTone::Info,
             operation_label(operation),
         ));
+        self.previous_repositories = Some(self.snapshot.repositories.clone());
         self.snapshot.repositories = Repositories::idle(
             self.snapshot.active.clone(),
             "An account change is in progress. Repositories load once it settles.",
