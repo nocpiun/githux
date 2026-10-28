@@ -2,9 +2,21 @@
 
 更新：2026-10-28（返工：可反复浏览的示例、行式文件树、页内 Tabs、分层错误）。R3 的可独立验证切片，位于 `src/ui/repository/**`、开发 fixture `src/bin_support/repository_fixture.rs`、独立预览 `examples/repository.rs`、测试入口 `tests/repository.rs`。它把已合并的 `data::RepositorySession` 与 `ui::reader::ReaderView` 串成一张可复用、真实数据的仓库阅读页。**尚未接入 `src/ui/mod.rs` / `src/app` / 正式 Shell**；接线是后续集成任务。
 
+## 统一页面与 overview 服务组合
+
+负责人将 repository-browser 与 repository-overview 合并为一个任务，唯一联合验收入口是 `cargo run --locked --example repository`（PR35）。`RepositoryPage` 拥有一个真实 `Entity<RepositoryOverview>`；identity/description → 自然高度 compact Releases/Contributors/Languages → 页内 Tabs → Code 的真实目录树与 ReaderView。没有第二个 header、模拟 reader 或并行验收页面。`repository_overview` example 仅保留为组件开发探针。
+
+仓库详情确认 canonical `RepositoryIdentity` 后，页面在现有账户服务创建 `PageReadSession`，**完整比较其 RepositoryReadContext 与该页 RepositorySession context**，包括服务实例、账户、授权 epoch 与选择代次。只有相同且仍有效才启动 releases/latest_release/contributors/languages 四个独立后台调用；不新建数据库、网络 client、登录或 PAT 路径。目录与 README 不等待它们完成。
+
+`extras.rs` 独立管理仓库作用域取消源、每端点请求代次和结果队列；发布前再次验证服务 context、活动页面、仓库 binding 与端点代次。成功、Partial、latest 404 与失败分别保留；一项失败只影响该组。Languages/Contributors Retry 只读取该组，Releases Retry 重读该组的 list/latest，不改变分支/文件/展开目录/reader。没有 render 请求或自动重试。
+
+分支切换只取消 Code 读取，**不清除或重取同仓库的 overview**。deactivate、重绑、账户/凭据失效、释放页面会取消 extras，旧成功/失败及动作一律拒绝。`PageAction::Overview(OverviewAction)` 向宿主保留 binding、release id/tag 或 contributor login/canonical URL；页面在转发前核对当前显示目标，回调延后执行并复核上下文。预览仅报告，不自动打开 URL。版本/关联头像支持单次鼠标及 Enter/Space 激活；匿名头像不可导航。头像保留宿主 decoded-image hook，未提供时诚实使用首字母，无另一路图片网络。
+
+联合场景通过同一个有界场景选择器：Overview loading（2 秒）、partial、单组 error（Languages 失败一次，可 Retry）、zero、long、latest unavailable（list 非空但 latest404）。共享 request-routed fixture 为同一 `octo/ledger` 提供全部真实 service 管线端点。
+
 ## 页面结构
 
-沿用已确认的仓库页面结构：仓库摘要 → 横向页内内容 Tabs → Code 区域的左文件树/右阅读器。页内 Tabs 与应用级 workspace 标签是两层不同导航，不共用状态。本轮只有 **Code** 有内容，其余 Tabs（Issues、Pull requests、Releases、Settings）沿用确认的名称、样式与顺序，内容区直接留空，不添加“未实现”卡片、假设置或复制的 GitHub 功能菜单。Releases/Contributors/Languages 属于独立 overview 组件，本任务不接入。
+沿用已确认的仓库页面结构：仓库摘要 → 横向页内内容 Tabs → Code 区域的左文件树/右阅读器。页内 Tabs 与应用级 workspace 标签是两层不同导航，不共用状态。本轮只有 **Code** 有内容，其余 Tabs（Issues、Pull requests、Releases、Settings）沿用确认的名称、样式与顺序，内容区直接留空，不添加“未实现”卡片、假设置或复制的 GitHub 功能菜单。Releases/Contributors/Languages 由内嵌的独立 overview 组件渲染；内部仍可复用，不复制其摘要实现。
 
 切出 Code 不再绘制树与正文，但保留 Code 导航意图（分支/选中路径/展开目录）；切回时若当前授权仍有效则恢复，失效则先重新验证，绝不恢复旧授权。
 

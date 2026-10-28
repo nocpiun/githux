@@ -108,3 +108,19 @@
 ## 交接
 
 新版预览会在最终检查及提交后按最后构建启动并保持打开，PID/head 记录在 delivery-state.json；负责人也可从 `cargo run --example repository` 或 `target/debug/examples/repository.exe` 打开，用工具栏逐个场景复验。PR #35 继续沿用，`pending` 用于本轮重新验收、`blocked` 保持由负责人管理，本任务不合并、不启用 auto-merge。
+
+
+## Owner 合并 browser + compact overview（统一页面）
+
+本轮接收协调者本地合并 `0d30185`，其中保留 overview compact head `d70b8ab`。browser 为两组件及组合唯一写入者；不再启动独立 overview 验收页面。整合 main `8ab0d5c`（含 Profile #36），保留所有已接受 Home/Profile 代码。
+
+新增 `src/ui/repository/extras.rs`：仓库详情成功后构造一个 RepositoryOverview entity，并创建现有 `PageReadSession`；完整 context 必须等于该页 RepositorySession context，且当前仍有效。四个独立 extras 调用在现有 BackgroundExecutor 执行，Code 继续读取；单端点取消/请求代次/发布队列与分支 Code 代次独立。切分支不重读或丢弃 extras；账户/授权/页面失活清理；旧成功/失败与 stale action 均不能回写。各组 Retry 只更新对应组；typed PageAction::Overview 保留 canonical release/contributor 目标，预览只报告。
+
+统一层级已实际查看 DPI-aware 原生帧：identity/description → compact Releases（一个版本）/Contributors（最多五头像）/Languages（一个分段条+短 legend）→ 页内 Tabs → 真实树和 ReaderView；没有卡框、第二个 header、模拟 reader 或固定半窗区域。1100×800、880×560 client 核验仍有可用文件阅读区域。原生在 880×560 打开 src/main.rs 并重复点三次，再 main→feature→main，extras 保持；错误场景 Languages 不影响成功 siblings 或 README。
+
+新增组合测试重用同一 fixture：四端点首次各一次、分支变化保持 entity/不倍增请求、Retry 保留 reader、partial/latest404/zero、旧端点错误在 retry 后拒绝、deactivate 清理、授权 A→B→A/rebind 旧动作拒绝、两种目标尺寸阅读区约束；overview 自身行为套件继续运行。一次既有 localhost bounded test 碰到瞬时 Network 错误，未修改网络层，完整 repository 重跑通过。最终全量结果见后续验证记录。
+
+历史合并权限：两任务完整已知历史 arbitration_ever_required 均 false，逻辑 OR 仍 false；merge_owner 为 coordinator，blocked/pending 保留。PR35/37 的相关反馈已读取，修复 case-sensitive ref 与 superseded latest_error；旧 popover 反馈沿历史保留，不恢复已删除设计。
+
+
+组合最终验证（本机 Windows、独立 target、指定 run-additional-cargo.ps1 串行 helper）：fmt/check --locked --all-targets/clippy -- -D warnings 通过；全套测试 538 product / 321 account / 54 Home / 152 Profile / 131 reader / 469 combined repository / 14 overview 全部通过。产品与 repository example 构建、diff check 结果记录于 PR35 最终交接。只启动统一 repository.exe，不启动独立 overview 验收窗口。负责人联合视觉验收仍待进行；blocked/pending 不变，无 merge/auto-merge。

@@ -58,6 +58,11 @@ fn group(id: &'static str, title: String, content: AnyElement, cx: &App) -> AnyE
         .child(content)
         .into_any_element()
 }
+fn activation_key(event: &gpui::KeyDownEvent) -> bool {
+    !event.is_held
+        && !event.keystroke.modifiers.modified()
+        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+}
 fn text(label: impl Into<String>, cx: &App) -> AnyElement {
     div()
         .min_w_0()
@@ -68,6 +73,7 @@ fn text(label: impl Into<String>, cx: &App) -> AnyElement {
 impl RepositoryOverview {
     fn retry(&self, section: OverviewSection, message: &str, cx: &mut Context<Self>) -> AnyElement {
         let binding = self.binding.clone();
+        let key_binding = binding.clone();
         div()
             .id(gpui::ElementId::Name(
                 format!("overview-retry-{}", section.id()).into(),
@@ -78,6 +84,21 @@ impl RepositoryOverview {
             .text_color(cx.theme().colors.fg_muted)
             .aria_label(format!("{message}. Retry {}", section.title()))
             .tooltip(Tooltip::text(message.to_string()))
+            .on_key_down(
+                cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
+                    if activation_key(event) {
+                        cx.stop_propagation();
+                        view.emit(
+                            OverviewAction::Refresh {
+                                binding: key_binding.clone(),
+                                section,
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
             .on_click(cx.listener(move |view, _, window, cx| {
                 view.emit(
                     OverviewAction::Refresh {
@@ -129,6 +150,12 @@ impl RepositoryOverview {
             let tag = release.tag_name.clone();
             let url = release.html_url.clone();
             let binding = self.binding.clone();
+            let key_action = OverviewAction::OpenRelease {
+                binding: binding.clone(),
+                release_id: id,
+                tag_name: tag.clone(),
+                html_url: url.clone(),
+            };
             let version = div()
                 .id("overview-release-version")
                 .debug_selector(|| "overview-release-version".into())
@@ -140,6 +167,14 @@ impl RepositoryOverview {
                     .cursor_pointer()
                     .text_color(cx.theme().colors.link)
                     .aria_label(format!("Release {tag}"))
+                    .on_key_down(cx.listener(
+                        move |view, event: &gpui::KeyDownEvent, window, cx| {
+                            if activation_key(event) {
+                                cx.stop_propagation();
+                                view.emit(key_action.clone(), window, cx);
+                            }
+                        },
+                    ))
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.emit(
                             OverviewAction::OpenRelease {
@@ -182,7 +217,12 @@ impl RepositoryOverview {
             .releases
             .error()
             .or_else(|| self.latest.as_ref().and_then(SectionState::error))
-            .or_else(|| data.and_then(|data| data.latest_error.as_deref()));
+            .or_else(|| {
+                self.latest
+                    .is_none()
+                    .then(|| data.and_then(|data| data.latest_error.as_deref()))
+                    .flatten()
+            });
         if let Some(error) = failed {
             row = row.child(self.retry(OverviewSection::Releases, error, cx));
         }
@@ -223,9 +263,22 @@ impl RepositoryOverview {
                     let binding = self.binding.clone();
                     let login = contributor.login.clone();
                     let url = contributor.html_url.clone();
+                    let key_action = OverviewAction::OpenContributor {
+                        binding: binding.clone(),
+                        login: login.clone(),
+                        html_url: url.clone(),
+                    };
                     avatar
                         .tab_index(0)
                         .cursor_pointer()
+                        .on_key_down(cx.listener(
+                            move |view, event: &gpui::KeyDownEvent, window, cx| {
+                                if activation_key(event) {
+                                    cx.stop_propagation();
+                                    view.emit(key_action.clone(), window, cx);
+                                }
+                            },
+                        ))
                         .on_click(cx.listener(move |view, _, window, cx| {
                             view.emit(
                                 OverviewAction::OpenContributor {

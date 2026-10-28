@@ -1,6 +1,6 @@
 # 仓库顶部资料组件
 
-更新：2026-10-28。负责人明确要求按 `02-repository-header.png` 重做为紧凑摘要条；此前三卡片、有界滚动面板和 notes popover 方案已废弃。当前组件位于 `src/ui/repository_overview/**`，独立 example/test 装配，**尚未挂载正式 Shell 或 repository-browser，也未接入真实账户数据**。
+更新：2026-10-28。负责人明确要求按 `02-repository-header.png` 重做为紧凑摘要条；此前三卡片、有界滚动面板和 notes popover 方案已废弃。当前组件位于 `src/ui/repository_overview/**`，独立 example/test 装配，**已内嵌于 repository-browser，使用既有账户作用域 page-data 服务读取；尚未挂载正式 Shell**。负责人将两任务合并由 browser 单写入者交付，PR35 为唯一联合验收 PR；原 PR37 的紧凑实现及历史保留在 browser 分支。
 
 ## 已确认的展示
 
@@ -17,7 +17,7 @@ Releases、Contributors、Languages 是一个横向自然高度摘要条，嵌�
 
 `OverviewBinding { account: AccountKey, repository: RepositoryIdentity, generation: u64 }` 固定账户、仓库及宿主请求代次。`apply_releases`、`apply_latest_release`、`apply_contributors`、`apply_languages` 和 `apply(OverviewUpdate)` 比较完整 binding，并复核 payload 自带仓库身份。旧绑定或不匹配 payload 返回 false、不修改现有状态。`set_binding` 清空所有段及本地 image/date presentation。宿主仍必须在发布成功/错误前复核同一个服务授权 context；UI binding 不是授权证明。
 
-`SectionState<T, P>`：Idle / Loading / Ready(T) / Partial { value, reason } / Error { message }。ReleasesData 保留 list、可选 latest 和 latest_error。`LatestReleaseState` 可独立应用；显式 latest 更新覆盖成组快照的 latest 展示，list 失败不抹掉它。领域 list/contributors 自带的 Partial 与外层 Partial 均保留。
+`SectionState<T, P>`：Idle / Loading / Ready(T) / Partial { value, reason } / Error { message }。ReleasesData 保留 list、可选 latest 和 latest_error。`LatestReleaseState` 可独立应用；显式 latest 更新覆盖成组快照的 latest 展示与错误，list 失败不抹掉它；独立 latest 成功后不再显示旧快照 latest_error 的 Retry。领域 list/contributors 自带的 Partial 与外层 Partial 均保留。
 
 `on_action(OnAction)` 接收：
 
@@ -35,11 +35,17 @@ Ely Avatar 已支持实际图像渲染。`set_avatar_image(&binding, user_id, Ar
 
 ## 预览、验证边界
 
+唯一完整页联合验收入口：
+
 ```sh
-cargo run --locked --example repository_overview
+cargo run --locked --example repository
 ```
 
-标准 Cargo example，通过 `src/bin_support/repository_overview_modules.rs` 的薄 path 装配复用实际组件。fixtures/场景开关在 example/test，不进入产品 target。场景：正常短值、latest 404 且 list 非空、Partial、单段错误、204、零语言、长名称/300 人/20 种语言。当前没有产品 Shell/data 挂载。
+`RepositoryPage` 拥有 `Entity<RepositoryOverview>`，在详情后启动四个独立 PageReadSession 读取；比较 repository/page session 的完整授权 context，发布与动作再次复核。分支只刷新 Code，不重取 overview；各组 Retry 不影响文件导航。详见 [统一仓库页契约](repository-browser.md)。
+
+`cargo run --locked --example repository_overview` 仅保留为局部开发探针，不再作为独立验收交付或并行页面。
+
+标准 Cargo example，通过 `src/bin_support/repository_overview_modules.rs` 的薄 path 装配复用实际组件。fixtures/场景开关在 example/test，不进入产品 target。场景：正常短值、latest 404 且 list 非空、Partial、单段错误、204、零语言、长名称/300 人/20 种语言。当前没有产品 Shell 挂载；browser 数据接线已实现。
 
 2026-10-28 本机真实 Windows 原生窗口通过 DPI-aware PrintWindow 截取并实际查看 Ready、窄窗、长名称、单段 Error、Latest unavailable、Partial、204、Zero 场景；与任务提供的原始图并排检查布局层级。当前 144 DPI 桌面 Ready 在 identity 和 Code 文本间显示一条紧凑横带，Code 内容空间占主导；窄窗换行，无卡框/固定半窗带。截图保存在任务目录并随交接提供，不把进程响应当视觉证据。鼠标真实点击验证了场景切换；IME、多屏 DPI 切换和原生键盘辅助技术没有完整验收，不能由 GPUI 测试推断。
 

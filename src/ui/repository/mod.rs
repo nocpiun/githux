@@ -31,6 +31,7 @@
 //! are discarded the same way, so switching branch, account (A→B→A), replacing
 //! the PAT or hiding the page can never paste an old result over a new one.
 
+mod extras;
 mod navigation;
 mod page_tabs;
 #[cfg(test)]
@@ -109,8 +110,10 @@ impl RepositoryPageServices {
 }
 
 /// What the page asks the host to do on its behalf.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PageAction {
+    /// Validated repository-scoped release or contributor navigation.
+    Overview(crate::ui::repository_overview::OverviewAction),
     /// An absolute `http(s)` URL the user pressed. The page never opens it.
     OpenExternal(String),
     /// A repository link that this page generation did not follow.
@@ -268,6 +271,7 @@ impl Role {
 /// The page view.
 pub struct RepositoryPage {
     services: RepositoryPageServices,
+    extras: extras::Extras,
     locator: RepositoryLocator,
     generation: u64,
     session: Option<RepositorySession>,
@@ -336,6 +340,7 @@ impl RepositoryPage {
         let base = tree_scroll.0.borrow().base_handle.clone();
         let mut page = Self {
             services,
+            extras: extras::Extras::default(),
             locator,
             generation: 0,
             session: None,
@@ -405,6 +410,7 @@ impl RepositoryPage {
     /// A new session is always created; a saved branch or file is restored
     /// against that new authorization and re-resolved to a fixed commit.
     pub fn activate(&mut self, cx: &mut Context<Self>) {
+        self.extras.stop();
         self.cancel_reader_interactions(cx);
         self.stop_work();
         self.pending_content = None;
@@ -449,6 +455,7 @@ impl RepositoryPage {
     /// Nothing that finishes later can replace the page's content, because the
     /// generation has already moved on.
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.extras.stop();
         self.cancel_reader_interactions(cx);
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
@@ -1138,6 +1145,7 @@ impl RepositoryPage {
         for message in messages {
             self.apply(message, window, cx);
         }
+        self.drain_overview(cx);
     }
 
     /// Detects an account/authorization change even when no message is pending,
@@ -1150,6 +1158,7 @@ impl RepositoryPage {
             return;
         }
         self.cancel_reader_interactions(cx);
+        self.extras.stop();
         self.authorization_lost = true;
         self.active = false;
         self.stop_work();
@@ -1190,7 +1199,7 @@ impl RepositoryPage {
             return;
         }
         match message.body {
-            Body::Repository(result) => self.apply_repository(result, cx),
+            Body::Repository(result) => self.apply_repository(result, window, cx),
             Body::Branches(result) => self.apply_branches(result, cx),
             Body::Revision {
                 branch,
@@ -1220,12 +1229,15 @@ impl RepositoryPage {
     fn apply_repository(
         &mut self,
         result: Result<RepositoryDetails, RepositoryError>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match result {
             Ok(details) => {
                 self.spawn_job(Job::Branches(details.identity.clone()));
+                let identity = details.identity.clone();
                 self.details = Some(details);
+                self.start_overview(identity, window, cx);
             }
             Err(error) => {
                 self.error = Some(PageError::from_repository(&error));

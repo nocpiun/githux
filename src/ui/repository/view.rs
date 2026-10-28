@@ -94,6 +94,11 @@ pub(super) fn render(
         .text_color(foreground)
         .text_size(text_size)
         .child(header)
+        .children(
+            page.overview()
+                .cloned()
+                .map(|overview| div().flex_none().min_w_0().w_full().px_5().child(overview)),
+        )
         .child(tabs)
         .child(body)
         .into_any_element()

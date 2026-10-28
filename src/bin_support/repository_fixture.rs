@@ -53,11 +53,17 @@ pub enum Scene {
     ReadmeInDocs,
     /// The first root directory read fails; Retry files recovers it.
     RootFailure,
+    OverviewLoading,
+    OverviewPartial,
+    OverviewError,
+    OverviewZero,
+    OverviewLong,
+    LatestUnavailable,
 }
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 12] = [
+    pub const ALL: [Scene; 18] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
@@ -70,10 +76,22 @@ impl Scene {
         Scene::Delayed,
         Scene::ReadmeInDocs,
         Scene::RootFailure,
+        Scene::OverviewLoading,
+        Scene::OverviewPartial,
+        Scene::OverviewError,
+        Scene::OverviewZero,
+        Scene::OverviewLong,
+        Scene::LatestUnavailable,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Scene::OverviewLoading => "Overview loading",
+            Scene::OverviewPartial => "Overview partial",
+            Scene::OverviewError => "Overview error",
+            Scene::OverviewZero => "Overview zero",
+            Scene::OverviewLong => "Overview long",
+            Scene::LatestUnavailable => "Latest unavailable",
             Scene::Normal => "Normal",
             Scene::EmptyRepository => "Empty repository",
             Scene::ReadmeUncertain => "README uncertain",
@@ -92,6 +110,24 @@ impl Scene {
     /// One line the preview toolbar shows about what this scene demonstrates.
     pub fn description(self) -> &'static str {
         match self {
+            Scene::OverviewLoading => {
+                "Repository extras take 2 seconds; browse files while the compact strip loads."
+            }
+            Scene::OverviewPartial => {
+                "Releases and contributors are partial observations; usable data remains visible."
+            }
+            Scene::OverviewError => {
+                "Languages fail once; Retry restores only Languages and keeps the file selection."
+            }
+            Scene::OverviewZero => {
+                "No latest observed, no contributors and zero language bytes; no distribution is invented."
+            }
+            Scene::OverviewLong => {
+                "Long version, many contributors and languages stay in the bounded compact strip."
+            }
+            Scene::LatestUnavailable => {
+                "The list contains releases but latest is 404: latest unavailable does not prove no releases."
+            }
             Scene::Normal => {
                 "Two branches, README, docs, src and a nested directory. Everything is browsable and repeatable."
             }
@@ -267,6 +303,7 @@ fn locator_path() -> String {
 /// Which scripted, one-shot failure a scene arms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArmedFailure {
+    Languages,
     Root,
     Directory,
     File,
@@ -386,6 +423,9 @@ impl FixtureTransport {
             // GET /repos/{owner}/{name}
             "" => Ok(json_response(200, &details_body(scene, url).to_string())),
             "/branches" => Ok(self.branches(scene, url)),
+            "/releases" | "/releases/latest" | "/contributors" | "/languages" => {
+                Ok(self.extras(rest, query, scene, url))
+            }
             branch_path => {
                 if let Some(reference) = branch_path.strip_prefix("/commits/") {
                     return Ok(self.commit(scene, reference, url));
@@ -647,6 +687,48 @@ impl FixtureTransport {
         }
     }
 
+    fn extras(&self, resource: &str, query: Option<&str>, scene: Scene, url: &str) -> HttpResponse {
+        let query: BTreeMap<_, _> = query
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|part| part.split_once('='))
+            .collect();
+        let list = matches!(resource, "/releases" | "/contributors");
+        if (list && query.get("per_page") != Some(&"100"))
+            || (resource == "/contributors" && query.get("anon") != Some(&"true"))
+            || (!list && !query.is_empty())
+        {
+            return self.mismatch(url);
+        }
+        let release = serde_json::json!({
+            "id": 501, "tag_name": if scene == Scene::OverviewLong { "v1.0.0-ledger-preview-with-a-long-version-label" } else { "v1.0.0" },
+            "name":"Ledger 1.0", "body":"Ledger release", "draft":false, "prerelease":false,
+            "html_url":format!("https://github.com/{OWNER}/{NAME}/releases/tag/v1.0.0"),
+            "created_at":"2026-10-20T10:00:00Z", "published_at":"2026-10-20T10:00:00Z"
+        });
+        let body = match resource {
+            "/releases/latest" if matches!(scene, Scene::LatestUnavailable | Scene::OverviewZero) => return json_response(404,"{}"),
+            "/releases/latest" => release,
+            "/releases" => if scene == Scene::OverviewZero {serde_json::json!([])} else {serde_json::json!([release])},
+            "/contributors" => serde_json::Value::Array((0..if scene == Scene::OverviewZero {0} else if scene == Scene::OverviewLong {35} else {4})
+                .map(|index|serde_json::json!({"id":100+index,"login":format!("ledger-{index}"),"contributions":10+index,
+                    "html_url":format!("https://github.com/ledger-{index}")})).collect()),
+            "/languages" if scene == Scene::OverviewError && self.take_armed(ArmedFailure::Languages) => return json_response(500,"{}"),
+            "/languages" if scene == Scene::OverviewZero => serde_json::json!({}),
+            "/languages" if scene == Scene::OverviewLong => serde_json::json!({"Rust":75000,"TypeScript":15000,"A language with a very long display name":9000,"C":1000}),
+            "/languages" => serde_json::json!({"Rust":92000,"Shell":6000,"Python":2000}),
+            _ => return self.mismatch(url),
+        };
+        let mut response = json_response(200, &body.to_string());
+        if scene == Scene::OverviewPartial && list {
+            response.headers.push((
+                "x-github-sso".into(),
+                "partial-results; organizations=1234".into(),
+            ));
+        }
+        response
+    }
+
     /// Consumes one armed failure. Returns true when the failure should fire.
     fn take_armed(&self, failure: ArmedFailure) -> bool {
         let mut armed = self.armed.lock().unwrap();
@@ -663,6 +745,7 @@ fn armed_for(scene: Scene) -> Option<ArmedFailure> {
     match scene {
         Scene::DirectoryFailure => Some(ArmedFailure::Directory),
         Scene::RootFailure => Some(ArmedFailure::Root),
+        Scene::OverviewError => Some(ArmedFailure::Languages),
         Scene::FileFailure => Some(ArmedFailure::File),
         _ => None,
     }
@@ -677,6 +760,22 @@ impl Transport for FixtureTransport {
         Box::pin(async move {
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
+            }
+            if self.scene() == Scene::OverviewLoading
+                && [
+                    "/releases",
+                    "/releases/latest",
+                    "/contributors",
+                    "/languages",
+                ]
+                .iter()
+                .any(|end| split_url(&request.url).is_some_and(|(path, _)| path.ends_with(end)))
+            {
+                tokio::select! {
+                    biased;
+                    _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
             }
             if self.scene() == Scene::Delayed {
                 tokio::select! {

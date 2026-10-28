@@ -361,3 +361,27 @@ fn languages_group_checked_bytes_into_three_segments() {
         "Anonymous Builder"
     );
 }
+
+#[gpui::test]
+fn independent_latest_recovery_removes_snapshot_error(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let binding = fixtures::binding(1);
+    apply_releases(
+        &h,
+        &binding,
+        SectionState::Ready(fixtures::latest_error_releases()),
+        cx,
+    );
+    let v = overview(&h, cx);
+    v.update(cx, |v, cx| {
+        v.apply_latest_release(
+            &binding,
+            SectionState::Ready(fixtures::ready_releases().latest.unwrap()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    cx.update(|w, cx| w.simulate_next_frame(cx));
+    assert!(cx.debug_bounds("overview-release-version").is_some());
+    assert!(cx.debug_bounds("overview-retry-releases").is_none());
+}

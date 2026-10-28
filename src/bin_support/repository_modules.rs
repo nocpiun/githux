@@ -19,5 +19,7 @@ pub mod geometry;
 pub mod reader;
 #[path = "../ui/repository/mod.rs"]
 pub mod repository;
+#[path = "../ui/repository_overview/mod.rs"]
+pub mod repository_overview;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;

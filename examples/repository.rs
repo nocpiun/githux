@@ -230,6 +230,9 @@ impl Preview {
         page.update(cx, |page, _| {
             page.on_action(std::rc::Rc::new(move |action, _window, cx| {
                 let text = match action {
+                    PageAction::Overview(action) => {
+                        format!("overview action (not opened): {action:?}")
+                    }
                     PageAction::OpenExternal(url) => format!("external link (not opened): {url}"),
                     PageAction::LinkNotFollowed { path, reason } => {
                         format!("link not followed: {path} — {reason}")

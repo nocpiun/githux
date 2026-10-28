@@ -67,3 +67,17 @@ example 默认短值，压力场景显式切换，下面少量有意义文档说
 真实本机 Windows 144 DPI，以 DPI-aware PrintWindow 捕获并实际查看 Ready、窄窗、长名称/300 人/20 语言、latest 404、Partial、单段 Error、204、Zero 场景。鼠标真实切换场景。将 Ready 与原始参考并排生成 comparison.png 并检查：三个小组位于 identity/description 与 Code 标记之间，常态约 80 logical px，无卡框/固定半窗/内部滚动，正文空间主导。窄窗两行分组；长名称省略但 share 与 Other 可读。初版非 DPI-aware capture 裁掉右侧，修正 capture DPI 后重新核实，未将裁剪图当交付证据。最终截图保存在 .agents/task/{ready,narrow,long,latest,partial,error,empty,zero}-native.png；comparison.png 为原图与实际 native 的并排检查材料。没有上传原始日志、凭据或私人记忆。
 
 仍待负责人视觉验收；没有声称 IME、多显示器 DPI 切换或原生辅助技术已验收。正式 Shell/repository-browser 挂载、账户服务和图片获取仍为后续整合。保持 owner-managed blocked，添加 pending 仅表示新预览已准备好，不合并、不 auto-merge。新 head 重新请求 Codex 审查；blocked 状态与 CI/review 分开报告。
+
+
+## 合并任务与统一页面集成（由 browser 执行）
+
+负责人明确将两任务合并，overview worker 已停止。协调者以 `0d30185` 将 compact head `d70b8ab` 合并进 browser；本轮保留该提交及全部历史，并整合已合并 main（含 Profile #36），没有复制旧卡片实现。PR35 成为唯一交付/联合验收目标；PR37 在组合提交推送并核验祖先后关闭为 superseded，保留 branch/worktree/review 历史。
+
+`RepositoryPage` 内嵌一个实际 `RepositoryOverview` entity，位置为描述后、页内 Tabs 前，自然高度 flex_none。使用 AccountService::page_session 的四个独立 extras 服务调用，捕获并比较与 RepositorySession 的完整授权 context。每端点取消/代次与 Code 分支代次分开；切同仓库分支不重读 extras，Retry 不重置文件/reader。旧授权、旧仓库、旧 endpoint 结果及 action 都拒绝；动作保留 typed target，仅预览报告不自动开网页。头像无 host image 时继续 initials fallback。
+
+携带 PR37 `d70b8ab` 审查意见修复：独立 latest Ready 后忽略成组快照的旧 latest_error，新增回归。旧 notes/popover 审查对应路径已按 compact 规格删除，历史不抹除。browser 的保存 ref 大小写问题同时修复（Git 分支名区分大小写）。
+
+统一预览 `examples/repository.rs` 与组合测试使用同一 request-routed fixture；新增 overview loading/partial/error/zero/long/latest404 场景，同一场景选择器。原生截图已实际检查 desktop 和 880×560 client：紧凑三组与真实树/源码同页，reader 保留剩余空间；原生 source 重复点三次及 main→feature→main 时 summary 保持，Languages 独立失败/Retry 的页面组合可操作。最终构建/全套验证与 PID/head 交接以 browser devlog 和 PR35 记录为准，不代表正式 Shell 或负责人验收通过。
+
+
+组合最终验证（本机 Windows、独立 target、指定 run-additional-cargo.ps1 串行 helper）：fmt/check --locked --all-targets/clippy -- -D warnings 通过；全套测试 538 product / 321 account / 54 Home / 152 Profile / 131 reader / 469 combined repository / 14 overview 全部通过。产品与 repository example 构建、diff check 结果记录于 PR35 最终交接。只启动统一 repository.exe，不启动独立 overview 验收窗口。负责人联合视觉验收仍待进行；blocked/pending 不变，无 merge/auto-merge。

@@ -38,6 +38,9 @@ impl RepositoryOverview {
     pub fn releases(&self) -> &ReleasesState {
         &self.releases
     }
+    pub fn latest_release(&self) -> Option<&LatestReleaseState> {
+        self.latest.as_ref()
+    }
     pub fn contributors(&self) -> &ContributorsState {
         &self.contributors
     }

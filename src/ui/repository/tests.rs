@@ -12,6 +12,9 @@
 //! prove real Windows input, IME or a real GitHub account; those remain manual
 //! acceptance items recorded in the task devlog.
 
+#[path = "extras_tests.rs"]
+mod extras_tests;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,7 +50,7 @@ fn locator() -> RepositoryLocator {
 
 // --------------------------------------------------------------- test setup --
 
-struct Fixture {
+pub(super) struct Fixture {
     transport: Arc<FixtureTransport>,
     accounts: Arc<AccountService>,
     executor: Arc<BackgroundExecutor>,
@@ -168,7 +171,7 @@ fn settle(
     );
 }
 
-fn frames(cx: &mut VisualTestContext) {
+pub(super) fn frames(cx: &mut VisualTestContext) {
     for _ in 0..2 {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
@@ -192,7 +195,9 @@ fn rows(page: &Entity<RepositoryPage>, cx: &mut VisualTestContext) -> Vec<TreeRo
 }
 
 /// The happy path in the Normal scene: summary, one fixed commit, README.
-fn normal(cx: &mut TestAppContext) -> (Fixture, Entity<RepositoryPage>, &mut VisualTestContext) {
+pub(super) fn normal(
+    cx: &mut TestAppContext,
+) -> (Fixture, Entity<RepositoryPage>, &mut VisualTestContext) {
     let fixture = Fixture::new(Scene::Normal);
     fixture.login(1);
     let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());

@@ -281,12 +281,6 @@ pub fn branch_choice(
             .branches
             .iter()
             .find(|branch| branch.name.as_str() == intent)
-            .or_else(|| {
-                branches
-                    .branches
-                    .iter()
-                    .find(|branch| branch.name.as_str().eq_ignore_ascii_case(intent))
-            })
         {
             return BranchChoice::Selected(branch.name.clone());
         }
@@ -742,7 +736,7 @@ mod tests {
         );
         assert_eq!(
             branch_choice(&list, None, Some("FEATURE")),
-            BranchChoice::Selected(DynamicRef::new("feature").unwrap())
+            BranchChoice::Selected(DynamicRef::new("FEATURE").unwrap())
         );
     }
 
