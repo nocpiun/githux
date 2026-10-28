@@ -1,5 +1,9 @@
 //! Interaction and measured layout coverage for the resizable sidebar.
 use super::{Shell, geometry::*, sidebar_state::SidebarState};
+use crate::domain::{
+    AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId, RepoOwner, RepoSummary,
+    RepoVisibility,
+};
 use crate::workspace::Route;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
@@ -16,6 +20,47 @@ fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContex
         Shell::bind_keys(cx);
     });
     let (view, cx) = cx.add_window_view(Shell::new);
+    // Same deterministic test rows/account as the navigation tests; the product populates these
+    // from the real account service, never from a fixture.
+    view.update(cx, |shell, cx| {
+        shell.set_repositories(
+            (0..124)
+                .map(|index| {
+                    let owner = ["githux-dev", "northstar", "studio", "demo"][index % 4];
+                    RepoSummary {
+                        id: index as u64,
+                        full_name: format!("{owner}/repo-{index:03}"),
+                        name: format!("repo-{index:03}"),
+                        owner: RepoOwner {
+                            id: 1,
+                            login: owner.to_string(),
+                            avatar_url: None,
+                        },
+                        visibility: RepoVisibility::Public,
+                        fork: false,
+                        archived: false,
+                        description: None,
+                        default_branch: Some("main".to_string()),
+                    }
+                })
+                .collect(),
+            cx,
+        );
+        shell.set_account(
+            Some(AccountSummary {
+                identity: AccountIdentity {
+                    key: AccountKey::new(1, HostId::github()),
+                    login: "lin-dev".to_string(),
+                    display_name: Some("Lin".to_string()),
+                    avatar_url: None,
+                    html_url: None,
+                },
+                epoch: AuthEpoch(1),
+                authorization: crate::domain::account::AuthorizationState::Verified,
+            }),
+            cx,
+        );
+    });
     cx.simulate_resize(size(px(1200.0), px(700.0)));
     cx.run_until_parked();
     (view, cx)

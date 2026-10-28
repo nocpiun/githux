@@ -18,28 +18,52 @@ use gpui::{
 };
 
 use crate::{
-    ui::fixtures::{self, ActivityKind, RepoFixture},
+    domain::AccountSummary,
+    ui::fixtures::{self, ActivityKind},
     workspace::{RepositorySession, Route, Session},
 };
 
 use super::geometry::ACTIVITY_ROW_HEIGHT;
 
+/// One frame's page input. Everything here is view data: the real account identity when signed in
+/// and the current account's repository rows. The page never reads a service, a credential or a
+/// network path.
+pub(super) struct PageData<'a> {
+    /// The active account's identity, or `None` while logged out.
+    pub account: Option<&'a AccountSummary>,
+    /// The current account's repository rows, already fetched by the account controller.
+    pub repositories: &'a [crate::domain::RepoSummary],
+    /// Settings › Accounts. The shell builds it from the account controller, so this module never
+    /// touches a service, a callback or a credential.
+    pub settings: Option<AnyElement>,
+}
+
 /// The page for the active `session`.
-pub(super) fn page(session: &Session, repositories: &[RepoFixture], cx: &App) -> AnyElement {
+pub(super) fn page(session: &Session, data: PageData<'_>, cx: &App) -> AnyElement {
     match session.route() {
         Route::Home => home(cx),
-        Route::Repository { .. } => {
-            let route = session.route();
-            let repo = repositories.iter().find(|repo| route.is_repository(repo));
-            match repo {
-                Some(repo) => repository(repo, session.state().repository.as_ref(), cx),
-                None => blank(),
-            }
+        Route::Repository { namespace, name } => {
+            // The route itself is the resource identity, so a tab still draws correctly after the
+            // list changed or the account switched. The row (description, avatar owner) is used
+            // when the current account's list still contains it; nothing is invented when it does
+            // not, and no repository browser is claimed here.
+            let repo = data.repositories.iter().find(|repo| {
+                repo.owner.login.eq_ignore_ascii_case(namespace)
+                    && repo.name.eq_ignore_ascii_case(name)
+            });
+            repository(
+                namespace,
+                name,
+                repo,
+                session.state().repository.as_ref(),
+                cx,
+            )
         }
-        Route::Profile => profile(cx),
-        // Settings options, notifications, cross-repository issues/PRs and Issue/PR detail are not
-        // designed yet, so their content area stays empty on purpose.
-        Route::Settings | Route::Notifications | Route::Issues | Route::PullRequests => blank(),
+        Route::Profile => profile(data.account, cx),
+        // Settings draws the Accounts section only; the remaining global settings design and the
+        // cross-repository pages are still empty on purpose.
+        Route::Settings => data.settings.unwrap_or_else(blank),
+        Route::Notifications | Route::Issues | Route::PullRequests => blank(),
     }
 }
 
@@ -286,8 +310,19 @@ fn feed_row(row: &fixtures::FeedFixture, cx: &App) -> AnyElement {
 /// A repository route's minimal identifier: enough to confirm the right page opened. The reader,
 /// header information and content tabs belong to later tasks. When the session has a browsing
 /// selection set (the R3 reader will do that), it is shown here as session state.
-fn repository(repo: &RepoFixture, session: Option<&RepositorySession>, cx: &App) -> AnyElement {
+///
+/// The remembered branch/file of a tab that comes back after an account switch is navigation only:
+/// this page shows it and claims no current authorization for the path.
+fn repository(
+    namespace: &str,
+    name: &str,
+    repo: Option<&crate::domain::RepoSummary>,
+    session: Option<&RepositorySession>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
+    let full_name = format!("{namespace}/{name}");
+    let description = repo.and_then(|repo| repo.description.clone());
     let branch = session.and_then(|session| session.branch.clone());
     let file = session.and_then(|session| session.file.clone());
     div()
@@ -303,24 +338,24 @@ fn repository(repo: &RepoFixture, session: Option<&RepositorySession>, cx: &App)
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(
-                    Avatar::new("repository-avatar", repo.namespace.clone()).size(AvatarSize::Lg),
-                )
+                .child(Avatar::new("repository-avatar", namespace.to_string()).size(AvatarSize::Lg))
                 .child(
                     div()
                         .min_w_0()
                         .text_size(theme.text_size(TextSize::Xl))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.colors.fg)
-                        .child(Ellipsis::new(repo.full_name())),
+                        .child(Ellipsis::new(full_name)),
                 ),
         )
-        .child(
-            div()
-                .text_size(theme.text_size(TextSize::Sm))
-                .text_color(theme.colors.fg_muted)
-                .child(repo.description),
-        )
+        .when_some(description, |page, description| {
+            page.child(
+                div()
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .text_color(theme.colors.fg_muted)
+                    .child(description),
+            )
+        })
         .when_some(branch, |page, branch| {
             let file = file.clone();
             page.child(
@@ -356,10 +391,21 @@ fn repository(repo: &RepoFixture, session: Option<&RepositorySession>, cx: &App)
         .into_any_element()
 }
 
-/// A profile route's minimal identifier; Overview is a later task.
-fn profile(cx: &App) -> AnyElement {
+/// A profile route's minimal identifier; Overview is a later task. It draws the real active
+/// account, and nothing at all while logged out.
+fn profile(account: Option<&AccountSummary>, cx: &App) -> AnyElement {
+    let Some(account) = account else {
+        return blank();
+    };
     let theme = cx.theme();
-    let account = fixtures::ACCOUNT;
+    let name = account
+        .identity
+        .display_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&account.identity.login)
+        .to_string();
+    let login = account.identity.login.clone();
     div()
         .debug_selector(|| "page-profile".to_string())
         .flex()
@@ -368,7 +414,7 @@ fn profile(cx: &App) -> AnyElement {
         .px_6()
         .py_5()
         .gap_3()
-        .child(Avatar::new("profile-avatar", account.name).size(AvatarSize::Xl))
+        .child(Avatar::new("profile-avatar", name.clone()).size(AvatarSize::Xl))
         .child(
             div()
                 .flex()
@@ -379,13 +425,13 @@ fn profile(cx: &App) -> AnyElement {
                         .text_size(theme.text_size(TextSize::Xl))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.colors.fg)
-                        .child(Ellipsis::new(account.name)),
+                        .child(Ellipsis::new(name)),
                 )
                 .child(
                     div()
                         .text_size(theme.text_size(TextSize::Sm))
                         .text_color(theme.colors.fg_subtle)
-                        .child(Ellipsis::new(format!("@{}", account.login))),
+                        .child(Ellipsis::new(format!("@{login}"))),
                 ),
         )
         .into_any_element()

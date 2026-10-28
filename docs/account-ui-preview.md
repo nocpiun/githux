@@ -1,6 +1,8 @@
 # 账户与仓库读取预览（account-ui）
 
-更新：2026-10-25。本文件记录 R2 真实登录与 GPUI 桥接的**接线验收预览**，不是正式 Shell 账户 UI，也不代表真实 PAT 联调已完成。账户服务、SQLite 目录、系统凭据、GitHub 读取与后台执行器沿用已有实现，没有新增 HTTP、SQLite 或账户服务路径。
+更新：2026-10-28。本文件记录 R2 真实登录与 GPUI 桥接的**接线验收预览**，不是正式 Shell 账户 UI，也不代表真实 PAT 联调已完成。账户服务、SQLite 目录、系统凭据、GitHub 读取与后台执行器沿用已有实现，没有新增 HTTP、SQLite 或账户服务路径。
+
+> 2026-10-28：预览已由 account-shell 任务接入正式 Shell——同一个 `app::accounts` 控制器复用生产账户服务，Settings › Accounts 提供 add/select/replace/revalidate，侧栏与 palette 使用真实账户与 `/user/repos` 数据。预览窗口仍作为开发者 example 保留（`cargo run --example account`），但不再作为接线验收的产物；其账户规则（generation、上下文复核、取消与对账、仓库列表失效）全部由正式控制器承载。
 
 ## 启动与产品隔离
 

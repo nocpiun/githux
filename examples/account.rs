@@ -25,14 +25,31 @@ mod network;
 #[path = "../src/storage/mod.rs"]
 mod storage;
 
-#[path = "../src/bin_support/account_modules.rs"]
-mod account_modules;
 #[path = "../src/platform/fonts.rs"]
 mod fonts;
-#[allow(unused_imports)]
-use account_modules as ui;
-#[allow(unused_imports)]
-use account_modules::bridge as accounts;
+
+// The example and the integration test entry both declare the product modules at these paths, so
+// `crate::app::accounts::Accounts` and `crate::ui::accounts::…` are the very product types.
+// The product modules below are compiled into this developer target where only part of their
+// surface is exercised, so the narrow allowances name that reason instead of widening the product
+// API or masking real warnings elsewhere.
+#[allow(dead_code)]
+mod app {
+    #[path = "../../src/app/accounts/mod.rs"]
+    pub mod accounts;
+}
+#[allow(dead_code)]
+mod ui {
+    #[path = "../../src/ui/accounts/mod.rs"]
+    pub mod accounts;
+    #[path = "../../src/ui/geometry.rs"]
+    pub mod geometry;
+    #[path = "../../src/ui/scroll/mod.rs"]
+    pub mod scroll;
+}
+
+#[path = "../src/bin_support/account_example.rs"]
+mod example;
 
 use ely_core::{
     Assets,
@@ -51,7 +68,7 @@ fn main() {
                 theme.font_family = fonts::UI_FAMILY.into();
                 theme.mono_family = fonts::CODE_FAMILY.into();
             });
-            accounts::open_window(cx);
+            example::open_window(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -60,7 +77,7 @@ fn main() {
             .detach();
             cx.activate(true);
         });
-    // Once the event loop returns, let any submitted SQLite/credential commit
-    // and the executor finish, with the bridge's existing bound on that wait.
-    accounts::wait_for_shutdown();
+    // Once the event loop returns, let any submitted SQLite/credential commit and the executor
+    // finish, bounded by the product controller's existing exit gate.
+    app::accounts::wait_for_shutdown();
 }

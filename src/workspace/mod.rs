@@ -1,11 +1,17 @@
-//! Window workspace and page sessions: routing, tab identity, activation and page-local state.
+//! Window workspaces and page sessions: routing, tab identity, activation and page-local state.
 //!
-//! One window owns one [`Workspace`]. It keeps an ordered collection of [`Session`]s — the
-//! application-level tabs drawn at the top of the island — and exactly one of them is active.
-//! Opening a page activates the session that already addresses that resource, or creates a new
-//! one; every resource is a single session, so clicking an entry twice never duplicates a tab.
-//! Closing the last session creates a fresh Home session. [`TabId`]s increase monotonically and
-//! are never reused, so page state keyed by an old id can never attach to a later session.
+//! One window owns one [`Sessions`] container, and that container holds one [`Workspace`] per
+//! account plus a separate logged-out workspace. Only the active account's workspace is visible;
+//! switching accounts shows that account's own tabs again and keeps every other account's tabs,
+//! order and active tab untouched. This is in-process memory only: restarting still starts Home
+//! and no workspace is persisted.
+//!
+//! A [`Workspace`] keeps an ordered collection of [`Session`]s — the application-level tabs drawn
+//! at the top of the island — and exactly one of them is active. Opening a page activates the
+//! session that already addresses that resource, or creates a new one; every resource is a single
+//! session, so clicking an entry twice never duplicates a tab. Closing the last session creates a
+//! fresh Home session. [`TabId`]s increase monotonically and are never reused, so page state keyed
+//! by an old id can never attach to a later session.
 //!
 //! Each session owns the page-local state that has to survive switching: a real GPUI
 //! [`ScrollHandle`] and [`FocusHandle`], plus the repository browsing selection the reader will
@@ -16,7 +22,7 @@
 
 use gpui::{App, FocusHandle, ScrollHandle};
 
-use crate::ui::fixtures::RepoFixture;
+use crate::domain::{AccountKey, RepoSummary};
 
 /// Stable identity of one session. Ids increase monotonically and a closed id is never handed out
 /// again.
@@ -64,14 +70,16 @@ pub enum Route {
 }
 
 impl Route {
-    pub fn repository(repo: &RepoFixture) -> Self {
+    /// The route for one `/user/repos` entry. Owner and name come from the real API value, so the
+    /// sidebar, the palette and the tab strip all address the same resource.
+    pub fn repository(repo: &RepoSummary) -> Self {
         Self::Repository {
-            namespace: repo.namespace.to_string(),
-            name: repo.name.to_string(),
+            namespace: repo.owner.login.clone(),
+            name: repo.name.clone(),
         }
     }
 
-    pub fn is_repository(&self, repo: &RepoFixture) -> bool {
+    pub fn is_repository(&self, repo: &RepoSummary) -> bool {
         self.key() == Self::repository(repo).key()
     }
 
@@ -109,6 +117,11 @@ impl Route {
 /// Repository browsing state a session carries for the reader that arrives in R3. It stays empty
 /// until that reader sets it; the session-isolation tests drive it through the shell. This is
 /// session state, not cached API data.
+///
+/// It deliberately holds navigation only: no `RepositoryReadContext`, `RepositorySession` handle,
+/// fetched content or pending generation is kept here. A tab restored after an account switch
+/// brings its remembered branch/path back to a page that must then read them under a freshly
+/// created authorization context — see [`Workspace::incarnation`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositorySession {
     pub branch: Option<String>,
@@ -126,6 +139,9 @@ pub struct PageState {
     /// Wheel smoothing for this page's scroll region. It belongs to the session so switching tabs
     /// never carries one page's easing into another.
     pub smooth: crate::ui::scroll::Motion<gpui::ScrollHandle>,
+    /// The page region's own visibility/fade and thumb-drag state. It is the same region as
+    /// `smooth`, so the wheel and the scrollbar always move one scroll position.
+    pub bars: crate::ui::scroll::Bars,
     pub focus: FocusHandle,
     pub strip_focus: FocusHandle,
     pub repository: Option<RepositorySession>,
@@ -136,6 +152,7 @@ impl PageState {
         let scroll = ScrollHandle::new();
         Self {
             smooth: crate::ui::scroll::Motion::new(scroll.clone()),
+            bars: crate::ui::scroll::Bars::new(),
             scroll,
             focus: cx.focus_handle(),
             strip_focus: cx.focus_handle().tab_stop(true).tab_index(-1),
@@ -191,26 +208,51 @@ pub struct CloseResult {
 pub struct Workspace {
     sessions: Vec<Session>,
     active: TabId,
-    next_id: u64,
+    /// The allocator handed to this workspace by its owning [`Sessions`]. All workspaces in one
+    /// window share it, so tab ids never collide across accounts.
+    allocator: TabAllocator,
+    /// How many times this workspace has become the visible one. A page controller keys its
+    /// fetched content and in-flight reads on `(account, incarnation)`, so returning to an account
+    /// restores the remembered navigation but never re-publishes content read under an older
+    /// authorization context.
+    incarnation: u64,
 }
+
+/// A monotonic tab-id source shared by every workspace in a window.
+type TabAllocator = std::rc::Rc<std::cell::Cell<u64>>;
 
 impl Workspace {
     /// A workspace always starts on Home; restoring the last page is not part of the first
     /// release.
+    #[cfg(test)]
     pub fn new(cx: &mut App) -> Self {
+        Self::with_allocator(std::rc::Rc::new(std::cell::Cell::new(0)), cx)
+    }
+
+    /// A workspace that hands out ids from a shared allocator.
+    fn with_allocator(allocator: TabAllocator, cx: &mut App) -> Self {
         let mut workspace = Self {
             sessions: Vec::new(),
             active: TabId(0),
-            next_id: 0,
+            allocator,
+            incarnation: 0,
         };
         let home = workspace.push(Route::Home, cx);
         workspace.active = home;
         workspace
     }
 
+    /// The current activation generation of this workspace. It is not a tab id: it changes even
+    /// when the same tabs come back. The integration tests assert the advance so a later page
+    /// controller can key its reads on it.
+    #[allow(dead_code)]
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
     fn push(&mut self, route: Route, cx: &mut App) -> TabId {
-        let id = TabId(self.next_id);
-        self.next_id += 1;
+        let id = TabId(self.allocator.get());
+        self.allocator.set(self.allocator.get() + 1);
         let state = PageState::new(&route, cx);
         self.sessions.push(Session { id, route, state });
         id
@@ -235,6 +277,15 @@ impl Workspace {
 
     pub fn session(&self, id: TabId) -> Option<&Session> {
         self.sessions.iter().find(|session| session.id == id)
+    }
+
+    /// The page-local state of one session, for the view code that owns its scroll region. The
+    /// session itself is unchanged; only the state it already owns is handed out.
+    pub fn state_mut(&mut self, id: TabId) -> Option<&mut PageState> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .map(|session| &mut session.state)
     }
 
     #[cfg(test)]
@@ -325,9 +376,107 @@ impl Workspace {
     }
 }
 
+/// Every account's tabs plus the logged-out tabs, for one window.
+///
+/// Account identity is the host plus the stable numeric account id ([`AccountKey`]); login text and
+/// the PAT are never part of it. A workspace is created the first time an account becomes active
+/// and starts on Home, exactly like the logged-out one.
+///
+/// [`Sessions`] dereferences to the visible [`Workspace`], so every routing, tab, drag and focus
+/// operation works on the active account without a second code path.
+pub struct Sessions {
+    logged_out: Workspace,
+    remembered: Vec<(AccountKey, Workspace)>,
+    visible: Option<AccountKey>,
+    /// Allocated across *all* workspaces, so a tab id is unique within the whole window, not just
+    /// within one account. Identical local tab numbers in two accounts therefore cannot collide.
+    allocator: TabAllocator,
+}
+
+impl Sessions {
+    /// Starts logged out: the shell never assumes saved metadata is a verified authorization.
+    pub fn new(cx: &mut App) -> Self {
+        let allocator: TabAllocator = std::rc::Rc::new(std::cell::Cell::new(0));
+        Self {
+            logged_out: Workspace::with_allocator(allocator.clone(), cx),
+            remembered: Vec::new(),
+            visible: None,
+            allocator,
+        }
+    }
+
+    /// The account whose workspace is visible; `None` is the logged-out workspace.
+    #[allow(dead_code)]
+    pub fn visible_account(&self) -> Option<&AccountKey> {
+        self.visible.as_ref()
+    }
+
+    /// Makes `account`'s workspace visible, creating it on first use. Returns `true` when the
+    /// visible workspace changed, so the caller knows to invalidate account-scoped views.
+    ///
+    /// Nothing from the outgoing workspace is cancelled or rewritten here: its tabs, order,
+    /// active tab and page state stay exactly as they were, and it is simply no longer visible.
+    pub fn show(&mut self, account: Option<AccountKey>, cx: &mut App) -> bool {
+        if self.visible == account {
+            return false;
+        }
+        self.visible = account.clone();
+        let workspace = match account {
+            Some(key) => match self.remembered.iter_mut().find(|(saved, _)| *saved == key) {
+                Some((_, workspace)) => workspace,
+                None => {
+                    self.remembered
+                        .push((key, Workspace::with_allocator(self.allocator.clone(), cx)));
+                    &mut self.remembered.last_mut().expect("just pushed").1
+                }
+            },
+            None => &mut self.logged_out,
+        };
+        workspace.incarnation = workspace.incarnation.saturating_add(1);
+        true
+    }
+
+    /// How many account workspaces are remembered besides the logged-out one.
+    #[allow(dead_code)]
+    pub fn remembered_count(&self) -> usize {
+        self.remembered.len()
+    }
+}
+
+impl std::ops::Deref for Sessions {
+    type Target = Workspace;
+
+    fn deref(&self) -> &Workspace {
+        match &self.visible {
+            Some(key) => self
+                .remembered
+                .iter()
+                .find(|(saved, _)| saved == key)
+                .map(|(_, workspace)| workspace)
+                .expect("a visible account always has a workspace"),
+            None => &self.logged_out,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Sessions {
+    fn deref_mut(&mut self) -> &mut Workspace {
+        match &self.visible {
+            Some(key) => self
+                .remembered
+                .iter_mut()
+                .find(|(saved, _)| saved == key)
+                .map(|(_, workspace)| workspace)
+                .expect("a visible account always has a workspace"),
+            None => &mut self.logged_out,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::HostId;
     use gpui::TestAppContext;
 
     fn workspace(cx: &mut TestAppContext) -> Workspace {
@@ -626,6 +775,129 @@ mod tests {
                 b_state.repository.as_ref().and_then(|r| r.file.as_deref()),
                 None
             );
+        });
+    }
+
+    fn repo_summary(owner: &str, name: &str) -> RepoSummary {
+        RepoSummary {
+            id: 1,
+            full_name: format!("{owner}/{name}"),
+            name: name.to_string(),
+            owner: crate::domain::RepoOwner {
+                id: 1,
+                login: owner.to_string(),
+                avatar_url: None,
+            },
+            visibility: crate::domain::RepoVisibility::Public,
+            fork: false,
+            archived: false,
+            description: None,
+            default_branch: Some("main".to_string()),
+        }
+    }
+
+    /// The accepted 2026-10-28 decision: each account keeps its own open tabs, and switching back
+    /// restores that account's tabs, order and active tab instead of reusing the previous set.
+    #[gpui::test]
+    fn every_account_keeps_its_own_tabs_order_and_active_tab(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let a = AccountKey::new(1, HostId::github());
+            let b = AccountKey::new(2, HostId::github());
+            let mut sessions = Sessions::new(cx);
+            assert_eq!(sessions.route(), &Route::Home, "logged out starts on Home");
+            assert!(sessions.show(Some(a.clone()), cx));
+            let a_home = sessions.active_id();
+            for name in ["one", "two", "three"] {
+                sessions.open(Route::repository(&repo_summary("shared", name)), cx);
+            }
+            sessions.open(Route::Settings, cx);
+            let a_ids: Vec<TabId> = sessions.sessions().iter().map(Session::id).collect();
+            let a_active = sessions.active_id();
+
+            // B opens the *same* repositories and its own Settings tab.
+            assert!(sessions.show(Some(b.clone()), cx));
+            assert_eq!(sessions.sessions().len(), 1, "B starts on its own Home");
+            assert_ne!(sessions.active_id(), a_home, "tab ids never collide");
+            for name in ["one", "two"] {
+                sessions.open(Route::repository(&repo_summary("shared", name)), cx);
+            }
+            let b_ids: Vec<TabId> = sessions.sessions().iter().map(Session::id).collect();
+            assert_eq!(b_ids.len(), 3);
+            assert!(
+                b_ids.iter().all(|id| !a_ids.contains(id)),
+                "the same repository in two accounts gets two different tab ids"
+            );
+
+            // Back to A: same ids, same order, same active tab.
+            assert!(sessions.show(Some(a.clone()), cx));
+            assert_eq!(
+                sessions
+                    .sessions()
+                    .iter()
+                    .map(Session::id)
+                    .collect::<Vec<_>>(),
+                a_ids
+            );
+            assert_eq!(sessions.active_id(), a_active);
+            assert_eq!(sessions.route(), &Route::Settings);
+
+            // B is untouched by the round trip.
+            assert!(sessions.show(Some(b), cx));
+            assert_eq!(
+                sessions
+                    .sessions()
+                    .iter()
+                    .map(Session::id)
+                    .collect::<Vec<_>>(),
+                b_ids
+            );
+            assert_eq!(sessions.sessions().len(), 3);
+            assert_eq!(sessions.remembered_count(), 2);
+        });
+    }
+
+    /// Restoring an account reuses the remembered navigation but advances the workspace's
+    /// incarnation, so a page controller cannot treat old content as current authorization.
+    #[gpui::test]
+    fn returning_to_an_account_advances_its_incarnation(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let a = AccountKey::new(1, HostId::github());
+            let b = AccountKey::new(2, HostId::github());
+            let mut sessions = Sessions::new(cx);
+            assert_eq!(
+                sessions.incarnation(),
+                0,
+                "the logged-out workspace is the first"
+            );
+
+            sessions.show(Some(a.clone()), cx);
+            assert_eq!(sessions.incarnation(), 1);
+            sessions.open(Route::repository(&repo_summary("shared", "one")), cx);
+            assert_eq!(
+                sessions.incarnation(),
+                1,
+                "opening a tab is not an activation"
+            );
+
+            sessions.show(Some(b.clone()), cx);
+            assert_eq!(sessions.incarnation(), 1, "B's workspace is new");
+
+            sessions.show(Some(a.clone()), cx);
+            assert_eq!(sessions.incarnation(), 2, "returning is a new activation");
+            assert_eq!(
+                sessions.sessions().len(),
+                2,
+                "the tabs are still remembered"
+            );
+            assert_eq!(sessions.remembered_count(), 2);
+
+            // Showing the same account again is not a change and does not advance it.
+            assert!(!sessions.show(Some(a), cx));
+            assert_eq!(sessions.incarnation(), 2);
+            // The logged-out workspace is restored too, from where it was left.
+            assert!(sessions.show(None, cx));
+            assert_eq!(sessions.route(), &Route::Home);
+            assert_eq!(sessions.incarnation(), 1);
         });
     }
 }

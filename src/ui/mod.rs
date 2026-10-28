@@ -20,10 +20,17 @@ use gpui::{
 };
 
 use crate::{
+    app::{
+        AccountsHandle,
+        accounts::{Accounts, Snapshot},
+    },
+    domain::{AccountKey, AccountSummary, RepoSummary},
     platform::fonts,
-    workspace::{OpenResult, Route, TabId, Workspace},
+    ui::accounts::RepositoryPreview,
+    workspace::{OpenResult, Route, Sessions, TabId},
 };
 
+pub mod accounts;
 mod chrome;
 pub mod fixtures;
 pub(crate) mod geometry;
@@ -53,15 +60,26 @@ actions!(
 );
 
 pub struct Shell {
-    workspace: Workspace,
-    repositories: Vec<fixtures::RepoFixture>,
+    /// One workspace per account plus the logged-out one. Deref reaches the visible workspace, so
+    /// routing, tab handling and focus keep one code path.
+    workspace: Sessions,
+    /// The account controller, when the application installed one. The app-global owns the
+    /// controller; the Shell keeps only a weak handle so it never creates a strong cycle that would
+    /// stop the controller's `Drop` (and the account-runtime teardown) from running.
+    accounts: Option<gpui::WeakEntity<Accounts>>,
+    /// The snapshot of the last frame, so the account/sidebar/tab publication can be compared
+    /// across frames instead of being re-read mid-render.
+    account_state: Snapshot,
+    /// Real `/user/repos` rows of the current account. Never fixture data.
+    repositories: Vec<RepoSummary>,
+    /// One tab stop per repository row, rebuilt when the row set changes.
+    repo_focus: Vec<FocusHandle>,
+    repo_ident: (Option<AccountKey>, usize),
     root_focus: FocusHandle,
     repo_scroll: ScrollHandle,
     repo_smooth: scroll::Motion<gpui::ScrollHandle>,
     /// Visibility and thumb drag belong only to the repository viewport.
     repo_bars: scroll::Bars,
-    /// One tab stop per repository row.
-    repo_focus: Vec<FocusHandle>,
     /// The repository row last scrolled into view, so a still focus does not scroll every frame.
     revealed_row: Option<usize>,
     palette: Option<palette::Session>,
@@ -179,10 +197,20 @@ impl Shell {
         // ahead of the long repository list, so keyboard navigation reaches them directly.
         let search_focus = cx.focus_handle().tab_stop(true).tab_index(-1);
         let repo_scroll = ScrollHandle::new();
-        let repositories = fixtures::repositories();
+        // The account controller is installed by `app::run` before this window is created. Its
+        // first publication decides the logged-out or signed-in shell; no fixture account or
+        // fixture repository list is ever used as a starting value.
+        let accounts = AccountsHandle::get(cx);
+        let account_state = accounts
+            .as_ref()
+            .map(|accounts| accounts.read(cx).snapshot().clone())
+            .unwrap_or_else(Snapshot::logged_out_unavailable);
+        let accounts = accounts.map(|accounts| accounts.downgrade());
+        let repositories = account_state.repositories.rows().to_vec();
         let repo_focus = (0..repositories.len())
             .map(|_| cx.focus_handle().tab_stop(true))
             .collect::<Vec<_>>();
+        let repo_ident = (account_state.active.clone(), repositories.len());
         let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
             if !window.is_window_active() {
                 scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
@@ -265,13 +293,16 @@ impl Shell {
             sidebar_menu_cursor: 0,
             sidebar_state: sidebar_state::SidebarState::default(),
             sidebar_activation,
-            workspace: Workspace::new(cx),
+            workspace: Sessions::new(cx),
+            accounts: accounts.clone(),
+            account_state,
             repositories,
             root_focus,
             repo_smooth: scroll::Motion::new(repo_scroll.clone()),
             repo_bars: scroll::Bars::new(),
             repo_scroll,
             repo_focus,
+            repo_ident,
             revealed_row: None,
             palette: None,
             restore_focus: false,
@@ -299,7 +330,88 @@ impl Shell {
                     shell.end_drags_on_blur(window, cx);
                 }
             }));
+        // Publish the controller's state as soon as it changes: an account switch, a repository
+        // list arriving, or a restore finishing. The projection runs once per change, not per
+        // frame, and never on a background thread.
+        if let Some(accounts) = accounts.as_ref().and_then(|weak| weak.upgrade()) {
+            let accounts_weak = accounts.downgrade();
+            cx.observe(&accounts, move |shell, _, cx| {
+                // The observer carries only a weak handle to the controller; the closure must not
+                // keep it alive forever, or its Drop (and the account-runtime teardown) never runs.
+                if let Some(accounts) = accounts_weak.upgrade() {
+                    shell.sync_accounts(Some(&accounts), cx);
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+        this.sync_accounts(
+            accounts.as_ref().and_then(|weak| weak.upgrade()).as_ref(),
+            cx,
+        );
         this
+    }
+
+    /// Projects the account controller's snapshot into the shell: the visible workspace, the
+    /// repository rows, their tab stops and the stored account identity.
+    ///
+    /// The account is taken from authoritative service state every time. Nothing here trusts a
+    /// reply, an optimistic selection or an injected request; the controller only publishes a
+    /// settled account, and this projection only reads it.
+    fn sync_accounts(&mut self, accounts: Option<&gpui::Entity<Accounts>>, cx: &mut Context<Self>) {
+        let Some(accounts) = accounts.cloned() else {
+            return;
+        };
+        let snapshot = accounts.read(cx).snapshot().clone();
+        let visible = snapshot.active.clone();
+        let ident = (visible.clone(), snapshot.repositories.len());
+        if self.account_state.active != snapshot.active
+            || self.repo_ident != ident
+            || self.account_state.repositories != snapshot.repositories
+        {
+            if self.workspace.show(visible, cx) {
+                // A new visible workspace: nothing from the previous account may stay active.
+                self.cancel_account_scoped_view_state(cx);
+            }
+            self.repositories = snapshot.repositories.rows().to_vec();
+            self.repo_focus = (0..self.repositories.len())
+                .map(|_| cx.focus_handle().tab_stop(true))
+                .collect();
+            self.repo_ident = ident;
+            self.revealed_row = None;
+            // The row set changed under the pointer: an in-flight reveal or wheel target is stale.
+            scroll::cancel_region(&mut self.repo_bars, &self.repo_smooth);
+            self.repo_scroll
+                .set_offset(gpui::Point::new(gpui::Pixels::ZERO, gpui::Pixels::ZERO));
+        }
+        self.account_state = snapshot;
+    }
+
+    /// Drops every piece of view state that belonged to the workspace that just stopped being
+    /// visible. The remembered tabs themselves keep their scroll, focus and repository selection;
+    /// what is dropped is the shell's own transient state and any pending background reveal.
+    fn cancel_account_scoped_view_state(&mut self, cx: &mut Context<Self>) {
+        self.close_palette(cx);
+        // The tab drag carries a TabId from the workspace that is no longer visible.
+        self.tab_drag = None;
+        self.tab_motion.cancel();
+        self.tab_bars
+            .hold(false, self.tab_now_ms(), cx.reduce_motion());
+        self.repo_smooth.cancel();
+        self.revealed_tab = None;
+        self.focused_tab = None;
+        self.tab_reach = gpui::Pixels::ZERO;
+        self.sidebar_state.menu_open.set(false);
+        self.sidebar_menu = false;
+    }
+
+    /// The active account's identity, for the sidebar row and the Profile page.
+    fn active_account(&self) -> Option<&AccountSummary> {
+        let active = self.account_state.active.as_ref()?;
+        self.account_state
+            .accounts
+            .iter()
+            .find(|summary| &summary.identity.key == active)
     }
 
     /// Ends the tab drag and the thumb drag without a drop, and lets the bar fade back to the
@@ -316,6 +428,27 @@ impl Shell {
         cx.notify();
     }
 
+    /// Replaces the shell's repository rows in tests, exactly as a real `/user/repos` result would
+    /// populate them. Production only ever takes them from the account controller.
+    #[cfg(test)]
+    pub fn set_repositories(&mut self, rows: Vec<RepoSummary>, cx: &mut Context<Self>) {
+        self.repositories = rows;
+        self.repo_focus = (0..self.repositories.len())
+            .map(|_| cx.focus_handle().tab_stop(true))
+            .collect();
+        self.revealed_row = None;
+        cx.notify();
+    }
+
+    /// Sets the real account identity used by the account row and the profile page in tests that
+    /// do not need the network path. Production only ever reads this from the service snapshot.
+    #[cfg(test)]
+    pub fn set_account(&mut self, summary: Option<AccountSummary>, cx: &mut Context<Self>) {
+        self.account_state.accounts = summary.clone().into_iter().collect();
+        self.account_state.active = summary.map(|summary| summary.identity.key);
+        cx.notify();
+    }
+
     /// The current page, inspected by the routing tests.
     #[cfg(test)]
     pub fn route(&self) -> Route {
@@ -324,7 +457,7 @@ impl Shell {
 
     /// The local fixture list behind the sidebar, inspected by the layout tests.
     #[cfg(test)]
-    pub fn repositories(&self) -> &[fixtures::RepoFixture] {
+    pub fn repositories(&self) -> &[RepoSummary] {
         &self.repositories
     }
 
@@ -872,15 +1005,17 @@ impl Shell {
         let route = match value {
             "nav:home" => Some(Route::Home),
             "nav:settings" => Some(Route::Settings),
-            "nav:profile" => Some(Route::Profile),
+            "nav:profile" if self.active_account().is_some() => Some(Route::Profile),
             "nav:notifications" => Some(Route::Notifications),
             "nav:issues" => Some(Route::Issues),
             "nav:pull-requests" => Some(Route::PullRequests),
+            // Repository commands come from the same current-account list the sidebar draws, so
+            // the palette cannot reach a resource the sidebar does not have.
             other => match other.strip_prefix("repo:") {
                 Some(full_name) => self
                     .repositories
                     .iter()
-                    .find(|repo| repo.full_name() == full_name)
+                    .find(|repo| repo.full_name.eq_ignore_ascii_case(full_name))
                     .map(Route::repository),
                 None => None,
             },
@@ -891,6 +1026,47 @@ impl Shell {
             }
             None => { /* Not reachable: the card only offers known values. */ }
         }
+    }
+
+    /// Maps the controller's repository state to the sidebar's status and its one explicit refresh
+    /// action. The Refresh here is scoped to this list; the fixed tab-toolbar Refresh stays disabled
+    /// and unrelated.
+    fn repository_list_status(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> (Option<sidebar::RepositoryStatus>, Option<gpui::AnyElement>) {
+        let state = &self.account_state.repositories;
+        let loading = matches!(state.preview, RepositoryPreview::Loading);
+        let can_refresh = self
+            .accounts
+            .as_ref()
+            .is_some_and(|weak| weak.upgrade().is_some())
+            && state.account.is_some()
+            && !loading;
+        let (incomplete, message) = match &state.preview {
+            RepositoryPreview::Ready(outcome) => {
+                sidebar::list_status(&outcome.readiness, outcome.repositories.len())
+            }
+            RepositoryPreview::Failed(message) => (true, message.clone()),
+            RepositoryPreview::Loading => {
+                (false, "Reading the visible repository set…".to_string())
+            }
+            RepositoryPreview::Idle(message) => (false, message.clone()),
+        };
+        let refresh = self.accounts.clone();
+        let status = sidebar::RepositoryStatus {
+            message: Some(message),
+            incomplete,
+            loading,
+            can_refresh,
+            on_refresh: std::rc::Rc::new(move |_, cx| {
+                if let Some(accounts) = &refresh {
+                    let _ = accounts.update(cx, |accounts, cx| accounts.refresh(cx));
+                }
+            }),
+        };
+        let line = sidebar::repository_status(&status, cx);
+        (Some(status), line)
     }
 
     fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -949,8 +1125,19 @@ impl Shell {
             .children([home, settings])
             .into_any_element();
 
-        let heading =
-            sidebar::group_heading(format!("Repositories ({})", self.repositories.len()), cx);
+        let (status, status_line) = self.repository_list_status(cx);
+        let heading = sidebar::group_heading(
+            format!("Repositories ({})", self.repositories.len()),
+            status.as_ref(),
+            cx,
+        );
+        let heading = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(heading)
+            .children(status_line)
+            .into_any_element();
         // A row reached with Tab must be visible: otherwise its focus ring and Enter's target sit
         // outside the viewport. Done in render, before this frame's prepaint, so the scroll and the
         // focused row land in the same frame; the stored index keeps a still focus from re-scrolling.
@@ -1044,15 +1231,41 @@ impl Shell {
             cx,
         );
 
+        // The account row is the real `/user` identity of the active account. Logged out, it is an
+        // honest sign-in entry: no name, login, status or profile route is invented.
         let account = {
             let this = this.clone();
+            let target = if self.active_account().is_some() {
+                Some(Route::Profile)
+            } else {
+                None
+            };
+            let display = self.active_account().map(|summary| {
+                let name = summary
+                    .identity
+                    .display_name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&summary.identity.login)
+                    .to_string();
+                sidebar::AccountDisplay::new(name, summary.identity.login.clone())
+            });
             sidebar::account_row(
-                fixtures::ACCOUNT,
+                display,
                 route == Route::Profile,
                 frame,
                 move |window, cx| {
-                    this.update(cx, |shell, cx| {
-                        shell.navigate(Route::Profile, window, cx);
+                    let target = target.clone();
+                    this.update(cx, |shell, cx| match target {
+                        Some(target) => {
+                            shell.navigate(target, window, cx);
+                        }
+                        None => {
+                            // Signed out: the same reachable sign-in path as the palette, so the
+                            // entry does something honest instead of opening a fake profile.
+                            shell.navigate(Route::Settings, window, cx);
+                            shell.focus_accounts_form(window, cx);
+                        }
                     });
                 },
                 cx,
@@ -1130,17 +1343,124 @@ impl Shell {
         sidebar::sidebar(nav, heading, repositories, account, quarters, frame, cx)
     }
 
+    /// Settings › Accounts. The minimal account surface: only the operations the accepted account
+    /// preview already defined (add, select, replace PAT, revalidate), plus the current directory
+    /// state. No general settings design, no account deletion, no logout and no cache policy.
+    fn settings_accounts(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(controller) = self.accounts.as_ref().and_then(|weak| weak.upgrade()) else {
+            return div()
+                .debug_selector(|| "settings-accounts-unavailable".to_string())
+                .p_6()
+                .child("Account services are not available in this build.")
+                .into_any_element();
+        };
+        let snapshot = controller.read(cx).snapshot().clone();
+        let replacing =
+            self.account_state.active.is_some() && controller.read(cx).replacing().is_some();
+        let busy = controller.read(cx).busy();
+        let restored = snapshot.accounts.iter().any(|summary| {
+            summary.authorization == crate::domain::account::AuthorizationState::PendingVerification
+        });
+        let callbacks =
+            crate::app::accounts::callbacks(controller.clone(), snapshot.status.clone());
+        let section = crate::ui::accounts::accounts_section(
+            crate::ui::accounts::AccountsSection {
+                token: crate::ui::accounts::TokenForm {
+                    token_input: controller.read(cx).token_input().clone(),
+                    replacing,
+                    busy,
+                    callbacks: &callbacks,
+                },
+                accounts: snapshot.accounts,
+                active: snapshot.active,
+                restored,
+                status: snapshot.status,
+            },
+            cx,
+        );
+        div()
+            .debug_selector(|| "page-settings".to_string())
+            .w_full()
+            .px_6()
+            .py_5()
+            .child(section)
+            .into_any_element()
+    }
+
+    /// Moves focus to the masked PAT field, used by the logged-out sidebar entry so it lands on a
+    /// real control instead of an empty page.
+    pub fn focus_accounts_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(controller) = self.accounts.as_ref().and_then(|weak| weak.upgrade()) else {
+            return;
+        };
+        let input = controller.read(cx).token_input().clone();
+        let focus = gpui::Focusable::focus_handle(input.read(cx), cx);
+        window.focus(&focus, cx);
+    }
+
     /// The island: the session tab strip, then the active page's own scroll area.
     fn island(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let colors = &theme.colors;
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
         let strip = self.tab_strip(window, cx);
-        let session = self.workspace.active();
-        let body = page::page(session, &self.repositories, cx);
-        let scroll = session.state().scroll.clone();
-        let smooth = session.state().smooth.clone();
-        let focus = session.state().focus.clone();
+        let settings_route = self.workspace.route() == &Route::Settings;
+        let session_id = self.workspace.active_id();
+        let settings = settings_route.then(|| self.settings_accounts(window, cx));
+        let account = self.active_account().cloned();
+        let (body, scroll, smooth, focus) = {
+            let session = self.workspace.active();
+            let body = page::page(
+                session,
+                page::PageData {
+                    account: account.as_ref(),
+                    repositories: &self.repositories,
+                    settings,
+                },
+                cx,
+            );
+            (
+                body,
+                session.state().scroll.clone(),
+                session.state().smooth.clone(),
+                session.state().focus.clone(),
+            )
+        };
+        let session_id_value = session_id.get();
+        // Settings › Accounts is not a second scrolling stack: it is the session's page region, so
+        // its bar targets the very `Motion` the page's wheel overlay already drives. One handle,
+        // one easing, one fade and one drag owner; nothing here re-implements `ui::scroll`.
+        let now = self.tab_now_ms();
+        let settings_bar = if settings_route {
+            let owner = cx.entity_id();
+            let bars = self
+                .workspace
+                .state_mut(session_id)
+                .expect("the active session is present");
+            let opacity = bars.bars.opacity(now);
+            let on_drag = account_scroll_drag(cx.entity(), session_id);
+            Some(
+                scroll::Bar {
+                    target: &bars.smooth,
+                    id: scroll::BarId {
+                        owner,
+                        name: "settings-scrollbar-y",
+                        axis: gpui::Axis::Vertical,
+                    },
+                    placement: scroll::Placement::overlay(4.0, 8.0),
+                    style: scroll::Style::DEFAULT,
+                    opacity,
+                    on_drag,
+                }
+                .render(cx),
+            )
+        } else {
+            None
+        };
 
         div()
             .debug_selector(|| "island".to_string())
@@ -1170,7 +1490,7 @@ impl Shell {
                         // One element per session id, so element state never carries over
                         // between pages.
                         div()
-                            .id(("island-page", session.id().get()))
+                            .id(("island-page", session_id_value))
                             .debug_selector(|| "island-page".to_string())
                             .size_full()
                             .overflow_y_scroll()
@@ -1179,9 +1499,25 @@ impl Shell {
                             .overflow_x_hidden()
                             .track_scroll(&scroll)
                             .track_focus(&focus)
+                            .when(settings_route, |page| {
+                                // The account page region owns one `Bars`: its bar only shows while
+                                // the pointer is inside this region, exactly like the sidebar and
+                                // the tab strip.
+                                page.on_hover(cx.listener(|shell, hovered: &bool, _, cx| {
+                                    let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                                    let now = shell.tab_now_ms();
+                                    let id = shell.workspace.active_id();
+                                    if let Some(state) = shell.workspace.state_mut(id)
+                                        && state.bars.hover(*hovered, now, reduced)
+                                    {
+                                        cx.notify();
+                                    }
+                                }))
+                            })
                             .child(body),
                     )
-                    .child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth)),
+                    .child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth))
+                    .children(settings_bar),
             )
             .into_any_element()
     }
@@ -1597,6 +1933,23 @@ impl Shell {
         self.palette = Some(session);
         Some(card)
     }
+}
+
+/// The thumb-drag hook for the account page region. It is a free function so it can be handed to
+/// `scroll::Bar` without borrowing the shell for the whole frame.
+fn account_scroll_drag(owner: gpui::Entity<Shell>, id: TabId) -> scroll::OnDragging {
+    Rc::new(move |axis, dragging, _, cx| {
+        owner.update(cx, |shell, cx| {
+            let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+            let now = shell.tab_now_ms();
+            let Some(state) = shell.workspace.state_mut(id) else {
+                return;
+            };
+            if state.bars.drag(&state.smooth, axis, dragging, now, reduced) {
+                cx.notify();
+            }
+        });
+    })
 }
 
 impl Render for Shell {

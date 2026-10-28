@@ -1,14 +1,12 @@
-// Module tree for the standalone account preview and its integration tests.
-// Every path is relative to this file, so Windows and Linux resolve the same
-// real account modules without copying their implementations.
-// The example and test entry use different subsets of the shared modules.
+// The developer-only account example's module assembly.
+//
+// `examples/account.rs` and `tests/account.rs` each declare the product modules they need directly
+// at their own crate root (`app::accounts`, `ui::accounts`, `ui::scroll`), because those modules
+// resolve `crate::app::accounts::…` and `crate::ui::accounts::…` paths internally. Declaring them
+// here inside a wrapper module would produce a second, incompatible copy of the product types —
+// exactly what a thin assembly must avoid.
+//
+// This file therefore only records that contract for the two entry points; it deliberately
+// re-exports nothing. Keep the two entry points' `#[path]` declarations in sync instead of adding
+// code here.
 #![allow(dead_code, unused_imports)]
-
-#[path = "../ui/accounts/mod.rs"]
-pub mod accounts;
-#[path = "../app/accounts/mod.rs"]
-pub mod bridge;
-#[path = "../ui/geometry.rs"]
-pub mod geometry;
-#[path = "../ui/scroll/mod.rs"]
-pub mod scroll;

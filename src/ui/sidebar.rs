@@ -17,8 +17,10 @@ use gpui::{
     ParentElement, Role, ScrollHandle, Styled, Window, div, prelude::*, px, transparent_black,
 };
 
+use crate::domain::RepoSummary;
+use crate::domain::repo::{PartialReason, ReposReadiness};
+
 use super::{
-    fixtures::{AccountFixture, RepoFixture},
     geometry::{
         ACCOUNT_ROW_HEIGHT, FOOTER_DIVIDER_HEIGHT, FOOTER_DIVIDER_SPACE, REPO_LEFT_PADDING,
         REPO_ROW_HEIGHT, SIDEBAR_INDICATOR_HEIGHT_RATIO, SIDEBAR_INDICATOR_MAX_HEIGHT,
@@ -30,6 +32,30 @@ use super::{
 };
 
 type Run = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+type SharedRun = std::rc::Rc<dyn Fn(&mut Window, &mut App) + 'static>;
+
+/// What the account row draws. Built from the real `GET /user` identity of the active account, or
+/// from nothing at all while logged out — there is no placeholder identity in the product.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AccountDisplay {
+    pub name: String,
+    pub login: String,
+    /// Placeholder GitHub user status (emoji + label). The status button is not wired to a write.
+    pub status_emoji: &'static str,
+    pub status_label: &'static str,
+}
+
+impl AccountDisplay {
+    pub(super) fn new(name: String, login: String) -> Self {
+        Self {
+            name,
+            login,
+            // The status button stays the accepted placeholder; no status is read or written.
+            status_emoji: "\u{1F4BB}",
+            status_label: "Coding",
+        }
+    }
+}
 
 impl super::Shell {
     pub(super) fn sidebar_divider(
@@ -325,7 +351,7 @@ fn marked(row: AnyElement, active: bool, row_height: f32, cx: &App) -> AnyElemen
 /// scrolled into view; a row that is merely clipped would otherwise take focus invisibly.
 pub(super) fn repo_row(
     index: usize,
-    repo: &RepoFixture,
+    repo: &RepoSummary,
     focus: &FocusHandle,
     active: bool,
     frame: SidebarFrame,
@@ -345,8 +371,8 @@ pub(super) fn repo_row(
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (REPO_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
-    let full_name = repo.full_name();
-    let avatar_name = repo.namespace.clone();
+    let full_name = repo.full_name.clone();
+    let avatar_name = repo.owner.login.clone();
     let run: Run = Box::new(run);
     let row = div()
         .id(("repo-row", index))
@@ -402,11 +428,14 @@ pub(super) fn repo_row(
     marked(row, active, height, cx)
 }
 
-/// The signed-in account. Only the compact avatar/name/@id cluster opens the profile; the row
+/// The account row. Signed in, only the compact avatar/name/@id cluster opens the profile; the row
 /// itself is not a button and does not light up as a whole. Expanded mode adds a separate
 /// placeholder status button on the right.
+///
+/// Logged out there is no identity to draw: the same control becomes a plain "Sign in" entry with
+/// no name, login or status, so the sidebar never shows an account that is not there.
 pub(super) fn account_row(
-    account: AccountFixture,
+    account: Option<AccountDisplay>,
     active: bool,
     frame: SidebarFrame,
     run: impl Fn(&mut Window, &mut App) + 'static,
@@ -419,13 +448,93 @@ pub(super) fn account_row(
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (ACCOUNT_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
+    let run: Run = Box::new(run);
+
+    let Some(account) = account else {
+        let sign_in_label = "Sign in to read your repositories";
+        let identity = div()
+            .id("account-identity")
+            .debug_selector(|| "account-identity".to_string())
+            .debug_selector(|| "account-signed-out".to_string())
+            .flex()
+            .items_center()
+            .min_w_0()
+            .gap(px(8.0 * frame.expansion))
+            .rounded(theme.radius(Radius::Sm))
+            .border_1()
+            .border_color(transparent_black())
+            .role(Role::Button)
+            .aria_label(sign_in_label)
+            .cursor_pointer()
+            .tab_index(0)
+            .focus(move |style| style.border_color(focus))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(move |_, window, cx| run(window, cx))
+            .tooltip(Tooltip::text(sign_in_label))
+            .child(
+                div()
+                    .debug_selector(|| "sidebar-account-avatar".to_string())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(avatar_side(cx, frame.expansion))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(colors.border)
+                    .child(
+                        Icon::new(IconName::User)
+                            .size(IconSize::Sm)
+                            .color(colors.fg_muted),
+                    ),
+            )
+            .when(!collapsed, |identity| {
+                identity.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .opacity(frame.expansion)
+                        .child(
+                            div()
+                                .debug_selector(|| "account-name".to_string())
+                                .text_size(name_size)
+                                .text_color(fg)
+                                .child(Ellipsis::new("Sign in")),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "account-login".to_string())
+                                .text_size(login_size)
+                                .text_color(subtle)
+                                .child(Ellipsis::new("No account active")),
+                        ),
+                )
+            });
+        let row = div()
+            .id("account-row")
+            .debug_selector(|| "account-row".to_string())
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(height))
+            .overflow_hidden()
+            .w_full()
+            .min_w_0()
+            .when(collapsed, |row| row.justify_center())
+            .when(!collapsed, |row| row.pr(px(3.0 + 5.0 * frame.expansion)))
+            .text_color(fg)
+            .child(identity)
+            .into_any_element();
+        return marked(row, active, height, cx);
+    };
+
     let identity_label = format!("Profile: {} (@{})", account.name, account.login);
     let collapsed_label = format!(
         "{} (@{}) · {} {}",
         account.name, account.login, account.status_emoji, account.status_label
     );
     let status_label = format!("Status: {}", account.status_label);
-    let run: Run = Box::new(run);
 
     let identity = div()
         .id("account-identity")
@@ -454,7 +563,7 @@ pub(super) fn account_row(
             identity_label.clone()
         }))
         .child(SidebarAvatar {
-            name: account.name.into(),
+            name: account.name.clone().into(),
             expansion: frame.expansion,
         })
         .when(!collapsed, |identity| {
@@ -469,7 +578,7 @@ pub(super) fn account_row(
                             .debug_selector(|| "account-name".to_string())
                             .text_size(name_size)
                             .text_color(fg)
-                            .child(Ellipsis::new(account.name)),
+                            .child(Ellipsis::new(account.name.clone())),
                     )
                     .child(
                         div()
@@ -530,6 +639,14 @@ pub(super) fn account_row(
         .when(!collapsed, |row| row.child(status))
         .into_any_element();
     marked(row, active, height, cx)
+}
+
+/// The account avatar's interpolated diameter, shared by the signed-in and signed-out rows.
+fn avatar_side(cx: &App, expansion: f32) -> gpui::Rems {
+    let theme = cx.theme();
+    let small = theme.avatar_size(AvatarSize::Xs);
+    let large = theme.avatar_size(AvatarSize::Md);
+    small + (large - small) * expansion
 }
 
 /// Account-only interpolated avatar. Ely Avatar exposes enum sizes, so use its initials/tint
@@ -650,19 +767,110 @@ pub(super) fn quarter_row(buttons: [AnyElement; 4]) -> AnyElement {
         .into_any_element()
 }
 
-/// A quiet group heading above the repository list.
-pub(super) fn group_heading(text: String, cx: &App) -> AnyElement {
+/// A quiet group heading above the repository list. `Repositories (N)` keeps the accepted layout;
+/// the optional second line reports loading, partial or failed reads instead of implying an empty
+/// list, and the explicit refresh is scoped to this list only.
+pub(super) struct RepositoryStatus {
+    pub message: Option<String>,
+    /// Only a genuine incomplete read is a warning; an empty complete list is not.
+    pub incomplete: bool,
+    /// Whether a read is currently running.
+    pub loading: bool,
+    /// Whether the refresh button can run.
+    pub can_refresh: bool,
+    /// Only the current account's repository read is refreshed.
+    pub on_refresh: SharedRun,
+}
+
+pub(super) fn group_heading(
+    text: String,
+    status: Option<&RepositoryStatus>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
+    let colors = &theme.colors;
     div()
         .debug_selector(|| "repo-heading".to_string())
+        .flex()
+        .items_center()
+        .gap_2()
         .flex_none()
         .pl(px(SIDEBAR_PADDING + 8.0))
         .pt_1()
         .text_size(theme.text_size(TextSize::Xs))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.colors.fg_subtle)
-        .child(text)
+        .text_color(colors.fg_subtle)
+        .child(div().min_w_0().child(text))
+        .when_some(status, |heading, status| {
+            heading.child(
+                div().flex_none().child(
+                    ely_core::buttons::Button::new(
+                        "repo-refresh",
+                        if status.loading {
+                            "Reading…"
+                        } else {
+                            "Refresh"
+                        },
+                    )
+                    .size(ely_core::theme::ControlSize::Sm)
+                    .disabled(!status.can_refresh || status.loading)
+                    .on_click({
+                        let run = status.on_refresh.clone();
+                        move |_, window, cx| run(window, cx)
+                    }),
+                ),
+            )
+        })
         .into_any_element()
+}
+
+/// The small status line under the heading: partial lists remain usable, but the reason they are
+/// incomplete stays visible next to them.
+pub(super) fn repository_status(status: &RepositoryStatus, cx: &App) -> Option<AnyElement> {
+    let message = status.message.as_deref()?;
+    let theme = cx.theme();
+    let colors = &theme.colors;
+    Some(
+        div()
+            .debug_selector(|| "repo-list-status".to_string())
+            .pl(px(SIDEBAR_PADDING + 8.0))
+            .pr_2()
+            .text_size(theme.text_size(TextSize::Xs))
+            .text_color(if status.incomplete {
+                colors.warning
+            } else {
+                colors.fg_subtle
+            })
+            .child(message.to_string())
+            .into_any_element(),
+    )
+}
+
+/// Maps the real list outcome to a small, honest status. Complete/Partial come from `/user/repos`
+/// pagination; a failure is never described as a complete empty set.
+pub(super) fn list_status(readiness: &ReposReadiness, count: usize) -> (bool, String) {
+    match readiness {
+        ReposReadiness::Complete => (
+            false,
+            if count == 0 {
+                "This account has a complete empty repository set.".to_string()
+            } else {
+                format!("Complete set of {count} repositories.")
+            },
+        ),
+        ReposReadiness::Partial { reason } => (
+            true,
+            match reason {
+                PartialReason::PageFailed { .. } => {
+                    "Partial list: a later page failed. Shown rows are still usable.".to_string()
+                }
+                PartialReason::SsoPartial { organizations } => format!(
+                    "Partial list: organization SSO authorization is required for {}.",
+                    organizations.join(", ")
+                ),
+            },
+        ),
+    }
 }
 
 /// The collapsed rail's overflow trigger and menu.
@@ -1083,7 +1291,6 @@ pub(super) fn sidebar(
             sidebar.child(
                 div()
                     .flex_none()
-                    .h(px(24.0 * frame.expansion))
                     .overflow_hidden()
                     .opacity(frame.expansion)
                     .child(heading),

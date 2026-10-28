@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use gpui::{Entity, KeyUpEvent, Keystroke, TestAppContext, VisualContext, VisualTestContext};
 
+use crate::app::AccountsHandle;
+use crate::ui::Shell;
+use crate::workspace::{Route, TabId};
+
 use super::wait_for_shutdown;
 use super::*;
 use crate::auth::InMemoryCredentialStore;
@@ -22,7 +26,29 @@ fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
         ely_core::init_for_tests(cx);
         crate::platform::fonts::register(cx).expect("test fonts");
+        Shell::bind_keys(cx);
     });
+}
+
+/// The real production composition: an application-global account controller and the ordinary
+/// Shell. Tests drive the same entity graph `app::run` creates; only the runtime is injected, so
+/// nothing in the assertions depends on the preview window.
+fn product_shell(
+    cx: &mut TestAppContext,
+    runtime: Option<AccountRuntime>,
+) -> (Entity<Shell>, Entity<Accounts>, &mut VisualTestContext) {
+    setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let accounts = cx.new(|cx| Accounts::new(runtime.map(Arc::new), window, cx));
+        cx.set_global(AccountsHandle(accounts));
+        Shell::new(window, cx)
+    });
+    let controller = cx.read(AccountsHandle::get).expect("installed controller");
+    // Draw the Settings page so the form is mounted, then focus the masked field the way a user
+    // does; the keyboard tests deliver real keystrokes into that same input.
+    show_settings(&view, cx);
+    focus_token(&controller, cx);
+    (view, controller, cx)
 }
 
 fn user(id: u64, login: &str) -> HttpResponse {
@@ -75,43 +101,81 @@ fn open(
     (AccountRuntime::new(accounts, executor.clone()), executor)
 }
 
-fn preview(
-    cx: &mut TestAppContext,
-    runtime: AccountRuntime,
-) -> (Entity<AccountPreview>, &mut VisualTestContext) {
-    setup(cx);
-    cx.add_window_view(|window, cx| AccountPreview::with_runtime(runtime, window, cx))
+/// Drains the controller the same way its 50ms background beat does, but synchronously, so a test
+/// can assert a state transition rather than sleeping a fixed number of frames.
+fn pump(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+    controller.update(cx, |accounts, cx| accounts.drain(cx));
+    cx.run_until_parked();
 }
 
 fn wait_for(
-    view: &Entity<AccountPreview>,
+    controller: &Entity<Accounts>,
     cx: &mut VisualTestContext,
-    condition: impl Fn(&Presentation) -> bool,
+    condition: impl Fn(&Snapshot) -> bool,
 ) {
     for _ in 0..400 {
-        view.update(cx, |view, cx| view.drain(cx));
-        cx.run_until_parked();
+        pump(controller, cx);
         std::thread::sleep(Duration::from_millis(5));
-        if view.read_with(cx, |view, _| condition(&view.presentation)) {
+        if controller.read_with(cx, |accounts, _| condition(accounts.snapshot())) {
             return;
         }
     }
-    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
-    panic!("preview did not settle: {presentation:?}");
+    let snapshot = controller.read_with(cx, |accounts, _| accounts.snapshot().clone());
+    panic!("the account controller did not settle: {snapshot:?}");
 }
 
-fn put_token(view: &Entity<AccountPreview>, cx: &mut VisualTestContext, token: &str) {
-    view.update(cx, |view, cx| {
-        view.input.update(cx, |input, cx| input.set_text(token, cx));
+fn put_token(controller: &Entity<Accounts>, cx: &mut VisualTestContext, token: &str) {
+    let input = controller.read_with(cx, |accounts, _| accounts.token_input().clone());
+    input.update(cx, |input, cx| input.set_text(token, cx));
+}
+
+fn focus_token(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        let input = controller.read(cx).token_input().clone();
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Draws the shell and puts the active page on Settings so the form is mounted for real, exactly
+/// as clicking Settings would do it.
+fn show_settings(view: &Entity<Shell>, cx: &mut VisualTestContext) {
+    cx.update_window_entity(view, |shell, window, cx| {
+        shell.navigate(Route::Settings, window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("account-token-form").is_some(),
+        "the Settings page must mount the account form"
+    );
+}
+
+fn submit(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+    cx.update_window_entity(controller, |accounts, window, cx| {
+        accounts.submit(window, cx)
     });
 }
 
-fn submit(view: &Entity<AccountPreview>, cx: &mut VisualTestContext) {
-    cx.update_window_entity(view, |view, window, cx| view.submit(window, cx));
+fn refresh(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+    controller.update(cx, |accounts, cx| accounts.refresh(cx));
+}
+
+fn select(controller: &Entity<Accounts>, id: u64, cx: &mut VisualTestContext) {
+    let key = AccountKey::new(id, HostId::github());
+    controller.update(cx, |accounts, cx| accounts.select(key, cx));
+}
+
+fn snapshot(controller: &Entity<Accounts>, cx: &mut VisualTestContext) -> Snapshot {
+    controller.read_with(cx, |accounts, _| accounts.snapshot().clone())
 }
 
 #[gpui::test]
-fn pat_submit_is_masked_cleared_and_real_repos_reach_gpui(cx: &mut TestAppContext) {
+fn pat_submit_is_masked_cleared_and_real_repos_reach_the_shell(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
     let mock = Arc::new(MockTransport::new());
     let host = host_runtime();
@@ -122,227 +186,84 @@ fn pat_submit_is_masked_cleared_and_real_repos_reach_gpui(cx: &mut TestAppContex
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
-    let (view, cx) = preview(cx, runtime);
-    assert!(view.read_with(cx, |view, cx| view.input.read(cx).is_masked()));
-    put_token(&view, cx, "synthetic-never-real");
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    // Before signing in the product has no account identity and no repository rows at all.
+    assert!(view.read_with(cx, |shell, _| shell.repositories().is_empty()));
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Settings
+    );
+    assert!(cx.debug_bounds("account-signed-out").is_some());
+    assert!(cx.debug_bounds("account-status").is_none());
+
+    focus_token(&controller, cx);
+    cx.update(|window, cx| {
+        let input = controller.read(cx).token_input().clone();
+        assert!(input.read(cx).is_masked());
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+    });
+    put_token(&controller, cx, "synthetic-never-real");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(view.read_with(cx, |view, cx| view.input.read(cx).is_empty()));
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    assert_eq!(view.read_with(cx, |view, _| view.generation), 1);
-    // A duplicate Enter/click while idle with an empty field cannot submit.
-    cx.simulate_keystrokes("enter");
-    assert_eq!(view.read_with(cx, |view, _| view.generation), 1);
-    view.update(cx, |view, cx| view.refresh(cx));
-    wait_for(
-        &view,
-        cx,
-        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    assert!(controller.read_with(cx, |accounts, cx| {
+        accounts.token_input().read(cx).is_empty()
+    }));
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    assert_eq!(
+        controller.read_with(cx, |accounts, _| accounts.generation),
+        1
     );
-    let debug = view.read_with(cx, |view, _| format!("{:?}", view.presentation));
+
+    // A duplicate Enter with an empty field cannot submit.
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        controller.read_with(cx, |accounts, _| accounts.generation),
+        1
+    );
+
+    // The real identity reached the Shell's own sidebar, and the real account page is reachable.
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 0);
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("account-signed-out").is_none());
+    assert!(cx.debug_bounds("account-name").is_some());
+    assert!(cx.debug_bounds("account-login").is_some());
+
+    // The same controller drives the sidebar list and the palette; the fixed toolbar refresh is
+    // not repurposed, only the list's own refresh reads repositories.
+    refresh(&controller, cx);
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    let snap = snapshot(&controller, cx);
+    println!("snapshot after A refresh: {:?}", snap.repositories.preview);
+    println!(
+        "shell rows: {}",
+        view.read_with(cx, |shell, _| shell.repositories().len())
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories()[0].full_name.clone()),
+        "alice/alpha"
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("repo-row-0")
+            .map(|b| b.size.width > gpui::Pixels::ZERO),
+        Some(true)
+    );
+    let debug = controller.read_with(cx, |accounts, _| format!("{:?}", accounts.snapshot()));
     assert!(!debug.contains("synthetic-never-real"));
-}
-
-fn frames(cx: &mut VisualTestContext) {
-    for _ in 0..3 {
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-    }
-}
-
-fn bounds(selector: &'static str, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
-    cx.debug_bounds(selector)
-        .unwrap_or_else(|| panic!("{selector} was not drawn"))
-}
-
-fn drag_outside(
-    cx: &mut VisualTestContext,
-    start: gpui::Point<gpui::Pixels>,
-    delta: gpui::Point<gpui::Pixels>,
-) {
-    cx.simulate_mouse_move(start, None, gpui::Modifiers::none());
-    cx.run_until_parked();
-    cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
-    cx.run_until_parked();
-    for step in 1..=5 {
-        let at = gpui::point(
-            start.x + delta.x * step as f32,
-            start.y + delta.y * step as f32,
-        );
-        cx.simulate_mouse_move(at, gpui::MouseButton::Left, gpui::Modifiers::none());
-        cx.run_until_parked();
-    }
-    let end = gpui::point(start.x + delta.x * 5.0, start.y + delta.y * 5.0);
-    cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
-    cx.run_until_parked();
-}
-
-#[gpui::test]
-fn no_overflow_draws_no_scrollbar_and_keeps_pat_input_usable(cx: &mut TestAppContext) {
-    let temp = tempfile::tempdir().unwrap();
-    let mock = Arc::new(MockTransport::new());
-    let store = Arc::new(InMemoryCredentialStore::new());
-    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    view.update(cx, |view, _| view.bars.snap(true));
-    frames(cx);
-    assert!(cx.debug_bounds("account-preview-scrollbar-y").is_none());
-    put_token(&view, cx, "synthetic");
-    assert_eq!(
-        view.read_with(cx, |view, cx| view.input.read(cx).text().to_string()),
-        "synthetic"
-    );
-}
-
-#[gpui::test]
-fn preview_scrollbar_drags_real_content_and_cleans_up(cx: &mut TestAppContext) {
-    let temp = tempfile::tempdir().unwrap();
-    let mock = Arc::new(MockTransport::new());
-    let names = (0..100)
-        .map(|index| format!("repository-{index}"))
-        .collect::<Vec<_>>();
-    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
-    host_runtime().block_on(async {
-        mock.enqueue(Ok(user(1, "alice"))).await;
-        mock.enqueue(Ok(repos(1, "alice", &names))).await;
-        mock.enqueue(Ok(repos(1, "alice", &["short"]))).await;
-    });
-    let store = Arc::new(InMemoryCredentialStore::new());
-    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    view.update(cx, |view, cx| view.refresh(cx));
-    wait_for(
-        &view,
-        cx,
-        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 100),
-    );
-    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(500.0)));
-    view.update(cx, |view, _| {
-        view.clock_pinned = Some(0);
-        view.bars.snap(true);
-    });
-    frames(cx);
-    // A long result overflows for real: the last row is laid out and the
-    // region reports a reach beyond the viewport.
-    assert!(cx.debug_bounds("repository-preview-row-99").is_some());
-    let reach = view.read_with(cx, |view, _| view.scroll.max_offset());
-    assert!(
-        reach.y > gpui::px(400.0),
-        "100 rows must overflow the viewport: {reach:?}"
-    );
-    let thumb = bounds("account-preview-scrollbar-y-thumb", cx);
-    assert!(thumb.size.height > gpui::px(0.0));
-    assert_eq!(
-        view.read_with(cx, |view, _| view.scroll.offset().y),
-        gpui::px(0.0)
-    );
-
-    // Dragging the shared thumb moves the real content, and releasing outside
-    // ends the drag.
-    drag_outside(
-        cx,
-        thumb.center(),
-        gpui::point(gpui::px(500.0), gpui::px(100.0)),
-    );
-    frames(cx);
-    let offset = view.read_with(cx, |view, _| view.scroll.offset());
-    assert!(offset.y < gpui::px(0.0), "real content moved: {offset:?}");
-    assert_eq!(offset.x, gpui::px(0.0));
-    assert!(view.read_with(cx, |view, _| view.bars.dragging().is_none()));
-
-    // Leaving the region fades the bar out within its 140 ms fade.
-    view.update(cx, |view, cx| {
-        view.bars.hover(false, 0, false);
-        cx.notify();
-    });
-    view.update(cx, |view, _| view.clock_pinned = Some(140));
-    frames(cx);
-    assert_eq!(view.update(cx, |view, _| view.bars.opacity(140)), 0.0);
-
-    // A shorter result re-measures the same handle; the old offset must stay
-    // inside the new range instead of pointing past the shorter content.
-    let previous = view.read_with(cx, |view, _| view.scroll.offset().y);
-    view.update(cx, |view, cx| view.refresh(cx));
-    wait_for(
-        &view,
-        cx,
-        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1),
-    );
-    for _ in 0..12 {
-        frames(cx);
-        let reach = view.read_with(cx, |view, _| view.scroll.max_offset().y);
-        if view.read_with(cx, |view, _| view.scroll.offset().y) >= -reach {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let (offset, reach) = view.read_with(cx, |view, _| {
-        (view.scroll.offset().y, view.scroll.max_offset().y)
-    });
-    assert!(
-        previous < -reach,
-        "the previous offset must have been outside the shorter range: {previous:?} vs {reach:?}"
-    );
-    assert!(
-        offset >= -reach && offset <= gpui::px(0.0),
-        "the shorter range must clamp the offset: {offset:?} vs {reach:?}"
-    );
-    assert!(cx.debug_bounds("repository-preview-row-99").is_none());
-
-    // Once nothing overflows, the bar is not built at all and input still works.
-    let (empty_runtime, _) = {
-        let mock = Arc::new(MockTransport::new());
-        let store = Arc::new(InMemoryCredentialStore::new());
-        open(
-            &temp.path().join("empty.sqlite3"),
-            store,
-            mock as Arc<dyn Transport>,
-        )
-    };
-    let (short_view, short_cx) = preview(cx, empty_runtime);
-    short_cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(1200.0)));
-    short_view.update(short_cx, |view, _| {
-        view.clock_pinned = Some(0);
-        view.bars.snap(true);
-    });
-    frames(short_cx);
-    let short_state = short_view.read_with(short_cx, |view, _| {
-        (view.scroll.offset(), view.scroll.max_offset())
-    });
-    assert_eq!(
-        short_state.1,
-        gpui::point(gpui::px(0.0), gpui::px(0.0)),
-        "the empty preview must fit the tall window"
-    );
-    assert!(
-        short_cx
-            .debug_bounds("account-preview-scrollbar-y")
-            .is_none(),
-        "a region without overflow draws no bar"
-    );
-    put_token(&short_view, short_cx, "still-editable");
-    assert_eq!(
-        short_view.read_with(short_cx, |view, cx| {
-            view.input.read(cx).text().to_string()
-        }),
-        "still-editable",
-        "a hidden bar must not block the PAT field"
-    );
-
-    // Cancel clears hover and drag without a fade; blur does the same.
-    view.update(cx, |view, cx| {
-        view.bars.snap(true);
-        view.cancel_scroll(cx);
-    });
-    assert_eq!(view.update(cx, |view, _| view.bars.opacity(140)), 0.0);
-    cx.deactivate_window();
-    assert!(view.read_with(cx, |view, _| view.bars.dragging().is_none()));
-    assert_eq!(view.update(cx, |view, _| view.bars.opacity(140)), 0.0);
 }
 
 #[gpui::test]
@@ -364,58 +285,70 @@ fn replace_switch_and_restart_restore_use_the_persistent_service(cx: &mut TestAp
         mock.enqueue(Ok(repos(2, "bob", &["bob-repo"]))).await;
     });
     let (runtime, _) = open(&path, store.clone(), mock.clone());
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "first");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    put_token(&view, cx, "second");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 2);
-    let first = AccountKey::new(1, HostId::github());
-    view.update(cx, |view, cx| view.select(first.clone(), cx));
-    wait_for(&view, cx, |state| state.active == Some(first.clone()));
-    view.update(cx, |view, cx| view.replace(first.clone(), cx));
-    put_token(&view, cx, "replacement");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| {
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+    });
+    controller.update(cx, |accounts, cx| {
+        accounts.replace(AccountKey::new(1, HostId::github()), cx)
+    });
+    put_token(&controller, cx, "replacement");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
         state
             .status
             .as_ref()
             .is_some_and(|status| status.text.contains("Replacement PAT verified"))
     });
-    view.update(cx, |view, cx| view.revalidate(first, cx));
-    wait_for(&view, cx, |state| {
+    controller.update(cx, |accounts, cx| {
+        accounts.revalidate(AccountKey::new(1, HostId::github()), cx)
+    });
+    wait_for(&controller, cx, |state| {
         state
             .status
             .as_ref()
             .is_some_and(|status| status.text.contains("revalidated"))
     });
-    let runtime = view.read_with(cx, |view, _| view.runtime.clone().unwrap());
+
+    // The service is closed and reopened on the same real SQLite lease; no state is restored from
+    // the old controller.
+    let runtime = controller.read_with(cx, |accounts, _| accounts.runtime.clone().unwrap());
     host.block_on(runtime.accounts.close()).unwrap();
     drop(runtime);
-    // Release the old view before reopening the SQLite lease.
-    view.update(cx, |view, _| {
-        view.presentation.accounts.clear();
-        if let Some(runtime) = view.runtime.take() {
+    controller.update(cx, |accounts, _| {
+        if let Some(runtime) = accounts.runtime.take() {
             runtime.shutdown();
         }
     });
+    cx.update(|window, _| window.remove_window());
+    drop(view);
+
     let (restored, _) = open(&path, store, mock);
-    let (restored_view, cx) = preview(cx, restored);
-    assert!(restored_view.read_with(cx, |view, _| {
-        view.presentation.accounts.len() == 2
-            && view.presentation.active == Some(AccountKey::new(1, HostId::github()))
-            && view
-                .presentation
-                .accounts
-                .iter()
-                .all(|summary| summary.authorization == AuthorizationState::PendingVerification)
-    }));
-    restored_view.update(cx, |view, cx| view.refresh(cx));
+    let (restored_view, restored_controller, cx) = product_shell(cx, Some(restored));
+    let state = snapshot(&restored_controller, cx);
+    assert_eq!(state.accounts.len(), 2);
+    assert_eq!(state.active, Some(AccountKey::new(1, HostId::github())));
+    assert!(
+        state
+            .accounts
+            .iter()
+            .all(|summary| summary.authorization == AuthorizationState::PendingVerification)
+    );
+    // A restored directory is not verified access: the Shell does not present it as verified.
+    assert!(restored_view.read_with(cx, |shell, _| shell.route()) != Route::Profile);
+    refresh(&restored_controller, cx);
     wait_for(
-        &restored_view,
+        &restored_controller,
         cx,
-        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1),
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1),
     );
 }
 
@@ -436,22 +369,24 @@ fn errors_and_partial_results_are_not_successful_empty_lists(cx: &mut TestAppCon
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    view.update(cx, |view, cx| view.refresh(cx));
-    wait_for(&view, cx, |state| {
-        matches!(state.repositories, RepositoryPreview::Failed(_))
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(state.repositories.preview, RepositoryPreview::Failed(_))
     });
-    assert!(view.read_with(cx, |view, _| {
-        view.presentation.accounts[0].authorization == AuthorizationState::Verified
-    }));
-    view.update(cx, |view, cx| view.refresh(cx));
+    assert_eq!(
+        snapshot(&controller, cx).accounts[0].authorization,
+        AuthorizationState::Verified
+    );
+    refresh(&controller, cx);
     wait_for(
-        &view,
+        &controller,
         cx,
-        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1),
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1),
     );
 }
 
@@ -534,43 +469,49 @@ fn cancelled_and_stale_replies_never_overwrite_the_new_operation(cx: &mut TestAp
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, transport);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    view.update(cx, |view, cx| view.refresh(cx));
-    let first_generation = view.read_with(cx, |view, _| view.generation);
-    view.update(cx, |view, cx| view.cancel(cx));
-    view.update(cx, |view, cx| view.refresh(cx));
-    let second_generation = view.read_with(cx, |view, _| view.generation);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    refresh(&controller, cx);
+    let first_generation = controller.read_with(cx, |accounts, _| accounts.generation);
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
+    refresh(&controller, cx);
+    let second_generation = controller.read_with(cx, |accounts, _| accounts.generation);
     assert!(second_generation > first_generation);
     // The new operation completes while the older request is still blocked.
     second_gate.release();
     wait_for(
-        &view,
+        &controller,
         cx,
-        |state| matches!(&state.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "new"),
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "new"),
     );
     // Releasing the older request afterwards must not overwrite the newer view.
     first_gate.release();
     for _ in 0..50 {
-        view.update(cx, |view, cx| view.drain(cx));
+        pump(&controller, cx);
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(view.read_with(cx, |view, _| {
-        matches!(&view.presentation.repositories, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "new")
-            && !format!("{:?}", view.presentation).contains("alice/old")
+    let published = snapshot(&controller, cx);
+    assert!(matches!(
+        &published.repositories.preview,
+        RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "new"
+    ));
+    assert!(!format!("{published:?}").contains("alice/old"));
+    assert!(view.read_with(cx, |shell, _| {
+        shell.repositories().len() == 1 && shell.repositories()[0].name == "new"
     }));
     // Duplicate submissions while busy do not advance the operation.
-    put_token(&view, cx, "duplicate-ignored");
-    let generation = view.read_with(cx, |view, _| view.generation);
-    view.update(cx, |view, cx| view.refresh(cx));
-    view.update(cx, |view, cx| view.refresh(cx));
+    put_token(&controller, cx, "duplicate-ignored");
+    let generation = controller.read_with(cx, |accounts, _| accounts.generation);
+    refresh(&controller, cx);
+    refresh(&controller, cx);
     assert_eq!(
-        view.read_with(cx, |view, _| view.generation),
+        controller.read_with(cx, |accounts, _| accounts.generation),
         generation + 1
     );
-    view.update(cx, |view, cx| view.cancel(cx));
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
 }
 
 #[gpui::test]
@@ -599,14 +540,15 @@ fn partial_page_failure_is_shown_as_partial_with_the_data_received(cx: &mut Test
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    view.update(cx, |view, cx| view.refresh(cx));
-    wait_for(&view, cx, |state| {
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
         matches!(
-            &state.repositories,
+            &state.repositories.preview,
             RepositoryPreview::Ready(outcome)
                 if outcome.repositories.len() == 1
                     && matches!(outcome.readiness, crate::domain::repo::ReposReadiness::Partial { .. })
@@ -625,15 +567,16 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, transport);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "first");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    put_token(&view, cx, "second");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 2);
-    view.update(cx, |view, cx| view.refresh(cx));
-    let runtime = view.read_with(cx, |view, _| view.runtime.clone().unwrap());
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    refresh(&controller, cx);
+    let runtime = controller.read_with(cx, |accounts, _| accounts.runtime.clone().unwrap());
     host_runtime()
         .block_on(
             runtime
@@ -643,16 +586,19 @@ fn a_repository_reply_is_dropped_when_the_account_changes_mid_request(cx: &mut T
         .unwrap();
     gate.release();
     for _ in 0..80 {
-        view.update(cx, |view, cx| view.drain(cx));
+        pump(&controller, cx);
         std::thread::sleep(Duration::from_millis(5));
     }
-    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    let presentation = snapshot(&controller, cx);
     assert!(
         !format!("{presentation:?}").contains("old-account"),
         "a result for the previous active account must not be published"
     );
     assert!(
-        matches!(presentation.repositories, RepositoryPreview::Idle(_)),
+        matches!(
+            presentation.repositories.preview,
+            RepositoryPreview::Idle(_)
+        ),
         "a discarded read must not leave the preview stuck in loading"
     );
 }
@@ -673,27 +619,26 @@ fn an_errored_mutation_clears_repository_results_for_the_previous_account(cx: &m
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "first");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    put_token(&view, cx, "second");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 2);
-    view.update(cx, |view, cx| view.refresh(cx));
-    wait_for(&view, cx, |state| {
-        matches!(state.repositories, RepositoryPreview::Ready(_))
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(state.repositories.preview, RepositoryPreview::Ready(_))
     });
     // Selecting another saved account changes the authoritative account, so
     // the repository set read under the previous account must be dropped.
-    view.update(cx, |view, cx| {
-        view.select(AccountKey::new(1, HostId::github()), cx)
-    });
-    wait_for(&view, cx, |state| {
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
         state.active == Some(AccountKey::new(1, HostId::github()))
     });
     assert!(matches!(
-        view.read_with(cx, |view, _| view.presentation.repositories.clone()),
+        snapshot(&controller, cx).repositories.preview,
         RepositoryPreview::Idle(_)
     ));
 }
@@ -708,29 +653,30 @@ fn cancelling_after_a_committed_mutation_reconciles_saved_accounts(cx: &mut Test
     host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
     // Cancel while the login is in flight; the login may still commit.
-    view.update(cx, |view, cx| view.cancel(cx));
-    let runtime = view.read_with(cx, |view, _| view.runtime.clone().unwrap());
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
+    let runtime = controller.read_with(cx, |accounts, _| accounts.runtime.clone().unwrap());
     // Drive the login to completion through the service itself, then let the
     // view observe `Settled` and reconcile.
     for _ in 0..200 {
-        view.update(cx, |view, cx| view.drain(cx));
+        pump(&controller, cx);
         std::thread::sleep(Duration::from_millis(5));
         if !runtime.accounts.summaries().is_empty() {
             break;
         }
     }
     for _ in 0..200 {
-        view.update(cx, |view, cx| view.drain(cx));
+        pump(&controller, cx);
         std::thread::sleep(Duration::from_millis(5));
-        if view.read_with(cx, |view, _| view.presentation.accounts.len() == 1) {
+        if snapshot(&controller, cx).accounts.len() == 1 {
             break;
         }
     }
-    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    let presentation = snapshot(&controller, cx);
     assert_eq!(
         presentation.accounts.len(),
         runtime.accounts.summaries().len(),
@@ -758,26 +704,26 @@ fn cancelling_revalidation_does_not_publish_its_late_success(cx: &mut TestAppCon
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
     let key = AccountKey::new(1, HostId::github());
-    view.update(cx, |view, cx| view.revalidate(key, cx));
-    view.update(cx, |view, cx| view.cancel(cx));
+    controller.update(cx, |accounts, cx| accounts.revalidate(key, cx));
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
     for _ in 0..200 {
-        view.update(cx, |view, cx| view.drain(cx));
+        pump(&controller, cx);
         std::thread::sleep(Duration::from_millis(5));
-        if view.read_with(cx, |view, _| {
-            view.presentation
-                .status
-                .as_ref()
-                .is_some_and(|status| status.text.contains("Cancellation settled"))
-        }) {
+        if snapshot(&controller, cx)
+            .status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Cancellations settled"))
+        {
             break;
         }
     }
-    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    let presentation = snapshot(&controller, cx);
     assert!(
         !presentation
             .status
@@ -798,18 +744,19 @@ fn closing_the_view_cancels_and_cannot_publish(cx: &mut TestAppContext) {
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, transport);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    view.update(cx, |view, cx| view.refresh(cx));
-    let before = view.read_with(cx, |view, _| view.presentation.clone());
-    view.update(cx, |view, _| {
-        view.alive.send_replace(false);
-        if let Some(operation) = view.operation.take() {
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    refresh(&controller, cx);
+    let before = snapshot(&controller, cx);
+    controller.update(cx, |accounts, _| {
+        accounts.alive.send_replace(false);
+        if let Some(operation) = accounts.operation.take() {
             operation.source.cancel();
         }
-        if let Some(runtime) = view.runtime.take() {
+        if let Some(runtime) = accounts.runtime.take() {
             runtime.shutdown();
         }
     });
@@ -818,10 +765,9 @@ fn closing_the_view_cancels_and_cannot_publish(cx: &mut TestAppContext) {
         std::thread::sleep(Duration::from_millis(5));
     }
     // A worker that finishes after teardown has nowhere to publish a result.
-    view.update(cx, |view, cx| view.drain(cx));
-    assert!(view.read_with(cx, |view, _| {
-        view.inbox.lock().unwrap().is_empty() && view.presentation == before
-    }));
+    pump(&controller, cx);
+    assert!(controller.read_with(cx, |accounts, _| accounts.inbox.lock().unwrap().is_empty()));
+    assert_eq!(snapshot(&controller, cx), before);
 }
 
 /// Review round 3: the parent owns the submit-enabled flag, so typing must
@@ -833,7 +779,8 @@ fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut T
     host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
     cx.simulate_input("synthetic-token");
     cx.run_until_parked();
     // A plain simulated click on the submit button must reach the service.
@@ -843,9 +790,9 @@ fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut T
     if let Some(target) = target {
         cx.simulate_click(target, gpui::Modifiers::none());
     } else {
-        submit(&view, cx);
+        submit(&controller, cx);
     }
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
 }
 
 /// Review round 7: process exit must wait for the detached teardown instead of
@@ -856,8 +803,9 @@ fn shutdown_waits_for_background_teardown(cx: &mut TestAppContext) {
     let mock = Arc::new(MockTransport::new());
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    if let Some(runtime) = view.read_with(cx, |view, _| view.runtime.clone()) {
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    if let Some(runtime) = controller.read_with(cx, |accounts, _| accounts.runtime.clone()) {
         runtime.shutdown();
     }
     drop(view);
@@ -894,19 +842,20 @@ fn a_failed_operation_keeps_its_error_and_presentation_comes_from_the_service(
     });
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "good");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    put_token(&view, cx, "bad");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| {
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "good");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    put_token(&controller, cx, "bad");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
         state
             .status
             .as_ref()
             .is_some_and(|status| status.tone == StatusTone::Error && status.text.contains("401"))
     });
-    let presentation = view.read_with(cx, |view, _| view.presentation.clone());
+    let presentation = snapshot(&controller, cx);
     assert!(
         !presentation
             .status
@@ -930,63 +879,182 @@ fn every_cancelled_mutation_is_reconciled_independently(cx: &mut TestAppContext)
     host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
     let key = AccountKey::new(1, HostId::github());
     // Cancel one mutation, then cancel a second one before the first settles.
-    view.update(cx, |view, cx| view.revalidate(key.clone(), cx));
-    let first = view.read_with(cx, |view, _| view.generation);
-    view.update(cx, |view, cx| view.cancel(cx));
-    view.update(cx, |view, cx| view.revalidate(key, cx));
-    let second = view.read_with(cx, |view, _| view.generation);
-    view.update(cx, |view, cx| view.cancel(cx));
+    controller.update(cx, |accounts, cx| accounts.revalidate(key.clone(), cx));
+    let first = controller.read_with(cx, |accounts, _| accounts.generation);
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
+    controller.update(cx, |accounts, cx| accounts.revalidate(key, cx));
+    let second = controller.read_with(cx, |accounts, _| accounts.generation);
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
     assert_eq!(
-        view.read_with(cx, |view, _| view.reconciling.clone()),
+        controller.read_with(cx, |accounts, _| accounts.reconciling.clone()),
         vec![first, second],
         "both cancelled mutations stay pending until they settle"
     );
     // Whichever order the two settlements arrive in, both are reconciled.
-    view.update(cx, |view, cx| view.reconcile(second, cx));
+    controller.update(cx, |accounts, cx| accounts.reconcile(second, cx));
     assert_eq!(
-        view.read_with(cx, |view, _| view.reconciling.clone()),
+        controller.read_with(cx, |accounts, _| accounts.reconciling.clone()),
         vec![first]
     );
-    view.update(cx, |view, cx| view.reconcile(first, cx));
-    assert!(view.read_with(cx, |view, _| view.reconciling.is_empty()));
-    assert!(view.read_with(cx, |view, _| {
-        view.presentation
+    controller.update(cx, |accounts, cx| accounts.reconcile(first, cx));
+    assert!(controller.read_with(cx, |accounts, _| accounts.reconciling.is_empty()));
+    assert!(
+        snapshot(&controller, cx)
             .status
             .as_ref()
             .is_some_and(|status| status.text.contains("Cancellations settled"))
-    }));
+    );
 }
 
 /// Review round 3: the preview must not be retained by its own keystroke
 /// subscription, otherwise releasing the view never runs `Drop` and the
 /// runtime/request teardown is skipped.
+/// A/B accounts opening the same repository keep isolated tabs, order, active selection and
+/// scroll. Switching A → B → A restores A exactly; the remembered navigation is not silently
+/// re-authorized (the workspace incarnation advances), and a delayed reply cannot change B.
 #[gpui::test]
-fn the_keystroke_subscription_does_not_retain_the_preview(cx: &mut TestAppContext) {
+fn account_switching_isolates_workspaces_and_restores_a(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(user(2, "bob"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["shared-repo", "only-a"])))
+            .await;
+        mock.enqueue(Ok(repos(2, "bob", &["shared-repo", "only-b"])))
+            .await;
+        mock.enqueue(Ok(repos(1, "alice", &["shared-repo", "only-a"])))
+            .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    // Sign in as A and as B; A is selected first.
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+    });
+
+    // A reads repositories and opens the same repo B will also open.
+    refresh(&controller, cx);
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        let route = Route::Repository {
+            namespace: "alice".to_string(),
+            name: "shared-repo".to_string(),
+        };
+        shell.navigate(route, window, cx);
+    });
+    cx.run_until_parked();
+    let a_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let a_ids: Vec<TabId> = view.read_with(cx, |shell, _| shell.tab_ids());
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
+
+    // Switch to B: its own Home, no A tabs, no A repository list published.
+    select(&controller, 2, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(2, HostId::github()))
+    });
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 1);
+    assert!(view.read_with(cx, |shell, _| shell.repositories().is_empty()));
+    assert_ne!(view.read_with(cx, |shell, _| shell.active_tab_id()), a_tab);
+
+    // B reads its own list, which contains the same repository plus one only B sees.
+    refresh(&controller, cx);
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories()[1].name.clone()),
+        "only-b"
+    );
+
+    // Switch back to A: its tabs, order, active tab and rows are restored.
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+    });
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), a_ids);
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), a_tab);
+    // The list was invalidated by the switch (scope 4): it is not silently re-published from the
+    // old authorization, and A must refresh under its current context to read again.
+    assert!(view.read_with(cx, |shell, _| shell.repositories().is_empty()));
+    refresh(&controller, cx);
+    wait_for(
+        &controller,
+        cx,
+        |state| matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 2);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories()[1].name.clone()),
+        "only-a"
+    );
+}
+
+/// The controller's keystroke interceptor holds only a weak reference, so dropping the window's
+/// root view and the app-global must release the controller and run its `Drop` teardown. The
+/// observable proof is the account runtime shutting down, not a raw strong-count probe.
+#[gpui::test]
+fn dropping_the_window_runs_the_controller_teardown(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
     let mock = Arc::new(MockTransport::new());
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    let weak = view.downgrade();
-    // The window root owns the view; closing it and dropping the test handle
-    // leaves only what the subscription itself retains.
+    // The runtime's `closed` flag is swapped on shutdown; observe it from outside.
+    let closed = runtime.closed.clone();
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    let weak = controller.downgrade();
+    assert!(
+        weak.upgrade().is_some(),
+        "the controller is alive before teardown"
+    );
+
+    // Simulate the application quit path: close the window, drop handles, clear the global.
     cx.update(|window, _| window.remove_window());
     drop(view);
+    drop(controller);
+    cx.cx.update(|cx| cx.clear_globals());
+
+    // The controller's Drop runs `shutdown`, which closes the account runtime off the UI thread.
+    let mut released = false;
     for _ in 0..400 {
         if weak.upgrade().is_none() {
+            released = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        weak.upgrade().is_none(),
+        released,
         "the interceptor must hold a weak reference, not the entity"
+    );
+    let closed = closed.load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        closed,
+        "the account runtime must be shut down with the controller"
     );
 }
 
@@ -999,37 +1067,33 @@ fn paste_and_cjk_text_stay_masked_and_submit(cx: &mut TestAppContext) {
     host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
     // Focus the masked field and paste from the clipboard, as Ctrl+V does.
-    cx.update(|window, cx| {
-        let input = view.read(cx).input.clone();
-        let focus = input.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
-    });
+    focus_token(&controller, cx);
     cx.update(|_, cx| {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("ghp_pasted".into()));
     });
     cx.simulate_keystrokes("ctrl-v");
-    cx.update_window_entity(&view, |view, _, cx| {
-        let input = view.input.read(cx);
+    cx.update_window_entity(&controller, |accounts, _, cx| {
+        let input = accounts.token_input().read(cx);
         assert_eq!(input.text(), "ghp_pasted", "paste reaches the field");
         assert!(input.is_masked(), "the field stays masked after pasting");
     });
     // A CJK composition replaces the value through the same input handler.
     cx.simulate_input("中文口令");
-    cx.update_window_entity(&view, |view, _, cx| {
-        let input = view.input.read(cx);
+    cx.update_window_entity(&controller, |accounts, _, cx| {
+        let input = accounts.token_input().read(cx);
         assert!(input.text().contains("中文口令"), "CJK text is accepted");
         assert!(input.is_masked(), "the field stays masked with CJK text");
     });
     // No unmasked copy path: the field never renders the value as aria text.
-    view.update(cx, |view, cx| {
-        view.input
-            .update(cx, |input, cx| input.set_text("ghp_final", cx));
-    });
-    submit(&view, cx);
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
-    assert!(view.read_with(cx, |view, cx| view.input.read(cx).is_empty()));
+    put_token(&controller, cx, "ghp_final");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    assert!(controller.read_with(cx, |accounts, cx| {
+        accounts.token_input().read(cx).is_empty()
+    }));
 }
 
 #[gpui::test]
@@ -1039,8 +1103,9 @@ fn tab_reaches_the_submit_button_and_enter_submits(cx: &mut TestAppContext) {
     host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
-    let (view, cx) = preview(cx, runtime);
-    put_token(&view, cx, "synthetic");
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
     // Password field, visibility toggle, then submit in Ely's focus order.
     cx.simulate_keystrokes("tab");
     cx.simulate_keystrokes("tab");
@@ -1048,5 +1113,5 @@ fn tab_reaches_the_submit_button_and_enter_submits(cx: &mut TestAppContext) {
     cx.simulate_event(KeyUpEvent {
         keystroke: Keystroke::parse("enter").unwrap(),
     });
-    wait_for(&view, cx, |state| state.accounts.len() == 1);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
 }

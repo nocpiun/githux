@@ -13,6 +13,10 @@ use gpui::{
 };
 
 use super::Shell;
+use crate::domain::{
+    AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId, RepoOwner, RepoSummary,
+    RepoVisibility,
+};
 use crate::workspace::{RepositorySession, Route};
 
 /// A `debug_selector` string built at runtime for the tests that index rows.
@@ -27,9 +31,60 @@ fn setup(cx: &mut TestAppContext) {
     });
 }
 
+/// The deterministic repository set these layout/navigation tests use, injected into the Shell's
+/// real row store. It is *test* data, not a product fixture: the product only ever populates these
+/// rows from `/user/repos`.
+fn test_repositories() -> Vec<RepoSummary> {
+    (0..124)
+        .map(|index| {
+            let owner = ["githux-dev", "northstar", "studio", "demo"][index % 4];
+            let name = match index {
+                0 => "githux".to_string(),
+                8 => "中文仓库名称验证样例".to_string(),
+                9 => "a-very-long-generated-repository-name-for-truncation-checks-0000".to_string(),
+                _ => format!("repo-{index:03}"),
+            };
+            RepoSummary {
+                id: index as u64,
+                full_name: format!("{owner}/{name}"),
+                name,
+                owner: RepoOwner {
+                    id: 1,
+                    login: owner.to_string(),
+                    avatar_url: None,
+                },
+                visibility: RepoVisibility::Public,
+                fork: false,
+                archived: false,
+                description: None,
+                default_branch: Some("main".to_string()),
+            }
+        })
+        .collect()
+}
+
 fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
     setup(cx);
-    cx.add_window_view(Shell::new)
+    let (view, cx) = cx.add_window_view(Shell::new);
+    view.update(cx, |shell, cx| {
+        shell.set_repositories(test_repositories(), cx);
+        shell.set_account(
+            Some(AccountSummary {
+                identity: AccountIdentity {
+                    key: AccountKey::new(1, HostId::github()),
+                    login: "lin-dev".to_string(),
+                    display_name: Some("Lin".to_string()),
+                    avatar_url: None,
+                    html_url: None,
+                },
+                epoch: AuthEpoch(1),
+                authorization: crate::domain::account::AuthorizationState::Verified,
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    (view, cx)
 }
 
 /// A press and release, as a real keyboard delivers them.
@@ -490,14 +545,14 @@ fn a_chinese_and_a_long_repository_name_stay_inside_the_sidebar(cx: &mut TestApp
             .repositories()
             .iter()
             .enumerate()
-            .max_by_key(|(_, repo)| repo.full_name().chars().count())
+            .max_by_key(|(_, repo)| repo.full_name.chars().count())
             .map(|(index, _)| index)
             .expect("repositories");
         (cjk, long)
     });
     assert!(
         view.read_with(cx, |shell, _| shell.repositories()[long_index]
-            .full_name()
+            .full_name
             .chars()
             .count())
             >= 40
