@@ -27,7 +27,7 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --
 
 状态不变由脚本等待，不调用模型、不并行启动第二个等待器。宿主工具允许约两小时及有界 API 收尾，或使用可恢复前台等待；不要套更短的 timeout、用 `tail` 截断结果或覆盖退出码。无需持续读取过程日志。工具完成后，读取完整 JSON 并核对本次 run_id、head、status 与原始退出码。
 
-`--wait-ci true` 包含 CI 汇总；开始或最终复核发现 `blocked` 标签时立即返回 `merge_blocked`，不继续等待或自动重审，也不宣称已核验全部 CI。`--check NAME` 只能追加同一 CI workflow 内检查，不能移除 CI。没有 wait-ci 不核验 CI；review_completed 不是合并许可。
+`--wait-ci true` 包含 CI 汇总。`blocked` 只禁止合并，不阻断 review/线程/所选 CI 的读取、轮询或原有的一小时后单次重审。pending/running 继续等待；整批反馈、失败与证据问题按正常优先级交回，并保留 `integration.blockers` 中的 `blocked_label`。本轮 clean 且所选 CI 就绪后，若最终实时标签仍含 `blocked`，返回 `merge_blocked`，不得返回 `checks_ready` 或 `review_completed`。`--check NAME` 只能追加同一 CI workflow 内检查，不能移除 CI。没有 wait-ci 不核验 CI；review_completed 不是合并许可。
 
 ## 返回后的处理
 
@@ -38,7 +38,7 @@ node "/ABSOLUTE/SKILL/DIR/scripts/wait-review.mjs" --repo OWNER/REPO --pr 123 --
 - `evidence_incomplete`、`evidence_conflict`、`ci_unverified`：缓冲期后仍有缺口/矛盾，读取各维度证据，不原样重启一小时等待。不要把工作流格式变化猜成通过。
 - `base_changed`、`merge_conflict`：核对目标分支；解决冲突或补齐组合验证，有新 head 则重新 CI/review。Draft、BLOCKED、未知 mergeability 不冒充冲突；已有人工验收限制不因同步基线解除。
 - `timeout`：读取 waiting_on/last_error/retry。`retry_uncertain`：发送可能已发生，保留意图，核对实际评论后用已确认游标只读恢复，不能删除记录来补发。
-- `merge_blocked`：检查 `integration.blockers`；`blocked_label` 必须等负责人手动移除后重查，不因标签所指问题已修复而自行撤掉。缺少/无效 labels 会报错，不能当无标签。
+- `merge_blocked`：审查及所选 CI 已收集，检查 `integration.blockers`；`blocked_label` 必须等负责人手动移除后重查，不因标签所指问题已修复而自行撤掉。其他结果（如 `review_arrived`、`ci_failed`、`timeout`）也可能携带 `blocked_label`：照常处理反馈，仍禁止合并；不要改用手写轮询来规避标签。缺少/无效 labels 会报错，不能当无标签。
 - `checks_ready`：重新读取实时标签（不得有 `blocked`）、完整裁决/验收历史、milestone、`PR` 工作流的 `Check` required check、最新 head/保护和当前基线后才能合并；review_passed=null、verdict=not_evaluated 始终保留。
 - `error`、`interrupted`、未知 Bot 消息、失败/取消：不算成功。错误输出文件若无法写入，依据 stdout 与退出码处理，不能退回读取旧成功文件。
 
