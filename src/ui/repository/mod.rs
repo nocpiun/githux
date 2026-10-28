@@ -215,6 +215,7 @@ enum Body {
     Branches(Result<BranchesOutcome, RepositoryError>),
     Revision {
         branch: String,
+        request: u64,
         result: Result<RepoSnapshot, RepositoryError>,
     },
     Root {
@@ -278,6 +279,10 @@ pub struct RepositoryPage {
     branches: Option<BranchesOutcome>,
     branches_error: Option<PageError>,
     branch: Option<BranchState>,
+    /// Monotonic identity of the newest branch resolution. A → B → A shares the
+    /// page generation, so a branch name alone cannot tell an older A reply from
+    /// the current one; this does.
+    branch_request: u64,
     selection: Selection,
     /// The README's own descriptor path, once discovery found one.
     readme_path: Option<String>,
@@ -341,6 +346,7 @@ impl RepositoryPage {
             branches: None,
             branches_error: None,
             branch: None,
+            branch_request: 0,
             readme_path: None,
             reader: None,
             reader_status: ReaderStatus::Loading,
@@ -396,21 +402,13 @@ impl RepositoryPage {
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.authorization_lost = false;
-        let session = match self.services.accounts.repo_service().session() {
-            Ok(session) => session,
-            Err(error) => {
-                self.active = false;
-                self.session = None;
-                self.context = None;
-                self.error = Some(PageError::from_repository(&error));
-                cx.notify();
-                return;
-            }
-        };
-        self.context = Some(session.context().clone());
-        self.session = Some(session);
-        self.active = true;
-        self.error = None;
+        // Clear every authorization-bound value *before* capturing a session:
+        // acquiring one can fail (for example the active account was removed),
+        // and the previous account's summary/tree/reader must not survive that
+        // early return.
+        self.active = false;
+        self.session = None;
+        self.context = None;
         self.details = None;
         self.branches = None;
         self.branches_error = None;
@@ -420,6 +418,18 @@ impl RepositoryPage {
         self.reader_status = ReaderStatus::Loading;
         self.cursor = None;
         self.invalidate_rows();
+        let session = match self.services.accounts.repo_service().session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.error = Some(PageError::from_repository(&error));
+                cx.notify();
+                return;
+            }
+        };
+        self.context = Some(session.context().clone());
+        self.session = Some(session);
+        self.active = true;
+        self.error = None;
         self.work = Some(Work::new());
         self.spawn_job(Job::Repository(self.locator.clone()));
         cx.notify();
@@ -829,7 +839,19 @@ impl RepositoryPage {
 
     /// Applies the current selection: README content, or the selected file once
     /// its ancestor directories are loaded.
+    ///
+    /// An already displayed document for this exact selection is kept as is: an
+    /// unrelated directory that finishes loading must not turn the reader back
+    /// into Loading, re-download the same blob and throw away the reader's
+    /// scroll position and selection.
     fn resolve_selection(&mut self, cx: &mut Context<Self>) {
+        if self.reader_status == ReaderStatus::Showing
+            && self.reader.as_ref().is_some_and(|reader| {
+                reader.read(cx).context().path() == self.current_path().unwrap_or_default()
+            })
+        {
+            return;
+        }
         match self.selection.clone() {
             Selection::Readme => self.request_readme_content(cx),
             Selection::File(path) => self.resolve_path(&path, cx),
@@ -863,6 +885,19 @@ impl RepositoryPage {
                     "A parent directory could not be read.",
                     Some(format!("`{ancestor}`: {}", error.title)),
                     error.retryable,
+                ));
+                return;
+            }
+            if let Err(error) = branch.tree.child_directory(ancestor) {
+                // The parent *is* loaded but has no such directory entry (or the
+                // entry is a file). No request can ever arrive for it, so publish
+                // a terminal status instead of waiting forever.
+                let error = PageError::from_repository(&error);
+                self.reader = None;
+                self.reader_status = ReaderStatus::ContentFailed(PageError::new(
+                    "A parent directory is not available at this commit.",
+                    Some(format!("`{ancestor}`: {}", error.title)),
+                    false,
                 ));
                 return;
             }
@@ -979,8 +1014,14 @@ impl RepositoryPage {
         self.error = None;
         self.cursor = None;
         self.invalidate_rows();
+        // Every resolution gets its own identity, so a slower reply for an
+        // earlier request can never be mistaken for the current one even when
+        // both name the same branch (A → B → A).
+        self.branch_request = self.branch_request.wrapping_add(1);
+        let request = self.branch_request;
         self.spawn_job(Job::Revision {
             branch: name,
+            request,
             identity: details.identity,
         });
         cx.notify();
@@ -1078,7 +1119,11 @@ impl RepositoryPage {
         match message.body {
             Body::Repository(result) => self.apply_repository(result, cx),
             Body::Branches(result) => self.apply_branches(result, cx),
-            Body::Revision { branch, result } => self.apply_revision(branch, result, cx),
+            Body::Revision {
+                branch,
+                request,
+                result,
+            } => self.apply_revision(branch, request, result, cx),
             Body::Root {
                 branch,
                 commit,
@@ -1167,10 +1212,13 @@ impl RepositoryPage {
     fn apply_revision(
         &mut self,
         branch: String,
+        request: u64,
         result: Result<RepoSnapshot, RepositoryError>,
         cx: &mut Context<Self>,
     ) {
-        if self.intent.branch.as_deref() != Some(branch.as_str()) {
+        // A superseded resolution is discarded whether it succeeded or failed.
+        if request != self.branch_request || self.intent.branch.as_deref() != Some(branch.as_str())
+        {
             return;
         }
         match result {
@@ -1275,7 +1323,23 @@ impl RepositoryPage {
                 .tree
                 .fail_load(&path, PageError::from_repository(&error)),
         }
+        let failure = state.tree.failure(&path).cloned();
         self.invalidate_rows();
+        // A selection waiting on *this* directory has to end in a terminal state
+        // rather than stay Loading; others keep what they were showing.
+        if let Some(error) = failure
+            && self
+                .selection
+                .path()
+                .is_some_and(|selected| RepositoryNavigation::ancestors(selected).contains(&path))
+        {
+            self.reader = None;
+            self.reader_status = ReaderStatus::ContentFailed(PageError::new(
+                "A parent directory could not be read.",
+                Some(format!("`{path}`: {}", error.title)),
+                error.retryable,
+            ));
+        }
         // A pending selection or a deeper expanded directory may have been
         // waiting for this tree.
         self.load_expanded(cx);
@@ -1618,6 +1682,7 @@ enum Job {
     Branches(RepositoryIdentity),
     Revision {
         branch: String,
+        request: u64,
         identity: RepositoryIdentity,
     },
     Root {
@@ -1663,7 +1728,11 @@ async fn run_job(
                 .await
                 .map(|Scoped { value, .. }| value),
         ),
-        Job::Revision { branch, identity } => {
+        Job::Revision {
+            branch,
+            request,
+            identity,
+        } => {
             // `branch` was validated as a ref before the job was created.
             let spec = RevisionSpec::Ref(DynamicRef::new(branch.clone()).expect("validated ref"));
             let result = session
@@ -1671,6 +1740,7 @@ async fn run_job(
                 .await;
             Body::Revision {
                 branch,
+                request,
                 result: result.map(|Scoped { value, .. }| value),
             }
         }

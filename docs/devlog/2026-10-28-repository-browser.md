@@ -47,6 +47,17 @@
 
 `PageError` 不再在描述里断言作用域；404 文案改为“该资源不存在或当前账户无法访问”，不再写“仓库对账户不可见”。仓库详情/分支/revision 失败才是页面级；目录失败定位到该行；blob/文件失败只替换阅读区；README 发现失败独立。`retry_directory` / `retry_reader` / `retry_readme` 各自只重试一个资源，不重载整页。
 
+### 7. Codex 首轮审查修复（同一 head 的 4 项）
+
+`1a55a52` 的 Codex 审查提出 4 项，均为本轮范围内的真实缺陷，已逐项修复并加回归测试：
+
+| 级别 | 问题 | 修法 |
+| --- | --- | --- |
+| P1 | `activate()` 在 `session()` 失败时提前返回，保留了上一个账户的摘要/分支/树/正文（`active=false` 后 `check_authorization` 不再清理，渲染又因 `selected_branch()` 存在而抑制页面错误） | 在获取 session **之前**清空所有授权绑定状态，失败路径也保持已清空；新增测试：移除账户后 `deactivate`+`activate` 必须无残留 |
+| P1 | A→B→A 时两次 A 解析共用一个页面代次与授权上下文，`begin_branch()` 不推进代次也不取消旧工作，branch-name 检查会接受旧的 A 结果 | 新增单调 `branch_request` 身份，`Job::Revision`/`Body::Revision` 携带它，`apply_revision` 先比对该身份再比对分支名；新增 A→B→A 测试 |
+| P2 | 打开文件后展开任意未加载目录会经 `apply_directory → resolve_selection` 无条件重取同一 blob，正文回到 Loading 并重建 `ReaderView`（丢滚动与选区），目录失败也触发 | `resolve_selection` 在“当前就是 Showing 且 reader 的 path 等于当前选中路径”时直接保留；新增测试验证同一 reader 实体存活且 blob 未被再次下载 |
+| P2 | 相对链接指向不存在的祖先目录（或恢复的路径在新分支上父目录已不存在）会永久停在 Loading：`child_directory()` 对“父已加载但没有该目录条目”也返回错误，却被当成“父未加载” | 区分“待加载的父目录”与“不可用的祖先”：后者立即发布终态；目录加载失败时，若当前选中路径正等待该目录，也发布终态。新增测试验证无下载且不留 Loading |
+
 ## 验证
 
 本机 Windows，独立 `target/`，`CARGO_BUILD_JOBS=1` / `-j 1`：
@@ -54,7 +65,7 @@
 - `cargo fmt --all -- --check` 通过
 - `cargo check --locked --all-targets` 通过
 - `cargo clippy --locked --all-targets -- -D warnings` 通过
-- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、repository **441**（其中本任务页面测试 28 项 + fixture 自测 6 项）全部通过
+- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、repository **445**（其中本任务页面测试 32 项 + fixture 自测 6 项）全部通过
 - `cargo build --locked --example repository` 通过
 - `git diff --check` 通过
 

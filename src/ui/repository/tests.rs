@@ -1242,6 +1242,178 @@ fn a_partial_branch_list_is_reported_as_partial(cx: &mut TestAppContext) {
     assert!(!page_error.title.contains("not visible"));
 }
 
+#[gpui::test]
+fn an_already_shown_file_survives_an_unrelated_directory_load(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = normal(cx);
+    page.update(cx, |page, cx| page.toggle_directory("src", cx));
+    settle(&page, cx, |page| page.tree("src").is_some());
+    page.update(cx, |page, cx| page.select_file("src/main.rs", cx));
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.selection() == &Selection::File("src/main.rs".into())
+    });
+    let reader = page
+        .read_with(cx, |page, _| page.reader().cloned())
+        .unwrap();
+    let blobs_before = fixture.transport.count("/git/blobs/");
+
+    // Expanding an unrelated directory must not reload the shown file.
+    page.update(cx, |page, cx| page.toggle_directory("docs", cx));
+    settle(&page, cx, |page| page.tree("docs").is_some());
+    for _ in 0..40 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        page.read_with(cx, |page, _| page.reader().cloned().map(|r| r.entity_id())),
+        Some(reader.entity_id()),
+        "the same reader entity is still mounted"
+    );
+    assert_eq!(
+        page.read_with(cx, |page, _| page.reader_status().clone()),
+        ReaderStatus::Showing,
+        "the reader never fell back to Loading"
+    );
+    assert_eq!(
+        fixture.transport.count("/git/blobs/"),
+        blobs_before,
+        "the already shown blob was not downloaded again"
+    );
+
+    // A failing unrelated directory leaves it alone too.
+    fixture.switch_scene(Scene::DirectoryFailure);
+    page.update(cx, |page, cx| page.toggle_directory("assets", cx));
+    settle(&page, cx, |page| page.tree("assets").is_some());
+    assert_eq!(
+        page.read_with(cx, |page, _| page.reader().cloned().map(|r| r.entity_id())),
+        Some(reader.entity_id())
+    );
+}
+
+#[gpui::test]
+fn a_superseded_branch_resolution_is_rejected_even_for_the_same_branch_name(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(Scene::Normal);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+
+    // A → B → A: the first A reply must be rejected once a newer resolution
+    // exists, even though both name the same branch.
+    page.update(cx, |page, cx| page.select_branch("feature/docs-polish", cx));
+    page.update(cx, |page, cx| page.select_branch("main", cx));
+    settle(&page, cx, |page| {
+        page.selected_branch() == Some("main") && page.reader_status() == &ReaderStatus::Showing
+    });
+    let accepted = page.read_with(cx, |page, _| {
+        page.fixed_commit().map(|sha| sha.as_str().to_string())
+    });
+    assert_eq!(
+        accepted.as_deref(),
+        Some("c0ffee0000000000000000000000000000000001"),
+        "the current main resolution is the one shown"
+    );
+    // Late replies from the superseded requests cannot change it.
+    for _ in 0..40 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        page.read_with(cx, |page, _| page
+            .fixed_commit()
+            .map(|sha| sha.as_str().to_string()))
+            .as_deref(),
+        Some("c0ffee0000000000000000000000000000000001")
+    );
+    assert_eq!(
+        page.read_with(cx, |page, _| page.selected_branch().map(str::to_string))
+            .as_deref(),
+        Some("main")
+    );
+    assert!(page.read_with(cx, |page, _| page.error().is_none()));
+}
+
+#[gpui::test]
+fn a_missing_ancestor_directory_ends_in_a_terminal_state_not_endless_loading(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, page, cx) = normal(cx);
+    // `assets` *is* loaded here, so its entries are known: a nonexistent child
+    // can never produce a response.
+    page.update(cx, |page, cx| page.toggle_directory("assets", cx));
+    settle(&page, cx, |page| page.tree("assets").is_some());
+    let blobs_before = fixture.transport.count("/git/blobs/");
+
+    page.update(cx, |page, cx| {
+        page.select_file("assets/missing/file.md", cx)
+    });
+    for _ in 0..40 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let status = page.read_with(cx, |page, _| page.reader_status().clone());
+    assert!(
+        matches!(
+            status,
+            ReaderStatus::ContentFailed(_) | ReaderStatus::SelectionUnavailable { .. }
+        ),
+        "a nonexistent ancestor produces a terminal status, got {status:?}"
+    );
+    assert_eq!(
+        fixture.transport.count("/git/blobs/"),
+        blobs_before,
+        "nothing was downloaded for a path that cannot exist"
+    );
+}
+
+#[gpui::test]
+fn activation_clears_previous_data_even_when_the_session_cannot_be_acquired(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, page, cx) = normal(cx);
+    assert!(page.read_with(cx, |page, _| page.details().is_some()));
+    // Remove the only account, then activate: `session()` fails.
+    fixture._runtime.block_on(async {
+        fixture
+            .accounts
+            .remove_saved(crate::domain::AccountKey::new(
+                1,
+                crate::domain::HostId::github(),
+            ))
+            .await
+            .expect("remove the account");
+    });
+    page.update(cx, |page, cx| page.deactivate(cx));
+    activate(&page, cx);
+    frames(cx);
+    page.read_with(cx, |page, _| {
+        assert!(!page.is_active());
+        assert!(page.error().is_some(), "the failure is reported");
+        assert!(
+            page.details().is_none(),
+            "the previous account's summary is gone"
+        );
+        assert!(
+            page.selected_branch().is_none(),
+            "no branch from the previous session"
+        );
+        assert!(page.rows().is_empty());
+        assert!(page.reader().is_none());
+    });
+    assert!(
+        cx.debug_bounds("repository-body").is_none()
+            || cx.debug_bounds("repository-tree-column").is_none(),
+        "old content is not still drawn"
+    );
+}
+
 /// Keeps the `TreeEntryKind` import used even when no test names it directly.
 fn _entry_kind(kind: &TreeEntryKind) -> bool {
     matches!(kind, TreeEntryKind::File { .. })

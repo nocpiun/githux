@@ -51,7 +51,7 @@ let page = cx.new(|cx| {
 
 ## 代次与发布
 
-一次浏览代次持有“一个已验证 session + 页面代次 + 分支/commit/资源身份”。所有慢操作在既有 `BackgroundExecutor` 的 Tokio runtime 上执行，结果经受锁队列回 GPUI，在 UI 线程排出。每条结果在应用前都核对：页面代次、捕获的 `RepositoryReadContext`、分支名、固定 commit，以及阅读目标身份；过期（切账户、替换 PAT、移除账户、A→B→A、切分支、关闭/隐藏）一律丢弃，成功与错误同等对待。失活时调用 `ReaderView::cancel_interactions`（main 新增的公开接口）结束阅读器手势，不改 reader 实现。
+一次浏览代次持有“一个已验证 session + 页面代次 + 分支请求身份 + 分支/commit/资源身份”。分支名本身不足以区分 A→B→A 的两次同名解析，因此每次 `begin_branch` 推进单调 `branch_request`，旧身份的 Revision 结果不论成功或失败都被丢弃。`activate` 在获取 session **之前**清空一切授权绑定状态，所以获取失败时不会残留上一个账户的内容。所有慢操作在既有 `BackgroundExecutor` 的 Tokio runtime 上执行，结果经受锁队列回 GPUI，在 UI 线程排出。每条结果在应用前都核对：页面代次、捕获的 `RepositoryReadContext`、分支名、固定 commit，以及阅读目标身份；过期（切账户、替换 PAT、移除账户、A→B→A、切分支、关闭/隐藏）一律丢弃，成功与错误同等对待。失活时调用 `ReaderView::cancel_interactions`（main 新增的公开接口）结束阅读器手势，不改 reader 实现。
 
 ## 文件树加载
 
@@ -69,6 +69,8 @@ let page = cx.new(|cx| {
 | README 发现 | `No README`（完整空树证明）/ `README not confirmed`（404 不确定）/ 发现失败，各有独立状态与重试 |
 
 404 只说“该资源不存在或当前账户无法访问”，不断言一定是权限问题。401/403/SSO/限流/超时/网络/解析/截断保持各自区别。所有重试都是用户点按的单次、针对一个资源的操作，不会重新登录、重载整页或互相重置；不存在自动重试循环。
+
+已经显示中的文档不会因为无关目录加载完成而被重新请求：`resolve_selection` 在“正在显示同一路径”时直接保留，读者滚动与选区因此不会丢失。反过来，若选中的祖先目录在已加载的父目录中根本不存在（或该条目是文件），页面立即给出终态而不是无限 Loading，目录加载失败也会终止等待该目录的选中状态。
 
 ## 开发预览与 fixture
 
