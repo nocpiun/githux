@@ -1174,9 +1174,23 @@ impl Shell {
         let loading = matches!(state.preview, RepositoryPreview::Loading);
         let mut retry: Option<sidebar::SharedRun> = None;
         let (message, warning) = match &state.preview {
-            // A complete list says nothing extra.
+            // A complete list says nothing extra; a partial one keeps its rows usable and also
+            // offers a scoped retry, because omitted pages otherwise cannot be reached again until
+            // an unrelated account operation changes the authorization.
             RepositoryPreview::Ready(outcome) => {
-                match sidebar::partial_status(&outcome.readiness) {
+                let readiness = &outcome.readiness;
+                if matches!(
+                    readiness,
+                    crate::domain::repo::ReposReadiness::Partial { .. }
+                ) {
+                    retry = self.accounts.clone().map(|accounts| {
+                        std::rc::Rc::new(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                            let _ = accounts.update(cx, |accounts, cx| accounts.refresh(cx));
+                        })
+                            as std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>
+                    });
+                }
+                match sidebar::partial_status(readiness) {
                     Some((warning, message)) => (Some(message), warning),
                     None => (None, false),
                 }

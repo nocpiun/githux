@@ -1909,3 +1909,58 @@ fn reconciliation_reloads_after_discarding_the_list(cx: &mut TestAppContext) {
         "reconciliation issues a fresh read"
     );
 }
+
+/// A partial result keeps its rows usable and also offers a scoped Retry, so omitted pages can be
+/// reached again without an unrelated account operation or a restart. This is the one case where a
+/// Ready state must still offer an action.
+#[gpui::test]
+fn partial_results_keep_rows_usable_and_offer_a_scoped_retry(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    // First page succeeds with a next link; second page fails with 503.
+    let page2 = "http://127.0.0.1:1/user/repos?page=2";
+    mock.serve_repos(
+        "synthetic",
+        HttpResponse {
+            status: 200,
+            headers: vec![("Link".into(), format!("<{page2}>; rel=\"next\""))],
+            body: serde_json::json!([{
+                "id": 1, "name": "first", "full_name": "alice/first",
+                "owner": {"id": 1, "login": "alice"}, "visibility": "public"
+            }])
+            .to_string(),
+        },
+    );
+    mock.serve_repos(
+        "synthetic-page-2",
+        HttpResponse {
+            status: 503,
+            headers: vec![],
+            body: "{}".into(),
+        },
+    );
+    mock.script_user(user(1, "alice"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(
+            &state.repositories.preview,
+            RepositoryPreview::Ready(outcome)
+                if outcome.repositories.len() == 1
+                    && matches!(outcome.readiness, crate::domain::repo::ReposReadiness::Partial { .. })
+        )
+    });
+    // Partial rows are still usable, and the sidebar keeps a scoped Retry for the omitted pages.
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 1);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories()[0].full_name.clone()),
+        "alice/first"
+    );
+    // The controller's own refresh is reachable and starts a fresh read for the same authorization.
+    controller.update(cx, |accounts, cx| accounts.refresh(cx));
+    wait_idle(&controller, cx);
+}

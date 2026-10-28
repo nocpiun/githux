@@ -76,3 +76,7 @@ git diff --check
 ### 后续
 
 - 推送修复 head，触发 `@codex review`，核验当前 head CI/审查后置 `pending` 等负责人验收；不合并、不 auto-merge，`blocked` 由负责人管理。
+
+## 审查追加（圆形修复后）
+
+Codex 对本轮 head 的新增意见：分页 Partial 结果只有行可点却没有 Retry，且已记录的 load key 会让之后同授权的 settlement 不再读取，导致缺失页拿不到。`repository_list_status` 现在对 `Partial` 也提供一次性 Retry（完整列表仍只有 `Repositories (N)`，失败仍保留各自一次性 Retry）。Partial 行仍可点击，不掩盖缺失原因。`refresh()` 走既有 `start()`，本次授权会重新发起读取。新增 `partial_results_keep_rows_usable_and_offer_a_scoped_retry` 回归测试。
