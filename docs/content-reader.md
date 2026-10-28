@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-27（文档级选择与行号左距）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
+更新：2026-10-28（公共 Motion 接线）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -91,8 +91,11 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、半透明、140ms 可反向淡出的细条，以及只读 `ScrollTarget`（`ScrollHandle` 与真实 `ListState` 适配，拖动开始/结束冻结列表测量）。Reader 直接使用这套共享实现，没有复制第二套样式或通用 scroll 子系统：
 
 - Markdown 纵向条绑定本地 `MarkdownView::list_state()` 的真实 `ListState`（PR #29 的 `ScrollTarget for ListState` 适配）；滚轮、thumb 拖拽、范围更新、长文异步落地均作用于同一个列表。无溢出时 `Bar::render` 不构建元素，也不保留透明拦截区域。
-- Source 纵/横条沿用同一 `Bars`/`Bar`/`Style`，绑定 `UniformListScrollHandle.base_handle`，两轴独立、互不抢角落。
-- hover 入场、快速反向和拖动移出后释放都由 `Bars`/`Fade` 处理；拖动期间保持可见，结束后回到 hover 状态。
+- Source 纵/横条沿用同一 `Bars`/`Bar`/`Style`，绑定包装真实 `UniformListScrollHandle.base_handle` 的持久 `Motion<ScrollHandle>`，两轴独立、互不抢角落；Markdown 绑定自身真实 `ListState` 的持久 `Motion<ListState>`。wheel 与 Bar 共享实例，离散输入约 130ms 缓动，precise Pointer / Touch / reduced-motion 直接写真实目标，不再额外运行列表内建 wheel。
+- Source 保留原生 x/y 双轴，Shift 仅在缺少原生 x 时映射 y；Markdown 仅纵向，不将水平输入变成纵向。现有代码块/表格是换行布局，没有内层横向 ScrollHandle，本轮保留该布局、字号与选择模型。
+- hover 入场、快速反向和拖动移出后释放都由 `Bars`/`Fade` 处理；140ms fade 与 wheel 动画分离，拖动期间保持可见，结束后回到 hover 状态。
+- wheel tick 与输入使用 owner 的同一时钟，只有动画未完成才请求帧。thumb drag、程序 offset 写入、选择按下、reset/adopt、正文替换、Esc、窗口失活/隐藏、移出布局和 dispose 均取消适当目标与 Bars；真实 ListState 的测量/drag hooks 没有替换或 `measure_all`。
+- 集成宿主在账户上下文失效而仍保留 reader 时调用新增 `ReaderView::cancel_interactions(cx)`；既有构造、show、SourceView、PreparedContent 接口保持兼容。宿主改变正文仍走 show 或换实体，网络/账户状态不进入 reader。本轮实现与验证见 [reader-motion 日志](devlog/2026-10-28-reader-motion.md)。
 
 ## 未覆盖与待验收
 

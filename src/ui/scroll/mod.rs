@@ -21,7 +21,7 @@ mod tests;
 
 pub use fade::Fade;
 pub use geometry::Thumb;
-pub use motion::{Motion, cancel_region, wheel_overlay};
+pub use motion::{Motion, WheelAxes, cancel_region, wheel_overlay, wheel_overlay_with};
 pub use target::ScrollTarget;
 
 use std::cell::Cell;

@@ -27,6 +27,8 @@
 pub mod fixtures;
 mod links;
 mod markdown;
+#[cfg(test)]
+mod motion_tests;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -34,7 +36,71 @@ mod tests;
 pub use links::LinkTarget;
 pub use source::SourceView;
 
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc, time::Instant};
+
+use crate::ui::scroll;
+
+/// One owner clock for fade and wheel presentation. Tests pin the same time used by real events.
+#[derive(Clone)]
+pub(super) struct ScrollClock {
+    origin: Instant,
+    pinned: Rc<Cell<Option<Instant>>>,
+}
+
+impl ScrollClock {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            pinned: Rc::new(Cell::new(None)),
+        }
+    }
+
+    fn now(&self) -> Instant {
+        self.pinned.get().unwrap_or_else(Instant::now)
+    }
+
+    fn ms(&self) -> u64 {
+        self.now()
+            .saturating_duration_since(self.origin)
+            .as_millis() as u64
+    }
+
+    #[cfg(test)]
+    fn pin(&self, ms: u64) {
+        self.pinned
+            .set(Some(self.origin + std::time::Duration::from_millis(ms)));
+    }
+}
+
+/// GPUI retains keyed state only while the element participates in consecutive frames (including
+/// cached frames). Its release also catches a retained reader being hidden by its host.
+fn scroll_lifetime<T: 'static>(cx: &Context<T>, cancel: fn(&mut T, &mut Context<T>)) -> AnyElement {
+    let owner = cx.entity().downgrade();
+    let key =
+        gpui::ElementId::Name(format!("reader-scroll-lifetime-{}", cx.entity_id().as_u64()).into());
+    gpui::canvas(
+        move |_, window, cx| {
+            let owner = owner.clone();
+            window.use_keyed_state(key.clone(), cx, move |window, lease| {
+                let keys_owner = owner.clone();
+                let owning_window = window.window_handle();
+                let keys = lease.intercept_keystrokes(move |event, window, cx| {
+                    if window.window_handle() == owning_window && event.keystroke.key == "escape" {
+                        let _ = keys_owner.update(cx, cancel);
+                    }
+                });
+                lease
+                    .on_release(move |_, cx| {
+                        let _ = owner.update(cx, cancel);
+                    })
+                    .detach();
+                keys
+            });
+        },
+        |_, _, _, _| {},
+    )
+    .into_any_element()
+}
 
 use ely_core::{
     primitives::{Icon, IconName},
@@ -162,9 +228,9 @@ pub struct ReaderView {
     /// The Markdown bar's fade and drag, on the same shared [`crate::ui::scroll::Bars`]
     /// as the tab strip and the sidebar.
     bars: crate::ui::scroll::Bars,
-    scroll_clock: std::time::Instant,
-    #[cfg(test)]
-    pinned_clock: Option<u64>,
+    scroll_clock: ScrollClock,
+    _activation: Subscription,
+    _visibility: Subscription,
 }
 
 impl ReaderView {
@@ -178,6 +244,8 @@ impl ReaderView {
     ) -> Self {
         let (state, observer, pending) =
             build_state(body, &kind, &context, cx.entity().downgrade(), window, cx);
+        cx.on_release(|view, cx| view.cancel_scroll_app(cx))
+            .detach();
         Self {
             context,
             kind,
@@ -187,9 +255,17 @@ impl ReaderView {
             _document_observer: observer,
             pending_markdown: pending,
             bars: crate::ui::scroll::Bars::new(),
-            scroll_clock: std::time::Instant::now(),
-            #[cfg(test)]
-            pinned_clock: None,
+            scroll_clock: ScrollClock::new(),
+            _activation: cx.observe_window_activation(window, |view, window, cx| {
+                if !window.is_window_active() {
+                    view.cancel_scroll(cx);
+                }
+            }),
+            _visibility: cx.observe_window_visibility(window, |view, visibility, _, cx| {
+                if !visibility.is_visible() {
+                    view.cancel_scroll(cx);
+                }
+            }),
         }
     }
 
@@ -213,6 +289,7 @@ impl ReaderView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_scroll(cx);
         self.kind = kind;
         self.pending_markdown = None;
         let (state, observer, pending) = build_state(
@@ -229,6 +306,12 @@ impl ReaderView {
         self.last_action = None;
         self.bars = crate::ui::scroll::Bars::new();
         cx.notify();
+    }
+
+    /// Ends scrolling/selection gestures before a retained reader's host invalidates its account
+    /// context or changes visibility. Content replacement and disposal also clean up automatically.
+    pub fn cancel_interactions(&mut self, cx: &mut Context<Self>) {
+        self.cancel_scroll(cx);
     }
 
     pub fn context(&self) -> &ResourceContext {
@@ -378,18 +461,42 @@ fn human_size(bytes: u64) -> String {
 }
 
 impl ReaderView {
-    fn now_ms(&self) -> u64 {
-        #[cfg(test)]
-        if let Some(ms) = self.pinned_clock {
-            return ms;
+    fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
+        self.cancel_scroll_app(cx);
+        cx.notify();
+    }
+
+    fn cancel_scroll_app(&mut self, cx: &mut App) {
+        match &self.state {
+            ReaderState::Markdown(document) => {
+                let motion = document.read(cx).motion().clone();
+                scroll::cancel_region(&mut self.bars, &motion);
+                document.update(cx, |doc, cx| doc.clear_selection(cx));
+            }
+            ReaderState::Source(source) => source.update(cx, |view, cx| view.cancel_scroll(cx)),
+            _ => {}
         }
-        self.scroll_clock.elapsed().as_millis() as u64
+    }
+
+    fn settle_bars(&mut self, cx: &mut Context<Self>) {
+        if let Some(document) = self.markdown() {
+            let motion = document.read(cx).motion().clone();
+            if !cx.has_active_drag() {
+                self.bars.settle(&motion, self.now_ms(), cx.reduce_motion());
+            }
+            // Active drag is cleared by GPUI after mouse-up dispatch.
+            cx.notify();
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.scroll_clock.ms()
     }
 
     /// Freezes the Markdown bar's fade clock for tests.
     #[cfg(test)]
     pub fn pin_scrollbar_clock(&mut self, ms: u64) {
-        self.pinned_clock = Some(ms);
+        self.scroll_clock.pin(ms);
     }
 
     /// Shows the Markdown bar without waiting for a hover fade.
@@ -400,7 +507,8 @@ impl ReaderView {
 }
 
 impl Render for ReaderView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lifetime = scroll_lifetime(cx, Self::cancel_scroll);
         let theme = cx.theme();
         let body = match &self.state {
             ReaderState::Empty => status_panel(
@@ -435,17 +543,18 @@ impl Render for ReaderView {
             ),
             ReaderState::Markdown(document) => {
                 let document = document.clone();
-                let state = document.read(cx).list_state().clone();
+                let state = document.read(cx).motion().clone();
                 let now = self.now_ms();
-                let reduce = cx.reduce_motion();
+                let reduce = cx.reduce_motion() || cx.theme().reduced_motion;
+                let moving = state.tick(self.scroll_clock.now(), reduce);
                 // The platform may end a thumb drag outside the region; settle
                 // it so the bar returns to its hover resting state.
                 if self.bars.dragging().is_some() && !cx.has_active_drag() {
                     self.bars.settle(&state, now, reduce);
                 }
                 let opacity = self.bars.opacity(now);
-                if self.bars.is_animating() {
-                    _window.request_animation_frame();
+                if moving || self.bars.is_animating() {
+                    window.request_animation_frame();
                 }
                 let this = cx.entity().downgrade();
                 let on_drag: crate::ui::scroll::OnDragging =
@@ -455,7 +564,7 @@ impl Render for ReaderView {
                             let reduce = cx.reduce_motion();
                             if let Some(state) = view
                                 .markdown()
-                                .map(|document| document.read(cx).list_state().clone())
+                                .map(|document| document.read(cx).motion().clone())
                             {
                                 view.bars.drag(&state, axis, dragging, now, reduce);
                             }
@@ -475,6 +584,7 @@ impl Render for ReaderView {
                     on_drag,
                 }
                 .render(cx);
+                let clock = self.scroll_clock.clone();
                 div()
                     .id("reader-markdown-root")
                     .debug_selector(|| "reader-markdown".to_string())
@@ -486,7 +596,26 @@ impl Render for ReaderView {
                         }
                     }))
                     .child(document)
+                    .child(scroll::wheel_overlay_with(
+                        "reader-markdown",
+                        scroll::WheelAxes::Vertical,
+                        state,
+                        move || clock.now(),
+                    ))
                     .child(bar)
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|view, _, _, cx| view.settle_bars(cx)),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|view, _, _, cx| view.settle_bars(cx)),
+                    )
+                    .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            view.cancel_scroll(cx);
+                        }
+                    }))
                     .into_any_element()
             }
             // Keep the source root's overlay siblings direct: an extra
@@ -500,5 +629,6 @@ impl Render for ReaderView {
             .bg(theme.colors.surface)
             .text_color(theme.colors.fg)
             .child(body)
+            .child(lifetime)
     }
 }
