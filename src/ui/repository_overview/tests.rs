@@ -821,6 +821,44 @@ fn independent_latest_and_domain_partial_are_preserved(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn release_updates_close_unavailable_notes_and_restore_focus(cx: &mut TestAppContext) {
+    let (harness, cx) = harness(cx);
+    let binding = fixtures::binding(1);
+    let mut missing_body = fixtures::ready_releases();
+    missing_body.list.releases[0].body = None;
+    let mut missing_release = fixtures::ready_releases();
+    missing_release.list.releases.clear();
+    for replacement in [
+        SectionState::Loading,
+        SectionState::Error {
+            message: "failed".into(),
+        },
+        SectionState::Ready(missing_body),
+        SectionState::Ready(missing_release),
+    ] {
+        apply_releases(
+            &harness,
+            &binding,
+            SectionState::Ready(fixtures::ready_releases()),
+            cx,
+        );
+        click("overview-release-notes-4", cx);
+        let entity = overview(&harness, cx);
+        assert!(entity.read_with(cx, |view, _| view.open_release().is_some()));
+        let notes_focus = cx.update(|window, cx| window.focused(cx));
+        apply_releases(&harness, &binding, replacement, cx);
+        cx.run_until_parked();
+        assert!(entity.read_with(cx, |view, _| view.open_release().is_none()));
+        assert!(cx.debug_bounds("overview-notes-panel").is_none());
+        assert!(cx.debug_bounds("overview-notes-dismiss").is_none());
+        cx.update(|window, cx| {
+            let focus = window.focused(cx).expect("live focus restored");
+            assert_ne!(Some(focus), notes_focus);
+        });
+    }
+}
+
+#[gpui::test]
 fn maximum_language_total_and_overflow_failure_are_distinct(cx: &mut TestAppContext) {
     let (harness, cx) = harness(cx);
     let binding = fixtures::binding(1);

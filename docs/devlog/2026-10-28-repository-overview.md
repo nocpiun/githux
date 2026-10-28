@@ -45,6 +45,8 @@ GPUI 测试覆盖：旧仓库/账户/generation 拒绝、单 section 失败/Part
 
 同轮核对补齐：latest endpoint 独立 typed state/update；payload 仓库身份复核；领域 Partial 与统计延迟提示；匿名名字 fallback；fixtures 仅 example/test 装配；最大 u64 语言计数和溢出错误的 UI 边界；窗口失活取消本地滚动，弱引用按键拦截包含 Tab/Shift+Tab/Escape。
 
+第三轮审查发现列表更新会移除 notes 渲染，但遗留 open_release 和按键捕获。render 在输入树发布前核对选中 release/body，缺失时统一 close_notes，取消 motion 并恢复焦点。新增回归覆盖 Loading、Error、缺少 body、缺少 release 四种更新。最终本地全套测试为 519 / 310 / 123 / 48 项。首次重跑遇到已有 localhost bounded transport 测试一次连接失败（Network 而非 ResponseTooLarge）；未改动该范围，随后完整重跑通过，记录此瞬时环境失败。
+
 ## 未执行 / 后续
 
 - 未做真实 Windows 预览窗口的人工视觉、鼠标手感和多 DPI 验收；`cargo run` 启动事实不等于视觉验收。

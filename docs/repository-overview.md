@@ -74,7 +74,7 @@ pub enum OverviewAction {
 - **Contributors**：区分 204 `EmptyRepository`、成功空内容和失败；显示 `observed_entries()` 的观察条数，不声称是完整人数；关联用户与匿名贡献者都显示 name/login 首字母（`Avatar`），不显示 email 或 raw JSON，也不下载头像。列表有界，Partial/延迟状态保留。
 - **Languages**：显示字节派生的 share，不是 LOC；`total_bytes == 0` 时不推断 `0%` 分布。每个语言行同时有文字名称、share/bytes 标签和 bar，颜色取当前主题的 chart 色板，不替换主题、不使用随机色。超长名称用省略号，列表有界，并注明舍入后不保证总和恰为 100%。
 - **布局**：三段位于 TOP 横条，宽窗口并排，窄窗口在顶部区域内换行/堆叠；不建立右侧纵栏。列表行数按窗口宽度收紧（宽窗口 3 行，窄窗口 2 行）；TOP 高度上限为 360px 与窗口高度一半的较小值，堆叠和长文案通过公共滚动 viewport 访问，为下方文件阅读保留空间。溢出内容使用公共 `ui::scroll` 的 `Motion` / `Bar` / `Bars`，没有新滚动代码。
-- **Popover**：Release notes 打开为 bounded 本地 popover；面板自身按 viewport 可用空间 clamp 宽高与位置，短/窄窗口下不会伸出窗口外。打开时焦点进入 popover，面板消费 Tab/Shift+Tab 以阻止焦点落到后方 overview 或阅读器，Escape、Close 按钮或点击外部关闭并把焦点还给组件；关闭时取消共享滚动 motion，避免与相邻阅读器竞争。popover 的滚动与相邻模拟阅读器互不影响。
+- **Popover**：Release notes 打开为 bounded 本地 popover；面板自身按 viewport 可用空间 clamp 宽高与位置，短/窄窗口下不会伸出窗口外。打开时焦点进入 popover，面板消费 Tab/Shift+Tab 以阻止焦点落到后方 overview 或阅读器，Escape、Close 按钮或点击外部关闭并把焦点还给组件；关闭时取消共享滚动 motion，避免与相邻阅读器竞争；列表更新为 Loading/Error 或不再包含选中 body 时，在下一帧发布前关闭 notes 并恢复焦点。popover 的滚动与相邻模拟阅读器互不影响。
 
 ## 独立预览
 
@@ -105,7 +105,7 @@ cargo run --example repository_overview
 - `cargo fmt --all -- --check`
 - `cargo check --locked --all-targets`
 - `cargo clippy --locked --all-targets -- -D warnings`
-- `cargo test --locked`：主 binary 519 项、account 310 项、reader 123 项、repository_overview 47 项，全部通过
+- `cargo test --locked`：主 binary 519 项、account 310 项、reader 123 项、repository_overview 48 项，全部通过
 - `cargo build --locked --example repository_overview`
 - `cargo build --locked`
 - `git diff --check`

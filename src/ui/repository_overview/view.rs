@@ -342,6 +342,17 @@ impl RepositoryOverview {
 
 impl Render for RepositoryOverview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.open_release {
+            let still_available = self.releases.value().is_some_and(|data| {
+                data.list
+                    .releases
+                    .iter()
+                    .any(|release| release.id == id && release.body.is_some())
+            });
+            if !still_available {
+                self.close_notes(window, cx);
+            }
+        }
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let viewport = window.viewport_size();
