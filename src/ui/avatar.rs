@@ -87,11 +87,13 @@ pub fn avatar(view: AvatarView<'_>, cx: &App) -> AnyElement {
     };
     let face: AnyElement = match view.image {
         Some(source) => {
-            // The picture fills the frame. `Image::new` already round-clips via its own corners; we
-            // rely on the outer `rounded_full` + `overflow_hidden` to keep the circle.
+            // Ely forwards the base style's corner radii to the inner `gpui::img`, so the rounding
+            // belongs on the image node itself: outer clipping alone can still leave opaque square
+            // corners painted. The cover fit keeps the crop centred and undistorted.
             ely_core::primitives::Image::new(element_id, source)
                 .fit(gpui::ObjectFit::Cover)
                 .size_full()
+                .rounded_full()
                 .into_any_element()
         }
         None => div()

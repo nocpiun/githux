@@ -58,3 +58,21 @@ git diff --check
 
 - 推送新 head，触发 `@codex review`，按 skill 核验当前 head 的 CI 与审查；`pending` 等待负责人重新验收；不合并、不 auto-merge；`merge_owner` 已纠正为 coordinator。
 - 三项之外的设置分类（General/Appearance/Network 等）未实现，未引入 `ely-settings` 之外的设置功能。
+
+## 负责人反馈轮二（头像形状修正）
+
+负责人纠正：头像必须保持**圆形**，从未授权改为正方形；上一轮真实图片接管 initials 后，方形来源图片露出了四角。仅修形状，不动真实头像加载、自动加载或 Settings 结构。
+
+- 根因：`src/ui/avatar.rs::avatar` 的图片分支只给 `ely_core::primitives::Image` 设了 `fit(Cover).size_full()`，注释误称外层 `rounded_full().overflow_hidden()` 已足够。锁定 Ely `primitives/image.rs` 的 `RenderOnce` 会把自身 `base.style().corner_radii` 拷给内部 `gpui::img`，GPUI `Img` 再把 radii 传给 `Window::paint_image`，所以圆角必须落在图片节点本身。
+- 修复：图片分支补 `.rounded_full()`。外层 frame 仍是 `rounded_full().overflow_hidden()`，尺寸/`ObjectFit::Cover` 居中裁切/固定槽位不变，因此 initials fallback 与真实图片轮廓一致，侧栏收起/展开的 `Rems` 插值尺寸也继续平滑。改动只在这一处共用渲染器，未改调用方。
+- 修复了那条误导注释。
+
+### 验证（本轮）
+
+- `cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo test --locked --bin githux -j 1`（577 项）通过；release 构建通过。
+- 真实窗口：`target/release/githux.exe`（PID 46196，Responding，标题 `Githux`），`PrintWindow` 抓取真实帧后用最近邻放大核对侧栏头像：nociun/githux 蛋糕头像与 opanel 头像四角已被圆裁切、露出侧栏背景，不再有白色/不透明方角。截图 `.agents/output/avatar-circle.png`、放大 `.agents/output/avatar-zoom.png` / `avatar-zoom3.png`。核对后关闭该自启进程。
+- **未验证**：Settings 页与账户 footer 头像的圆角同屏复核受本机桌面会话限制（模拟点击未被接收）；它们是同一渲染器的调用方，但仍需负责人在原生窗口确认。真实 PAT 登录未执行。
+
+### 后续
+
+- 推送修复 head，触发 `@codex review`，核验当前 head CI/审查后置 `pending` 等负责人验收；不合并、不 auto-merge，`blocked` 由负责人管理。
