@@ -9,7 +9,7 @@
 1. 公开基本资料：显示实际提供的 name/login/bio、公开 company/location/website、followers/following/public repos/public gists/created_at。空字符串与缺失字段不显示；name 缺失时回退 login，头像只显示首字母/字素，**不请求 avatar_url，也不推断私有资料**。
 2. 个人 README：消费 host 准备的 `PreparedContent`，直接复用现有 `ReaderView` 的 Markdown、选择、链接与有界滚动行为。显示区域限高 280px，长正文不会挤掉后续区块。
 3. Pinned/Popular repositories：保持服务顺序，显示公开仓库摘要。没有 star 排序、自动导航或自动网络调用。
-4. 贡献热力图：消费明确 `ContributionRange` 与 `ContributionCalendar`，展示服务总计和真实 day/count tooltip。键盘聚焦后方向键/Home/End 与 hover 都更新同一天数据说明；长区间使用共享横向滚动。
+4. 贡献热力图：消费明确 `ContributionRange` 与 `ContributionCalendar`，展示服务总计和真实 day/count tooltip。键盘聚焦后方向键/Home/End 与 hover 都更新同一天数据说明；左右移动一周、上下移动一天，键盘操作同时滚动显示选中的周；长区间使用共享横向滚动。
 
 不包含 Profile 其他 Tabs、Contribution Activity、gist 浏览、写操作、图片下载、磁盘/离线缓存、新主题或另一套 inline-code/Markdown 渲染器。
 
@@ -34,7 +34,7 @@ view.update_in(cx, |view, window, cx| {
 - `ProfileTarget { host, id }` 是**被查看用户**的稳定资源身份，不是当前登录账户。`ProfileBinding { account, epoch }` 来自 host 捕获的授权/服务上下文。不能把 login 当授权身份，也不能用固定 SHA 代替服务上下文校验。
 - 每个独立页面会话从 `request()` 取得 `ProfileRequest`，将它随基本资料、仓库、README 与贡献读取一起捕获。后台结果先经现有 page-data/服务 fresh-context 核验，再调用窄 `update_*`。组件再检查 target/binding/generation；贡献更新还必须匹配组件当前 range。返回 `false` 表示旧结果已丢弃。
 - 切 Profile、切账户、授权 epoch/服务 binding 变化或改贡献区间时调用 `bind(target, binding, range)`，取得新 request。它清空所有旧 section、Reader、焦点动作与滚动状态；同一 login 的另一位用户、A→B→A 与旧错误响应都不能复用旧显示。独立 section 的 Loading/Error/Ready 可以分别更新，不互相清空。
-- **README 发现属于 page-data/host：** 尝试该用户同名 **PUBLIC** 仓库根 README，读取固定内容并准备 `PreparedContent` 后供给组件。旧版 Share-to-profile 标记当前 API 不可观察，组件不宣称与网站完全相同的资格判定。未发现、不可见、 denied 与真实空文件必须保留服务语义，不能猜测。
+- **README 发现属于 page-data/host：** 已合入的 [`PageReadSession::profile_readme`](page-data-service.md#个人-readme-helper) 可供后续 adapter 调用；尝试该用户同名 **PUBLIC** 仓库根 README，读取固定内容并准备 `PreparedContent` 后供给组件。旧版 Share-to-profile 标记当前 API 不可观察，组件不宣称与网站完全相同的资格判定。未发现、不可见、 denied 与真实空文件必须保留服务语义，不能猜测。
 - 组件不选择默认日期。未来 host 按已批准产品策略提供**最近滚动一年**的 `ContributionRange`；本组件不在内部读取时钟或另算默认区间。
 - `update_readme_with_context` 只用于没有服务 `PreparedContent` 身份的独立 fixture；正式 adapter 使用 `update_readme`，保留 `ReaderView::from_prepared` 的固定 repository/commit/path 相对链接上下文。
 - 通过 `on_action` 接收 `ProfileAction`。每个动作携带产生它的 request 和类型化 `ProfileActionKind::Profile / Repository(RepositoryTarget) / ExternalLink / Readme(ReaderAction)`。host 决定是否打开 Profile、仓库或外链；仓库动作保留已有 `databaseId`（API 允许缺失）与 nameWithOwner，不发明身份，不自动调用系统浏览器。
@@ -57,7 +57,7 @@ view.update_in(cx, |view, window, cx| {
 
 ## Contribution 语义
 
-- 日期必须落在 host 明确区间内；范围生成与闰年/年边界经过验证，最多 366 天。非法/重复日期、范围外记录不会被并入其他日期。
+- 日期必须落在 host 明确区间内；范围生成与闰年/年边界经过验证，遵守领域 `MAX_DAYS=366` 的起止差上限（包含首尾时最多 367 天）。非法/重复日期、范围外记录不会被并入其他日期。
 - 服务返回的 `count=0` 是真实零贡献；缺失 day 是 Missing，不显示为零。GraphQL field errors、缺失日期、无效/范围外记录都有 partial 说明。
 - 已知 `NONE` 与四个 quartile 使用固定展示 ramp；未知 level 显示独立未知色，保留实际 count 与 level unavailable 文本，**不用未知 level 推断贡献数，也不把服务 color 字符串当 CSS**。
 - 880×560 下完整一年保持自然 11px cell 与间距；更窄窗口有界横向滚动，不压缩全年 cell。页面纵向与热力图横向分别使用共享 `Motion`/`Bar`/`Bars`。

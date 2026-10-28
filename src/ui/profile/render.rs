@@ -252,12 +252,14 @@ impl ProfileView {
             .text_size(theme.text_size(TextSize::Base))
             .text_color(colors.fg_subtle)
             .child(format!("@{}", basic.login));
-        let profile_button =
-            Button::new("profile-open", "Open profile")
-                .variant(ButtonVariant::Link)
-                .on_click(cx.listener(|view, _, window, cx| {
-                    view.emit(ProfileActionKind::Profile, window, cx)
-                }));
+        let profile_request = self.request();
+        let profile_button = Button::new("profile-open", "Open profile")
+            .variant(ButtonVariant::Link)
+            .on_click(cx.listener(move |view, _, window, cx| {
+                if view.accepts(&profile_request) {
+                    view.emit(ProfileActionKind::Profile, window, cx);
+                }
+            }));
         let mut metadata = Vec::new();
         for value in [clean(&basic.company), clean(&basic.location)]
             .into_iter()
@@ -278,16 +280,19 @@ impl ProfileView {
         if let Some(created) = clean(&basic.created_at) {
             metadata.push(meta_text(format!("Joined {created}"), cx));
         }
+        let website_request = self.request();
         let website = clean(&basic.website_url).map(|url| {
             let url = url.to_string();
             Button::new("profile-website", "Website")
                 .variant(ButtonVariant::Link)
                 .on_click(cx.listener(move |view, _, window, cx| {
-                    view.emit(
-                        ProfileActionKind::ExternalLink { url: url.clone() },
-                        window,
-                        cx,
-                    )
+                    if view.accepts(&website_request) {
+                        view.emit(
+                            ProfileActionKind::ExternalLink { url: url.clone() },
+                            window,
+                            cx,
+                        );
+                    }
                 }))
         });
         panel(
@@ -458,6 +463,7 @@ impl ProfileView {
     ) -> AnyElement {
         let theme = cx.theme();
         let selected = self.selected_repository == index;
+        let request = self.request();
         let target = RepositoryTarget::from_repo(repo);
         let name = target.name_with_owner.clone();
         let description = clean(&repo.description)
@@ -495,8 +501,10 @@ impl ProfileView {
             .hover(|style| style.bg(theme.colors.hover))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(move |view, _, window, cx| {
-                view.selected_repository = index;
-                view.emit(ProfileActionKind::Repository(target.clone()), window, cx);
+                if view.accepts(&request) {
+                    view.selected_repository = index;
+                    view.emit(ProfileActionKind::Repository(target.clone()), window, cx);
+                }
             }))
             .child(
                 div()
@@ -828,8 +836,31 @@ impl ProfileView {
             "end" => count - 1,
             _ => return,
         });
+        self.reveal_selected_week();
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn reveal_selected_week(&self) {
+        let Some(selected) = self.selected_day else {
+            return;
+        };
+        let week = selected / 7;
+        let left = px(week as f32 * (CELL + CELL_GAP));
+        let right = left + px(CELL);
+        let viewport = self.heatmap_scroll.bounds();
+        let visible_left = px(0.0);
+        let visible_right = viewport.size.width;
+        let current = self.heatmap_scroll.offset().x;
+        let offset = if left + current < visible_left {
+            visible_left - left
+        } else if right + current > visible_right {
+            visible_right - right
+        } else {
+            current
+        };
+        self.heatmap_motion
+            .set_axis_offset(Axis::Horizontal, offset);
     }
 }
 

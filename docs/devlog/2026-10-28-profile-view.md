@@ -1,7 +1,7 @@
 # Profile Overview 展示组件与独立预览
 
 - 日期：2026-10-28；任务 ID：profile-view；执行者：基层 Agent。
-- PR：待创建。目标：在 committed base `913eb5eb650c83eeb4c9b5c5cf422e5c26720506` 上交付 UI-only Profile Overview、合成预览、测试与 host adapter 文档。
+- PR：[#36](https://github.com/nocpiun/githux/pull/36)。目标：在 committed base `913eb5eb650c83eeb4c9b5c5cf422e5c26720506` 上交付 UI-only Profile Overview、合成预览、测试与 host adapter 文档。
 - 状态：实现与本地验证完成，待 PR 审查、CI 与负责人原生窗口验收；本任务不合并。
 
 ## 改动与决定
@@ -23,7 +23,7 @@ Pin 语义保持服务分类：GitHub Popular 只在无 pin 且 showcase 明确�
 - `cargo fmt --all`；随后以 `--check` 复核。
 - `check --locked --all-targets`。
 - `clippy --locked --all-targets -- -D warnings`。
-- `test --locked`：主 binary、account、reader、profile assemblies 全部通过；profile assembly 含 140 项（其中 13 项 profile 行为/模型测试，其他为复用 Reader/scroll/domain 测试）。
+- `test --locked`：主 binary、account、reader、profile assemblies 全部通过；组合树主 binary 538、account 321、profile 149、reader 131 项全部通过；本任务包含 18 项 profile 行为/模型测试，其余为复用 Reader/scroll/domain 测试。
 - `build --locked` 与 `build --locked --example profile`。
 - `git diff --check`。
 
@@ -35,8 +35,12 @@ Pin 语义保持服务分类：GitHub Popular 只在无 pin 且 showcase 明确�
 
 PR #36 首轮 `aba07c7` Codex 提出两项可直接修复问题：page thumb 外部释放后未 `settle`，导致 Motion 继续吞 wheel；热力图左右/上下步长与竖向 week column 的视觉方向相反。已分别补上释放清理与左右 7 天、上下 1 天，并在 `page_wheel_reaches_sections_below_the_viewport` 加入真实 thumb drag→release→wheel 回归，键盘用例显式区分 Right=下一周与 Down=下一天。两项均无需产品/架构裁决，永久 `arbitration_ever_required=false` 保持不变；等待新 head 的 CI/review，仍不自行合并。
 
+第二轮 `16304ab` review 指出横向溢出时键盘选中日未 reveal；已经共享 Motion 滚动显示选中的 week，新增 600px 下 End/Home 的真实 offset 与 day detail 验证。自行检查同时补齐 rebind 更换焦点句柄、替换 README 后拒绝保留旧 Reader 的回调，以及 header/repository 点击的 request 复查，并有 stale-reader/focus 回归。
+
+同步 main `342e72d`（已接受 PR #32 reader-motion、PR #33 page-data），无冲突；没有修改这些 owners 的实现。随后对组合树重新执行全部检查。README 发现 helper 的已合入接口已链接至主题文档，正式挂载仍待集成。
+
 ## 后续
 
-- 协调者创建/跟踪 PR；任务属 First Release milestone #1，保留 `pending` 等负责人验收，不自动合并。
+- 原执行者跟踪 PR #36 最新 head 审查/CI 并交回协调者；任务属 First Release milestone #1，保留 `pending` 等负责人验收，不自动合并。
 - 负责人验收真实 Windows 预览：880×560 与缩窗、长元数据、README 选择/滚动、pin hints、全年图、鼠标/键盘 focus、外链不自动打开。
 - 正式集成由后续 host adapter 完成，不将 fixture 当真实账户数据。

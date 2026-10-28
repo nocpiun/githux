@@ -417,6 +417,33 @@ fn readme_uses_reader_and_actions_keep_the_current_target(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn replaced_readme_cannot_emit_and_rebind_drops_focused_actions(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let old_reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
+    view.update_in(cx, |view, window, cx| {
+        let request = view.request();
+        view.update_readme(
+            &request,
+            SectionState::Ready(readme("person", "new body")),
+            window,
+            cx,
+        );
+        view.repository_focus_for_test().focus(window, cx);
+    });
+    old_reader.update_in(cx, |reader, window, cx| {
+        reader.handle_link("https://example.invalid/old", window, cx);
+    });
+    assert!(view.read_with(cx, |view, _| view.last_action().is_none()));
+    view.update_in(cx, |view, _, cx| {
+        view.bind(target(42), binding(9, 5), range(), cx);
+    });
+    publish_ready(&view, cx);
+    cx.simulate_keystrokes("enter");
+    assert!(view.read_with(cx, |view, _| view.last_action().is_none()));
+}
+
+#[gpui::test]
 fn repository_actions_use_typed_stable_resource_and_keyboard(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
@@ -648,5 +675,26 @@ fn long_content_and_long_ranges_stay_bounded(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |view, _| view.heatmap_scroll.offset().x < px(0.0)));
     assert!(view.read_with(cx, |view, _| view.heatmap_scroll.offset().x
         >= -view.heatmap_scroll.max_offset().x));
+    view.update_in(cx, |view, window, cx| {
+        view.heatmap_focus_for_test().focus(window, cx);
+    });
+    cx.simulate_keystrokes("home end");
+    let max = view.read_with(cx, |view, _| view.heatmap_scroll.max_offset().x);
+    assert!(view.read_with(cx, |view, _| {
+        (view.heatmap_scroll.offset().x + max).abs() <= px(1.0)
+    }));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected_day_detail()),
+        Some("2024-02-29: 365 contributions".into())
+    );
+    cx.simulate_keystrokes("home");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.heatmap_scroll.offset().x),
+        px(0.0)
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected_day_detail()),
+        Some("2023-03-01: 0 contributions".into())
+    );
     assert!(graph.size.height <= px(110.0));
 }

@@ -30,6 +30,7 @@ pub struct ProfileView {
     pub(super) contributions: SectionState<ContributionCalendar>,
     pub(super) readme: SectionState<()>,
     pub(super) reader: Option<Entity<ReaderView>>,
+    reader_generation: u64,
     pub(super) repository_focus: FocusHandle,
     pub(super) heatmap_focus: FocusHandle,
     pub(super) selected_repository: usize,
@@ -77,6 +78,7 @@ impl ProfileView {
             contributions: SectionState::Loading,
             readme: SectionState::Loading,
             reader: None,
+            reader_generation: 0,
             repository_focus: cx.focus_handle().tab_stop(true),
             heatmap_focus: cx.focus_handle().tab_stop(true),
             selected_repository: 0,
@@ -119,6 +121,8 @@ impl ProfileView {
         self.selected_repository = 0;
         self.selected_day = None;
         self.last_action = None;
+        self.repository_focus = cx.focus_handle().tab_stop(true);
+        self.heatmap_focus = cx.focus_handle().tab_stop(true);
         self.page_motion.set_offset(point(px(0.0), px(0.0)));
         self.heatmap_motion.set_offset(point(px(0.0), px(0.0)));
         scroll::cancel_region(&mut self.page_bars, &self.page_motion);
@@ -272,6 +276,11 @@ impl ProfileView {
         if !self.accepts(request) {
             return false;
         }
+        self.reader_generation = self
+            .reader_generation
+            .checked_add(1)
+            .expect("profile README generation exhausted");
+        let reader_generation = self.reader_generation;
         self.reader = None;
         self.readme = match state {
             SectionState::Loading => SectionState::Loading,
@@ -285,7 +294,10 @@ impl ProfileView {
                     reader.on_action(Rc::new(move |action, window, cx| {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |view, cx| {
-                                if view.accepts(&reader_request) {
+                                if view.accepts(&reader_request)
+                                    && view.reader_generation == reader_generation
+                                    && view.reader.is_some()
+                                {
                                     view.emit(ProfileActionKind::Readme(action), window, cx);
                                 }
                             });
