@@ -81,3 +81,27 @@ git diff --check
 ## 审查追加（圆形修复后）
 
 Codex 对本轮 head 的新增意见：分页 Partial 结果只有行可点却没有 Retry，且已记录的 load key 会让之后同授权的 settlement 不再读取，导致缺失页拿不到。`repository_list_status` 现在对 `Partial` 也提供一次性 Retry（完整列表仍只有 `Repositories (N)`，失败仍保留各自一次性 Retry）。Partial 行仍可点击，不掩盖缺失原因。`refresh()` 走既有 `start()`，本次授权会重新发起读取。新增 `partial_results_keep_rows_usable_and_offer_a_scoped_retry` 回归测试。
+
+## 负责人追加：离屏头像细条与请求总超时
+
+负责人授权在本 PR 修复 repository viewport 下方的头像碎片，以及审查 [r4400866433](https://github.com/nocpiun/githux/pull/38#discussion_r4400866433) 的头像总超时。此前仅形状范围的限制由本次明确指令覆盖；永久裁决记录仍为 `arbitration_ever_required: true`、`merge_owner: coordinator`。main `cdda362` 已在分支历史内，未升级或修改 GPUI/Ely、registry 或 git checkout。
+
+### 裁切防护与失败复现
+
+GPUI 0.3.10 的 `with_content_mask` 将不相交 mask 钳成零面积矩形；`paint_image` 使用 `cover_bounds` 对 mask 近边 floor、远边 ceil，非整数设备坐标上的零高度 mask 因而可能变成一个设备像素。外层 `overflow_hidden` 不能消除这个问题。
+
+`ui::avatar` 新增薄 `VisibleAvatar` Element，委托原头像的 layout/prepaint；paint 时先计算 `window.content_mask().bounds` 与头像布局 bounds 的真实交集，宽或高为零就跳过绘制。防护包住整个头像 frame，因此图片和 tinted initials 背景都不能复活为空的 mask。部分可见时仍完整委托原元素，保留圆形、Cover、身份、固定尺寸、Rems 插值、加载与行交互；不增加 footer 背景、padding 或按行号裁切。
+
+- GPUI 回归使用生产 avatar renderer、不透明高对比图、有界滚动容器和固定 footer，覆盖完全离屏、边界部分可见、非整数 offset、100%/150% scale、先滚动 initials 再发布延迟图片。另施加两个不相交真实祖先 mask，直接覆盖小数零面积 mask。关闭防护后测试失败（离屏图片进入 paint 并持有零高 mask），开启后通过。
+- `cargo run --example avatar` 增加可滚动列表、固定 footer 和 disjoint-mask 探针；不读账户数据库、不联网。原生 150% DPI 下，关闭防护时 disjoint mask 区域有红绿细条，开启防护后图片和 frame 细线全部消失。DPI-aware PrintWindow 同区域 `x725..790/y540..590` 测得修复前 46 个亮色图片像素、修复后 0；共 48 个像素变化。证据 `.agents/output/clip-native-before.png`、`clip-native-after.png`、`clip-native-pixels.json`。
+- 真实 Shell release 通过 posted window messages 验证滚轮改变列表、窗口高度调整、收起/展开以及 Settings/footer 头像；截图 `.agents/output/shell-clip-scrolled.png`、`shell-clip-collapsed.png`、`shell-clip-reexpanded.png`。原生 scale 为 150%。已发送 scrollbar 拖动消息，但未能从截图充分证明 thumb 拖动生效，不能声称完成手动拖动验收。100% 原生缩放与真实手动拖 scrollbar/动画手感仍需负责人验收；测试平台的两种 scale 不代替原生验收。
+
+### 总超时
+
+`ReqwestAvatars` 客户端设置 15 秒 total request timeout，覆盖建连、响应头和完整 body；保持原 cancellation、无 Authorization 和生产 HTTPS 边界。真实 localhost socket 回归分别停滞响应头、停滞 body，验证 `run_fetch` 发布 Failed、释放唯一 semaphore permit，随后头像成功完成。测试用合成 PNG，不读取真实凭据。
+
+### 本轮检查与交付边界
+
+`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo test --locked -j 1`（587 / 587 / 54 / 156 / 135 / 488 / 16）、release 构建与 avatar example 构建通过；`git diff --check` 通过。Windows example 运行时锁住 exe 的链接失败已通过正常关闭本任务探针并重跑解决。
+
+本轮推送后对新 head 请求 Codex review，最新远端 CI/review 结果留 PR 与本地交付状态。不将本地检查或原生截图当负责人验收。`blocked`、`pending` 保留，不 merge、不 auto-merge；真实 PAT 登录未执行。

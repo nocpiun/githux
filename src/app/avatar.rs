@@ -176,7 +176,14 @@ pub struct ReqwestAvatars {
 
 impl ReqwestAvatars {
     pub fn new() -> Result<Self, ()> {
+        Self::with_timeout(std::time::Duration::from_secs(15))
+    }
+
+    fn with_timeout(timeout: std::time::Duration) -> Result<Self, ()> {
         let client = reqwest::Client::builder()
+            // Covers connection establishment, response headers and the entire streamed body.
+            // A stalled endpoint must release its avatar semaphore permit and reach fallback.
+            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|_| ())?;
@@ -464,6 +471,95 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    /// Real sockets exercise both a server that never sends headers and one that sends headers
+    /// then stalls its body. Each timeout must release the only permit so the next request runs.
+    #[tokio::test]
+    async fn stalled_headers_and_body_time_out_and_release_the_next_request() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        for send_headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let (release, stop) = std::sync::mpsc::channel::<()>();
+            let server = std::thread::spawn(move || {
+                let (mut stalled, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let size = stalled.read(&mut request).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&request[..size])
+                        .to_ascii_lowercase()
+                        .contains("authorization:")
+                );
+                if send_headers {
+                    stalled
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\nx")
+                        .unwrap();
+                    stalled.flush().unwrap();
+                }
+                // Keep the first socket open while accepting and completing the following request.
+                let (mut following, _) = listener.accept().unwrap();
+                assert!(following.read(&mut request).unwrap() > 0);
+                let body = png();
+                write!(
+                    following,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                following.write_all(&body).unwrap();
+                following.flush().unwrap();
+                let _ = stop.recv_timeout(Duration::from_secs(5));
+            });
+            let bytes = Arc::new(ReqwestAvatars::with_timeout(Duration::from_millis(150)).unwrap());
+            let fetcher = Arc::new(AvatarFetcher::new(bytes, true));
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let inbox = Arc::new(Mutex::new(Vec::new()));
+            let stalled_key = AvatarKey::new("test", 1, format!("{base}/stalled"));
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                run_fetch(
+                    permits.clone().acquire_owned().await.unwrap(),
+                    fetcher.clone(),
+                    AvatarRequest {
+                        key: stalled_key.clone(),
+                    },
+                    inbox.clone(),
+                ),
+            )
+            .await
+            .expect("a stalled avatar reaches its total deadline");
+            assert_eq!(
+                permits.available_permits(),
+                1,
+                "a timed-out fetch releases its permit"
+            );
+            assert!(
+                matches!(drain(&inbox).as_slice(), [AvatarCompletion::Failed(key)] if key == &stalled_key)
+            );
+            let next_key = AvatarKey::new("test", 2, format!("{base}/next"));
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                run_fetch(
+                    permits.clone().acquire_owned().await.unwrap(),
+                    fetcher,
+                    AvatarRequest {
+                        key: next_key.clone(),
+                    },
+                    inbox.clone(),
+                ),
+            )
+            .await
+            .expect("the next avatar is not starved");
+            assert!(
+                matches!(drain(&inbox).as_slice(), [AvatarCompletion::Ready(key, _)] if key == &next_key)
+            );
+            let _ = release.send(());
+            server.join().unwrap();
+        }
     }
 
     #[test]

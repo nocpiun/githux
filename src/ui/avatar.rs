@@ -10,7 +10,10 @@
 //! of a second loader per component.
 
 use ely_core::theme::{ActiveTheme, AvatarSize, TextSize};
-use gpui::{AnyElement, App, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*};
+use gpui::{
+    AnyElement, App, Bounds, Element, ElementId, FontWeight, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, ParentElement, Pixels, Styled, Window, div, prelude::*,
+};
 
 use crate::app::avatar::AvatarKey;
 
@@ -102,19 +105,85 @@ pub fn avatar(view: AvatarView<'_>, cx: &App) -> AnyElement {
             .child(initials(&name_owned))
             .into_any_element(),
     };
-    div()
-        .debug_selector(move || selector.clone())
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(side)
-        .rounded_full()
-        .overflow_hidden()
-        .bg(color.opacity(0.16))
-        .text_color(color)
-        .child(face)
-        .into_any_element()
+    VisibleAvatar(
+        div()
+            .debug_selector(move || selector.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(side)
+            .rounded_full()
+            .overflow_hidden()
+            .bg(color.opacity(0.16))
+            .text_color(color)
+            .child(face)
+            .into_any_element(),
+    )
+    .into_any_element()
+}
+
+/// Keeps GPUI 0.3.10 from reviving an empty ancestor mask during device-pixel snapping.
+/// Layout and prepaint still run normally; only completely clipped avatar painting is skipped.
+/// Guard the frame too: its tinted fallback background must not revive an empty mask either.
+/// Partially visible avatars retain the original ancestor mask and the image's own circle/cover.
+struct VisibleAvatar(AnyElement);
+
+impl IntoElement for VisibleAvatar {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for VisibleAvatar {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let visible = window.content_mask().bounds.intersect(&bounds);
+        if visible.size.width > Pixels::ZERO && visible.size.height > Pixels::ZERO {
+            self.0.paint(window, cx);
+        }
+    }
 }
 
 /// The avatar key for a repository's namespace owner, when it has a URL. The numeric owner id keeps
@@ -134,4 +203,170 @@ pub fn account_key(identity: &crate::domain::AccountIdentity) -> Option<AvatarKe
         .as_deref()
         .filter(|url| !url.trim().is_empty())
         .map(|url| AvatarKey::new(identity.key.host.as_str(), identity.key.id, url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, ImageSource, Render, ScrollHandle, TestAppContext, px};
+    use std::sync::{Arc, Mutex};
+
+    struct ClipProbe {
+        image: ImageSource,
+        scroll: ScrollHandle,
+        ready: bool,
+    }
+    impl Render for ClipProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let face = avatar(
+                AvatarView {
+                    id: "disjoint",
+                    selector: "disjoint",
+                    image: self.ready.then(|| self.image.clone()),
+                    name: "Opaque Square",
+                    slot: AvatarSlot::Rems(gpui::rems(2.0)),
+                },
+                cx,
+            );
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    gpui::canvas(
+                        move |bounds, window, cx| {
+                            let mut face = face;
+                            face.prepaint_as_root(
+                                bounds.origin,
+                                gpui::size(
+                                    gpui::AvailableSpace::Definite(px(32.0)),
+                                    gpui::AvailableSpace::Definite(px(32.0)),
+                                ),
+                                window,
+                                cx,
+                            );
+                            face
+                        },
+                        |bounds, mut face, window, cx| {
+                            let first = gpui::ContentMask {
+                                bounds: Bounds::new(bounds.origin, gpui::size(px(32.0), px(8.0))),
+                            };
+                            let second = gpui::ContentMask {
+                                bounds: Bounds::new(
+                                    bounds.origin + gpui::point(px(0.0), px(12.25)),
+                                    gpui::size(px(32.0), px(20.0)),
+                                ),
+                            };
+                            window.with_content_mask(Some(first), |window| {
+                                window.with_content_mask(Some(second), |window| {
+                                    face.paint(window, cx)
+                                })
+                            });
+                        },
+                    )
+                    .absolute()
+                    .left(px(100.0))
+                    .top(px(200.0))
+                    .size(px(32.0)),
+                )
+                .child(
+                    div()
+                        .id("viewport")
+                        .h(px(80.25))
+                        .w(px(80.0))
+                        .flex_none()
+                        .overflow_y_scroll()
+                        .overflow_x_hidden()
+                        .track_scroll(&self.scroll)
+                        .child(div().flex().flex_col().children((0..12).map(|row| {
+                            div().h(px(32.25)).flex_none().child(avatar(
+                                AvatarView {
+                                    id: &format!("clip-{row}"),
+                                    selector: &format!("clip-{row}"),
+                                    image: self.ready.then(|| self.image.clone()),
+                                    name: "Opaque Square",
+                                    slot: AvatarSlot::Rems(gpui::rems(2.0)),
+                                },
+                                cx,
+                            ))
+                        }))),
+                )
+                .child(
+                    div()
+                        .id("fixed-footer")
+                        .debug_selector(|| "fixed-footer".to_string())
+                        .h(px(100.0))
+                        .w_full()
+                        .flex_none()
+                        .child("Fixed footer"),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn offscreen_images_never_reach_paint_with_an_empty_fractional_mask(cx: &mut TestAppContext) {
+        cx.update(ely_core::init_for_tests);
+        let pixels = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 12, 32, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let image = cx.update(|cx| {
+            gpui::Image::from_bytes(gpui::ImageFormat::Png, png.into_inner())
+                .to_image_data(cx.svg_renderer())
+                .unwrap()
+        });
+        let masks = Arc::new(Mutex::new(Vec::new()));
+        let recorded = masks.clone();
+        let source = ImageSource::Custom(Arc::new(move |window, _| {
+            recorded.lock().unwrap().push(window.content_mask().bounds);
+            Some(Ok(image.clone()))
+        }));
+        let (view, cx) = cx.add_window_view(|_, _| ClipProbe {
+            image: source,
+            scroll: ScrollHandle::new(),
+            ready: false,
+        });
+        // Scroll while still showing initials, then settle the delayed image response.
+        view.update(cx, |probe, cx| {
+            probe.scroll.set_offset(gpui::point(px(0.0), px(-16.5)));
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        view.update(cx, |probe, cx| {
+            probe.ready = true;
+            cx.notify();
+        });
+        for scale in [1.0, 1.5] {
+            cx.simulate_scale_factor_change(scale);
+            for offset in [0.0, -0.25, -16.5, -48.25] {
+                masks.lock().unwrap().clear();
+                view.update(cx, |probe, cx| {
+                    probe.scroll.set_offset(gpui::point(px(0.0), px(offset)));
+                    cx.notify();
+                });
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+                let samples = masks.lock().unwrap();
+                assert!(!samples.is_empty(), "partially visible images still draw");
+                assert!(
+                    samples
+                        .iter()
+                        .all(|mask| mask.size.width > Pixels::ZERO
+                            && mask.size.height > Pixels::ZERO),
+                    "offscreen image paint revived an empty mask at scale {scale}, offset {offset}: {samples:?}"
+                );
+                assert!(
+                    samples
+                        .iter()
+                        .any(|mask| mask.size.height > Pixels::ZERO && mask.size.height < px(32.0)),
+                    "boundary avatar keeps its partial clip"
+                );
+                assert!(cx.debug_bounds("fixed-footer").is_some());
+            }
+        }
+    }
 }

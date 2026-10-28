@@ -34,14 +34,16 @@ mod ui;
 mod workspace;
 
 use gpui::{
-    App, AppContext, Bounds, Context, ImageSource, IntoElement, ObjectFit, ParentElement, Render,
-    Styled, StyledImage, Window, WindowBounds, WindowOptions, div, img, px, rems, rgb, size,
+    App, AppContext, Bounds, Context, ImageSource, InteractiveElement, IntoElement, ObjectFit,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, StyledImage, Window,
+    WindowBounds, WindowOptions, div, img, px, rems, rgb, size,
 };
 use std::{io::Cursor, sync::Arc};
 use ui::avatar::{AvatarSlot, AvatarView, avatar};
 
 struct Probe {
     image: ImageSource,
+    scroll: ScrollHandle,
 }
 
 impl Render for Probe {
@@ -73,6 +75,16 @@ impl Render for Probe {
             };
             row = row.child(div().w(px(64.0)).h(px(64.0)).child(face));
         }
+        let mask_face = avatar(
+            AvatarView {
+                id: "disjoint-mask",
+                selector: "disjoint-mask",
+                image: Some(self.image.clone()),
+                name: "Disjoint Mask",
+                slot: AvatarSlot::Rems(rems(2.0)),
+            },
+            cx,
+        );
         div()
             .size_full()
             .bg(background)
@@ -83,6 +95,93 @@ impl Render for Probe {
                 ),
             )
             .child(row)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(464.0))
+                    .top(px(300.0))
+                    .child("Disjoint masks"),
+            )
+            .child(
+                gpui::canvas(
+                    move |bounds, window, cx| {
+                        let mut face = mask_face;
+                        face.prepaint_as_root(
+                            bounds.origin,
+                            gpui::size(
+                                gpui::AvailableSpace::Definite(px(32.0)),
+                                gpui::AvailableSpace::Definite(px(32.0)),
+                            ),
+                            window,
+                            cx,
+                        );
+                        face
+                    },
+                    |bounds, mut face, window, cx| {
+                        let viewport = gpui::ContentMask {
+                            bounds: Bounds::new(bounds.origin, size(px(32.0), px(8.0))),
+                        };
+                        let nested = gpui::ContentMask {
+                            bounds: Bounds::new(
+                                bounds.origin + gpui::point(px(0.0), px(12.25)),
+                                size(px(32.0), px(20.0)),
+                            ),
+                        };
+                        window.with_content_mask(Some(viewport), |window| {
+                            window.with_content_mask(Some(nested), |window| face.paint(window, cx))
+                        });
+                    },
+                )
+                .absolute()
+                .left(px(480.0))
+                .top(px(330.0))
+                .size(px(32.0)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(32.0))
+                    .top(px(158.0))
+                    .w(px(400.0))
+                    .flex()
+                    .flex_col()
+                    .child(div().child("Bounded list: scroll wheel; fixed footer below"))
+                    .child(
+                        div()
+                            .id("avatar-viewport")
+                            .h(px(80.0))
+                            .w_full()
+                            .overflow_y_scroll()
+                            .overflow_x_hidden()
+                            .track_scroll(&self.scroll)
+                            .child(div().flex().flex_col().children((0..12).map(|index| {
+                                div()
+                                    .h(px(31.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.0))
+                                    .child(avatar(
+                                        AvatarView {
+                                            id: &format!("scroll-avatar-{index}"),
+                                            selector: "scroll-avatar",
+                                            image: Some(self.image.clone()),
+                                            name: "Square Image",
+                                            slot: AvatarSlot::Rems(rems(1.5)),
+                                        },
+                                        cx,
+                                    ))
+                                    .child(format!("Owner {index}"))
+                            }))),
+                    )
+                    // No opaque cover-up: any escaped red fragment is visible on the same background.
+                    .child(
+                        div()
+                            .h(px(160.0))
+                            .flex_none()
+                            .child("Fixed account / shortcuts area"),
+                    ),
+            )
     }
 }
 
@@ -109,7 +208,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                         None,
-                        size(px(640.0), px(220.0)),
+                        size(px(640.0), px(460.0)),
                         cx,
                     ))),
                     titlebar: Some(gpui::TitlebarOptions {
@@ -121,6 +220,7 @@ fn main() {
                 |_, cx| {
                     cx.new(|_| Probe {
                         image: ImageSource::Render(Arc::clone(&image)),
+                        scroll: ScrollHandle::new(),
                     })
                 },
             )
