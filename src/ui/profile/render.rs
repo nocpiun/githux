@@ -236,6 +236,7 @@ impl ProfileView {
                 div()
                     .flex()
                     .items_center()
+                    .justify_center()
                     .gap_2()
                     .py_2()
                     .px_2()

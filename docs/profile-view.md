@@ -1,6 +1,6 @@
 # Profile Overview 展示组件
 
-更新：2026-10-28。**视觉返工中，负责人已否决旧交付，尚未通过新版视觉验收。** 已实现可复用的只读 Profile Overview，位于 [`src/ui/profile/`](../src/ui/profile/)。独立开发预览为 `examples/profile.rs`，测试装配为 `tests/profile.rs` 与 `src/bin_support/profile_modules.rs`。**尚未接入 Shell、路由、workspace、账户服务或真实页面数据；预览中的合成数据不表示生产集成完成。**
+更新：2026-10-28。**负责人已确认当前其余视觉无问题，主 Agent 补齐 Overview tab 居中修正；PR 尚未合并。** 已实现可复用的只读 Profile Overview，位于 [`src/ui/profile/`](../src/ui/profile/)。独立开发预览为 `examples/profile.rs`，测试装配为 `tests/profile.rs` 与 `src/bin_support/profile_modules.rs`。**尚未接入 Shell、路由、workspace、账户服务或真实页面数据；预览中的合成数据不表示生产集成完成。**
 
 ## 已实现的展示范围
 
@@ -82,4 +82,4 @@ cargo run --example profile
 
 ReaderView 与内部 MarkdownView 当前均 size_full，虚拟 ListState 自持 viewport/Motion；无自然高度或外部纵向流 API。按字符/行猜高度、复制 renderer 或 measure_all 不被采用。已向协调者提交 additive ReaderLayout::Flow 建议：默认 Viewport 不变，复用现有 AST/选择/链接，短正文真实排版占高、长内容保留 lazy 外部页面流，移除冗余纵向 wheel/bar。涉及共享 reader/mod.rs、markdown/document.rs 与 Reader 专属测试/文档，Profile 未越权改这些文件。
 
-当前正常首屏仍因旧 viewport 空白不能满足原图密度，长内容连续流也未完成；`blocked` 保留，**不能据局部版式、编译或截图宣称视觉已对齐**。新预览的整体验收与 pending 要等该能力协调完成。
+负责人最新反馈为除 Overview tab 未居中外，其余当前视觉无问题。Overview 的图标与文字现作为一组在既有 112px tab 内水平居中，保留原高度、间距和下划线范围。README 仍使用现有固定 viewport；上述自然流 API 尚未实现，不把这次视觉反馈写成该能力已完成。`blocked` 仍由负责人管理，Agent 不移除。

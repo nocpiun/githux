@@ -2,7 +2,7 @@
 
 - 日期：2026-10-28；任务 ID：profile-view；执行者：基层 Agent。
 - PR：[#36](https://github.com/nocpiun/githux/pull/36)。目标：在 committed base `913eb5eb650c83eeb4c9b5c5cf422e5c26720506` 上交付 UI-only Profile Overview、合成预览、测试与 host adapter 文档。
-- 状态：**视觉返工中**。负责人否决旧交付；下列旧验证是历史，不代表新版验收。共享 Reader Flow API 待协调；blocked 保留，不添加 pending、不合并。
+- 状态：负责人最新确认其余当前视觉无问题，主 Agent 亲自修复 Overview tab 居中。共享 Reader Flow API 尚未实现；blocked 保留，PR 未合并。下列各轮验证保留各自边界。
 
 ## 改动与决定
 
@@ -58,3 +58,9 @@ PR #36 首轮 `aba07c7` Codex 提出两项可直接修复问题：page thumb 外
 本地新版实际 native frame：144 DPI；1100×800 client=1650×1200 physical，880×560 client=1320×840。截图存 task 忽略目录：rework-1100-800.png、rework-lower.png、rework-minimum.png、rework-minimum-lower.png。Win32 wheel 消息实际使页面滚到下方四卡与完整贡献图；Win32 点击 README Projects 与第一张卡分别报告正确 Reader External 和 RepositoryTarget(id=1)，End 键选中最后一天且显示真实日期/count；这是 Windows 消息输入验证，非人工鼠标/触控板验收。未以 PrintWindow 上半截当整页通过。整页密度仍被旧 Reader 空框阻塞。
 
 新增 GPUI 行为覆盖 name/login 上下、资料边界、卡片两列/单列边界和键盘、月份跨年/闰年星期、真实 website 点击动作。既有身份/旧响应/Reader stale callback/partial/pin/scroll 回归保留。最终同步 main 8de1959（已接受 Home/Feed PR #34），无冲突；组合树 fmt/check/clippy -D warnings、完整 suite 538 + 321 + 54 + 152 + 131、product/example build 与 diff check 均通过。最终 head/CI/review 与 preview PID 放 PR/本地交接，不为补 SHA 再造提交。
+
+## Overview tab 居中收尾（主 Agent）
+
+负责人反馈 Overview tab 内容偏左，其余当前视觉无问题。原因是固定 112px 宽的 flex tab 只设纵向 items_center，主轴仍默认从左开始。仅增加 justify_center，让 BookOpen 图标与 Overview 文案整体水平居中；tab 宽度、上下 padding、下划线、其余版式和 Reader 行为保持。
+
+验证：cargo fmt --all -- --check、经串行 Cargo helper 的 test --locked --test profile（152 项通过）、build --locked --example profile、clippy --locked --all-targets -- -D warnings 均通过。没有为单一可逆样式变更新增镜像测试。原生工具 @oai/sky 未连接到 native pipe；统一 Computer Use 的应用启动请求随后超时，本轮未取得修复后的原生截图，不能声称已做视觉复核。重建的 examples/profile.exe 供复看。PR blocked 标签保留，历史裁决 true/coordinator 保持；README Flow 建议没有在本次小修复中实现。
