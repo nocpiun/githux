@@ -30,9 +30,13 @@ pub(crate) mod geometry;
 mod page;
 mod palette;
 pub mod reader;
-mod scroll;
+pub(crate) mod scroll;
 mod sidebar;
+mod sidebar_state;
 mod tabs;
+
+#[cfg(test)]
+mod sidebar_tests;
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +57,9 @@ pub struct Shell {
     repositories: Vec<fixtures::RepoFixture>,
     root_focus: FocusHandle,
     repo_scroll: ScrollHandle,
+    repo_smooth: scroll::Motion<gpui::ScrollHandle>,
+    /// Visibility and thumb drag belong only to the repository viewport.
+    repo_bars: scroll::Bars,
     /// One tab stop per repository row.
     repo_focus: Vec<FocusHandle>,
     /// The repository row last scrolled into view, so a still focus does not scroll every frame.
@@ -63,6 +70,8 @@ pub struct Shell {
     /// The strip's horizontal offset. One handle for the whole row, so the drag, the wheel and the
     /// scrollbar all move the same scroll position.
     tab_scroll: ScrollHandle,
+    /// Horizontal wheel motion belongs to the strip and shares the same target as its Bar.
+    tab_motion: scroll::Motion<ScrollHandle>,
     /// A tab the strip still has to bring into view, resolved in render once its bounds exist.
     revealed_tab: Option<TabId>,
     /// The tab whose strip entry last took keyboard focus, so Tab onto an offscreen tab reveals it
@@ -87,6 +96,28 @@ pub struct Shell {
     /// check does not cancel it before the test can drop it.
     #[cfg(test)]
     tab_drag_pinned: bool,
+    sidebar_state: sidebar_state::SidebarState,
+    sidebar_activation: gpui::Subscription,
+    sidebar_keys: gpui::Subscription,
+    sidebar_bounds: gpui::Subscription,
+    sidebar_more_focus: FocusHandle,
+    /// The resize heat band in window coordinates, captured from the real layout each prepaint.
+    /// Pointer events report window positions, while a band built from the shell body's local
+    /// origin would be off by the title bar inset; this keeps both in one space.
+    sidebar_resize_band: Option<gpui::Bounds<gpui::Pixels>>,
+    /// The shell body's left edge in window coordinates, so pointer positions can be converted to
+    /// the container space the sidebar geometry uses (title-bar/DPI safe).
+    sidebar_body_left: Option<gpui::Pixels>,
+    /// The collapse/expand toggle's own focus. Keyboard activation must keep focus here so a
+    /// second Enter/Space reverses the mode instead of dropping into the shell root.
+    sidebar_toggle_focus: FocusHandle,
+    /// Focus while the collapsed More menu is open. A dedicated handle (not the trigger's) so
+    /// Escape, arrows and Enter reach the panel, not the row behind it.
+    sidebar_menu_focus: FocusHandle,
+    /// Whether the collapsed More menu is open. Owned here so every dismissal path agrees.
+    sidebar_menu: bool,
+    /// Keyboard highlight inside the collapsed More menu.
+    sidebar_menu_cursor: usize,
     /// Ends tab drags and scrollbar visibility when the window loses activation.
     _window_activation: Option<gpui::Subscription>,
 }
@@ -147,24 +178,109 @@ impl Shell {
         // The search entry and the session tabs sit at the front of the tab order (index -1),
         // ahead of the long repository list, so keyboard navigation reaches them directly.
         let search_focus = cx.focus_handle().tab_stop(true).tab_index(-1);
+        let repo_scroll = ScrollHandle::new();
         let repositories = fixtures::repositories();
         let repo_focus = (0..repositories.len())
             .map(|_| cx.focus_handle().tab_stop(true))
             .collect::<Vec<_>>();
+        let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
+            if !window.is_window_active() {
+                scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
+                shell.close_sidebar_menu(window, cx);
+                let resizing = shell.sidebar_state.dragging;
+                shell.sidebar_state.end_resize(
+                    cx.background_executor().now(),
+                    false,
+                    cx.theme().reduced_motion || cx.reduce_motion(),
+                );
+                if resizing {
+                    cx.stop_active_drag(window);
+                }
+                cx.notify();
+            }
+        });
+        // A changed window is not a new drag. The remembered expanded width is kept and
+        // clamped only when used, so widening the window again restores the user's choice.
+        let sidebar_bounds = cx.observe_window_bounds(window, |shell, window, cx| {
+            if shell.sidebar_state.dragging || shell.repo_bars.dragging().is_some() {
+                cx.stop_active_drag(window);
+            }
+            scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
+            scroll::cancel_region(&mut shell.tab_bars, &shell.tab_motion);
+            for session in shell.workspace.sessions() {
+                session.state().smooth.cancel();
+            }
+            if let Some(palette) = &shell.palette {
+                palette.smooth.cancel();
+            }
+            shell.sidebar_state.end_resize(
+                cx.background_executor().now(),
+                false,
+                cx.theme().reduced_motion || cx.reduce_motion(),
+            );
+            // Ely closes its menu when focus leaves. Keep it anchored safely when the
+            // viewport changes, including maximize/restore, without retaining a stale panel.
+            shell.close_sidebar_menu(window, cx);
+            shell
+                .sidebar_state
+                .settle(window.viewport_size().width.into());
+            cx.notify();
+        });
+        let tab_scroll = ScrollHandle::new();
+        let this = cx.entity();
+        let sidebar_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            this.update(cx, |shell, cx| {
+                if matches!(event.keystroke.key.as_str(), "tab") && shell.sidebar_menu {
+                    // The menu is modal while open: Tab must not park focus behind it.
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "escape" && shell.sidebar_menu {
+                    cx.stop_propagation();
+                    shell.close_sidebar_menu(window, cx);
+                } else if event.keystroke.key == "escape" && shell.repo_bars.dragging().is_some() {
+                    scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
+                    cx.stop_active_drag(window);
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if event.keystroke.key == "escape" && shell.sidebar_state.dragging {
+                    shell.sidebar_state.end_resize(
+                        cx.background_executor().now(),
+                        false,
+                        cx.theme().reduced_motion || cx.reduce_motion(),
+                    );
+                    cx.stop_active_drag(window);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            });
+        });
         let mut this = Self {
+            sidebar_keys,
+            sidebar_bounds,
+            sidebar_more_focus: cx.focus_handle(),
+            sidebar_resize_band: None,
+            sidebar_body_left: None,
+            sidebar_toggle_focus: cx.focus_handle(),
+            sidebar_menu_focus: cx.focus_handle(),
+            sidebar_menu: false,
+            sidebar_menu_cursor: 0,
+            sidebar_state: sidebar_state::SidebarState::default(),
+            sidebar_activation,
             workspace: Workspace::new(cx),
             repositories,
             root_focus,
-            repo_scroll: ScrollHandle::new(),
+            repo_smooth: scroll::Motion::new(repo_scroll.clone()),
+            repo_bars: scroll::Bars::new(),
+            repo_scroll,
             repo_focus,
             revealed_row: None,
             palette: None,
             restore_focus: false,
             search_focus,
-            tab_scroll: ScrollHandle::new(),
+            tab_scroll: tab_scroll.clone(),
             revealed_tab: None,
             focused_tab: None,
             tab_reach: gpui::Pixels::ZERO,
+            tab_motion: scroll::Motion::new(tab_scroll.clone()),
             tab_bars: scroll::Bars::new(),
             tab_drag: None,
             tab_clock: std::time::Instant::now(),
@@ -190,8 +306,13 @@ impl Shell {
     /// real pointer state.
     fn end_drags_on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_tab_drag(window, cx);
-        let target = self.tab_scroll.clone();
-        self.tab_bars.cancel(&target);
+        scroll::cancel_region(&mut self.tab_bars, &self.tab_motion);
+        for session in self.workspace.sessions() {
+            session.state().smooth.cancel();
+        }
+        if let Some(palette) = &self.palette {
+            palette.smooth.cancel();
+        }
         cx.notify();
     }
 
@@ -223,6 +344,12 @@ impl Shell {
     #[cfg(test)]
     pub fn page_offset(&self) -> Point<gpui::Pixels> {
         self.workspace.active().state().scroll.offset()
+    }
+
+    /// The active page's maximum scroll offset, for the wheel-occlusion test.
+    #[cfg(test)]
+    pub fn page_max_offset(&self) -> Point<gpui::Pixels> {
+        self.workspace.active().state().scroll.max_offset()
     }
 
     /// The scroll offset of one session's page.
@@ -265,6 +392,22 @@ impl Shell {
         self.workspace.active_id()
     }
 
+    #[cfg(test)]
+    pub fn scroll_repositories_by(&mut self, dy: gpui::Pixels) {
+        let offset = self.repo_scroll.offset();
+        self.repo_smooth.cancel();
+        self.repo_scroll
+            .set_offset(gpui::point(offset.x, offset.y + dy));
+    }
+
+    /// For the sidebar test helper only: directly scroll the real handle, never through a
+    /// partially clipped hit target.
+    #[cfg(test)]
+    pub fn scroll_repositories_for_test(&mut self, dy: gpui::Pixels, cx: &mut Context<Self>) {
+        self.scroll_repositories_by(dy);
+        cx.notify();
+    }
+
     /// One session's repository browsing state, when the session is a repository page.
     #[cfg(test)]
     pub fn repository_state(&self, id: TabId) -> Option<&crate::workspace::RepositorySession> {
@@ -300,7 +443,7 @@ impl Shell {
     #[cfg(test)]
     pub fn scroll_tabs_by(&self, dx: gpui::Pixels) {
         let offset = self.tab_scroll.offset();
-        self.tab_scroll
+        self.tab_motion
             .set_offset(gpui::point(offset.x + dx, offset.y));
     }
 
@@ -309,6 +452,7 @@ impl Shell {
     /// here, so reuse rules live in one place, and the resulting tab is brought into view.
     pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.close_palette(cx);
+        self.tab_motion.cancel();
         let previous = self.workspace.active_id();
         let id = match self.workspace.open(route, cx) {
             OpenResult::Opened(id) | OpenResult::Activated(id) => id,
@@ -334,9 +478,13 @@ impl Shell {
                 focused.as_ref() == Some(&state.focus) || state.focus.contains_focused(window, cx);
             (strip, page)
         });
+        if let Some(session) = self.workspace.session(id) {
+            session.state().smooth.cancel();
+        }
         let Some(result) = self.workspace.close(id, cx) else {
             return;
         };
+        self.tab_motion.cancel();
         // A drag of the tab that just closed is over: keeping it would let a stale slot move
         // whichever tab now sits at that index.
         if self.tab_drag.as_ref().is_some_and(|drag| drag.id == id) {
@@ -363,13 +511,14 @@ impl Shell {
     /// Keeps the strip's offset inside its content. Called after a close so the tail never leaves
     /// a blank stretch, and harmless when nothing was clamped.
     fn clamp_tab_scroll(&self) {
+        self.tab_motion.cancel();
         let max = self.tab_scroll.max_offset();
         let offset = self.tab_scroll.offset();
         let x = offset
             .x
             .clamp(-max.x.max(gpui::Pixels::ZERO), gpui::Pixels::ZERO);
         if x != offset.x {
-            self.tab_scroll.set_offset(gpui::point(x, offset.y));
+            self.tab_motion.set_offset(gpui::point(x, offset.y));
         }
     }
 
@@ -377,6 +526,7 @@ impl Shell {
     /// that frame's measured bounds, and only once per newly revealed tab so a manual scroll is
     /// never overridden on later frames.
     fn reveal_tab(&mut self, id: TabId) {
+        self.tab_motion.cancel();
         self.revealed_tab = Some(id);
     }
 
@@ -434,7 +584,7 @@ impl Shell {
         // Never past the row's left edge; the lower end is left to GPUI's own clamp, which runs
         // against this frame's freshly laid out content and is therefore not a frame behind.
         let x = target.min(0.0);
-        self.tab_scroll
+        self.tab_motion
             .set_offset(gpui::point(gpui::px(x), gpui::Pixels::ZERO));
         true
     }
@@ -460,6 +610,7 @@ impl Shell {
         if self.palette.is_some() {
             return;
         }
+        self.tab_motion.cancel();
         let previous = self.workspace.active_id();
         if let Some(next) = self.workspace.cycle(by) {
             self.follow_page_focus(previous, next, window, cx);
@@ -488,9 +639,15 @@ impl Shell {
         if previous == next {
             return;
         }
+        // Switching freezes both session positions at their current presentation, rather than
+        // letting a hidden page's old wheel target resume when it is reopened.
+        if let Some(session) = self.workspace.session(next) {
+            session.state().smooth.cancel();
+        }
         let Some(previous) = self.workspace.session(previous) else {
             return;
         };
+        previous.state().smooth.cancel();
         let focused = window.focused(cx);
         let in_previous_page = focused.as_ref() == Some(&previous.state().focus)
             || previous.state().focus.contains_focused(window, cx);
@@ -540,10 +697,78 @@ impl Shell {
     }
 
     /// Opens the palette over the shell. Closing gives focus back to the search entry.
+    /// Whether the collapsed More menu is open, for tests and keyboard dismissal.
+    #[cfg(test)]
+    pub fn sidebar_menu_open(&self) -> bool {
+        self.sidebar_menu
+    }
+
+    /// Opens the collapsed More menu at its first entry and focuses it.
+    pub fn open_sidebar_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_menu = true;
+        self.sidebar_menu_cursor = 0;
+        self.sidebar_state.menu_open.set(true);
+        window.focus(&self.sidebar_menu_focus, cx);
+        cx.notify();
+    }
+
+    /// Moves the menu highlight, wrapping over the three enabled entries (New stays disabled).
+    pub fn move_sidebar_menu_cursor(&mut self, by: isize, cx: &mut Context<Self>) {
+        const ENABLED: [usize; 3] = [0, 1, 2];
+        let at = ENABLED
+            .iter()
+            .position(|&i| i == self.sidebar_menu_cursor)
+            .unwrap_or(0) as isize;
+        let next = (at + by).rem_euclid(ENABLED.len() as isize) as usize;
+        self.sidebar_menu_cursor = ENABLED[next];
+        cx.notify();
+    }
+
+    /// Runs the highlighted menu entry, if it is one of the enabled destinations.
+    pub fn pick_sidebar_menu_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = match self.sidebar_menu_cursor {
+            0 => Some(Route::Notifications),
+            1 => Some(Route::Issues),
+            2 => Some(Route::PullRequests),
+            _ => None,
+        };
+        self.pick_sidebar_menu(target, window, cx);
+    }
+
+    /// Runs one menu destination, closing the menu first so focus and the panel both settle
+    /// before navigation.
+    pub fn pick_sidebar_menu(
+        &mut self,
+        target: Option<Route>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_sidebar_menu(window, cx);
+        if let Some(target) = target {
+            self.navigate(target, window, cx);
+        }
+    }
+
+    /// Closes the collapsed More menu and returns focus to its trigger.
+    pub fn close_sidebar_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sidebar_menu {
+            return;
+        }
+        self.sidebar_menu = false;
+        self.sidebar_state.menu_open.set(false);
+        window.focus(&self.sidebar_more_focus, cx);
+        cx.notify();
+    }
+
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_motion.cancel();
+        self.repo_smooth.cancel();
+        self.workspace.active().state().smooth.cancel();
         if self.palette.is_some() {
             return;
         }
+        // Only one overlay at a time: an open More menu closes before the palette takes focus.
+        self.close_sidebar_menu(window, cx);
         // The palette returns focus to the entry, not to whatever transient node holds it.
         window.focus(&self.search_focus, cx);
         let mut session = palette::Session::new(window, cx, palette::commands(&self.repositories));
@@ -632,9 +857,10 @@ impl Shell {
     /// Closes the palette. Focus returns to the search entry on the next frame, so it is never
     /// left on a card that just left the tree.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
-        if self.palette.take().is_none() {
+        let Some(session) = self.palette.take() else {
             return;
-        }
+        };
+        session.smooth.cancel();
         self.restore_focus = true;
         cx.notify();
     }
@@ -670,6 +896,18 @@ impl Shell {
     fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let this = cx.entity();
         let route = self.workspace.route().clone();
+        // One presentation decision for the whole footer: the compact More entries during the
+        // critical band and during mode transitions, the four entries once clearly expanded.
+        let footer_compact = self.sidebar_state.footer_compact();
+        // Leaving the compact presentation unmounts both the More trigger and its panel. Drop the
+        // menu state and put focus on a control that stays mounted, or the shell's Tab interceptor
+        // would keep treating an invisible menu as open.
+        if !footer_compact && self.sidebar_menu {
+            self.close_sidebar_menu(window, cx);
+            window.focus(&self.root_focus, cx);
+        }
+        let frame = self.sidebar_state.frame;
+        let nav_metrics = sidebar::nav_metrics(frame.expansion, window.rem_size(), cx);
 
         let home = {
             let this = this.clone();
@@ -678,11 +916,13 @@ impl Shell {
                 IconName::House,
                 "Home",
                 route == Route::Home,
+                nav_metrics,
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Home, window, cx);
                     });
                 },
+                cx,
             )
         };
         let settings = {
@@ -692,11 +932,13 @@ impl Shell {
                 IconName::Settings,
                 "Settings",
                 route == Route::Settings,
+                nav_metrics,
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Settings, window, cx);
                     });
                 },
+                cx,
             )
         };
         let nav = div()
@@ -708,7 +950,7 @@ impl Shell {
             .into_any_element();
 
         let heading =
-            sidebar::group_heading(format!("Repositories · {}", self.repositories.len()), cx);
+            sidebar::group_heading(format!("Repositories ({})", self.repositories.len()), cx);
         // A row reached with Tab must be visible: otherwise its focus ring and Enter's target sit
         // outside the viewport. Done in render, before this frame's prepaint, so the scroll and the
         // focused row land in the same frame; the stored index keeps a still focus from re-scrolling.
@@ -718,6 +960,8 @@ impl Shell {
             .position(|handle| handle.is_focused(window));
         match focused_row {
             Some(index) if self.revealed_row != Some(index) => {
+                // A keyboard reveal wins over any in-flight wheel easing.
+                self.repo_smooth.cancel();
                 if let Some(row) = self.repo_scroll.bounds_for_item(index) {
                     sidebar::reveal_row(&self.repo_scroll, row);
                 }
@@ -741,6 +985,7 @@ impl Shell {
                     repo,
                     &focus,
                     active,
+                    frame,
                     move |window, cx| {
                         let target = target.clone();
                         this.update(cx, |shell, cx| {
@@ -751,13 +996,60 @@ impl Shell {
                 )
             })
             .collect::<Vec<_>>();
-        let repositories = sidebar::repository_group(rows, &self.repo_scroll, cx);
+        let repo_bar = scroll::Bar {
+            target: &self.repo_smooth,
+            id: scroll::BarId {
+                owner: cx.entity_id(),
+                name: "repo-scrollbar",
+                axis: gpui::Axis::Vertical,
+            },
+            placement: scroll::Placement::overlay(4.0, 8.0),
+            style: scroll::Style::DEFAULT,
+            opacity: self.repo_bars.opacity(self.tab_now_ms()),
+            on_drag: {
+                let this = cx.entity();
+                Rc::new(move |axis, dragging, _, cx| {
+                    this.update(cx, |shell, cx| {
+                        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                        if shell.repo_bars.drag(
+                            &shell.repo_smooth,
+                            axis,
+                            dragging,
+                            shell.tab_now_ms(),
+                            reduced,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+        }
+        .render(cx);
+        let repositories = sidebar::repository_group(
+            rows,
+            &self.repo_scroll,
+            self.repo_smooth.clone(),
+            repo_bar,
+            {
+                let this = cx.entity();
+                move |hovered, cx| {
+                    this.update(cx, |shell, cx| {
+                        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                        if shell.repo_bars.hover(hovered, shell.tab_now_ms(), reduced) {
+                            cx.notify();
+                        }
+                    });
+                }
+            },
+            cx,
+        );
 
         let account = {
             let this = this.clone();
             sidebar::account_row(
                 fixtures::ACCOUNT,
                 route == Route::Profile,
+                frame,
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Profile, window, cx);
@@ -790,36 +1082,52 @@ impl Shell {
                 cx,
             )
         };
-        let quarters = sidebar::quarter_row([
-            quarter(
-                "notifications",
-                IconName::Bell,
-                "Notifications",
-                Some(Route::Notifications),
-                route == Route::Notifications,
-                this.clone(),
-            ),
-            quarter(
-                "issues",
-                IconName::CircleDot,
-                "Issues",
-                Some(Route::Issues),
-                route == Route::Issues,
-                this.clone(),
-            ),
-            quarter(
-                "pull-requests",
-                IconName::GitPullRequest,
-                "Pull requests",
-                Some(Route::PullRequests),
-                route == Route::PullRequests,
-                this.clone(),
-            ),
-            // New has no approved resource list this round: named, disabled, does nothing.
-            quarter("new", IconName::Plus, "New", None, false, this.clone()),
-        ]);
+        let quarters = if footer_compact {
+            sidebar::overflow(
+                sidebar::OverflowMenuView {
+                    shell: this.clone(),
+                    route: &route,
+                    focus: &self.sidebar_more_focus,
+                    menu_focus: &self.sidebar_menu_focus,
+                    open: self.sidebar_state.menu_open.clone(),
+                    menu_open: self.sidebar_menu,
+                    cursor: self.sidebar_menu_cursor,
+                    viewport: window.viewport_size(),
+                },
+                cx,
+            )
+        } else {
+            sidebar::quarter_row([
+                quarter(
+                    "notifications",
+                    IconName::Bell,
+                    "Notifications",
+                    Some(Route::Notifications),
+                    route == Route::Notifications,
+                    this.clone(),
+                ),
+                quarter(
+                    "issues",
+                    IconName::CircleDot,
+                    "Issues",
+                    Some(Route::Issues),
+                    route == Route::Issues,
+                    this.clone(),
+                ),
+                quarter(
+                    "pull-requests",
+                    IconName::GitPullRequest,
+                    "Pull requests",
+                    Some(Route::PullRequests),
+                    route == Route::PullRequests,
+                    this.clone(),
+                ),
+                // New has no approved resource list this round: named, disabled, does nothing.
+                quarter("new", IconName::Plus, "New", None, false, this.clone()),
+            ])
+        };
 
-        sidebar::sidebar(nav, heading, repositories, account, quarters)
+        sidebar::sidebar(nav, heading, repositories, account, quarters, frame, cx)
     }
 
     /// The island: the session tab strip, then the active page's own scroll area.
@@ -831,6 +1139,7 @@ impl Shell {
         let session = self.workspace.active();
         let body = page::page(session, &self.repositories, cx);
         let scroll = session.state().scroll.clone();
+        let smooth = session.state().smooth.clone();
         let focus = session.state().focus.clone();
 
         div()
@@ -849,19 +1158,30 @@ impl Shell {
             .overflow_hidden()
             .child(strip)
             .child(
-                // One element per session id, so element state never carries over between pages.
+                // The wheel overlay covers only the page under the strip: the strip has its own
+                // horizontal scrolling and must keep receiving its own wheel deltas.
                 div()
-                    .id(("island-page", session.id().get()))
-                    .debug_selector(|| "island-page".to_string())
+                    .debug_selector(|| "island-scroll-region".to_string())
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .overflow_y_scroll()
-                    // Content never paints past the island's right edge; wide text is cut inside.
-                    .overflow_x_hidden()
-                    .track_scroll(&scroll)
-                    .track_focus(&focus)
-                    .child(body),
+                    .child(
+                        // One element per session id, so element state never carries over
+                        // between pages.
+                        div()
+                            .id(("island-page", session.id().get()))
+                            .debug_selector(|| "island-page".to_string())
+                            .size_full()
+                            .overflow_y_scroll()
+                            // Content never paints past the island's right edge; wide text is
+                            // cut inside.
+                            .overflow_x_hidden()
+                            .track_scroll(&scroll)
+                            .track_focus(&focus)
+                            .child(body),
+                    )
+                    .child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth)),
             )
             .into_any_element()
     }
@@ -942,7 +1262,7 @@ impl Shell {
             )
         };
         let scrollbar = scroll::Bar {
-            target: &self.tab_scroll,
+            target: &self.tab_motion,
             id: scroll::BarId {
                 owner,
                 name: "tab-scrollbar",
@@ -965,7 +1285,13 @@ impl Shell {
             on_drag_move,
             on_drop,
         };
-        tabs::strip(view, owner, scrollbar, cx)
+        tabs::strip(
+            view,
+            owner,
+            scrollbar,
+            scroll::wheel_overlay("tabs", gpui::Axis::Horizontal, self.tab_motion.clone()),
+            cx,
+        )
     }
 
     /// Milliseconds since the shell started, the clock the strip's scrollbar fade runs on.
@@ -1073,7 +1399,7 @@ impl Shell {
     /// platform drag is over, so a drag that ends anywhere (including outside the strip) hands
     /// visibility back to the hover state.
     fn set_thumb_dragging(&mut self, axis: gpui::Axis, dragging: bool, cx: &mut Context<Self>) {
-        let target = self.tab_scroll.clone();
+        let target = self.tab_motion.clone();
         if self.tab_bars.drag(
             &target,
             axis,
@@ -1086,6 +1412,7 @@ impl Shell {
     }
 
     fn start_tab_drag(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_motion.cancel();
         let Some(index) = self.workspace.position(id) else {
             return;
         };
@@ -1167,7 +1494,7 @@ impl Shell {
             let max: f32 = self.tab_scroll.max_offset().x.into();
             let next = (offset + step).clamp(-max, 0.0);
             if next != offset {
-                self.tab_scroll
+                self.tab_motion
                     .set_offset(gpui::point(gpui::px(next), gpui::Pixels::ZERO));
             }
         }
@@ -1194,6 +1521,7 @@ impl Shell {
         if drag.id != id {
             return;
         }
+        self.tab_motion.cancel();
         let target = drag.target;
         // Re-checked here rather than trusting the slot: a closed tab is ignored, and the session
         // keeps its own id, state and route either way.
@@ -1226,6 +1554,7 @@ impl Shell {
         if !self.workspace.activate(id) {
             return;
         }
+        self.tab_motion.cancel();
         self.follow_page_focus(previous, id, window, cx);
         self.reveal_tab(id);
         cx.notify();
@@ -1257,6 +1586,7 @@ impl Shell {
             input: session.input.clone(),
             focus: session.focus.clone(),
             scroll: session.scroll.clone(),
+            smooth: session.smooth.clone(),
             cursor: session.cursor,
             commands: session.commands.clone(),
             on_close: close,
@@ -1271,6 +1601,43 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+        if self.sidebar_state.sample(
+            cx.background_executor().now(),
+            window.viewport_size().width.into(),
+            reduced,
+        ) {
+            window.request_animation_frame();
+        }
+        let now = std::time::Instant::now();
+        if self.sidebar_state.sample_sash(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self.repo_bars.dragging().is_some() && !cx.has_active_drag() {
+            self.repo_bars
+                .settle(&self.repo_smooth, self.tab_now_ms(), reduced);
+        }
+        // Sample before testing is_animating, so the last fade frame retires immediately.
+        self.repo_bars.opacity(self.tab_now_ms());
+        if self.repo_bars.is_animating() {
+            window.request_animation_frame();
+        }
+        if self.repo_smooth.tick(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self.tab_motion.tick(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self.workspace.active().state().smooth.tick(now, reduced) {
+            window.request_animation_frame();
+        }
+        if self
+            .palette
+            .as_ref()
+            .is_some_and(|session| session.smooth.tick(now, reduced))
+        {
+            window.request_animation_frame();
+        }
         let theme = cx.theme();
         let colors = &theme.colors;
         let (bg, fg) = (colors.bg, colors.fg);
@@ -1280,6 +1647,12 @@ impl Render for Shell {
             this.update(cx, |shell, cx| shell.open_palette(window, cx));
         };
         let titlebar = chrome::titlebar(self.search_focus.clone(), open_search, window, cx);
+        // Keep the subscription alive for the lifetime of the shell.
+        let _ = (
+            &self.sidebar_activation,
+            &self.sidebar_keys,
+            &self.sidebar_bounds,
+        );
         // One clock read per frame: the strip's fade and a scrollbar that just became necessary
         // (or unnecessary) both advance from it, so no timer of their own is needed.
         if self.tab_bars.is_animating() {
@@ -1296,7 +1669,7 @@ impl Render for Shell {
         }
         // A thumb drag ends wherever the pointer is released; visibility then follows hover again.
         if self.tab_bars.dragging().is_some() && !cx.has_active_drag() {
-            let target = self.tab_scroll.clone();
+            let target = self.tab_motion.clone();
             if self
                 .tab_bars
                 .settle(&target, self.tab_now_ms(), cx.reduce_motion())
@@ -1322,6 +1695,7 @@ impl Render for Shell {
             window.request_animation_frame();
         }
         let sidebar = self.sidebar(window, cx);
+        let divider = self.sidebar_divider(window, cx);
         let island = self.island(window, cx);
         let palette = self.palette(cx);
 
@@ -1373,7 +1747,71 @@ impl Render for Shell {
                     .child(titlebar)
                     .child(
                         div()
+                            .id("shell-body")
                             .debug_selector(|| "shell-body".to_string())
+                            .relative()
+                            .on_drag_move(cx.listener(
+                                |shell,
+                                 event: &gpui::DragMoveEvent<sidebar_state::SidebarDrag>,
+                                 window,
+                                 cx| {
+                                    let drag = event.drag(cx);
+                                    if drag.owner != cx.entity_id() || !shell.sidebar_state.dragging
+                                    {
+                                        return;
+                                    }
+                                    // One coordinate space for the whole gesture: the pointer's
+                                    // window x minus the body's own left edge. The sash anchor is
+                                    // the presented sidebar width in that same space.
+                                    let body_left =
+                                        shell.sidebar_body_left.map(f32::from).unwrap_or(0.0);
+                                    shell.sidebar_state.resize_pointer_at(
+                                        f32::from(event.event.position.x) - body_left,
+                                        cx.background_executor().now(),
+                                        window.viewport_size().width.into(),
+                                        cx.theme().reduced_motion || cx.reduce_motion(),
+                                    );
+                                    // The gesture itself keeps the line visible. Pointer hover is
+                                    // still recorded for the moment the drag ends, so a release
+                                    // outside fades out and a release inside stays lit.
+                                    let hovered = shell
+                                        .sidebar_resize_band
+                                        .is_some_and(|band| band.contains(&event.event.position));
+                                    shell.sidebar_state.note_pointer(
+                                        hovered,
+                                        cx.background_executor().now(),
+                                        cx.theme().reduced_motion || cx.reduce_motion(),
+                                    );
+                                    cx.notify();
+                                },
+                            ))
+                            .on_mouse_up(
+                                gpui::MouseButton::Left,
+                                cx.listener(|shell, event: &gpui::MouseUpEvent, _window, cx| {
+                                    let hovered = shell
+                                        .sidebar_resize_band
+                                        .is_some_and(|band| band.contains(&event.position));
+                                    let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                                    shell.sidebar_state.end_resize(
+                                        cx.background_executor().now(),
+                                        hovered,
+                                        reduced,
+                                    );
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                gpui::MouseButton::Left,
+                                cx.listener(|shell, _, _, cx| {
+                                    let reduced = cx.theme().reduced_motion || cx.reduce_motion();
+                                    shell.sidebar_state.end_resize(
+                                        cx.background_executor().now(),
+                                        false,
+                                        reduced,
+                                    );
+                                    cx.notify();
+                                }),
+                            )
                             .bg(bg)
                             .flex()
                             .flex_1()
@@ -1393,7 +1831,8 @@ impl Render for Shell {
                                     .pb(px(geometry::ISLAND_INSET))
                                     .pl(px(geometry::ISLAND_GAP))
                                     .child(island),
-                            ),
+                            )
+                            .child(divider),
                     )
                     .children(palette),
             )

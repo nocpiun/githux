@@ -47,6 +47,34 @@ fn bounds(selector: &'static str, cx: &mut VisualTestContext) -> Bounds<Pixels> 
         .unwrap_or_else(|| panic!("{selector} was not drawn"))
 }
 
+/// Clicks a sidebar repository row, first scrolling it into the list's viewport when the row has
+/// scrolled out of view. Without this a click lands on whatever row is painted there instead.
+fn click_repo_row(view: &gpui::Entity<Shell>, index: usize, cx: &mut VisualTestContext) {
+    let scroll = bounds("repo-scroll", cx);
+    let row = bounds(selector(format!("repo-row-{index}")), cx);
+    if row.bottom() > scroll.bottom() || row.top() < scroll.top() {
+        // Directly drive the real handle in the test platform: a partially clipped row can expose
+        // less than its centre, so a synthetic wheel delta cannot make the later click reliable.
+        let dy = if row.bottom() > scroll.bottom() {
+            scroll.bottom() - row.bottom()
+        } else {
+            scroll.top() - row.top()
+        };
+        let before = view.read_with(cx, |shell, _| shell.repo_offset());
+        view.update(cx, |shell, cx| shell.scroll_repositories_for_test(dy, cx));
+        cx.run_until_parked();
+        click(selector(format!("repo-row-{index}")), cx);
+        // Leave the list where it was: a helper that reveals a row must not become an unexpected
+        // sidebar scroll for the test that called it.
+        view.update(cx, |shell, cx| {
+            shell.scroll_repositories_for_test(before.y - shell.repo_offset().y, cx);
+        });
+        cx.run_until_parked();
+        return;
+    }
+    click(selector(format!("repo-row-{index}")), cx);
+}
+
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
     let target = bounds(selector, cx).center();
     cx.simulate_click(target, Modifiers::none());
@@ -194,6 +222,12 @@ fn the_repository_group_scrolls_without_moving_the_island_page(cx: &mut TestAppC
         source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
+    // The wheel now eases over real time; let the smoothing settle before reading the offset.
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
     let repo_offset = view.read_with(cx, |shell, _| shell.repo_offset());
     assert!(
         repo_offset.y < px(0.0),
@@ -224,7 +258,7 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
     click("quarter-pull-requests", cx);
     assert_eq!(route(&view, cx), Route::PullRequests);
 
-    click("account-row", cx);
+    click("account-identity", cx);
     assert_eq!(route(&view, cx), Route::Profile);
     assert!(cx.debug_bounds("page-profile").is_some());
 
@@ -620,6 +654,12 @@ fn the_wheel_keeps_the_user_position_until_the_cursor_moves(cx: &mut TestAppCont
         source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
+    // Let the wheel easing settle before checking that a repaint keeps the user's position.
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
     let before = view.read_with(cx, |shell, _| shell.palette_scroll_offset());
     assert!(before.y < px(0.0), "the wheel moves the list");
 
@@ -695,7 +735,7 @@ fn repositories_and_profile_keep_separate_scroll_focus_and_selection(cx: &mut Te
     let a = view.read_with(cx, |shell, _| shell.active_tab_id());
     click("repo-row-1", cx);
     let b = view.read_with(cx, |shell, _| shell.active_tab_id());
-    click("account-row", cx);
+    click("account-identity", cx);
     let profile = view.read_with(cx, |shell, _| shell.active_tab_id());
     assert_ne!(a, b);
     assert_ne!(b, profile);
@@ -731,7 +771,8 @@ fn repositories_and_profile_keep_separate_scroll_focus_and_selection(cx: &mut Te
         touch_phase: Default::default(),
         source: ScrollSource::Pointer,
     });
-    cx.run_until_parked();
+    // The page now eases its wheel input; let it settle fully before recording the offset.
+    settle_scroll(cx);
     let home_offset = view.read_with(cx, |shell, _| shell.page_offset());
     assert!(home_offset.y < px(0.0), "Home scrolled: {home_offset:?}");
     assert_eq!(
@@ -829,7 +870,7 @@ fn more_tabs_than_fit_scroll_horizontally_instead_of_compressing(cx: &mut TestAp
     let single_tab_top = bounds("tab-0", cx).top();
 
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     assert_eq!(
         view.read_with(cx, |shell, _| shell.tab_count()),
@@ -887,7 +928,7 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
 
     // Start from the row's left end so both wheel gestures have somewhere to go.
@@ -949,8 +990,21 @@ fn wheel_and_manual_scroll_move_only_the_strip(cx: &mut TestAppContext) {
         "a native horizontal delta scrolls the strip once: {after_shift:?}"
     );
 
-    // Manual scrolling is not undone by later frames.
-    let held = after_shift;
+    // Discrete input continues through the shared 130ms motion; after settling the accumulated
+    // target must equal exactly nine line deltas (the capture path consumes each wheel once).
+    view.update(cx, |shell, _| {
+        shell.tab_motion.tick(
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+            false,
+        );
+    });
+    let held = view.read_with(cx, |shell, _| shell.tab_scroll_offset());
+    let line = cx.update(|window, _| window.line_height());
+    assert!(
+        (held.x - line * -9.0).abs() <= px(1.0),
+        "accumulated wheel target: {held:?}"
+    );
+    // A settled position is not undone by later frames.
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(
@@ -982,7 +1036,7 @@ fn the_strip_scrollbar_appears_on_hover_and_can_be_dragged(cx: &mut TestAppConte
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     // Back to the row start so the thumb sits at the track's left end.
     view.update(cx, |shell, _| {
@@ -1057,7 +1111,7 @@ fn the_strip_scrollbar_fades_in_out_and_pins_while_dragged(cx: &mut TestAppConte
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
 
     let fade = |view: &gpui::Entity<Shell>, cx: &mut VisualTestContext, at: u64| {
@@ -1124,7 +1178,7 @@ fn opening_and_switching_reveal_the_target_tab(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
 
     // Opening the twelfth tab brings it fully into view. The scroll offset is applied by the
@@ -1322,6 +1376,15 @@ fn closing_a_focused_inactive_tab_keeps_the_page_and_restores_focus(cx: &mut Tes
 }
 
 /// Runs one more frame so a scroll offset applied during render is reflected in the painted bounds.
+/// Lets a wheel ease run to completion (the animation is real-time, not frame-counted).
+fn settle_scroll(cx: &mut VisualTestContext) {
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+}
+
 fn pump(cx: &mut VisualTestContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -1455,7 +1518,7 @@ fn tabbing_to_an_offscreen_tab_reveals_it(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     // Go back to the first tab so the far ones are off screen.
     let first = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
@@ -1581,7 +1644,7 @@ fn the_strip_toolbar_is_pinned_and_shrinks_the_viewport(cx: &mut TestAppContext)
 
     // Overflowing leaves the toolbar where it was and keeps it out of the scrolling row.
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     let scrolled_toolbar = bounds("tab-toolbar", cx);
     assert_eq!(scrolled_toolbar, toolbar, "the toolbar never scrolls");
@@ -1835,7 +1898,7 @@ fn dragging_near_an_edge_scrolls_the_row_not_the_page(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     // Start from the row's beginning so there is somewhere to auto-scroll to.
     view.update(cx, |shell, _| {
@@ -2105,7 +2168,7 @@ fn edge_scrolling_continues_while_the_pointer_is_stationary(cx: &mut TestAppCont
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     view.update(cx, |shell, _| {
         let offset = shell.tab_scroll_offset();
@@ -2271,7 +2334,7 @@ fn the_scrollbar_fades_after_a_drag_that_ended_outside_the_strip(cx: &mut TestAp
     cx.simulate_resize(size(px(880.0), px(560.0)));
     cx.run_until_parked();
     for index in 0..11 {
-        click(selector(format!("repo-row-{index}")), cx);
+        click_repo_row(&view, index, cx);
     }
     // Hover the strip so its scrollbar is fully visible, then start carrying a tab.
     hover("tab-scroll", cx);
@@ -2420,4 +2483,142 @@ fn reduced_motion_shows_the_bar_without_animating(cx: &mut TestAppContext) {
         "the fade jumps straight to visible"
     );
     assert!(!view.read_with(cx, |shell, _| shell.tab_scrollbar_animating()));
+}
+
+#[gpui::test]
+fn tabs_use_shared_motion_for_discrete_precise_touch_and_programmatic_actions(
+    cx: &mut TestAppContext,
+) {
+    use std::time::{Duration, Instant};
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click_repo_row(&view, index, cx);
+    }
+    view.update(cx, |s, _| {
+        let at = s.tab_scroll.offset();
+        s.scroll_tabs_by(-at.x);
+    });
+    pump(cx);
+    let strip = bounds("tab-scroll", cx);
+    let send = |cx: &mut VisualTestContext, delta, source| {
+        cx.simulate_mouse_move(strip.center(), None, Modifiers::none());
+        cx.simulate_event(ScrollEvent {
+            position: strip.center(),
+            delta,
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source,
+        });
+        cx.run_until_parked();
+    };
+    send(
+        cx,
+        ScrollDelta::Lines(gpui::point(0.0, -4.0)),
+        ScrollSource::Pointer,
+    );
+    assert!(view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    let line = cx.update(|window, _| window.line_height());
+    let target = line * -4.0;
+    assert!(view.read_with(cx, |s, _| s.tab_scroll.offset()).x > target);
+    view.update(cx, |s, _| {
+        s.tab_motion
+            .tick(Instant::now() + Duration::from_millis(200), false);
+    });
+    assert!((view.read_with(cx, |s, _| s.tab_scroll.offset()).x - target).abs() <= px(1.0));
+    let at = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    // Native horizontal delta wins over simultaneous vertical movement, and pixel input is direct.
+    send(
+        cx,
+        ScrollDelta::Pixels(gpui::point(px(-35.0), px(-90.0))),
+        ScrollSource::Pointer,
+    );
+    assert_eq!(
+        view.read_with(cx, |s, _| s.tab_scroll.offset()).x,
+        at.x - px(35.0)
+    );
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    let at = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    send(
+        cx,
+        ScrollDelta::Pixels(gpui::point(px(-45.0), px(0.0))),
+        ScrollSource::Touch,
+    );
+    assert_eq!(
+        view.read_with(cx, |s, _| s.tab_scroll.offset()).x,
+        at.x - px(45.0)
+    );
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    send(
+        cx,
+        ScrollDelta::Lines(gpui::point(0.0, -4.0)),
+        ScrollSource::Pointer,
+    );
+    click("nav-home", cx);
+    let revealed = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    view.update(cx, |s, _| {
+        assert!(
+            !s.tab_motion
+                .tick(Instant::now() + Duration::from_secs(1), false)
+        );
+    });
+    assert_eq!(view.read_with(cx, |s, _| s.tab_scroll.offset()), revealed);
+    send(
+        cx,
+        ScrollDelta::Lines(gpui::point(0.0, -4.0)),
+        ScrollSource::Pointer,
+    );
+    cx.update_window_entity(&view, |s, window, cx| s.end_drags_on_blur(window, cx));
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+}
+
+#[gpui::test]
+fn tab_wheel_stays_smooth_after_the_strip_scrolls_a_full_viewport(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    for index in 0..11 {
+        click_repo_row(&view, index, cx);
+    }
+    let strip = bounds("tab-scroll", cx);
+    // Scroll the content a full viewport so a wheel overlay that travelled with the row would be
+    // entirely clipped and miss the pointer on the visible right side.
+    let max = view.read_with(cx, |s, _| s.tab_scroll_max().x);
+    view.update(cx, |s, _| {
+        let at = s.tab_scroll.offset().x;
+        s.scroll_tabs_by(-max - at);
+    });
+    pump(cx);
+    let probe = gpui::point(strip.right() - px(20.0), strip.center().y);
+    cx.simulate_mouse_move(probe, None, Modifiers::none());
+    let before = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    cx.simulate_event(ScrollEvent {
+        position: probe,
+        delta: ScrollDelta::Pixels(gpui::point(px(0.0), px(-60.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
+    });
+    cx.run_until_parked();
+    let after = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    // Already at the tail, so a further negative delta clamps rather than jumping; move the other
+    // way with a positive delta to prove the overlay is still receiving input there.
+    assert_eq!(after, before);
+    cx.simulate_event(ScrollEvent {
+        position: probe,
+        delta: ScrollDelta::Pixels(gpui::point(px(0.0), px(60.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
+    });
+    cx.run_until_parked();
+    let moved = view.read_with(cx, |s, _| s.tab_scroll.offset());
+    assert_eq!(moved.x, before.x + px(60.0));
+    assert!(!view.read_with(cx, |s, _| s.tab_motion.is_animating()));
+    assert!(!view.read_with(cx, |s, _| {
+        s.tab_motion
+            .tick(Instant::now() + Duration::from_secs(1), false)
+    }));
 }

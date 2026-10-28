@@ -192,6 +192,7 @@ pub(super) struct Session {
     pub input: Entity<TextInput>,
     pub focus: FocusHandle,
     pub scroll: ScrollHandle,
+    pub smooth: super::scroll::Motion<ScrollHandle>,
     pub cursor: usize,
     pub commands: Vec<Command>,
     /// The query the highlight was last reset for.
@@ -211,10 +212,13 @@ impl Session {
         let focus = cx.focus_handle();
         let field = input.read(cx).focus_handle(cx);
         window.focus(&field, cx);
+        let scroll = ScrollHandle::new();
+        let smooth = super::scroll::Motion::new(scroll.clone());
         Self {
             input,
             focus,
-            scroll: ScrollHandle::new(),
+            scroll,
+            smooth,
             cursor: 0,
             commands,
             last_query: String::new(),
@@ -246,6 +250,7 @@ impl Session {
             self.last_query = query;
             self.cursor = 0;
             self.scroll.set_offset(gpui::Point::default());
+            self.smooth.cancel();
         }
     }
 
@@ -260,6 +265,8 @@ impl Session {
         let at = self.cursor.min(count - 1) as isize;
         self.cursor = (at + by).rem_euclid(count as isize) as usize;
         let child = child_index(entries, self.cursor);
+        // A keyboard move wins over any in-flight wheel easing.
+        self.smooth.cancel();
         self.scroll.scroll_to_item(child);
     }
 }
@@ -269,6 +276,7 @@ pub(super) struct View {
     pub input: Entity<TextInput>,
     pub focus: FocusHandle,
     pub scroll: ScrollHandle,
+    pub smooth: super::scroll::Motion<ScrollHandle>,
     pub cursor: usize,
     pub commands: Vec<Command>,
     pub on_close: Run,
@@ -418,17 +426,30 @@ pub(super) fn render(view: View, cx: &mut App) -> AnyElement {
         )
         .child(
             div()
-                .id("palette-list")
-                .debug_selector(|| "palette-list".to_string())
+                .debug_selector(|| "palette-list-region".to_string())
+                .relative()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h_0()
-                .p_2()
-                .gap_0p5()
-                .overflow_y_scroll()
-                .track_scroll(&view.scroll)
-                .children(rows),
+                .child(
+                    div()
+                        .id("palette-list")
+                        .debug_selector(|| "palette-list".to_string())
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .p_2()
+                        .gap_0p5()
+                        .overflow_y_scroll()
+                        .track_scroll(&view.scroll)
+                        .children(rows),
+                )
+                .child(super::scroll::wheel_overlay(
+                    "palette",
+                    gpui::Axis::Vertical,
+                    view.smooth.clone(),
+                )),
         )
         .child(
             div()

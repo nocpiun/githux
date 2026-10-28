@@ -123,6 +123,9 @@ pub struct RepositorySession {
 /// navigation reaches the strip before the long repository list.
 pub struct PageState {
     pub scroll: ScrollHandle,
+    /// Wheel smoothing for this page's scroll region. It belongs to the session so switching tabs
+    /// never carries one page's easing into another.
+    pub smooth: crate::ui::scroll::Motion<gpui::ScrollHandle>,
     pub focus: FocusHandle,
     pub strip_focus: FocusHandle,
     pub repository: Option<RepositorySession>,
@@ -130,8 +133,10 @@ pub struct PageState {
 
 impl PageState {
     fn new(route: &Route, cx: &mut App) -> Self {
+        let scroll = ScrollHandle::new();
         Self {
-            scroll: ScrollHandle::new(),
+            smooth: crate::ui::scroll::Motion::new(scroll.clone()),
+            scroll,
             focus: cx.focus_handle(),
             strip_focus: cx.focus_handle().tab_stop(true).tab_index(-1),
             repository: matches!(route, Route::Repository { .. }).then(RepositorySession::default),
