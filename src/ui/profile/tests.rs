@@ -488,11 +488,17 @@ fn heatmap_hover_focus_and_keyboard_expose_real_day_data(cx: &mut TestAppContext
     view.update_in(cx, |view, window, cx| {
         view.heatmap_focus_for_test().focus(window, cx);
     });
-    cx.simulate_keystrokes("right right");
+    cx.simulate_keystrokes("down down");
     assert_eq!(
         view.read_with(cx, |view, _| view.selected_day_detail()),
         Some("2024-02-29: 2 contributions".into())
     );
+    cx.simulate_keystrokes("home right");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected_day_detail()),
+        Some("2024-03-04: 3 contributions; level unavailable".into())
+    );
+    cx.simulate_keystrokes("home down down");
     assert!(cx.debug_bounds("profile-day-detail").is_some());
     let leap = cx.debug_bounds("profile-contribution-day-2").unwrap();
     cx.simulate_mouse_move(leap.center(), None, gpui::Modifiers::none());
@@ -535,6 +541,44 @@ fn page_wheel_reaches_sections_below_the_viewport(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |view, _| view.page_scroll.offset().y < px(0.0)));
     let after = cx.debug_bounds("profile-repositories-section").unwrap();
     assert!(after.top() < before.top());
+
+    view.update(cx, |view, _| view.show_page_scrollbar_for_test());
+    cx.run_until_parked();
+    let thumb = cx.debug_bounds("profile-page-scrollbar-thumb").unwrap();
+    let start = thumb.center();
+    cx.simulate_mouse_move(start, None, gpui::Modifiers::none());
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    for step in 1..=3 {
+        cx.simulate_mouse_move(
+            start + point(px(0.0), px(5.0 * step as f32)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(
+        start + point(px(0.0), px(15.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.page_dragging_for_test()),
+        None
+    );
+    let before_wheel = view.read_with(cx, |view, _| view.page_scroll.offset().y);
+    let root = cx.debug_bounds("profile-overview").unwrap();
+    cx.simulate_mouse_move(root.center(), None, gpui::Modifiers::none());
+    cx.simulate_event(gpui::ScrollEvent {
+        position: root.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-30.0))),
+        modifiers: gpui::Modifiers::none(),
+        touch_phase: Default::default(),
+        source: gpui::ScrollSource::Pointer,
+    });
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.page_scroll.offset().y < before_wheel));
 }
 
 #[gpui::test]

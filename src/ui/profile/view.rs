@@ -368,6 +368,16 @@ impl ProfileView {
     pub fn heatmap_focus_for_test(&self) -> FocusHandle {
         self.heatmap_focus.clone()
     }
+
+    #[cfg(test)]
+    pub fn show_page_scrollbar_for_test(&mut self) {
+        self.page_bars.snap(true);
+    }
+
+    #[cfg(test)]
+    pub fn page_dragging_for_test(&self) -> Option<gpui::Axis> {
+        self.page_bars.dragging()
+    }
 }
 
 impl Drop for ProfileView {

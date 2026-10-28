@@ -132,6 +132,10 @@ impl Render for ProfileView {
         let repositories = self.render_repositories(cx);
         let contributions = self.render_contributions(window, cx);
         let now = self.now_ms();
+        if self.page_bars.dragging().is_some() && !cx.has_active_drag() {
+            let target = self.page_motion.clone();
+            self.page_bars.settle(&target, now, cx.reduce_motion());
+        }
         let page_opacity = self.page_bars.opacity(now);
         if self.page_bars.is_animating() {
             window.request_animation_frame();
@@ -816,10 +820,10 @@ impl ProfileView {
         }
         let current = self.selected_day.unwrap_or(0);
         self.selected_day = Some(match event.keystroke.key.as_str() {
-            "right" => (current + 1).min(count - 1),
-            "left" => current.saturating_sub(1),
-            "down" => (current + 7).min(count - 1),
-            "up" => current.saturating_sub(7),
+            "right" => (current + 7).min(count - 1),
+            "left" => current.saturating_sub(7),
+            "down" => (current + 1).min(count - 1),
+            "up" => current.saturating_sub(1),
             "home" => 0,
             "end" => count - 1,
             _ => return,

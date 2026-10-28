@@ -31,6 +31,10 @@ Pin 语义保持服务分类：GitHub Popular 只在无 pin 且 showcase 明确�
 
 原生 Windows 预览已独立启动，标题 `Githux · Profile Overview preview`、进程 Responding；`PrintWindow` 成功取得 1000px 与最小 880×560 请求尺寸的真实渲染帧。最小尺寸帧显示 initials、name/login/bio、两列有界 public metadata 与 README 顶部，场景 toolbar 横向滚动不裁切。曾据帧修正 metadata 单行裁切，并新增 GPUI 几何回归。页面 wheel 在测试平台验证实际 scroll offset 与后续 section 位移。尝试用合成原生 wheel 截取下方 section 未取得滚动后的帧，因此不声称下半部视觉或 Windows 原生输入已经验收；启动/Responding 也不单独作为 GUI 通过证据。
 
+## 审查修复
+
+PR #36 首轮 `aba07c7` Codex 提出两项可直接修复问题：page thumb 外部释放后未 `settle`，导致 Motion 继续吞 wheel；热力图左右/上下步长与竖向 week column 的视觉方向相反。已分别补上释放清理与左右 7 天、上下 1 天，并在 `page_wheel_reaches_sections_below_the_viewport` 加入真实 thumb drag→release→wheel 回归，键盘用例显式区分 Right=下一周与 Down=下一天。两项均无需产品/架构裁决，永久 `arbitration_ever_required=false` 保持不变；等待新 head 的 CI/review，仍不自行合并。
+
 ## 后续
 
 - 协调者创建/跟踪 PR；任务属 First Release milestone #1，保留 `pending` 等负责人验收，不自动合并。
