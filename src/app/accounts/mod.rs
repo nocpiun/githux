@@ -713,6 +713,11 @@ impl Accounts {
                 StatusTone::Warning,
                 "The account or authorization changed while this request ran; its result was discarded.",
             ));
+            // The read we just discarded is not reused, but the settled authorization still needs a
+            // list. Clear the load marker and start a fresh read now that this operation is done;
+            // otherwise the sidebar would stay on the idle placeholder with no recovery.
+            self.loaded = None;
+            self.autoload_if_needed(cx);
             cx.notify();
             return;
         }
@@ -730,6 +735,8 @@ impl Accounts {
                 StatusTone::Warning,
                 "A repository result for the previous account was discarded.",
             ));
+            self.loaded = None;
+            self.autoload_if_needed(cx);
             cx.notify();
             return;
         }
