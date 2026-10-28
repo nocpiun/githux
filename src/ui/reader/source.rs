@@ -15,6 +15,9 @@
 
 use std::ops::Range;
 
+use super::ScrollClock;
+use crate::ui::scroll;
+
 use ely_core::{
     forms::{Highlight, code_highlights},
     theme::{ActiveTheme, TextSize},
@@ -56,14 +59,15 @@ pub struct SourceView {
     dragging: bool,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
-    bars: crate::ui::scroll::Bars,
-    clock: std::time::Instant,
+    pub(super) bars: crate::ui::scroll::Bars,
+    clock: ScrollClock,
+    pub(super) motion: scroll::Motion<gpui::ScrollHandle>,
+    _activation: gpui::Subscription,
+    _visibility: gpui::Subscription,
     last_reach: gpui::Point<Pixels>,
     /// Body bounds and shaped layout of each row actually painted this frame,
     /// so a drag over trailing whitespace still maps to a real column.
     rows: std::collections::HashMap<usize, (gpui::Bounds<Pixels>, gpui::TextLayout)>,
-    #[cfg(test)]
-    pinned_clock: Option<u64>,
     /// The widest row observed so far; visible rows can extend this after layout.
     widest: usize,
     width: Pixels,
@@ -79,6 +83,10 @@ impl SourceView {
         let text: std::sync::Arc<str> = std::sync::Arc::from(text.into());
         let line_starts = line_starts(&text);
         let (widest, width) = widest_line(&text, &line_starts, window, cx);
+        let scroll = UniformListScrollHandle::new();
+        let motion = scroll::Motion::new(scroll.0.borrow().base_handle.clone());
+        cx.on_release(|view, _| scroll::cancel_region(&mut view.bars, &view.motion))
+            .detach();
         Self {
             text,
             line_starts,
@@ -86,13 +94,22 @@ impl SourceView {
             selection: None,
             dragging: false,
             focus: cx.focus_handle().tab_stop(true),
-            scroll: UniformListScrollHandle::new(),
+            scroll,
             bars: crate::ui::scroll::Bars::new(),
-            clock: std::time::Instant::now(),
+            clock: ScrollClock::new(),
+            motion,
+            _activation: cx.observe_window_activation(window, |view, window, cx| {
+                if !window.is_window_active() {
+                    view.cancel_scroll(cx);
+                }
+            }),
+            _visibility: cx.observe_window_visibility(window, |view, visibility, _, cx| {
+                if !visibility.is_visible() {
+                    view.cancel_scroll(cx);
+                }
+            }),
             last_reach: Default::default(),
             rows: std::collections::HashMap::new(),
-            #[cfg(test)]
-            pinned_clock: None,
             widest,
             width,
         }
@@ -145,7 +162,7 @@ impl SourceView {
 
     #[cfg(test)]
     pub fn pin_scrollbar_clock(&mut self, ms: u64) {
-        self.pinned_clock = Some(ms);
+        self.clock.pin(ms);
     }
 
     #[cfg(test)]
@@ -196,6 +213,7 @@ impl SourceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.motion.cancel();
         window.focus(&self.focus, cx);
         let range = self.line_range(line);
         let at = range.start
@@ -218,10 +236,9 @@ impl SourceView {
     }
 
     fn end_selection_drag(&mut self, cx: &mut Context<Self>) {
-        if self.dragging {
-            self.dragging = false;
-            cx.notify();
-        }
+        self.dragging = false;
+        // GPUI clears active_drag after dispatch; notify so render can settle the native hook.
+        cx.notify();
     }
 
     fn drag(
@@ -412,6 +429,7 @@ impl Focusable for SourceView {
 
 impl Render for SourceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lifetime = super::scroll_lifetime(cx, Self::cancel_scroll);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let mono = theme.mono_family.clone();
@@ -425,13 +443,13 @@ impl Render for SourceView {
         // publishes itself as it is laid out, so pointer handling in this
         // frame never reads a previous frame's row positions.
         self.rows.clear();
-        let reduce = cx.reduce_motion();
+        let reduce = cx.reduce_motion() || cx.theme().reduced_motion;
+        let moving = self.motion.tick(self.clock.now(), reduce);
         if self.bars.dragging().is_some() && !cx.has_active_drag() {
-            let base = self.scroll.0.borrow().base_handle.clone();
-            self.bars.settle(&base, self.now_ms(), reduce);
+            self.bars.settle(&self.motion, self.now_ms(), reduce);
         }
         let opacity = self.bars.opacity(self.now_ms());
-        if self.bars.is_animating() {
+        if moving || self.bars.is_animating() {
             window.request_animation_frame();
         }
         let handle = self.scroll.0.borrow().base_handle.clone();
@@ -453,6 +471,7 @@ impl Render for SourceView {
         .with_width_from_item(Some(widest))
         .track_scroll(&self.scroll)
         .size_full();
+        let clock = self.clock.clone();
         div()
             .id("reader-source-root")
             .debug_selector(|| "reader-source".to_string())
@@ -464,8 +483,15 @@ impl Render for SourceView {
             .font_family(mono)
             .text_color(colors.fg)
             .child(list)
-            .child(self.scrollbar(gpui::Axis::Vertical, opacity, &handle, cx))
-            .child(self.scrollbar(gpui::Axis::Horizontal, opacity, &handle, cx))
+            .child(lifetime)
+            .child(scroll::wheel_overlay_with(
+                "reader-source",
+                scroll::WheelAxes::Both,
+                self.motion.clone(),
+                move || clock.now(),
+            ))
+            .child(self.scrollbar(gpui::Axis::Vertical, opacity, &self.motion, cx))
+            .child(self.scrollbar(gpui::Axis::Horizontal, opacity, &self.motion, cx))
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
                 view.drag_anywhere(event, cx);
             }))
@@ -487,6 +513,9 @@ impl Render for SourceView {
             }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;
+                if keystroke.key == "escape" {
+                    view.cancel_scroll(cx);
+                }
                 if !keystroke.modifiers.secondary(cx) {
                     return;
                 }
@@ -506,19 +535,21 @@ impl Render for SourceView {
 }
 
 impl SourceView {
+    pub(super) fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
+        scroll::cancel_region(&mut self.bars, &self.motion);
+        self.dragging = false;
+        cx.notify();
+    }
+
     fn now_ms(&self) -> u64 {
-        #[cfg(test)]
-        if let Some(ms) = self.pinned_clock {
-            return ms;
-        }
-        self.clock.elapsed().as_millis() as u64
+        self.clock.ms()
     }
 
     fn scrollbar(
         &self,
         axis: gpui::Axis,
         opacity: f32,
-        handle: &gpui::ScrollHandle,
+        handle: &scroll::Motion<gpui::ScrollHandle>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let name = match axis {
@@ -529,9 +560,13 @@ impl SourceView {
         let on_drag: crate::ui::scroll::OnDragging =
             std::rc::Rc::new(move |axis, dragging, _: &mut Window, cx: &mut App| {
                 let _ = this.update(cx, |view, cx| {
-                    let base = view.scroll.0.borrow().base_handle.clone();
-                    view.bars
-                        .drag(&base, axis, dragging, view.now_ms(), cx.reduce_motion());
+                    view.bars.drag(
+                        &view.motion,
+                        axis,
+                        dragging,
+                        view.now_ms(),
+                        cx.reduce_motion(),
+                    );
                     cx.notify();
                 });
             });

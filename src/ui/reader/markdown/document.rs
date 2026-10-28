@@ -92,6 +92,7 @@ pub struct MarkdownView {
     parsed: Arc<Parsed>,
     text: String,
     list: ListState,
+    motion: crate::ui::scroll::Motion<ListState>,
     focus: FocusHandle,
     on_link: Option<OnLink>,
     /// Bumped for every read, so an older background read lapses.
@@ -138,6 +139,7 @@ impl MarkdownView {
         let mut view = Self {
             parsed: Arc::new(Parsed::default()),
             text: String::new(),
+            motion: crate::ui::scroll::Motion::new(list.clone()),
             list,
             focus,
             on_link: None,
@@ -174,6 +176,7 @@ impl MarkdownView {
     /// Replaces the text; short texts parse at once, longer ones in the
     /// background pool.
     pub fn reset(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.motion.cancel();
         self.generation += 1;
         self.text = text.into();
         self.pending_top = true;
@@ -248,6 +251,10 @@ impl MarkdownView {
         &self.list
     }
 
+    pub(crate) fn motion(&self) -> &crate::ui::scroll::Motion<ListState> {
+        &self.motion
+    }
+
     /// Outline as last read: level, title, block index.
     pub fn outline(&self) -> Vec<(u8, String, usize)> {
         self.parsed
@@ -273,6 +280,7 @@ impl MarkdownView {
         if generation != self.generation {
             return;
         }
+        self.motion.cancel();
         read.blocks = flatten(read.blocks);
         read.doctext = DocText::build(&read.blocks);
         #[cfg(test)]
@@ -353,6 +361,12 @@ impl MarkdownView {
         }
     }
 
+    /// Ends transient gestures while preserving the completed selection for later copy.
+    pub(crate) fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
+        self.pressed_link = None;
+        self.end_drag(cx);
+    }
+
     /// Copies the selection; false when there is nothing to copy.
     pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
         let text = self.selected_text();
@@ -372,6 +386,7 @@ impl MarkdownView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.motion.cancel();
         window.focus(&self.focus, cx);
         if !shift {
             self.anchor = at;
@@ -1329,6 +1344,7 @@ impl Render for MarkdownView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    view.motion.cancel();
                     window.focus(&view.focus, cx);
                     let hit = view.hit_at_live(event.position);
                     match hit {

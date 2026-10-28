@@ -287,6 +287,27 @@ pub fn wheel_overlay<T: ScrollTarget + Clone + 'static>(
     axis: Axis,
     motion: Motion<T>,
 ) -> AnyElement {
+    wheel_overlay_with(id, WheelAxes::Mapped(axis), motion, Instant::now)
+}
+
+/// Input ownership for a region. Existing one-axis consumers retain their mapping; readers
+/// can preserve native x/y and Shift without converting a horizontal gesture into vertical motion.
+#[derive(Clone, Copy)]
+pub enum WheelAxes {
+    Mapped(Axis),
+    Both,
+    Vertical,
+}
+
+/// The same input overlay with explicit axis ownership and the owner's monotonic clock.
+/// The clock also lets event tests advance presentation without sleeping.
+pub fn wheel_overlay_with<T: ScrollTarget + Clone + 'static>(
+    id: &'static str,
+    axes: WheelAxes,
+    motion: Motion<T>,
+    now: impl Fn() -> Instant + 'static,
+) -> AnyElement {
+    let now = Rc::new(now);
     div()
         .debug_selector(move || format!("wheel-overlay-{id}"))
         .absolute()
@@ -298,31 +319,56 @@ pub fn wheel_overlay<T: ScrollTarget + Clone + 'static>(
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                 move |_, hitbox, window, _| {
                     let motion = motion.clone();
+                    let now = now.clone();
                     window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                         if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
                             return;
                         }
                         let delta = event.delta.pixel_delta(window.line_height());
-                        // Horizontal regions prefer a real horizontal delta (Windows already maps
-                        // Shift+wheel to one), then fall back to vertical wheel movement.
-                        let primary = if axis == Axis::Vertical {
-                            delta.y
-                        } else {
-                            delta.x
-                        };
-                        let secondary = if axis == Axis::Vertical {
-                            delta.x
-                        } else {
-                            delta.y
-                        };
-                        let delta = if primary != gpui::Pixels::ZERO {
-                            primary
-                        } else {
-                            secondary
-                        };
                         let precise = event.delta.precise() || event.source == ScrollSource::Touch;
                         let reduced = cx.theme().reduced_motion || cx.reduce_motion();
-                        if motion.wheel(Instant::now(), f32::from(delta), axis, precise, reduced) {
+                        let now = now();
+                        let (x, y) = (f32::from(delta.x), f32::from(delta.y));
+                        let consumed = match axes {
+                            WheelAxes::Mapped(axis) => {
+                                let (primary, secondary) = if axis == Axis::Vertical {
+                                    (y, x)
+                                } else {
+                                    (x, y)
+                                };
+                                motion.wheel(
+                                    now,
+                                    if primary != 0.0 { primary } else { secondary },
+                                    axis,
+                                    precise,
+                                    reduced,
+                                )
+                            }
+                            WheelAxes::Both => {
+                                // Windows already emits x for Shift+wheel; remap y only when
+                                // there is no native x. A diagonal precise gesture keeps both axes.
+                                let (x, y) = if event.modifiers.shift {
+                                    (if x != 0.0 { x } else { y }, 0.0)
+                                } else {
+                                    (x, y)
+                                };
+                                let horizontal =
+                                    motion.wheel(now, x, Axis::Horizontal, precise, reduced);
+                                let vertical =
+                                    motion.wheel(now, y, Axis::Vertical, precise, reduced);
+                                horizontal || vertical
+                            }
+                            WheelAxes::Vertical => {
+                                if event.modifiers.shift && y != 0.0 {
+                                    // A vertical native list otherwise consumes Shift+y in its
+                                    // bubble handler. Reserve that gesture for horizontal owners.
+                                    true
+                                } else {
+                                    motion.wheel(now, y, Axis::Vertical, precise, reduced)
+                                }
+                            }
+                        };
+                        if consumed {
                             cx.stop_propagation();
                             window.refresh();
                         }
