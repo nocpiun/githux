@@ -352,7 +352,14 @@ impl AvatarCache {
 
 /// Runs one avatar fetch on the caller-provided fetcher and pushes the completion into `inbox`.
 /// Called on the executor; it must not touch a GPUI entity.
-pub async fn run_fetch(fetcher: Arc<AvatarFetcher>, request: AvatarRequest, inbox: AvatarInbox) {
+pub async fn run_fetch(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    fetcher: Arc<AvatarFetcher>,
+    request: AvatarRequest,
+    inbox: AvatarInbox,
+) {
+    // Held for the whole fetch so the shared avatar concurrency bound is respected.
+    let _permit = permit;
     let key = request.key;
     match fetcher.fetch(&key).await {
         Some(image) => inbox

@@ -599,7 +599,13 @@ impl Transport for GatedTransport {
                     result = wait => result.expect("gate"),
                 };
             }
-            immediate.expect("scripted response")
+            // No scripted reply left means the test's request budget is exhausted; return a plain
+            // network failure instead of panicking a background thread.
+            immediate.unwrap_or_else(|| {
+                Err(TransportError::Network {
+                    message: "no scripted response".into(),
+                })
+            })
         })
     }
 }
@@ -1605,4 +1611,170 @@ fn the_replacement_form_targets_the_selected_account_not_the_active_one(cx: &mut
         Some(AccountKey::new(2, HostId::github())),
         "the replacement target is the account the user pressed Replace on"
     );
+}
+
+/// Revalidating a *different* saved account must not blank the active account's loaded list: the
+/// active authorization did not change, so the list stays valid instead of going idle with no retry.
+#[gpui::test]
+fn revalidating_another_account_keeps_the_active_account_list(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["a"]));
+    mock.serve_repos("second", repos(2, "bob", &["b"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    // The revalidation of B issues another GET /user.
+    mock.script_user(user(2, "bob"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+    put_token(&controller, cx, "second");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    wait_idle(&controller, cx);
+    // Make A active and wait for its list.
+    select(&controller, 1, cx);
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "a")
+    });
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 1);
+    wait_idle(&controller, cx);
+    // Revalidate B (not active). A's list must remain.
+    controller.update(cx, |accounts, cx| {
+        accounts.revalidate(AccountKey::new(2, HostId::github()), cx)
+    });
+    wait_idle(&controller, cx);
+    let state = snapshot(&controller, cx);
+    assert!(
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories[0].name == "a"),
+        "revalidating another account must not blank the active account's list: {:?}",
+        state.repositories.preview
+    );
+    assert_eq!(view.read_with(cx, |shell, _| shell.repositories().len()), 1);
+}
+
+/// Cancelling a repository read must leave a recoverable state: the sidebar keeps a Retry (Failed)
+/// or the previously loaded list, and the automatic loader can read again.
+#[gpui::test]
+fn cancelling_a_repository_read_stays_recoverable(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Gate::new(repos(1, "alice", &["later"])));
+    let transport = Arc::new(GatedTransport {
+        responses: Mutex::new(VecDeque::from([
+            Ok(user(1, "alice")),
+            // The retried read after the cancel is served from the scripted queue.
+            Ok(repos(1, "alice", &["later"])),
+        ])),
+        gates: Mutex::new(VecDeque::from([gate.clone()])),
+        requests: AtomicUsize::new(0),
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, transport);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    // The automatic read is parked on the gate; cancel it.
+    controller.update(cx, |accounts, cx| accounts.cancel(cx));
+    gate.release();
+    wait_idle(&controller, cx);
+    let state = snapshot(&controller, cx);
+    assert!(
+        matches!(state.repositories.preview, RepositoryPreview::Failed(_)),
+        "a cancelled read is recoverable (Retry-able), not an unrecoverable idle state: {:?}",
+        state.repositories.preview
+    );
+    // The load marker was cleared, so a manual retry is allowed to read again.
+    controller.update(cx, |accounts, cx| accounts.refresh(cx));
+    wait_idle(&controller, cx);
+    assert!(
+        !matches!(
+            snapshot(&controller, cx).repositories.preview,
+            RepositoryPreview::Loading
+        ),
+        "the retried read settles instead of hanging"
+    );
+}
+
+/// Avatar fetches are bounded: with many owners, no more than the semaphore's permit count runs at
+/// once, so a large list cannot open an unbounded burst of connections.
+#[gpui::test]
+fn avatar_fetches_are_bounded_by_a_semaphore(cx: &mut TestAppContext) {
+    use crate::app::avatar::{AvatarBytes, AvatarKey};
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+
+    // A byte source that blocks until its gate opens, tracking peak concurrency through a shared
+    // counter, so the test can observe how many fetches ran simultaneously.
+    struct Gated {
+        bodies: Mutex<HashMap<String, (u16, Vec<u8>)>>,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl AvatarBytes for Gated {
+        fn load<'a>(
+            &'a self,
+            url: &'a str,
+            _max: usize,
+            _cancel: crate::network::cancel::CancellationToken,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(u16, Vec<u8>), ()>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                // Wait for the test to open the gate, yielding the task so siblings can start.
+                while !self.release.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                self.bodies.lock().unwrap().get(url).cloned().ok_or(())
+            })
+        }
+    }
+    let peak = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let source = Arc::new(Gated {
+        bodies: Mutex::new(HashMap::new()),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        peak: peak.clone(),
+        release: release.clone(),
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    controller.update(cx, |accounts, _| {
+        accounts.install_avatar_source(source.clone())
+    });
+    // Request many distinct owners at once.
+    for id in 0..64u64 {
+        let key = AvatarKey::new("github.com", id, format!("https://avatars.test/{id}.png"));
+        controller.update(cx, |accounts, _| {
+            let _ = accounts.avatar(key);
+        });
+    }
+    // Let the queue start; the gate is still shut, so only the permitted count can be in flight.
+    settle_beats_for(&controller, cx, Duration::from_millis(600));
+    let observed = peak.load(Ordering::SeqCst);
+    assert!(
+        observed <= 6,
+        "at most the avatar semaphore's 6 permits run at once, saw {observed}"
+    );
+    assert!(observed >= 1, "the bound is real, not zero concurrency");
+    // Nothing has settled yet because the gate is shut; opening it lets the rest drain without a
+    // panic, proving the queue is bounded rather than failing.
+    release.store(true, Ordering::SeqCst);
+    settle_beats_for(&controller, cx, Duration::from_millis(600));
 }

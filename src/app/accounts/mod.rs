@@ -237,8 +237,11 @@ pub(crate) struct Accounts {
     /// Pending avatar requests the renderer asked for but the controller has not started yet. The
     /// renderer only records intent; the launch happens off the paint path.
     avatar_queue: Vec<AvatarRequest>,
-    /// The fetcher every avatar read runs on, built from the runtime's existing transport.
+    /// The fetcher every avatar read runs on.
     avatar_fetcher: Option<Arc<AvatarFetcher>>,
+    /// Bounds how many avatar fetches run at once. A long repository list queues here instead of
+    /// opening one connection per owner.
+    avatar_permits: Arc<tokio::sync::Semaphore>,
     /// The list that was on screen before an account mutation discarded it. If the mutation fails
     /// without changing the authorization, this is restored instead of leaving an idle placeholder
     /// that the automatic loader will not refill (its key already matched).
@@ -380,6 +383,7 @@ impl Accounts {
             avatar_inbox: Arc::new(Mutex::new(Vec::new())),
             avatar_queue: Vec::new(),
             avatar_fetcher: None,
+            avatar_permits: Arc::new(tokio::sync::Semaphore::new(6)),
             previous_repositories: None,
             loaded: None,
             receiver_task: None,
@@ -492,12 +496,18 @@ impl Accounts {
             for request in queued {
                 let fetcher = fetcher.clone();
                 let inbox = inbox.clone();
-                // One tracked job per avatar; they share the executor's concurrency bound, so a long
-                // list cannot launch an unbounded burst.
+                let permits = self.avatar_permits.clone();
+                // One tracked job per avatar, each gated by the avatar semaphore so a long list
+                // cannot launch an unbounded burst of simultaneous HTTP requests.
                 let _ = runtime.spawn(
                     crate::network::cancel::CancellationToken::new().1,
                     || {},
-                    async move { run_fetch(fetcher, request, inbox).await },
+                    async move {
+                        let Ok(permit) = permits.acquire_owned().await else {
+                            return;
+                        };
+                        run_fetch(permit, fetcher, request, inbox).await;
+                    },
                 );
             }
         }
@@ -766,10 +776,9 @@ impl Accounts {
                         },
                     };
                 } else if !switched {
-                    self.snapshot.repositories = Repositories::idle(
-                        self.snapshot.active.clone(),
-                        "Authorization or current account changed. Reloading repositories…",
-                    );
+                    // A settled mutation that did not change the active account's authorization
+                    // (e.g. revalidating another saved account) leaves the existing list valid.
+                    self.snapshot.repositories = self.restored_or_idle();
                 }
             }
             Err(message) => {
@@ -796,18 +805,7 @@ impl Accounts {
                     // same authorization loaded, so `autoload_if_needed` below will not refetch.
                     // Restoring the previous list is honest and keeps the sidebar usable; when the
                     // authorization did change, the automatic load replaces this instead.
-                    self.snapshot.repositories = match self.previous_repositories.take() {
-                        Some(previous)
-                            if previous.account == self.snapshot.active
-                                && matches!(previous.preview, RepositoryPreview::Ready(_)) =>
-                        {
-                            previous
-                        }
-                        _ => Repositories::idle(
-                            self.snapshot.active.clone(),
-                            "An account change did not complete; the repository list will reload for the current account.",
-                        ),
-                    };
+                    self.snapshot.repositories = self.restored_or_idle();
                 }
             }
         }
@@ -819,6 +817,26 @@ impl Accounts {
         // repository read is a no-op here because its key is already recorded.
         self.autoload_if_needed(cx);
         cx.notify();
+    }
+
+    /// The repository list to show after a non-repository mutation settled and the authorization
+    /// did not change (for example revalidating a different account, or a rejected PAT). The list
+    /// that was on screen is still valid, so it is restored instead of leaving an idle placeholder
+    /// that `autoload_if_needed` will not refill. When the authorization did change, this returns
+    /// `None` and the automatic load takes over.
+    fn restored_or_idle(&mut self) -> Repositories {
+        match self.previous_repositories.take() {
+            Some(previous)
+                if previous.account == self.snapshot.active
+                    && matches!(previous.preview, RepositoryPreview::Ready(_)) =>
+            {
+                previous
+            }
+            _ => Repositories::idle(
+                self.snapshot.active.clone(),
+                "The current account changed; its repositories will load automatically.",
+            ),
+        }
     }
 
     fn append_cleanup_warning(&mut self) {
@@ -1073,10 +1091,28 @@ impl Accounts {
             StatusTone::Info,
             "Cancellation requested. An in-flight account operation still settles in the service; saved accounts are reconciled when it does, and nothing will claim it was rolled back.",
         ));
-        self.snapshot.repositories = Repositories::idle(
-            self.snapshot.active.clone(),
-            "Cancelled. The current authorization's repositories reload when it settles.",
-        );
+        // A cancelled repository read publishes nothing and, unlike a mutation, has no settlement
+        // to reconcile. Mark it as a recoverable failure so the sidebar keeps a Retry and forget the
+        // load marker, letting the automatic loader try again when the authorization next settles.
+        // Restoring a previously loaded list is honest too, when the authorization is unchanged.
+        // Forget the automatic-load marker for the cancelled read so a Retry or the next settle can
+        // read again; the failed state below also keeps a scoped Retry visible meanwhile.
+        self.loaded = None;
+        self.snapshot.repositories = match self.previous_repositories.take() {
+            Some(previous)
+                if previous.account == self.snapshot.active
+                    && matches!(previous.preview, RepositoryPreview::Ready(_)) =>
+            {
+                previous
+            }
+            _ => Repositories {
+                account: self.snapshot.active.clone(),
+                preview: RepositoryPreview::Failed(
+                    "The repository read was cancelled before any result was applied. Retry to read the current account's repositories."
+                        .into(),
+                ),
+            },
+        };
         self.input
             .update(cx, |input, cx| input.set_disabled(false, cx));
         cx.notify();
