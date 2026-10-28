@@ -98,3 +98,5 @@ branch从标题右上角移到Tabs右侧；顶部删除stars/forks/REST issue+PR
 本轮a0b369c审查追加修复：README uncertain面板新增Retry README，retry_reader也将Uncertain路由到发现接口；只重试readme，不清空树/overview或重新解析commit。回归验证成功恢复及其他资源请求不增加。
 
 README uncertain修复后完整复跑：541/324/54/152/131/479/14项全部通过，repository单独再跑479项通过。仍仅PR35待负责人验收，blocked不移除、不合并。
+
+当前head c7e9177审查clean但Linux CI揭示旧端点测试时序假设：真实新Languages请求可能已完成，不能断言仍Loading。将测试隔离到受控发布队列，取消旧工作/推进代次，只注入过期错误并核对当前Loading不变；不改生产逻辑或网络层。随后重新验证/审查。

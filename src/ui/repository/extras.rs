@@ -451,8 +451,17 @@ mod tests {
         page.update(cx, |page, cx| {
             let binding = page.extras.binding.clone().unwrap();
             let context = page.context.clone().unwrap();
-            page.read_extra(Endpoint::Languages, cx);
+            // Isolate the publication boundary from the real worker's speed:
+            // a fresh worker may already finish on Linux before this assertion.
+            if let Some(work) = page.extras.work[3].take() {
+                work.source.cancel();
+            }
+            page.extras.requests[3] += 1;
             let request = page.extras.requests[3];
+            page.extras.inbox.lock().unwrap().clear();
+            page.extras.view.as_ref().unwrap().update(cx, |view, cx| {
+                view.apply_languages(&binding, SectionState::Loading, cx);
+            });
             page.extras.inbox.lock().unwrap().push_back(Reply {
                 binding: binding.clone(),
                 context: context.clone(),
