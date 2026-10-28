@@ -40,7 +40,7 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 - 初建或 `set_unavailable` 是“无当前数据”，不是成功空列表；离线/无缓存不得显示成“没有活动”。
 - `set_loading` 只影响一栏；另一栏的内容、错误或滚动不被擦除。
 - `apply_error` 只终止对应栏；`HomeError` 的认证、限流、SSO、网络、超时、取消和解析失败分别给出不冒充空结果的提示。
-- `RefreshAvailability` 由 host 根据 cooldown、在途、限流或轮询状态提供。不可用时刷新按钮禁用且 `refresh` 被忽略；一次可用刷新只发出一次请求并进入 refreshing，直到 host 应用结果或错误。
+- `RefreshAvailability` 由 host 根据 cooldown、在途、限流或轮询状态提供。不可用时刷新按钮禁用且 `refresh` 被忽略；首次加载（Loading）或一次可用刷新进入 refreshing 后，同一栏在下一次结果/错误前拒绝再次刷新。
 
 ## 输出动作
 
@@ -105,6 +105,6 @@ cargo build --locked
 git diff --check
 ```
 
-`tests/home.rs` 共 41 项（含共享 scroll 模块用例），本任务新增用例覆盖：两栏独立、单栏错误不擦除另一栏、真空/错误/unavailable 区分、Partial 保留条目、1,000 条 Home 与 300 条 Feed 虚拟化、精确滚轮只动目标栏一次、绑定切换清空、旧 generation 成功与错误拒绝、键盘与鼠标回调一次且身份稳定、刷新不可用/双击阻止、窄窗口堆叠、未知事件与缺字段回退、全部 typed event 描述。
+`tests/home.rs` 共 43 项（含共享 scroll 模块用例），本任务新增用例覆盖：两栏独立、单栏错误不擦除另一栏、真空/错误/unavailable 区分、Partial 保留条目、1,000 条 Home 与 300 条 Feed 虚拟化、精确滚轮只动目标栏一次、绑定切换清空、旧 generation 成功与错误拒绝、键盘与鼠标回调一次且身份稳定、Home/End 无选择时的绝对边界、刷新不可用/加载中/双击阻止、窄窗口堆叠、未知事件与缺字段回退、全部 typed event 描述。
 
 真实窗口：`target/debug/examples/home.exe` 以标题 `Githux · Home view preview` 独立启动、Responding、按 PID 正常关闭。该检查只证明启动路径与关闭收尾；锁屏/无输入环境下未做真实键盘、IME、DPI、拖拽和视觉验收，需负责人按 `pending` 验收。未连接 GitHub，也未读取真实 PAT。

@@ -671,6 +671,59 @@ fn refresh_is_scoped_disabled_while_unavailable_and_cannot_double_fire(cx: &mut 
 }
 
 #[gpui::test]
+fn a_loading_panel_refuses_refresh_until_a_result_arrives(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    view.update(cx, |view, cx| {
+        assert!(view.set_loading(Column::Home, &binding(), 1, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.refresh(Column::Home, window, cx);
+            view.refresh(Column::Home, window, cx);
+        });
+    });
+    assert!(
+        actions.borrow().is_empty(),
+        "a first load owns the request slot"
+    );
+    let (home, _) = mixed();
+    view.update(cx, |view, cx| {
+        assert!(view.apply_home(&binding(), 1, home, cx));
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.refresh(Column::Home, window, cx));
+    });
+    assert_eq!(actions.borrow().len(), 1);
+}
+
+#[gpui::test]
+fn home_and_end_from_no_selection_choose_the_correct_boundary(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let actions = action_sink(&view, cx);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.home_view.focus.focus(window, cx));
+    });
+    cx.simulate_keystrokes("end enter");
+    cx.run_until_parked();
+    let HomeAction::ActivateWorkItem(last) = actions.borrow()[0].clone() else {
+        panic!("expected the last work item");
+    };
+    assert_eq!(last.id, 10_005);
+
+    // A new snapshot clears selection again, so Home must choose the first row.
+    apply(&view, cx);
+    cx.simulate_keystrokes("home enter");
+    cx.run_until_parked();
+    let HomeAction::ActivateWorkItem(first) = actions.borrow()[1].clone() else {
+        panic!("expected the first work item");
+    };
+    assert_eq!(first.id, 10_000);
+}
+
+#[gpui::test]
 fn narrow_windows_stack_both_columns_inside_the_view(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     apply(&view, cx);

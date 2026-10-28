@@ -160,6 +160,13 @@ impl<T> PanelState<T> {
         )
     }
 
+    /// A first load or a manual refresh already owns this column's request
+    /// slot; another refresh must not be emitted until a result or error ends
+    /// the wait.
+    fn is_busy(&self) -> bool {
+        matches!(self, Self::Loading) || self.refreshing()
+    }
+
     fn data(&self) -> Option<&T> {
         match self {
             Self::Ready {
@@ -600,8 +607,8 @@ impl HomeView {
 
     fn can_refresh(&self, column: Column) -> bool {
         match column {
-            Column::Home => self.home.refresh.available && !self.home.state.refreshing(),
-            Column::Feed => self.feed.refresh.available && !self.feed.state.refreshing(),
+            Column::Home => self.home.refresh.available && !self.home.state.is_busy(),
+            Column::Feed => self.feed.refresh.available && !self.feed.state.is_busy(),
         }
     }
 
@@ -740,8 +747,17 @@ impl HomeView {
         match event.keystroke.key.as_str() {
             "down" => self.move_selection(column, 1, window, cx),
             "up" => self.move_selection(column, -1, window, cx),
-            "home" => self.move_selection(column, isize::MIN, window, cx),
-            "end" => self.move_selection(column, isize::MAX, window, cx),
+            "home" => {
+                if self.item_count(column) > 0 {
+                    self.select(column, 0, window, cx);
+                }
+            }
+            "end" => {
+                let count = self.item_count(column);
+                if count > 0 {
+                    self.select(column, count - 1, window, cx);
+                }
+            }
             "enter" | "space" => {
                 if let Some(index) = self.selected(column) {
                     self.activate(column, index, window, cx);
@@ -857,7 +873,7 @@ fn render_panel<T: PanelRows + 'static>(
     };
     let body = panel_body(column, model, opacity, handles, cx);
     let refreshing = model.state.refreshing();
-    let disabled = !model.refresh.available || refreshing;
+    let disabled = !model.refresh.available || model.state.is_busy();
     let unavailable_reason = (!model.refresh.available)
         .then(|| model.refresh.reason.clone())
         .flatten();
