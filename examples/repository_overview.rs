@@ -47,7 +47,7 @@ enum Scenario {
     Error,
     EmptyRepository,
     ZeroLanguages,
-    LongNotes,
+    LongNames,
 }
 
 impl Scenario {
@@ -58,7 +58,7 @@ impl Scenario {
         Scenario::Error,
         Scenario::EmptyRepository,
         Scenario::ZeroLanguages,
-        Scenario::LongNotes,
+        Scenario::LongNames,
     ];
 
     fn label(self) -> &'static str {
@@ -69,7 +69,7 @@ impl Scenario {
             Self::Error => "Error",
             Self::EmptyRepository => "204 empty",
             Self::ZeroLanguages => "Zero languages",
-            Self::LongNotes => "Long notes",
+            Self::LongNames => "Long names",
         }
     }
 }
@@ -163,9 +163,7 @@ impl Preview {
                 Scenario::Error => {
                     let _ = view.apply_releases(
                         &binding,
-                        SectionState::Error {
-                            message: "rate limit exceeded".to_string(),
-                        },
+                        SectionState::Ready(fixtures::ready_releases()),
                         cx,
                     );
                     let _ = view.apply_contributors(
@@ -177,9 +175,7 @@ impl Preview {
                     );
                     let _ = view.apply_languages(
                         &binding,
-                        SectionState::Error {
-                            message: "invalid response".to_string(),
-                        },
+                        SectionState::Ready(fixtures::ready_languages()),
                         cx,
                     );
                 }
@@ -217,7 +213,7 @@ impl Preview {
                         cx,
                     );
                 }
-                Scenario::LongNotes => {
+                Scenario::LongNames => {
                     let _ = view.apply_releases(
                         &binding,
                         SectionState::Ready(fixtures::ready_releases()),
@@ -230,11 +226,18 @@ impl Preview {
                     );
                     let _ = view.apply_languages(
                         &binding,
-                        SectionState::Ready(fixtures::many_languages()),
+                        SectionState::Ready({
+                            let mut value = fixtures::many_languages();
+                            value.languages[0].name = "An intentionally very long language name for compact-layout verification".into();
+                            value
+                        }),
                         cx,
                     );
                 }
             }
+        });
+        self.overview.update(cx, |view, cx| {
+            view.set_release_date_label(&binding, 4, "3 days ago".into(), cx);
         });
         self.scenario = scenario;
         self.reader_scroll.set_offset(gpui::Point::default());
@@ -251,6 +254,7 @@ impl Preview {
                 .debug_selector(move || format!("scenario-{}", scenario.label()))
                 .child(
                     Button::new(("scenario", index), scenario.label())
+                        .size(ely_core::theme::ControlSize::Sm)
                         .variant(match active {
                             true => ButtonVariant::Primary,
                             false => ButtonVariant::Secondary,
@@ -267,6 +271,9 @@ impl Preview {
             .debug_selector(|| "overview-preview-toolbar".to_string())
             .flex()
             .flex_wrap()
+            .w_full()
+            .min_w_0()
+            .flex_none()
             .items_center()
             .gap_2()
             .px_3()
@@ -312,6 +319,7 @@ impl Render for Preview {
         );
         let reader_text = theme.text_size(TextSize::Sm);
         let action_text = theme.text_size(TextSize::Xs);
+        let preview_width = (_window.viewport_size().width - px(48.0)).max(px(1.0));
         let status = self.action.clone().unwrap_or_else(|| {
             "Actions are shown here; the preview never opens a URL or downloads an asset."
                 .to_string()
@@ -320,12 +328,18 @@ impl Render for Preview {
         div()
             .debug_selector(|| "overview-preview".to_string())
             .size_full()
+            .w(_window.viewport_size().width)
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(bg)
             .text_color(fg)
             .child(toolbar)
-            .child(self.overview.clone())
+            .child(div().px_6().pt_5().pb_3().child(div().text_size(px(22.0)).child("nocpiun / githux"))
+                .child(div().text_color(subtle).child("A calm desktop workspace for GitHub.")))
+            .child(div().w_full().px_6().child(div().w(preview_width).border_t_1().border_color(border).child(self.overview.clone())))
+            .child(div().px_6().py_2().border_b_1().border_color(border).child("Code"))
             .child(
                 div()
                     .id("overview-preview-reader")
@@ -343,13 +357,12 @@ impl Render for Preview {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .children((0..80).map(|index| {
-                                div()
-                                    .text_size(reader_text)
-                                    .child(format!(
-                                        "Simulated file reader line {index}: the TOP panel must not consume this space."
-                                    ))
-                            })),
+                            .child(div().text_size(px(22.0)).child("Githux"))
+                            .child(div().text_size(reader_text).child("Your GitHub workspace, made for desktop."))
+                            .child(div().pt_4().child("A quieter way to work"))
+                            .child(div().text_size(reader_text).child("Browse repository files, read project documentation, and stay close to the work that matters."))
+                            .child(div().pt_4().child("Getting started"))
+                            .child(div().font_family(fonts::CODE_FAMILY).text_size(reader_text).child("cargo run --locked")),
                     ),
             )
             .child(
@@ -382,6 +395,10 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(480.0), px(480.0))),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("Githux · Compact overview preview".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| cx.new(|cx| Preview::new(window, cx)))

@@ -52,3 +52,18 @@ GPUI 测试覆盖：旧仓库/账户/generation 拒绝、单 section 失败/Part
 - 未做真实 Windows 预览窗口的人工视觉、鼠标手感和多 DPI 验收；`cargo run` 启动事实不等于视觉验收。
 - 未接入正式 Shell 或 repository-browser；未调用真实 `RepoService` / `repository_extras` 读取；未读取真实 PAT 或访问真实 GitHub。
 - 正式接入仍须宿主构造绑定、发起独立三段读取、发布前复核 `is_current`、处理 typed 动作，并把组件放在仓库页 TOP 区域。边界与建议步骤见 `docs/repository-overview.md`。
+
+
+## 负责人要求的紧凑视觉重做（同一 PR #37）
+
+负责人 2026-10-28 拒绝此前卡片/滚动/notes 密度，明确以任务提供的 02-repository-header.png 为层级参考。本轮先读取实际图片，再重写为自然高度横向摘要条。原方案与此前“交付”记录仅作历史，不代表验收通过。
+
+移除三卡片、固定半窗高度、内部 scroll、release history、notes/popover、Open/Notes 按钮、常驻 refresh 和 byte/API 段落。Releases 只显示 supplied latest 版本 link、可选宿主日期和必要 flags；Contributors 为最多 5 个头像，匿名不可导航；Languages 为一个 segmented bar、最多三项 legend，长尾合并 Other，checked byte 运算。保留账户/仓库/generation 及 payload identity 门槛、独立失败/Partial、404/204/空值区别。Ely 支持 host-decoded RenderImage，新增绑定范围内的图像输入；没有新增网络/图像获取系统或伪造照片。组件自然高度嵌入契约和宿主 image/date 依赖见 topic doc。
+
+example 默认短值，压力场景显式切换，下面少量有意义文档说明代替 80 行占位。未复制 browser/header/tree 产品实现。薄装配不再导入 shared scroll，因为该组件已无滚动 owner。
+
+同步 origin/main（最终验证基线 8de19593e6a4b9342aafa79074759d9a93231a29），保留其 Home/page-data/reader 工作，没有竞争写入。fmt、locked all-target check、clippy -D warnings、完整 cargo test、product build、example build、diff check 均通过；全套 538 / 321 / 54 Home / 131 reader / 13 overview-target（其中 8 个组件用例）通过。构建过程中原生 preview exe 仍打开曾导致 Windows LNK1104；关闭本任务 PID 后构建通过，无代码/依赖绕行。
+
+真实本机 Windows 144 DPI，以 DPI-aware PrintWindow 捕获并实际查看 Ready、窄窗、长名称/300 人/20 语言、latest 404、Partial、单段 Error、204、Zero 场景。鼠标真实切换场景。将 Ready 与原始参考并排生成 comparison.png 并检查：三个小组位于 identity/description 与 Code 标记之间，常态约 80 logical px，无卡框/固定半窗/内部滚动，正文空间主导。窄窗两行分组；长名称省略但 share 与 Other 可读。初版非 DPI-aware capture 裁掉右侧，修正 capture DPI 后重新核实，未将裁剪图当交付证据。最终截图保存在 .agents/task/{ready,narrow,long,latest,partial,error,empty,zero}-native.png；comparison.png 为原图与实际 native 的并排检查材料。没有上传原始日志、凭据或私人记忆。
+
+仍待负责人视觉验收；没有声称 IME、多显示器 DPI 切换或原生辅助技术已验收。正式 Shell/repository-browser 挂载、账户服务和图片获取仍为后续整合。保持 owner-managed blocked，添加 pending 仅表示新预览已准备好，不合并、不 auto-merge。新 head 重新请求 Codex 审查；blocked 状态与 CI/review 分开报告。

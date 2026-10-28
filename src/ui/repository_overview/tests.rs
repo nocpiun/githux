@@ -1,47 +1,15 @@
-//! GPUI tests for the repository TOP component.
-//!
-//! They run on GPUI's test platform. They cover the component's own behaviour: stale binding
-//! rejection, independent section states, latest-404 ambiguity, draft/prerelease metadata,
-//! anonymous and bounded contributor lists, 204 versus empty-content versus error, zero and
-//! overflow-safe language output, bounded popover focus/dismissal/scroll, and the TOP layout
-//! beside a simulated reader. They do not replace a native window or real GitHub data check.
-
-use std::rc::Rc;
-
+//! Behavioral coverage for compact summaries and scoped updates.
+use super::view::summary::{contributor_display, language_segments};
+use super::{fixtures, *};
+use crate::domain::account::{AccountKey, HostId};
 use gpui::{
     AppContext as _, Bounds, Entity, InteractiveElement, Modifiers, ParentElement, Pixels, Point,
-    ScrollDelta, ScrollEvent, ScrollSource, StatefulInteractiveElement, Styled, TestAppContext,
-    VisualContext, VisualTestContext, point, px, size,
+    StatefulInteractiveElement, Styled, TestAppContext, VisualContext, VisualTestContext, px, size,
 };
-
-use crate::domain::account::{AccountKey, HostId};
-use crate::domain::repository_extras::{
-    Contributor, ContributorsState, ExtrasCompleteness, ExtrasIncompleteReason, LanguagesOutcome,
-    ReleasesOutcome,
-};
-
-use super::fixtures;
-use super::view;
-use super::{
-    ContributorsState as OverviewContributorsState, LanguagesState as OverviewLanguagesState,
-    OverviewAction, OverviewBinding, OverviewSection, ReleasesData, ReleasesState,
-    RepositoryOverview, SectionState,
-};
-
-fn selector(name: String) -> &'static str {
-    Box::leak(name.into_boxed_str())
-}
-
+use std::rc::Rc;
 fn setup(cx: &mut TestAppContext) {
     cx.update(ely_core::init_for_tests);
-    cx.update(|cx| {
-        ely_core::theme::Theme::update(cx, |theme| {
-            theme.font_family = "Noto Sans".into();
-            theme.mono_family = "Google Sans Code".into();
-        });
-    });
 }
-
 struct ReaderProbe {
     scroll: gpui::ScrollHandle,
     focus: gpui::FocusHandle,
@@ -152,7 +120,7 @@ fn apply_releases(
 fn apply_contributors(
     harness: &Entity<Harness>,
     binding: &OverviewBinding,
-    state: OverviewContributorsState,
+    state: ContributorsState,
     cx: &mut VisualTestContext,
 ) -> bool {
     overview(harness, cx).update(cx, |view, cx| view.apply_contributors(binding, state, cx))
@@ -161,7 +129,7 @@ fn apply_contributors(
 fn apply_languages(
     harness: &Entity<Harness>,
     binding: &OverviewBinding,
-    state: OverviewLanguagesState,
+    state: LanguagesState,
     cx: &mut VisualTestContext,
 ) -> bool {
     overview(harness, cx).update(cx, |view, cx| view.apply_languages(binding, state, cx))
@@ -178,772 +146,218 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn scroll_over(selector: &'static str, dy: f32, cx: &mut VisualTestContext) {
-    let target = bounds(selector, cx).center();
-    cx.simulate_mouse_move(target, None, Modifiers::none());
-    cx.simulate_event(ScrollEvent {
-        position: target,
-        delta: ScrollDelta::Lines(point(0.0, dy)),
-        modifiers: Modifiers::none(),
-        touch_phase: Default::default(),
-        source: ScrollSource::Pointer,
-    });
+#[gpui::test]
+fn compact_ready_has_one_version_avatars_and_one_bar(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    cx.simulate_resize(size(px(1100.0), px(760.0)));
     cx.run_until_parked();
-}
-
-#[gpui::test]
-fn stale_repository_account_and_generation_bindings_are_rejected(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let current = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &current,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-
-    let stale_generation = fixtures::binding(2);
-    assert!(!apply_releases(
-        &harness,
-        &stale_generation,
-        SectionState::Error {
-            message: "stale generation".to_string()
-        },
-        cx
-    ));
-
-    let mut other_account = fixtures::binding(1);
-    other_account.account = AccountKey::new(99, HostId::github());
-    assert!(!apply_releases(
-        &harness,
-        &other_account,
-        SectionState::Error {
-            message: "stale account".to_string()
-        },
-        cx
-    ));
-
-    let state = overview(&harness, cx).read_with(cx, |view, _| view.releases().clone());
-    assert!(
-        matches!(state, SectionState::Ready(_)),
-        "a stale update must not erase the current section"
-    );
-}
-
-#[gpui::test]
-fn one_section_failure_does_not_erase_the_other_sections(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_contributors()),
-        cx
-    ));
-    assert!(apply_languages(
-        &harness,
-        &binding,
-        SectionState::Error {
-            message: "languages failed".to_string()
-        },
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-releases").is_some());
-    assert!(cx.debug_bounds("overview-contributors").is_some());
-    assert!(cx.debug_bounds("overview-languages-error").is_some());
-
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Error {
-            message: "releases failed".to_string()
-        },
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-releases-error").is_some());
-    assert!(cx.debug_bounds("overview-contributors").is_some());
-    assert!(
-        cx.debug_bounds("overview-contributors-empty-content")
-            .is_none()
-    );
-    assert!(cx.debug_bounds("overview-languages-error").is_some());
-}
-
-#[gpui::test]
-fn latest_404_is_ambiguous_and_a_list_can_still_show_releases(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::latest_none_releases()),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-releases-latest-none").is_some());
-    assert!(cx.debug_bounds("overview-release-4").is_some());
-    assert!(cx.debug_bounds("overview-releases-empty").is_none());
-    assert!(view::latest_none_text().contains("does not prove"));
-}
-
-#[gpui::test]
-fn draft_and_prerelease_labels_are_preserved(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    // Fixture order: index 1 is the pre-release, index 2 is the draft.
-    assert!(
-        cx.debug_bounds("overview-release-prerelease-row-1-3")
-            .is_some()
-    );
-    assert!(cx.debug_bounds("overview-release-draft-row-2-2").is_some());
-    assert!(cx.debug_bounds("overview-release-4").is_some());
-}
-
-#[gpui::test]
-fn contributors_handle_anonymous_and_large_sets_with_a_bounded_list(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_contributors()),
-        cx
-    ));
-    assert!(
-        cx.debug_bounds("overview-contributor-anonymous-1")
-            .is_some()
-    );
-    assert!(cx.debug_bounds("overview-contributor-0").is_some());
-
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::large_contributors()),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-contributor-0").is_some());
-    assert!(cx.debug_bounds("overview-contributor-2").is_some());
-    assert!(
-        cx.debug_bounds("overview-contributor-3").is_none(),
-        "the panel must cap the visible contributor rows"
-    );
-}
-
-#[gpui::test]
-fn contributor_email_and_raw_json_are_not_displayed(cx: &mut TestAppContext) {
-    let anonymous = &fixtures::ready_contributors().contributors[1];
-    let secondary = view::contributor_secondary(anonymous);
-    assert!(secondary.contains("anonymous"));
-    assert!(!secondary.contains("anon@example.invalid"));
-    assert_eq!(view::contributor_display(anonymous), "Anonymous Builder");
-
-    let linked = &fixtures::ready_contributors().contributors[0];
-    assert_eq!(view::contributor_display(linked), "Nocpiun");
-    assert!(!view::contributor_secondary(linked).contains("never-show@example.invalid"));
-
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_contributors()),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-contributor-0").is_some());
-    assert!(
-        cx.debug_bounds("overview-contributor-anonymous-1")
-            .is_some()
-    );
-}
-
-#[gpui::test]
-fn contributors_204_empty_repository_differs_from_empty_content_and_error(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::empty_repository_contributors()),
-        cx
-    ));
-    assert!(
-        cx.debug_bounds("overview-contributors-empty-repository")
-            .is_some()
-    );
-    assert!(
-        cx.debug_bounds("overview-contributors-empty-content")
-            .is_none()
-    );
-
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::empty_content_contributors()),
-        cx
-    ));
-    assert!(
-        cx.debug_bounds("overview-contributors-empty-content")
-            .is_some()
-    );
-    assert!(
-        cx.debug_bounds("overview-contributors-empty-repository")
-            .is_none()
-    );
-
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Error {
-            message: "403 forbidden".to_string()
-        },
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-contributors-error").is_some());
-    assert!(
-        cx.debug_bounds("overview-contributors-empty-content")
-            .is_none()
-    );
-}
-
-#[gpui::test]
-fn zero_language_bytes_do_not_infer_a_percentage_distribution(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_languages(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::zero_languages()),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-languages-zero").is_some());
-    assert!(cx.debug_bounds("overview-language-0").is_none());
-    assert_eq!(view::format_share(None), "—");
-}
-
-#[gpui::test]
-fn long_language_names_and_many_languages_stay_bounded_and_labelled(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_languages(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::many_languages()),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-language-0").is_some());
-    assert!(cx.debug_bounds("overview-language-2").is_some());
-    assert!(cx.debug_bounds("overview-language-3").is_none());
-    assert!(cx.debug_bounds("overview-language-share-0").is_some());
-    assert_eq!(view::format_share(Some(1.0 / 3.0)), "33.3%");
-    assert_eq!(view::format_share(Some(1.0)), "100.0%");
-}
-
-#[gpui::test]
-fn partial_states_render_partial_notes_without_discarding_values(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        fixtures::partial_releases_state(),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-releases-partial").is_some());
-    assert!(cx.debug_bounds("overview-release-4").is_some());
-
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Partial {
-            value: fixtures::partial_contributors(),
-            reason: vec![ExtrasIncompleteReason::PageLimit { limit: 1 }],
-        },
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-contributors-partial").is_some());
-
-    assert!(apply_languages(
-        &harness,
-        &binding,
-        fixtures::partial_languages_state(),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-languages-partial").is_some());
-}
-
-#[gpui::test]
-fn release_notes_open_a_bounded_popover_and_escape_returns_focus(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-notes-panel").is_none());
-    let before = bounds("repository-overview", cx);
-
-    click("overview-release-notes-4", cx);
-    assert!(cx.debug_bounds("overview-notes-panel").is_some());
-    assert!(cx.debug_bounds("overview-notes-body").is_some());
-    let panel = bounds("overview-notes-panel", cx);
-    assert!(
-        panel.size.height <= px(260.0),
-        "the notes popover must stay bounded, got {:?}",
-        panel.size.height
-    );
-    let after = bounds("repository-overview", cx);
-    assert_eq!(
-        before.size.height, after.size.height,
-        "opening a popover must not expand the TOP strip"
-    );
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("overview-notes-panel").is_none());
-}
-
-#[gpui::test]
-fn popover_scrolling_and_dismissal_do_not_leak_to_the_neighbour_reader(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    click("overview-release-notes-4", cx);
-    assert!(cx.debug_bounds("overview-notes-panel").is_some());
-
-    let reader_before = reader_offset(&harness, cx);
-    scroll_over("overview-notes-body", -40.0, cx);
-    let notes_after = overview(&harness, cx).read_with(cx, |view, _| view.notes_offset());
-    assert!(
-        notes_after.y < px(0.0),
-        "the notes popover should scroll, got {notes_after:?}"
-    );
-    assert_eq!(
-        reader_offset(&harness, cx),
-        reader_before,
-        "scrolling the popover must not move the neighbouring reader"
-    );
-
-    // Clicking outside dismisses the popover without changing the reader's own scroll.
-    let notes_before_dismiss = overview(&harness, cx).read_with(cx, |view, _| view.notes_offset());
-    assert!(notes_before_dismiss.y < px(0.0));
-    let reader_bounds = bounds("probe-reader", cx);
-    let reader_point = point(
-        reader_bounds.right() - px(40.0),
-        reader_bounds.top() + px(10.0),
-    );
-    cx.simulate_click(reader_point, Modifiers::none());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("overview-notes-panel").is_none());
-    let notes_after_close = overview(&harness, cx).read_with(cx, |view, _| view.notes_offset());
-    let reader_before = reader_offset(&harness, cx);
-    cx.simulate_mouse_move(reader_point, None, Modifiers::none());
-    cx.simulate_event(ScrollEvent {
-        position: reader_point,
-        delta: ScrollDelta::Lines(point(0.0, -30.0)),
-        modifiers: Modifiers::none(),
-        touch_phase: Default::default(),
-        source: ScrollSource::Pointer,
-    });
-    cx.run_until_parked();
-    let reader_after = reader_offset(&harness, cx);
-    assert!(
-        reader_after.y < reader_before.y,
-        "the reader should still scroll independently"
-    );
-    let notes_after = overview(&harness, cx).read_with(cx, |view, _| view.notes_offset());
-    assert_eq!(
-        notes_after, notes_after_close,
-        "the closed popover must not share the reader's scroll target"
-    );
-}
-
-#[gpui::test]
-fn notes_panel_fits_a_short_window_and_traps_tab(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    let viewport = size(px(480.0), px(700.0));
-    cx.simulate_resize(viewport);
-    cx.run_until_parked();
-    click("overview-release-notes-4", cx);
-    assert!(cx.debug_bounds("overview-notes-panel").is_some());
-    let panel = bounds("overview-notes-panel", cx);
-    assert!(panel.left() >= px(0.0));
-    assert!(panel.top() >= px(0.0));
-    assert!(
-        panel.right() <= viewport.width + px(1.0),
-        "panel must fit horizontally, got {:?}",
-        panel
-    );
-    assert!(
-        panel.bottom() <= viewport.height + px(1.0),
-        "panel must fit vertically, got {:?}",
-        panel
-    );
-
-    cx.simulate_keystrokes("tab shift-tab");
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("overview-notes-panel").is_some(),
-        "Tab must not move focus out of the open popover"
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("overview-notes-panel").is_none());
-}
-
-#[gpui::test]
-fn callbacks_use_the_current_binding_and_fire_once_per_press(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_contributors()),
-        cx
-    ));
-
-    click("overview-refresh-releases", cx);
-    let (count, last) = harness.read_with(cx, |harness, _| {
-        (harness.action_count, harness.last_action.clone())
-    });
-    assert_eq!(count, 1);
-    assert_eq!(
-        last,
-        Some(OverviewAction::Refresh {
-            binding: binding.clone(),
-            section: OverviewSection::Releases,
-        })
-    );
-
-    click("overview-release-open-4", cx);
-    let last = harness.read_with(cx, |harness, _| harness.last_action.clone());
-    assert_eq!(
-        last,
-        Some(OverviewAction::OpenRelease {
-            binding: binding.clone(),
-            release_id: 4,
-            tag_name: "v1.3.0".to_string(),
-            html_url: Some("https://example.invalid/nocpiun/githux/releases/v1.3.0".to_string()),
-        })
-    );
-
-    click("overview-contributor-open-0", cx);
-    let last = harness.read_with(cx, |harness, _| harness.last_action.clone());
-    assert_eq!(
-        last,
-        Some(OverviewAction::OpenContributor {
-            binding: binding.clone(),
-            login: Some("nocpiun".to_string()),
-            html_url: Some("https://example.invalid/nocpiun".to_string()),
-        })
-    );
-}
-
-#[gpui::test]
-fn top_layout_stays_bounded_with_space_for_a_reader_at_desktop_and_narrow_widths(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    assert!(apply_contributors(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::large_contributors()),
-        cx
-    ));
-    assert!(apply_languages(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::many_languages()),
-        cx
-    ));
-
-    for viewport in [
-        size(px(1200.0), px(800.0)),
-        size(px(600.0), px(480.0)),
-        size(px(480.0), px(480.0)),
+    let top = bounds("repository-overview", cx);
+    assert!(top.size.height < px(100.0));
+    assert!(bounds("probe-reader", cx).size.height > px(600.0));
+    assert!(cx.debug_bounds("overview-release-version").is_some());
+    assert!(cx.debug_bounds("overview-avatar-0").is_some());
+    assert!(cx.debug_bounds("overview-language-bar").is_some());
+    let language = bounds("overview-languages", cx);
+    assert!(language.right() <= top.right());
+    assert!(language.left() >= bounds("overview-contributors", cx).right());
+    for obsolete in [
+        "overview-release-4",
+        "overview-notes-panel",
+        "overview-refresh-releases",
+        "overview-language-0",
     ] {
-        cx.simulate_resize(viewport);
-        cx.run_until_parked();
-        let top = bounds("repository-overview", cx);
-        let reader = bounds("probe-reader", cx);
-        assert_eq!(top.top(), px(0.0));
-        assert!(top.bottom() <= reader.top());
-        assert!(top.size.height <= viewport.height * 0.5);
-        assert!(reader.size.height >= viewport.height * 0.5);
-        assert!(reader.bottom() <= viewport.height + px(1.0));
-        assert_eq!(reader.left(), top.left());
-        assert_eq!(reader.size.width, top.size.width);
-        let reader_before = reader_offset(&harness, cx);
-        cx.update(|_, cx| {
-            ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true);
-        });
-        scroll_over("overview-sections-viewport", -120.0, cx);
-        let languages = bounds("overview-languages", cx);
-        let region = bounds("overview-sections-viewport", cx);
-        assert!(
-            languages.top() < region.bottom(),
-            "last section must be reachable"
-        );
-        assert_eq!(reader_before, reader_offset(&harness, cx));
+        assert!(cx.debug_bounds(obsolete).is_none());
     }
 }
-
-#[gpui::test]
-fn refresh_actions_are_scoped_per_section(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    click("overview-refresh-contributors", cx);
-    let last = harness.read_with(cx, |harness, _| harness.last_action.clone());
-    assert_eq!(
-        last,
-        Some(OverviewAction::Refresh {
-            binding: binding.clone(),
-            section: OverviewSection::Contributors,
-        })
-    );
-    click("overview-refresh-languages", cx);
-    let last = harness.read_with(cx, |harness, _| harness.last_action.clone());
-    assert_eq!(
-        last,
-        Some(OverviewAction::Refresh {
-            binding: binding.clone(),
-            section: OverviewSection::Languages,
-        })
-    );
-}
-
-#[gpui::test]
-fn set_binding_clears_states_and_rejects_old_updates(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let old = fixtures::binding(1);
-    assert!(apply_releases(
-        &harness,
-        &old,
-        SectionState::Ready(fixtures::ready_releases()),
-        cx
-    ));
-    let new = fixtures::binding(2);
-    let overview_entity = overview(&harness, cx);
-    cx.update_window_entity(&overview_entity, |view, window, cx| {
-        view.set_binding(new.clone(), window, cx);
-    });
-    cx.run_until_parked();
-    let state = overview_entity.read_with(cx, |view, _| view.releases().clone());
-    assert!(matches!(state, SectionState::Idle));
-    assert!(!apply_releases(
-        &harness,
-        &old,
-        SectionState::Error {
-            message: "old".to_string()
-        },
-        cx
-    ));
-}
-
-#[gpui::test]
-fn independent_latest_and_domain_partial_are_preserved(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    apply_releases(
-        &harness,
-        &binding,
-        SectionState::Ready(fixtures::partial_releases()),
+fn ready(h: &Entity<Harness>, cx: &mut VisualTestContext) {
+    let b = fixtures::binding(1);
+    apply_releases(h, &b, SectionState::Ready(fixtures::ready_releases()), cx);
+    apply_contributors(
+        h,
+        &b,
+        SectionState::Ready(fixtures::ready_contributors()),
         cx,
     );
-    assert!(cx.debug_bounds("overview-releases-partial").is_some());
-    let entity = overview(&harness, cx);
-    entity.update(cx, |view, cx| {
-        view.apply_latest_release(
-            &binding,
-            SectionState::Ready(fixtures::latest_none_releases().latest.unwrap()),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("overview-releases-latest-none").is_some());
-    apply_releases(
-        &harness,
-        &binding,
-        SectionState::Error {
-            message: "list failed".into(),
-        },
-        cx,
+    apply_languages(h, &b, SectionState::Ready(fixtures::ready_languages()), cx);
+}
+#[gpui::test]
+fn actions_are_scoped_and_anonymous_is_not_navigable(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    click("overview-release-version", cx);
+    assert_eq!(h.read_with(cx, |h, _| h.action_count), 1);
+    assert!(
+        matches!(h.read_with(cx,|h,_|h.last_action.clone()),Some(OverviewAction::OpenRelease{binding,release_id:4,..}) if binding==fixtures::binding(1))
     );
-    assert!(cx.debug_bounds("overview-releases-latest-none").is_some());
-    assert!(cx.debug_bounds("overview-releases-error").is_some());
-    let mut other = fixtures::repository();
-    other.id = 999;
-    let mut mismatch = fixtures::ready_languages();
-    mismatch.repository = other;
-    assert!(!apply_languages(
-        &harness,
-        &binding,
-        SectionState::Ready(mismatch),
-        cx
-    ));
-}
-
-#[gpui::test]
-fn release_updates_close_unavailable_notes_and_restore_focus(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    let mut missing_body = fixtures::ready_releases();
-    missing_body.list.releases[0].body = None;
-    let mut missing_release = fixtures::ready_releases();
-    missing_release.list.releases.clear();
-    for replacement in [
-        SectionState::Loading,
-        SectionState::Error {
-            message: "failed".into(),
-        },
-        SectionState::Ready(missing_body),
-        SectionState::Ready(missing_release),
-    ] {
-        apply_releases(
-            &harness,
-            &binding,
-            SectionState::Ready(fixtures::ready_releases()),
-            cx,
-        );
-        click("overview-release-notes-4", cx);
-        let entity = overview(&harness, cx);
-        assert!(entity.read_with(cx, |view, _| view.open_release().is_some()));
-        let notes_focus = cx.update(|window, cx| window.focused(cx));
-        apply_releases(&harness, &binding, replacement, cx);
-        cx.run_until_parked();
-        assert!(entity.read_with(cx, |view, _| view.open_release().is_none()));
-        assert!(cx.debug_bounds("overview-notes-panel").is_none());
-        assert!(cx.debug_bounds("overview-notes-dismiss").is_none());
-        cx.update(|window, cx| {
-            let focus = window.focused(cx).expect("live focus restored");
-            assert_ne!(Some(focus), notes_focus);
-        });
-    }
-}
-
-#[gpui::test]
-fn maximum_language_total_and_overflow_failure_are_distinct(cx: &mut TestAppContext) {
-    let (harness, cx) = harness(cx);
-    let binding = fixtures::binding(1);
-    let maximum = LanguagesOutcome::from_bytes(
-        fixtures::repository(),
-        serde_json::json!({"Rust": u64::MAX})
-            .as_object()
-            .unwrap()
-            .clone(),
-        Default::default(),
-    )
-    .unwrap();
-    assert!(apply_languages(
-        &harness,
-        &binding,
-        SectionState::Ready(maximum),
-        cx
-    ));
-    assert!(cx.debug_bounds("overview-language-share-0").is_some());
-    let overflow = LanguagesOutcome::from_bytes(
-        fixtures::repository(),
-        serde_json::json!({"Rust": u64::MAX, "Other": 1})
-            .as_object()
-            .unwrap()
-            .clone(),
-        Default::default(),
-    )
-    .unwrap_err();
+    click("overview-avatar-0", cx);
+    assert_eq!(h.read_with(cx, |h, _| h.action_count), 2);
+    cx.simulate_keystrokes("tab shift-tab escape");
+    cx.run_until_parked();
+    click("overview-avatar-1", cx);
+    assert_eq!(h.read_with(cx, |h, _| h.action_count), 2);
     apply_languages(
-        &harness,
-        &binding,
+        &h,
+        &fixtures::binding(1),
         SectionState::Error {
-            message: overflow.to_string(),
+            message: "Offline".into(),
         },
         cx,
     );
-    assert!(cx.debug_bounds("overview-languages-error").is_some());
-    assert!(cx.debug_bounds("overview-languages-zero").is_none());
+    click("overview-retry-languages", cx);
+    assert!(matches!(
+        h.read_with(cx, |h, _| h.last_action.clone()),
+        Some(OverviewAction::Refresh {
+            section: OverviewSection::Languages,
+            ..
+        })
+    ));
+    assert!(cx.debug_bounds("overview-release-version").is_some());
 }
-
-#[test]
-fn helpers_keep_byte_shares_and_reasons_honest() {
-    assert_eq!(view::format_share(Some(0.0)), "0.0%");
-    assert_eq!(view::format_share(Some(0.125)), "12.5%");
-    assert_eq!(view::format_share(None), "—");
-    assert_eq!(view::human_bytes(512), "512 bytes");
-    assert_eq!(view::human_bytes(1024), "1.0 KiB");
-    let text = view::partial_reason_text(&[
-        ExtrasIncompleteReason::PageLimit { limit: 2 },
-        ExtrasIncompleteReason::SsoPartial {
-            organizations: vec!["acme".to_string()],
+#[gpui::test]
+fn stale_bindings_and_wrong_payloads_are_rejected(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    for mut binding in [fixtures::binding(2), fixtures::binding(1)] {
+        if binding.generation == 1 {
+            binding.account = AccountKey::new(99, HostId::github());
+        }
+        assert!(!apply_releases(&h, &binding, SectionState::Loading, cx));
+    }
+    let mut value = fixtures::ready_languages();
+    value.repository.id = 99;
+    assert!(!apply_languages(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(value),
+        cx
+    ));
+    let entity = overview(&h, cx);
+    cx.update_window_entity(&entity, |view, window, cx| {
+        view.set_binding(fixtures::binding(2), window, cx)
+    });
+    assert!(!apply_contributors(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::ready_contributors()),
+        cx
+    ));
+}
+#[gpui::test]
+fn latest_404_does_not_infer_a_version_from_the_list(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    apply_releases(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::latest_none_releases()),
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-release-version").is_none());
+    let entity = overview(&h, cx);
+    entity.update(cx, |v, cx| {
+        v.apply_latest_release(
+            &fixtures::binding(1),
+            SectionState::Ready(fixtures::ready_releases().latest.unwrap()),
+            cx,
+        );
+    });
+    apply_releases(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Error {
+            message: "list unavailable".into(),
         },
-    ]);
-    assert!(text.contains("page limit 2"));
-    assert!(text.contains("acme"));
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-release-version").is_some());
+}
+#[gpui::test]
+fn narrow_and_stress_leave_reader_space_without_local_scroll(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    apply_contributors(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::large_contributors()),
+        cx,
+    );
+    apply_languages(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::many_languages()),
+        cx,
+    );
+    cx.simulate_resize(size(px(480.0), px(480.0)));
+    cx.run_until_parked();
+    assert!(bounds("repository-overview", cx).size.height < px(220.0));
+    assert!(bounds("probe-reader", cx).size.height > px(240.0));
+    assert!(cx.debug_bounds("overview-avatar-4").is_some());
+    assert!(cx.debug_bounds("overview-avatar-5").is_none());
+    assert!(cx.debug_bounds("overview-sections-viewport").is_none());
+}
+#[gpui::test]
+fn empty_204_zero_and_partial_remain_independent(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    for value in [
+        fixtures::empty_repository_contributors(),
+        fixtures::empty_content_contributors(),
+        fixtures::partial_contributors(),
+    ] {
+        apply_contributors(
+            &h,
+            &fixtures::binding(1),
+            SectionState::Ready(value.clone()),
+            cx,
+        );
+        assert_eq!(
+            overview(&h, cx).read_with(cx, |v, _| v.contributors().value().unwrap().state),
+            value.state
+        );
+        assert!(cx.debug_bounds("overview-release-version").is_some());
+    }
+    apply_languages(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::zero_languages()),
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-language-bar").is_none());
+}
+#[gpui::test]
+fn supplied_latest_flags_and_partial_do_not_disappear(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut data = fixtures::partial_releases();
+    let release = data.latest.as_mut().unwrap().release.as_mut().unwrap();
+    release.draft = true;
+    release.prerelease = true;
+    apply_releases(&h, &fixtures::binding(1), SectionState::Ready(data), cx);
+    assert!(cx.debug_bounds("overview-draft").is_some());
+    assert!(cx.debug_bounds("overview-prerelease").is_some());
+    assert!(overview(&h, cx).read_with(cx, |v, _| matches!(
+        v.releases().value().unwrap().list.completeness,
+        crate::domain::repository_extras::ExtrasCompleteness::Partial { .. }
+    )));
 }
 
 #[test]
-fn fixtures_keep_latest_and_list_independent() {
-    let data = fixtures::latest_none_releases();
-    assert!(data.latest.is_some());
-    assert!(data.latest.as_ref().unwrap().release.is_none());
-    assert!(!data.list.releases.is_empty());
-    let list = ReleasesOutcome {
-        repository: fixtures::repository(),
-        releases: data.list.releases.clone(),
-        completeness: ExtrasCompleteness::Complete,
-        page_metadata: Vec::new(),
-    };
-    let _ = ReleasesData::new(list, None);
-    let _ = ContributorsState::Content;
-    let _ = LanguagesOutcome {
-        repository: fixtures::repository(),
-        languages: Vec::new(),
-        total_bytes: 0,
-        metadata: Default::default(),
-    };
-    let _ = Contributor {
-        login: None,
-        id: None,
-        name: None,
-        email: None,
-        avatar_url: None,
-        html_url: None,
-        contributions: 0,
-        raw: serde_json::json!({}),
-    };
+fn languages_group_checked_bytes_into_three_segments() {
+    let value = fixtures::many_languages();
+    let segments = language_segments(&value).unwrap();
+    assert_eq!(segments.len(), 3);
+    assert_eq!(segments[2].name, "Other");
+    assert!((segments.iter().map(|v| v.share).sum::<f64>() - 1.0).abs() < 1e-12);
+    let mut invalid = fixtures::ready_languages();
+    invalid.languages[0].bytes = u64::MAX;
+    assert!(language_segments(&invalid).is_none());
+    assert!(
+        language_segments(&fixtures::zero_languages())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        contributor_display(&fixtures::ready_contributors().contributors[1]),
+        "Anonymous Builder"
+    );
 }

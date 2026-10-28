@@ -27,23 +27,7 @@ pub fn binding(generation: u64) -> OverviewBinding {
     OverviewBinding::new(account(), repository(), generation)
 }
 
-pub const LONG_RELEASE_BODY: &str = r#"## Highlights
-
-This is a deliberately long plain-text release note used to prove that the TOP panel keeps the
-repository page readable. It is shown in a bounded popover, not as rendered Markdown and not as
-release-management controls.
-
-- item one
-- item two
-- item three
-
-The body keeps going so the popover has real overflow to scroll: lorem ipsum dolor sit amet,
-consectetur adipiscing elit. 中文和 emoji 🚀 也在文本中。Sed do eiusmod tempor incididunt ut
-labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris
-nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit
-esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt
-in culpa qui officia deserunt mollit anim id est laborum.
-"#;
+const RELEASE_BODY: &str = "Release notes remain data and are not rendered by the compact strip.";
 
 fn release(
     id: u64,
@@ -74,14 +58,7 @@ pub fn ready_releases() -> ReleasesData {
     let list = ReleasesOutcome {
         repository: repository(),
         releases: vec![
-            release(
-                4,
-                "v1.3.0",
-                Some("Next"),
-                false,
-                false,
-                Some(LONG_RELEASE_BODY),
-            ),
+            release(4, "v1.3.0", Some("Next"), false, false, Some(RELEASE_BODY)),
             release(
                 3,
                 "v1.2.0-rc.1",
@@ -111,7 +88,7 @@ pub fn ready_releases() -> ReleasesData {
             Some("Next"),
             false,
             false,
-            Some(LONG_RELEASE_BODY),
+            Some(RELEASE_BODY),
         )),
         metadata: ResponseMetadata::default(),
     };
@@ -239,8 +216,7 @@ pub fn ready_languages() -> LanguagesOutcome {
                 share: Some(0.62),
             },
             LanguageStat {
-                name: "A language name that is deliberately much longer than a normal label"
-                    .to_string(),
+                name: "TypeScript".to_string(),
                 bytes: 250,
                 share: Some(0.25),
             },

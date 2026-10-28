@@ -1,125 +1,48 @@
 # 仓库顶部资料组件
 
-更新：2026-10-28。状态：可复用的 Releases / Contributors / Languages 顶部资料组件已实现于 [`src/ui/repository_overview/`](../src/ui/repository_overview/mod.rs)，通过独立 Cargo example 与集成测试装配。它**尚未挂载到正式 Shell 或 repository-browser 页面**，也没有真实 data/auth 接线；产品 binary 的模块树不导入该组件。真实数据接入是后续集成任务。
+更新：2026-10-28。负责人明确要求按 `02-repository-header.png` 重做为紧凑摘要条；此前三卡片、有界滚动面板和 notes popover 方案已废弃。当前组件位于 `src/ui/repository_overview/**`，独立 example/test 装配，**尚未挂载正式 Shell 或 repository-browser，也未接入真实账户数据**。
 
-本主题只维护该组件自身的输入、动作、布局与验证边界。low-level REST 读取与语义仍以 [仓库顶部资料 low-level API](repository-extras-service.md) 为准；滚动外观与输入以 [统一滚动](scrolling.md) 为准，本组件只消费公共 `ui::scroll`，不新增第二套滚动实现。
+## 已确认的展示
 
-## 边界与职责
+Releases、Contributors、Languages 是一个横向自然高度摘要条，嵌在仓库 identity/description **之后、内容 tabs 之前**。沿用 Ely palette、Noto Sans / Google Sans Code。桌面一行三个小组，只有小标题和摘要；窄窗口按每组约 190px 的内容预算换行。无独立卡框、固定半窗高度、最小高度占位、内部滚动、常驻刷新图标、history、Notes/Open 按钮或 popover。下方 Code 阅读区保持主导。
 
-| 位置 | 职责 |
-| --- | --- |
-| [`src/ui/repository_overview/mod.rs`](../src/ui/repository_overview/mod.rs) | 公共类型：`OverviewBinding`、`ReleasesData`、`SectionState`、`OverviewAction`、`OverviewUpdate`、`RepositoryOverview` |
-| [`src/ui/repository_overview/view.rs`](../src/ui/repository_overview/view.rs) | 三段资料的实际渲染、bounded 列表、popover 焦点/关闭、共享滚动条与 wheel 输入 |
-| [`src/ui/repository_overview/fixtures.rs`](../src/ui/repository_overview/fixtures.rs) | 仅预览/测试使用的确定性场景，不进入产品模块树 |
-| [`examples/repository_overview.rs`](../examples/repository_overview.rs) | `cargo run --example repository_overview` 的独立原生预览 |
-| [`tests/repository_overview.rs`](../tests/repository_overview.rs) + `src/ui/repository_overview/tests.rs` | GPUI 测试装配与组件用例 |
-| [`src/bin_support/repository_overview_modules.rs`](../src/bin_support/repository_overview_modules.rs) | example/test 的薄 `#[path]` 装配，复用真实组件与公共滚动模块 |
+- Releases：完整 list 观察才在标题显示本次可见 Release 数；Partial 不显示伪精确总数。仅显示 supplied latest 的 version link，保留 draft/prerelease；不从列表排序推断 latest，不重复版本、名称、正文。404 显示 `Latest unavailable`，不是“仓库没有 Release”。宿主可为对应 release ID 提供相对日期；组件不制造时钟或日期。
+- Contributors：最多 5 个横向 Ely Avatar。关联用户且有 html_url 才可导航；匿名或无地址者不可点击/Tab 激活。名字置于 tooltip/accessibility，不显示 email/raw JSON、贡献次数、总人数或永久 API caveat。`+N` 只计当前观察中没画出的条目，非仓库总人数。Partial 显示短标识；204 显示 Empty repository，成功空集合是 None returned，错误是 Unavailable · Retry。
+- Languages：从 checked u64 字节总和派生比例，只画一个 segmented bar。最多三个 legend 项；超过三种语言时前两种 + 其余字节合并 Other。颜色由名称稳定映射到现有 Ely chart palette。长名称省略，比例独立保留，tooltip/accessibility 带完整标签。零值不伪造 0% 分布，溢出或 total 不一致为 unavailable。无 byte/total/rounding 段落、独立语言进度条。百分比为近似整数，小于 0.5% 用 <1%。
+- 每段状态和失败独立，Ready 不带刷新 chrome。失败时原位 Retry 发出该段的 scoped Refresh；不会触发 HTTP、URL opener 或图像下载。
 
-组件不读取凭据、不调用 HTTP、不下载 asset、不打开 URL、不写磁盘缓存、不轮询，也不做 Packages/Environments、Release 管理或仓库 Settings。它只渲染调用方已经取得并校验过的领域观察值。
+## 复用与自然高度嵌入
 
-## 输入 API
+`RepositoryOverview::new(binding, window, cx)` 创建 GPUI Entity。宿主提供有界宽度，将 entity 作为正常 `flex_none` 子项嵌入页面头区，让其自行测量高度；不套 `size_full`、固定 height 或另一个右栏。组件不拥有 identity/header/tabs/tree/reader；这些由 repository-browser / 正式宿主组合。示例中的 identity、Code 文本和少量说明仅说明放置位置，不是第二套仓库产品页面。
 
-宿主为一次仓库/账户/请求范围构造 `OverviewBinding`，并在请求开始前固定它：
+`OverviewBinding { account: AccountKey, repository: RepositoryIdentity, generation: u64 }` 固定账户、仓库及宿主请求代次。`apply_releases`、`apply_latest_release`、`apply_contributors`、`apply_languages` 和 `apply(OverviewUpdate)` 比较完整 binding，并复核 payload 自带仓库身份。旧绑定或不匹配 payload 返回 false、不修改现有状态。`set_binding` 清空所有段及本地 image/date presentation。宿主仍必须在发布成功/错误前复核同一个服务授权 context；UI binding 不是授权证明。
 
-```rust
-let binding = OverviewBinding::new(account_key, repository_identity, request_generation);
-let view = cx.new(|cx| RepositoryOverview::new(binding.clone(), window, cx));
-```
+`SectionState<T, P>`：Idle / Loading / Ready(T) / Partial { value, reason } / Error { message }。ReleasesData 保留 list、可选 latest 和 latest_error。`LatestReleaseState` 可独立应用；显式 latest 更新覆盖成组快照的 latest 展示，list 失败不抹掉它。领域 list/contributors 自带的 Partial 与外层 Partial 均保留。
 
-`OverviewBinding` 同时包含：
+`on_action(OnAction)` 接收：
 
-- `account: AccountKey`：稳定账户隔离身份；
-- `repository: RepositoryIdentity`：仓库身份；
-- `generation: u64`：宿主自己的页面/请求代次。
+- Refresh { binding, section }
+- OpenRelease { binding, release_id, tag_name, html_url }
+- OpenContributor { binding, login, html_url }
 
-组件在 `apply_releases` / `apply_contributors` / `apply_languages` / `apply` 中比较完整绑定；不匹配时返回 `false`，不改变当前状态。这阻止旧仓库、旧账户或旧请求代次的结果覆盖新视图。它**不是授权证明**：宿主仍须在发布成功或错误前用同一个 `RepoService::is_current(&context)` 复核服务授权上下文。
+version 和 linked avatar 本身是 action 目标，每次激活一次。宿主执行网络或导航；组件不做自动动作。
 
-三段各自独立：
+### Avatar 与日期窄接口
 
-```rust
-pub type ReleasesState = SectionState<ReleasesData, Vec<ExtrasIncompleteReason>>;
-pub type ContributorsState = SectionState<ContributorsOutcome, Vec<ExtrasIncompleteReason>>;
-pub type LanguagesState = SectionState<LanguagesOutcome, String>;
+Ely Avatar 已支持实际图像渲染。`set_avatar_image(&binding, user_id, Arc<RenderImage>, cx)` 接收宿主已经取得/解码的图像，不接 URL。组件不会把 domain avatar_url 交给 GPUI 的自动远程加载器，避免另建匿名 HTTP/凭据旁路。未提供图像时用真实 name/login 首字母；仓库没有现成头像预览资产，不伪造照片。后续宿主须提供账户范围内的图像获取与解码（不属于本组件/本 PR）。
 
-pub enum SectionState<T, P> {
-    Idle,
-    Loading,
-    Ready(T),
-    Partial { value: T, reason: P },
-    Error { message: String },
-}
-```
+`set_release_date_label(&binding, release_id, String, cx)` 接收宿主基于实际时间字段和时钟格式化的简短相对日期，仅对当前展示的 release ID 生效。预览用确定性合成日期，非实时数据。
 
-`apply_latest_release(binding, LatestReleaseState, cx)` 可独立应用 latest endpoint 的 Idle/Loading/Ready/Partial/Error；它覆盖 `ReleasesData` 中用于成组快照的 latest 展示，列表失败也不会抹掉独立 latest。各 `apply_*` 同时校验 outcome 自带的仓库身份，拒绝绑定与 payload 不一致。领域 outcome 自身的 Partial 不会因外层使用 Ready 而丢失。
-
-`ReleasesData` 分开保存 `list: ReleasesOutcome`、`latest: Option<LatestReleaseOutcome>` 和 `latest_error: Option<String>`。latest 使用 GitHub 的 latest 语义，不由客户端排序推断；`None` 只表示 404 可见性歧义，列表仍可显示 Release。单个 section 失败不会清空另外两个。
-
-## 动作 API
-
-组件只发出类型化动作，不自行执行：
-
-```rust
-pub enum OverviewAction {
-    Refresh { binding: OverviewBinding, section: OverviewSection },
-    OpenRelease { binding: OverviewBinding, release_id: u64, tag_name: String, html_url: Option<String> },
-    OpenContributor { binding: OverviewBinding, login: Option<String>, html_url: Option<String> },
-}
-```
-
-宿主通过 `view.on_action(Rc::new(|action, window, cx| { ... }))` 接收。刷新动作携带当前绑定和 section，由宿主决定是否发起请求；`OpenRelease` / `OpenContributor` 只携带 URL 数据，宿主决定是否交给外部浏览器。组件不会自动打开任何 URL 或下载 asset。
-
-## 渲染行为
-
-- **Releases**：显示 GitHub latest 的 tag/name 与 `Draft` / `Pre-release` 标签；latest 404 使用“无可见 latest，不证明仓库没有 Release”的歧义文案；列表显示受服务端 draft/prerelease 可见性约束的观察值。列表最多显示有限行，更多以 `+N more` 提示；Release body 只作为 bounded plain-text popover 的输入，不渲染 Markdown，也不提供发布管理控件。
-- **Contributors**：区分 204 `EmptyRepository`、成功空内容和失败；显示 `observed_entries()` 的观察条数，不声称是完整人数；关联用户与匿名贡献者都显示 name/login 首字母（`Avatar`），不显示 email 或 raw JSON，也不下载头像。列表有界，Partial/延迟状态保留。
-- **Languages**：显示字节派生的 share，不是 LOC；`total_bytes == 0` 时不推断 `0%` 分布。每个语言行同时有文字名称、share/bytes 标签和 bar，颜色取当前主题的 chart 色板，不替换主题、不使用随机色。超长名称用省略号，列表有界，并注明舍入后不保证总和恰为 100%。
-- **布局**：三段位于 TOP 横条，宽窗口并排，窄窗口在顶部区域内换行/堆叠；不建立右侧纵栏。列表行数按窗口宽度收紧（宽窗口 3 行，窄窗口 2 行）；TOP 高度上限为 360px 与窗口高度一半的较小值，堆叠和长文案通过公共滚动 viewport 访问，为下方文件阅读保留空间。溢出内容使用公共 `ui::scroll` 的 `Motion` / `Bar` / `Bars`，没有新滚动代码。
-- **Popover**：Release notes 打开为 bounded 本地 popover；面板自身按 viewport 可用空间 clamp 宽高与位置，短/窄窗口下不会伸出窗口外。打开时焦点进入 popover，面板消费 Tab/Shift+Tab 以阻止焦点落到后方 overview 或阅读器，Escape、Close 按钮或点击外部关闭并把焦点还给组件；关闭时取消共享滚动 motion，避免与相邻阅读器竞争；列表更新为 Loading/Error 或不再包含选中 body 时，在下一帧发布前关闭 notes 并恢复焦点。popover 的滚动与相邻模拟阅读器互不影响。
-
-## 独立预览
+## 预览、验证边界
 
 ```sh
-cargo run --example repository_overview
+cargo run --locked --example repository_overview
 ```
 
-预览是独立 Cargo example，不是产品启动参数。它用真实组件和 fixture 场景（Ready、Latest 404、Partial、Error、204 empty、Zero languages、Long notes）展示输入/动作，并在下方放一个模拟文件阅读区以核对 TOP 高度和空间保留。预览不连接账户、凭据或网络；`src/app/mod.rs` 不识别预览参数，默认 release binary 也不包含 example 或 preview 控件。
+标准 Cargo example，通过 `src/bin_support/repository_overview_modules.rs` 的薄 path 装配复用实际组件。fixtures/场景开关在 example/test，不进入产品 target。场景：正常短值、latest 404 且 list 非空、Partial、单段错误、204、零语言、长名称/300 人/20 种语言。当前没有产品 Shell/data 挂载。
 
-## 验证与边界
+2026-10-28 本机真实 Windows 原生窗口通过 DPI-aware PrintWindow 截取并实际查看 Ready、窄窗、长名称、单段 Error、Latest unavailable、Partial、204、Zero 场景；与任务提供的原始图并排检查布局层级。当前 144 DPI 桌面 Ready 在 identity 和 Code 文本间显示一条紧凑横带，Code 内容空间占主导；窄窗换行，无卡框/固定半窗带。截图保存在任务目录并随交接提供，不把进程响应当视觉证据。鼠标真实点击验证了场景切换；IME、多屏 DPI 切换和原生键盘辅助技术没有完整验收，不能由 GPUI 测试推断。
 
-`tests/repository_overview.rs` 在 GPUI 测试平台运行 `src/ui/repository_overview/tests.rs`，覆盖：
+GPUI 用例覆盖紧凑三组与阅读区空间、自然高度窄布局、一个 version/一个 bar、没有旧 popover/list chrome、绑定和 payload 隔离、linked/anonymous action 归属、每次点击一次、Partial/204/空/零/错误、latest 不从 list 推断、checked language overflow/grouping。删除旧 popover/scroll 相关用例，因为对应交互已按负责人要求移除。
 
-- 旧仓库、旧账户、旧 generation 的更新被拒绝，当前 section 不被清空；
-- 单 section 失败/Partial 不影响另外两段；
-- latest 404 歧义且列表仍显示 Release；
-- draft/prerelease 标签保留；
-- 匿名与大量贡献者、有界行数、email/raw JSON 不显示；
-- 204 空仓库与成功空内容、错误分离；
-- 零语言不推断 0%、长名称与舍入、有界语言行；
-- popover 打开/关闭、焦点返回、Escape 与外部点击、bounded 高度、短窗口内的 viewport 适配与 Tab 焦点保持；
-- popover 滚动/关闭不泄漏到相邻模拟阅读器；
-- 回调使用当前绑定且每次点击触发一次；
-- 桌面与窄窗口下组件保持在 TOP、有界高度、无右侧纵栏，并给阅读器留空间。
-
-已验证（本机 Windows，2026-10-28，提交前工作树）：
-
-- `cargo fmt --all -- --check`
-- `cargo check --locked --all-targets`
-- `cargo clippy --locked --all-targets -- -D warnings`
-- `cargo test --locked`：主 binary 519 项、account 310 项、reader 123 项、repository_overview 48 项，全部通过
-- `cargo build --locked --example repository_overview`
-- `cargo build --locked`
-- `git diff --check`
-
-未执行：真实 Windows 预览窗口的人工视觉/交互验收，以及正式 Shell / repository-browser 中的真实 GitHub 数据挂载。GPUI 测试平台不经过 Windows 原生输入分发，也不替代真实窗口、IME、多 DPI 与鼠标手感验收。真实 data 接线仍需宿主捕获 `RepoService` session/context、调用 low-level extras 读取、在发布前复核 `is_current`，再把结果交给本组件。
-
-## 后续集成
-
-正式仓库页面接入时应：
-
-1. 从仓库页面的 `RepositoryIdentity`、活动账户和页面请求代次构造 `OverviewBinding`；
-2. 通过已有 data 服务（或 repository-browser 的 session）发起 Releases/Contributors/Languages 读取，每段独立取消与结算；
-3. 在成功与错误发布前复核授权上下文与页面代次；
-4. 把 typed outcome 包装成 `SectionState` 交给 `RepositoryOverview::apply`，处理 `Refresh` / `OpenRelease` / `OpenContributor` 动作；
-5. 将组件放在仓库页 TOP 区域，而不是右侧纵栏。
-
-本组件不实现上述挂载，也不改变 `src/ui/mod.rs`、`src/app/mod.rs`、`src/workspace/**` 或 repository-browser 的写入范围。
+本轮 fmt、locked all-target check、clippy -D warnings、相关/全套 tests、产品与 example build、diff check 的具体结果见本任务开发日志。`blocked` 由负责人管理；新预览准备后才加 pending，不合并。
