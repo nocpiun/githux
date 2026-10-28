@@ -238,3 +238,10 @@ Codex 针对 `638b702`（P2）指出：展开过渡期间 More 仍可用，若�
 同一手势的每个 move 先采样当前动画：模式没变时保留 transition，目标改变则从当前呈现帧衔接、仅使用原动画的剩余时间。因此连续 move 不会让侧栏瞬移，也不会无限延后完成时间；模式反向切换才重新开始约200ms过渡。普通 resize 仍立即跟手；重新按下 sash 的新手势仍接管先前按钮动画。切换动画期间 More 优先于 footer 的宽度锁存结果，结束后按原临界区规则恢复四按钮，阈值/几何/命中和公共滚动均未改动。
 
 新增三条受控时间回归，旧代码上全部失败，分别覆盖 collapse 后连续 move、expand 后持续改变目标（仍在原200ms期限内完成）、反向后继续 move 并释放。新增启用动画的 GPUI 真实事件与布局测试，检查连续鼠标事件前后没有跳帧、中间 expansion、sidebar/island/sash 同步、只有 More、完成后指针与 sash 命中带对齐。原有重新抓取中断按钮动画的测试保留，全量420 tests通过。`cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo clippy --locked --all-targets -j 1 -- -D warnings`、`cargo build --locked -j 1` 和 `git diff --check` 均通过。本机桌面自动验证通道连接失败，备用通道选择应用时授权等待超时，未完成 Windows 原生拖动视觉复测；上述 GPUI 事件/布局证据不替代负责人真机验收。旧预览占用 exe 时已核对其 worktree 路径和 PID+系统创建时间后关闭，再成功构建。
+
+
+## 合并前同步：与已验收阅读器组合（2026-10-28）
+
+负责人已验收侧栏并授权合并。同步 main `dd2b1f2`（已合并 content-reader PR #27）时，唯一冲突是 `src/ui/mod.rs` 的模块声明：同时保留 `pub mod reader` 与 `pub(crate) mod scroll`，其余 reader 代码直接采用 main；没有调整侧栏状态机、阈值、动画或布局。共享滚动文档同步为已实现的消费者状态，区分 reader 已复用的 Bar/Bars 与尚待接入的公共 wheel Motion。
+
+组合验证：fmt、locked all-target check、clippy `-D warnings`、cargo test（517 bin + 123 reader，均通过）、cargo build 与 diff check 通过，所有 Cargo 编译均使用本 worktree target、`-j 1`。第一次测试在构建产品 binary 时因旧预览占用 `githux.exe` 被系统拒绝，尚未执行用例；核对预览路径及 PID40368/系统创建时间后只关闭该旧窗口，再执行上述通过的测试。负责人验收针对此前的 `f1ccf31` 侧栏行为，组合提交仍须重新通过 CI 和审查后由主 Agent squash 合并。
