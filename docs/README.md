@@ -12,6 +12,7 @@
 | 统一滚动条外观、几何、拖动、淡入淡出与后续接入 | [统一滚动](scrolling.md) |
 | 各类数据如何存储、刷新、失效 | [缓存策略](cache-strategy.md) |
 | PAT 认证、凭据存储、账户代次与可取消的 GitHub 读取服务 | [认证与网络](auth-and-network.md) |
+| 账户与仓库读取预览：启动命令、结果类型、正式接入接口 | [账户预览](account-ui-preview.md) |
 | 首版功能对应的 REST/GraphQL 接口、token 权限与限流边界 | [GitHub API 能力核验](github-api-capabilities.md) |
 | 派发、并行、审查循环与合并权限 | [Agent 工作流](agent-workflow.md) |
 | 实现和验证的共同要求 | [代码约定](code-standards.md) |

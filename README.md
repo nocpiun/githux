@@ -16,6 +16,8 @@ cargo run --locked
 
 首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`；不要与其他项目/原型共享可写 target。Windows debug binary 为 `target/debug/githux.exe`。
 
+复杂组件的开发预览使用独立 Cargo example，不进入正式产品启动路径或发行包。仓库正文阅读器运行 `cargo run --example reader`；真实账户与仓库读取接线预览运行 `cargo run --example account`。后者直接连接应用数据目录、系统凭据与 GitHub，token 只能由操作者在预览 UI 中输入；自动测试使用合成凭据与 mock。两个 example 都不随默认 release 构建或正式 artifact 发布。
+
 `cargo run` 会自动把固定版本、经 SHA256 校验的 app-local Windows App SDK 运行时放到实际被启动的 exe 旁边：首次缺缓存时下载，之后复用本地缓存并离线运行；`--release`、显式 `--target`、自定义 `--target-dir` 以及新 worktree、`cargo clean` 后都无需手动准备。`cargo test`/`cargo bench` 等其他 Cargo 运行不经此准备。这是开发启动准备，不是系统安装，但也**不等于没有运行时依赖**：`cargo build` 不准备运行时，手动双击裸 exe 或分发给他人时仍须执行 `./scripts/prepare-windows-runtime.ps1 -Destination <exe 所在目录>`，并保留同目录 DLL、PRI、`githux-wasdk.manifest` 与 SDK 许可证，不能只复制 exe。CI 的 Windows artifact 已在打包步骤中包含这些文件。未准备运行时会回退到标准高度的 DWM 按钮。细节、缓存位置与 `--manifest-path` 等边界见 [Windows 运行时](docs/windows-runtime.md)。
 
 Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
