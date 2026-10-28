@@ -1862,3 +1862,50 @@ fn a_failed_list_keeps_its_retry_across_an_unrelated_mutation(cx: &mut TestAppCo
         "an unrelated rejected mutation restores the previous list state"
     );
 }
+
+/// Reconciliation invalidates the displayed list, so it must also clear the automatic-load marker;
+/// otherwise the settled authorization's read is skipped and the sidebar stays on the idle
+/// placeholder with no retry. This drives `reconcile` directly for a tracked cancelled generation.
+#[gpui::test]
+fn reconciliation_reloads_after_discarding_the_list(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["a"]));
+    mock.script_user(user(1, "alice"));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock.clone());
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(_))
+    });
+    wait_idle(&controller, cx);
+    let reads_before = mock.repo_reads.load(Ordering::SeqCst);
+
+    // Force the exact reconcile state: the list is Ready, the load marker matches, and a cancelled
+    // generation is pending reconciliation. Reconciling must discard the list *and* reload.
+    let generation = controller.update(cx, |accounts, _| {
+        accounts.force_reconcile_state_for_test();
+        accounts.generation
+    });
+    controller.update(cx, |accounts, cx| accounts.reconcile(generation, cx));
+    beat_until(&controller, cx, |_, cx| {
+        !matches!(
+            &snapshot(&controller, cx).repositories.preview,
+            RepositoryPreview::Idle(_) | RepositoryPreview::Loading
+        )
+    });
+    let state = snapshot(&controller, cx);
+    assert!(
+        !matches!(state.repositories.preview, RepositoryPreview::Idle(_)),
+        "reconciliation must reload, not strand the sidebar on idle: {:?}",
+        state.repositories.preview
+    );
+    assert!(
+        mock.repo_reads.load(Ordering::SeqCst) > reads_before,
+        "reconciliation issues a fresh read"
+    );
+}

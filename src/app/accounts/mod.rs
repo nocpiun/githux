@@ -330,6 +330,17 @@ impl Accounts {
         self.restored_or_idle()
     }
 
+    /// Puts the controller into the exact state `reconcile` handles: a pending cancelled generation
+    /// and a matching load marker with a `Ready` list. Used only by the reconcile regression test,
+    /// which then calls `reconcile` itself to check that it discards the list and reloads.
+    #[cfg(test)]
+    pub fn force_reconcile_state_for_test(&mut self) -> u64 {
+        if !self.reconciling.contains(&self.generation) {
+            self.reconciling.push(self.generation);
+        }
+        self.generation
+    }
+
     /// The cache state of one avatar without starting a fetch, for the avatar tests.
     #[cfg(test)]
     pub fn avatar_state_for_test(&self, key: &AvatarKey) -> Option<AvatarState> {
@@ -669,11 +680,14 @@ impl Accounts {
         self.refresh_presentation();
         // Each settlement may have changed this account's authorization evidence, so the displayed
         // repository set is invalidated every time, not only when the last pending one finishes.
+        // Discarding it also clears the load marker: otherwise `autoload_if_needed` below would see
+        // the still-matching key and do nothing, stranding the sidebar on the idle placeholder.
         if previous == self.snapshot.active {
             self.snapshot.repositories = Repositories::idle(
                 self.snapshot.active.clone(),
                 "Reloading repositories under the settled authorization…",
             );
+            self.loaded = None;
         }
         self.snapshot.status = Some(if self.reconciling.is_empty() {
             StatusMessage::new(

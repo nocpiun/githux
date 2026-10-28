@@ -289,12 +289,31 @@ fn decode_scheme(url: &str) -> Option<&str> {
     Some(scheme)
 }
 
-/// Decodes fetched bytes into a GPUI `Image` in a format GPUI can rasterize locally. GitHub serves
-/// PNG (and sometimes JPEG); SVG is rejected because it needs a renderer the avatar path does not
-/// have. Anything else, or a broken payload, is a failure — never a broken-image icon.
+/// Decodes fetched bytes into a GPUI `Image` in a format GPUI can rasterize locally, but only after
+/// a **full** decode proves the payload is a real image.
+///
+/// A signature check is not enough: an eight-byte PNG header, or a truncated or corrupted body with
+/// a correct prefix, would be accepted and then fail inside GPUI's renderer, producing exactly the
+/// broken-image state this path exists to avoid. Decoding here means a bad payload is a failure and
+/// the caller keeps its initials fallback. SVG is rejected because it needs a renderer this path
+/// does not have.
 fn decode_image(bytes: Vec<u8>) -> Option<Arc<Image>> {
     let format = detect_format(&bytes)?;
+    // Fully decode to validate; the decoded pixels are then dropped. This runs off the UI thread.
+    image::load_from_memory_with_format(&bytes, to_image_crate_format(format)).ok()?;
     Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+/// Maps GPUI's image format to the `image` crate's, for the validation decode.
+fn to_image_crate_format(format: ImageFormat) -> image::ImageFormat {
+    match format {
+        ImageFormat::Png => image::ImageFormat::Png,
+        ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Webp => image::ImageFormat::WebP,
+        ImageFormat::Gif => image::ImageFormat::Gif,
+        // `detect_format` only ever returns the four above.
+        _ => unreachable!("only avatar formats reach the decoder"),
+    }
 }
 
 /// Sniffs the format from the leading bytes rather than trusting a header or a file extension, so a
@@ -563,6 +582,19 @@ mod tests {
             cache.request(first).is_none(),
             "repeated paints after eviction still do not refetch"
         );
+    }
+
+    /// A payload with a correct signature but no decodable body must fail, not publish a Ready image
+    /// that would render as a broken-image icon.
+    #[test]
+    fn a_signature_only_payload_is_rejected() {
+        // Just the eight-byte PNG signature, and a truncated real PNG.
+        assert!(decode_image(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).is_none());
+        let mut truncated = png();
+        truncated.truncate(24);
+        assert!(decode_image(truncated).is_none());
+        // The intact image still decodes.
+        assert!(decode_image(png()).is_some());
     }
 
     #[test]

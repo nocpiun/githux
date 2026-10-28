@@ -1998,6 +1998,7 @@ dependencies = [
  "ely-settings",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "pulldown-cmark",
  "raw-window-handle",
  "reqwest",
