@@ -4,6 +4,10 @@ use gpui::{Axis, Bounds, ListState, Pixels, Point, ScrollHandle, Window};
 /// Minimal scrollbar boundary. Future motion controllers cancel their animation in
 /// `drag_started` and `set_axis_offset`; the scrollbar itself never consumes wheel input.
 pub trait ScrollTarget {
+    /// A native vertical-only list must not acquire horizontal motion or drag state.
+    fn supports_axis(&self, _axis: Axis) -> bool {
+        true
+    }
     fn viewport_bounds(&self) -> Bounds<Pixels>;
     fn offset(&self) -> Point<Pixels>;
     fn max_offset(&self) -> Point<Pixels>;
@@ -42,6 +46,9 @@ impl ScrollTarget for ScrollHandle {
 /// GPUI lists scroll vertically only; an axis they do not support is ignored instead of
 /// panicking, so a mis-wired consumer sees no movement rather than a crash.
 impl ScrollTarget for ListState {
+    fn supports_axis(&self, axis: Axis) -> bool {
+        axis == Axis::Vertical
+    }
     fn viewport_bounds(&self) -> Bounds<Pixels> {
         self.viewport_bounds()
     }

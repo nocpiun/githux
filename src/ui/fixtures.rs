@@ -41,12 +41,17 @@ pub struct AccountFixture {
     pub name: &'static str,
     pub login: &'static str,
     pub bio: &'static str,
+    /// Placeholder GitHub user status shown by the sidebar's status button.
+    pub status_emoji: &'static str,
+    pub status_label: &'static str,
 }
 
 pub const ACCOUNT: AccountFixture = AccountFixture {
     name: "Lin",
     login: "lin-dev",
     bio: "A calm desktop workspace for GitHub.",
+    status_emoji: "💻",
+    status_label: "Coding",
 };
 
 /// Whether a Home row is an issue or a pull request.

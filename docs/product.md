@@ -49,7 +49,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 - Windows 三个窗口按钮使用 Windows App SDK 的系统绘制 Tall 模式：品牌/搜索区保留 32px 内容行，上下各留 8px，典型顶栏高 48px；Githux 使用 Ely 的 Md 字号（默认 14px），搜索框自身高 28px、在内容行内垂直居中；实际行高读取系统 Height 并按窗口 DPI 换算，island 从该行下缘开始。按钮区域不加 padding。SDK 初始化失败回退到原有标准高度 DWM 适配；DWM 也不可用或无原生 HWND 的测试平台保留自绘回退（直角单框/重叠框）。macOS/Linux 不安装此适配。Tall 按钮的背景、交互、高度与对齐，以及最终品牌字号/搜索框高度均已获负责人真实预览验收，证据见 [Tall 标题栏记录](devlog/2026-10-23-tall-caption.md)，原有 DWM 验收见 [原生按钮记录](devlog/2026-10-23-native-caption.md)。
 - 侧边栏直接从顶部导航开始，没有额外 Logo/品牌块。上方 Home、Settings，中间仓库列表，底部账户信息与快捷入口。
 - 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。范围确定为 `GET /user/repos` 在当前活动账户、token 与组织授权下返回的集合（owner、collaborator、organization_member），不限定单个组织；排序与局部筛选待定。
-- 底部点击头像/名称进入 Profile；下方横向四等分图标入口为 Notifications、Issues、PRs、New。不放主题切换。
+- 底部点击头像/名称进入 Profile；展开时下方横向四等分图标入口为 Notifications、Issues、PRs、New，不放主题切换。侧栏支持受限 resize 和 56px 图标栏收起，收起后四入口合为“...”菜单；New 在创建范围未批准前继续禁用。仓库列表与固定 footer 之间有细分割线；账号区只有头像/名字/@ID 打开 Profile，展开时右侧另有占位 emoji 状态按钮（点击不导航、无写状态功能），收起时隐藏并把状态并入头像 tooltip。仓库/页面/palette 的滚轮使用共享平滑适配，触控板像素滚动直接响应。账号区独立间隔、客户区外留白、行外活动线与交互契约见 [侧栏布局](sidebar-layout.md)，最终视觉与滚动手感等待负责人真实窗口验收。
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。R1 首份外壳交付只提供本地导航命令（各页与当前仓库列表），不调用 GitHub，也不据此确定未来全局搜索范围。
 - 侧栏以外的页面主区域采用 island，与窗口边缘留微小距离，内外圆角协调。不是所有子面板都变成浮动卡片；精确间距、圆角和最大化行为待真实窗口确认。
 - island 顶部为应用级会话标签（tab strip），可同时保留多个仓库、Issue/PR、个人主页等；它和页面内的横向内容 Tabs 是两层不同导航，不共用状态。页面内容内的大标题保留，不再显示重复页面名称的占位标题条，也不保留其高度。Profile 首版只实现 Overview。

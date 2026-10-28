@@ -2,10 +2,10 @@
 //!
 //! Every tab is one workspace session. Tabs keep one readable width and never compress: once they
 //! no longer fit, the scrolling viewport scrolls horizontally instead of shrinking labels, wrapping
-//! or widening the island. The scrolling is GPUI's own horizontal overflow on a [`ScrollHandle`],
-//! so the wheel path is the framework's: a vertical wheel maps onto the only scrollable axis,
-//! Windows already turns Shift+wheel into a horizontal delta, and a device's native horizontal
-//! delta arrives as one, so nothing is converted twice.
+//! or widening the island. The real horizontal `ScrollHandle` is driven by shared `scroll::Motion`:
+//! discrete wheel input eases, while precise pointer and touch input apply directly. A native
+//! horizontal delta wins; vertical wheel is the fallback, and Windows Shift+wheel is not remapped
+//! a second time.
 //!
 //! Layout: one inset on every edge of the strip's own box, then a row that holds the scrolling
 //! viewport and a pinned toolbar. The toolbar sits outside the viewport, so it neither scrolls nor
@@ -106,6 +106,7 @@ pub(super) fn strip(
     view: View,
     owner: gpui::EntityId,
     scrollbar: AnyElement,
+    wheel_overlay: AnyElement,
     cx: &App,
 ) -> AnyElement {
     let entries = &view.entries;
@@ -119,6 +120,7 @@ pub(super) fn strip(
     let rows = div()
         .id("tab-scroll")
         .debug_selector(|| "tab-scroll".to_string())
+        .relative()
         .flex()
         .flex_row()
         .flex_none()
@@ -143,6 +145,21 @@ pub(super) fn strip(
         .zip(view.drop_at)
         .map(|(_, slot)| insertion_marker(slot, view.scroll.offset().x, cx));
 
+    // The overlay belongs to the non-scrolling viewport, not the row: as a row child it would
+    // travel with the content and leave the visible right side uncovered once the strip scrolls.
+    // It sits above the scrollbar band's siblings only in paint order, so the thumb keeps its own
+    // hit target below and tab clicks still reach their own nodes.
+    let wheel_viewport = div()
+        .debug_selector(|| "tab-wheel-viewport".to_string())
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w_full()
+        .h(px(TAB_HEIGHT))
+        .child(rows)
+        .child(wheel_overlay);
+
     let scrollbar_band = div()
         .debug_selector(|| "tab-scrollbar-band".to_string())
         .relative()
@@ -158,7 +175,7 @@ pub(super) fn strip(
         .min_w_0()
         .min_h_0()
         .relative()
-        .child(rows)
+        .child(wheel_viewport)
         .children(marker)
         .child(scrollbar_band);
 
