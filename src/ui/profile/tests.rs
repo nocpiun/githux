@@ -460,6 +460,39 @@ fn repository_actions_use_typed_stable_resource_and_keyboard(cx: &mut TestAppCon
     assert_eq!(repository.id, Some(2));
     assert_eq!(repository.name_with_owner, "owner/two");
     assert_eq!(action.request.binding, binding(7, 1));
+    view.update(cx, |view, cx| {
+        let request = view.request();
+        view.update_repositories(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos: vec![
+                    repo(1, "one"),
+                    repo(2, "two"),
+                    repo(3, "three"),
+                    repo(4, "four"),
+                ],
+                total_repos: 4,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            cx,
+        );
+    });
+    cx.simulate_keystrokes("home down enter");
+    let action = view.read_with(cx, |view, _| view.last_action().cloned().unwrap());
+    assert!(
+        matches!(action.kind, ProfileActionKind::Repository(repository) if repository.id == Some(3))
+    );
+    cx.simulate_keystrokes("right up enter");
+    let action = view.read_with(cx, |view, _| view.last_action().cloned().unwrap());
+    assert!(
+        matches!(action.kind, ProfileActionKind::Repository(repository) if repository.id == Some(2))
+    );
+    cx.simulate_keystrokes("right enter");
+    let action = view.read_with(cx, |view, _| view.last_action().cloned().unwrap());
+    assert!(
+        matches!(action.kind, ProfileActionKind::Repository(repository) if repository.id == Some(2)),
+        "Right at a row edge stays in that row"
+    );
 }
 
 #[gpui::test]

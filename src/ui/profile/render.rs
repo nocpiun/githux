@@ -564,10 +564,28 @@ impl ProfileView {
         }
         let key = event.keystroke.key.as_str();
         match key {
-            "right" | "down" => {
-                self.selected_repository = (self.selected_repository + 1).min(count - 1)
+            "right" => {
+                if self.selected_repository.is_multiple_of(2)
+                    && self.selected_repository + 1 < count
+                {
+                    self.selected_repository += 1;
+                }
             }
-            "left" | "up" => self.selected_repository = self.selected_repository.saturating_sub(1),
+            "left" => {
+                if !self.selected_repository.is_multiple_of(2) {
+                    self.selected_repository -= 1;
+                }
+            }
+            "down" => {
+                if self.selected_repository + 2 < count {
+                    self.selected_repository += 2;
+                }
+            }
+            "up" => {
+                if self.selected_repository >= 2 {
+                    self.selected_repository -= 2;
+                }
+            }
             "home" => self.selected_repository = 0,
             "end" => self.selected_repository = count - 1,
             "enter" | "space" => {

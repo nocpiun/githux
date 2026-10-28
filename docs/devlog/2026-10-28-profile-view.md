@@ -41,6 +41,8 @@ PR #36 首轮 `aba07c7` Codex 提出两项可直接修复问题：page thumb 外
 
 第三轮 `014478d` review 指出 page motion 为 true 时 `||` 短路跳过 heatmap tick；改为同一时间采样下先分别 tick，再合并 animation 标记。长范围回归同时启动两个离散 wheel 动画，断言 page 仍动画期间两区域真实 offset 均推进。
 
+第四轮 `cb61c40` review 指出 repository 两列 grid 的上下键仍为一步；已改为上下两项，左右仅在当前行移动，边界保持选中，并扩展 repository typed-action 用例覆盖四仓库、Down/Up/Right 与行边界。
+
 ## 后续
 
 - 原执行者跟踪 PR #36 最新 head 审查/CI 并交回协调者；任务属 First Release milestone #1，保留 `pending` 等负责人验收，不自动合并。
