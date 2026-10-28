@@ -71,7 +71,8 @@ git diff --check
 
 - `cargo fmt --all -- --check`、`cargo check --locked --all-targets -j 1`、`cargo test --locked --bin githux -j 1`（577 项）通过；release 构建通过。
 - 真实窗口：`target/release/githux.exe`（PID 46196，Responding，标题 `Githux`），`PrintWindow` 抓取真实帧后用最近邻放大核对侧栏头像：nociun/githux 蛋糕头像与 opanel 头像四角已被圆裁切、露出侧栏背景，不再有白色/不透明方角。截图 `.agents/output/avatar-circle.png`、放大 `.agents/output/avatar-zoom.png` / `avatar-zoom3.png`。核对后关闭该自启进程。
-- **未验证**：Settings 页与账户 footer 头像的圆角同屏复核受本机桌面会话限制（模拟点击未被接收）；它们是同一渲染器的调用方，但仍需负责人在原生窗口确认。真实 PAT 登录未执行。
+- 补充独立离线原生样例 `cargo run --example avatar`：左侧显示红色不透明方形源图（绿色中心），右侧调用生产共用渲染器显示 repository、收起/展开过渡、账户及 Settings 对应尺寸，末列为 initials fallback。此样例不打开账户数据库、不联网。原生窗口 PID 72760 的 DPI-aware `PrintWindow` 截图为 `.agents/output/opaque-avatar-circle.png`；四组图片共 16 个圆外角像素均为背景 RGB(24,33,42)，中心均保留源图绿色 RGB(24,224,112)，未裁切源图的角为红色 RGB(255,24,48)。像素记录为 `.agents/output/avatar-pixel-evidence.json`，验证图片圆角实际绘制，而非只核对样式或宽高。
+- **未验证**：真实 Shell 的 Settings 页与账户 footer 同屏交互、侧栏收起/展开动画及真实 PAT 输入仍需负责人验收。离线样例验证共用渲染器在对应尺寸的裁切，不能代替这些原生产品交互。样例窗口按已记录 PID 请求正常关闭，未操作其他任务窗口。
 
 ### 后续
 
