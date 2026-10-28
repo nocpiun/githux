@@ -95,6 +95,7 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 - Source 保留原生 x/y 双轴，Shift 仅在缺少原生 x 时映射 y；Markdown 仅纵向，不将水平输入变成纵向。现有代码块/表格是换行布局，没有内层横向 ScrollHandle，本轮保留该布局、字号与选择模型。
 - hover 入场、快速反向和拖动移出后释放都由 `Bars`/`Fade` 处理；140ms fade 与 wheel 动画分离，拖动期间保持可见，结束后回到 hover 状态。
 - wheel tick 与输入使用 owner 的同一时钟，只有动画未完成才请求帧。thumb drag、程序 offset 写入、选择按下、reset/adopt、正文替换、Esc、窗口失活/隐藏、移出布局和 dispose 均取消适当目标与 Bars；真实 ListState 的测量/drag hooks 没有替换或 `measure_all`。
+- 失活/隐藏/取消只结束未完成的拖动与待激活链接，保留完成的文本选区供重新激活后复制；正文替换与显式空白取消仍清空选区。
 - 集成宿主在账户上下文失效而仍保留 reader 时调用新增 `ReaderView::cancel_interactions(cx)`；既有构造、show、SourceView、PreparedContent 接口保持兼容。宿主改变正文仍走 show 或换实体，网络/账户状态不进入 reader。本轮实现与验证见 [reader-motion 日志](devlog/2026-10-28-reader-motion.md)。
 
 ## 未覆盖与待验收

@@ -471,7 +471,7 @@ impl ReaderView {
             ReaderState::Markdown(document) => {
                 let motion = document.read(cx).motion().clone();
                 scroll::cancel_region(&mut self.bars, &motion);
-                document.update(cx, |doc, cx| doc.clear_selection(cx));
+                document.update(cx, |doc, cx| doc.cancel_gesture(cx));
             }
             ReaderState::Source(source) => source.update(cx, |view, cx| view.cancel_scroll(cx)),
             _ => {}

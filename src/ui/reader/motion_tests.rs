@@ -297,6 +297,29 @@ fn wheel_is_cancelled_by_reveal_replacement_escape_and_deactivation(cx: &mut Tes
 }
 
 #[gpui::test]
+fn deactivation_keeps_completed_markdown_selection_for_copy(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, body(), DocumentKind::Markdown);
+    let document = reader.read_with(cx, |r, _| r.markdown().unwrap().clone());
+    document.update(cx, |doc, cx| doc.select_all(cx));
+    let selected = document.read_with(cx, |doc, _| doc.selected_text());
+    assert!(!selected.is_empty());
+    cx.deactivate_window();
+    assert_eq!(
+        document.read_with(cx, |doc, _| doc.selected_text()),
+        selected
+    );
+    cx.update(|w, _| w.activate_window());
+    document.update_in(cx, |doc, w, cx| doc.focus(w, cx));
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), selected);
+    reader.update(cx, |r, cx| r.cancel_interactions(cx));
+    assert_eq!(
+        document.read_with(cx, |doc, _| doc.selected_text()),
+        selected
+    );
+}
+
+#[gpui::test]
 fn selection_press_and_context_invalidation_cancel_pending_motion(cx: &mut TestAppContext) {
     for kind in [
         DocumentKind::Source { language: None },

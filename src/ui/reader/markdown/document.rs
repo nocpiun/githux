@@ -361,6 +361,12 @@ impl MarkdownView {
         }
     }
 
+    /// Ends transient gestures while preserving the completed selection for later copy.
+    pub(crate) fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
+        self.pressed_link = None;
+        self.end_drag(cx);
+    }
+
     /// Copies the selection; false when there is nothing to copy.
     pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
         let text = self.selected_text();

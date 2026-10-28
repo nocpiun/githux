@@ -20,4 +20,8 @@
 
 原生 Windows 预览已运行：`target/debug/examples/reader.exe`，PID 29760，窗口 1672×1196 物理像素。经 Win32 实际鼠标点击切换 Markdown → Source → Large source、纵向 wheel 与水平 wheel，PrintWindow 前后帧确认 Markdown 内容向上移动、Source 长行水平移动、Large source 从首行推进到第 5 行附近，并显示原有细条；表格字号、inline code 与 gutter 的真实渲染可见。截图保存在本地 `.agents/task/`，不提交工具产物。此处验证了原生输入送达与最终滚动位置，没有采集高速中间帧，不将其写成负责人手感验收。预览保留供负责人查看。
 
+## PR #32 首轮审查修复
+
+审查发现失活/隐藏的清理路径调用 Markdown `clear_selection`，会让用户切去别的应用再回来时丢失已选文字；Source 保留选区。该意见成立且无争议。现改为只清理拖动与待激活链接，完成的 anchor/head 保留；正文替换、显式空白取消仍按原路径清空。新增 `deactivation_keeps_completed_markdown_selection_for_copy`，验证失活/重新激活后的 Ctrl+C 仍复制原选区，宿主取消也保留完成的选区。修复后重新通过 fmt/check/clippy、全量测试（527 主程序 + 310 账户 + 131 reader）、预览/产品构建与 diff 检查。裁决历史仍为 false/worker，本轮人工验收 hold 不变。
+
 GPUI 测试事件不经过 Windows 原生输入分发。最终真实窗口滚轮手感、触控板、多 DPI 和负责人视觉验收单独记录，不以测试平台或进程响应代替。
