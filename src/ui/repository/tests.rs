@@ -1617,3 +1617,52 @@ fn old_branch_identity_rejects_success_and_error_after_returning_to_same_name(
         assert!(p.error().is_none());
     });
 }
+
+#[gpui::test]
+fn enumeration_failure_preserves_saved_branch_and_recovery_preserves_reader(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, page, cx) = normal(cx);
+    let listing = page.read_with(cx, |p, _| p.branches().cloned()).unwrap();
+    page.update(cx, |p, cx| {
+        p.intent.branch = Some("feature/docs-polish".into());
+        p.branch = None;
+        p.apply_branches(Err(GitHubError::Timeout { seconds: 1 }.into()), cx);
+    });
+    settle(&page, cx, |p| {
+        p.selected_branch() == Some("feature/docs-polish")
+            && p.reader_status() == &ReaderStatus::Showing
+    });
+    let reader = page.read_with(cx, |p, _| p.reader().unwrap().entity_id());
+    page.update(cx, |p, cx| p.apply_branches(Ok(listing), cx));
+    assert_eq!(
+        reader,
+        page.read_with(cx, |p, _| p.reader().unwrap().entity_id())
+    );
+    assert!(fixture.transport.mismatches().is_empty());
+}
+
+#[gpui::test]
+fn failed_file_stays_failed_when_an_unrelated_directory_finishes(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::FileFailure);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+    page.update(cx, |p, cx| p.toggle_directory("src", cx));
+    settle(&page, cx, |p| p.tree("src").is_some());
+    page.update(cx, |p, cx| p.select_file("src/main.rs", cx));
+    settle(&page, cx, |p| {
+        matches!(p.reader_status(), ReaderStatus::ContentFailed(_))
+    });
+    let count = fixture.transport.count("/git/blobs/");
+    page.update(cx, |p, cx| p.toggle_directory("assets", cx));
+    settle(&page, cx, |p| p.tree("assets").is_some());
+    assert_eq!(count, fixture.transport.count("/git/blobs/"));
+    assert!(page.read_with(cx, |p, _| matches!(
+        p.reader_status(),
+        ReaderStatus::ContentFailed(_)
+    )));
+    page.update(cx, |p, cx| p.retry_reader(cx));
+    settle(&page, cx, |p| p.reader_status() == &ReaderStatus::Showing);
+}

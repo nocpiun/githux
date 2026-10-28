@@ -503,6 +503,14 @@ impl RepositoryPage {
         self.begin_branch(branch, cx);
     }
 
+    /// Refreshes branch enumeration without replacing the displayed snapshot.
+    pub fn retry_branches(&mut self, cx: &mut Context<Self>) {
+        if let Some(details) = &self.details {
+            self.spawn_job(Job::Branches(details.identity.clone()));
+            cx.notify();
+        }
+    }
+
     /// Switches to `name`, re-resolving it to a new fixed commit. Old tree and
     /// reader content are dropped immediately.
     pub fn select_branch(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -876,6 +884,9 @@ impl RepositoryPage {
     /// into Loading, re-download the same blob and throw away the reader's
     /// scroll position and selection.
     fn resolve_selection(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.reader_status, ReaderStatus::ContentFailed(_)) {
+            return;
+        }
         if self.reader_status == ReaderStatus::Showing
             && self.reader.as_ref().is_some_and(|reader| {
                 reader.read(cx).context().path() == self.current_path().unwrap_or_default()
@@ -1237,6 +1248,11 @@ impl RepositoryPage {
         };
         self.branches_error = error;
         self.branches = outcome.clone();
+        if self.branch.is_some() {
+            // Retrying enumeration updates only the picker, never the loaded snapshot.
+            cx.notify();
+            return;
+        }
         let choice = match &outcome {
             Some(outcome) => branch_choice(
                 outcome,
@@ -1245,8 +1261,14 @@ impl RepositoryPage {
             ),
             // Without a branch list the repository's observed default branch is
             // still a valid ref; a failed list is not an empty repository.
-            None => match details.default_branch.clone() {
-                Some(default) => BranchChoice::Selected(default),
+            None => match self
+                .intent
+                .branch
+                .as_deref()
+                .and_then(|name| DynamicRef::new(name).ok())
+                .or_else(|| details.default_branch.clone())
+            {
+                Some(reference) => BranchChoice::Selected(reference),
                 None => BranchChoice::None { empty: false },
             },
         };
@@ -1390,6 +1412,15 @@ impl RepositoryPage {
                 .fail_load(&path, PageError::from_repository(&error)),
         }
         let failure = state.tree.failure(&path).cloned();
+        if failure.is_none()
+            && matches!(self.reader_status, ReaderStatus::ContentFailed(_))
+            && self
+                .selection
+                .path()
+                .is_some_and(|selected| RepositoryNavigation::ancestors(selected).contains(&path))
+        {
+            self.reader_status = ReaderStatus::Loading;
+        }
         self.invalidate_rows();
         // A selection waiting on *this* directory has to end in a terminal state
         // rather than stay Loading; others keep what they were showing.

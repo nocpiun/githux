@@ -35,7 +35,7 @@ let page = cx.new(|cx| {
 | `select_tab(tab, cx)` | 切换页内 Tabs；离开 Code 结束阅读器手势，回到 Code 复核授权 |
 | `toggle_directory(path, cx)` | 展开/折叠目录；首次展开才发一次 tree 请求，不递归下载整个仓库 |
 | `select_file(path, cx)` / `show_readme(cx)` | 切换阅读目标 |
-| `retry(cx)` / `retry_directory(path, cx)` / `retry_reader(cx)` / `retry_readme(cx)` | 各自只重试对应资源的单次有界操作 |
+| `retry_branches(cx)` / `retry(cx)` / `retry_directory(path, cx)` / `retry_reader(cx)` / `retry_readme(cx)` | 各自只重试对应资源的单次有界操作 |
 
 ## 导航与选中
 
@@ -67,6 +67,8 @@ let page = cx.new(|cx| {
 | 目录 | 该行内表达 + 该目录的 Retry；其余目录与正文继续可用 |
 | blob / 文件正文 | 只替换阅读区；仓库资料、分支、树与其他内容保留 |
 | README 发现 | `No README`（完整空树证明）/ `README not confirmed`（404 不确定）/ 发现失败，各有独立状态与重试 |
+
+分支枚举失败不会覆盖保存的非默认分支；优先解析保存 ref，并提供 Retry branches 单独恢复列表。文件失败在无关目录加载完成后保持终态，直到显式 Retry 或重新选择。
 
 404 只说“该资源不存在或当前账户无法访问”，不断言一定是权限问题。401/403/SSO/限流/超时/网络/解析/截断保持各自区别。所有重试都是用户点按的单次、针对一个资源的操作，不会重新登录、重载整页或互相重置；不存在自动重试循环。
 

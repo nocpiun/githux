@@ -207,16 +207,30 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     let colors = theme.colors.clone();
     let small = theme.text_size(TextSize::Xs);
     let Some(branches) = page.branches() else {
+        let retry = cx.weak_entity();
+        let error = page.branches_error().cloned();
         return div()
             .debug_selector(|| "repository-branch-unavailable".to_string())
+            .flex()
+            .flex_col()
+            .gap_1()
             .flex_none()
             .w(px(220.0))
             .text_size(small)
             .text_color(colors.fg_subtle)
             .child(match page.selected_branch() {
                 Some(branch) => format!("branch {branch}"),
-                None => "branch list unavailable".to_string(),
+                None => "Branch list unavailable".to_string(),
             })
+            .children(error.map(|error| {
+                div().child(error.title).child(
+                    Button::new("repository-retry-branches", "Retry branches")
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let _ = retry.update(cx, |page, cx| page.retry_branches(cx));
+                        }),
+                )
+            }))
             .into_any_element();
     };
     let choices: Vec<Choice> = branches

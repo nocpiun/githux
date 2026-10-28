@@ -65,7 +65,7 @@
 - `cargo fmt --all -- --check` 通过
 - `cargo check --locked --all-targets` 通过
 - `cargo clippy --locked --all-targets -- -D warnings` 通过
-- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、Home **54**、repository **451**（其中本任务页面行为测试 34 项、导航模型测试 4 项 + fixture 自测 6 项）全部通过
+- `cargo test --locked`：main binary **538**、account 装配 **321**、reader **131**、Home **54**、repository **453**（其中本任务页面行为测试 36 项、导航模型测试 4 项 + fixture 自测 6 项）全部通过
 - `cargo build --locked --example repository` 通过
 - `git diff --check` 通过
 
@@ -86,9 +86,10 @@
 
 截图、临时 native probe 脚本保存在被忽略的 `.agents/task/`，不进入产品或 Git；它们证明上列实际操作，不替代负责人视觉验收。
 
-### 第二轮审查与验收补齐
+### 后续审查与验收补齐
 
 - `selection_request` 为每次文件选择/重试提供独立单调身份，旧正文错误也不能覆盖后来同文件成功；分支身份覆盖所有后台消息，切分支取消前轮工作。
+- 分支列表失败优先解析已保存分支；新增 Retry branches 只刷新列表，不重建已显示快照和 reader。正文失败保持终态，无关目录完成不触发隐式重试。
 - 根目录失败新增 `Retry files`，使用当前 snapshot 的根 handle；不重置资料或已显示 README。
 - 子目录截断/Partial 显示 `Incomplete`，只有完整空子目录才显示 empty。
 - 默认 README 若在 docs/ 下，按 descriptor.path 展开祖先并选中真实节点；新增该场景和事件测试。
