@@ -258,7 +258,7 @@ pub(super) fn feed_row(
         .id(("feed-avatar", index))
         .debug_selector(move || format!("feed-avatar-{index}"))
         .flex_none()
-        .child(Avatar::new(("feed-avatar-face", index), actor).size(AvatarSize::Sm))
+        .child(Avatar::new(("feed-avatar-face", index), actor).size(AvatarSize::Lg))
         .when(!profile.login.trim().is_empty(), |avatar| {
             avatar
                 .role(gpui::Role::Link)
@@ -374,7 +374,7 @@ pub(super) fn feed_row(
                     div()
                         .debug_selector(move || format!("feed-header-{index}"))
                         .flex()
-                        .items_start()
+                        .items_center()
                         .gap_3()
                         .min_w_0()
                         .child(avatar)

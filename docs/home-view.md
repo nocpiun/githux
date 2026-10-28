@@ -64,7 +64,8 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - Feed 是有间距的活动卡片：avatar、可点击 actor、动作句与相对时间组成 header，详情在下面的 inset repository panel。Issue/PR 显示可用 title/number/status（merged 优先）；Push/ref/release/member/comment/unknown 使用既有 typed payload，缺字段安全回退，不补造仓库统计或正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
 - 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。
-- 窗口较窄（小于 760 logical px）时两栏改为上下堆叠；两栏始终留在视图边界内。
+- 双列模式使用约 32 logical px 的间距、等宽列；窗口较窄（小于 760 logical px）时上下堆叠，纵向间距保持约 16px。顶部/左右留白不变，底部约 8px；生命周期 canvas 以绝对定位零尺寸参与 render，不再作为 flex child 留出额外 gap。
+- Feed 头像使用 `AvatarSize::Lg`（40 logical px），圆形且不收缩，与 actor/action + 相对时间组成的 header 整体居中；保留原 Profile 点击和键盘动作，无网络图片。
 
 ## 滚动与键盘
 
@@ -85,7 +86,8 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 | 位置 | 职责 |
 | --- | --- |
 | `src/ui/home/mod.rs` | 状态、更新 API、动作类型、面板布局与列表接线 |
-| `src/ui/home/presentation.rs` | 行、Feed typed 描述、错误与 Partial 文案、回退 |
+| `src/ui/home/presentation.rs` | 错误与 Partial 文案、完整性提示 |
+| `src/ui/home/rows.rs` | Home 行、Feed 卡片、内容导航与 typed 详情 |
 | `src/ui/home/tests.rs` | 真实组件的确定性 GPUI 测试 |
 | `examples/home.rs` | 独立原生预览与合成场景 |
 | `src/bin_support/home_modules.rs` | 预览/测试的薄 `#[path]` 装配 |

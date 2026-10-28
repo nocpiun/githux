@@ -1016,7 +1016,7 @@ fn variable_feed_cards_have_details_below_header_and_last_card_is_reachable(
 ) {
     let (view, cx) = open(cx);
     view.update(cx, |view, cx| {
-        let events = (0..300)
+        let mut events: Vec<_> = (0..300)
             .map(|index| {
                 if index % 2 == 0 {
                     feed_event(
@@ -1040,6 +1040,8 @@ fn variable_feed_cards_have_details_below_header_and_last_card_is_reachable(
                 }
             })
             .collect();
+        events[0].actor.display_login =
+            Some("A deliberately long actor display name that wraps within a narrow card".into());
         view.apply_feed(
             &binding(),
             1,
@@ -1048,7 +1050,24 @@ fn variable_feed_cards_have_details_below_header_and_last_card_is_reachable(
         );
     });
     cx.run_until_parked();
+    cx.simulate_resize(size(px(880.0), px(560.0)));
+    cx.run_until_parked();
+    let root = bounds("home-view", cx);
+    let left = bounds("home-panel", cx);
+    let right = bounds("feed-panel", cx);
+    assert!(right.left() > left.right());
+    assert!((left.size.width - right.size.width).abs() <= px(1.0));
+    assert!(right.right() <= root.right());
+    // The real scroll viewport reaches the bottom inset, rather than leaving
+    // an extra flex-child gap below both lists.
+    let viewport = bounds("feed-rows", cx);
+    assert!(root.bottom() - viewport.bottom() < left.left() - root.left());
     let header = bounds("feed-header-0", cx);
+    let avatar = bounds("feed-avatar-0", cx);
+    let actor = bounds("feed-actor-0", cx);
+    assert!(avatar.right() < actor.left());
+    assert!(actor.right() <= header.right());
+    assert!((avatar.center().y - header.center().y).abs() <= px(1.0));
     let details = bounds("feed-details-0", cx);
     assert!(details.top() > header.bottom());
     assert!(bounds("feed-card-0", cx).size.height > bounds("feed-card-1", cx).size.height);

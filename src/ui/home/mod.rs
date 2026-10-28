@@ -932,12 +932,11 @@ impl Render for HomeView {
             .min_h_0()
             .w_full()
             .min_w_0()
-            .gap_4()
             .map(|columns| {
                 if narrow {
-                    columns.flex_col().children([home, feed])
+                    columns.flex_col().gap_4().children([home, feed])
                 } else {
-                    columns.flex_row().children([home, feed])
+                    columns.flex_row().gap_8().children([home, feed])
                 }
             });
 
@@ -948,8 +947,10 @@ impl Render for HomeView {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .p_4()
-            .gap_4()
+            .relative()
+            .px_4()
+            .pt_4()
+            .pb_2()
             .bg(colors.surface)
             .text_size(body_size)
             .text_color(colors.fg)
@@ -1331,5 +1332,11 @@ fn visible_lifetime(cx: &Context<HomeView>) -> AnyElement {
         },
         |_, _, _, _| {},
     )
+    // Keep the render lease alive without adding a flex item or a gap below
+    // the two viewports. The canvas remains part of every rendered frame.
+    .absolute()
+    .top_0()
+    .left_0()
+    .size(px(0.0))
     .into_any_element()
 }
