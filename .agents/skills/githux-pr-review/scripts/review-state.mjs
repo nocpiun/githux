@@ -16,13 +16,7 @@ function inspectHead(options, pr) {
   // Owner labels are independent of GitHub's mergeable_state/protection settings.
   if (!Array.isArray(pr.labels) || pr.labels.some(label => typeof label?.name !== 'string'))
     throw new Error('Missing or invalid PR labels');
-  const labels = pr.labels.map(label => label.name);
-  if (labels.some(name => name.toLowerCase() === 'blocked')) return event(options, 'merge_blocked', {
-    integration: { labels, blockers: ['blocked_label'], base_ref: pr.base?.ref ?? null,
-      base_sha: pr.base?.sha ?? null, mergeable: pr.mergeable, mergeable_state: pr.mergeable_state ?? null },
-    next_actions: ['wait_for_owner_unblock'],
-    message: 'PR 带有负责人管理的 blocked 标签；禁止合并，Agent 不得自行移除标签。负责人移除后重新核验当前 head。',
-  });
+  // Labels gate final readiness, not review collection or timeout recovery.
   // REST mergeable is tri-state: null means GitHub is still computing it.
   // Protection, draft and failing checks are not merge conflicts.
   if (pr.mergeable === false) return event(options, 'merge_conflict', {
@@ -33,6 +27,12 @@ function inspectHead(options, pr) {
   return null;
 }
 
+
+function mergeBlockers(pr) {
+  return [pr.labels.some(label => label.name.toLowerCase() === 'blocked') && 'blocked_label',
+    pr.draft && 'draft', pr.mergeable == null && 'mergeability_unknown',
+    ['blocked', 'behind'].includes(pr.mergeable_state) && pr.mergeable_state].filter(Boolean);
+}
 
 const CODEX_APP = 1144995;
 const SUMMARY = '<!-- codex-pull-request-review-summary -->';
@@ -144,6 +144,8 @@ async function readThreads(options, inline, currentReviews, since, api, signal) 
 function decide(options, snapshot) {
   const { review, threads, ci, integration } = snapshot;
   const actions = [];
+  const ownerBlocked = integration.blockers.includes('blocked_label');
+  if (ownerBlocked) actions.push('wait_for_owner_unblock');
   if (review.state === 'feedback') actions.push('assess_review');
   if (threads.historical.length) actions.push('verify_historical_threads');
   if (review.state === 'clean' && threads.current.length) actions.push('verify_review_threads');
@@ -161,7 +163,7 @@ function decide(options, snapshot) {
   else if (ci.state === 'unverified') status = 'ci_unverified';
   else if (review.state === 'clean' && threads.state === 'pending') status = 'history_pending';
   else if (review.state === 'clean') {
-    if (!options.waitCi) status = 'review_completed';
+    if (!options.waitCi) status = ownerBlocked ? 'merge_blocked' : 'review_completed';
     else if (ci.state === 'success') status = integration.blockers.length ? 'merge_blocked' : 'checks_ready';
   }
   if (['unverified_bot_message', 'evidence_conflict', 'evidence_incomplete', 'ci_unverified', 'trigger_changed'].includes(status)) actions.push('verify_evidence');
@@ -193,10 +195,8 @@ export async function inspectReview(options, api = ghApi, signal, observe = () =
   const advertisedBase = pr.base.sha;
   pr.base = { ...pr.base, sha: await targetHead(pr.base.ref) };
   const integration = { base_sha: pr.base.sha, pr_base_sha: advertisedBase, base_ref: pr.base.ref, mergeable: pr.mergeable,
-    draft: Boolean(pr.draft), mergeable_state: pr.mergeable_state, labels: pr.labels.map(label => label.name), blockers: [] };
-  if (pr.draft) integration.blockers.push('draft');
-  if (pr.mergeable == null) integration.blockers.push('mergeability_unknown');
-  if (['blocked', 'behind'].includes(pr.mergeable_state)) integration.blockers.push(pr.mergeable_state);
+    draft: Boolean(pr.draft), mergeable_state: pr.mergeable_state, labels: pr.labels.map(label => label.name),
+    blockers: mergeBlockers(pr) };
   if (options.expectedBase && options.expectedBase !== pr.base.sha)
     return event(options, 'base_changed', { integration, previous_base: options.expectedBase, next_actions: ['verify_current_base'] });
   const since = Date.parse(options.since ?? pr.created_at);
@@ -272,8 +272,7 @@ export async function inspectReview(options, api = ghApi, signal, observe = () =
   integration.mergeable = last.mergeable;
   integration.draft = Boolean(last.draft);
   integration.mergeable_state = last.mergeable_state;
-  integration.blockers = [last.draft && 'draft', last.mergeable == null && 'mergeability_unknown',
-    ['blocked', 'behind'].includes(last.mergeable_state) && last.mergeable_state].filter(Boolean);
+  integration.blockers = mergeBlockers(last);
   const result = decide(options, snapshot);
   observe(result);
   return result.status === 'waiting' ? null : result;

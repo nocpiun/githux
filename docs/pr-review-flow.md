@@ -9,9 +9,8 @@ flowchart TD
     A[记录 repo / PR / 完整 head / 本轮触发凭据] --> B[开始本次 run，结果文件写 running]
     B --> C{PR 关闭、head 改变或合并冲突？}
     C -->|是| STOP[返回状态和证据，停止旧轮次]
-    C -->|否| LABEL{实时标签包含 blocked？}
-    LABEL -->|是| OWNER[返回 merge_blocked，等待负责人移除标签]
-    LABEL -->|否| READ[串行读取审查、全部线程、所选 CI、目标分支 ref]
+    C -->|否| LABEL[校验实时标签，将 blocked 记为合并限制]
+    LABEL --> READ[串行读取审查、全部线程、所选 CI、目标分支 ref]
     READ --> BASE{目标分支变化或 CI 测试旧基线？}
     BASE -->|是| REBASE[返回 base_changed，验证与新基线的组合]
     BASE -->|否| EVIDENCE{未知消息、审查失败或证据异常？}
@@ -25,7 +24,7 @@ flowchart TD
     THREADS -->|是| HISTORY[交回线程收尾，不等不存在的新评论]
     THREADS -->|否| CI{所选 CI 全部成功？}
     CI -->|否| WAIT
-    CI -->|是| BLOCK{Draft 或其他合并阻塞？}
+    CI -->|是| BLOCK{blocked 标签、Draft 或其他合并阻塞？}
     BLOCK -->|是| CHECK
     BLOCK -->|否| READY[checks_ready：执行者核验最终合并权限与验收]
     WAIT --> DEADLINE{达到本轮时限？}
@@ -33,9 +32,9 @@ flowchart TD
     DEADLINE -->|是| RETRY[进入有界超时恢复流程]
 ```
 
-各维度分别保留。比如本轮有反馈且 CI 失败，返回整批反馈同时附 `ci.state=failed`，执行者一次处理两类问题。图中的分支不是“找到一种问题便丢弃其他证据”；遇到 head/关闭/冲突或负责人添加 blocked 时停止沿用旧批次；标签在收集前后均检查。
+各维度分别保留。比如本轮有反馈且 CI 失败，返回整批反馈同时附 `ci.state=failed`，执行者一次处理两类问题。图中的分支不是“找到一种问题便丢弃其他证据”；遇到 head/关闭/冲突时停止沿用旧批次；标签在收集前后均检查。添加 blocked 只改变合并限制，不中断同一 head 的审查收集与轮询；即使有标签，反馈仍须修复。
 
-代码的返回优先级：head/关闭/blocked 标签/冲突与目标分支变化 → 新触发轮次 → 未知 Bot 信息/审查失败 → 本轮反馈 → CI 失败 → 证据冲突/缺失 → CI 旧基线/无法验证 → 线程收尾 → CI 等待 → 合并阻塞/最终核验。即使同时命中多个条件，已收集的 review、threads、ci、integration 与 next_actions 一并返回。
+代码的返回优先级：head/关闭/冲突与目标分支变化 → 新触发轮次 → 未知 Bot 信息/审查失败 → 本轮反馈 → CI 失败 → 证据冲突/缺失 → CI 旧基线/无法验证 → 线程收尾 → CI 等待 → 合并阻塞/最终核验。即使同时命中多个条件，已收集的 review、threads、ci、integration 与 next_actions 一并返回。
 
 ## 本轮审查与历史线程
 
@@ -95,7 +94,7 @@ flowchart TD
 
 不能把 PR 响应里的 `base.sha` 当作目标分支实时 HEAD：真实 PR #17 验证已观察到它滞后。脚本开始和结束时读取目标分支 `git/ref/heads/...`，并与 CI 实际 checkout 的临时 merge 提交父节点比较。checkout 日志不可读取、格式变化、jobs 测试不同 revision，或无法证明测试组合时交回核实。正常文档任务被策略允许的上游 skipped 不参与 checkout 核验，但汇总 CI 必须 success。
 
-`blocked` 标签在首读、最终复核和自动重审前都独立检查：发现即返回 `merge_blocked`（退出 15、`integration.blockers=["blocked_label"]`），不继续等待或自动触发审查；缺失/无效标签数据报错，不放行。即使未传 `--wait-ci` 也不能返回 `review_completed` 来绕过它。`pending` 仅标识人工验收，具体职责及独立 `PR` 行数门槛见 [工作流](agent-workflow.md#pr-标签与规模门槛)。
+`blocked` 标签在首读、最终复核和自动重审前都独立校验：它作为 `integration.blockers` 中的 `blocked_label` 保留，**不停止 review/线程/所选 CI 的读取、轮询或原有有界自动重审**。本轮反馈、失败、证据问题及超时照常返回，各维度与标签限制一起交回；调用者仍禁止合并。审查 clean、线程已处理且所选 CI 就绪后，最终仍带标签才返回 `merge_blocked`（退出 15）；即使未传 `--wait-ci` 也不能返回 `review_completed` 来绕过它。标签在等待中加入/移除会在后续轮询与最终复核中更新，缺失/无效标签数据报错，不放行。`pending` 仅标识人工验收，具体职责及独立 `PR` 行数门槛见 [工作流](agent-workflow.md#pr-标签与规模门槛)。
 
 `checks_ready` 只代表已收集维度齐备，不授权合并。合并前再次确认实时无 `blocked`，`PR` 工作流的 `Check` required check 通过，且 `pending` 对应的负责人验收已通过。执行者仍需核对完整裁决历史、负责人 UI 验收、milestone、最新分支保护及当前 head，并按工作流使用 squash merge 和 GitHub 默认消息。
 
@@ -120,6 +119,8 @@ flowchart TD
 
 已有审查完成、CI 单独等待、旧线程/证据待处理、明确错误/未知消息、新触发、关闭/冲突/head 或基线变化，都不属于“无结果恢复”。重试日志按同一任务 repo/PR/head 保存，重启不重置第二轮期限；跨状态文件/机器不是全局锁。`--timeout-seconds 0` 和 `--auto-retry false` 禁止自动评论。
 
+`blocked` 不是停止重审的条件：没有审查结果时仍按上述额度重试，第二轮无结果返回 `timeout` 并携带合并限制，不因标签无限等待或增加额度。
+
 同 SHA 的摘要没有唯一 run ID。新触发 ID/服务端时间可以排除之前可见的证据，不能证明晚到的旧运行属于新运行。发现重叠或矛盾须核实，不以重试绕过审查。
 
 ## 返回与调用约定
@@ -141,7 +142,7 @@ flowchart TD
 | evidence_incomplete / evidence_conflict | 11 / 12 | 短暂复查后仍有缺口/矛盾，交回证据 |
 | base_changed | 13 | 验证与新目标基线的组合；有新提交则重新 CI/review |
 | ci_unverified | 14 | workflow/run/check/checkout 证据无法唯一核验 |
-| merge_blocked | 15 | `blocked` 标签（`blocked_label`）、Draft、保护或未知 mergeability 阻塞；标签须由负责人移除后重查 |
+| merge_blocked | 15 | 审查及所选检查就绪，但 `blocked` 标签（`blocked_label`）、Draft、保护或未知 mergeability 阻塞；标签须由负责人移除后重查 |
 | trigger_changed | 16 | 核对新的触发评论并改用对应服务端游标 |
 | error / interrupted | 1 / 130 | 明确错误/取消，不算成功 |
 
