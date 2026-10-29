@@ -716,6 +716,11 @@ impl HomeView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn feed_refresh_available(&self) -> bool {
+        !self.feed.state.is_busy() && self.feed.refresh.available
+    }
+
     fn can_refresh(&self, column: Column) -> bool {
         match column {
             Column::Home => self.home.refresh.available && !self.home.state.is_busy(),

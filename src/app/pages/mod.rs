@@ -78,6 +78,10 @@ impl PageAvatars {
         Self { accounts }
     }
 
+    pub fn accounts(&self) -> Option<&gpui::WeakEntity<crate::app::accounts::Accounts>> {
+        self.accounts.as_ref()
+    }
+
     pub fn image(&self, key: AvatarKey, cx: &mut App) -> Option<gpui::ImageSource> {
         let accounts = self.accounts.as_ref()?.upgrade()?;
         match accounts.update(cx, |accounts, _| accounts.avatar(key)) {

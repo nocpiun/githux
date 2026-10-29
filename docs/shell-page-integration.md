@@ -49,7 +49,8 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 ## Home 与 Feed
 
 - Home 固定 `involves:<当前认证 login>`、无时间窗口、`updated` 降序。
-- Feed 使用服务端顺序和已有 typed event；未知类型保留简短 fallback；不自动轮询。
+- Feed 使用服务端顺序和已有 typed event；未知类型保留简短 fallback；不自动轮询。Poll-Interval 只控制刷新按钮何时重新可用，到期不会自行发起读取。
+- 页面组件发出的 action 在组件更新栈结束后才交给 host，避免 refresh/navigation 重入正在更新的同一实体。
 - 两栏独立加载、错误、Partial、空态和刷新；一栏失败不擦另一栏。
 - 刷新按钮由 host 提供可用性。Feed 收到 `X-Poll-Interval` 后在该窗口内禁用刷新，不另建计时轮询。
 - 登录前、凭据不可用或离线时显示“无当前数据/不可用”，绝不把 synthetic items 当结果。

@@ -17,6 +17,7 @@
 - `Route::UserProfile { host, login }` 支持他人 Profile，key 做 host + 大小写归一；只有服务器响应可以更新 canonical 显示名。
 - 头像沿用 `app::avatar` 唯一 loader/cache 与 `ui::avatar` 圆形呈现。Home Feed 和 Profile header 只接收已解码图片。
 - 正式页面拥有自己的局部滚动；Shell 的外层页面 wheel/scroller 现在只用于 Settings 与留空页面。
+- 审查发现并修复两处问题：Home/Profile 的同步 action 转发会在组件更新栈内重入 host，改为 frame 后派发；Feed 的 Poll-Interval 到期后原逻辑不会恢复刷新，现用独立 deadline 只恢复按钮可用性，不发请求。两者都有回归测试。
 
 ## 验证
 

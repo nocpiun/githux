@@ -134,6 +134,7 @@ pub struct ProfilePage {
     active: bool,
     unavailable: Option<PresentationError>,
     _changed: Option<Subscription>,
+    _avatars_changed: Option<Subscription>,
 }
 
 impl ProfilePage {
@@ -166,6 +167,7 @@ impl ProfilePage {
             active: true,
             unavailable: None,
             _changed: None,
+            _avatars_changed: None,
         };
         this.start_receiver(cx);
         this.rebind(services, cx);
@@ -187,6 +189,7 @@ impl ProfilePage {
         self.requests = [0; 4];
         self.request = None;
         self.unavailable = None;
+        self._avatars_changed = None;
         self.view = None;
         self._changed = None;
         let Some(services) = self.services.clone() else {
@@ -231,13 +234,36 @@ impl ProfilePage {
         let weak = cx.weak_entity();
         view.update(cx, |view, _| {
             view.on_action(Rc::new(move |action, window, cx| {
-                let _ = weak.update(cx, |page, cx| page.action(action, window, cx));
+                // ProfileView is still being updated while it emits this action. Navigation or a
+                // reader link that re-enters the same host would panic, so dispatch after the
+                // component update completes.
+                let weak = weak.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = weak.update(cx, |page, cx| page.action(action, window, cx));
+                });
             }));
         });
         let request = view.read(cx).request();
         self.request = Some(request);
         self._changed = Some(cx.observe(&view, |_, _, cx| cx.notify()));
         self.view = Some(view);
+        // The shared avatar cache notifies its controller when a decode lands. Reapply the header
+        // image from that event, not from `render`, so a late picture updates the page once.
+        self._avatars_changed = self.avatars.accounts().and_then(|accounts| {
+            let entity = accounts.upgrade()?;
+            Some(cx.observe(&entity, |page, _, cx| {
+                if let Some(basic) =
+                    page.view
+                        .as_ref()
+                        .and_then(|view| match view.read(cx).basic() {
+                            SectionState::Ready(basic) => Some(basic.clone()),
+                            _ => None,
+                        })
+                {
+                    page.sync_avatar(basic, cx);
+                }
+            }))
+        });
     }
 
     pub(super) fn action(
@@ -633,13 +659,6 @@ fn repository_error(error: RepositoryError) -> PresentationError {
 impl Render for ProfilePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(view) = self.view.clone() {
-            // A late avatar completion only changes presentation; no read is restarted.
-            if let Some(basic) = match view.read(cx).basic() {
-                SectionState::Ready(basic) => Some(basic.clone()),
-                _ => None,
-            } {
-                self.sync_avatar(basic, cx);
-            }
             return view.into_any_element();
         }
         if let Some(error) = &self.unavailable {
