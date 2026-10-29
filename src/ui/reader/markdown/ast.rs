@@ -308,11 +308,11 @@ impl Building {
                         return;
                     }
                     self.inline.text.truncate(start);
-                    // Open HTML ranges that began inside the removed alt text
-                    // would point into the middle of the following text (and
-                    // possibly split a UTF-8 character); close or discard them
-                    // before any more text is appended.
-                    close_html_opens(&mut self.html, &mut self.inline);
+                    // HTML opened before this image keeps spanning the text
+                    // that follows it; only ranges that began inside the
+                    // removed alt text are dropped, so no stale byte offset
+                    // can split the following UTF-8 characters.
+                    self.html.retain(|open| open.start <= start);
                     // The description's formatting belongs to the removed
                     // text. Keeping it would style the following text with
                     // stale ranges, or even cut a multibyte character.
@@ -1198,6 +1198,12 @@ fn open_html(
     in_cell: bool,
 ) {
     let start = inline.text.len();
+    // The HTML parser bounds one fragment's tree, but this stack survives
+    // across `InlineHtml` events. Bound it too, so an unmatched closing tag
+    // never scans an unbounded history of openings.
+    if opens.len() >= html::MAX_DEPTH {
+        return;
+    }
     opens.push(HtmlOpen {
         name: element.name.clone(),
         kind,

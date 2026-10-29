@@ -261,6 +261,30 @@ fn dropped_inline_elements_suppress_their_content_across_events() {
 }
 
 #[test]
+fn html_ranges_survive_images_that_remove_alt_text() {
+    let doc = parse("<a href=\"guide.md\">before ![alt](p.png) after</a>");
+    let paragraph = find_paragraph(&doc.blocks, "before");
+    assert_eq!(paragraph.text, "before  after", "{paragraph:?}");
+    assert_eq!(
+        paragraph.links,
+        vec![(0..13, "guide.md".to_string())],
+        "the surrounding anchor still covers the text after the image: {paragraph:?}"
+    );
+}
+
+#[test]
+fn many_unclosed_inline_tags_stay_bounded() {
+    let mut input = "<b>".repeat(20_000);
+    input.push_str("text");
+    for _ in 0..20_000 {
+        input.push_str("</i>");
+    }
+    let doc = parse(&input);
+    let paragraph = find_paragraph(&doc.blocks, "text");
+    assert!(!paragraph.text.is_empty());
+}
+
+#[test]
 fn html_links_survive_markdown_emphasis_inside_a_cell() {
     let doc = parse("| a |\n|---|\n| <a href=\"guide.md\">read *this*</a> |");
     let rows = doc

@@ -176,8 +176,7 @@ fn is_raw_text(name: &str) -> bool {
 /// unbounded depth would abort the process with a stack overflow even though
 /// the input is small. Deeper starts are flattened: their text is kept, the
 /// extra tags are dropped, and the end tags are consumed by `suppressed`.
-const MAX_DEPTH: usize = 256;
-
+pub(crate) const MAX_DEPTH: usize = 256;
 /// Elements dropped with their entire raw content (no readable text).
 fn is_raw_dropped(name: &str) -> bool {
     matches!(name, "script" | "style" | "template")
