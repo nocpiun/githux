@@ -283,7 +283,7 @@ git diff --check
 ### 验证边界（重要）
 
 - **真实 GitHub 认证尚未验证。** 本 PR 没有读取 `gh auth token`、浏览器 Cookie 或任何用户文件，也没有对 `api.github.com` 发请求。真实 PAT 联调要等用户在产品 UI 里显式提供 token。
-- **真实 Windows Credential Manager**：只有“用自己的唯一测试项读写删”这一条在本机实际执行通过；产品路径（登录→保存→重启→读取）尚未接入 UI，因此未验证。
+- **真实 Windows Credential Manager**：只有“用自己的唯一测试项读写删”这一条在本机实际执行通过；产品路径（登录→保存→重启→读取）现已接入正式 Shell，但真实 PAT 联调仍未验证，须由负责人在原生窗口输入 token。
 - **local mock 端到端**：真实 socket、真实 HTTP/1.1 解析、真实 reqwest 客户端，但服务端是仓库内的最小 mock。
 - **HTTPS/TLS**：本地 mock 走明文 HTTP（仅限 localhost 测试 base URL）。生产 `api.github.com` 的 TLS 路径由 reqwest + native-tls 承担，未在 CI 中真实连通验证。
 - **依赖选择**：`reqwest 0.13.5` + `tokio 1.54` 在固定工具链 1.98.1 上本地编译、测试通过；四平台 CI 编译以 PR 检查为准，本地无法代替。

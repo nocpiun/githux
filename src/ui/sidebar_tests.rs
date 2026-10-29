@@ -1,5 +1,9 @@
 //! Interaction and measured layout coverage for the resizable sidebar.
 use super::{Shell, geometry::*, sidebar_state::SidebarState};
+use crate::domain::{
+    AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId, RepoOwner, RepoSummary,
+    RepoVisibility,
+};
 use crate::workspace::Route;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
@@ -16,6 +20,47 @@ fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContex
         Shell::bind_keys(cx);
     });
     let (view, cx) = cx.add_window_view(Shell::new);
+    // Same deterministic test rows/account as the navigation tests; the product populates these
+    // from the real account service, never from a fixture.
+    view.update(cx, |shell, cx| {
+        shell.set_repositories(
+            (0..124)
+                .map(|index| {
+                    let owner = ["githux-dev", "northstar", "studio", "demo"][index % 4];
+                    RepoSummary {
+                        id: index as u64,
+                        full_name: format!("{owner}/repo-{index:03}"),
+                        name: format!("repo-{index:03}"),
+                        owner: RepoOwner {
+                            id: 1,
+                            login: owner.to_string(),
+                            avatar_url: None,
+                        },
+                        visibility: RepoVisibility::Public,
+                        fork: false,
+                        archived: false,
+                        description: None,
+                        default_branch: Some("main".to_string()),
+                    }
+                })
+                .collect(),
+            cx,
+        );
+        shell.set_account(
+            Some(AccountSummary {
+                identity: AccountIdentity {
+                    key: AccountKey::new(1, HostId::github()),
+                    login: "lin-dev".to_string(),
+                    display_name: Some("Lin".to_string()),
+                    avatar_url: None,
+                    html_url: None,
+                },
+                epoch: AuthEpoch(1),
+                authorization: crate::domain::account::AuthorizationState::Verified,
+            }),
+            cx,
+        );
+    });
     cx.simulate_resize(size(px(1200.0), px(700.0)));
     cx.run_until_parked();
     (view, cx)
@@ -1943,4 +1988,60 @@ fn resize_switch_animation_survives_real_drag_events_and_layout_frames(cx: &mut 
         }
         release(pointer, cx);
     }
+}
+
+/// Review finding 1: a Settings thumb drag must be settled when the platform drag ends, otherwise
+/// `Motion::thumb_drag` stays set and every later wheel event is consumed without moving the page.
+/// Finding 2: hovering the overflowing Settings page must animate its fade, so a frame is requested
+/// while the fade runs and it retires afterward.
+#[gpui::test]
+fn the_settings_scroll_region_settles_its_drag_and_animates_its_fade(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(900.0), px(560.0)));
+    cx.run_until_parked();
+    click("nav-settings", cx);
+    cx.run_until_parked();
+
+    // The Settings page has a bar only for its own session, and it is not dragging initially.
+    let settings = view.read_with(cx, |s, _| s.active_tab_id());
+    let page_bars_present = view.read_with(cx, |s, _| s.page_bars(settings).is_some());
+    assert!(page_bars_present, "the Settings region owns its own Bars");
+    assert_eq!(
+        view.read_with(cx, |s, _| s.page_bars_dragging(settings)),
+        None
+    );
+
+    // Start a thumb drag the way the shared Bar does, then simulate the platform dropping it.
+    view.update(cx, |s, _| s.start_page_thumb_drag(settings, 0));
+    assert_eq!(
+        view.read_with(cx, |s, _| s.page_bars_dragging(settings)),
+        Some(gpui::Axis::Vertical),
+        "the drag is recorded on the session's own Bars"
+    );
+    // A frame with no active platform drag must settle it (the render loop does this each frame).
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |s, _| s.page_bars_dragging(settings)),
+        None,
+        "a released thumb drag must be settled so wheel scrolling is not permanently consumed"
+    );
+    // The fade still retires after the settle (this also proves opacity is being sampled).
+    view.update(cx, |s, _| {
+        s.page_bars_hover(settings, true, 0);
+    });
+    view.update(cx, |s, _| {
+        let _ = s.page_bars_hover(settings, false, 0);
+    });
+    let opacity = view.update(cx, |s, _| s.page_bars_opacity(settings, 140));
+    assert_eq!(
+        opacity, 0.0,
+        "the fade retires to zero after the pointer leaves"
+    );
+    assert!(
+        !view.read_with(cx, |s, _| s.page_bars_animating(settings)),
+        "the fade is not left animating after it retires"
+    );
 }

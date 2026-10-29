@@ -67,22 +67,30 @@ pub(crate) struct AccountRuntime {
     pub accounts: Arc<AccountService>,
     executor: Arc<BackgroundExecutor>,
     jobs: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    closed: std::sync::atomic::AtomicBool,
+    /// Whether shutdown has begun. Exposed so the production-composition tests can observe that
+    /// dropping the controller really tears the account stack down.
+    pub closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AccountRuntime {
+    #[allow(dead_code)] // Used by the module tests that build a runtime without a custom transport.
     pub fn new(accounts: AccountService, executor: Arc<BackgroundExecutor>) -> Self {
         Self {
             accounts: Arc::new(accounts),
             executor,
             jobs: Mutex::new(Vec::new()),
-            closed: std::sync::atomic::AtomicBool::new(false),
+            closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// The executor every account/network call runs on. Pages mount their own reads on it instead
+    /// of creating a second runtime thread.
+    pub fn executor(&self) -> Arc<BackgroundExecutor> {
+        self.executor.clone()
     }
 
     /// Run one tracked operation on the existing Tokio executor. The caller owns
     /// the operation generation and both the result and the completion signal.
-    ///
     /// `settled` runs on the network thread after the future ends (including a
     /// durable commit that outlived cancellation). It must only enqueue cheap
     /// data; it must not touch GPUI or block.

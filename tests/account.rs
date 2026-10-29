@@ -21,12 +21,20 @@ mod network;
 #[path = "../src/storage/mod.rs"]
 mod storage;
 
-#[path = "../src/bin_support/account_modules.rs"]
-mod account_modules;
-#[allow(unused_imports)]
-use account_modules as ui;
-#[allow(unused_imports)]
-use account_modules::bridge as app;
+// The production-composition tests exercise the ordinary Shell as well, so they use the real
+// product module tree. Only the external boundaries (database, credentials, transport) are
+// injected by the test bodies.
+#[path = "../src/app/mod.rs"]
+#[allow(dead_code)]
+mod app;
+
+// The example-only preview window is a separate developer target. These tests exercise the
+// product composition (`app::run`'s entity graph), so the example module tree is not included
+// here; the example keeps its own scroll-region coverage in its own target.
 
 #[path = "../src/platform/mod.rs"]
-pub mod platform;
+mod platform;
+#[path = "../src/ui/mod.rs"]
+mod ui;
+#[path = "../src/workspace/mod.rs"]
+mod workspace;

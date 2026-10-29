@@ -23,7 +23,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use crate::ui::fixtures::RepoFixture;
+use crate::domain::RepoSummary;
 
 pub(super) type Run = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 pub(super) type Move = Rc<dyn Fn(isize, &mut Window, &mut App) + 'static>;
@@ -38,8 +38,9 @@ pub(super) struct Command {
     pub icon: IconName,
 }
 
-/// Every command this round offers: the shell's pages, then the fixture repositories.
-pub(super) fn commands(repositories: &[RepoFixture]) -> Vec<Command> {
+/// Every command this round offers: the shell's pages, then the active account's repository rows.
+/// The palette never fetches on its own, so it can only offer what the sidebar already shows.
+pub(super) fn commands(repositories: &[RepoSummary]) -> Vec<Command> {
     let pages = [
         ("nav:home", "Go to Home", IconName::House),
         ("nav:settings", "Go to Settings", IconName::Settings),
@@ -62,8 +63,8 @@ pub(super) fn commands(repositories: &[RepoFixture]) -> Vec<Command> {
         })
         .collect();
     all.extend(repositories.iter().map(|repo| Command {
-        value: format!("repo:{}", repo.full_name()),
-        label: repo.full_name(),
+        value: format!("repo:{}", repo.full_name),
+        label: repo.full_name.clone(),
         group: "Repositories",
         icon: IconName::Folder,
     }));
@@ -487,11 +488,20 @@ mod tests {
         commands(
             &repos
                 .iter()
-                .map(|(namespace, name)| RepoFixture {
-                    namespace: namespace.to_string(),
+                .map(|(owner, name)| RepoSummary {
+                    id: 1,
+                    full_name: format!("{owner}/{name}"),
                     name: name.to_string(),
-                    description: "fixture",
-                    language: "Rust",
+                    owner: crate::domain::RepoOwner {
+                        id: 1,
+                        login: owner.to_string(),
+                        avatar_url: None,
+                    },
+                    visibility: crate::domain::RepoVisibility::Public,
+                    fork: false,
+                    archived: false,
+                    description: None,
+                    default_branch: Some("main".to_string()),
                 })
                 .collect::<Vec<_>>(),
         )

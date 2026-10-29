@@ -1,4 +1,12 @@
-//! Application startup and composition. Business services are not implemented yet.
+//! Application startup and composition.
+//!
+//! Startup installs the account controller and opens the ordinary Githux Shell window. The
+//! controller restores the saved account directory on its own background thread, so nothing here
+//! blocks the UI thread on SQLite or the platform credential store, and the window shows an honest
+//! logged-out or restoring state first.
+//!
+//! The developer-only account example is a separate Cargo target. This product path has no
+//! preview flag, fixture scenario selector or preview window hook.
 
 use ely_core::{
     Assets,
@@ -9,7 +17,10 @@ use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions
 #[cfg(target_os = "windows")]
 use ely_core::theme::ActiveTheme;
 
-use crate::{platform, ui::Shell};
+pub mod accounts;
+pub mod avatar;
+
+use crate::{app::accounts::Accounts, platform, ui::Shell};
 
 pub fn run() {
     gpui_platform::application()
@@ -47,6 +58,8 @@ pub fn run() {
                     ) {
                         eprintln!("Native caption unavailable; using custom controls: {error}");
                     }
+                    let accounts = cx.new(|cx| Accounts::new(None, window, cx));
+                    cx.set_global(AccountsHandle(accounts));
                     cx.new(|cx| Shell::new(window, cx))
                 },
             )
@@ -61,4 +74,28 @@ pub fn run() {
             .detach();
             cx.activate(true);
         });
+    // Once the event loop returns, let any submitted SQLite/credential commit and the executor
+    // finish, bounded by the controller's existing exit gate.
+    crate::app::accounts::wait_for_shutdown();
+}
+
+/// The app-global account controller. The shell and any future page read it from here instead of
+/// constructing a second service stack.
+pub struct AccountsHandle(pub gpui::Entity<Accounts>);
+
+impl gpui::Global for AccountsHandle {}
+
+impl AccountsHandle {
+    /// The installed controller, once a window has created it.
+    pub fn get(cx: &App) -> Option<gpui::Entity<Accounts>> {
+        cx.try_global::<Self>().map(|handle| handle.0.clone())
+    }
+
+    /// The narrow production access point for the next integration step: the active account's
+    /// account service, repository service and executor. `None` while logged out or unavailable.
+    #[allow(dead_code)]
+    pub fn services(cx: &App) -> Option<crate::app::accounts::AccountServices> {
+        let accounts = Self::get(cx)?;
+        accounts.read(cx).services()
+    }
 }
