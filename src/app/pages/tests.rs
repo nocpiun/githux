@@ -676,3 +676,58 @@ fn authorization_change_drops_page_hosts_without_reusing_their_old_context(
         "the old authorization-bound page host must be dropped"
     );
 }
+
+#[gpui::test]
+fn compact_retry_state_is_readable_and_retries_once(cx: &mut TestAppContext) {
+    use crate::ui::compact_status;
+
+    cx.update(ely_core::init_for_tests);
+    let (view, cx) = cx.add_window_view(|_window, _cx| {
+        use gpui::{App, Context, IntoElement, Render, Window, div, prelude::*};
+        struct Probe {
+            retries: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let retries = self.retries.clone();
+                let failed = compact_status::failed(
+                    "probe-failed",
+                    "Failed to load docs",
+                    "rate limited; try again later",
+                    Some(move |_: &mut Window, _: &mut App| retries.set(retries.get() + 1)),
+                    None,
+                    cx,
+                );
+                let loading = compact_status::loading("probe-loading", "Loading docs…", cx);
+                let empty = compact_status::empty("No files", cx);
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(failed)
+                    .child(loading)
+                    .child(empty)
+            }
+        }
+        Probe {
+            retries: std::rc::Rc::new(std::cell::Cell::new(0)),
+        }
+    });
+    cx.run_until_parked();
+    let failed = cx
+        .debug_bounds("compact-failed-Failed to load docs")
+        .unwrap();
+    let loading = cx.debug_bounds("compact-loading-Loading docs…").unwrap();
+    assert!(failed.size.height > gpui::px(0.0));
+    assert!(loading.size.height > gpui::px(0.0));
+    assert!(cx.debug_bounds("compact-empty-No files").is_some());
+    // One real click on the warning mark is one retry. The test entity owns the count; the
+    // production pages route the same callback through their existing single-resource retry.
+    cx.simulate_click(failed.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |probe, _| probe.retries.get()),
+        1,
+        "a warning mark carries exactly one retry"
+    );
+}

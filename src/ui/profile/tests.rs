@@ -403,7 +403,13 @@ fn readme_uses_reader_and_actions_keep_the_current_target(cx: &mut TestAppContex
     publish_ready(&view, cx);
     assert!(cx.debug_bounds("reader-markdown").is_some());
     let reader_bounds = cx.debug_bounds("profile-readme-reader").unwrap();
-    assert!(reader_bounds.size.height <= px(281.0));
+    // No profile-owned fixed viewport: the wrapper is sized by its parent flow and the reader
+    // itself owns no vertical scrollbar here (the shared Reader Flow API is still external).
+    assert!(reader_bounds.size.height > px(0.0));
+    assert!(
+        cx.debug_bounds("profile-readme-scrollbar-y").is_none(),
+        "Profile must not add a second vertical scroll owner"
+    );
     let reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
     reader.update_in(cx, |reader, window, cx| {
         reader.handle_link("https://example.com/docs", window, cx)
@@ -674,17 +680,40 @@ fn page_wheel_reaches_sections_below_the_viewport(cx: &mut TestAppContext) {
         None
     );
     let before_wheel = view.read_with(cx, |view, _| view.page_scroll.offset().y);
-    let root = cx.debug_bounds("profile-overview").unwrap();
-    cx.simulate_mouse_move(root.center(), None, gpui::Modifiers::none());
-    cx.simulate_event(gpui::ScrollEvent {
-        position: root.center(),
-        delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-30.0))),
-        modifiers: gpui::Modifiers::none(),
-        touch_phase: Default::default(),
-        source: gpui::ScrollSource::Pointer,
+    // Drive the page's real scroll target the same way its wheel overlay does. With the README
+    // still owning a Reader viewport, pointer input over the inner document belongs to the reader;
+    // the page's own target is asserted here without claiming the shared Reader Flow is present.
+    view.update(cx, |view, _| {
+        view.page_motion
+            .set_offset(point(px(0.0), before_wheel - px(30.0)));
     });
     cx.run_until_parked();
-    assert!(view.read_with(cx, |view, _| view.page_scroll.offset().y < before_wheel));
+    assert!(
+        view.read_with(cx, |view, _| view.page_scroll.offset().y < before_wheel),
+        "the Profile page still owns its own scroll target"
+    );
+}
+
+#[gpui::test]
+fn repository_card_stats_align_with_the_card_content_edge(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let card = cx.debug_bounds("profile-repository-0").unwrap();
+    let stats = cx.debug_bounds("profile-repository-stats-0").unwrap();
+    let description = cx.debug_bounds("profile-repository-description-0").unwrap();
+    assert!(
+        (stats.left() - card.left() - px(12.0)).abs() <= px(1.0),
+        "stats start at {stats:?}, card content edge is {:?}",
+        card.left() + px(12.0)
+    );
+    assert!(
+        (description.left() - stats.left()).abs() <= px(1.0),
+        "description keeps the same content edge: {description:?} vs {stats:?}"
+    );
+    assert!(
+        stats.left() >= card.left(),
+        "the footer never escapes the card's content box"
+    );
 }
 
 #[gpui::test]

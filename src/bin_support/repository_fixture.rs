@@ -59,6 +59,7 @@ pub enum Scene {
     OverviewZero,
     OverviewLong,
     LatestUnavailable,
+    ReleasesFailure,
     ReadmeParagraphEnd,
     ReadmeListEnd,
     ReadmeCodeEnd,
@@ -67,7 +68,7 @@ pub enum Scene {
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 22] = [
+    pub const ALL: [Scene; 23] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
@@ -86,6 +87,7 @@ impl Scene {
         Scene::OverviewZero,
         Scene::OverviewLong,
         Scene::LatestUnavailable,
+        Scene::ReleasesFailure,
         Scene::ReadmeParagraphEnd,
         Scene::ReadmeListEnd,
         Scene::ReadmeCodeEnd,
@@ -100,6 +102,7 @@ impl Scene {
             Scene::OverviewZero => "Overview zero",
             Scene::OverviewLong => "Overview long",
             Scene::LatestUnavailable => "Latest unavailable",
+            Scene::ReleasesFailure => "Releases failure",
             Scene::ReadmeParagraphEnd => "README paragraph end",
             Scene::ReadmeListEnd => "README list end",
             Scene::ReadmeCodeEnd => "README code end",
@@ -139,6 +142,9 @@ impl Scene {
             }
             Scene::LatestUnavailable => {
                 "The list contains releases but latest is 404: latest unavailable does not prove no releases."
+            }
+            Scene::ReleasesFailure => {
+                "The first latest request fails once; the compact warning mark retries only Releases and recovers."
             }
             Scene::ReadmeParagraphEnd
             | Scene::ReadmeListEnd
@@ -322,6 +328,7 @@ fn locator_path() -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArmedFailure {
     Languages,
+    Releases,
     Root,
     Directory,
     File,
@@ -768,6 +775,7 @@ impl FixtureTransport {
         });
         let body = match resource {
             "/releases/latest" if matches!(scene, Scene::LatestUnavailable | Scene::OverviewZero) => return json_response(404,"{}"),
+            "/releases/latest" if scene == Scene::ReleasesFailure && self.take_armed(ArmedFailure::Releases) => return json_response(500,"{}"),
             "/releases/latest" => release,
             "/releases" => if scene == Scene::OverviewZero {serde_json::json!([])} else {serde_json::json!([release])},
             "/contributors" => serde_json::Value::Array((0..if scene == Scene::OverviewZero {0} else if scene == Scene::OverviewLong {35} else {4})
@@ -806,6 +814,7 @@ fn armed_for(scene: Scene) -> Option<ArmedFailure> {
         Scene::DirectoryFailure => Some(ArmedFailure::Directory),
         Scene::RootFailure => Some(ArmedFailure::Root),
         Scene::OverviewError => Some(ArmedFailure::Languages),
+        Scene::ReleasesFailure => Some(ArmedFailure::Releases),
         Scene::FileFailure => Some(ArmedFailure::File),
         _ => None,
     }

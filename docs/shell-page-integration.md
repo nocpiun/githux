@@ -80,6 +80,16 @@ Issue/PR 详情、通知、搜索和所有写操作未扩展。未设计路由�
 
 Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`/`Bars`。Shell 不会在外层再给它们包一个抢占 wheel 的页面滚动器；该外层 scrolling 现在只用于 Settings/尚未设计的空白页。页面内滚动条仍使用共享 `ui::scroll`，没有第二套几何或 fade。
 
+## 紧凑状态与布局精修（2026-10-29 第二轮反馈）
+
+- `src/ui/compact_status.rs` 是页面紧凑状态的共享呈现：可重试失败为黄色 warning 标记 + tooltip 原因 + 单次重试（鼠标/Enter/Space），加载为 Ely spinner，确认空值为中性圆点；错误详情、登录提示、空状态和 Partial 仍保留必要文字。没有新增请求或轮询。
+- Repository 文件树的目录 loading/Failed、树根失败/截断、分支失败与 reader loading，以及 overview 的 Releases/Contributors 错误/加载都使用同一组呈现。overview 的 no-latest 是确认空值，不会显示成 warning。
+- Home 列 hard error 使用 warning+tooltip；loading 与 unavailable 保留文字与各自 marker。
+- Profile section loading 使用 spinner；section error 使用 warning+tooltip，具体原因保留可读文本。
+- Profile Pinned 卡片的描述和 language/star/fork 行按卡片内容起点对齐；文字层级与卡片布局不变。
+- 本人 Profile 打开时，侧栏账户行不再显示仓库/导航行的选中线；头像、current 身份与账户交互不变。
+- Profile README 已移除自身固定 280px 高度；在 Reader 的共享自然高度/Flow API 提供前，内容区仍不能完整参与页面流。本轮没有用固定大高度冒充完成，也没有修改 reader 源码。该项保持未完成，等待 reader owner。
+
 ## 验证与限制
 
 正式集成测试（`src/app/pages/tests.rs`）使用临时 SQLite、内存凭据、可控 transport、真实 `Accounts` 控制器、正式 `Shell` 与真实页面组件，覆盖：
@@ -91,4 +101,4 @@ Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`
 - 关闭一个仓库标签不关闭或清空另一个；
 - 重新验证推进授权 epoch 后旧页面 host 被丢弃。
 
-真实 Windows 窗口对正式 `target/debug/githux.exe` 已核对启动、Home/Feed 真实数据、侧栏仓库 README/树/分支、Profile 头像/README/pins 与滚动；截图只保留在被忽略目录。未由本任务完成：负责人输入真实 PAT 的完整验收、原生滚轮到贡献图底部、IME、多 DPI/跨屏、触控板，以及 Settings 的最终设计。Settings 仍是过渡页，不能以本轮状态视为最终验收。
+真实 Windows 窗口对正式 `target/debug/githux.exe` 已核对启动、Home/Feed 真实数据、侧栏仓库 README/树/分支、Profile 头像/README/pins 与滚动；截图只保留在被忽略目录。未由本任务完成：负责人输入真实 PAT 的完整验收、Profile README 的共享 Reader Flow、原生鼠标/键盘/IME、多 DPI/跨屏与触控板，以及 Settings 的最终设计。Settings 仍是过渡页，不能以本轮状态视为最终验收。

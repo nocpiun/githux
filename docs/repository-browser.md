@@ -24,6 +24,12 @@
 
 `app::pages::repository_page` 已把 `RepositoryPage` 挂到正式 workspace 的仓库路由：同一账户 `AccountService`/`BackgroundExecutor`、真实会话、既有 overview/Code/README/分支/底条均保留。普通标签切换调用新增 `suspend`，只结束滚动/阅读器手势并保留已验证内容；关闭只释放该页 host；账户或授权变化保留分支/路径/展开的导航意图，丢弃内容/固定提交/上下文后由新会话重读。Star/Fork 没有写回调，不宣称成功；contributor/release typed action 由 host 复核后进入统一导航。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
+## 紧凑状态呈现（2026-10-29 第二轮反馈）
+
+文件树目录行的 loading 改用 Ely spinner（tooltip 给出目录名）；目录失败与 root/branch 失败合并为一个黄色 warning 标记，tooltip 保留原因，可重试时同一标记的鼠标/Enter/Space 只发起该资源的一次重试，恢复后标记消失。树截断/不完整和 capped 改用 warning 图标 + tooltip，不再让长句占满行。真空目录 `empty`、README 缺失/不确定、错误详情面板和 Partial 仍保留文字，因为这些是数据/操作语义而非可折叠的紧凑失败。
+
+Releases/Contributors 的紧凑条也使用同一 warning/loading 呈现；latest 的确认空值是中性圆点，不是 warning。开发 fixture 新增 ReleasesFailure（只失败一次，可重试恢复），与既有一轮失败场景一致，只存在于 example/test 装配。
+
 ## 构造与生命周期（正式接入契约）
 
 主机只注入已存在的能力：`Arc<AccountService>`、`Arc<BackgroundExecutor>` 与一个 `RepositoryLocator`。构造后页面默认**未激活**：

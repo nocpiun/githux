@@ -5,6 +5,8 @@
 
 #[path = "../ui/avatar.rs"]
 pub mod avatar;
+#[path = "../ui/compact_status.rs"]
+pub mod compact_status;
 #[path = "../ui/geometry.rs"]
 pub mod geometry;
 #[path = "../ui/home/mod.rs"]

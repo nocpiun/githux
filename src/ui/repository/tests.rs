@@ -708,6 +708,39 @@ fn a_directory_failure_is_scoped_to_that_row_and_one_retry_recovers(cx: &mut Tes
 }
 
 #[gpui::test]
+fn failed_directory_uses_one_compact_retry_mark_that_disappears_after_recovery(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(Scene::DirectoryFailure);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.update(cx, |page, cx| page.toggle_directory("docs", cx));
+    settle(&page, cx, |page| page.tree_failure("docs").is_some());
+    frames(cx);
+    let mark = cx
+        .debug_bounds("compact-failed-Failed to load docs")
+        .expect("the failed directory keeps one compact warning mark");
+    assert!(
+        cx.debug_bounds("repository-row-failed").is_some(),
+        "the row owns the mark, not a separate text and button pair"
+    );
+    // The mark is the retry target: a single click starts one scoped read.
+    cx.simulate_click(mark.center(), Modifiers::none());
+    settle(&page, cx, |page| page.tree("docs").is_some());
+    frames(cx);
+    assert!(
+        cx.debug_bounds("compact-failed-Failed to load docs")
+            .is_none(),
+        "recovery removes the warning mark"
+    );
+    assert!(cx.debug_bounds("repository-row-docs").is_some());
+}
+
+#[gpui::test]
 fn a_file_failure_replaces_only_the_reader_and_one_retry_recovers(cx: &mut TestAppContext) {
     let fixture = Fixture::new(Scene::FileFailure);
     fixture.login(1);

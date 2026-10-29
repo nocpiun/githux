@@ -17,6 +17,13 @@
 
 `app::pages::ProfilePage` 已把本组件接入正式 Shell。host 先用目标 login 读取 `ProfileBasic`，只有服务器返回后才用真实数字 id/canonical login 建立 `ProfileTarget`；随后独立读取 pins、host 生成的最近滚动一年贡献区间和同名公开仓库根 README。README 的缺失/不确定/不适用通过新增 `SectionState::Unavailable` 中性呈现，不作为认证或网络错误。Header 头像通过新增 `set_avatar` 只接收 `app::avatar` 已解码图片；原有圆形、首字母 fallback 与尺寸不变。本人/他人由 `Route::Profile` / `Route::UserProfile` 统一寻址，canonical 更新只作用于原 TabId。接入细节与真实验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
+## 2026-10-29 第二轮反馈
+
+- Pinned/Popular 卡片的描述与 language/star/fork 行改为按卡片内容起点对齐，不再跟随标题文字的图标缩进；名称层级、两列/单列、键盘行为不变。
+- Profile section loading 使用 Ely spinner 加可读标签；section error 使用 warning 图标 + tooltip，原因文本保留。确认缺失/不确定的 README 仍使用中性 `Unavailable`。
+- 本人 Profile 打开时侧栏账户行不再显示导航选中线；头像、current 身份与账户点击不变。
+- README 自身的固定 280px 高度和 overflow 容器已移除。共享 Reader 的自然高度/Flow API 仍由 reader owner 提供；在该能力落地前 README 内容区不能完整参与 Profile 页面流，本项保持未完成，不用固定大高度或前端 strip 冒充。
+
 ## Host adapter / mounting 职责
 
 正式集成任务必须把组件声明进自己的 `ui` 模块树（本任务没有改 `src/ui/mod.rs`），并在 Profile 页面会话中持有 `Entity<ProfileView>`：

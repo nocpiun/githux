@@ -13,6 +13,8 @@
 
 #[path = "../ui/badge.rs"]
 pub mod badge;
+#[path = "../ui/compact_status.rs"]
+pub mod compact_status;
 #[path = "repository_fixture.rs"]
 pub mod fixture;
 #[path = "../ui/geometry.rs"]

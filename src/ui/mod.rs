@@ -35,6 +35,7 @@ pub mod accounts;
 pub mod avatar;
 pub(crate) mod badge;
 mod chrome;
+pub(crate) mod compact_status;
 pub(crate) mod geometry;
 pub mod home;
 mod page;
@@ -1874,7 +1875,10 @@ impl Shell {
             sidebar::account_row(
                 display,
                 account_avatar,
-                route == Route::Profile,
+                // The account row is the signed-in identity, not a page-selection item. Its own
+                // Profile page therefore keeps the avatar/current identity but does not draw the
+                // navigation selection lane that Home/Settings/repository rows use.
+                false,
                 frame,
                 move |window, cx| {
                     let target = target.clone();
