@@ -88,7 +88,11 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 
 12. **DNS 解析绕过本地来源策略（P2，安全）**：只检查 URL host 文本，`https://internal.example/` 解析到 `127.0.0.1`/`10.x` 仍会连接。外部客户端现在注入 `GuardResolver`：对每个 DNS 答案套用同一 `is_local_address` 判定，任一答案为本地/私网即让解析失败，连接固定在这些已校验地址上（重定向的每一跳都重新解析并重新校验）。回归测试用 `localhost`（离线必解析到 loopback）验证：去掉判定后该测试失败。
 
-第七轮（第六轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
+第七轮提出 1 条，核实成立并修复：
+
+13. **IPv6 unique-local 未拒绝（P2，安全）**：`fc00::/7` 是内网地址段，原策略只覆盖 loopback/未指定/链路本地/site-local，`https://[fd00::1]/` 因此仍可被连接；`GuardResolver` 复用同一判定，DNS 解析也没有拦住。现已并入 `is_local_address`（字面 host、重定向与 DNS 答案共用同一函数）。
+
+第八轮（第七轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
 
 ## 后续
 

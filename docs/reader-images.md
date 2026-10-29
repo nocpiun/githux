@@ -81,7 +81,7 @@ let reader = cx.new(|cx| {
 `ReqwestExternalImages` 使用自己的 `reqwest::Client`：
 
 - 不设置 `Authorization`、`Cookie`、`Proxy-Authorization`，请求只带图片 Accept；`.no_proxy()` 禁用系统代理，避免把代理凭据转发到图片主机。
-- 生产构造只接受 `https`；无 userinfo；拒绝 loopback/`localhost`/未指定/链路本地/私网（含 10/8、172.16/12、192.168/16）与 100.64/10 共享地址。IPv4-mapped IPv6（`[::ffff:127.0.0.1]`）先归一化为 IPv4 再套用同一策略，IPv6 链路本地（`fe80::/10`）与 site-local（`fec0::/10`）也拒绝，避免换一种拼写绕过本地来源边界；同一函数用于首跳和每个重定向 `Location`。（`file:`、`data:`、`javascript:` 等在进入 URL 校验前就已被 reader 拒绝。）
+- 生产构造只接受 `https`；无 userinfo；拒绝 loopback/`localhost`/未指定/链路本地/私网（含 10/8、172.16/12、192.168/16）与 100.64/10 共享地址。IPv4-mapped IPv6（`[::ffff:127.0.0.1]`）先归一化为 IPv4 再套用同一策略，IPv6 链路本地（`fe80::/10`）、site-local（`fec0::/10`）与 unique-local（`fc00::/7`，内网地址段）也拒绝，避免换一种拼写绕过本地来源边界；同一函数用于首跳和每个重定向 `Location`。（`file:`、`data:`、`javascript:` 等在进入 URL 校验前就已被 reader 拒绝。）
 - `Policy::none` 后**手动逐跳**重定向：用与连接方相同的 `reqwest::Url` 解析和 `join`，每一跳重新校验 scheme/host/userinfo，拒绝本地来源；超过 `max_redirects` 报 `TooManyRedirects`，不把 3xx 当成功。这避免了把凭据送到重定向目标（本路径根本没有凭据，但本地来源校验不能省）。
 - 总超时覆盖连接、每一跳和整个 body；`Content-Length` 只做提前拒绝提示，实际字节在流式累计时限制，超限即 `TooLarge`，不会先缓冲完整超大 body。
 - 测试构造 `with_local_http()`（`#[cfg(test)]`）允许 loopback `http`，用真实 socket 验证「请求里没有 Authorization/Cookie/Proxy-Authorization」「同源重定向跟随」「file/data 重定向不接触目标」「重定向循环有界」「Content-Length 缺失的流式上限」「停顿超时」。

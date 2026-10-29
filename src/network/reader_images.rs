@@ -177,12 +177,16 @@ fn is_local_address(addr: std::net::IpAddr) -> bool {
             }
             let segments = ip.segments();
             // `fe80::/10` is link-local; `fec0::/10` is the deprecated
-            // site-local range, refused for the same reason.
+            // site-local range; `fc00::/7` is the unique-local range used for
+            // internal networks. All three reach machines that are not part of
+            // the public internet, so a README picture must not connect to them.
             let site_local = (segments[0] & 0xffc0) == 0xfec0;
+            let unique_local = (segments[0] & 0xfe00) == 0xfc00;
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unicast_link_local()
                 || site_local
+                || unique_local
                 || ip == Ipv6Addr::LOCALHOST
         }
     }

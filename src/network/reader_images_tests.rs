@@ -292,6 +292,8 @@ fn alternate_local_address_spellings_are_refused() {
         "https://[::]/a.png",
         "https://[fe80::1]/a.png",
         "https://[fec0::1]/a.png",
+        "https://[fd00::1]/a.png",
+        "https://[fc00::1]/a.png",
     ] {
         assert!(
             matches!(
@@ -415,6 +417,10 @@ fn every_answer_address_is_classified_by_one_policy() {
         "::",
         "fe80::1",
         "fec0::1",
+        // IPv6 unique-local (`fc00::/7`) is the internal-network range.
+        "fd00::1",
+        "fc00::1",
+        "fd12:3456:789a::1",
         "::ffff:127.0.0.1",
         "::ffff:10.0.0.1",
     ] {
