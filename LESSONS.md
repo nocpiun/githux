@@ -1,6 +1,6 @@
 # 项目教训
 
-记录 Githux 实际遇到的问题，供所有 Agent 在改动前阅读。每条包含规则、原因、证据与适用范围；没有实际发生的故障写入设计风险，不伪造复盘历史。维护方式见 [共享文档索引](docs/README.md)。
+记录 Githux 实际遇到的问题，供所有 Agent 在任务开工时阅读并应用相关条目，交付时评估是否需要补充。每条包含规则、原因、证据与适用范围；有新证据时新增或完善旧条，没有新增无需凑条目。尚未发生的问题写入设计风险，不伪造复盘历史。执行要求见 [Agent 工作流](docs/agent-workflow.md)，维护分工见 [共享文档索引](docs/README.md)。
 
 ## L001：要重新包含子目录，先让父目录能够被遍历
 
@@ -65,3 +65,24 @@
 - **原因**：PR #14 的本轮 clean 收据与历史未解决线程同时存在，旧脚本继续等不存在的新行内评论；PR #17 只读核验又发现 PR base.sha 仍为 a57e56c，而 main ref 已到 9125427。
 - **证据**：[PR #14 收据](https://github.com/nocpiun/githux/pull/14#issuecomment-6392497811)、[PR #17 的旧 CI](https://github.com/nocpiun/githux/actions/runs/40158048254)；真实 checkout merge 的 parents 与目标 ref 核验及回归记录见 [开发日志](docs/devlog/2026-10-25-review-timeout-retry.md)。
 - **范围**：审查等待器和并行 PR 集成；不能用更多轮询、重触发或关闭所有线程掩盖维度混淆。
+
+## L010：交互预览的 fixture 必须支持反复操作
+
+- **规则**：可交互预览按请求与资源身份应答，覆盖重复打开、返回、切换与重试；预览与行为测试共用 fixture。未建模请求明确报告开发配置错误，只有显式错误场景才返回相应产品错误。仓库预览的当前契约见 [开发预览与 fixture](docs/repository-browser.md#开发预览与-fixture)。
+- **原因**：repository example 最初用一次性响应队列 `pop_front()`，仅首屏请求有数据，耗尽后统一返回 404；正常后续点击被误报为资源或权限问题。测试与预览各用一套 transport，测试通过没有暴露预览中的缺口。
+- **证据**：[返工记录](docs/devlog/2026-10-28-repository-browser.md#本轮返工背景)及其“示例可完整、反复浏览”“预览场景与验收共用数据”；当前 [共享 fixture](src/bin_support/repository_fixture.rs) 的 `the_same_resource_can_be_read_repeatedly_and_in_any_order`、`scripted_failures_fire_once_so_a_single_retry_recovers`、`an_unmodelled_request_is_a_development_error_not_a_permission_result` 分别覆盖反复读取、一次失败后恢复和开发诊断（599），[页面行为测试](src/ui/repository/tests.rs) 覆盖嵌套目录、同文件重复打开与分支往返。预览与测试入口分别见 [example](examples/repository.rs) 和 [test](tests/repository.rs)。
+- **范围**：有返回、重复读取、异步请求或重试的交互预览与验收工具。一次性队列可用于刻意限定顺序的测试，不能冒充可自由操作的预览数据源；合成 fixture 的实网验证边界仍按 [L002](#l002模拟验证要写清边界)。
+
+## L011：裁切要核对实际绘制节点与设备像素边界
+
+- **规则**：图像圆角要核对图片绘制节点实际收到的 radii；滚动裁切要覆盖完全离屏、部分可见、小数偏移及不同 scale，使用不透明高对比源图核对绘制结果。针对空 mask 的防护只跳过真实交集宽或高为零的绘制，保留部分可见内容；账户头像的接入背景见 [账户接入](docs/account-ui-preview.md#正式-shell-的账户界面2026-10-28-反馈后重做)。
+- **原因**：头像最初仅在外层设 `rounded_full().overflow_hidden()`，图片节点仍露出方角。补图片节点圆角后又确认另一缺陷：GPUI 0.3.10 将不相交祖先 mask 钳成零面积，设备坐标取整可能把小数零高度扩为一像素，离屏头像及 tinted frame 在 viewport 下方露出细条。仅检查样式和布局尺寸无法识别这两处绘制问题。
+- **证据**：[头像形状修正](docs/devlog/2026-10-28-account-shell.md#负责人反馈轮二头像形状修正)记录图片节点 `.rounded_full()` 与原生角像素核验；[裁切防护与失败复现](docs/devlog/2026-10-28-account-shell.md#裁切防护与失败复现)记录关闭防护时回归失败、150% 原生探针修复前 46 个亮色图片像素到修复后 0。[生产渲染器](src/ui/avatar.rs) 的 `VisibleAvatar::paint` 保护整个 frame，`offscreen_images_never_reach_paint_with_an_empty_fractional_mask` 覆盖两个不相交祖先 mask、1.0/1.5 scale、小数偏移及延迟图片；[avatar example](examples/avatar.rs) 提供离线原生探针。
+- **范围**：GPUI/Ely 图片、滚动容器与祖先 mask 的绘制排查。空 mask 根因限定于日志所核验的 GPUI 0.3.10，不推广为所有框架均有此缺陷；原生 100% 缩放、手动拖动与动画手感未因此完成验收，验证边界按 [L002](#l002模拟验证要写清边界)。
+
+## L012：同一页面的组件拆分要保留联合验收
+
+- **规则**：按 [任务拆分工作流](docs/agent-workflow.md#角色派发与并行)指定页面组合的唯一执行者、联合预览和整页验收场景；独立组件探针验证局部行为，交付结论须说明实际组合的验证范围。
+- **原因**：repository-overview 最初独立于 browser 交付，独立示例下方使用模拟阅读区，真实 browser 未挂载该组件。分别验证无法证明摘要、Tabs、文件树与真实 reader 同页时的空间分配、分支切换与局部失败行为。后续将两任务合并，由 browser 单一执行者统一组合和验收。这是共享记录中的集成缺口；负责人对密度和布局的新选择不作为技术故障归因。
+- **证据**：[overview 初始结果与未接入边界](docs/devlog/2026-10-28-repository-overview.md#未执行--后续)、[任务合并与统一页面集成](docs/devlog/2026-10-28-repository-overview.md#合并任务与统一页面集成由-browser-执行)及 [browser 组合记录](docs/devlog/2026-10-28-repository-browser.md#owner-合并-browser--compact-overview统一页面)记录 PR #37 由统一 PR #35 取代。组合后的 [联合回归](src/ui/repository/extras_tests.rs) 中，`scoped_retry_keeps_source_and_sibling_groups` 验证 extras 失败/重试保留 reader，`overview_reads_once_and_branch_changes_keep_the_embedded_entity` 验证分支切换不倍增 extras 请求；日志另记录桌面与 880×560 的原生同页检查。当前联合入口与组件探针定位见 [统一页面契约](docs/repository-browser.md#统一页面与-overview-服务组合)。
+- **范围**：同页多个组件的并行实现、预览与交接。组件内部仍可独立开发和测试；联合 example 的验证不能推导正式 Shell 已接线，原生证据仍遵循 [L002](#l002模拟验证要写清边界)。
