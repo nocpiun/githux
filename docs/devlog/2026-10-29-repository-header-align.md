@@ -29,3 +29,21 @@
 ## 交付边界
 
 按本任务要求 PR 关联 First Release milestone #1，添加 `pending`，等待负责人原生验收，不合并、不启用 auto-merge。最终 head、CI/review 链接和全程裁决记录保存在 PR 与 `.agents/task/delivery-state.json`，不为审查后补日志再制造新提交。
+
+## 2026-10-29 rebase 到 feature/shell-pages 后的组合验证
+
+负责人要求本 UI 任务 rebase 到 `feature/shell-pages`，PR 合并目标由 `main` 改为该分支（PR #42 为 Shell 实际页面接线）。rebase 由主协调者完成，无人工源码冲突；本地 `git diff --check`、`cargo fmt --all -- --check` 已通过。
+
+组合基线以实时 `origin/feature/shell-pages` 为准。本任务发现并修复一处自己引入的可移植性问题：`header_tests.rs` 原来 `use crate::repository::{...}` 只存在于独立测试装配（`tests/repository.rs` 把 `repository` 挂在 crate 根）；rebase 后产品测试树把 `ui::repository` 真正挂载，该路径在产品 `--bin githux` 测试目标中不存在，CI code-check 报 `E0432`。改为 `use super::{ReaderStatus, ...}`（`tests.rs` 同一路径），测试逻辑不变。
+
+本地检查（均经 `.agents/task/cargo-serialized.ps1`、jobs=1、本 worktree target）：
+
+- `cargo fmt --all -- --check`：通过。
+- `cargo check --locked --all-targets`：通过。
+- `cargo test --locked --bin githux`：727 项通过（包含 Shell 真实页面挂载测试与 `header_tests`）。
+- `cargo test --locked --test repository`：495 项通过。
+- `cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`：在串行锁上排队执行，结果待补（不预设通过）。
+
+真实 Windows 组合验证：在包含 Shell 实际页面接线的正式 `target/debug/githux.exe`（不是 repository example）中核验 Code 两列 header 对齐；需要真实账户/凭据才能进入 Repository 页的路径不属于本任务合成证据范围，只记录已实际启动和可到达的步骤，截图写入被忽略的 `.agents/output/`。
+
+Shell 本轮继续修复 Profile README Flow 与简介三行换行，可能推进基线；本任务不替 Shell 修改这两个功能。若实时 `origin/feature/shell-pages` 前进，按 `githux-pr-review` 的 `base_changed` 处理，必要 rebase 后重新对新 head 走 CI/review，不沿用旧基线通过结论。

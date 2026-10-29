@@ -3,7 +3,7 @@
 use gpui::{Entity, TestAppContext, VisualTestContext, px};
 
 use super::{Fixture, activate, frames, normal, open, settle};
-use crate::repository::{ReaderStatus, RepositoryNavigation, RepositoryPage, Selection};
+use super::{ReaderStatus, RepositoryNavigation, RepositoryPage, Selection};
 use crate::repository_modules::fixture::Scene;
 
 fn aligned_headers(cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
