@@ -68,6 +68,27 @@ struct Inner {
     /// cancelling one document stops only its own loads.
     work: Mutex<HashMap<ImageScope, (CancellationToken, CancellationTokenSource)>>,
     cache: Mutex<ResolutionCache>,
+    /// Test-only gate that pauses after decoding and reports that worker's
+    /// thread, so a test can change the account at exactly that boundary.
+    #[cfg(test)]
+    publish_probe: Mutex<Option<PublishProbe>>,
+}
+
+/// Per-service test instrumentation for the decode -> publish boundary.
+#[cfg(test)]
+pub(super) struct PublishProbe {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl PublishProbe {
+    fn finish(self) {
+        let _ = self.entered.send(());
+        self.resume
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("release the publish probe");
+    }
 }
 
 impl Drop for Inner {
@@ -157,6 +178,8 @@ impl RepositoryImageService {
                 permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
                 work: Mutex::new(HashMap::new()),
                 cache: Mutex::new(ResolutionCache::default()),
+                #[cfg(test)]
+                publish_probe: Mutex::new(None),
             }),
         }
     }
@@ -170,6 +193,22 @@ impl RepositoryImageService {
     /// still the active authorization.
     pub fn verify(&self) -> bool {
         self.inner.session.verify()
+    }
+
+    /// Pauses the next load after decoding and before publishing, so a test can
+    /// change the account at exactly that boundary.
+    #[cfg(test)]
+    pub fn pause_before_publish(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *self.inner.publish_probe.lock().expect("publish probe lock") =
+            Some(PublishProbe { entered, resume });
+        (ready, release)
     }
 
     async fn load(
@@ -207,12 +246,37 @@ impl RepositoryImageService {
         }
         let limits = self.inner.limits.clone();
         let decode = tokio::task::spawn_blocking(move || decode_image(bytes, &limits));
-        tokio::select! {
+        let decoded = tokio::select! {
             biased;
-            _ = cancel.clone().cancelled() => Err(ImageFailure::Cancelled),
-            _ = tokio::time::sleep_until(deadline) => Err(ImageFailure::Timeout),
+            _ = cancel.clone().cancelled() => return Err(ImageFailure::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => return Err(ImageFailure::Timeout),
             decoded = decode => decoded.map_err(|_| ImageFailure::Network)?,
+        };
+        #[cfg(test)]
+        {
+            let probe = self
+                .inner
+                .publish_probe
+                .lock()
+                .expect("publish probe lock")
+                .take();
+            if let Some(probe) = probe {
+                let _ = tokio::task::spawn_blocking(move || probe.finish()).await;
+            }
         }
+        // Decoding is another await boundary: the account may have been
+        // switched, removed or reauthorized while the blocking decode ran.
+        // Retired authorization must never publish repository bytes, so this is
+        // re-checked after the await — staleness outranks the decoded picture,
+        // cancellation and worker errors, exactly as `RepositorySession::content`
+        // does after its own preparation step.
+        if !self.inner.session.verify() {
+            return Err(ImageFailure::StaleContext);
+        }
+        if cancel.is_cancelled() {
+            return Err(ImageFailure::Cancelled);
+        }
+        decoded
     }
 
     async fn repository_bytes(

@@ -76,7 +76,11 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 8. **换预算未取消旧板（P2）**：`set_image_limits` 丢弃旧 board，但新 board 拿到新的 reader 标识，之后文档变化/释放只会取消新 scope —— 旧任务继续跑并占用 provider 的 semaphore。现在替换前先取消当前 scope。
 9. **仓库图片缺少总超时（P2）**：`total_timeout` 原本没作用于仓库路径（commit + 每一级目录 + blob 各自只有 transport 的单请求超时），一段慢而成功的序列可以远超预算并长期占住并发名额。`load` 现在用一个 deadline 覆盖全部请求与解码；`the_total_timeout_bounds_the_whole_repository_load` 反向验证（去掉 deadline 测试会卡到超时）。
 
-第四轮（第三轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
+第四轮提出 1 条，核实成立并修复：
+
+10. **解码后未复检授权（P2）**：`spawn_blocking` 解码是另一个 await 边界；此前只在解码前检查 session。账户在此期间切换/撤销时，旧授权下解出的仓库字节仍可能作为成功结果发布。现在解码后再 `session.verify()`（与 `RepositorySession::content` 的准备后复检一致），陈旧优先于图片、取消与 worker 错误。测试用 per-service 的 publish probe 精确停在「解码完成、尚未发布」处切换账户；去掉复检后该测试确实拿到 `Ok(DecodedImage)`，证明缺陷真实存在。
+
+第五轮（第四轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
 
 ## 后续
 

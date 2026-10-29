@@ -730,3 +730,51 @@ async fn the_total_timeout_bounds_the_whole_repository_load() {
         "the whole load is bounded by one deadline, not per request"
     );
 }
+
+/// Finding: an account change while the blocking decode runs must not publish
+/// the decoded picture. `RepositorySession::content` re-checks after its own
+/// preparation step; this path must do the same after decoding. The probe holds
+/// the load exactly between decode and publish, so the boundary is real.
+#[tokio::test]
+async fn an_account_change_during_decode_publishes_nothing() {
+    let fixture = fixture().await;
+    fixture.login(1).await;
+    let session = fixture.session();
+
+    let bytes = png_bytes();
+    for step in image_chain(&bytes) {
+        fixture.transport.push(200, step);
+    }
+
+    let (source, _) = external("https://example.com/never.png", Vec::new());
+    let service = fixture.service(session, source, ImageLimits::default());
+    let (entered, release) = service.pause_before_publish();
+
+    let sink = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("k"),
+            target: repository_request(COMMIT, "docs/images/diagram.png"),
+        },
+        sink.clone(),
+    );
+
+    // The picture is decoded and waiting to be published.
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .expect("the decode boundary is reached")
+        .expect("probe signal");
+    assert!(sink.drain().is_empty(), "nothing was published yet");
+
+    // A different account replaces the one the session was captured under.
+    fixture.login(2).await;
+    let _ = release.send(());
+
+    let completion = next_completion(&sink).await;
+    assert_eq!(
+        completion.result,
+        Err(ImageFailure::StaleContext),
+        "a picture decoded under a retired authorization is never published"
+    );
+}
