@@ -261,6 +261,15 @@ fn dropped_inline_elements_suppress_their_content_across_events() {
 }
 
 #[test]
+fn suppression_search_stays_on_utf8_boundaries() {
+    let doc = parse("before <script><!-- </中文> --></script> after\n\nafter script 中文 tail");
+    let copied = copied(&doc.blocks);
+    assert!(copied.contains("before"), "{copied}");
+    assert!(!copied.contains("中文>"), "{copied}");
+    assert!(copied.contains("after script 中文 tail"), "{copied}");
+}
+
+#[test]
 fn raw_text_end_tags_need_a_real_tag_name_boundary() {
     let doc = parse("<script>const example = \"</scripture>\"; secret();</script><p>visible</p>");
     let copied = copied(&doc.blocks);

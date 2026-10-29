@@ -236,7 +236,9 @@ impl Building {
                     self.suppressed = None;
                     break;
                 }
-                rest = &after[1..];
+                // `</` is ASCII, so this offset is a char boundary even when
+                // the next byte starts a multi-byte character.
+                rest = after;
             }
             if self.suppressed.is_some() {
                 return;
