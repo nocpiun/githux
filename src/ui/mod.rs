@@ -553,32 +553,38 @@ impl Shell {
     fn page_navigation_sink(&self, cx: &Context<Self>) -> crate::app::pages::NavigationSink {
         let weak = cx.weak_entity();
         Rc::new(move |action, window, cx| {
-            let _ = weak.update(cx, |shell, cx| match action {
-                crate::app::pages::PageNavigation::Open(route) => {
-                    shell.navigate(route, window, cx);
-                }
-                crate::app::pages::PageNavigation::External(url) => {
-                    if url.starts_with("https://") || url.starts_with("http://") {
-                        cx.open_url(&url);
+            // A page can emit a typed navigation while its own entity is still being updated
+            // (for example a contributor action handled by RepositoryPage). Shell navigation may
+            // suspend that same page, so dispatch only after the emitting update completes.
+            let weak = weak.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = weak.update(cx, |shell, cx| match action {
+                    crate::app::pages::PageNavigation::Open(route) => {
+                        shell.navigate(route, window, cx);
                     }
-                }
-                crate::app::pages::PageNavigation::CanonicalProfile { tab, login } => {
-                    // Only a tab that still addresses a user profile may be renamed by this reply;
-                    // the host has already checked its service, login and request generation.
-                    let valid = shell.workspace.session(tab).is_some_and(|session| {
-                        matches!(session.route(), Route::UserProfile { .. })
-                    });
-                    if valid {
-                        shell.workspace.canonicalize(
-                            tab,
-                            Route::UserProfile {
-                                host: crate::domain::HostId::github(),
-                                login,
-                            },
-                        );
-                        cx.notify();
+                    crate::app::pages::PageNavigation::External(url) => {
+                        if url.starts_with("https://") || url.starts_with("http://") {
+                            cx.open_url(&url);
+                        }
                     }
-                }
+                    crate::app::pages::PageNavigation::CanonicalProfile { tab, login } => {
+                        // Only a tab that still addresses a user profile may be renamed by this reply;
+                        // the host has already checked its service, login and request generation.
+                        let valid = shell.workspace.session(tab).is_some_and(|session| {
+                            matches!(session.route(), Route::UserProfile { .. })
+                        });
+                        if valid {
+                            shell.workspace.canonicalize(
+                                tab,
+                                Route::UserProfile {
+                                    host: crate::domain::HostId::github(),
+                                    login,
+                                },
+                            );
+                            cx.notify();
+                        }
+                    }
+                });
             });
         })
     }
@@ -787,6 +793,24 @@ impl Shell {
         if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
             page.update(cx, |page, cx| page.refresh_for_test(column, window, cx));
         }
+    }
+
+    #[cfg(test)]
+    pub fn navigate_contributor_for_test(
+        &mut self,
+        login: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sink = self.page_navigation_sink(cx);
+        sink(
+            crate::app::pages::PageNavigation::Open(Route::UserProfile {
+                host: crate::domain::HostId::github(),
+                login: login.to_string(),
+            }),
+            window,
+            cx,
+        );
     }
 
     #[cfg(test)]
