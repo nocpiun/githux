@@ -261,6 +261,43 @@ fn dropped_inline_elements_suppress_their_content_across_events() {
 }
 
 #[test]
+fn html_links_survive_markdown_emphasis_inside_a_cell() {
+    let doc = parse("| a |\n|---|\n| <a href=\"guide.md\">read *this*</a> |");
+    let rows = doc
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Table { rows, .. } => Some(rows.clone()),
+            _ => None,
+        })
+        .expect("table");
+    let cell = &rows[0][0];
+    assert_eq!(cell.text, "read this", "{cell:?}");
+    assert_eq!(cell.links, vec![(0..9, "guide.md".to_string())], "{cell:?}");
+}
+
+#[test]
+fn html_ranges_never_point_into_removed_image_alt_text() {
+    let doc = parse("![ab<b>x](a)中文</b>");
+    let paragraph = find_paragraph(&doc.blocks, "中文");
+    let ranges: Vec<_> = paragraph
+        .styles
+        .iter()
+        .map(|(range, _)| range.clone())
+        .chain(paragraph.links.iter().map(|(range, _)| range.clone()))
+        .collect();
+    for range in ranges {
+        assert!(
+            paragraph.text.is_char_boundary(range.start)
+                && paragraph.text.is_char_boundary(range.end)
+                && range.end <= paragraph.text.len(),
+            "stale range {range:?} in {:?}",
+            paragraph.text
+        );
+    }
+}
+
+#[test]
 fn unterminated_end_tags_consume_the_fragment_in_linear_time() {
     let mut input = String::from("<div>");
     for _ in 0..100_000 {

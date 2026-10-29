@@ -308,6 +308,11 @@ impl Building {
                         return;
                     }
                     self.inline.text.truncate(start);
+                    // Open HTML ranges that began inside the removed alt text
+                    // would point into the middle of the following text (and
+                    // possibly split a UTF-8 character); close or discard them
+                    // before any more text is appended.
+                    close_html_opens(&mut self.html, &mut self.inline);
                     // The description's formatting belongs to the removed
                     // text. Keeping it would style the following text with
                     // stale ranges, or even cut a multibyte character.
@@ -604,32 +609,14 @@ pub fn parse(markdown: &str) -> Document {
                 // a link. Flush it into the cell before collecting the cell,
                 // otherwise its text and link are lost with the builder.
                 if let Some(Container::Cell(cell)) = stack.last_mut()
-                    && let Some((_, mut pending)) = inline.take()
+                    && let Some((_, pending)) = inline.take()
                 {
-                    while !pending.open.is_empty() {
-                        let end = pending.inline.text.len();
-                        pending.close(end);
-                    }
-                    let at = cell.inline.text.len();
-                    cell.inline.text.push_str(&pending.inline.text);
-                    cell.inline.styles.extend(
-                        pending
-                            .inline
-                            .styles
-                            .into_iter()
-                            .map(|(range, style)| (range.start + at..range.end + at, style)),
-                    );
-                    cell.inline.links.extend(
-                        pending
-                            .inline
-                            .links
-                            .into_iter()
-                            .map(|(range, url)| (range.start + at..range.end + at, url)),
-                    );
+                    merge_cell_builder(cell, pending);
                 }
                 let Some(Container::Cell(mut building)) = stack.pop() else {
                     continue;
                 };
+                building.close_html();
                 while !building.open.is_empty() {
                     let end = building.inline.text.len();
                     building.close(end);
@@ -771,6 +758,40 @@ fn with_inline(inline: &mut Option<(Option<u8>, Building)>, edit: impl FnOnce(&m
     }
     if let Some((_, building)) = inline.as_mut() {
         edit(building);
+    }
+}
+
+/// Merge a cell's pending builder into the cell while re-basing its open
+/// Markdown and HTML stacks, so mixed content like `<a href="…">read *this*</a>`
+/// keeps its HTML link after the emphasis builder merges back.
+fn merge_cell_builder(cell: &mut Building, mut pending: Building) {
+    let at = cell.inline.text.len();
+    for (start, _open) in &mut pending.open {
+        *start += at;
+    }
+    for open in &mut pending.html {
+        open.start += at;
+    }
+    cell.open.append(&mut pending.open);
+    cell.html.append(&mut pending.html);
+    cell.inline.text.push_str(&pending.inline.text);
+    cell.inline.styles.extend(
+        pending
+            .inline
+            .styles
+            .into_iter()
+            .map(|(range, style)| (range.start + at..range.end + at, style)),
+    );
+    cell.inline.links.extend(
+        pending
+            .inline
+            .links
+            .into_iter()
+            .map(|(range, url)| (range.start + at..range.end + at, url)),
+    );
+    // A cell keeps a picture's alt text in place; it has no notes to attach.
+    if !cell.in_cell {
+        cell.notes.append(&mut pending.notes);
     }
 }
 
