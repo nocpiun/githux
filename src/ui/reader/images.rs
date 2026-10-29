@@ -223,10 +223,14 @@ impl ImageBoard {
     /// Applies one completion. Returns the top-level blocks that need a fresh
     /// measurement because their picture changed size.
     pub(super) fn apply(&mut self, completion: ImageCompletion) -> Vec<usize> {
-        self.in_flight = self.in_flight.saturating_sub(1);
+        // Reject a stale completion before touching the current generation's
+        // accounting: `begin`/`forget_unfinished` reset the count, so an old
+        // completion arriving afterwards must not consume a current slot (that
+        // would stop the pump while a live request is still outstanding).
         if completion.scope != self.scope() {
             return Vec::new();
         }
+        self.in_flight = self.in_flight.saturating_sub(1);
         let key = completion.key;
         let Some(state) = self.states.get_mut(&key) else {
             // The source was dropped by a document/attachment change.
@@ -248,7 +252,10 @@ impl ImageBoard {
     }
 
     /// Releases the oldest decoded pictures until the budget holds again.
-    pub(super) fn evict(&mut self) {
+    /// Returns the top-level blocks whose picture shrank to a placeholder, so
+    /// their rows are measured at the new height instead of keeping the old one.
+    pub(super) fn evict(&mut self) -> Vec<usize> {
+        let mut affected = Vec::new();
         while self.ready_order.len() > self.limits.max_ready_images
             || self.ready_bytes > self.limits.max_ready_bytes
         {
@@ -264,8 +271,14 @@ impl ImageBoard {
                     .saturating_mul(4);
                 self.ready_bytes = self.ready_bytes.saturating_sub(bytes);
                 *state = ImageState::Released;
+                if let Some(blocks) = self.blocks.get(&key) {
+                    affected.extend(blocks.iter().copied());
+                }
             }
         }
+        affected.sort_unstable();
+        affected.dedup();
+        affected
     }
 
     #[cfg(test)]

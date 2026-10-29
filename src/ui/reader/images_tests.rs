@@ -349,3 +349,71 @@ fn forgetting_unfinished_work_keeps_ready_pictures_and_redemands_the_rest() {
     assert_eq!(board.want(1, target("docs/pending.png")).label(), "loading");
     assert!(board.has_pending());
 }
+
+/// Finding: a stale completion that arrives after a generation change must not
+/// consume a slot belonging to the new generation's in-flight work.
+#[test]
+fn a_stale_completion_does_not_consume_a_current_slot() {
+    let mut board = board();
+    board.want(0, target("docs/a.png"));
+    let first_scope = board.scope();
+    board.take_pending(10);
+
+    // The document changes while the old completion is still queued.
+    board.begin(first_scope.generation.wrapping_add(1));
+    board.set_attached(true);
+    board.want(0, target("docs/a.png"));
+    assert_eq!(
+        board.take_pending(10).len(),
+        1,
+        "the new picture is in flight"
+    );
+    assert!(board.work_outstanding());
+
+    // The old completion arrives now.
+    let mut stale = ready_for(&board, 4, 4);
+    stale.scope = first_scope;
+    stale.key = target("docs/a.png").key();
+    assert!(board.apply(stale).is_empty());
+    assert!(
+        board.work_outstanding(),
+        "the live request is still counted as outstanding"
+    );
+
+    // Its own completion is still applied and still counts.
+    let mut fresh = ready_for(&board, 4, 4);
+    fresh.key = target("docs/a.png").key();
+    assert_eq!(board.apply(fresh), vec![0]);
+    assert!(!board.work_outstanding());
+    assert_eq!(label(&board, &target("docs/a.png").key()), Some("ready"));
+}
+
+/// Finding: eviction replaces a ready picture with a shorter placeholder, so the
+/// owning block must be measured again.
+#[test]
+fn eviction_reports_the_blocks_it_shrank() {
+    let limits = ImageLimits {
+        max_ready_images: 1,
+        ..ImageLimits::default()
+    };
+    let mut board = ImageBoard::new(limits);
+    board.begin(1);
+    board.set_attached(true);
+    for (block, name) in [(3, "a.png"), (8, "b.png")] {
+        board.want(block, target(&format!("docs/{name}")));
+        board.take_pending(10);
+        let mut completion = ready_for(&board, 10, 10);
+        completion.key = target(&format!("docs/{name}")).key();
+        board.apply(completion);
+    }
+    // Both blocks are registered under their own picture; the first is evicted.
+    let mut affected = board.evict();
+    affected.sort_unstable();
+    assert_eq!(
+        affected,
+        vec![3],
+        "the evicted picture's block is measured again"
+    );
+    assert_eq!(label(&board, &target("docs/a.png").key()), Some("released"));
+    assert!(board.evict().is_empty(), "nothing left to evict");
+}

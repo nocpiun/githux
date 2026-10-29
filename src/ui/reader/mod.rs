@@ -306,8 +306,17 @@ impl ReaderView {
     ) -> Self {
         let (state, observer, pending) =
             build_state(body, &kind, &context, cx.entity().downgrade(), window, cx);
-        cx.on_release(|view, cx| view.cancel_scroll_app(cx))
-            .detach();
+        cx.on_release(|view, cx| {
+            view.cancel_scroll_app(cx);
+            // A service clone is held by each in-flight task, so dropping the
+            // provider field would not stop its loads. Cancel this reader's own
+            // scope, which never affects another reader sharing the provider.
+            if let Some(provider) = view.image_provider.clone() {
+                provider.cancel(view.image_scope());
+            }
+            view.stop_image_pump();
+        })
+        .detach();
         let image_limits = ImageLimits::default();
         let mut view = Self {
             context,
@@ -825,7 +834,7 @@ impl ReaderView {
     }
 
     /// Hands queued requests to the provider, bounded by the in-flight budget.
-    fn dispatch_images(&mut self, _cx: &mut Context<Self>) {
+    fn dispatch_images(&mut self, cx: &mut Context<Self>) {
         let Some(provider) = self.image_provider.clone() else {
             return;
         };
@@ -837,7 +846,15 @@ impl ReaderView {
         for request in requests {
             provider.start(request, sink.clone());
         }
-        self.images.borrow_mut().evict();
+        let released = self.images.borrow_mut().evict();
+        if !released.is_empty() {
+            if let Some(document) = self.markdown().cloned() {
+                for block in released {
+                    document.update(cx, |document, cx| document.remeasure_block(block, cx));
+                }
+            }
+            cx.notify();
+        }
     }
 
     fn cancel_scroll(&mut self, cx: &mut Context<Self>) {

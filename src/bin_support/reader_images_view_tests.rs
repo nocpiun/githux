@@ -562,3 +562,100 @@ fn replacing_an_attached_provider_asks_the_new_one(cx: &mut TestAppContext) {
         reader.image_state(&relative).as_deref() == Some("ready")
     });
 }
+
+/// Finding: dropping a reader must cancel its own picture scope instead of
+/// leaving production loads running behind a still-live service clone.
+///
+/// A host holds the reader optionally, the way a page drops the reader it
+/// replaces; dropping that strong reference releases the reader.
+#[gpui::test]
+fn dropping_a_reader_cancels_its_picture_scope(cx: &mut TestAppContext) {
+    /// A provider that records the scopes it was asked to cancel.
+    struct RecordingProvider {
+        cancelled: std::sync::Arc<std::sync::Mutex<Vec<crate::reader::ImageScope>>>,
+    }
+
+    impl crate::reader::ImageProvider for RecordingProvider {
+        fn start(&self, request: crate::reader::ImageRequest, sink: crate::reader::ImageSink) {
+            // Never completes: the reader is dropped while this is in flight.
+            let _ = (request, sink);
+        }
+
+        fn cancel(&self, scope: crate::reader::ImageScope) {
+            self.cancelled.lock().unwrap().push(scope);
+        }
+    }
+
+    struct SketchyHost {
+        reader: Option<Entity<ReaderView>>,
+    }
+
+    impl gpui::Render for SketchyHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .children(self.reader.clone().map(|reader| reader.into_any_element()))
+        }
+    }
+
+    setup(cx);
+    let cancelled = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = std::sync::Arc::new(RecordingProvider {
+        cancelled: cancelled.clone(),
+    });
+    let provider_for_view = provider.clone();
+    let (host, cx) = cx.add_window_view(move |window, cx| {
+        let reader = cx.new(|cx| {
+            let mut reader = ReaderView::new(
+                crate::content::PreparedBody::Utf8 {
+                    text: "![x](https://images.invalid/public/logo.png)
+"
+                    .to_string(),
+                    has_bom: false,
+                },
+                crate::reader::DocumentKind::Markdown,
+                crate::reader::ResourceContext::new(
+                    crate::fixture::OWNER,
+                    crate::fixture::NAME,
+                    COMMIT,
+                    crate::fixture::README_PATH,
+                ),
+                window,
+                cx,
+            );
+            reader.set_image_provider(
+                Some(provider_for_view as std::sync::Arc<dyn crate::reader::ImageProvider>),
+                cx,
+            );
+            reader
+        });
+        SketchyHost {
+            reader: Some(reader),
+        }
+    });
+    cx.update(|window, _| window.activate_window());
+    frames(cx);
+    let scope = host.read_with(cx, |host, _| {
+        host.reader
+            .as_ref()
+            .expect("the reader is mounted")
+            .read_with(cx, |reader, _| reader.image_scope())
+    });
+    // The provider is still attached to the reader; nothing has been cancelled.
+    assert!(cancelled.lock().unwrap().is_empty());
+
+    // The host drops the reader, as a page does when it replaces the document.
+    host.update(cx, |host, cx| {
+        host.reader = None;
+        cx.notify();
+    });
+    frames(cx);
+    assert!(
+        cancelled.lock().unwrap().contains(&scope),
+        "the released reader's own scope was cancelled: {:?}, wanted {scope:?}",
+        cancelled.lock().unwrap()
+    );
+    // The recording provider is still alive in this test, so the cancellation
+    // came from the reader's release hook, not from dropping the service.
+    assert!(std::sync::Arc::strong_count(&provider) > 0);
+}

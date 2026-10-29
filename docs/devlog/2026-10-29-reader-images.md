@@ -56,6 +56,22 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 - Long document：滚动到末尾才请求远端横幅图片。
 - Natural height (page scroll)：README 完整展开，**只有外层页面滚动**；滚动 3 次后仍见中段图片与后续段落，末段页脚可见。
 
+## 审查修复轮次（同一 PR，第二、三轮）
+
+第一轮 Codex 审查提出 3 条，均核实成立并已修复 + 回归测试：
+
+1. **图片泵启动顺序（P1）**：首帧构建子块时排队请求，发生在该帧的 pump 结算之后，没人重启它 —— 图片会停在 `loading`，直到无关重绘（原测试的重复 `refresh()` 掩盖了它）。现在帧末同步 dispatch 队列，并由根元素的 deferred prepaint hook 保证接收者在跑。`pictures_load_without_an_unrelated_redraw` 只推进 pump 时钟、从不 `refresh()`。
+2. **替换仍附着的 provider（P2）**：`set_attached(true)` 因已附着直接返回，旧的 `Loading`/在途计数/旧 scope 都留着，新 provider 永远不被询问，旧完成还能匹配。替换现在推进文档代次并重置未完成需求（`forget_unfinished`，与 suspend 共用）。
+3. **一个块多张图（P2）**：`blocks` 是「块索引 → 单个 key」，引用/列表/脚注里多张图会互相覆盖，后完成的图找不到块可重测。改为「key → 块列表」。
+
+第二轮提出 3 条，同样核实成立并修复：
+
+4. **过期完成消耗新代次名额（P2）**：`apply` 先 `in_flight -= 1` 再校验 scope；`begin` 重置计数后，一个旧完成会把新请求的在途名额吃掉，pump 提前停止。现在先校验 scope 再计数。回归测试反向验证：把顺序改回去测试即失败。
+5. **reader 释放未取消图片 scope（P2）**：`on_release` 原来只取消滚动。`RepositoryImageService::start` 每个在途任务持有一个服务 clone，所以丢掉 provider 字段不会停止加载。现在 release 钩子显式取消本 reader 的 scope（不影响共享同一 provider 的另一 reader）。测试用「不完成、只记录 cancel」的 provider，先证明无修复时失败、加上修复通过。
+6. **淘汰已解码图片后未重测（P2）**：`evict` 把旧 Ready 换成更矮的 `Released` 占位，但不返回受影响的块，列表保留旧高度。现在 `evict` 返回受影响的块，`dispatch_images` 用同一条 `remeasure_block` 路径重测。
+
+第三轮（第二轮修复后的 head）仍未完成 CI 与最终回执核验，状态以 PR 记录为准。
+
 ## 后续
 
 - 正式 Shell 未接图片：`src/ui/repository/mod.rs`、Profile、Home 仍用旧 Reader API（无 provider → 诚实占位）。最小接线契约见 `docs/reader-images.md#后续正式接线契约`；`ReaderImageService` 与 `ReqwestExternalImages` 都已是生产实现，不是 mock trait。
