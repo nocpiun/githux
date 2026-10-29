@@ -268,3 +268,105 @@ fn a_stalled_response_times_out() {
         Err(ExternalImageError::Timeout)
     );
 }
+
+/// Finding: alternate spellings of a loopback/link-local address must not slip
+/// past the local-source boundary. IPv4-mapped IPv6 and IPv6 link-local forms
+/// reach the same prohibited destinations as their plain IPv4 spellings.
+#[test]
+fn alternate_local_address_spellings_are_refused() {
+    let fetcher = ReqwestExternalImages::new().expect("client");
+    let limits = ExternalImageLimits::default();
+    for url in [
+        // IPv4-mapped IPv6: the same machine as 127.0.0.1.
+        "https://[::ffff:127.0.0.1]/a.png",
+        "https://[::ffff:169.254.169.254]/a.png",
+        "https://[::ffff:10.0.0.1]/a.png",
+        // Plain private / shared ranges are never a public picture.
+        "https://10.0.0.1/a.png",
+        "https://192.168.1.10/a.png",
+        "https://172.16.0.1/a.png",
+        "https://100.64.0.1/a.png",
+        "https://0.0.0.0/a.png",
+        // Native IPv6 loopback, unspecified and link-local.
+        "https://[::1]/a.png",
+        "https://[::]/a.png",
+        "https://[fe80::1]/a.png",
+        "https://[fec0::1]/a.png",
+    ] {
+        assert!(
+            matches!(
+                load(&fetcher, url, &limits),
+                Err(ExternalImageError::Refused(_))
+            ),
+            "{url} must be refused as a local source"
+        );
+    }
+    // A genuine public address is still accepted by the check itself (the
+    // request then fails on network, which is not a refusal). `.invalid` never
+    // resolves, so the assertion below can only fail on a policy mistake.
+    assert!(!matches!(
+        load(&fetcher, "https://images.invalid/a.png", &limits),
+        Err(ExternalImageError::Refused(_))
+    ));
+}
+
+/// Finding (policy coverage): the same check runs on every redirect hop, so the
+/// classification itself must reject mapped, private and link-local forms. This
+/// is the function `check()` uses for both the first request and each `Location`
+/// target, so covering it covers both paths.
+#[test]
+fn the_local_source_policy_covers_mapped_private_and_link_local_forms() {
+    for host in [
+        "localhost",
+        "[::1]",
+        "::1",
+        "[::ffff:127.0.0.1]",
+        "[::ffff:7f00:1]",
+        "[::ffff:169.254.169.254]",
+        "[::ffff:10.1.2.3]",
+        "[fe80::1]",
+        "[fec0::1]",
+        "[::]",
+        "127.0.0.1",
+        "0.0.0.0",
+        "10.1.2.3",
+        "172.16.0.1",
+        "192.168.1.10",
+        "169.254.169.254",
+        "100.64.0.1",
+    ] {
+        assert!(is_local_host(host), "{host} must count as a local source");
+    }
+    for host in [
+        "images.invalid",
+        "cdn.example.com",
+        // Real public addresses (a Cloudflare resolver and its IPv6 form).
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+        "[2606:4700:4700::1111]",
+    ] {
+        assert!(!is_local_host(host), "{host} must count as a public host");
+    }
+}
+
+/// The refused forms never open a connection, so production mode rejects them
+/// before the client is used at all.
+#[test]
+fn private_and_mapped_addresses_are_refused_in_production_mode() {
+    let fetcher = ReqwestExternalImages::new().expect("client");
+    let limits = ExternalImageLimits::default();
+    for url in [
+        "https://[::ffff:127.0.0.1]/a.png",
+        "https://169.254.169.254/a.png",
+        "https://10.1.2.3/a.png",
+        "https://192.168.1.10/a.png",
+    ] {
+        assert!(
+            matches!(
+                load(&fetcher, url, &limits),
+                Err(ExternalImageError::Refused(_))
+            ),
+            "{url} must be refused"
+        );
+    }
+}

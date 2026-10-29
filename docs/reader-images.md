@@ -81,7 +81,7 @@ let reader = cx.new(|cx| {
 `ReqwestExternalImages` 使用自己的 `reqwest::Client`：
 
 - 不设置 `Authorization`、`Cookie`、`Proxy-Authorization`，请求只带图片 Accept；`.no_proxy()` 禁用系统代理，避免把代理凭据转发到图片主机。
-- 生产构造只接受 `https`；无 userinfo；拒绝 loopback/`localhost`/未指定/链路本地地址（`file:`、`data:`、`javascript:` 等在进入 URL 校验前就已被 reader 拒绝）。
+- 生产构造只接受 `https`；无 userinfo；拒绝 loopback/`localhost`/未指定/链路本地/私网（含 10/8、172.16/12、192.168/16）与 100.64/10 共享地址。IPv4-mapped IPv6（`[::ffff:127.0.0.1]`）先归一化为 IPv4 再套用同一策略，IPv6 链路本地（`fe80::/10`）与 site-local（`fec0::/10`）也拒绝，避免换一种拼写绕过本地来源边界；同一函数用于首跳和每个重定向 `Location`。（`file:`、`data:`、`javascript:` 等在进入 URL 校验前就已被 reader 拒绝。）
 - `Policy::none` 后**手动逐跳**重定向：用与连接方相同的 `reqwest::Url` 解析和 `join`，每一跳重新校验 scheme/host/userinfo，拒绝本地来源；超过 `max_redirects` 报 `TooManyRedirects`，不把 3xx 当成功。这避免了把凭据送到重定向目标（本路径根本没有凭据，但本地来源校验不能省）。
 - 总超时覆盖连接、每一跳和整个 body；`Content-Length` 只做提前拒绝提示，实际字节在流式累计时限制，超限即 `TooLarge`，不会先缓冲完整超大 body。
 - 测试构造 `with_local_http()`（`#[cfg(test)]`）允许 loopback `http`，用真实 socket 验证「请求里没有 Authorization/Cookie/Proxy-Authorization」「同源重定向跟随」「file/data 重定向不接触目标」「重定向循环有界」「Content-Length 缺失的流式上限」「停顿超时」。
@@ -98,7 +98,7 @@ let reader = cx.new(|cx| {
 | `max_decoded_bytes` | 32 MiB | 解码前按 `width*height*4` 预算，另作为 `image::Limits::max_alloc` |
 | `max_pixels` | 8,000,000 | 先读 header 得到尺寸，超过即 `TooManyPixels`，在危险分配之前 |
 | `max_dimension` | 8192 | 同上，单边上限，同时设置 decoder 严格维度上限 |
-| `total_timeout` | 20 s | 单次完整读取（含重定向与 body），超时 `Timeout` |
+| `total_timeout` | 20 s | 一次完整加载的**总**截止时间：覆盖提交/每一级目录/blob 多个请求、外链重定向与 body，以及解码；超时 `Timeout` |
 | `max_concurrent` | 3 | 每个 provider 同时执行的加载数，semaphore 限制 |
 | `max_in_flight` | 12 | reader 已交给 provider 但未完成的请求上限；其余按可见顺序排队 |
 | `max_ready_images` | 32 | 每个 reader 当前文档保留的已解码图片数，超出按最老释放 |

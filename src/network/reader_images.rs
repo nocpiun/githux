@@ -149,15 +149,46 @@ impl ReqwestExternalImages {
 /// address when possible; otherwise only the `localhost` name is treated as
 /// local. Anything else is a public host.
 fn is_local_host(host: &str) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if bare.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    match bare.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => {
-            ip.is_loopback() || ip.is_unspecified() || ip.is_link_local()
+    // An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) reaches the same machine
+    // as the IPv4 form, so the IPv4 policy has to be applied to it too;
+    // otherwise an alternate spelling would bypass the local-source boundary.
+    //
+    // Besides loopback, unspecified and link-local, private and shared address
+    // ranges are refused: a README picture pointing at `10.x`, `192.168.x` or
+    // carrier-grade NAT is never a public picture, and following it would let a
+    // document reach services on the user's own network.
+    let v4_local = |ip: &Ipv4Addr| {
+        ip.is_loopback()
+            || ip.is_unspecified()
+            || ip.is_link_local()
+            || ip.is_private()
+            // 100.64.0.0/10, carrier-grade NAT.
+            || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
+            // 0.0.0.0/8, "this network".
+            || ip.octets()[0] == 0
+    };
+    match bare.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => v4_local(&ip),
+        Ok(IpAddr::V6(ip)) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return v4_local(&mapped);
+            }
+            // `is_unicast_link_local` covers `fe80::/10`; the deprecated
+            // site-local `fec0::/10` range is rejected for the same reason.
+            let segments = ip.segments();
+            let site_local = (segments[0] & 0xffc0) == 0xfec0;
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unicast_link_local()
+                || site_local
+                || ip == Ipv6Addr::LOCALHOST
         }
-        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unspecified(),
         Err(_) => false,
     }
 }

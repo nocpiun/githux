@@ -80,7 +80,11 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 
 10. **解码后未复检授权（P2）**：`spawn_blocking` 解码是另一个 await 边界；此前只在解码前检查 session。账户在此期间切换/撤销时，旧授权下解出的仓库字节仍可能作为成功结果发布。现在解码后再 `session.verify()`（与 `RepositorySession::content` 的准备后复检一致），陈旧优先于图片、取消与 worker 错误。测试用 per-service 的 publish probe 精确停在「解码完成、尚未发布」处切换账户；去掉复检后该测试确实拿到 `Ok(DecodedImage)`，证明缺陷真实存在。
 
-第五轮（第四轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
+第五轮提出 1 条，核实成立并修复：
+
+11. **本地地址策略可被绕过（P2，安全）**：`is_local_host` 只对 `IpAddr::V4` 判 loopback/未指定/链路本地；`https://[::ffff:127.0.0.1]/` 这类 IPv4-mapped IPv6 与 `fe80::/10` 链路本地都返回 false，生产抓取器会真的去连被 IPv4 策略禁止的目标。现在 mapped 地址先归一化为 IPv4 再套用同一策略，并补上 IPv6 链路本地/site-local；同时把私网与 100.64/10 共享地址并入策略（README 图片指向 `10.x`/`192.168.x` 从来不是公开图片）。同一函数用于首跳和每个重定向 `Location`，因此覆盖两条路径；`alternate_local_address_spellings_are_refused` 与 `the_local_source_policy_covers_mapped_private_and_link_local_forms` 覆盖正反两面。
+
+第六轮（第五轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
 
 ## 后续
 
