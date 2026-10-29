@@ -1628,6 +1628,45 @@ fn tabbing_to_an_offscreen_tab_reveals_it(cx: &mut TestAppContext) {
     );
 }
 
+/// The rounded-corner mask wraps the island without taking part in layout: the island keeps
+/// exactly the frame the window insets give it, and its page keeps filling the inner box. This
+/// is what lets the language bar stay flush to the island bottom while the corners are erased.
+#[gpui::test]
+fn the_rounded_corner_mask_does_not_move_the_island_or_its_page(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    for (width, height) in [(1280.0, 820.0), (880.0, 560.0)] {
+        cx.simulate_resize(size(px(width), px(height)));
+        cx.run_until_parked();
+        let body = bounds("shell-body", cx);
+        let island = bounds("island", cx);
+        let page = bounds("island-page", cx);
+        let inset = px(super::geometry::ISLAND_INSET);
+        // The wrapper adds no padding and no margin of its own.
+        assert_eq!(
+            body.right() - island.right(),
+            inset,
+            "right inset at {width}"
+        );
+        assert_eq!(
+            body.bottom() - island.bottom(),
+            inset,
+            "bottom inset at {width}"
+        );
+        assert_eq!(
+            island.left(),
+            px(super::geometry::SIDEBAR_WIDTH) + px(super::geometry::ISLAND_GAP)
+        );
+        // The page's own scroll region starts inside the 1px border and fills the island width.
+        assert_eq!(page.left(), island.left() + px(1.0));
+        assert_eq!(page.right(), island.right() - px(1.0));
+        assert_eq!(page.bottom(), island.bottom() - px(1.0));
+        // The mask only erases inside the border: a corner narrower than the island radius, so
+        // the 1px ring is never repainted over.
+        let inner_radius = super::geometry::ISLAND_RADIUS - super::geometry::ISLAND_BORDER_WIDTH;
+        assert!(inner_radius > 0.0 && inner_radius < super::geometry::ISLAND_RADIUS);
+    }
+}
+
 /// The strip's inset matches the island's own gap to the window, and both top and left agree.
 #[gpui::test]
 fn the_strip_inset_matches_the_island_gap(cx: &mut TestAppContext) {
