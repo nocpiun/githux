@@ -136,16 +136,18 @@ impl Transport for PageTransport {
                 ));
             }
             if url.contains("/received_events") {
-                return Ok(json(
-                    200,
-                    serde_json::json!([{
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("x-poll-interval".into(), "1".into())],
+                    body: serde_json::json!([{
                         "id": "evt-1", "type": "WatchEvent",
                         "actor": {"id": 7, "login": "bob", "avatar_url": null},
                         "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
                         "payload": {"action": "started"},
                         "created_at": "2026-10-28T09:00:00Z"
-                    }]),
-                ));
+                    }])
+                    .to_string(),
+                });
             }
             if url.ends_with("/graphql") {
                 // Home/Profile tests can distinguish the profile query from repository counts by
@@ -263,6 +265,77 @@ fn login(controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
     wait_until(controller, cx, |accounts| {
         accounts.snapshot().accounts.len() == 1
     });
+}
+
+#[gpui::test]
+fn home_refresh_and_navigation_actions_do_not_reenter_the_host(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.home_mount_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)) {
+            break;
+        }
+    }
+    assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
+    // A real refresh action goes HomeView -> HomePage through a deferred dispatch. It must not
+    // panic, and it must start exactly one new request for that column.
+    let before = transport.seen("/search/issues");
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.refresh_home_for_test(crate::ui::home::Column::Home, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(transport.seen("/search/issues"), before + 1);
+}
+
+#[gpui::test]
+fn feed_refresh_is_reenabled_when_its_server_poll_interval_expires(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.home_mount_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)) {
+            break;
+        }
+    }
+    // The synthetic Feed response requests a one-second poll interval. Refresh stays disabled
+    // while that interval runs, then the host restores the control without issuing a read.
+    assert!(!view.read_with(cx, |shell, cx| shell.feed_refresh_available_for_test(cx)));
+    let feed_reads = transport.seen("/received_events");
+    // Drive the same expiry boundary the real timer reaches, without depending on the test
+    // scheduler's wall clock or introducing a real sleep.
+    view.update(cx, |shell, cx| shell.expire_feed_cooldown_for_test(cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |shell, cx| shell.feed_refresh_available_for_test(cx)));
+    assert_eq!(
+        transport.seen("/received_events"),
+        feed_reads,
+        "cooldown expiry only restores refresh; it must not poll"
+    );
 }
 
 #[gpui::test]

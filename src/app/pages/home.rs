@@ -19,6 +19,12 @@ use crate::workspace::TabId;
 use super::{NavigationSink, PageAvatars, PageNavigation};
 use crate::workspace::Route;
 
+/// The deadline is presentation-only. Expiring it restores the Feed refresh control; it never
+/// initiates a request. Extracted so the expiry rule can be exercised without a wall-clock sleep.
+fn cooldown_expired(ready: Option<Instant>, now: Instant) -> bool {
+    ready.is_some_and(|ready| now >= ready)
+}
+
 struct Work {
     token: CancellationToken,
     source: CancellationTokenSource,
@@ -58,6 +64,7 @@ pub struct HomePage {
     alive: Arc<watch::Sender<bool>>,
     receiver: Option<gpui::Task<()>>,
     feed_ready: Option<Instant>,
+    feed_cooldown_task: Option<gpui::Task<()>>,
     view: Entity<HomeView>,
     avatars: PageAvatars,
     navigation: NavigationSink,
@@ -120,7 +127,13 @@ impl HomePage {
                 ))
             }));
             view.on_action(Rc::new(move |action, window, cx| {
-                let _ = page_weak.update(cx, |page, cx| page.action(action, window, cx));
+                // The emitting HomeView is still on the update stack here. Re-entering its host
+                // synchronously (refresh calls HomeView::update again; navigation suspends the
+                // same host) would panic. Deliver the action after this component update ends.
+                let page_weak = page_weak.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = page_weak.update(cx, |page, cx| page.action(action, window, cx));
+                });
             }));
         });
         let _changed = cx.observe(&view, |_, _, cx| cx.notify());
@@ -138,6 +151,7 @@ impl HomePage {
             alive: Arc::new(alive),
             receiver: None,
             feed_ready: None,
+            feed_cooldown_task: None,
             view,
             avatars,
             navigation,
@@ -455,7 +469,91 @@ impl HomePage {
                 cx,
             );
         });
+        if column == Column::Feed
+            && let Some(ready) = self.feed_ready
+        {
+            self.schedule_feed_cooldown(ready, generation, cx);
+        }
         cx.notify();
+    }
+
+    /// Re-enable only the Feed refresh affordance when its server-requested poll interval ends.
+    /// This schedules no read and does not touch either snapshot.
+    fn schedule_feed_cooldown(&mut self, ready: Instant, generation: u64, cx: &mut Context<Self>) {
+        self.feed_cooldown_task = None;
+        self.feed_cooldown_task = Some(cx.spawn(async move |this, cx| {
+            let wait = ready.saturating_duration_since(Instant::now());
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
+            let _ = this.update(cx, |page, cx| {
+                if page.generation != generation
+                    || !cooldown_expired(page.feed_ready, Instant::now())
+                {
+                    return;
+                }
+                page.feed_ready = None;
+                page.feed_cooldown_task = None;
+                let binding = page.binding.clone();
+                let generation = page.generation;
+                page.view.update(cx, |view, cx| {
+                    view.set_refresh_availability(
+                        Column::Feed,
+                        &binding,
+                        generation,
+                        RefreshAvailability::available(),
+                        cx,
+                    );
+                });
+                cx.notify();
+            });
+        }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_for_test(
+        &mut self,
+        column: Column,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.view
+            .update(cx, |view, cx| view.refresh(column, window, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_feed_cooldown_for_test(&mut self, cx: &mut Context<Self>) {
+        let Some(ready) = self.feed_ready else {
+            return;
+        };
+        if !cooldown_expired(Some(ready), Instant::now()) {
+            // Drive the same expiry branch without waiting for a real clock tick.
+            self.feed_ready = Some(Instant::now() - Duration::from_millis(1));
+        }
+        let generation = self.generation;
+        let binding = self.binding.clone();
+        if self.generation != generation || !cooldown_expired(self.feed_ready, Instant::now()) {
+            return;
+        }
+        self.feed_ready = None;
+        self.feed_cooldown_task = None;
+        self.view.update(cx, |view, cx| {
+            view.set_refresh_availability(
+                Column::Feed,
+                &binding,
+                generation,
+                RefreshAvailability::available(),
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn feed_refresh_available_for_test(&self, cx: &gpui::App) -> bool {
+        let view = self.view.read(cx);
+        matches!(view.feed_state(), crate::ui::home::PanelState::Ready { .. })
+            && view.feed_refresh_available()
     }
 
     #[cfg(test)]
@@ -477,6 +575,8 @@ impl HomePage {
             }
         }
         self.inbox.lock().expect("home inbox").clear();
+        self.feed_cooldown_task = None;
+        self.feed_ready = None;
         self.session = None;
     }
 }

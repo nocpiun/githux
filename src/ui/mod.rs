@@ -777,6 +777,38 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub fn refresh_home_for_test(
+        &mut self,
+        column: crate::ui::home::Column,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.refresh_for_test(column, window, cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn expire_feed_cooldown_for_test(&mut self, cx: &mut Context<Self>) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.expire_feed_cooldown_for_test(cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn feed_refresh_available_for_test(&self, cx: &App) -> bool {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Home(page)) => {
+                page.read(cx).feed_refresh_available_for_test(cx)
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
     pub fn home_is_ready_for_test(&self, cx: &App) -> bool {
         let id = self.workspace.active_id();
         self.pages.get(&id).is_some_and(|page| match page {
