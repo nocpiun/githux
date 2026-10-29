@@ -42,8 +42,17 @@
 - `cargo check --locked --all-targets`：通过。
 - `cargo test --locked --bin githux`：727 项通过（包含 Shell 真实页面挂载测试与 `header_tests`）。
 - `cargo test --locked --test repository`：495 项通过。
-- `cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`：在串行锁上排队执行，结果待补（不预设通过）。
+- `cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`：通过。
+- 实际验证的 Shell 基线为 `96c32464786204ab1ca947f060ed68e0b6f484bc`；结果文件 `.agents/output/shell-validation.exit` 保留最初 import 失败和修复后全部检查的原始退出码。
 
-真实 Windows 组合验证：在包含 Shell 实际页面接线的正式 `target/debug/githux.exe`（不是 repository example）中核验 Code 两列 header 对齐；需要真实账户/凭据才能进入 Repository 页的路径不属于本任务合成证据范围，只记录已实际启动和可到达的步骤，截图写入被忽略的 `.agents/output/`。
+正式 `target/debug/githux.exe` 已启动，但实际账户目录被另一任务运行中的应用独占，显示 account database already in use，因此不能宣称该 exe 的真实账户仓库页已验收。没有关闭别人的应用、读取 PAT 或复制真实账户目录。
+
+为完成原生组合验证，临时本地 Cargo example 复用产品 `app`、`Accounts`、`Shell`、`workspace`、`MountedPage` 和所有实际 `ui` 模块，仅注入临时 SQLite、内存凭据、合成 token 和 request-routed transport（仓库响应仍来自现有共享 fixture）。通过真实侧栏点击 → Shell 导航 → Repository mount → README/reader 的路径操作，不是直接把独立 RepositoryPage 放进一个假 Shell。探针只用于验证，源码归档 `.agents/output/header_shell_probe.rs`，未提交、未进入产品或依赖锁文件。
+
+Windows 144 DPI / 150% 组合窗口中已完成：README、展开 src、源码失败、单次 Retry 恢复源码、窗口收窄到 1340 device px（含框架约 893 logical px）及深层 `docs/guides/nested/deep-note.md`。底线在上述状态均一致；截图为 `shell-combined-readme.png`、`shell-combined-error.png`、`shell-combined-source.png`、`shell-combined-narrow.png`、`shell-combined-deep-path.png`。另用同一探针临时将 header 恢复为原来的 `py_2` 内容定高，`shell-combined-before.png` 再次显示源码按钮使右边底线下降；诊断后已恢复实际源码，临时探针进程关闭。
+
+这是有真实 Shell 页面挂载的原生 synthetic 组合验证；不代表实网账户、PAT 登录、物理跨屏/DPI 切换、目录 loading 瞬间截图或任意极长路径都已验收。长路径与状态边界仍有 GPUI 测试平台压力用例。Shell 新目录行图标位于 header 以下，组合中目录展开不会改变两侧 header 边界。
+
+本轮应用 L010（按资源身份支持重复读取）与 L012（验证 Shell/host/Repository 的真实组合），不沿用旧 main example 的结论代替正式挂载证据。新增教训候选：复用组件测试跨不同 crate 装配时，类型 import 应相对组件模块或稳定的产品路径，不能依赖独立 example 才有的 crate 根别名；本轮 `E0432` 和修复后产品/独立两套测试树通过可定位此问题。交协调者去重归入现有约定。
 
 Shell 本轮继续修复 Profile README Flow 与简介三行换行，可能推进基线；本任务不替 Shell 修改这两个功能。若实时 `origin/feature/shell-pages` 前进，按 `githux-pr-review` 的 `base_changed` 处理，必要 rebase 后重新对新 head 走 CI/review，不沿用旧基线通过结论。
