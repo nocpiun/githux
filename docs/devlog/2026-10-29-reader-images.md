@@ -84,7 +84,11 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 
 11. **本地地址策略可被绕过（P2，安全）**：`is_local_host` 只对 `IpAddr::V4` 判 loopback/未指定/链路本地；`https://[::ffff:127.0.0.1]/` 这类 IPv4-mapped IPv6 与 `fe80::/10` 链路本地都返回 false，生产抓取器会真的去连被 IPv4 策略禁止的目标。现在 mapped 地址先归一化为 IPv4 再套用同一策略，并补上 IPv6 链路本地/site-local；同时把私网与 100.64/10 共享地址并入策略（README 图片指向 `10.x`/`192.168.x` 从来不是公开图片）。同一函数用于首跳和每个重定向 `Location`，因此覆盖两条路径；`alternate_local_address_spellings_are_refused` 与 `the_local_source_policy_covers_mapped_private_and_link_local_forms` 覆盖正反两面。
 
-第六轮（第五轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
+第六轮提出 1 条，核实成立并修复：
+
+12. **DNS 解析绕过本地来源策略（P2，安全）**：只检查 URL host 文本，`https://internal.example/` 解析到 `127.0.0.1`/`10.x` 仍会连接。外部客户端现在注入 `GuardResolver`：对每个 DNS 答案套用同一 `is_local_address` 判定，任一答案为本地/私网即让解析失败，连接固定在这些已校验地址上（重定向的每一跳都重新解析并重新校验）。回归测试用 `localhost`（离线必解析到 loopback）验证：去掉判定后该测试失败。
+
+第七轮（第六轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
 
 ## 后续
 

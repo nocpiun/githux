@@ -101,11 +101,18 @@ impl ReqwestExternalImages {
     }
 
     fn build(allow_local_http: bool) -> Result<Self, ExternalImageError> {
+        // Every DNS answer is checked against the same local/private policy as
+        // the URL host, so a public-looking name cannot point the client at an
+        // internal address. The test constructor allows loopback on purpose.
+        let resolver = GuardResolver {
+            allow_local: allow_local_http,
+        };
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             // No system proxy: neither the request nor its credentials can be
             // forwarded to a proxy the user configured for something else.
             .no_proxy()
+            .dns_resolver(resolver)
             .build()
             .map_err(|_| ExternalImageError::Network)?;
         Ok(Self {
@@ -145,24 +152,12 @@ impl ReqwestExternalImages {
     }
 }
 
-/// Whether a host is the local machine or a link-local address. Parsed as an
-/// address when possible; otherwise only the `localhost` name is treated as
-/// local. Anything else is a public host.
-fn is_local_host(host: &str) -> bool {
+/// Whether an address is the local machine, the local network or a link-local
+/// destination. Applied to IP literals and to every DNS answer, so a hostname
+/// that resolves to an internal address cannot bypass the boundary either.
+fn is_local_address(addr: std::net::IpAddr) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    if bare.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    // An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) reaches the same machine
-    // as the IPv4 form, so the IPv4 policy has to be applied to it too;
-    // otherwise an alternate spelling would bypass the local-source boundary.
-    //
-    // Besides loopback, unspecified and link-local, private and shared address
-    // ranges are refused: a README picture pointing at `10.x`, `192.168.x` or
-    // carrier-grade NAT is never a public picture, and following it would let a
-    // document reach services on the user's own network.
     let v4_local = |ip: &Ipv4Addr| {
         ip.is_loopback()
             || ip.is_unspecified()
@@ -173,15 +168,16 @@ fn is_local_host(host: &str) -> bool {
             // 0.0.0.0/8, "this network".
             || ip.octets()[0] == 0
     };
-    match bare.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => v4_local(&ip),
-        Ok(IpAddr::V6(ip)) => {
+    match addr {
+        IpAddr::V4(ip) => v4_local(&ip),
+        IpAddr::V6(ip) => {
+            // An IPv4-mapped address reaches the same machine as its IPv4 form.
             if let Some(mapped) = ip.to_ipv4_mapped() {
                 return v4_local(&mapped);
             }
-            // `is_unicast_link_local` covers `fe80::/10`; the deprecated
-            // site-local `fec0::/10` range is rejected for the same reason.
             let segments = ip.segments();
+            // `fe80::/10` is link-local; `fec0::/10` is the deprecated
+            // site-local range, refused for the same reason.
             let site_local = (segments[0] & 0xffc0) == 0xfec0;
             ip.is_loopback()
                 || ip.is_unspecified()
@@ -189,7 +185,68 @@ fn is_local_host(host: &str) -> bool {
                 || site_local
                 || ip == Ipv6Addr::LOCALHOST
         }
+    }
+}
+
+/// Whether a host is the local machine or a link-local address. Parsed as an
+/// address when possible; otherwise only the `localhost` name is treated as
+/// local here. A hostname is finally judged by the addresses it resolves to —
+/// see [`GuardResolver`].
+fn is_local_host(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(addr) => is_local_address(addr),
         Err(_) => false,
+    }
+}
+
+/// A DNS resolver that refuses to resolve a name to any local/private address.
+///
+/// Checking only the URL's host is not enough: `https://internal.example/` can
+/// resolve to `127.0.0.1` or `10.0.0.5`, and the client would then connect to a
+/// destination the address policy forbids. This resolver applies the same policy
+/// to every answer and fails the lookup when *any* answer is local, so a
+/// subsequent resolution cannot bypass the check. The client connects only to
+/// the addresses returned here.
+struct GuardResolver {
+    allow_local: bool,
+}
+
+impl reqwest::dns::Resolve for GuardResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let host = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let allow_local = self.allow_local;
+        Box::pin(async move {
+            // Port 0 is replaced by the connector with the scheme's default.
+            let addrs = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+                .collect::<Vec<std::net::SocketAddr>>();
+            if addrs.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "image host resolved to no address",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            if !allow_local
+                && let Some(local) = addrs.iter().find(|addr| is_local_address(addr.ip()))
+            {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("image host resolves to a local address ({})", local.ip()),
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 

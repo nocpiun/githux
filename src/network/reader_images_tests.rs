@@ -370,3 +370,59 @@ fn private_and_mapped_addresses_are_refused_in_production_mode() {
         );
     }
 }
+
+/// Finding: a public-looking hostname that resolves to a local/private address
+/// must not be connected to. The guard resolver applies the same address policy
+/// to every DNS answer, so this is checked where the addresses are produced, not
+/// only on the URL's host text.
+#[test]
+fn the_resolver_refuses_a_name_that_resolves_to_a_local_address() {
+    let runtime = runtime();
+    // `localhost` is the one name guaranteed to resolve to loopback offline.
+    let guarded = GuardResolver { allow_local: false };
+    let outcome = runtime.block_on(async {
+        reqwest::dns::Resolve::resolve(&guarded, "localhost".parse().expect("name")).await
+    });
+    assert!(
+        outcome.is_err(),
+        "a name resolving to loopback must fail the lookup instead of connecting"
+    );
+
+    // The test-only fetcher allows loopback on purpose, so the same lookup
+    // succeeds there and real localhost sockets stay testable.
+    let allowed = GuardResolver { allow_local: true };
+    let outcome = runtime.block_on(async {
+        reqwest::dns::Resolve::resolve(&allowed, "localhost".parse().expect("name")).await
+    });
+    let addrs: Vec<std::net::SocketAddr> = outcome.expect("allowed lookup").collect();
+    assert!(!addrs.is_empty());
+    assert!(addrs.iter().all(|addr| addr.ip().is_loopback()));
+}
+
+/// The address policy itself, applied to DNS answers and URL hosts alike.
+#[test]
+fn every_answer_address_is_classified_by_one_policy() {
+    use std::net::IpAddr;
+    for local in [
+        "127.0.0.1",
+        "10.1.2.3",
+        "192.168.0.5",
+        "172.20.1.1",
+        "169.254.169.254",
+        "100.64.1.1",
+        "0.0.0.0",
+        "::1",
+        "::",
+        "fe80::1",
+        "fec0::1",
+        "::ffff:127.0.0.1",
+        "::ffff:10.0.0.1",
+    ] {
+        let addr: IpAddr = local.parse().expect("ip");
+        assert!(is_local_address(addr), "{local} must be local");
+    }
+    for public in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+        let addr: IpAddr = public.parse().expect("ip");
+        assert!(!is_local_address(addr), "{public} must be public");
+    }
+}
