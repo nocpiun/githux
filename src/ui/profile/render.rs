@@ -1,6 +1,6 @@
-use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
@@ -80,7 +80,7 @@ pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
         .bg(theme.colors.bg)
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(theme.colors.warning)
-        .tooltip(Tooltip::text(message))
+        .tooltip(ui_tooltip(message))
         .child(
             Icon::new(IconName::TriangleAlert)
                 .size(IconSize::Sm)

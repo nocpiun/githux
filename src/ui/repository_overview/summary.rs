@@ -5,6 +5,7 @@ use crate::domain::repository_extras::{
     LanguagesOutcome, Release,
 };
 use crate::ui::badge::Badge;
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
     data_display::Avatar,
     data_display::Tone,
@@ -168,7 +169,7 @@ impl RepositoryOverview {
             let version = div()
                 .id("overview-release-version")
                 .debug_selector(|| "overview-release-version".into())
-                .tooltip(Tooltip::text(tag.clone()))
+                .tooltip(ui_tooltip(tag.clone()))
                 .min_w_0()
                 .child(Ellipsis::new(tag.clone()));
             row = row.child(
@@ -311,7 +312,7 @@ impl RepositoryOverview {
                     .id(("overview-avatar", index))
                     .debug_selector(move || format!("overview-avatar-{index}"))
                     .aria_label(label.clone())
-                    .tooltip(Tooltip::text(label))
+                    .tooltip(ui_tooltip(label))
                     .child(avatar);
                 row = row.child(if linked {
                     let binding = self.binding.clone();

@@ -1,10 +1,10 @@
 //! Content targets and activity cards; all navigation stays typed.
 use super::{Column, HomeAction, HomeView, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
-use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
     data_display::Avatar,
-    primitives::{FocusRing, Icon, IconName, Tooltip},
+    primitives::{FocusRing, Icon, IconName},
     theme::{ActiveTheme, AvatarSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };

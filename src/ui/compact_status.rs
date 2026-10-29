@@ -6,13 +6,15 @@
 
 use ely_core::{
     motion::Spinner,
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize},
 };
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div,
     prelude::*, px,
 };
+
+use super::tooltip::ui_tooltip;
 
 /// A compact loading mark. `label` is the accessible name and tooltip, so an icon-only row remains
 /// understandable by hover and assistive technology.
@@ -24,7 +26,7 @@ pub fn loading(id: impl Into<gpui::ElementId>, label: impl Into<String>, cx: &Ap
         .debug_selector(move || selector.clone())
         .role(gpui::Role::ProgressIndicator)
         .aria_label(label.clone())
-        .tooltip(Tooltip::text(label))
+        .tooltip(ui_tooltip(label))
         .flex_none()
         .flex()
         .items_center()
@@ -67,7 +69,7 @@ pub fn failed(
             gpui::Role::Image
         })
         .aria_label(aria.clone())
-        .tooltip(Tooltip::text(aria))
+        .tooltip(ui_tooltip(aria))
         .flex_none()
         .flex()
         .items_center()
@@ -119,7 +121,7 @@ pub fn empty(label: impl Into<String>, cx: &App) -> AnyElement {
         .id(gpui::ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector.clone())
         .aria_label(label.clone())
-        .tooltip(Tooltip::text(label))
+        .tooltip(ui_tooltip(label))
         .flex_none()
         .child(Icon::new(IconName::Circle).size(IconSize::Xs).color(color))
         .into_any_element()

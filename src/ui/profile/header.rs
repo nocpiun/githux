@@ -1,8 +1,8 @@
 //! Flat profile identity header. Public metadata is secondary to the person.
 use super::{ProfileActionKind, ProfileView, SectionState};
-use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, TextSize},
 };
 use gpui::{

@@ -15,14 +15,14 @@ mod rows;
 mod tests;
 mod time;
 
-use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
+use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use ely_core::{
     buttons::IconButton,
     motion::Spinner,
-    primitives::{IconName, Tooltip},
+    primitives::IconName,
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
