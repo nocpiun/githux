@@ -56,3 +56,22 @@ GPUI 0.3.10 的 `ContentMask` 只有矩形边界（`gpui-pre` 的 `window.rs` �
 - 推送后对当前 head 触发 `@codex review`，走 [PR 审查流程](../pr-review-flow.md)。
 - 加 `pending` 等负责人原生验收；不合并、不 auto-merge，`blocked` 由负责人管理。
 - 若后续升级到支持非矩形 mask 的 GPUI，可把 `RoundedClip` 换成真正的 mask，删除角擦除。
+
+
+## 迁移到 Shell 页面集成分支后的组合验证
+
+负责人指定唯一集成目标为 `feature/shell-pages`（PR #42），本 PR #46 不再面向 main。协调者完成 rebase 后，验证 head 为 `e0e211c311425a411adaa21f15f1d4f195aadce1`，实时目标基线为 `96c32464786204ab1ca947f060ed68e0b6f484bc`。原 main 上的组件检查与截图只是历史证据，不等于正式 Shell 已验收。本轮保留 `pub mod home` 与 `mod island`、真实页面接线及 `outer_scroll` 条件；未修改 Profile README Flow 或简介换行逻辑。
+
+在该组合上，经 `.agents/task/cargo-serialized.ps1`（相同 named mutex、jobs=1、worktree 独立 target）运行 fmt/check all-targets/clippy all-targets -D warnings/test/build，全部通过。测试计数为 728 / 728 / 55 / 158 / 135 / 495 / 18。PowerShell 5.1 将 cargo 正常 stderr 当作错误的问题，仅在本地忽略的包装中修正，仍传回 cargo 退出码。
+
+原生验证改用本 worktree 的正式 `target/debug/githux.exe`，通过应用已有保存账户读取真实公开仓库，不读取、打印或导出 PAT。使用 DPI-aware PrintWindow 和按 PID 限定的 Windows 消息进行输入、截图；这是原生程序接收合成鼠标/滚轮消息的验证，不代表手动输入手感或完整账户认证验收。当前显示器 scale 为 150%。
+
+- `shell-repo-return.png`：正式 Shell 的 Repository 页面、文件树、真实 README 与 language bar 同屏，底条两端沿岛圆角收边。
+- `shell-language-tooltip.png`、`shell-narrow-tooltip.png`：底边 hover 显示 `Rust 93%`，向上拟合；`shell-reader-scroll-own.png` 验证 README 滚轮改变正文而底条保持原位置。
+- `shell-profile-own-ready.png`、`shell-home-return.png`、`shell-repo-return.png`：Repository → Profile → Home → Repository 往返；Profile 资料/pins/贡献仍可见，仓库保留文件与正文。本基线的 Profile README 呈现缺口由 Shell 任务负责，本任务不把它说成已经修复。
+- `shell-repository-narrow.png`、`shell-sidebar-collapsed.png`：resize 到 1328×964 设备像素客户区，以及侧栏收起后，文件树/Reader 可见、底条仍贴底且两端不越界。
+- 正式 Shell 缺陷反向核验：临时仅绕过 `rounded_island` 构建并运行同一组合，得到 `shell-before-clip.png`，之后恢复源码并重新构建修复版。对照 `shell-repo-return.png`，左下角 `(361,1218)/(362,1218)` 从完整紫色 RGB(169,152,221) 变为背景 RGB(37,37,37)，右下角 `(1908,1218)` 从完整粉色 RGB(220,138,144) 变为相同背景；保留的内侧条段颜色不变。放大图为 `shell-before-clip-left/right.png`、`shell-repo-return-left/right.png`；像素记录 `shell-corner-pixels.json`。这些真实账户截图只保留在忽略的 `.agents/output`，不上传。
+
+按 L002/L011/L012，本轮新增的证据是正式 Shell 页面接线与圆角的组合运行，而非将先前 example 当成正式路由。曾尝试单独组合探针，但原仓库 fixture 不覆盖侧栏/Home/Profile 接口，会给出明确 599；该临时探针已移入本地任务目录，不提交、不作为成功证据。没有新增需要单列的稳定教训；可复用部分已由上述三条覆盖。并行原生窗口同名时需按本任务 PID 限定输入和截图，避免串入其他窗口。
+
+仍未覆盖其他原生 DPI、手动 thumb 拖拽和动画手感；保留 pending，不合并或 auto-merge。最终 CI/review 收据和新 head 留在 PR 与 delivery.progress，不以旧 main 结果放行。
