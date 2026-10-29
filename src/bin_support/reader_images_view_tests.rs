@@ -659,3 +659,73 @@ fn dropping_a_reader_cancels_its_picture_scope(cx: &mut TestAppContext) {
     // came from the reader's release hook, not from dropping the service.
     assert!(std::sync::Arc::strong_count(&provider) > 0);
 }
+
+/// Finding: replacing the picture board must cancel the old board's scope. The
+/// replacement gets a new reader identity, so document changes and release only
+/// see the new one and the old loads would keep running.
+#[gpui::test]
+fn replacing_image_limits_cancels_the_old_board_scope(cx: &mut TestAppContext) {
+    struct RecordingProvider {
+        cancelled: std::sync::Arc<std::sync::Mutex<Vec<crate::reader::ImageScope>>>,
+    }
+
+    impl crate::reader::ImageProvider for RecordingProvider {
+        fn start(&self, request: crate::reader::ImageRequest, sink: crate::reader::ImageSink) {
+            let _ = (request, sink);
+        }
+
+        fn cancel(&self, scope: crate::reader::ImageScope) {
+            self.cancelled.lock().unwrap().push(scope);
+        }
+    }
+
+    setup(cx);
+    let cancelled = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = std::sync::Arc::new(RecordingProvider {
+        cancelled: cancelled.clone(),
+    });
+    let provider_for_view = provider.clone();
+    let (reader, cx) = cx.add_window_view(move |window, cx| {
+        let mut reader = ReaderView::new(
+            crate::content::PreparedBody::Utf8 {
+                text: "![x](https://images.invalid/public/logo.png)\n".to_string(),
+                has_bom: false,
+            },
+            crate::reader::DocumentKind::Markdown,
+            crate::reader::ResourceContext::new(
+                crate::fixture::OWNER,
+                crate::fixture::NAME,
+                COMMIT,
+                crate::fixture::README_PATH,
+            ),
+            window,
+            cx,
+        );
+        reader.set_image_provider(
+            Some(provider_for_view as std::sync::Arc<dyn crate::reader::ImageProvider>),
+            cx,
+        );
+        reader
+    });
+    cx.update(|window, _| window.activate_window());
+    frames(cx);
+    let old_scope = reader.read_with(cx, |reader, _| reader.image_scope());
+    cancelled.lock().unwrap().clear();
+
+    reader.update_in(cx, |reader, _window, cx| {
+        reader.set_image_limits(
+            crate::reader::ImageLimits {
+                max_in_flight: 2,
+                ..crate::reader::ImageLimits::default()
+            },
+            cx,
+        );
+    });
+    let new_scope = reader.read_with(cx, |reader, _| reader.image_scope());
+    assert_ne!(new_scope.reader, old_scope.reader, "a new board identity");
+    assert!(
+        cancelled.lock().unwrap().contains(&old_scope),
+        "the replaced board's scope was cancelled: {:?}",
+        cancelled.lock().unwrap()
+    );
+}

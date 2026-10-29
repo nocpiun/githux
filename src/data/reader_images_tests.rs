@@ -695,3 +695,38 @@ async fn cancelling_one_scope_does_not_cancel_another_readers_work() {
         "only the replaced reader's scope was cancelled"
     );
 }
+
+/// Finding: the repository path performs several requests, so a per-request
+/// transport timeout alone can exceed the advertised complete-load budget many
+/// times over. `ImageLimits::total_timeout` now bounds the whole load.
+#[tokio::test]
+async fn the_total_timeout_bounds_the_whole_repository_load() {
+    let fixture = fixture().await;
+    fixture.login(1).await;
+    let session = fixture.session();
+
+    // The commit read itself never completes in time.
+    let _release = fixture.transport.block(200, commit_json());
+
+    let (source, _) = external("https://example.com/never.png", Vec::new());
+    let limits = ImageLimits {
+        total_timeout: Duration::from_millis(150),
+        ..ImageLimits::default()
+    };
+    let service = fixture.service(session, source, limits);
+    let sink = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("slow"),
+            target: repository_request(COMMIT, "a.png"),
+        },
+        sink.clone(),
+    );
+    let completion = next_completion(&sink).await;
+    assert_eq!(
+        completion.result,
+        Err(ImageFailure::Timeout),
+        "the whole load is bounded by one deadline, not per request"
+    );
+}

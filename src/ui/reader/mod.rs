@@ -442,11 +442,22 @@ impl ReaderView {
     /// demand. Called when a retained reader's host hides its window; finished
     /// pictures stay drawn.
     fn suspend_images(&mut self, cx: &mut Context<Self>) {
+        // Cancelling the provider cannot remove a completion that already sits
+        // in the sink. Advancing the generation invalidates it, so a hidden
+        // window's late result can never consume a slot belonging to the work
+        // the visible window starts next.
         if let Some(provider) = self.image_provider.clone() {
             provider.cancel(self.image_scope());
         }
         self.stop_image_pump();
-        self.images.borrow_mut().suspend();
+        self.image_generation = self.image_generation.wrapping_add(1);
+        let generation = self.image_generation;
+        let attached = self.image_provider.is_some();
+        {
+            let mut board = self.images.borrow_mut();
+            board.advance(generation);
+            board.set_attached(attached);
+        }
         cx.notify();
     }
 
@@ -456,12 +467,17 @@ impl ReaderView {
         if self.image_limits == limits {
             return;
         }
+        // The old board's reader identity disappears with it, so its scope must
+        // be cancelled here: document changes and release only see the new one.
+        if let Some(provider) = self.image_provider.clone() {
+            provider.cancel(self.image_scope());
+        }
+        self.stop_image_pump();
         self.image_limits = limits.clone();
         let attached = self.image_provider.is_some();
-        self.stop_image_pump();
         self.images = std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(limits)));
         self.images.borrow_mut().set_attached(attached);
-        self.image_generation += 1;
+        self.image_generation = self.image_generation.wrapping_add(1);
         let generation = self.image_generation;
         self.images.borrow_mut().begin(generation);
         self.attach_images_to_document(cx);

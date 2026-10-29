@@ -417,3 +417,34 @@ fn eviction_reports_the_blocks_it_shrank() {
     assert_eq!(label(&board, &target("docs/a.png").key()), Some("released"));
     assert!(board.evict().is_empty(), "nothing left to evict");
 }
+
+/// Finding: suspension must invalidate the cancelled scope while keeping the
+/// pictures already drawn, so a completion queued before the window was hidden
+/// cannot consume a slot belonging to the work the visible window starts next.
+#[test]
+fn suspension_invalidates_the_old_scope_and_keeps_ready_pictures() {
+    let mut board = board();
+    board.want(0, target("docs/ready.png"));
+    let old_scope = board.scope();
+    board.take_pending(10);
+    let mut completion = ready_for(&board, 4, 4);
+    completion.key = target("docs/ready.png").key();
+    board.apply(completion);
+    board.want(1, target("docs/owed.png"));
+    let mut queued = ready_for(&board, 4, 4);
+    queued.key = target("docs/owed.png").key();
+
+    board.advance(old_scope.generation.wrapping_add(1));
+    board.set_attached(true);
+    assert_ne!(board.scope(), old_scope, "the scope advances");
+    assert_eq!(
+        label(&board, &target("docs/ready.png").key()),
+        Some("ready"),
+        "a finished picture survives the suspension"
+    );
+    assert!(board.state(&target("docs/owed.png").key()).is_none());
+
+    // The queued completion from before the suspension arrives now.
+    assert!(board.apply(queued).is_empty());
+    assert!(!board.work_outstanding());
+}

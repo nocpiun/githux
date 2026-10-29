@@ -177,17 +177,27 @@ impl RepositoryImageService {
         request: &ImageRequest,
         cancel: CancellationToken,
     ) -> Result<DecodedImage, ImageFailure> {
-        let bytes = match &request.target {
-            ImageTarget::Repository {
-                owner,
-                name,
-                commit,
-                path,
-            } => {
-                self.repository_bytes(owner, name, commit, path, cancel.clone())
-                    .await?
-            }
-            ImageTarget::External { url } => self.external_bytes(url, cancel.clone()).await?,
+        // One deadline for the whole load, including decode. A repository
+        // picture is several requests (commit, each directory, blob) whose own
+        // transport timeouts are per-request; without this, a slow but
+        // successful sequence could hold a concurrency permit far past the
+        // advertised budget and a host-configured shorter timeout would have no
+        // effect on this path at all.
+        let deadline = tokio::time::Instant::now() + self.inner.limits.total_timeout;
+        let bytes = tokio::select! {
+            biased;
+            _ = cancel.clone().cancelled() => return Err(ImageFailure::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => return Err(ImageFailure::Timeout),
+            bytes = async {
+                match &request.target {
+                    ImageTarget::Repository { owner, name, commit, path } => {
+                        self.repository_bytes(owner, name, commit, path, cancel.clone()).await
+                    }
+                    ImageTarget::External { url } => {
+                        self.external_bytes(url, cancel.clone()).await
+                    }
+                }
+            } => bytes?,
         };
         if cancel.is_cancelled() {
             return Err(ImageFailure::Cancelled);
@@ -196,9 +206,13 @@ impl RepositoryImageService {
             return Err(ImageFailure::StaleContext);
         }
         let limits = self.inner.limits.clone();
-        tokio::task::spawn_blocking(move || decode_image(bytes, &limits))
-            .await
-            .map_err(|_| ImageFailure::Network)?
+        let decode = tokio::task::spawn_blocking(move || decode_image(bytes, &limits));
+        tokio::select! {
+            biased;
+            _ = cancel.clone().cancelled() => Err(ImageFailure::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(ImageFailure::Timeout),
+            decoded = decode => decoded.map_err(|_| ImageFailure::Network)?,
+        }
     }
 
     async fn repository_bytes(

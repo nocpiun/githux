@@ -124,6 +124,14 @@ impl ImageBoard {
         &self.limits
     }
 
+    /// Advances the generation while keeping finished pictures: a suspension
+    /// stops network work without forgetting what is already drawn, and a late
+    /// completion of the previous generation is rejected.
+    pub(super) fn advance(&mut self, generation: u64) {
+        self.generation = generation;
+        self.forget_unfinished();
+    }
+
     /// Starts a new document generation, dropping every picture of the old one.
     pub(super) fn begin(&mut self, generation: u64) {
         self.generation = generation;

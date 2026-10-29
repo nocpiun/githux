@@ -70,7 +70,13 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 5. **reader 释放未取消图片 scope（P2）**：`on_release` 原来只取消滚动。`RepositoryImageService::start` 每个在途任务持有一个服务 clone，所以丢掉 provider 字段不会停止加载。现在 release 钩子显式取消本 reader 的 scope（不影响共享同一 provider 的另一 reader）。测试用「不完成、只记录 cancel」的 provider，先证明无修复时失败、加上修复通过。
 6. **淘汰已解码图片后未重测（P2）**：`evict` 把旧 Ready 换成更矮的 `Released` 占位，但不返回受影响的块，列表保留旧高度。现在 `evict` 返回受影响的块，`dispatch_images` 用同一条 `remeasure_block` 路径重测。
 
-第三轮（第二轮修复后的 head）仍未完成 CI 与最终回执核验，状态以 PR 记录为准。
+第三轮提出 3 条，均核实成立并修复：
+
+7. **挂起未作废旧 scope（P2）**：取消 provider 不能移除已进入 sink 的完成；`suspend()` 重置了计数但没改 scope，恢复可见后旧完成会通过 scope 校验并消耗新工作的名额。`suspend_images` 现在推进代次（`ImageBoard::advance`，保留已就绪图片），旧完成因此被拒绝。
+8. **换预算未取消旧板（P2）**：`set_image_limits` 丢弃旧 board，但新 board 拿到新的 reader 标识，之后文档变化/释放只会取消新 scope —— 旧任务继续跑并占用 provider 的 semaphore。现在替换前先取消当前 scope。
+9. **仓库图片缺少总超时（P2）**：`total_timeout` 原本没作用于仓库路径（commit + 每一级目录 + blob 各自只有 transport 的单请求超时），一段慢而成功的序列可以远超预算并长期占住并发名额。`load` 现在用一个 deadline 覆盖全部请求与解码；`the_total_timeout_bounds_the_whole_repository_load` 反向验证（去掉 deadline 测试会卡到超时）。
+
+第四轮（第三轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
 
 ## 后续
 
