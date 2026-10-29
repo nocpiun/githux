@@ -92,7 +92,7 @@ cargo test --locked                       # 全部通过：635/635 bin、635 acc
 
 13. **IPv6 unique-local 未拒绝（P2，安全）**：`fc00::/7` 是内网地址段，原策略只覆盖 loopback/未指定/链路本地/site-local，`https://[fd00::1]/` 因此仍可被连接；`GuardResolver` 复用同一判定，DNS 解析也没有拦住。现已并入 `is_local_address`（字面 host、重定向与 DNS 答案共用同一函数）。
 
-第八轮（第七轮修复后的 head）的 CI 与最终回执以 PR 记录为准。
+第八轮无新缺陷（review clean），仅要求核对历史线程。逐条对照当前代码确认 13 条修复都在位并有对应回归测试后，通过 GraphQL resolve 全部历史线程；随后只读复核：review clean、threads clear、CI 成功（四平台 Build、Ubuntu code check、`CI` 汇总与 `PR` 工作流的 `Check` 均通过）。`pending` 标签仍表示等待负责人原生验收，因此本任务不自行合并。
 
 ## 后续
 
