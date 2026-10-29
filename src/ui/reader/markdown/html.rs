@@ -177,6 +177,13 @@ fn is_raw_text(name: &str) -> bool {
 /// the input is small. Deeper starts are flattened: their text is kept, the
 /// extra tags are dropped, and the end tags are consumed by `suppressed`.
 pub(crate) const MAX_DEPTH: usize = 256;
+
+/// Largest `start` accepted from an HTML ordered list.
+///
+/// The renderer adds an item's index to the list's first number, so an
+/// arbitrary `u64` from `<ol start="…">` could overflow. This leaves room for
+/// far more items than a 2 MiB document can hold.
+pub(crate) const MAX_LIST_START: u64 = u64::MAX - (1 << 32);
 /// Elements dropped with their entire raw content (no readable text).
 fn is_raw_dropped(name: &str) -> bool {
     matches!(name, "script" | "style" | "template")

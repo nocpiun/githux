@@ -969,6 +969,10 @@ fn push_html_list(element: &Element, out: &mut Vec<Block>) {
             element
                 .attr("start")
                 .and_then(|value| value.trim().parse::<u64>().ok())
+                // The renderer adds the item index to this number, and a list
+                // may hold as many items as the content budget allows. Cap it
+                // so `first + index` can never overflow.
+                .map(|first| first.min(html::MAX_LIST_START))
                 .unwrap_or(1),
         )
     } else {

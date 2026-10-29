@@ -261,6 +261,25 @@ fn dropped_inline_elements_suppress_their_content_across_events() {
 }
 
 #[test]
+fn html_list_starts_cannot_overflow_the_renderers_counter() {
+    let doc = parse("<ol start=\"18446744073709551615\"><li>one</li><li>two</li></ol>");
+    let (start, items) = doc
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::List { start, items } => Some((*start, items.len())),
+            _ => None,
+        })
+        .expect("list");
+    let first = start.expect("an ordered list keeps its start");
+    assert_eq!(items, 2);
+    assert!(
+        first.checked_add(items as u64 + 64).is_some(),
+        "start {first} must leave room for the item index"
+    );
+}
+
+#[test]
 fn suppression_search_stays_on_utf8_boundaries() {
     let doc = parse("before <script><!-- </中文> --></script> after\n\nafter script 中文 tail");
     let copied = copied(&doc.blocks);
