@@ -301,6 +301,37 @@ fn home_refresh_and_navigation_actions_do_not_reenter_the_host(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn repository_contributor_navigation_is_deferred_and_opens_a_profile(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    let rows = view.read_with(cx, |shell, _| shell.repositories().to_vec());
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::repository(&rows[0]), window, cx);
+    });
+    cx.run_until_parked();
+    // Emit the exact typed action a real contributor control produces while the repository host
+    // is on the update stack. It must be dispatched after that update, then reach Shell's shared
+    // open-or-activate path without panicking.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate_contributor_for_test("carol", window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::UserProfile {
+            host: HostId::github(),
+            login: "carol".to_string(),
+        }
+    );
+}
+
+#[gpui::test]
 fn feed_refresh_is_reenabled_when_its_server_poll_interval_expires(cx: &mut TestAppContext) {
     let transport = Arc::new(PageTransport::default());
     let (view, controller, cx) = open_shell(cx, transport.clone());
