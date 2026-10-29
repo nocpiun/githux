@@ -96,7 +96,7 @@ README 中常见的原始 HTML 由本地 `src/ui/reader/markdown/html.rs` 规范
 - 表格：`table`/`thead`/`tbody`/`tr`/`th`/`td` 转成 `Block::Table`；首行全为 `th` 时作为表头，否则第一行提升为表头；`align` 属性或 `style="text-align:..."` 决定列对齐；单元格内的块级内容按行内文本展平。
 - 代码：`pre`/`code` 成为围栏代码块（`class="language-x"` 取语言）；Markdown 行内代码与围栏代码中的 HTML 原样保留，因为它们是 `Code`/`CodeBlock` 事件而非 HTML 事件。
 - 安全：`script`/`style`/`template`/`iframe`/`object`/`embed`/`head` 等整段丢弃，事件处理属性只被忽略，绝不回写原始 HTML；实体按常见命名引用与数值引用解码，未知或畸形实体保留字面文本。
-- 明确不支持：`align` 等布局属性的视觉居中/对齐（内容保留、布局忽略）；`colspan`/`rowspan`；SVG/MathML 与 CSS 布局；`<details>` 的折叠交互（默认全部展开）；未闭合标签按容错规则丢弃或展开。复杂嵌套或表格跨度会退化为内容保留的近似排版。
+- 明确不支持：`align` 等布局属性的视觉居中/对齐（内容保留、布局忽略）；`colspan`/`rowspan`；SVG/MathML 与 CSS 布局；`<details>` 的折叠交互（默认全部展开）；未闭合标签按容错规则丢弃或展开。元素树嵌套深度上限 256 层，更深的标签被展平（文本保留、额外标签丢弃），以避免小体积输入触发递归栈溢出。复杂嵌套或表格跨度会退化为内容保留的近似排版。
 
 ## 滚动条（共享核心）
 

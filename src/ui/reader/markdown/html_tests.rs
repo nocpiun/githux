@@ -8,6 +8,7 @@
 use super::super::fixtures;
 use super::ast::{Align, Block, Inline, Style, parse};
 use super::doctext::DocText;
+use super::html;
 
 fn debug(blocks: &[Block]) -> String {
     format!("{blocks:?}")
@@ -230,6 +231,24 @@ fn headings_from_html_are_registered_for_navigation() {
     assert!(matches!(doc.blocks[0], Block::Heading(2, _)));
     assert_eq!(doc.headings[0].title, "Setup");
     assert_eq!(doc.headings[0].level, 2);
+}
+
+#[test]
+fn deeply_nested_html_is_flattened_instead_of_overflowing() {
+    // This is small enough to fit the reader budget but deep enough that an
+    // unbounded recursive tree would abort while parsing, walking or dropping.
+    let depth = 60_000;
+    let input = format!("{}text{}", "<div>".repeat(depth), "</div>".repeat(depth));
+    let doc = parse(&input);
+    let copied = copied(&doc.blocks);
+    assert!(copied.contains("text"), "{copied}");
+}
+
+#[test]
+fn entity_decoding_does_not_rescan_the_rest_of_the_document() {
+    let bare = "&".repeat(100_000);
+    assert_eq!(html::decode_entities(&bare).len(), bare.len());
+    assert_eq!(html::decode_entities("a &amp; b &#128640;"), "a & b 🚀");
 }
 
 #[test]

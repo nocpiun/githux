@@ -166,6 +166,15 @@ fn is_raw_text(name: &str) -> bool {
     matches!(name, "script" | "style" | "template" | "title" | "textarea")
 }
 
+/// Maximum element nesting this parser builds.
+///
+/// A repository README can nest thousands of `<div>`s inside the reader's
+/// 2 MiB budget. The element tree is walked and dropped recursively, so an
+/// unbounded depth would abort the process with a stack overflow even though
+/// the input is small. Deeper starts are flattened: their text is kept, the
+/// extra tags are dropped, and the end tags are consumed by `suppressed`.
+const MAX_DEPTH: usize = 256;
+
 /// Elements dropped with their entire raw content (no readable text).
 fn is_raw_dropped(name: &str) -> bool {
     matches!(name, "script" | "style" | "template")
@@ -181,6 +190,9 @@ pub fn parse(fragment: &str) -> Vec<Node> {
     let len = bytes.len();
     let mut roots = Vec::new();
     let mut stack: Vec<Element> = Vec::new();
+    // Start tags past `MAX_DEPTH` that were not pushed, so their end tags must
+    // be ignored instead of closing a real ancestor.
+    let mut suppressed = 0usize;
     let mut i = 0;
     while i < len {
         if bytes[i] != b'<' {
@@ -228,12 +240,16 @@ pub fn parse(fragment: &str) -> Vec<Node> {
                 };
                 if self_closing || is_void(&element.name) {
                     attach(&mut stack, &mut roots, Node::Element(element));
+                } else if stack.len() >= MAX_DEPTH {
+                    suppressed += 1;
                 } else {
                     stack.push(element);
                 }
             }
             Tag::End { name } => {
-                if let Some(position) = stack
+                if suppressed > 0 {
+                    suppressed -= 1;
+                } else if let Some(position) = stack
                     .iter()
                     .rposition(|open| open.name.eq_ignore_ascii_case(&name))
                 {
@@ -330,10 +346,13 @@ pub fn decode_entities(text: &str) -> String {
 
 fn decode_at(text: &str, i: usize) -> Option<(char, usize)> {
     let rest = &text[i + 1..];
-    let semi = rest.find(';')?;
-    if semi > 32 {
-        return None;
-    }
+    // Only a short window can form a character reference; scanning the whole
+    // remaining string for `;` would make a README full of bare `&` quadratic.
+    let semi = rest
+        .char_indices()
+        .take(33)
+        .find(|(_, ch)| *ch == ';')
+        .map(|(index, _)| index)?;
     let body = &rest[..semi];
     let decoded = if let Some(number) = body.strip_prefix('#') {
         let code = if let Some(hex) = number.strip_prefix(['x', 'X']) {
