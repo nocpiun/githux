@@ -4,10 +4,18 @@
 //! (`ely-documents` @ `30c66fe1`, MIT). The syntax tree is produced by
 //! `pulldown-cmark` rather than Ely's mdast so the reader owns the parser too.
 //! Only the read-only subset is kept: no editing blocks, tables or history.
+//!
+//! Raw HTML is normalised by [`super::html`]: comments never reach the model,
+//! inline tags become the same styles/links the Markdown syntax produces, and
+//! block tags map onto the existing `Block` variants. HTML inside code spans
+//! and fenced code is untouched because those arrive as `Code`/`CodeBlock`
+//! events, not HTML events.
 
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+use super::html::{self, Element, Node};
 
 /// How a stretch of inline text prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +107,12 @@ pub enum Block {
         alt: String,
         url: String,
     },
-    /// Raw HTML, shown as inert text.
+    /// Raw HTML kept for compatibility with callers that still match on it.
+    ///
+    /// The parser no longer produces this variant: comments are dropped and
+    /// common HTML is converted to the other block types. It stays so the
+    /// renderer in `document.rs` (owned by the image task) keeps compiling
+    /// until both tasks agree on removing it.
     Html(String),
     Footnote {
         label: String,
@@ -155,6 +168,11 @@ struct Building {
     task: Option<bool>,
     /// True while this builder belongs to a table cell.
     in_cell: bool,
+    /// Inline HTML elements left open between `InlineHtml` events.
+    html: Vec<HtmlOpen>,
+    /// A comment-only HTML fragment sat between two text runs; the next run
+    /// collapses its leading whitespace so the copy reads like the browser.
+    html_gap: bool,
 }
 
 enum Open {
@@ -163,9 +181,55 @@ enum Open {
     Image { url: String, start: usize },
 }
 
+/// One open inline HTML element and the style or link it contributes.
+struct HtmlOpen {
+    name: String,
+    kind: HtmlKind,
+    start: usize,
+}
+
+enum HtmlKind {
+    Style(Style),
+    Link(String),
+}
+
 impl Building {
     fn push_text(&mut self, text: &str) {
+        if self.html_gap {
+            self.html_gap = false;
+            let trimmed = text.trim_start_matches(' ');
+            if trimmed.len() != text.len()
+                && (self.inline.text.is_empty() || self.inline.text.ends_with(' '))
+            {
+                self.inline.text.push_str(trimmed);
+                return;
+            }
+        }
         self.inline.text.push_str(text);
+    }
+
+    /// Convert an inline HTML fragment into text, styles, links and pictures.
+    fn push_html(&mut self, fragment: &str) {
+        let nodes = html::parse(fragment);
+        let text = self.inline.text.len();
+        let notes = self.notes.len();
+        let opens = self.html.len();
+        append_html_inline(
+            &nodes,
+            &mut self.inline,
+            &mut self.notes,
+            &mut self.html,
+            self.in_cell,
+        );
+        // A fragment that contributed nothing (a comment, or a dropped tag)
+        // glues the surrounding text runs together.
+        self.html_gap =
+            self.inline.text.len() == text && self.notes.len() == notes && self.html.len() == opens;
+    }
+
+    /// Close any HTML element still open at the end of this builder.
+    fn close_html(&mut self) {
+        close_html_opens(&mut self.html, &mut self.inline);
     }
 
     fn close(&mut self, end: usize) {
@@ -244,7 +308,7 @@ pub fn parse(markdown: &str) -> Document {
     // Paragraph or heading text being collected.
     let mut inline: Option<(Option<u8>, Building)> = None;
     let mut code: Option<(Option<String>, String)> = None;
-    let mut html = String::new();
+    let mut html_buffer = String::new();
     let mut footnotes: Vec<String> = Vec::new();
 
     fn finish_inline(inline: &mut Option<(Option<u8>, Building)>, stack: &mut [Container]) {
@@ -255,6 +319,7 @@ pub fn parse(markdown: &str) -> Document {
             let end = building.inline.text.len();
             building.close(end);
         }
+        building.close_html();
         let notes = std::mem::take(&mut building.notes);
         let inline = building.inline;
         // A table cell collects inline text only.
@@ -581,30 +646,32 @@ pub fn parse(markdown: &str) -> Document {
             }
             Event::Start(Tag::HtmlBlock) => {
                 finish_inline(&mut inline, &mut stack);
-                html.clear();
+                html_buffer.clear();
             }
             // Block HTML is buffered until its closing event. Inline HTML
             // belongs to the surrounding paragraph, tight list item or cell,
             // so it must reach a builder even when none exists yet: those
             // contexts never emit `End(HtmlBlock)`.
             Event::Html(text) => match &mut inline {
-                Some((_, building)) => building.push_text(&text),
-                None => html.push_str(&text),
+                Some((_, building)) => building.push_html(&text),
+                None => html_buffer.push_str(&text),
             },
             Event::InlineHtml(text) => match &mut inline {
-                Some((_, building)) => building.push_text(&text),
+                Some((_, building)) => building.push_html(&text),
                 None => {
                     if let Some(Container::Cell(cell)) = stack.last_mut() {
-                        cell.inline.text.push_str(&text);
+                        cell.push_html(&text);
                     } else {
-                        with_inline(&mut inline, |building| building.push_text(&text));
+                        with_inline(&mut inline, |building| building.push_html(&text));
                     }
                 }
             },
             Event::End(TagEnd::HtmlBlock) => {
-                let text = std::mem::take(&mut html);
+                let text = std::mem::take(&mut html_buffer);
                 if !text.trim().is_empty() {
-                    push_block(&mut stack, Block::Html(text.trim_end().to_string()));
+                    for block in html_blocks(&text) {
+                        push_block(&mut stack, block);
+                    }
                 }
             }
             Event::End(_) => {}
@@ -659,6 +726,457 @@ fn push_block(stack: &mut [Container], block: Block) {
         Some(Container::List { current, .. }) => current.push(block),
         _ => {}
     }
+}
+
+/// Convert a buffered block-HTML fragment into the reader's own blocks.
+fn html_blocks(fragment: &str) -> Vec<Block> {
+    let nodes = html::parse(fragment);
+    let mut out = Vec::new();
+    blocks_from_nodes(&nodes, &mut out);
+    out
+}
+
+/// Walk `nodes` as block content, turning inline runs into paragraphs.
+fn blocks_from_nodes(nodes: &[Node], out: &mut Vec<Block>) {
+    let mut run = Inline::default();
+    let mut notes = Vec::new();
+    let mut opens = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Text(text) => push_html_text(&mut run, text),
+            Node::End(_) => {}
+            Node::Element(element) if html::is_block(&element.name) => {
+                flush_html_run(&mut run, &mut notes, &mut opens, out);
+                block_from_element(element, out);
+            }
+            Node::Element(element) => {
+                append_html_element(element, &mut run, &mut notes, &mut opens, false);
+            }
+        }
+    }
+    flush_html_run(&mut run, &mut notes, &mut opens, out);
+}
+
+fn flush_html_run(
+    run: &mut Inline,
+    notes: &mut Vec<Block>,
+    opens: &mut Vec<HtmlOpen>,
+    out: &mut Vec<Block>,
+) {
+    close_html_opens(opens, run);
+    trim_inline_end(run);
+    if !run.is_empty() {
+        out.push(Block::Paragraph(std::mem::take(run)));
+    }
+    out.append(notes);
+}
+
+/// Build the inline content of a heading or table cell.
+///
+/// `in_cell` keeps a picture's alternative text where the picture was; a
+/// heading returns the pictures as notes for the caller to place after it.
+fn inline_of_nodes(nodes: &[Node], in_cell: bool) -> (Inline, Vec<Block>) {
+    let mut inline = Inline::default();
+    let mut notes = Vec::new();
+    let mut opens = Vec::new();
+    append_html_inline(nodes, &mut inline, &mut notes, &mut opens, in_cell);
+    close_html_opens(&mut opens, &mut inline);
+    trim_inline_end(&mut inline);
+    (inline, notes)
+}
+
+fn block_from_element(element: &Element, out: &mut Vec<Block>) {
+    let name = element.name.as_str();
+    if html::is_dropped(name) {
+        return;
+    }
+    match name {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            let level = name.as_bytes()[1] - b'0';
+            let (inline, notes) = inline_of_nodes(&element.children, false);
+            if !inline.is_empty() {
+                out.push(Block::Heading(level, inline));
+            }
+            out.extend(notes);
+        }
+        "hr" => out.push(Block::Rule),
+        "img" => push_html_image(element, out),
+        "br" => {}
+        "pre" => push_html_code(element, out),
+        "blockquote" => {
+            let mut body = Vec::new();
+            blocks_from_nodes(&element.children, &mut body);
+            out.push(Block::Quote { kind: None, body });
+        }
+        "ul" | "ol" => push_html_list(element, out),
+        "table" => {
+            if let Some(table) = html_table(element) {
+                out.push(table);
+            }
+        }
+        "summary" => {
+            // `<details><summary>` reads as a bold line before the body.
+            let (mut inline, notes) = inline_of_nodes(&element.children, false);
+            if !inline.text.is_empty() {
+                inline.styles.push((0..inline.text.len(), Style::Strong));
+            }
+            if !inline.is_empty() {
+                out.push(Block::Paragraph(inline));
+            }
+            out.extend(notes);
+        }
+        _ => blocks_from_nodes(&element.children, out),
+    }
+}
+
+fn push_html_image(element: &Element, out: &mut Vec<Block>) {
+    let alt = element.attr("alt").unwrap_or_default();
+    let url = element.attr("src").unwrap_or_default().trim();
+    if url.is_empty() {
+        if !alt.trim().is_empty() {
+            out.push(Block::Paragraph(Inline {
+                text: alt.to_string(),
+                ..Inline::default()
+            }));
+        }
+        return;
+    }
+    out.push(Block::Image {
+        alt: alt.to_string(),
+        url: url.to_string(),
+    });
+}
+
+fn push_html_code(element: &Element, out: &mut Vec<Block>) {
+    let language = find_code_language(&element.children);
+    let mut text = html::raw_text(&element.children);
+    if let Some(stripped) = text.strip_prefix('\n') {
+        text = stripped.to_string();
+    }
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    out.push(Block::Code { language, text });
+}
+
+fn find_code_language(nodes: &[Node]) -> Option<String> {
+    for node in nodes {
+        let Node::Element(element) = node else {
+            continue;
+        };
+        if element.name == "code" {
+            let class = element.attr("class")?;
+            for token in class.split_whitespace() {
+                if let Some(language) = token
+                    .strip_prefix("language-")
+                    .or_else(|| token.strip_prefix("lang-"))
+                {
+                    return Some(language.to_string());
+                }
+            }
+        }
+        if let Some(language) = find_code_language(&element.children) {
+            return Some(language);
+        }
+    }
+    None
+}
+
+fn push_html_list(element: &Element, out: &mut Vec<Block>) {
+    let start = if element.name == "ol" {
+        Some(
+            element
+                .attr("start")
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(1),
+        )
+    } else {
+        None
+    };
+    let mut items = Vec::new();
+    for child in &element.children {
+        let Node::Element(item) = child else {
+            continue;
+        };
+        if item.name != "li" {
+            continue;
+        }
+        let mut body = Vec::new();
+        blocks_from_nodes(&item.children, &mut body);
+        items.push((None, body));
+    }
+    if !items.is_empty() {
+        out.push(Block::List { start, items });
+    }
+}
+
+fn html_table(element: &Element) -> Option<Block> {
+    let mut head = Vec::new();
+    let mut rows = Vec::new();
+    let mut aligns = Vec::new();
+    collect_table_rows(element, &mut head, &mut rows, &mut aligns);
+    if head.is_empty() && !rows.is_empty() {
+        head = rows.remove(0);
+    }
+    if head.is_empty() {
+        return None;
+    }
+    let width = head
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+        .max(aligns.len());
+    aligns.resize(width, Align::None);
+    head.resize(width, Inline::default());
+    for row in rows.iter_mut() {
+        row.resize(width, Inline::default());
+    }
+    Some(Block::Table {
+        aligns,
+        head,
+        rows,
+        repeated_head: false,
+    })
+}
+
+fn collect_table_rows(
+    element: &Element,
+    head: &mut Vec<Inline>,
+    rows: &mut Vec<Vec<Inline>>,
+    aligns: &mut Vec<Align>,
+) {
+    for child in &element.children {
+        let Node::Element(node) = child else {
+            continue;
+        };
+        match node.name.as_str() {
+            "tr" => {
+                let mut cells = Vec::new();
+                let mut row_aligns = Vec::new();
+                let mut has_th = false;
+                for cell in &node.children {
+                    let Node::Element(cell) = cell else {
+                        continue;
+                    };
+                    if cell.name != "td" && cell.name != "th" {
+                        continue;
+                    }
+                    has_th |= cell.name == "th";
+                    let (inline, _) = inline_of_nodes(&cell.children, true);
+                    cells.push(inline);
+                    row_aligns.push(cell_align(cell));
+                }
+                if cells.is_empty() {
+                    continue;
+                }
+                if head.is_empty() && rows.is_empty() && has_th {
+                    *head = cells;
+                } else {
+                    rows.push(cells);
+                }
+                for (column, align) in row_aligns.into_iter().enumerate() {
+                    if align == Align::None {
+                        continue;
+                    }
+                    if aligns.len() <= column {
+                        aligns.resize(column + 1, Align::None);
+                    }
+                    if aligns[column] == Align::None {
+                        aligns[column] = align;
+                    }
+                }
+            }
+            "thead" | "tbody" | "tfoot" => collect_table_rows(node, head, rows, aligns),
+            _ => {}
+        }
+    }
+}
+
+fn cell_align(cell: &Element) -> Align {
+    if let Some(align) = cell.attr("align") {
+        return match align.to_ascii_lowercase().as_str() {
+            "center" => Align::Center,
+            "right" => Align::Right,
+            "left" => Align::Left,
+            _ => Align::None,
+        };
+    }
+    if let Some(style) = cell.attr("style") {
+        let style = style.to_ascii_lowercase();
+        if style.contains("text-align:center") || style.contains("text-align: center") {
+            return Align::Center;
+        }
+        if style.contains("text-align:right") || style.contains("text-align: right") {
+            return Align::Right;
+        }
+        if style.contains("text-align:left") || style.contains("text-align: left") {
+            return Align::Left;
+        }
+    }
+    Align::None
+}
+
+/// Append the readable content of parsed HTML nodes to an inline run.
+fn append_html_inline(
+    nodes: &[Node],
+    inline: &mut Inline,
+    notes: &mut Vec<Block>,
+    opens: &mut Vec<HtmlOpen>,
+    in_cell: bool,
+) {
+    for node in nodes {
+        match node {
+            Node::Text(text) => push_html_text(inline, text),
+            Node::End(name) => close_html(opens, name, inline),
+            Node::Element(element) => append_html_element(element, inline, notes, opens, in_cell),
+        }
+    }
+}
+
+fn append_html_element(
+    element: &Element,
+    inline: &mut Inline,
+    notes: &mut Vec<Block>,
+    opens: &mut Vec<HtmlOpen>,
+    in_cell: bool,
+) {
+    let name = element.name.as_str();
+    if html::is_dropped(name) {
+        return;
+    }
+    let style = match name {
+        "code" | "kbd" | "samp" => Some(HtmlKind::Style(Style::Code)),
+        "strong" | "b" => Some(HtmlKind::Style(Style::Strong)),
+        "em" | "i" => Some(HtmlKind::Style(Style::Emphasis)),
+        "del" | "s" | "strike" => Some(HtmlKind::Style(Style::Strike)),
+        _ => None,
+    };
+    if let Some(kind) = style {
+        return open_html(element, kind, inline, notes, opens, in_cell);
+    }
+    match name {
+        "br" => inline.text.push('\n'),
+        "wbr" | "hr" => {}
+        "img" => {
+            let alt = element.attr("alt").unwrap_or_default();
+            let url = element.attr("src").unwrap_or_default().trim();
+            if url.is_empty() || in_cell {
+                push_html_text(inline, alt);
+            } else {
+                notes.push(Block::Image {
+                    alt: alt.to_string(),
+                    url: url.to_string(),
+                });
+            }
+        }
+        "a" => match element.attr("href").filter(|href| !href.is_empty()) {
+            Some(href) => open_html(
+                element,
+                HtmlKind::Link(href.to_string()),
+                inline,
+                notes,
+                opens,
+                in_cell,
+            ),
+            None => append_html_inline(&element.children, inline, notes, opens, in_cell),
+        },
+        name if html::is_block(name) => {
+            // A block inside inline content (for example a `<p>` in a table
+            // cell) still reads as one run, separated by a space.
+            push_html_text(inline, " ");
+            append_html_inline(&element.children, inline, notes, opens, in_cell);
+            push_html_text(inline, " ");
+        }
+        _ => append_html_inline(&element.children, inline, notes, opens, in_cell),
+    }
+}
+
+fn open_html(
+    element: &Element,
+    kind: HtmlKind,
+    inline: &mut Inline,
+    notes: &mut Vec<Block>,
+    opens: &mut Vec<HtmlOpen>,
+    in_cell: bool,
+) {
+    let start = inline.text.len();
+    opens.push(HtmlOpen {
+        name: element.name.clone(),
+        kind,
+        start,
+    });
+    // A start tag delivered on its own stays open across the following text
+    // and end-tag events; a complete element (including an empty one) closes
+    // here.
+    if !element.children.is_empty() {
+        append_html_inline(&element.children, inline, notes, opens, in_cell);
+        close_html(opens, &element.name, inline);
+    } else if element.closed {
+        close_html(opens, &element.name, inline);
+    }
+}
+
+fn close_html(opens: &mut Vec<HtmlOpen>, name: &str, inline: &mut Inline) {
+    let Some(position) = opens.iter().rposition(|open| open.name == name) else {
+        return;
+    };
+    close_html_to(opens, position, inline);
+}
+
+fn close_html_opens(opens: &mut Vec<HtmlOpen>, inline: &mut Inline) {
+    close_html_to(opens, 0, inline);
+}
+
+fn close_html_to(opens: &mut Vec<HtmlOpen>, position: usize, inline: &mut Inline) {
+    while opens.len() > position {
+        let open = opens.pop().expect("an open HTML element");
+        let end = inline.text.len();
+        let start = open.start.min(end);
+        if start == end {
+            continue;
+        }
+        match open.kind {
+            HtmlKind::Style(style) => inline.styles.push((start..end, style)),
+            HtmlKind::Link(url) => inline.links.push((start..end, url)),
+        }
+    }
+}
+
+/// Append collapsed HTML text, avoiding doubled or leading spaces.
+fn push_html_text(inline: &mut Inline, text: &str) {
+    let collapsed = html::collapse_whitespace(text);
+    if collapsed.is_empty() {
+        return;
+    }
+    if inline.text.is_empty() {
+        let trimmed = collapsed.trim_start_matches(' ');
+        if trimmed.is_empty() {
+            return;
+        }
+        inline.text.push_str(trimmed);
+    } else if inline.text.ends_with(' ')
+        && let Some(rest) = collapsed.strip_prefix(' ')
+    {
+        inline.text.push_str(rest);
+    } else {
+        inline.text.push_str(&collapsed);
+    }
+}
+
+/// Drop trailing spaces and clamp the ranges that pointed past them.
+fn trim_inline_end(inline: &mut Inline) {
+    let len = inline.text.trim_end_matches(' ').len();
+    if len == inline.text.len() {
+        return;
+    }
+    inline.text.truncate(len);
+    for (range, _) in inline.styles.iter_mut() {
+        range.end = range.end.min(len);
+    }
+    for (range, _) in inline.links.iter_mut() {
+        range.end = range.end.min(len);
+    }
+    inline.styles.retain(|(range, _)| range.start < range.end);
+    inline.links.retain(|(range, _)| range.start < range.end);
 }
 
 #[cfg(test)]
@@ -743,15 +1261,12 @@ mod tests {
     }
 
     #[test]
-    fn html_is_inert_text() {
+    fn script_content_is_dropped_instead_of_shown_as_html() {
         let doc = parse("<script>alert(1)</script>\n\nplain");
-        assert!(
-            doc.blocks
-                .iter()
-                .any(|b| matches!(b, Block::Html(text) if text.contains("alert(1)"))),
-            "{:?}",
-            doc.blocks
-        );
+        let visible = format!("{:?}", doc.blocks);
+        assert!(!visible.contains("alert"), "{visible}");
+        assert!(!visible.contains("<script"), "{visible}");
+        assert!(visible.contains("plain"), "{visible}");
     }
 
     #[test]
@@ -768,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_html_keeps_its_tags_in_a_tight_item() {
+    fn inline_html_becomes_text_styles_in_a_tight_item() {
         let doc = parse(
             "- <kbd>Ctrl</kbd>
 - plain
@@ -782,9 +1297,12 @@ mod tests {
             .iter()
             .map(|block| format!("{block:?}"))
             .collect();
-        assert!(text.contains("<kbd>Ctrl</kbd>"), "{text}");
-        assert!(text.contains("<b>h</b>"), "{text}");
-        assert!(text.contains("<i>x</i>"), "{text}");
+        assert!(!text.contains("<kbd>"), "{text}");
+        assert!(!text.contains("<b>"), "{text}");
+        assert!(!text.contains("<i>"), "{text}");
+        assert!(text.contains("Ctrl"), "{text}");
+        assert!(text.contains("h"), "{text}");
+        assert!(text.contains("x"), "{text}");
     }
 }
 

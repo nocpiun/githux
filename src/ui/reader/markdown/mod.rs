@@ -11,6 +11,9 @@
 mod ast;
 mod doctext;
 mod document;
+mod html;
+#[cfg(test)]
+mod html_tests;
 mod inline;
 
 pub use document::MarkdownView;
