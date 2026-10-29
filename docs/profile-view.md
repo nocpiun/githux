@@ -13,6 +13,10 @@
 
 不包含 Profile 其他 Tabs、Contribution Activity、gist 浏览、写操作、图片下载、磁盘/离线缓存、新主题或另一套 inline-code/Markdown 渲染器。
 
+## 正式 Shell 接入（2026-10-29）
+
+`app::pages::ProfilePage` 已把本组件接入正式 Shell。host 先用目标 login 读取 `ProfileBasic`，只有服务器返回后才用真实数字 id/canonical login 建立 `ProfileTarget`；随后独立读取 pins、host 生成的最近滚动一年贡献区间和同名公开仓库根 README。README 的缺失/不确定/不适用通过新增 `SectionState::Unavailable` 中性呈现，不作为认证或网络错误。Header 头像通过新增 `set_avatar` 只接收 `app::avatar` 已解码图片；原有圆形、首字母 fallback 与尺寸不变。本人/他人由 `Route::Profile` / `Route::UserProfile` 统一寻址，canonical 更新只作用于原 TabId。接入细节与真实验证边界见 [Shell 页面接入](shell-page-integration.md)。
+
 ## Host adapter / mounting 职责
 
 正式集成任务必须把组件声明进自己的 `ui` 模块树（本任务没有改 `src/ui/mod.rs`），并在 Profile 页面会话中持有 `Entity<ProfileView>`：

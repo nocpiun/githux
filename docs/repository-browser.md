@@ -20,6 +20,10 @@
 
 切出 Code 不再绘制树与正文，但保留 Code 导航意图（分支/选中路径/展开目录）；切回时若当前授权仍有效则恢复，失效则先重新验证，绝不恢复旧授权。
 
+## 正式 Shell 接入（2026-10-29）
+
+`app::pages::repository_page` 已把 `RepositoryPage` 挂到正式 workspace 的仓库路由：同一账户 `AccountService`/`BackgroundExecutor`、真实会话、既有 overview/Code/README/分支/底条均保留。普通标签切换调用新增 `suspend`，只结束滚动/阅读器手势并保留已验证内容；关闭只释放该页 host；账户或授权变化保留分支/路径/展开的导航意图，丢弃内容/固定提交/上下文后由新会话重读。Star/Fork 没有写回调，不宣称成功；contributor/release typed action 由 host 复核后进入统一导航。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
+
 ## 构造与生命周期（正式接入契约）
 
 主机只注入已存在的能力：`Arc<AccountService>`、`Arc<BackgroundExecutor>` 与一个 `RepositoryLocator`。构造后页面默认**未激活**：

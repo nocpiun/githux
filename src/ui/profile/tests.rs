@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     CellLevel, PresentationError, ProfileActionKind, ProfileBinding, ProfileTarget, ProfileView,
-    SectionState, heatmap_presentation, render::initials, repository_presentation,
+    SectionState, render::initials, repository_presentation,
 };
 
 fn target(id: u64) -> ProfileTarget {

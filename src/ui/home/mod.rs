@@ -120,6 +120,10 @@ pub enum HomeAction {
 }
 
 pub type OnAction = Rc<dyn Fn(HomeAction, &mut Window, &mut App)>;
+/// Optional host presentation hook. The component supplies a stable actor identity and receives
+/// an already-resolved avatar element; no image request or cache belongs to HomeView.
+pub type AvatarRenderer =
+    Rc<dyn Fn(&crate::domain::home::FeedEvent, usize, &mut App) -> Option<AnyElement>>;
 
 /// Successful data, a hard failure, or a host-declared no-data state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -329,6 +333,7 @@ pub struct HomeView {
     home_view: PanelView,
     feed_view: PanelView,
     on_action: Option<OnAction>,
+    avatar_renderer: Option<AvatarRenderer>,
     last_action: Option<HomeAction>,
     now: SystemTime,
     fixed_now: bool,
@@ -356,6 +361,7 @@ impl HomeView {
             home_view: PanelView::new(cx),
             feed_view: PanelView::new(cx),
             on_action: None,
+            avatar_renderer: None,
             last_action: None,
             now: SystemTime::now(),
             fixed_now: false,
@@ -487,6 +493,10 @@ impl HomeView {
 
     pub fn on_action(&mut self, handler: OnAction) {
         self.on_action = Some(handler);
+    }
+
+    pub fn set_avatar_renderer(&mut self, renderer: AvatarRenderer) {
+        self.avatar_renderer = Some(renderer);
     }
 
     /// The last emitted action, useful for a host status line and preview.
@@ -1117,6 +1127,9 @@ impl PanelRows for FeedOutcome {
             index,
             view.feed_view.selected == Some(index),
             view.now,
+            view.avatar_renderer
+                .as_ref()
+                .and_then(|render| render(&event, index, cx)),
             cx,
         )
     }

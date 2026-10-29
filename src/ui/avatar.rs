@@ -15,7 +15,26 @@ use gpui::{
     IntoElement, LayoutId, ParentElement, Pixels, Styled, Window, div, prelude::*,
 };
 
-use crate::app::avatar::AvatarKey;
+/// The stable identity of one avatar. It is deliberately not a row index or a login string: the
+/// account/owner key stays the same when the list reorders, and a changed URL is a different key so
+/// the old image is never shown for the new identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AvatarKey {
+    /// `host` + numeric owner/account id, when known, so one host's id cannot match another's.
+    pub subject: String,
+    /// The exact URL GitHub returned. A different URL is a different key, so a renamed account or a
+    /// refreshed URL cannot keep serving the previous picture.
+    pub url: String,
+}
+
+impl AvatarKey {
+    pub fn new(host: impl AsRef<str>, id: u64, url: impl Into<String>) -> Self {
+        Self {
+            subject: format!("{}#{id}", host.as_ref()),
+            url: url.into(),
+        }
+    }
+}
 
 /// Up to two capitals from a name's first and last words, matching Ely's convention so the fallback
 /// does not look like a different component.
