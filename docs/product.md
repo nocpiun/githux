@@ -1,6 +1,8 @@
 # 产品约定
 
-更新：2026-10-22。以下是已确认基线的共享摘要，具体未定项在末尾。概念图用于讨论布局，不替代真实 Ely 窗口的视觉验收。
+更新：2026-10-29。以下是已确认基线的共享摘要，具体未定项在末尾。概念图用于讨论布局，不替代真实 Ely 窗口的视觉验收。
+
+“已确认”表示产品决定；“已合并”表示组件存在于 main；“正式接线”表示产品 binary 的实际路由使用它；“原生已验证”必须另有真实窗口证据。四者不能互相替代。当前合并基线、源码证据和剩余缺口见[开发路线图](roadmap.md#当前证据与下一步)。
 
 ## 目标与技术方向
 
@@ -24,9 +26,9 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | --- | --- |
 | A1–A6 外壳 | 自定义标题栏、island、固定侧边栏、全部仓库的有界列表、基础多标签、command palette 入口 |
 | B1–B3 Home | 启动首页、最近参与且有更新的 Issues/PRs、关注动态 |
-| C1–C5、C8–C9 仓库 | 资料、分支与文件树、README、源码阅读；顶部信息栏展示 Releases、Contributors、Languages |
+| C1–C5、C8–C9 仓库 | 资料、分支与文件树、README、源码阅读；Releases、Contributors 位于资料后的紧凑摘要区，Languages 位于页面底边 |
 | D1–D4 Profile | 基本资料和 Overview 结构、个人 README、Pinned/Popular Repos、贡献热力图 |
-| E1–E2 设置 | 全局与仓库设置；具体项目仍需确定 |
+| E1–E2 设置 | 全局与仓库设置；最终设计及具体项目仍需确定。现有 Settings 仅是过渡账户功能入口，见[设置过渡边界](#设置过渡边界) |
 | F1–F4 账户和数据 | 登录与安全凭据保存、多账户保存但单账户活动、离线阅读、联网刷新 |
 | G1–G2 体验 | Windows 原生交互与流畅度；Noto Sans / Google Sans Code 及字体回退 |
 
@@ -49,7 +51,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 - Windows 三个窗口按钮使用 Windows App SDK 的系统绘制 Tall 模式：品牌/搜索区保留 32px 内容行，上下各留 8px，典型顶栏高 48px；Githux 使用 Ely 的 Md 字号（默认 14px），搜索框自身高 28px、在内容行内垂直居中；实际行高读取系统 Height 并按窗口 DPI 换算，island 从该行下缘开始。按钮区域不加 padding。SDK 初始化失败回退到原有标准高度 DWM 适配；DWM 也不可用或无原生 HWND 的测试平台保留自绘回退（直角单框/重叠框）。macOS/Linux 不安装此适配。Tall 按钮的背景、交互、高度与对齐，以及最终品牌字号/搜索框高度均已获负责人真实预览验收，证据见 [Tall 标题栏记录](devlog/2026-10-23-tall-caption.md)，原有 DWM 验收见 [原生按钮记录](devlog/2026-10-23-native-caption.md)。
 - 侧边栏直接从顶部导航开始，没有额外 Logo/品牌块。上方 Home、Settings，中间仓库列表，底部账户信息与快捷入口。
 - 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。范围确定为 `GET /user/repos` 在当前活动账户、token 与组织授权下返回的集合（owner、collaborator、organization_member），不限定单个组织；排序与局部筛选待定。
-- 仓库 namespace 与账户使用 GitHub 返回的**真实头像**（`RepoOwner.avatar_url`、`AccountIdentity.avatar_url`），图片不可用（无 URL、加载中、404/超时、损坏或解码失败）时以同尺寸 initials fallback 稳定占位，不显示破图图标也不推动布局。头像以 host + 稳定 owner/账户 ID + URL 为身份，重复 owner 与重绘不重复下载，账户切换或 URL 变化不串图；请求不带 PAT。收起侧栏同样显示正确图像。
+- 仓库 namespace 与账户使用 GitHub 返回的**真实头像**（`RepoOwner.avatar_url`、`AccountIdentity.avatar_url`），图片不可用（无 URL、加载中、404/超时、损坏或解码失败）时以同尺寸 initials fallback 稳定占位，不显示破图图标也不推动布局。头像以 host + 稳定 owner/账户 ID + URL 为身份，重复 owner 与重绘不重复下载，账户切换或 URL 变化不串图；请求不带 PAT，并有覆盖连接、响应头和完整正文的有限总超时。真实图与 fallback 均为圆形；完全离屏时跳过头像绘制，避免空内容 mask 经设备像素取整后露出细条。收起侧栏同样显示正确图像。实现见 [`app::avatar`](../src/app/avatar.rs) 与 [`ui::avatar`](../src/ui/avatar.rs)；验证边界见 [account-shell 记录](devlog/2026-10-28-account-shell.md)。
 - 仓库列表**自动加载**：正常启动时若已有活动保存账户，先用现有凭据走真实 `/user/repos` 读取（保存身份不等于已验证，必须实际验证）；登录新增、切换账户、替换 PAT、重新验证成功 settle 后也自动读取完整分页。侧栏不再有常驻“Refresh”或“Complete set of N repositories”文案；成功非空只保留 `Repositories (N)` 与列表，成功零仓库给简短空态。加载中显示轻量指示，真实失败（SSO/权限/限流/网络/失效）保留可区分提示并只在失败时提供一次性重试；失败不会被显示成空列表，也不会自动无限重试。重绘、resize、展开/收起侧栏、打开 Settings 不重复读取。标签条固定工具栏的禁用 Refresh 仍是独立占位，不承载此列表刷新。
 - 底部点击头像/名称进入 Profile；展开时下方横向四等分图标入口为 Notifications、Issues、PRs、New，不放主题切换。侧栏支持受限 resize 和 56px 图标栏收起，收起后四入口合为“...”菜单；New 在创建范围未批准前继续禁用。仓库列表与固定 footer 之间有细分割线；账号区只有头像/名字/@ID 打开 Profile，展开时右侧另有占位 emoji 状态按钮（点击不导航、无写状态功能），收起时隐藏并把状态并入头像 tooltip。仓库/页面/palette 的滚轮使用共享平滑适配，触控板像素滚动直接响应。账号区独立间隔、客户区外留白、行外活动线与交互契约见 [侧栏布局](sidebar-layout.md)，最终视觉与滚动手感等待负责人真实窗口验收。
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。R1 首份外壳交付只提供本地导航命令（各页与当前仓库列表），不调用 GitHub，也不据此确定未来全局搜索范围。
@@ -79,7 +81,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | --- | --- |
 | Home | 启动进入首页；左栏标题严格为 **Home**，展示最近参与且有更新的 Issues/PRs；右栏标题严格为 **Feed**，展示关注动态 |
 | Repository | 顶部仓库资料与横向内容 Tabs；下方左文件树、右文件查看器，默认 README，处理没有 README 的仓库 |
-| 仓库附加资料 | C5–C9 的布局位置统一确定为顶部信息栏，不另开右侧纵栏；首版仅实现 Releases、Contributors、Languages，Packages/Environments 延后 |
+| 仓库附加资料 | Releases、Contributors 统一放在资料后的紧凑摘要区；Languages 以页面底边比例色条展示，不另开右侧纵栏，也不恢复旧的顶部 Languages 组。首版仅实现这三项，Packages/Environments 延后 |
 | Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；不实现 Contribution Activity 和其他内容 Tabs |
 | Global Settings | 借鉴 Magpie 的分类与行式设置组织，具体分类布局与首批选项待定 |
 | Repository Settings | 首轮提供简单设置，风格与全局 Settings 一致，具体选项待定 |
@@ -88,11 +90,21 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 已排除出首版，不套用仓库的留空约定补出额外内容页。
 
+**截至 PR #38 合并基线，正式 [`ui::page`](../src/ui/page.rs) 仍是 Home fixture 与 Repository/Profile identifier stubs。** 已合并的 `ui::home`、`ui::profile`、统一 `ui::repository`（含内嵌 overview 与 reader）是可复用组件/开发 example，不是上述正式路由已接通的证据。它们的正式挂载、账户作用域 adapter 和导航属于 shell-pages；组件验收也不自动代表整条产品路径已验收。
+
+### 设置过渡边界
+
+account-shell 在正式 Shell 中加入的 **Settings › Accounts** 只承担过渡期的账户添加、选择、PAT 替换和重新验证入口。负责人 2026-10-29 明确：接受这些功能合入 **不等于最终 Settings 设计验收，最终版本不能直接沿用现有页面**。全局与仓库 Settings 后续单独设计、单独验收；首批设置项目仍未决定。另行开展的 local-only 设置设计任务只是未批准提案，不得纳入已确认规则。
+
 ### Home 与 Feed 的数据范围
 
-左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。候选查询是 `involves:当前用户名` 与条目更新时间排序；是否设时间窗口、是否额外包含仅被请求评审等关系，在 Home 实现任务中明确。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
+左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。负责人 2026-10-28 确认：查询固定为 `involves:当前已认证登录`，**不添加时间窗口**，按 `updated` 降序；不额外扩大到仅被请求评审等关系。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
 
-右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。刷新遵守服务端限制；展示名称为 Feed，不要求每张卡片标注“API 事件流”。来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
+右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。已确认 Feed 保留服务返回顺序，展示现有 typed event 覆盖，未知类型简洁回退；不过滤，初始只提供手动刷新，不自动轮询，刷新遵守服务端限制。展示名称为 Feed，不要求每张卡片标注“API 事件流”。组件契约见 [Home / Feed 页面视图](home-view.md)，来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
+
+### Profile 的已确认读取与回退
+
+个人 README 来自目标用户公开的同名仓库（canonical owner/name 均为该用户 login）的**根目录普通 `README.md`**，按固定 commit/blob 读取；不把 `.github/` 或 `docs/` 下的 README 当作 Profile README。仓库 pins 保持服务顺序；观察到 gist pin 时只提示，不增加 gist 功能。**只有无 pin 且服务明确给出 Popular 回退时才展示 Popular**；gist-only、截断或不确定结果不擅自转 Popular。贡献图由正式 host 提供**最近滚动一年**的范围。当前这些是已合并 page-data 与 Profile 组件的已接受契约，正式 Shell 尚未调用；详见 [账户页面数据服务](page-data-service.md) 和 [Profile 展示组件](profile-view.md)。
 
 ## 视觉、字体与原生体验
 
@@ -104,10 +116,12 @@ UI 默认 **Noto Sans**，代码默认 **Google Sans Code**。建议随包固定
 
 ## 仍待决定
 
-- 侧边栏仓库排序/局部筛选，command palette 搜索范围，Notifications/全局 Issues/PRs/New 的具体内容。
-- 顶部信息栏的密度和窄窗口呈现、无 README 的具体呈现、Popular 排序与 README 发现规则、Home 的时间窗口与额外参与关系、Feed 卡片类型/过滤。gist-only 的热门回退和旧版个人 README 规则已明确延后到相应 Profile 任务前讨论。
-- H6 其余进阶交互本轮不设计实现，基础边界不能借机恢复它们。标签数量不设上限、溢出用水平滚动承载已经确认，不再作为开放问题。启动仍进入 Home，不恢复上次活动页。
-- 最小窗口、面板宽度与响应布局、设置项目、产品语言、本人/他人操作。
-- PAT 创建引导的最小权限清单、私有缓存授权失效与账户移除策略；若 H7 选定需要编辑内容的操作，再明确相应草稿规则。
+- 侧边栏仓库排序/局部筛选，command palette 搜索范围，Notifications/全局 Issues/PRs/New 的具体内容；H1–H4/H7 的最小功能与动作清单。
+- 最终全局/仓库 Settings 的分类、布局、首批项目及仓库设置范围；现有 Accounts 分区不预决这些选择。
+- 顶部摘要的窄窗口呈现、无 README 的最终呈现细节、Feed 后续自动刷新/过滤（若提出）；Home 无时间窗口、Feed 服务顺序与手动刷新、Profile 的 README/pins/Popular/最近一年规则已经确认，不再列为待定。
+- H6 其余进阶交互本轮不设计实现，基础边界不能借机恢复它们。标签数量不设上限、溢出用水平滚动承载、每账户独立标签切回恢复（仅内存）已经确认；启动仍进入 Home，不恢复上次活动页或重启前标签。
+- 最小窗口、面板宽度与响应布局、产品语言、本人/他人操作。
+- PAT 创建引导的最小权限清单、私有内容授权失效后的展示/保留规则、账户移除后的私有内容保留/删除策略；若 H7 选定需要编辑内容的操作，再明确相应草稿规则。
+- 各类业务内容缓存的验证间隔、容量、淘汰与调度参数；账户 SQLite 目录已经实现，不等于这些缓存参数已经决定。
 
 这些选择应在相关任务开始前补齐必要范围，其他无依赖工作可以继续，不要求先把所有问题一次定完。
