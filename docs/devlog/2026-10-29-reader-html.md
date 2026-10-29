@@ -1,38 +1,38 @@
 # reader-html：Markdown 中的 HTML 与注释
 
-- 日期：2026-10-29（Asia/Shanghai），任务 `reader-html`，分支 `fix/reader-html`。
-- 状态：实现与本地验证完成，待真实窗口人工验收（PR 加 `pending`，不合并）。
-- 目标：README 中的 `<div align="center">`、HTML 注释、常见 HTML 标签不再作为原文显示；保留 Reader 的跨块选择、复制与图片接口。
+- 日期：2026-10-29（Asia/Shanghai），任务 `reader-html`，PR [#47](https://github.com/nocpiun/githux/pull/47)，分支 `fix/reader-html`。
+- 状态：解析、复制和图片接口回归已实现；真实 Reader fixture 原生预览已核验，等待当前 head 审查/CI 与负责人验收。保留 `pending`，不合并、不 auto-merge。
 
-## 改动与决定
+## 行为与范围
 
-- 新增 `src/ui/reader/markdown/html.rs`：按 WHATWG HTML 语法/分词章节实现的有界子集解析器。只做分词、属性与实体的最小解码、容错元素树，不执行、不解析 URL、不回写原始 HTML。注释、doctype 与处理指令直接丢弃；`script`/`style`/`template` 及其内容整段丢弃；`iframe`/`object`/`embed`/`head` 等非内容元素也丢弃。
-- `ast.rs` 不再生成 `Block::Html`：块级 HTML 先缓冲到 `End(HtmlBlock)`，再由 `html_blocks` 转成既有 `Block`；行内 `Html`/`InlineHtml` 映射到既有 `Inline` 的样式与链接范围。
-  - 容器：`div`/`p`/`center`/`section`/`details`/`summary` 等展开为段落；`h1`–`h6` 成为标题；`ul`/`ol`/`li` 成为列表；`blockquote`/`hr`/`br` 对应引用/分隔线/换行。
-  - 行内：`strong`/`b`、`em`/`i`、`del`/`s`、`code`/`kbd`/`samp`、`a href` 映射到与 Markdown 相同的 `Style`/`links`；HTML 内联元素在 `InlineHtml` 事件之间用独立栈维护，`</tag>` 通过新增的 `Node::End` 关闭，不干扰 Markdown 的 open 栈。
-  - 图片：`<img src alt>` 生成 `Block::Image`（单元格内保留 alt 文本），URL 不在这里解析，仍由 reader 的 `links::resolve` 与图片管线判定，保持同一账号/commit 图片身份与既有接口。
-  - 表格：`table`/`thead`/`tbody`/`tr`/`th`/`td` 转成 `Block::Table`；首行全 `th` 作表头，否则第一行提升为表头；`align`/`style="text-align:..."` 决定列对齐；单元格内块级内容展平为行内文本。
-  - 代码：`pre`/`code` 成为 `Block::Code`（`class="language-x"` 取语言）；Markdown 行内代码与围栏代码是 `Code`/`CodeBlock` 事件，HTML 原样保留。
-- 删除注释后相邻文本的空格会合并（`html_gap`），因此复制文本读作 `before after` 而不是 `before  after`；跨行与行内注释都不进入 `DocText`。
-- `Block::Html` 变体保留但不再被生成。合并 main 的 reader-images（PR #45）后，`document.rs` 仍保留其渲染分支以防旧模型输入，但本解析器不会产生该变体；后续可单独删除。
-- 与 reader-images 合并（main `9522eee`）时解决了两份主题文档的冲突：HTML 规范化与图片板共存——`<img>`/行内图片均走 `Block::Image` → `links::resolve` → 宿主 provider；表格 cell 内图片仍是 alt。
-- 明确边界（已写入 [阅读器 HTML 子集](../../content-reader.md#html-子集2026-10-29)）：`align` 等布局属性忽略视觉对齐（内容保留）、不支持 `colspan`/`rowspan`、SVG/MathML/CSS 布局、`<details>` 折叠交互；未闭合标签按容错规则丢弃或展开。没有新增依赖，未改 `Cargo.toml`/`Cargo.lock`，未触碰 `src/ui/reader/mod.rs`、`markdown/document.rs` 或图片网络模块。
-- 预览便利：`examples/reader.rs` 新增 `HTML` fixture 与可选的首个命令行参数（fixture 索引），只用于脚本化截图，不影响默认启动。
+`ast.rs` 原先把块级 HTML 生成 `Block::Html`，行内标签直接追加到可复制正文；同一 fixture 在修复前真实窗口显示了 `<div align="center">`、注释里的 table/img 和标签正文。
 
-## 验证
+新增 `src/ui/reader/markdown/html.rs` 做子集分词、属性/实体解码和容错树。HTML 事件转换为已有 `Paragraph`、`Heading`、`Quote`、`List`、`Table`、`Code`、`Image` 及 `Inline` 样式/链接；注释、声明及 script/style/template/iframe 等丢弃元素的内容不进入模型。行内丢弃状态跨事件保存，抑制 Markdown 文本、图片、数学和样式输出，因此隐藏内容不会产生图片请求。Markdown 代码事件不参与 HTML 解析。
 
-- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check`：通过（含合并 main `9522eee` 后的重跑）。
-- `cargo test --locked`：全部通过（668+668+54+210+189+506+569+16 项，0 失败，含合并 main `9522eee` 后的重跑）。`tests/reader.rs` 189 项含新增的 `markdown::html_tests`，覆盖用户场景 fixture、注释（跨行/行内）不进入模型与复制、容器/强调/链接/图片/表格/列表语义、代码内 HTML 原样、脚本与事件属性不可见、单元格展平与混合 Markdown 强调、实体解码、标题索引、深度/表格补格/实体扫描/跨事件栈/raw-text 边界与 UTF-8 边界。
-- `cargo build --locked --example reader`：通过。
-- `cargo fmt --all -- --check`、`git diff --check`：通过。
-- 真实原生预览（同一 fixture，1280x900，DPI 144，Windows）：
-  - 修复前：`target` 基线 `ast.rs` + 同一 fixture，`.agents/output/before-html.png` 显示 `<div align="center">`、`<img>`、`<!-- ... -->` 与 `<table>` 等作为灰色/正文文本原样出现。
-  - 修复后：`after-html.png`（已另存为 `evidence-after-top.png`）显示图片占位「项目徽标 — picture not loaded」、加粗/斜体/行内代码/链接、`展开说明` 加粗、带列对齐的表格与列表；`after-html-bottom.png` 显示行内代码中的 `<div align="center">`/`<span>x</span>` 原样保留、围栏 HTML 代码块（含注释）原样保留、注释与 `<script>` 不出现在正文、末尾「尾部文本。」正常。这些截图为审查修复前的同一行为实现；审查修复只增加深度/单元格预算与实体解码窗口，不改变正常 fixture 行为。
-  - 证据保存注意：本机后续会话中同一 `MoveWindow`+`CopyFromScreen` 脚本反复拍到桌面壁纸，不能确认最终提交的视觉差异，已如实记录；正常 fixture 在审查修复前后的解析与复制回归一致。
-  - 未覆盖：真实 IME/多 DPI/跨屏仍未由本任务验收。合并后的 `ReaderView` 已接入 reader-images 的图片板，`<img>` 与 Markdown 图片走同一条 provider 路径，但原生图片加载只在该任务的独立预览中验收，未接入正式 Shell。
+`<img src alt>` 与 Markdown 图片都生成 `Block::Image`，地址由既有 `links::resolve` 与图片板解析；不新增网络路径。真实 Reader 测试记录 provider 收到的请求，核验 owner/name/固定 commit/相对目录与 scope，确认注释和脚本内图片没有请求；同一视图中 `Ctrl+A/C` 的剪贴板内容保留可见正文而没有隐藏内容。
 
-## 后续
+HTML 树与跨事件行内栈都有 256 层上限；表格补齐单元格前检查 65,536 格预算，超限回退为按行文本；实体扫描窗口有界；畸形结束标签/声明消费剩余片段；ordered-list start 保留足够的加法余量。相关回归覆盖审查中发现的栈溢出、二次扫描、表格内存膨胀、状态泄漏和 UTF-8 边界。
 
-- 可选清理：删除不再产生的 `Block::Html` 及 `document.rs`/`doctext.rs` 中对应分支。
-- 真实主界面接入后，需用真实 README（含 `div align` 徽标、HTML 表格）做一次原生验收，并确认图片加载在同一账号/commit 下正常。
-- 候选可复用教训（交由本批 workflow-lessons 决定是否写入 `LESSONS.md`）：构建容错 HTML 树时不要把同一节点先克隆进结果、再把原件压栈；否则子节点会挂到被丢弃的副本上，解析结果看似“标签全部消失”。本任务第一版即因此让所有块级 HTML 变成空块，靠 fixture 测试暴露，修复为闭合时自底向上挂载。同类教训还有：跨事件保持的解析状态（行内 HTML 开标签、丢弃元素抑制）必须和一次性解析的深度/大小预算一起设上限，否则审查会用畸形输入把它们变成二次或溢出路径。证据：首轮 11 项 fixture 失败；后续四轮审查分别发现无限嵌套、实体二次扫描、表格补格膨胀、行内 script 泄漏、跨事件栈不限与 raw-text 前缀误匹配，均已修复并加入回归。
+详细支持子集和未支持项只维护在 [阅读器文档](../content-reader.md#html-子集2026-10-29)。`div`/`p` 的 align 视觉布局忽略，内容保留；不支持 CSS、表格跨度、SVG/MathML 布局或 details 折叠交互。表格内图片沿用现有 alt fallback，段落内图片沿用段落后的图片块。
+
+无新依赖，未改 Cargo.toml/Cargo.lock、Ely revision 或依赖缓存。任务实现未编辑 `reader/mod.rs`、`markdown/document.rs` 或图片网络模块。main 的 reader-images PR #45 合入后，正常 merge `9522eee`，解决两份主题文档冲突；图片板与 HTML 转换在同一组合上验证。`Block::Html` 暂保留兼容分支，但本解析器不再产生它。
+
+## 验证与证据
+
+所有重型 cargo 命令经本 worktree 的 `.agents/task/cargo-serialized.ps1`，独立 target，`CARGO_BUILD_JOBS=1`。
+
+- `cargo fmt --all -- --check`、`git diff --check` 通过。
+- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 在与 reader-images 组合后通过；本轮新增抑制事件与真实 provider/剪贴板回归的 Reader 目标 194 项通过，完整检查结果在 PR 与本地 delivery-state 绑定最新 head。
+- `cargo build --locked --example reader` 通过。运行 `reader.exe 1` 展示 HTML fixture，不注入图片 provider，因此明确显示“no image service attached”，不把占位当作真实网络图片验收。
+- 真实 Windows 窗口，同一 fixture，1280×900、DPI 144：修复前截图 `.agents/output/evidence-before.png`；本轮修复后 `final-html-top.png` 显示图片占位、强调/链接/代码、表格列对齐和列表；向真实 HWND 投递 wheel 消息后 `final-html-bottom.png` 显示代码中的标签/注释原样、正文注释消失、尾部文字可达。这些帧已实际查看。
+- 截图曾因 CopyFromScreen 抓到锁屏壁纸，已改用 Win32 PrintWindow 重新核验。壁纸帧不作为验收证据；截图/辅助脚本仅留本地 `.agents/output`/`.agents/task`。
+
+未覆盖真实账户/网络 README、多 DPI、跨屏、实体鼠标手感和 IME；synthetic fixture、provider 记录测试与真实实网验收分别说明。最终人工验收仍须由负责人完成。
+
+## 审查处理与后续
+
+所有成立的反馈按已有要求直接修复，未发生需求争议或待裁决。`delivery-state.json` 与 PR 保留 `arbitration_ever_required: false / merge_owner: worker`；任务明确要求人工验收，因此不会自行合并。
+
+可选后续：删除不再生成的 `Block::Html` 兼容分支；正式 Shell 接线后用真实 README 验收 HTML 图片加载与账号/commit 身份。
+
+候选教训交给本批 workflow-lessons 汇入：只限制一次性解析树不足以约束跨事件状态，必须同时限制保留栈和输出膨胀预算；抑制不可信内容必须覆盖结构输出，不能仅过滤文本。证据是本 PR 审查中实际复现的深层 HTML、跨事件标签、宽×长表格和隐藏 Markdown 图片。未在他人拥有的 LESSONS.md/工作流文档追加。

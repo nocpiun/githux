@@ -10,6 +10,95 @@ use super::ast::{Align, Block, Inline, Style, parse};
 use super::doctext::DocText;
 use super::html;
 
+/// Records the actual requests handed out by ReaderView; failed completion is
+/// intentional so the test exercises identity and refusal without network I/O.
+#[derive(Default)]
+struct RecordingImages(std::sync::Mutex<Vec<crate::content::images::ImageRequest>>);
+
+impl crate::content::images::ImageProvider for RecordingImages {
+    fn start(
+        &self,
+        request: crate::content::images::ImageRequest,
+        sink: crate::content::images::ImageSink,
+    ) {
+        self.0.lock().unwrap().push(request.clone());
+        sink.push(crate::content::images::ImageCompletion {
+            scope: request.scope,
+            key: request.key,
+            result: Err(crate::content::images::ImageFailure::NotFound),
+        });
+    }
+
+    fn cancel(&self, _scope: crate::content::images::ImageScope) {}
+}
+
+#[gpui::test]
+fn html_images_use_the_existing_reader_context_and_comments_never_request(
+    cx: &mut gpui::TestAppContext,
+) {
+    use super::super::{DocumentKind, ImageTarget};
+    use crate::content::PreparedBody;
+    use gpui::VisualTestContext;
+
+    fn frames(cx: &mut VisualTestContext) {
+        for _ in 0..4 {
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(25));
+        }
+    }
+    let provider = std::sync::Arc::new(RecordingImages::default());
+    let (reader, cx) = super::super::tests::open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "<div align=\"center\"><img src=\"images/logo.png\" alt=\"Logo\"></div>\n\n<!-- <img src=\"hidden.png\"> -->\n\nbefore <script>![hidden](secret.png)</script> after".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(provider.clone()), cx)
+    });
+    frames(cx);
+    let requests = provider.0.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "comments and scripts must not load images: {requests:?}"
+    );
+    assert_eq!(
+        requests[0].target,
+        ImageTarget::Repository {
+            owner: fixtures::OWNER.into(),
+            name: fixtures::NAME.into(),
+            commit: fixtures::COMMIT.into(),
+            path: "docs/images/logo.png".into(),
+        }
+    );
+    assert_eq!(
+        requests[0].scope,
+        reader.read_with(cx, |reader, _| reader.image_scope())
+    );
+
+    reader.update_in(cx, |reader, window, cx| {
+        reader
+            .markdown()
+            .unwrap()
+            .update(cx, |markdown, cx| markdown.focus(window, cx));
+    });
+    cx.simulate_keystrokes("secondary-a secondary-c");
+    cx.run_until_parked();
+    let text = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default();
+    assert!(text.contains("Logo"), "{text:?}");
+    assert!(text.contains("before after"), "{text:?}");
+    assert!(!text.contains("hidden"), "{text:?}");
+}
+
 fn debug(blocks: &[Block]) -> String {
     format!("{blocks:?}")
 }
@@ -258,6 +347,30 @@ fn dropped_inline_elements_suppress_their_content_across_events() {
     );
     let copied = copied(&doc.blocks);
     assert_eq!(copied.trim(), "before after", "{copied}");
+}
+
+#[test]
+fn dropped_inline_html_emits_no_images_styles_or_math() {
+    for tag in ["script", "style", "template", "iframe", "object"] {
+        for source in [
+            format!("before <{tag}>![hidden](secret.png) **bold** $math$</{tag}> after"),
+            format!("| head |\n|---|\n| before <{tag}>![hidden](secret.png)</{tag}> after |"),
+        ] {
+            let doc = parse(&source);
+            let text = copied(&doc.blocks);
+            assert!(text.contains("before after"), "{tag}: {doc:?}");
+            assert!(!text.contains("hidden"), "{tag}: {doc:?}");
+            assert!(!text.contains("bold"), "{tag}: {doc:?}");
+            assert!(!text.contains("math"), "{tag}: {doc:?}");
+            assert!(!debug(&doc.blocks).contains("secret.png"), "{tag}: {doc:?}");
+        }
+    }
+}
+
+#[test]
+fn inline_suppression_requires_a_real_end_tag() {
+    let doc = parse("before <script><!-- </script> --> hidden </scripture> hidden </script> after");
+    assert_eq!(copied(&doc.blocks).trim(), "before after");
 }
 
 #[test]

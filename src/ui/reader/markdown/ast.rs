@@ -195,8 +195,6 @@ struct HtmlOpen {
 enum HtmlKind {
     Style(Style),
     Link(String),
-    /// A dropped element whose content must be suppressed across events.
-    Suppress,
 }
 
 impl Building {
@@ -219,68 +217,40 @@ impl Building {
 
     /// Convert an inline HTML fragment into text, styles, links and pictures.
     fn push_html(&mut self, fragment: &str) {
-        // Consume the end tag that closes the suppressed element before
-        // resuming normal inline content.
-        if let Some(name) = self.suppressed.clone() {
-            let mut rest = fragment;
-            while let Some(start) = rest.find("</") {
-                let after = &rest[start + 2..];
-                if after
-                    .get(..name.len())
-                    .is_some_and(|tag| tag.eq_ignore_ascii_case(&name))
-                {
-                    let end = after.find('>').map_or(fragment.len(), |offset| {
-                        start + 2 + offset.saturating_add(1)
-                    });
-                    rest = &rest[end.min(rest.len())..];
-                    self.suppressed = None;
-                    break;
-                }
-                // `</` is ASCII, so this offset is a char boundary even when
-                // the next byte starts a multi-byte character.
-                rest = after;
-            }
-            if self.suppressed.is_some() {
-                return;
-            }
-            if rest.is_empty() {
-                return;
-            }
-            return self.push_html(rest);
-        }
         let nodes = html::parse(fragment);
-        if let Some(Node::Suppressed(name)) = nodes.first() {
-            self.suppressed = Some(name.clone());
-            self.html_gap = true;
-            return;
-        }
         let text = self.inline.text.len();
         let notes = self.notes.len();
         let opens = self.html.len();
-        append_html_inline(
-            &nodes,
-            &mut self.inline,
-            &mut self.notes,
-            &mut self.html,
-            self.in_cell,
-        );
-        // A dropped element that stayed open suppresses later text events.
-        if let Some(open) = self.html.last()
-            && matches!(open.kind, HtmlKind::Suppress)
-        {
-            self.suppressed = Some(open.name.clone());
-            self.html.pop();
+        for node in &nodes {
+            if let Some(name) = &self.suppressed {
+                // Only a matching parsed end tag ends suppression. A prefix
+                // such as `</scripture>` or a tag inside a comment cannot do so.
+                if matches!(node, Node::End(end) if end == name) {
+                    self.suppressed = None;
+                }
+                continue;
+            }
+            match node {
+                Node::Suppressed(name) => self.suppressed = Some(name.clone()),
+                Node::Element(element)
+                    if html::is_dropped(&element.name)
+                        && !html::is_void(&element.name)
+                        && !element.closed =>
+                {
+                    self.suppressed = Some(element.name.clone());
+                }
+                _ => append_html_inline(
+                    std::slice::from_ref(node),
+                    &mut self.inline,
+                    &mut self.notes,
+                    &mut self.html,
+                    self.in_cell,
+                ),
+            }
         }
-        if self.suppressed.is_some() {
-            self.html_gap = true;
-            return;
-        }
-        // A fragment that contributed nothing (a comment, or a dropped tag)
-        // glues the surrounding text runs together.
-        self.html_gap = self.suppressed.is_none()
-            && self.inline.text.len() == text
-            && self.notes.len() == notes
-            && self.html.len() == opens;
+        // A comment or dropped element glues the surrounding text runs.
+        self.html_gap =
+            self.inline.text.len() == text && self.notes.len() == notes && self.html.len() == opens;
     }
 
     /// Close any HTML element still open at the end of this builder.
@@ -353,8 +323,8 @@ enum Container {
 /// Parse `markdown` for reading.
 ///
 /// GitHub's tables, footnotes, strikethrough, task lists, maths and alerts are
-/// on; editing extensions are off. Raw HTML is kept as inert text and pictures
-/// only keep their alt text.
+/// on; editing extensions are off. HTML is normalized to the existing blocks
+/// and inline styles, and pictures retain their URL for the reader pipeline.
 pub fn parse(markdown: &str) -> Document {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
@@ -421,6 +391,43 @@ pub fn parse(markdown: &str) -> Document {
         // Inside a table cell an image note has nowhere to go, so the alt
         // text must stay in place instead of being moved after the cell.
         let in_cell = matches!(stack.last(), Some(Container::Cell(_)));
+        let suppressed = inline
+            .as_ref()
+            .is_some_and(|(_, building)| building.suppressed.is_some())
+            || matches!(stack.last(), Some(Container::Cell(cell)) if cell.suppressed.is_some());
+        // Dropped HTML spans contain Markdown events too. Ignore their entire
+        // inline output, including image notes, rather than only their text.
+        // HTML events still reach the builder to recognize the closing tag;
+        // block boundaries still finalize their owning containers.
+        if suppressed
+            && matches!(
+                &event,
+                Event::Text(_)
+                    | Event::Code(_)
+                    | Event::InlineMath(_)
+                    | Event::DisplayMath(_)
+                    | Event::SoftBreak
+                    | Event::HardBreak
+                    | Event::FootnoteReference(_)
+                    | Event::TaskListMarker(_)
+                    | Event::Start(
+                        Tag::Emphasis
+                            | Tag::Strong
+                            | Tag::Strikethrough
+                            | Tag::Link { .. }
+                            | Tag::Image { .. }
+                    )
+                    | Event::End(
+                        TagEnd::Emphasis
+                            | TagEnd::Strong
+                            | TagEnd::Strikethrough
+                            | TagEnd::Link
+                            | TagEnd::Image
+                    )
+            )
+        {
+            continue;
+        }
         match event {
             Event::Start(Tag::Paragraph) => inline = Some((None, Building::default())),
             Event::End(TagEnd::Paragraph) => finish_inline(&mut inline, &mut stack),
@@ -459,7 +466,7 @@ pub fn parse(markdown: &str) -> Document {
                     // Tight list items and table cells hold text with no
                     // paragraph of their own.
                     if let Some(Container::Cell(cell)) = stack.last_mut() {
-                        cell.inline.text.push_str(&text);
+                        cell.push_text(&text);
                     } else {
                         inline = Some((None, Building::default()));
                         if let Some((_, building)) = inline.as_mut() {
@@ -1151,16 +1158,6 @@ fn append_html_element(
     match name {
         "br" => inline.text.push('\n'),
         "wbr" | "hr" => {}
-        name if html::is_dropped(name) && element.children.is_empty() && !element.closed => {
-            // The opening tag of a dropped element arrives without children;
-            // mark it so the caller suppresses the following text events until
-            // the matching end tag.
-            opens.push(HtmlOpen {
-                name: name.to_string(),
-                kind: HtmlKind::Suppress,
-                start: inline.text.len(),
-            });
-        }
         "img" => {
             let alt = element.attr("alt").unwrap_or_default();
             let url = element.attr("src").unwrap_or_default().trim();
@@ -1248,7 +1245,6 @@ fn close_html_to(opens: &mut Vec<HtmlOpen>, position: usize, inline: &mut Inline
         match open.kind {
             HtmlKind::Style(style) => inline.styles.push((start..end, style)),
             HtmlKind::Link(url) => inline.links.push((start..end, url)),
-            HtmlKind::Suppress => {}
         }
     }
 }
