@@ -355,22 +355,31 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
             .w(px(220.0))
             .text_size(small)
             .text_color(colors.fg_subtle)
-            .child(match (page.selected_branch(), &error) {
-                (Some(branch), _) => div().child(format!("branch {branch}")).into_any_element(),
-                (None, Some(error)) => crate::ui::compact_status::failed(
+            .children(page.selected_branch().map(|branch| {
+                div()
+                    .debug_selector(|| "repository-branch-fallback".to_string())
+                    .child(format!("branch {branch}"))
+            }))
+            .children(error.map(|error| {
+                crate::ui::compact_status::failed(
                     "repository-retry-branches",
                     "Branch list unavailable",
                     error.title.clone(),
                     retry,
                     Some("repository-retry-branches"),
                     cx,
-                ),
-                (None, None) => crate::ui::compact_status::loading(
-                    "repository-branches-loading",
-                    "Loading branches…",
-                    cx,
-                ),
-            })
+                )
+            }))
+            .when(
+                page.selected_branch().is_none() && page.branches_error().is_none(),
+                |row| {
+                    row.child(crate::ui::compact_status::loading(
+                        "repository-branches-loading",
+                        "Loading branches…",
+                        cx,
+                    ))
+                },
+            )
             .into_any_element();
     };
     let choices: Vec<Choice> = branches

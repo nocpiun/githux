@@ -19,8 +19,9 @@
 ## 验证
 
 - 串行 Cargo helper（`CARGO_BUILD_JOBS=1`）通过：`fmt`、`check --locked --all-targets`、`clippy --locked --all-targets -- -D warnings`、`test --locked`（主 binary 723、home 55、profile 158、reader 135、repository 491、repository_overview 18）及 `git diff --check`。
-- 新增断言：compact failed/loading/empty 可渲染且一次点击只重试一次；目录失败标记可点击并在恢复后消失；Releases latest 失败显示可点击 warning，恢复后消失；无 latest 不是 warning；Profile 卡片统计行对齐卡内容边；本人 Profile 不画账户行选中线。
-- 开发 fixture 新增 `Scene::ReleasesFailure`（第一次 latest 失败一次，之后恢复），只用于 example/test，不进入产品。
+- 新增断言：compact failed/loading/empty 可渲染且一次点击只重试一次；目录失败标记可点击、保持展开并在恢复后消失；Releases latest 失败显示可点击 warning，恢复后消失；无 latest 不是 warning；分支失败时 fallback 分支仍可浏览且显示可恢复 warning；Profile 卡片统计行对齐卡内容边；本人 Profile 不画账户行选中线。
+- 开发 fixture 新增 `Scene::ReleasesFailure` 与 `Scene::BranchesFailure`（各自第一次失败一次，之后恢复），只用于 example/test，不进入产品。
+- 审查修复：共享 warning 重试点击现在 `stop_propagation`，避免目录行同时折叠并隐藏刚重试的结果；分支枚举失败时，即使已经选中 fallback 默认分支，仍同时显示 fallback 名称、warning 和重试，不再把枚举错误藏起来。两项都有回归测试。
 
 ## 真实验证（原生窗口）
 

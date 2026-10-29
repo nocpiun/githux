@@ -662,6 +662,37 @@ fn switching_to_another_tab_clears_the_code_area_and_returning_restores_it(
 }
 
 #[gpui::test]
+fn branch_failure_keeps_the_fallback_branch_and_offers_a_retry(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::BranchesFailure);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.selected_branch().map(str::to_string)),
+        Some("main".to_string()),
+        "the default branch remains browsable"
+    );
+    assert!(page.read_with(cx, |page, _| page.branches_error().is_some()));
+    frames(cx);
+    assert!(
+        cx.debug_bounds("repository-branch-fallback").is_some(),
+        "the fallback branch remains visible"
+    );
+    let mark = cx
+        .debug_bounds("repository-retry-branches")
+        .expect("the failed enumeration keeps a retry mark");
+    cx.simulate_click(mark.center(), Modifiers::none());
+    settle(&page, cx, |page| page.branches().is_some());
+    frames(cx);
+    assert!(page.read_with(cx, |page, _| page.branches_error().is_none()));
+    assert!(cx.debug_bounds("repository-retry-branches").is_none());
+    assert!(page.read_with(cx, |page, _| page.reader().is_some()));
+}
+
+#[gpui::test]
 fn a_directory_failure_is_scoped_to_that_row_and_one_retry_recovers(cx: &mut TestAppContext) {
     let fixture = Fixture::new(Scene::DirectoryFailure);
     fixture.login(1);
@@ -722,7 +753,7 @@ fn failed_directory_uses_one_compact_retry_mark_that_disappears_after_recovery(
     settle(&page, cx, |page| page.tree_failure("docs").is_some());
     frames(cx);
     let mark = cx
-        .debug_bounds("compact-failed-Failed to load docs")
+        .debug_bounds("repository-row-failed")
         .expect("the failed directory keeps one compact warning mark");
     assert!(
         cx.debug_bounds("repository-row-failed").is_some(),
