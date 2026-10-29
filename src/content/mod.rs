@@ -4,6 +4,8 @@
 // The service is delivered before its reader/data integration.
 #![allow(dead_code)]
 
+pub mod images;
+
 use crate::domain::blob::{BlobBody, BlobIdentity, BlobRead};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

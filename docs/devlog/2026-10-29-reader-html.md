@@ -14,25 +14,25 @@
   - 表格：`table`/`thead`/`tbody`/`tr`/`th`/`td` 转成 `Block::Table`；首行全 `th` 作表头，否则第一行提升为表头；`align`/`style="text-align:..."` 决定列对齐；单元格内块级内容展平为行内文本。
   - 代码：`pre`/`code` 成为 `Block::Code`（`class="language-x"` 取语言）；Markdown 行内代码与围栏代码是 `Code`/`CodeBlock` 事件，HTML 原样保留。
 - 删除注释后相邻文本的空格会合并（`html_gap`），因此复制文本读作 `before after` 而不是 `before  after`；跨行与行内注释都不进入 `DocText`。
-- `Block::Html` 变体保留但不再被生成，以免改动 reader-images 任务独占的 `document.rs`/`doctext.rs`。其删除与渲染分支清理留给两者合并后统一处理。
+- `Block::Html` 变体保留但不再被生成。合并 main 的 reader-images（PR #45）后，`document.rs` 仍保留其渲染分支以防旧模型输入，但本解析器不会产生该变体；后续可单独删除。
+- 与 reader-images 合并（main `9522eee`）时解决了两份主题文档的冲突：HTML 规范化与图片板共存——`<img>`/行内图片均走 `Block::Image` → `links::resolve` → 宿主 provider；表格 cell 内图片仍是 alt。
 - 明确边界（已写入 [阅读器 HTML 子集](../../content-reader.md#html-子集2026-10-29)）：`align` 等布局属性忽略视觉对齐（内容保留）、不支持 `colspan`/`rowspan`、SVG/MathML/CSS 布局、`<details>` 折叠交互；未闭合标签按容错规则丢弃或展开。没有新增依赖，未改 `Cargo.toml`/`Cargo.lock`，未触碰 `src/ui/reader/mod.rs`、`markdown/document.rs` 或图片网络模块。
 - 预览便利：`examples/reader.rs` 新增 `HTML` fixture 与可选的首个命令行参数（fixture 索引），只用于脚本化截图，不影响默认启动。
 
 ## 验证
 
-- `cargo check --locked --all-targets`：通过（4m06s，首次依赖构建）。
-- `cargo clippy --locked --all-targets -- -D warnings`：通过。
-- `cargo test --locked`：全部通过（599+599+54+168+147+500+16 项，0 失败），其中 `tests/reader.rs` 147 项含新增的 11 项 `markdown::html_tests`，覆盖用户场景 fixture、注释（跨行/行内）不进入模型与复制、容器/强调/链接/图片/表格/列表语义、代码内 HTML 原样、脚本与事件属性不可见、单元格展平、实体解码、标题索引、畸形边界与 UTF-8 边界。
+- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check`：通过（含合并 main `9522eee` 后的重跑）。
+- `cargo test --locked`：全部通过（668+668+54+210+189+506+569+16 项，0 失败，含合并 main `9522eee` 后的重跑）。`tests/reader.rs` 189 项含新增的 `markdown::html_tests`，覆盖用户场景 fixture、注释（跨行/行内）不进入模型与复制、容器/强调/链接/图片/表格/列表语义、代码内 HTML 原样、脚本与事件属性不可见、单元格展平与混合 Markdown 强调、实体解码、标题索引、深度/表格补格/实体扫描/跨事件栈/raw-text 边界与 UTF-8 边界。
 - `cargo build --locked --example reader`：通过。
 - `cargo fmt --all -- --check`、`git diff --check`：通过。
 - 真实原生预览（同一 fixture，1280x900，DPI 144，Windows）：
   - 修复前：`target` 基线 `ast.rs` + 同一 fixture，`.agents/output/before-html.png` 显示 `<div align="center">`、`<img>`、`<!-- ... -->` 与 `<table>` 等作为灰色/正文文本原样出现。
   - 修复后：`after-html.png`（已另存为 `evidence-after-top.png`）显示图片占位「项目徽标 — picture not loaded」、加粗/斜体/行内代码/链接、`展开说明` 加粗、带列对齐的表格与列表；`after-html-bottom.png` 显示行内代码中的 `<div align="center">`/`<span>x</span>` 原样保留、围栏 HTML 代码块（含注释）原样保留、注释与 `<script>` 不出现在正文、末尾「尾部文本。」正常。这些截图为审查修复前的同一行为实现；审查修复只增加深度/单元格预算与实体解码窗口，不改变正常 fixture 行为。
   - 证据保存注意：本机后续会话中同一 `MoveWindow`+`CopyFromScreen` 脚本反复拍到桌面壁纸，不能确认最终提交的视觉差异，已如实记录；正常 fixture 在审查修复前后的解析与复制回归一致。
-  - 未覆盖：图片真正加载依赖尚未合入的 reader-images 任务，本任务只保证 `<img>` 进入既有 `Block::Image` 管线；真实 IME/多 DPI/跨屏仍未由本任务验收。
+  - 未覆盖：真实 IME/多 DPI/跨屏仍未由本任务验收。合并后的 `ReaderView` 已接入 reader-images 的图片板，`<img>` 与 Markdown 图片走同一条 provider 路径，但原生图片加载只在该任务的独立预览中验收，未接入正式 Shell。
 
 ## 后续
 
-- 与 reader-images 合并时处理 `docs/content-reader.md`、`docs/content-reader-markdown-patch.md` 的同文件冲突；两边都改了这两份主题文档。
-- 合并 reader-images 后确认 `<img>` 在真实仓库正文中加载，并考虑移除 `Block::Html` 及其渲染/复制分支。
-- 候选可复用教训（交由本批 workflow-lessons 决定是否写入 `LESSONS.md`）：构建容错 HTML 树时不要把同一节点先克隆进结果、再把原件压栈；否则子节点会挂到被丢弃的副本上，解析结果看似“标签全部消失”。本任务第一版即因此让所有块级 HTML 变成空块，靠 fixture 测试暴露，修复为闭合时自底向上挂载。证据：`html_tests` 首轮 11 项失败、修复后 147 项通过。
+- 可选清理：删除不再产生的 `Block::Html` 及 `document.rs`/`doctext.rs` 中对应分支。
+- 真实主界面接入后，需用真实 README（含 `div align` 徽标、HTML 表格）做一次原生验收，并确认图片加载在同一账号/commit 下正常。
+- 候选可复用教训（交由本批 workflow-lessons 决定是否写入 `LESSONS.md`）：构建容错 HTML 树时不要把同一节点先克隆进结果、再把原件压栈；否则子节点会挂到被丢弃的副本上，解析结果看似“标签全部消失”。本任务第一版即因此让所有块级 HTML 变成空块，靠 fixture 测试暴露，修复为闭合时自底向上挂载。同类教训还有：跨事件保持的解析状态（行内 HTML 开标签、丢弃元素抑制）必须和一次性解析的深度/大小预算一起设上限，否则审查会用畸形输入把它们变成二次或溢出路径。证据：首轮 11 项 fixture 失败；后续四轮审查分别发现无限嵌套、实体二次扫描、表格补格膨胀、行内 script 泄漏、跨事件栈不限与 raw-text 前缀误匹配，均已修复并加入回归。

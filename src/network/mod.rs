@@ -27,6 +27,7 @@
 
 pub mod cancel;
 pub mod executor;
+pub mod reader_images;
 #[cfg(test)]
 pub mod test_server;
 pub mod transport;

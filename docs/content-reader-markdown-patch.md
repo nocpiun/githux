@@ -26,7 +26,7 @@
 - 列表使用真实 `gpui::ListState`，只构建可见块；`list_state()` 是公开的真实滚动源；PR #29 合入后，reader 的细条已改用共享 `src/ui/scroll` 的 `ScrollTarget for ListState`，没有过渡条或重复实现。没有假外层 handle、重复滚动条或透明拦截区域。
 - 行内代码由带真实 padding 的圆角框绘制；padding 参与换行、绘制和命中的同一组字形坐标，复制直接读原文，长代码可断行。
 - fenced code 语言标签是真元素，在代码块内上移约 6px（叠加 `mb_1`），代码正文和块间距不变。
-- 图片不创建任何 loader，仅显示 alt/未载入提示；HTML 由新增的 `src/ui/reader/markdown/html.rs` 规范化（注释丢弃，常见容器/行内/链接/图片/表格映射到既有 `Block`/`Inline`，脚本类整段丢弃），不再作为惰性文本；危险链接仍由 reader 的 `links::resolve` 拒绝；链接只回调，不自动外跳。
+- 图片由 `src/ui/reader/images.rs` 的板驱动：地址经 `links::resolve` 转成 `ImageTarget`，宿主 provider 读取/解码，reader 只在当前文档代次发布结果；未注入 provider 时仍是 alt/未载入提示。HTML 由新增的 `src/ui/reader/markdown/html.rs` 规范化（注释丢弃，常见容器/行内/链接/图片/表格映射到既有 `Block`/`Inline`，脚本类整段丢弃），不再作为惰性文本；`<img src>` 产生的 `Block::Image` 走同一条图片板。危险链接仍由 reader 的 `links::resolve` 拒绝；链接只回调，不自动外跳。表格 cell 内图片仍只保留 alt。
 
 ## 文档级选择与行号间距
 

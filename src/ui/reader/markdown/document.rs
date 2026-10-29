@@ -22,6 +22,7 @@ use super::{
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
 };
+use crate::ui::reader::images::{self, ImageBoard, ImageState};
 
 /// Texts this long parse at once; longer ones parse in the background.
 const AT_ONCE: usize = 128 << 10;
@@ -120,6 +121,10 @@ pub struct MarkdownView {
     /// Paragraph units painted in the frame being built. Hit testing uses only
     /// these, so a row scrolled away can never win at its old position.
     visible_units: Rc<RefCell<std::collections::HashSet<usize>>>,
+    /// The reader's shared picture state, when a host attached one.
+    image_board: Option<Rc<RefCell<ImageBoard>>>,
+    /// The fixed repository context relative pictures resolve against.
+    resource_context: Option<crate::ui::reader::ResourceContext>,
     _focus_loss: Option<gpui::Subscription>,
 }
 
@@ -158,6 +163,8 @@ impl MarkdownView {
             paragraph_ranges: Default::default(),
             block_bounds: Default::default(),
             visible_units: Default::default(),
+            image_board: None,
+            resource_context: None,
             _focus_loss: None,
         };
         // Losing focus ends the gesture: a later move must not keep extending
@@ -187,6 +194,33 @@ impl MarkdownView {
         self.motion.cancel();
         self.list.remeasure();
         cx.notify();
+    }
+
+    /// Attaches the reader's shared picture state and the fixed context its
+    /// relative picture addresses resolve against.
+    pub(crate) fn set_images(
+        &mut self,
+        board: Rc<RefCell<ImageBoard>>,
+        context: crate::ui::reader::ResourceContext,
+    ) {
+        self.image_board = Some(board);
+        self.resource_context = Some(context);
+    }
+
+    /// Re-measures one top-level block after a picture changed size. The list
+    /// keeps its scroll anchor, so a picture landing below the viewport does
+    /// not move the text being read.
+    pub(crate) fn remeasure_block(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.layout.is_flow() {
+            // Flow mode lays every block out in one column on each frame, so the
+            // picture's new height reaches the parent layout by re-rendering.
+            cx.notify();
+            return;
+        }
+        if ix < self.list.item_count() {
+            self.list.remeasure_items(ix..ix + 1);
+            cx.notify();
+        }
     }
 
     /// Replaces the text; short texts parse at once, longer ones in the
@@ -932,20 +966,7 @@ impl MarkdownView {
                 .text_size(gpui::px(sm))
                 .child(tex.clone())
                 .into_any_element(),
-            Block::Image { alt, url } => div()
-                .debug_selector(move || format!("markdown-picture-note-{ix}"))
-                .px_3()
-                .py_2()
-                .rounded(radius)
-                .bg(colors.sunken)
-                .text_size(gpui::px(sm))
-                .text_color(colors.fg_muted)
-                .child(if alt.is_empty() {
-                    format!("picture not loaded: {url}")
-                } else {
-                    format!("{alt} — picture not loaded")
-                })
-                .into_any_element(),
+            Block::Image { alt, url } => self.picture_unit(ix, alt, url, &colors, xs, radius),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
                 .font_family(mono)
@@ -982,6 +1003,8 @@ impl MarkdownView {
         // over blank space or outside the viewport.
         let bounds = self.block_bounds.clone();
         let inset = self.layout == crate::ui::reader::MarkdownLayout::Repository;
+        // Flow mode uses the same real first/last block inset; the host scrolls
+        // it, so the document does not need list-level padding tricks.
         let vertical = window.rem_size() * 0.75;
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
@@ -1237,11 +1260,12 @@ impl MarkdownView {
                     .child(view)
                     .into_any_element()
             }
+            Block::Image { alt, url } => self.picture_unit(ix, alt, url, colors, body, radius),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
                 .child(match other {
-                    Block::Image { alt, .. } => format!("{alt} — picture not loaded"),
+                    Block::Image { alt, .. } => alt.clone(),
                     Block::Html(text) => text.clone(),
                     Block::Math { tex, .. } => tex.clone(),
                     Block::Paragraph(inline) => inline.text.clone(),
@@ -1253,6 +1277,38 @@ impl MarkdownView {
 }
 
 impl MarkdownView {
+    /// One picture block: the resolved state of its source, or the honest
+    /// reason it cannot be shown. The alt text stays visible in every state.
+    fn picture_unit(
+        &self,
+        ix: usize,
+        alt: &str,
+        url: &str,
+        colors: &ely_core::theme::Palette,
+        size: f32,
+        radius: gpui::Rems,
+    ) -> AnyElement {
+        let state = match (&self.image_board, &self.resource_context) {
+            (Some(board), Some(context)) => match images::resolve_target(url, context) {
+                Ok(target) => board.borrow_mut().want(ix, target),
+                Err(failure) => ImageState::Failed(failure),
+            },
+            _ => ImageState::Unavailable,
+        };
+        images::image_element(
+            gpui::ElementId::Name(format!("reader-picture-{ix}").into()),
+            images::image_selector(ix),
+            alt,
+            &state,
+            images::PictureStyle {
+                colors,
+                small_text: size,
+                radius,
+            },
+            images::frame_selector(ix),
+        )
+    }
+
     /// A paragraph drawn from one unit of the document model.
     ///
     /// The paragraph paints the document's selection, registers its real
@@ -1343,8 +1399,104 @@ fn flatten(blocks: Vec<Block>) -> Vec<Block> {
     out
 }
 
+impl MarkdownView {
+    /// Natural height: every block in one column, so the element reports the
+    /// document's full height and the host's scroll container scrolls it.
+    ///
+    /// Nothing about the document changes: the same `item()` builds each block,
+    /// so selection units, links, code, tables and pictures behave exactly as in
+    /// the virtualized viewport. Only the sizing differs.
+    fn render_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors.clone();
+        let horizontal = window.rem_size() * 0.5;
+        self.visible_units.borrow_mut().clear();
+        let blocks = self.parsed.blocks.len();
+        let mut column = div().flex().flex_col().w_full().min_w_0();
+        for ix in 0..blocks {
+            column = column.child(self.item(ix, window, cx));
+        }
+        div()
+            .id("reader-markdown")
+            .debug_selector(|| "reader-markdown".to_string())
+            .track_focus(&self.focus)
+            .key_context("ReaderMarkdown")
+            .relative()
+            .w_full()
+            .min_w_0()
+            .bg(colors.surface)
+            .px(horizontal)
+            .py_3()
+            .child(column)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    view.motion.cancel();
+                    window.focus(&view.focus, cx);
+                    match view.hit_at_live(event.position) {
+                        Some(hit) => {
+                            if !event.modifiers.shift {
+                                view.anchor_block = view.block_of(hit.start);
+                            }
+                            view.press(hit.at, event.modifiers.shift, hit.link, window, cx)
+                        }
+                        None => {
+                            view.anchor = 0;
+                            view.head = 0;
+                            view.dragging = true;
+                            view.pressed_link = None;
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
+            .on_drag(SelectDrag, |_, _, _, cx| cx.new(|_| EmptyView))
+            .on_drag_move(cx.listener(
+                move |view, event: &gpui::DragMoveEvent<SelectDrag>, _, cx| {
+                    if !view.dragging {
+                        return;
+                    }
+                    let position = event.event.position;
+                    if let Some(hit) = view.hit_at_live(position) {
+                        view.extend(hit.at, cx);
+                    } else {
+                        view.extend(view.edge_offset(position), cx);
+                    }
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |view, _, window, cx| {
+                    view.end_drag(cx);
+                    view.click(window, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| view.end_drag(cx)),
+            )
+            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                let keystroke = &event.keystroke;
+                if !keystroke.modifiers.secondary(cx) {
+                    return;
+                }
+                match keystroke.key.as_str() {
+                    "a" => {
+                        view.select_all(cx);
+                        cx.stop_propagation();
+                    }
+                    "c" if view.copy(cx) => cx.stop_propagation(),
+                    _ => {}
+                }
+            }))
+            .into_any_element()
+    }
+}
+
 impl Render for MarkdownView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.layout.is_flow() {
+            return self.render_flow(window, cx);
+        }
         let colors = cx.theme().colors.clone();
         let repository_layout = self.layout == crate::ui::reader::MarkdownLayout::Repository;
         let horizontal = window.rem_size() * 0.5
