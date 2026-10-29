@@ -39,6 +39,8 @@ pub enum Scene {
     NoReadme,
     /// The first attempt to open `docs` fails; a retry succeeds.
     DirectoryFailure,
+    /// Branch enumeration fails once while the default branch still browses.
+    BranchesFailure,
     /// The first attempt to read `src/main.rs` fails; a retry succeeds.
     FileFailure,
     /// A complete, empty branch list: no commit can be selected.
@@ -68,12 +70,13 @@ pub enum Scene {
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 23] = [
+    pub const ALL: [Scene; 24] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
         Scene::NoReadme,
         Scene::DirectoryFailure,
+        Scene::BranchesFailure,
         Scene::FileFailure,
         Scene::NoBranches,
         Scene::TruncatedTree,
@@ -112,6 +115,7 @@ impl Scene {
             Scene::ReadmeUncertain => "README uncertain",
             Scene::NoReadme => "No README",
             Scene::DirectoryFailure => "Directory failure",
+            Scene::BranchesFailure => "Branches failure",
             Scene::FileFailure => "File failure",
             Scene::NoBranches => "No branches",
             Scene::TruncatedTree => "Truncated tree",
@@ -166,6 +170,9 @@ impl Scene {
             }
             Scene::DirectoryFailure => {
                 "Opening docs fails once; the directory row reports it and one retry succeeds."
+            }
+            Scene::BranchesFailure => {
+                "The first branch listing fails; the default branch stays readable and the retry restores the picker."
             }
             Scene::FileFailure => {
                 "Reading src/main.rs fails once; the reader reports it and one retry succeeds."
@@ -329,6 +336,7 @@ fn locator_path() -> String {
 enum ArmedFailure {
     Languages,
     Releases,
+    Branches,
     Root,
     Directory,
     File,
@@ -504,6 +512,9 @@ impl FixtureTransport {
     fn branches(&self, scene: Scene, url: &str) -> HttpResponse {
         if scene == Scene::NoBranches {
             return json_response(200, "[]");
+        }
+        if scene == Scene::BranchesFailure && self.take_armed(ArmedFailure::Branches) {
+            return json_response(500, "{}");
         }
         let names: Vec<&str> = BRANCHES
             .iter()
@@ -812,6 +823,7 @@ impl FixtureTransport {
 fn armed_for(scene: Scene) -> Option<ArmedFailure> {
     match scene {
         Scene::DirectoryFailure => Some(ArmedFailure::Directory),
+        Scene::BranchesFailure => Some(ArmedFailure::Branches),
         Scene::RootFailure => Some(ArmedFailure::Root),
         Scene::OverviewError => Some(ArmedFailure::Languages),
         Scene::ReleasesFailure => Some(ArmedFailure::Releases),

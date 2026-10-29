@@ -92,7 +92,12 @@ pub fn failed(
                         key_retry(window, cx);
                     }
                 })
-                .on_click(move |_, window, cx| retry(window, cx))
+                .on_click(move |_, window, cx| {
+                    // The mark often lives inside a clickable row (for example a directory).
+                    // Consume the press here so one retry never also toggles that ancestor.
+                    cx.stop_propagation();
+                    retry(window, cx);
+                })
                 .child(
                     Icon::new(IconName::RotateCw)
                         .size(IconSize::Xs)
