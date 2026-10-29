@@ -252,6 +252,26 @@ fn entity_decoding_does_not_rescan_the_rest_of_the_document() {
 }
 
 #[test]
+fn dropped_inline_elements_suppress_their_content_across_events() {
+    let doc = parse(
+        "before <script>alert(1)</script> after\n\n<style>x { color: red }</style>\n\n<iframe>fallback</iframe>",
+    );
+    let copied = copied(&doc.blocks);
+    assert_eq!(copied.trim(), "before after", "{copied}");
+}
+
+#[test]
+fn unterminated_end_tags_consume_the_fragment_in_linear_time() {
+    let mut input = String::from("<div>");
+    for _ in 0..100_000 {
+        input.push_str("</a");
+    }
+    input.push_str("</div>");
+    let doc = parse(&input);
+    assert!(!copied(&doc.blocks).contains("</a"));
+}
+
+#[test]
 fn over_wide_tables_fall_back_to_text_without_quadratic_padding() {
     let mut input = String::from("<table><tr>");
     for _ in 0..2_000 {

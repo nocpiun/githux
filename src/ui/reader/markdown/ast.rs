@@ -173,6 +173,10 @@ struct Building {
     /// A comment-only HTML fragment sat between two text runs; the next run
     /// collapses its leading whitespace so the copy reads like the browser.
     html_gap: bool,
+    /// An inline element whose whole content is dropped (`script`, `style`,
+    /// ...). Its tags and text arrive as separate events, so suppression must
+    /// survive the HTML helper returning.
+    suppressed: Option<String>,
 }
 
 enum Open {
@@ -191,10 +195,15 @@ struct HtmlOpen {
 enum HtmlKind {
     Style(Style),
     Link(String),
+    /// A dropped element whose content must be suppressed across events.
+    Suppress,
 }
 
 impl Building {
     fn push_text(&mut self, text: &str) {
+        if self.suppressed.is_some() {
+            return;
+        }
         if self.html_gap {
             self.html_gap = false;
             let trimmed = text.trim_start_matches(' ');
@@ -210,7 +219,39 @@ impl Building {
 
     /// Convert an inline HTML fragment into text, styles, links and pictures.
     fn push_html(&mut self, fragment: &str) {
+        // Consume the end tag that closes the suppressed element before
+        // resuming normal inline content.
+        if let Some(name) = self.suppressed.clone() {
+            let mut rest = fragment;
+            while let Some(start) = rest.find("</") {
+                let after = &rest[start + 2..];
+                if after
+                    .get(..name.len())
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case(&name))
+                {
+                    let end = after.find('>').map_or(fragment.len(), |offset| {
+                        start + 2 + offset.saturating_add(1)
+                    });
+                    rest = &rest[end.min(rest.len())..];
+                    self.suppressed = None;
+                    break;
+                }
+                rest = &after[1..];
+            }
+            if self.suppressed.is_some() {
+                return;
+            }
+            if rest.is_empty() {
+                return;
+            }
+            return self.push_html(rest);
+        }
         let nodes = html::parse(fragment);
+        if let Some(Node::Suppressed(name)) = nodes.first() {
+            self.suppressed = Some(name.clone());
+            self.html_gap = true;
+            return;
+        }
         let text = self.inline.text.len();
         let notes = self.notes.len();
         let opens = self.html.len();
@@ -221,10 +262,23 @@ impl Building {
             &mut self.html,
             self.in_cell,
         );
+        // A dropped element that stayed open suppresses later text events.
+        if let Some(open) = self.html.last()
+            && matches!(open.kind, HtmlKind::Suppress)
+        {
+            self.suppressed = Some(open.name.clone());
+            self.html.pop();
+        }
+        if self.suppressed.is_some() {
+            self.html_gap = true;
+            return;
+        }
         // A fragment that contributed nothing (a comment, or a dropped tag)
         // glues the surrounding text runs together.
-        self.html_gap =
-            self.inline.text.len() == text && self.notes.len() == notes && self.html.len() == opens;
+        self.html_gap = self.suppressed.is_none()
+            && self.inline.text.len() == text
+            && self.notes.len() == notes
+            && self.html.len() == opens;
     }
 
     /// Close any HTML element still open at the end of this builder.
@@ -744,7 +798,7 @@ fn blocks_from_nodes(nodes: &[Node], out: &mut Vec<Block>) {
     for node in nodes {
         match node {
             Node::Text(text) => push_html_text(&mut run, text),
-            Node::End(_) => {}
+            Node::End(_) | Node::Suppressed(_) => {}
             Node::Element(element) if html::is_block(&element.name) => {
                 flush_html_run(&mut run, &mut notes, &mut opens, out);
                 block_from_element(element, out);
@@ -1040,6 +1094,7 @@ fn append_html_inline(
         match node {
             Node::Text(text) => push_html_text(inline, text),
             Node::End(name) => close_html(opens, name, inline),
+            Node::Suppressed(_) => {}
             Node::Element(element) => append_html_element(element, inline, notes, opens, in_cell),
         }
     }
@@ -1069,6 +1124,16 @@ fn append_html_element(
     match name {
         "br" => inline.text.push('\n'),
         "wbr" | "hr" => {}
+        name if html::is_dropped(name) && element.children.is_empty() && !element.closed => {
+            // The opening tag of a dropped element arrives without children;
+            // mark it so the caller suppresses the following text events until
+            // the matching end tag.
+            opens.push(HtmlOpen {
+                name: name.to_string(),
+                kind: HtmlKind::Suppress,
+                start: inline.text.len(),
+            });
+        }
         "img" => {
             let alt = element.attr("alt").unwrap_or_default();
             let url = element.attr("src").unwrap_or_default().trim();
@@ -1150,6 +1215,7 @@ fn close_html_to(opens: &mut Vec<HtmlOpen>, position: usize, inline: &mut Inline
         match open.kind {
             HtmlKind::Style(style) => inline.styles.push((start..end, style)),
             HtmlKind::Link(url) => inline.links.push((start..end, url)),
+            HtmlKind::Suppress => {}
         }
     }
 }

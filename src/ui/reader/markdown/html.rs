@@ -55,6 +55,9 @@ pub enum Node {
     /// An end tag with no matching start in this fragment. The caller uses it
     /// to close an element opened by an earlier `InlineHtml` event.
     End(String),
+    /// A dropped raw-text element whose end tag is in a later fragment. The
+    /// caller keeps suppressing text until that tag arrives.
+    Suppressed(String),
 }
 
 /// Elements that never have children.
@@ -220,7 +223,9 @@ pub fn parse(fragment: &str) -> Vec<Node> {
             } => {
                 if is_raw_text(&name) {
                     let (content, next) = raw_content(fragment, next, &name);
-                    if !is_raw_dropped(&name) {
+                    if is_raw_dropped(&name) && next >= len {
+                        attach(&mut stack, &mut roots, Node::Suppressed(name));
+                    } else if !is_raw_dropped(&name) {
                         let element = Element {
                             name,
                             attrs,
@@ -263,6 +268,16 @@ pub fn parse(fragment: &str) -> Vec<Node> {
                 } else {
                     attach(&mut stack, &mut roots, Node::End(name));
                 }
+                if let Some(name) = stack.last().map(|element| element.name.clone())
+                    && is_raw_text(&name)
+                {
+                    // An unclosed raw-text element runs to the fragment end;
+                    // its content must not become readable text.
+                    while let Some(element) = stack.pop() {
+                        attach(&mut stack, &mut roots, Node::Element(element));
+                    }
+                    break;
+                }
             }
         }
         i = next;
@@ -286,7 +301,7 @@ fn collect_raw_text(nodes: &[Node], out: &mut String) {
     for node in nodes {
         match node {
             Node::Text(text) => out.push_str(text),
-            Node::End(_) => {}
+            Node::End(_) | Node::Suppressed(_) => {}
             Node::Element(element) => match element.name.as_str() {
                 "br" => out.push('\n'),
                 name if is_dropped(name) => {}
@@ -473,8 +488,13 @@ fn scan_tag(fragment: &str, i: usize) -> Option<(Tag, usize)> {
         return Some((Tag::Comment, end));
     }
     if rest.starts_with('!') || rest.starts_with('?') {
-        let end = fragment[i..].find('>').map(|offset| i + offset + 1);
-        return end.map(|end| (Tag::Declaration, end));
+        // An unterminated declaration consumes the rest of the fragment;
+        // returning `None` would make the caller rescan the same suffix.
+        let end = fragment[i..]
+            .find('>')
+            .map(|offset| i + offset + 1)
+            .unwrap_or(len);
+        return Some((Tag::Declaration, end));
     }
     if let Some(name) = rest.strip_prefix('/') {
         let name_len = name.bytes().take_while(|byte| is_name_byte(*byte)).count();
@@ -482,7 +502,10 @@ fn scan_tag(fragment: &str, i: usize) -> Option<(Tag, usize)> {
             return None;
         }
         let name = name[..name_len].to_ascii_lowercase();
-        let end = fragment[i..].find('>').map(|offset| i + offset + 1)?;
+        let end = fragment[i..]
+            .find('>')
+            .map(|offset| i + offset + 1)
+            .unwrap_or(len);
         return Some((Tag::End { name }, end));
     }
     if !rest.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
