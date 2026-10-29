@@ -261,6 +261,14 @@ fn dropped_inline_elements_suppress_their_content_across_events() {
 }
 
 #[test]
+fn raw_text_end_tags_need_a_real_tag_name_boundary() {
+    let doc = parse("<script>const example = \"</scripture>\"; secret();</script><p>visible</p>");
+    let copied = copied(&doc.blocks);
+    assert!(!copied.contains("secret"), "{copied}");
+    assert!(copied.contains("visible"), "{copied}");
+}
+
+#[test]
 fn html_ranges_survive_images_that_remove_alt_text() {
     let doc = parse("<a href=\"guide.md\">before ![alt](p.png) after</a>");
     let paragraph = find_paragraph(&doc.blocks, "before");

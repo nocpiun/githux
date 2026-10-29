@@ -601,17 +601,23 @@ fn scan_tag(fragment: &str, i: usize) -> Option<(Tag, usize)> {
 
 fn raw_content(fragment: &str, start: usize, name: &str) -> (String, usize) {
     let needle = format!("</{name}");
-    match find_ci(&fragment[start..], &needle) {
-        Some(offset) => {
-            let content_end = start + offset;
+    let mut search = start;
+    while let Some(offset) = find_ci(&fragment[search..], &needle) {
+        let after = search + offset + needle.len();
+        // `</scripture>` is text inside a script, not its end tag: the name
+        // must end at whitespace, `/`, or `>`.
+        let boundary = fragment.as_bytes().get(after).copied();
+        if boundary.is_none_or(|byte| byte == b'>' || byte == b'/' || byte.is_ascii_whitespace()) {
+            let content_end = search + offset;
             let next = fragment[content_end..]
                 .find('>')
                 .map(|gt| content_end + gt + 1)
                 .unwrap_or(fragment.len());
-            (fragment[start..content_end].to_string(), next)
+            return (fragment[start..content_end].to_string(), next);
         }
-        None => (fragment[start..].to_string(), fragment.len()),
+        search = after;
     }
+    (fragment[start..].to_string(), fragment.len())
 }
 
 fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
