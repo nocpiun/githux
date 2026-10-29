@@ -78,6 +78,10 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经新增 `set_avatar_renderer` 只传入已解码元素。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
+## 2026-10-29 第二轮状态呈现
+
+列级硬失败改为共享 warning 标记 + tooltip 原因，不再用整段错误说明占据状态区；first load 仍显示 spinner 与 Loading 文案，Unavailable 仍显示中性圆点和文字。原因是登录/缺数据与硬失败不是同一语义，不能用 spinner 或 warning 互相冒充；刷新、Partial 和空结果行为不变。
+
 ## host / data 待接职责
 
 - 用正式 data 服务读取账户作用域结果，并在请求前固定稳定账户上下文；返回后再核对上下文、页面 binding 与 generation，再调用本视图的 `apply_*`。

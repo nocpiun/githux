@@ -89,44 +89,31 @@ fn text(label: impl Into<String>, cx: &App) -> AnyElement {
 impl RepositoryOverview {
     fn retry(&self, section: OverviewSection, message: &str, cx: &mut Context<Self>) -> AnyElement {
         let binding = self.binding.clone();
-        let key_binding = binding.clone();
-        div()
-            .id(gpui::ElementId::Name(
-                format!("overview-retry-{}", section.id()).into(),
-            ))
-            .debug_selector(move || format!("overview-retry-{}", section.id()))
-            .tab_index(0)
-            .cursor_pointer()
-            .text_color(cx.theme().colors.fg_muted)
-            .aria_label(format!("{message}. Retry {}", section.title()))
-            .tooltip(Tooltip::text(message.to_string()))
-            .on_key_down(
-                cx.listener(move |view, event: &gpui::KeyDownEvent, window, cx| {
-                    if activation_key(event) {
-                        cx.stop_propagation();
-                        view.emit(
-                            OverviewAction::Refresh {
-                                binding: key_binding.clone(),
-                                section,
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                }),
-            )
-            .on_click(cx.listener(move |view, _, window, cx| {
-                view.emit(
-                    OverviewAction::Refresh {
-                        binding: binding.clone(),
-                        section,
-                    },
-                    window,
-                    cx,
-                )
-            }))
-            .child("Unavailable · Retry")
-            .into_any_element()
+        let label = format!("Retry {}", section.title());
+        let reason = message.to_string();
+        let section_label = section.title().to_string();
+        let _ = section_label;
+        let this = cx.entity().downgrade();
+        let id = format!("overview-retry-{}", section.id());
+        crate::ui::compact_status::failed(
+            gpui::ElementId::Name(id.clone().into()),
+            label,
+            reason,
+            Some(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |view, cx| {
+                    view.emit(
+                        OverviewAction::Refresh {
+                            binding: binding.clone(),
+                            section,
+                        },
+                        window,
+                        cx,
+                    );
+                });
+            }),
+            Some(Box::leak(id.into_boxed_str())),
+            cx,
+        )
     }
     fn release_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let data = self.releases.value();
@@ -137,7 +124,7 @@ impl RepositoryOverview {
         let title = "Releases".into();
         let (release, status): (Option<&Release>, &str) = match self.latest.as_ref() {
             Some(SectionState::Ready(value) | SectionState::Partial { value, .. }) => {
-                (value.release.as_ref(), "Latest unavailable")
+                (value.release.as_ref(), "No latest release")
             }
             Some(SectionState::Loading) => (None, "Loading…"),
             Some(SectionState::Error { .. }) => (None, "Latest unavailable"),
@@ -157,7 +144,16 @@ impl RepositoryOverview {
                 None => (None, "Not loaded"),
             },
         };
+        let loading_row = matches!(self.latest.as_ref(), Some(SectionState::Loading))
+            || (self.latest.is_none() && self.releases.is_loading());
         let mut row = div().flex().items_center().gap_2().min_w_0();
+        if release.is_none() && loading_row {
+            row = row.child(crate::ui::compact_status::loading(
+                "overview-releases-loading",
+                "Loading releases…",
+                cx,
+            ));
+        }
         if let Some(release) = release {
             let id = release.id;
             let tag = release.tag_name.clone();
@@ -252,20 +248,27 @@ impl RepositoryOverview {
             {
                 row = row.child(text(format!("· {label}"), cx));
             }
-        } else {
-            row = row.child(text(status, cx));
+        } else if !loading_row {
+            if status == "No latest release" {
+                row = row.child(crate::ui::compact_status::empty("No latest release", cx));
+            } else {
+                row = row.child(text(status, cx));
+            }
         }
-        let failed = self
-            .releases
-            .error()
-            .or_else(|| self.latest.as_ref().and_then(SectionState::error))
+        let list_failed = self.releases.error();
+        let latest_failed = self
+            .latest
+            .as_ref()
+            .and_then(SectionState::error)
             .or_else(|| {
                 self.latest
                     .is_none()
                     .then(|| data.and_then(|data| data.latest_error.as_deref()))
                     .flatten()
             });
-        if let Some(error) = failed {
+        if let Some(error) = list_failed {
+            row = row.child(self.retry(OverviewSection::Releases, error, cx));
+        } else if let Some(error) = latest_failed {
             row = row.child(self.retry(OverviewSection::Releases, error, cx));
         }
         if list_partial || self.latest.as_ref().is_some_and(SectionState::is_partial) {
@@ -356,15 +359,14 @@ impl RepositoryOverview {
             }
         } else if let Some(error) = self.contributors.error() {
             row = row.child(self.retry(OverviewSection::Contributors, error, cx));
-        } else {
-            row = row.child(text(
-                if self.contributors.is_loading() {
-                    "Loading…"
-                } else {
-                    "Not loaded"
-                },
+        } else if self.contributors.is_loading() {
+            row = row.child(crate::ui::compact_status::loading(
+                "overview-contributors-loading",
+                "Loading contributors…",
                 cx,
             ));
+        } else {
+            row = row.child(text("Not loaded", cx));
         }
         group(
             "overview-contributors",

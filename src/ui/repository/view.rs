@@ -342,29 +342,35 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     let Some(branches) = page.branches() else {
         let retry = cx.weak_entity();
         let error = page.branches_error().cloned();
+        let loading = page.branches_loading;
+        let retry = (!loading).then_some(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+            let _ = retry.update(cx, |page, cx| page.retry_branches(cx));
+        });
         return div()
             .debug_selector(|| "repository-branch-unavailable".to_string())
             .flex()
-            .flex_col()
+            .items_center()
             .gap_1()
             .flex_none()
             .w(px(220.0))
             .text_size(small)
             .text_color(colors.fg_subtle)
-            .child(match page.selected_branch() {
-                Some(branch) => format!("branch {branch}"),
-                None => "Branch list unavailable".to_string(),
+            .child(match (page.selected_branch(), &error) {
+                (Some(branch), _) => div().child(format!("branch {branch}")).into_any_element(),
+                (None, Some(error)) => crate::ui::compact_status::failed(
+                    "repository-retry-branches",
+                    "Branch list unavailable",
+                    error.title.clone(),
+                    retry,
+                    Some("repository-retry-branches"),
+                    cx,
+                ),
+                (None, None) => crate::ui::compact_status::loading(
+                    "repository-branches-loading",
+                    "Loading branches…",
+                    cx,
+                ),
             })
-            .children(error.map(|error| {
-                div().child(error.title).child(
-                    Button::new("repository-retry-branches", "Retry branches")
-                        .disabled(page.branches_loading)
-                        .size(ControlSize::Sm)
-                        .on_click(move |_, _, cx| {
-                            let _ = retry.update(cx, |page, cx| page.retry_branches(cx));
-                        }),
-                )
-            }))
             .into_any_element();
     };
     let choices: Vec<Choice> = branches
@@ -700,58 +706,67 @@ fn tree_column(
 fn tree_warnings(
     page: &RepositoryPage,
     colors: &ely_core::theme::Palette,
-    small: gpui::Rems,
+    _small: gpui::Rems,
     cx: &mut Context<RepositoryPage>,
 ) -> Vec<AnyElement> {
     let mut warnings = Vec::new();
     if page.tree("").is_some_and(tree_incomplete) {
         warnings.push(
             div()
+                .id("repository-tree-incomplete")
                 .debug_selector(|| "repository-tree-incomplete".to_string())
+                .tooltip(Tooltip::text(
+                    "This directory listing is truncated or incomplete; it is not a complete empty directory.",
+                ))
                 .px_2()
                 .py_1()
-                .text_size(small)
-                .text_color(colors.warning)
                 .child(
-                    "This directory listing is truncated or incomplete; it is not a complete empty directory.",
+                    Icon::new(IconName::TriangleAlert)
+                        .size(IconSize::Xs)
+                        .color(colors.warning),
                 )
                 .into_any_element(),
         );
     }
     if let Some(error) = page.tree_failure("") {
+        let page = cx.weak_entity();
+        let retry = error
+            .retryable
+            .then_some(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                let _ = page.update(cx, |page, cx| page.retry_directory("", cx));
+            });
         warnings.push(
             div()
                 .debug_selector(|| "repository-tree-error".to_string())
                 .px_2()
                 .py_1()
-                .text_size(small)
-                .text_color(colors.danger)
-                .child(error.title.clone())
-                .when(error.retryable, |row| {
-                    let page = cx.weak_entity();
-                    row.child(
-                        Button::new("repository-retry-root", "Retry files")
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                let _ = page.update(cx, |page, cx| page.retry_directory("", cx));
-                            }),
-                    )
-                })
+                .child(crate::ui::compact_status::failed(
+                    "repository-retry-root",
+                    "Files could not be loaded",
+                    error.title.clone(),
+                    retry,
+                    Some("repository-retry-root"),
+                    cx,
+                ))
                 .into_any_element(),
         );
     }
     if page.tree_capped() {
         warnings.push(
             div()
+                .id("repository-tree-capped")
                 .debug_selector(|| "repository-tree-capped".to_string())
-                .px_2()
-                .py_1()
-                .text_size(small)
-                .text_color(colors.warning)
-                .child(format!(
+                .tooltip(Tooltip::text(format!(
                     "More rows are loaded than the {}-row tree cap. Collapse directories to review the rest; nothing was fetched recursively.",
                     super::navigation::MAX_TREE_ROWS
-                ))
+                )))
+                .px_2()
+                .py_1()
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(IconSize::Xs)
+                        .color(colors.warning),
+                )
                 .into_any_element(),
         );
     }
@@ -844,9 +859,11 @@ fn tree_row(
             div()
                 .debug_selector(|| "repository-row-loading".to_string())
                 .flex_none()
-                .text_size(small)
-                .text_color(colors.fg_subtle)
-                .child("loading…")
+                .child(crate::ui::compact_status::loading(
+                    SharedString::from(format!("repository-row-loading-{path}")),
+                    format!("Loading {name}…"),
+                    cx,
+                ))
                 .into_any_element(),
         ),
         RowState::Empty => Some(
@@ -860,45 +877,39 @@ fn tree_row(
         ),
         RowState::Incomplete => Some(
             div()
+                .id(SharedString::from(format!("repository-row-incomplete-{path}")))
                 .debug_selector(|| "repository-row-incomplete".into())
+                .aria_label("Incomplete directory listing")
+                .tooltip(Tooltip::text(
+                    "This directory listing is truncated or incomplete; it is not a complete empty directory.",
+                ))
                 .text_color(colors.warning)
                 .flex_none()
-                .child("Incomplete")
+                .child(Icon::new(IconName::TriangleAlert).size(IconSize::Xs))
                 .into_any_element(),
         ),
         RowState::Failed(error) => {
             let entity = entity.clone();
             let path = path.clone();
             let retryable = error.retryable;
+            let retry_path = path.clone();
+            let label = format!("Failed to load {name}");
             Some(
                 div()
-                    .id(SharedString::from(format!("repository-row-error-{path}")))
-                    .tooltip(Tooltip::text(error.title.clone()))
                     .debug_selector(|| "repository-row-failed".to_string())
-                    .flex()
                     .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(small)
-                            .text_color(colors.danger)
-                            .child("Failed"),
-                    )
-                    .when(retryable, |row| {
-                        row.child(
-                            Button::new(
-                                SharedString::from(format!("repository-row-retry-{path}")),
-                                "Retry",
-                            )
-                            .variant(ButtonVariant::Ghost)
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                entity.update(cx, |page, cx| page.retry_directory(&path, cx));
-                            }),
-                        )
-                    })
+                    .child(crate::ui::compact_status::failed(
+                        SharedString::from(format!("repository-row-error-{path}")),
+                        label,
+                        error.title.clone(),
+                        retryable.then_some(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                            entity.update(cx, |page, cx| {
+                                page.retry_directory(&retry_path, cx);
+                            });
+                        }),
+                        None,
+                        cx,
+                    ))
                     .into_any_element(),
             )
         }
@@ -1050,11 +1061,17 @@ fn loading_panel(cx: &App) -> AnyElement {
     div()
         .debug_selector(|| "repository-loading".to_string())
         .flex()
+        .flex_col()
         .items_center()
         .justify_center()
+        .gap_2()
         .size_full()
         .text_color(colors.fg_subtle)
-        .child("Loading…")
+        .child(crate::ui::compact_status::loading(
+            "repository-reader-loading",
+            "Loading file…",
+            cx,
+        ))
         .into_any_element()
 }
 

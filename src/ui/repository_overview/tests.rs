@@ -365,6 +365,41 @@ fn languages_keep_every_identity_and_checked_bytes() {
 }
 
 #[gpui::test]
+fn latest_failure_is_a_warning_mark_with_visible_recovery(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let binding = fixtures::binding(1);
+    apply_releases(
+        &h,
+        &binding,
+        SectionState::Ready(fixtures::latest_error_releases()),
+        cx,
+    );
+    cx.run_until_parked();
+    let mark = cx
+        .debug_bounds("overview-retry-releases")
+        .expect("latest/list failure leaves a retry mark, not body text");
+    assert!(mark.size.height > px(0.0));
+    assert!(
+        cx.debug_bounds("overview-retry-releases").is_some(),
+        "the shared retry mark keeps its stable debug selector"
+    );
+    let v = overview(&h, cx);
+    v.update(cx, |v, cx| {
+        v.apply_latest_release(
+            &binding,
+            SectionState::Ready(fixtures::ready_releases().latest.unwrap()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("overview-retry-releases").is_none(),
+        "a recovered latest read removes the warning mark"
+    );
+    assert!(cx.debug_bounds("overview-release-version").is_some());
+}
+
+#[gpui::test]
 fn independent_latest_recovery_removes_snapshot_error(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     let binding = fixtures::binding(1);
@@ -446,6 +481,23 @@ fn latest_badge_follows_independent_truth_and_groups_stay_left(cx: &mut TestAppC
         ))
     });
     assert!(cx.debug_bounds("overview-latest-badge").is_none());
+}
+
+#[gpui::test]
+fn no_latest_is_a_true_empty_not_a_warning(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    apply_releases(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::latest_none_releases()),
+        cx,
+    );
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("overview-retry-releases").is_none(),
+        "a confirmed no-latest response is not a warning"
+    );
+    assert!(cx.debug_bounds("overview-release-version").is_none());
 }
 
 #[gpui::test]

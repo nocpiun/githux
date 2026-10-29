@@ -1155,26 +1155,64 @@ fn panel_body<T: PanelRows + 'static>(
             theme.radius(Radius::Md),
         )
     };
+    // A hard failure is a compact warning with a readable reason in its tooltip. A first load
+    // or an empty/unavailable state stays a short written status: it is not an error mark, and a
+    // spinner alone would leave "no data" and "not signed in" indistinguishable.
+    if let PanelState::Ready {
+        content: PanelContent::Error(error),
+        ..
+    } = &model.state
+    {
+        let reason = presentation::error_message(error);
+        return div()
+            .debug_selector(move || format!("{}-status", column_name(column)))
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_5()
+            .text_center()
+            .child(crate::ui::compact_status::failed(
+                format!("{}-error-mark", column_name(column)),
+                "This column could not be loaded",
+                reason,
+                None::<fn(&mut gpui::Window, &mut gpui::App)>,
+                None,
+                cx,
+            ))
+            .into_any_element();
+    }
     let status = match &model.state {
-        PanelState::Loading => Some(("Loading…", colors.fg_subtle, None)),
-        PanelState::Ready {
-            content: PanelContent::Error(error),
-            ..
-        } => Some((
-            "This column could not be loaded.",
-            colors.danger,
-            Some(presentation::error_message(error)),
+        PanelState::Loading => Some((
+            "Loading…",
+            colors.fg_subtle,
+            None,
+            crate::ui::compact_status::loading(
+                format!("{}-loading-mark", column_name(column)),
+                "Loading this column…",
+                cx,
+            ),
         )),
         PanelState::Ready {
             content: PanelContent::Unavailable { message },
             ..
-        } => Some(("No current data.", colors.fg_subtle, Some(message.clone()))),
+        } => Some((
+            "No current data.",
+            colors.fg_subtle,
+            Some(message.clone()),
+            { crate::ui::compact_status::empty("No current data", cx) },
+        )),
         PanelState::Ready {
             content: PanelContent::Ready(_),
             ..
+        }
+        | PanelState::Ready {
+            content: PanelContent::Error(_),
+            ..
         } => None,
     };
-    if let Some((title, color, detail)) = status {
+    if let Some((title, color, detail, mark)) = status {
         return div()
             .debug_selector(move || format!("{}-status", column_name(column)))
             .flex_1()
@@ -1186,6 +1224,7 @@ fn panel_body<T: PanelRows + 'static>(
             .gap_2()
             .p_5()
             .text_center()
+            .child(mark)
             .child(div().text_color(color).child(title))
             .children(detail.map(|detail| {
                 div()
