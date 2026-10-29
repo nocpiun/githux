@@ -1797,7 +1797,7 @@ impl Shell {
                 name: "repo-scrollbar",
                 axis: gpui::Axis::Vertical,
             },
-            placement: scroll::Placement::overlay(4.0, 8.0),
+            placement: scroll::Placement::overlay(1.5, 8.0),
             style: scroll::Style::DEFAULT,
             opacity: self.repo_bars.opacity(self.tab_now_ms()),
             on_drag: {
@@ -2082,7 +2082,7 @@ impl Shell {
                         name: "settings-scrollbar-y",
                         axis: gpui::Axis::Vertical,
                     },
-                    placement: scroll::Placement::overlay(4.0, 8.0),
+                    placement: scroll::Placement::overlay(1.5, 8.0),
                     style: scroll::Style::DEFAULT,
                     opacity,
                     on_drag,

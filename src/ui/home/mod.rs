@@ -1327,7 +1327,7 @@ fn list_rows<T: PanelRows + 'static>(
             },
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(4.0, 8.0),
+        placement: scroll::Placement::overlay(1.5, 8.0),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,

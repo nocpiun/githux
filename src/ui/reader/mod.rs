@@ -624,7 +624,7 @@ impl Render for ReaderView {
                         name: "reader-markdown-scrollbar",
                         axis: gpui::Axis::Vertical,
                     },
-                    placement: crate::ui::scroll::Placement::overlay(4.0, 8.0),
+                    placement: crate::ui::scroll::Placement::overlay(1.5, 8.0),
                     style: crate::ui::scroll::Style::DEFAULT,
                     opacity,
                     on_drag,

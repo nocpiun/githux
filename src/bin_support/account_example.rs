@@ -188,7 +188,7 @@ impl Render for AccountPreview {
                 name: "account-preview-scrollbar-y",
                 axis: gpui::Axis::Vertical,
             },
-            placement: Placement::overlay(4.0, 8.0),
+            placement: Placement::overlay(1.5, 8.0),
             style: Style::DEFAULT,
             opacity,
             on_drag,
