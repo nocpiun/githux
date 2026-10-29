@@ -252,6 +252,27 @@ fn entity_decoding_does_not_rescan_the_rest_of_the_document() {
 }
 
 #[test]
+fn over_wide_tables_fall_back_to_text_without_quadratic_padding() {
+    let mut input = String::from("<table><tr>");
+    for _ in 0..2_000 {
+        input.push_str("<td>x</td>");
+    }
+    input.push_str("</tr>");
+    for _ in 0..2_000 {
+        input.push_str("<tr><td>y</td></tr>");
+    }
+    input.push_str("</table>");
+    let doc = parse(&input);
+    assert!(
+        !doc.blocks
+            .iter()
+            .any(|block| matches!(block, Block::Table { .. })),
+        "an over-budget table must not become a padded grid"
+    );
+    assert!(copied(&doc.blocks).contains("x"), "the text is preserved");
+}
+
+#[test]
 fn html_inline_style_ranges_stay_on_char_boundaries() {
     let doc = parse("<b>中文 bold</b> tail");
     let text = find_paragraph(&doc.blocks, "中文");

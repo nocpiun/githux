@@ -812,6 +812,10 @@ fn block_from_element(element: &Element, out: &mut Vec<Block>) {
         "table" => {
             if let Some(table) = html_table(element) {
                 out.push(table);
+            } else {
+                // A malformed or over-budget table still reads as text instead
+                // of allocating an enormous padded grid.
+                blocks_from_nodes(&element.children, out);
             }
         }
         "summary" => {
@@ -910,6 +914,12 @@ fn push_html_list(element: &Element, out: &mut Vec<Block>) {
     }
 }
 
+/// Upper bound on padded table cells (rows plus header times widest row).
+///
+/// One wide row followed by thousands of narrow rows would otherwise expand a
+/// few hundred kilobytes of HTML into gigabytes of `Inline` values.
+const MAX_TABLE_CELLS: usize = 65_536;
+
 fn html_table(element: &Element) -> Option<Block> {
     let mut head = Vec::new();
     let mut rows = Vec::new();
@@ -925,6 +935,9 @@ fn html_table(element: &Element) -> Option<Block> {
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0))
         .max(aligns.len());
+    if width.saturating_mul(rows.len().saturating_add(1)) > MAX_TABLE_CELLS {
+        return None;
+    }
     aligns.resize(width, Align::None);
     head.resize(width, Inline::default());
     for row in rows.iter_mut() {

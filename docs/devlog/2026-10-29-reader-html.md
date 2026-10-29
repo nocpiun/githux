@@ -27,8 +27,8 @@
 - `cargo fmt --all -- --check`、`git diff --check`：通过。
 - 真实原生预览（同一 fixture，1280x900，DPI 144，Windows）：
   - 修复前：`target` 基线 `ast.rs` + 同一 fixture，`.agents/output/before-html.png` 显示 `<div align="center">`、`<img>`、`<!-- ... -->` 与 `<table>` 等作为灰色/正文文本原样出现。
-  - 修复后：`after-html.png`（已另存为 `evidence-after-top.png`）显示图片占位「项目徽标 — picture not loaded」、加粗/斜体/行内代码/链接、`展开说明` 加粗、带列对齐的表格与列表；`after-html-bottom.png` 显示行内代码中的 `<div align="center">`/`<span>x</span>` 原样保留、围栏 HTML 代码块（含注释）原样保留、注释与 `<script>` 不出现在正文、末尾「尾部文本。」正常。这些截图为审查修复前的同一行为实现；审查修复只增加深度上限与实体解码窗口，不改变正常 fixture 行为。
-  - 证据保存注意：窗口截图需先 `MoveWindow` 定位再抓取；直接 `SetForegroundWindow` 后抓屏可能拍到桌面壁纸，不能作为行为证据。
+  - 修复后：`after-html.png`（已另存为 `evidence-after-top.png`）显示图片占位「项目徽标 — picture not loaded」、加粗/斜体/行内代码/链接、`展开说明` 加粗、带列对齐的表格与列表；`after-html-bottom.png` 显示行内代码中的 `<div align="center">`/`<span>x</span>` 原样保留、围栏 HTML 代码块（含注释）原样保留、注释与 `<script>` 不出现在正文、末尾「尾部文本。」正常。这些截图为审查修复前的同一行为实现；审查修复只增加深度/单元格预算与实体解码窗口，不改变正常 fixture 行为。
+  - 证据保存注意：本机后续会话中同一 `MoveWindow`+`CopyFromScreen` 脚本反复拍到桌面壁纸，不能确认最终提交的视觉差异，已如实记录；正常 fixture 在审查修复前后的解析与复制回归一致。
   - 未覆盖：图片真正加载依赖尚未合入的 reader-images 任务，本任务只保证 `<img>` 进入既有 `Block::Image` 管线；真实 IME/多 DPI/跨屏仍未由本任务验收。
 
 ## 后续
