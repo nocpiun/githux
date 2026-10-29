@@ -6,7 +6,7 @@ use ely_core::{
 use gpui::{
     AnyElement, App, Axis, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
-    Window, div, prelude::*, px,
+    Window, div, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -255,6 +255,13 @@ impl ProfileView {
         let body = match &self.readme {
             SectionState::Loading => loading("Loading profile README…", cx),
             SectionState::Error(error) => state_panel(error, cx),
+            SectionState::Unavailable(message) => div()
+                .debug_selector(|| "profile-readme-unavailable".to_string())
+                .p_3()
+                .text_size(cx.theme().text_size(TextSize::Sm))
+                .text_color(cx.theme().colors.fg_subtle)
+                .child(message.clone())
+                .into_any_element(),
             SectionState::Ready(()) => div()
                 .debug_selector(|| "profile-readme-reader".to_string())
                 .w_full()
@@ -299,6 +306,11 @@ impl ProfileView {
             let body = match &self.repositories {
                 SectionState::Loading => loading("Loading repository pins…", cx),
                 SectionState::Error(error) => state_panel(error, cx),
+                SectionState::Unavailable(message) => div()
+                    .p_3()
+                    .text_color(cx.theme().colors.fg_subtle)
+                    .child(message.clone())
+                    .into_any_element(),
                 SectionState::Ready(_) => unreachable!(),
             };
             return div()
@@ -556,6 +568,11 @@ impl ProfileView {
             let body = match &self.contributions {
                 SectionState::Loading => loading("Loading contributions…", cx),
                 SectionState::Error(error) => state_panel(error, cx),
+                SectionState::Unavailable(message) => div()
+                    .p_3()
+                    .text_color(cx.theme().colors.fg_subtle)
+                    .child(message.clone())
+                    .into_any_element(),
                 SectionState::Ready(_) => unreachable!(),
             };
             return div()

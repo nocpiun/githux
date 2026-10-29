@@ -491,6 +491,11 @@ impl Accounts {
         }));
     }
 
+    #[cfg(test)]
+    pub(crate) fn drain_for_test(&mut self, cx: &mut Context<Self>) {
+        self.drain(cx);
+    }
+
     fn drain(&mut self, cx: &mut Context<Self>) {
         let messages: Vec<Message> = {
             let mut inbox = self.inbox.lock().expect("account inbox");

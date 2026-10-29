@@ -23,6 +23,10 @@
 //! database, reads a credential or fetches a PAT itself; every read goes through
 //! `AccountService::repo_service()`.
 //!
+//! The page is mounted by the product Shell and is also exercised by its standalone preview/test
+//! assembly. Its public lifecycle/accessor surface is intentionally wider than the one Shell path
+//! (for embedders and the suite); the allowance is scoped to this module rather than the crate.
+//!
 //! ## Publication
 //!
 //! Every background result is checked before it can change anything: the page
@@ -30,6 +34,8 @@
 //! resource identity the result belongs to. A stale success and a stale error
 //! are discarded the same way, so switching branch, account (A→B→A), replacing
 //! the PAT or hiding the page can never paste an old result over a new one.
+
+#![allow(dead_code)]
 
 mod extras;
 mod navigation;
@@ -48,7 +54,7 @@ use std::time::Duration;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
-    div, prelude::*, px,
+    div, prelude::*,
 };
 use tokio::sync::watch;
 
@@ -479,6 +485,14 @@ impl RepositoryPage {
             self.error = Some(PageError::deactivated());
         }
         cx.notify();
+    }
+
+    /// Suspend only background UI interactions for an ordinary workspace-tab switch. Valid,
+    /// already verified content stays available; unlike `deactivate`, this is not an authorization
+    /// invalidation and does not force a network re-read on reactivation.
+    pub fn suspend(&mut self, cx: &mut Context<Self>) {
+        self.cancel_scroll(cx);
+        self.cancel_reader_interactions(cx);
     }
 
     /// Replaces the injected capabilities and re-reads the saved navigation
@@ -2058,6 +2072,7 @@ fn _entry_kind_is_file(kind: &TreeEntryKind) -> bool {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use test_support::*;
 
 #[cfg(test)]
@@ -2073,6 +2088,10 @@ mod test_support {
         /// The authorization context of the current session, for rebind checks.
         pub(crate) fn context(&self) -> Option<&RepositoryReadContext> {
             self.context.as_ref()
+        }
+
+        pub fn context_for_test(&self) -> Option<RepositoryReadContext> {
+            self.context.clone()
         }
 
         /// Sends one plain navigation key to the page's tree handler, exactly as

@@ -64,6 +64,9 @@ impl RepositoryOverview {
         if binding != &self.binding {
             return false;
         }
+        if self.avatar_images.contains_key(&user_id) {
+            return true;
+        }
         self.avatar_images.insert(user_id, image);
         cx.notify();
         true

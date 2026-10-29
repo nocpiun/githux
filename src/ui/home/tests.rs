@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    Entity, Modifiers, MouseButton, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext,
-    VisualTestContext, point, px, size,
+    Entity, Modifiers, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, VisualTestContext,
+    point, px, size,
 };
 
 use super::presentation::{feed_summary, home_summary};

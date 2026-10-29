@@ -74,6 +74,10 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - 每栏是独立 Tab stop。列表根聚焦时 Up/Down/Home/End 移动选择，Enter/Space 激活所选 Home 条目或 Feed 事件；各内容链接也是独立键盘入口，键盘激活不抢回列表焦点。
 - 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。每个链接阻止冒泡，不发生卡片/列表二次激活。
 
+## 正式 Shell 接入（2026-10-29）
+
+本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经新增 `set_avatar_renderer` 只传入已解码元素。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
+
 ## host / data 待接职责
 
 - 用正式 data 服务读取账户作用域结果，并在请求前固定稳定账户上下文；返回后再核对上下文、页面 binding 与 generation，再调用本视图的 `apply_*`。

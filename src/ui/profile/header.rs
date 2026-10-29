@@ -5,7 +5,7 @@ use ely_core::{
     theme::{ActiveTheme, IconSize, TextSize},
 };
 use gpui::{
-    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px,
+    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*,
 };
 
 impl ProfileView {
@@ -95,21 +95,16 @@ impl ProfileView {
             .flex()
             .items_start()
             .gap_5()
-            .child(
-                div()
-                    .debug_selector(|| "profile-avatar-initials".into())
-                    .flex_none()
-                    .size(px(84.0))
-                    .rounded_full()
-                    .bg(theme.colors.accent.opacity(0.18))
-                    .text_color(theme.colors.fg)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(theme.text_size(TextSize::Xl))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(super::render::initials(basic)),
-            )
+            .child(crate::ui::avatar::avatar(
+                crate::ui::avatar::AvatarView {
+                    id: "profile-header-avatar",
+                    selector: "profile-avatar-initials",
+                    image: self.avatar.clone(),
+                    name: &display,
+                    slot: crate::ui::avatar::AvatarSlot::Rems(gpui::rems(84.0 / 16.0)),
+                },
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()

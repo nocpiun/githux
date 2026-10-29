@@ -231,6 +231,7 @@ pub(super) fn feed_row(
     index: usize,
     selected: bool,
     now: SystemTime,
+    real_avatar: Option<AnyElement>,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -258,7 +259,11 @@ pub(super) fn feed_row(
         .id(("feed-avatar", index))
         .debug_selector(move || format!("feed-avatar-{index}"))
         .flex_none()
-        .child(Avatar::new(("feed-avatar-face", index), actor).size(AvatarSize::Lg))
+        .child(real_avatar.unwrap_or_else(|| {
+            Avatar::new(("feed-avatar-face", index), actor)
+                .size(AvatarSize::Lg)
+                .into_any_element()
+        }))
         .when(!profile.login.trim().is_empty(), |avatar| {
             avatar
                 .role(gpui::Role::Link)

@@ -3,6 +3,8 @@
 // are reused without Shell, routes, network or application services.
 #![allow(dead_code, unused_imports)]
 
+#[path = "../ui/avatar.rs"]
+pub mod avatar;
 #[path = "../ui/geometry.rs"]
 pub mod geometry;
 #[path = "../ui/home/mod.rs"]

@@ -38,3 +38,8 @@ mod platform;
 mod ui;
 #[path = "../src/workspace/mod.rs"]
 mod workspace;
+
+// The production Shell mounts `ui::repository`, whose own suite shares the development fixture.
+// Product binaries never declare this module.
+#[path = "../src/bin_support/test_repository_modules.rs"]
+mod repository_modules;

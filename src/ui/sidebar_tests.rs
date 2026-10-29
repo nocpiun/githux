@@ -674,12 +674,14 @@ fn touch_pan_applies_directly_without_a_second_inertia(cx: &mut TestAppContext) 
 #[gpui::test]
 fn wheel_over_the_palette_scrolls_the_palette_not_the_page(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
-    // A short window makes the Home page scrollable behind the palette.
+    // Home owns its own two scrolling viewports; the Shell must not wrap it in another page
+    // scroller. A short window still has to leave the palette's own list scrollable.
     cx.simulate_resize(size(px(900.0), px(500.0)));
     cx.run_until_parked();
-    assert!(
-        f32::from(view.read_with(cx, |s, _| s.page_max_offset().y)) > 0.0,
-        "the Home page must be scrollable for this regression"
+    assert_eq!(
+        view.read_with(cx, |s, _| s.page_max_offset()),
+        gpui::Point::default(),
+        "the mounted Home page must not use the Shell's outer page scroller"
     );
     click("search-entry", cx);
     let list = bounds("palette-list", cx);

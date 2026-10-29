@@ -3,6 +3,8 @@
 // included; `examples/profile.rs` and `tests/profile.rs` share this real tree.
 #![allow(dead_code, unused_imports)]
 
+#[path = "../ui/avatar.rs"]
+pub mod avatar;
 #[path = "../ui/geometry.rs"]
 pub mod geometry;
 #[path = "../ui/profile/mod.rs"]

@@ -256,6 +256,15 @@ impl AccountService {
             .expect("registry lock")
             .active_context()
     }
+
+    /// Current authoritative display identity. Used only to classify own-profile navigation;
+    /// authorization still comes from a separately captured read session.
+    pub fn active_summary(&self) -> Option<AccountSummary> {
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .active_summary()
+    }
 }
 
 impl RepoService {

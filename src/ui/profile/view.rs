@@ -29,6 +29,7 @@ pub struct ProfileView {
     pub(super) repositories: SectionState<ProfilePinned>,
     pub(super) contributions: SectionState<ContributionCalendar>,
     pub(super) readme: SectionState<()>,
+    pub(super) avatar: Option<gpui::ImageSource>,
     pub(super) reader: Option<Entity<ReaderView>>,
     reader_generation: u64,
     pub(super) repository_focus: FocusHandle,
@@ -80,6 +81,7 @@ impl ProfileView {
             repositories: SectionState::Loading,
             contributions: SectionState::Loading,
             readme: SectionState::Loading,
+            avatar: None,
             reader: None,
             reader_generation: 0,
             repository_focus: cx.focus_handle().tab_stop(true),
@@ -123,6 +125,7 @@ impl ProfileView {
         self.repositories = SectionState::Loading;
         self.contributions = SectionState::Loading;
         self.readme = SectionState::Loading;
+        self.avatar = None;
         self.cancel_reader(cx);
         self.reader = None;
         self.selected_repository = 0;
@@ -172,6 +175,43 @@ impl ProfileView {
 
     pub fn readme_state(&self) -> &SectionState<()> {
         &self.readme
+    }
+
+    /// Publish a confirmed non-error absence (no eligible public root README).
+    pub fn set_readme_unavailable(
+        &mut self,
+        request: &ProfileRequest,
+        message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(request) {
+            return false;
+        }
+        self.cancel_reader(cx);
+        self.reader = None;
+        self.readme = SectionState::Unavailable(message.into());
+        cx.notify();
+        true
+    }
+
+    /// Replace only the decoded header image; no loader or URL enters this component.
+    pub fn set_avatar(
+        &mut self,
+        request: &ProfileRequest,
+        image: Option<gpui::ImageSource>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(request) {
+            return false;
+        }
+        // The host may sample the shared avatar cache on each repaint. A Ready image is terminal
+        // for this binding, so re-applying it must not schedule another frame forever.
+        if self.avatar.is_some() && image.is_some() {
+            return true;
+        }
+        self.avatar = image;
+        cx.notify();
+        true
     }
 
     pub fn reader(&self) -> Option<&Entity<ReaderView>> {
@@ -266,6 +306,13 @@ impl ProfileView {
                 window,
                 cx,
             ),
+            SectionState::Unavailable(message) => self.update_readme_with_context(
+                request,
+                SectionState::Unavailable(message),
+                ResourceContext::new("", "", "", "README.md"),
+                window,
+                cx,
+            ),
         }
     }
 
@@ -293,6 +340,7 @@ impl ProfileView {
         self.readme = match state {
             SectionState::Loading => SectionState::Loading,
             SectionState::Error(error) => SectionState::Error(error),
+            SectionState::Unavailable(message) => SectionState::Unavailable(message),
             SectionState::Ready(body) => {
                 let reader_request = self.request();
                 let this = cx.entity().downgrade();
@@ -325,6 +373,15 @@ impl ProfileView {
         if let Some(reader) = &self.reader {
             reader.update(cx, |reader, cx| reader.cancel_interactions(cx));
         }
+    }
+
+    /// Stop background UI work while this page remains mounted but inactive. Valid content and
+    /// navigation stay intact; the host separately clears them when authorization changes.
+    pub fn suspend(&mut self, cx: &mut Context<Self>) {
+        scroll::cancel_region(&mut self.page_bars, &self.page_motion);
+        scroll::cancel_region(&mut self.heatmap_bars, &self.heatmap_motion);
+        self.cancel_reader(cx);
+        cx.notify();
     }
 
     pub fn on_action(&mut self, handler: OnProfileAction) {

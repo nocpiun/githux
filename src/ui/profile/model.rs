@@ -51,6 +51,9 @@ pub enum SectionState<T> {
     #[default]
     Loading,
     Error(PresentationError),
+    /// A confirmed non-error absence, used by the Profile README section. This is not a failed
+    /// read and must not be rendered as an authentication/network problem.
+    Unavailable(String),
     Ready(T),
 }
 
