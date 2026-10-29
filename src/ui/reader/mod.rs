@@ -285,6 +285,9 @@ pub struct ReaderView {
     images: std::rc::Rc<std::cell::RefCell<images::ImageBoard>>,
     image_provider: Option<std::sync::Arc<dyn ImageProvider>>,
     image_pump: Option<Task<()>>,
+    /// Whether the pump loop is alive. The loop clears this when it settles
+    /// instead of dropping its own `Task`, which would cancel it mid-poll.
+    pump_running: bool,
     /// Incremented for every document generation; a completion for any other
     /// generation is discarded. Paired with a per-reader id so two readers
     /// sharing one provider never cancel or accept each other's work.
@@ -324,6 +327,7 @@ impl ReaderView {
             ))),
             image_provider: None,
             image_pump: None,
+            pump_running: false,
             image_generation: 0,
             image_limits,
             _activation: cx.observe_window_activation(window, |view, window, cx| {
@@ -400,24 +404,39 @@ impl ReaderView {
         provider: Option<std::sync::Arc<dyn ImageProvider>>,
         cx: &mut Context<Self>,
     ) {
+        // Replacing one provider with another keeps the board attached, so an
+        // attachment flip would leave the old `Loading` states and the old
+        // scope in place: the new provider would never be asked and a queued
+        // completion from the old one could still match. Advancing the document
+        // generation makes the replacement a real new picture generation.
+        let replacing_attached = self.image_provider.is_some() && provider.is_some();
         if let Some(previous) = self.image_provider.take() {
             previous.cancel(self.image_scope());
         }
         self.image_provider = provider;
-        let attached = self.image_provider.is_some();
-        self.images.borrow_mut().set_attached(attached);
+        if replacing_attached {
+            self.image_generation = self.image_generation.wrapping_add(1);
+            let generation = self.image_generation;
+            let mut board = self.images.borrow_mut();
+            board.begin(generation);
+            board.set_attached(true);
+        } else {
+            let attached = self.image_provider.is_some();
+            self.images.borrow_mut().set_attached(attached);
+        }
         self.attach_images_to_document(cx);
         self.ensure_image_pump(cx);
         cx.notify();
     }
 
     /// Stops every in-flight picture load and turns unfinished ones back into
-    /// demand. Called when a retained reader's host invalidates its context.
+    /// demand. Called when a retained reader's host hides its window; finished
+    /// pictures stay drawn.
     fn suspend_images(&mut self, cx: &mut Context<Self>) {
         if let Some(provider) = self.image_provider.clone() {
             provider.cancel(self.image_scope());
         }
-        self.image_pump = None;
+        self.stop_image_pump();
         self.images.borrow_mut().suspend();
         cx.notify();
     }
@@ -430,7 +449,7 @@ impl ReaderView {
         }
         self.image_limits = limits.clone();
         let attached = self.image_provider.is_some();
-        self.image_pump = None;
+        self.stop_image_pump();
         self.images = std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(limits)));
         self.images.borrow_mut().set_attached(attached);
         self.image_generation += 1;
@@ -695,7 +714,7 @@ impl ReaderView {
         if let Some(provider) = self.image_provider.clone() {
             provider.cancel(self.image_scope());
         }
-        self.image_pump = None;
+        self.stop_image_pump();
         self.image_generation = self.image_generation.wrapping_add(1);
         let generation = self.image_generation;
         let attached = self.image_provider.is_some();
@@ -728,13 +747,14 @@ impl ReaderView {
     fn ensure_image_pump(&mut self, cx: &mut Context<Self>) {
         if self.image_provider.is_none() {
             self.images.borrow_mut().clear_pending();
-            self.image_pump = None;
+            self.stop_image_pump();
             return;
         }
         self.dispatch_images(cx);
-        if self.image_pump.is_some() || !self.images.borrow().work_outstanding() {
+        if self.pump_running || !self.images.borrow().work_outstanding() {
             return;
         }
+        self.pump_running = true;
         self.image_pump = Some(cx.spawn(async move |view: WeakEntity<Self>, cx| {
             loop {
                 cx.background_executor()
@@ -744,6 +764,9 @@ impl ReaderView {
                     .update(cx, |view, cx| view.pump_images(cx))
                     .unwrap_or(false);
                 if !more {
+                    // The handle points at this very task; clearing it here
+                    // would cancel the future mid-update, so the stop is
+                    // recorded and the field is released after the loop ends.
                     break;
                 }
             }
@@ -755,16 +778,25 @@ impl ReaderView {
     fn pump_images(&mut self, cx: &mut Context<Self>) -> bool {
         if self.image_provider.is_none() {
             self.images.borrow_mut().clear_pending();
-            self.image_pump = None;
+            self.pump_running = false;
             return false;
         }
         self.drain_images(cx);
         self.dispatch_images(cx);
         let more = self.images.borrow().work_outstanding();
         if !more {
-            self.image_pump = None;
+            // Only the flag: the running loop reads it and exits on its own, so
+            // dropping the `Task` can never cancel the future mid-poll.
+            self.pump_running = false;
         }
         more
+    }
+
+    /// Cancels the pump task and marks it stopped. Called when the document,
+    /// the provider or the window visibility changes.
+    fn stop_image_pump(&mut self) {
+        self.image_pump = None;
+        self.pump_running = false;
     }
 
     /// Applies finished loads. A completion from another generation, another
@@ -897,28 +929,26 @@ impl Render for ReaderView {
             ReaderState::Markdown(document) if self.markdown_layout.is_flow() => {
                 // Natural height: the document column measures every block and
                 // the host's scroll container scrolls it. No inner bar, no
-                // wheel capture and no clipping here. The height is recorded in
-                // prepaint and reported on the next frame, so a host can re-lay
-                // out its page after a picture lands or the text re-wraps.
-                let this = cx.entity().downgrade();
+                // wheel capture and no clipping here.
+                //
+                // Both callbacks are deferred: prepaint runs after this render,
+                // so the measured height and any demand the child blocks queued
+                // while building this frame are handled by the next dispatch
+                // instead of re-entering it.
+                let measured = cx.entity().downgrade();
                 div()
                     .debug_selector(|| "reader-flow".to_string())
                     .w_full()
                     .min_w_0()
                     .on_children_prepainted(move |painted, window, cx| {
-                        let Some(bounds) = painted.first().copied() else {
-                            return;
-                        };
-                        if bounds.size.height <= gpui::Pixels::ZERO {
-                            return;
-                        }
-                        // Prepaint already ran this frame, so the report is
-                        // deferred: the host's relayout happens after this
-                        // dispatch instead of re-entering it.
-                        let this = this.clone();
+                        let height = painted
+                            .first()
+                            .map(|bounds| bounds.size.height)
+                            .unwrap_or(gpui::Pixels::ZERO);
+                        let measured = measured.clone();
                         window.defer(cx, move |window, cx| {
-                            let _ = this.update(cx, |view, cx| {
-                                view.note_document_height(bounds.size.height, window, cx);
+                            let _ = measured.update(cx, |view, cx| {
+                                view.note_document_height(height, window, cx);
                             });
                         });
                     })
@@ -1019,13 +1049,41 @@ impl Render for ReaderView {
             // full-size wrapper can reorder hit testing against the rows.
             ReaderState::Source(view) => view.clone().into_any_element(),
         };
-        div()
+        // Blocks queue their picture demand while a frame is built, which is
+        // after the pump already settled for that render. This prepaint hook
+        // restarts the pump for whatever was queued, so the requests reach the
+        // provider without needing an unrelated redraw. It covers both the
+        // bounded viewport and the natural-height presentation.
+        let demand = cx.entity().downgrade();
+        let element = div()
             .debug_selector(|| "reader".to_string())
             .size_full()
             .min_h_0()
             .bg(theme.colors.surface)
             .text_color(theme.colors.fg)
+            .on_children_prepainted(move |_, window, cx| {
+                // Blocks queue their picture demand while `body` is built, which
+                // happens after the pump settled for the previous frame. Hand it
+                // to the provider and make sure a receiver is running, so the
+                // request reaches the provider without an unrelated redraw.
+                let demand = demand.clone();
+                window.defer(cx, move |_window, cx| {
+                    let _ = demand.update(cx, |view, cx| {
+                        if view.image_provider.is_some() {
+                            view.ensure_image_pump(cx);
+                        }
+                    });
+                });
+            })
             .child(body)
             .child(lifetime)
+            .into_any_element();
+        // Dispatch synchronously too: picture demand is complete by the time
+        // `body` was built above, so the request starts in this frame. Spawning
+        // a task is left to the deferred hook, because a draw must not spawn.
+        if self.image_provider.is_some() {
+            self.dispatch_images(cx);
+        }
+        element
     }
 }

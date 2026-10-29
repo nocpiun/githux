@@ -496,3 +496,69 @@ fn picture_blocks_measure_next_to_their_paragraphs(cx: &mut TestAppContext) {
         "the picture sits below the preceding paragraph: {paragraph:?} {picture:?}"
     );
 }
+
+/// Finding: a first frame with a provider queues demand after the pump already
+/// settled for that render. The pictures must still reach the provider without
+/// an unrelated redraw, so this test never calls `window.refresh()`.
+#[gpui::test]
+fn pictures_load_without_an_unrelated_redraw(cx: &mut TestAppContext) {
+    setup(cx);
+    let pipeline = Pipeline::new(Scene::Healthy);
+    let opened = pipeline.open(Scene::Healthy, Scene::limits(Scene::Healthy));
+    let (reader, cx) = cx.add_window_view(|window, cx| {
+        let (reader, _provider) = crate::fixture::open_reader(opened, window, cx);
+        reader
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(900.0), px(700.0)));
+    let relative = repository_key("docs/images/diagram.png");
+    // Only the executor's own pump beat is driven: no `refresh`, no resize and
+    // no input after the first frame.
+    for _ in 0..600 {
+        cx.background_executor
+            .advance_clock(Duration::from_millis(25));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+        if reader
+            .read_with(cx, |reader, _| reader.image_state(&relative))
+            .as_deref()
+            == Some("ready")
+        {
+            return;
+        }
+    }
+    panic!(
+        "pictures never loaded without an unrelated redraw: {:?}",
+        reader.read_with(cx, |reader, _| reader.image_states_debug())
+    );
+}
+
+/// Finding: replacing an attached provider must re-ask the new provider instead
+/// of leaving the old `Loading` states in place.
+#[gpui::test]
+fn replacing_an_attached_provider_asks_the_new_one(cx: &mut TestAppContext) {
+    let (pipeline, reader, cx) = open(cx, Scene::Healthy);
+    let relative = repository_key("docs/images/diagram.png");
+    settle(&reader, cx, |reader| {
+        reader.image_state(&relative).as_deref() == Some("ready")
+    });
+
+    // A provider for the same document replaces the first one.
+    let replacement = pipeline.open(Scene::Healthy, Scene::limits(Scene::Healthy));
+    reader.update_in(cx, |reader, _window, cx| {
+        reader.set_image_provider(
+            Some(replacement.provider.clone() as std::sync::Arc<dyn crate::reader::ImageProvider>),
+            cx,
+        );
+    });
+    // The new generation starts empty: the picture is either not known yet or
+    // already re-requested, and it is never still "ready" from the old provider.
+    let state = reader.read_with(cx, |reader, _| reader.image_state(&relative));
+    assert!(
+        state.is_none() || state.as_deref() == Some("loading"),
+        "a replaced provider starts a new picture generation, got {state:?}"
+    );
+    settle(&reader, cx, |reader| {
+        reader.image_state(&relative).as_deref() == Some("ready")
+    });
+}

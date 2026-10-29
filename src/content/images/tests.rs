@@ -236,26 +236,3 @@ fn the_sink_keeps_completions_until_drained() {
     );
     assert!(sink.drain().is_empty());
 }
-
-#[test]
-fn pending_requests_are_bounded_and_keep_order() {
-    let mut pending = PendingRequests::default();
-    for index in 0..5 {
-        pending.push(ImageRequest {
-            scope: scope(1),
-            key: ImageKey::new(format!("k{index}")),
-            target: ImageTarget::External {
-                url: format!("https://example.com/{index}.png"),
-            },
-        });
-    }
-    let taken = pending.take(2);
-    assert_eq!(
-        taken.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
-        ["k0", "k1"]
-    );
-    assert!(!pending.is_empty());
-    let rest = pending.take(10);
-    assert_eq!(rest.len(), 3);
-    assert!(pending.is_empty());
-}

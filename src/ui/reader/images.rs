@@ -85,8 +85,10 @@ pub(crate) struct ImageBoard {
     /// Requests handed to the provider that have not completed or been
     /// cancelled. Their completions arrive through the sink.
     in_flight: usize,
-    /// Top-level block index -> key, for a targeted remeasure on completion.
-    blocks: HashMap<usize, ImageKey>,
+    /// Picture key -> the top-level blocks that want it. A quote, list or
+    /// footnote can hold several distinct pictures, so a single key per block
+    /// would drop the others and leave their rows at the wrong height.
+    blocks: HashMap<ImageKey, Vec<usize>>,
     sink: ImageSink,
 }
 
@@ -134,27 +136,20 @@ impl ImageBoard {
     }
 
     /// Records whether a provider is attached. Changing the attachment drops
-    /// every non-ready picture so the next frame requests it again.
+    /// every non-ready picture so the next frame requests it again. Use
+    /// [`Self::forget_unfinished`] when the provider changed but stays attached.
     pub(super) fn set_attached(&mut self, attached: bool) {
         if self.attached == attached {
             return;
         }
         self.attached = attached;
-        self.pending.clear();
-        self.in_flight = 0;
-        self.blocks.clear();
-        self.states.retain(|_, state| state.is_ready());
-        self.ready_order.retain(|key| self.states.contains_key(key));
+        self.forget_unfinished();
     }
 
     /// Drops unfinished loads and requests while keeping finished pictures, so
     /// a hidden window stops networking without forgetting what is drawn.
     pub(super) fn suspend(&mut self) {
-        self.pending.clear();
-        self.in_flight = 0;
-        self.blocks.clear();
-        self.states.retain(|_, state| state.is_ready());
-        self.ready_order.retain(|key| self.states.contains_key(key));
+        self.forget_unfinished();
     }
 
     pub(super) fn attached(&self) -> bool {
@@ -165,7 +160,10 @@ impl ImageBoard {
     /// and queues the request the first time this source is wanted.
     pub(super) fn want(&mut self, block: usize, target: ImageTarget) -> ImageState {
         let key = target.key();
-        self.blocks.insert(block, key.clone());
+        let blocks = self.blocks.entry(key.clone()).or_default();
+        if !blocks.contains(&block) {
+            blocks.push(block);
+        }
         if let Some(state) = self.states.get(&key) {
             return state.clone();
         }
@@ -199,6 +197,16 @@ impl ImageBoard {
 
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Dropped by a provider replacement, a document change or suspension.
+    /// A block that still wants a picture asks again on the next frame.
+    pub(super) fn forget_unfinished(&mut self) {
+        self.pending.clear();
+        self.in_flight = 0;
+        self.blocks.clear();
+        self.states.retain(|_, state| state.is_ready());
+        self.ready_order.retain(|key| self.states.contains_key(key));
     }
 
     /// Whether anything is queued or outstanding. The pump stops when this is
@@ -236,11 +244,7 @@ impl ImageBoard {
             }
             Err(failure) => *state = ImageState::Failed(failure),
         }
-        self.blocks
-            .iter()
-            .filter(|(_, wanted)| **wanted == key)
-            .map(|(block, _)| *block)
-            .collect()
+        self.blocks.get(&key).cloned().unwrap_or_default()
     }
 
     /// Releases the oldest decoded pictures until the budget holds again.
@@ -272,6 +276,16 @@ impl ImageBoard {
     #[cfg(test)]
     pub(super) fn known_states(&self) -> usize {
         self.states.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn in_flight_debug(&self) -> usize {
+        self.in_flight
+    }
+
+    #[cfg(test)]
+    pub(super) fn blocks_for_test(&self) -> HashMap<ImageKey, Vec<usize>> {
+        self.blocks.clone()
     }
 
     #[cfg(test)]

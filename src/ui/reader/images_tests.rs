@@ -290,3 +290,62 @@ fn a_picture_of_every_state_draws_something() {
         assert!(!state.label().is_empty());
     }
 }
+
+/// Finding: a quote/list/footnote can hold several distinct pictures under one
+/// top-level block index. Each must still be found when it completes.
+#[test]
+fn every_picture_in_one_block_is_tracked() {
+    let mut board = board();
+    board.want(4, target("docs/first.png"));
+    board.want(4, target("docs/second.png"));
+    board.take_pending(10);
+
+    let mut first = ready_for(&board, 4, 4);
+    first.key = target("docs/first.png").key();
+    assert_eq!(
+        board.apply(first),
+        vec![4],
+        "the first picture still remeasures its owning block"
+    );
+
+    let mut second = ready_for(&board, 4, 4);
+    second.key = target("docs/second.png").key();
+    assert_eq!(
+        board.apply(second),
+        vec![4],
+        "the second picture under the same block is not lost"
+    );
+    // One block appears once per key, not once per `want` call in a frame.
+    board.want(4, target("docs/first.png"));
+    let keys = board.blocks_for_test();
+    assert_eq!(keys.get(&target("docs/first.png").key()), Some(&vec![4]));
+}
+
+/// Finding: replacing an attached provider must drop the old unfinished states
+/// and ask the new provider again.
+#[test]
+fn forgetting_unfinished_work_keeps_ready_pictures_and_redemands_the_rest() {
+    let mut board = board();
+    board.want(0, target("docs/ready.png"));
+    board.want(1, target("docs/pending.png"));
+    board.take_pending(10);
+    let mut completion = ready_for(&board, 4, 4);
+    completion.key = target("docs/ready.png").key();
+    board.apply(completion);
+    assert!(board.work_outstanding(), "one picture is still owed");
+
+    board.forget_unfinished();
+    assert!(!board.work_outstanding());
+    assert_eq!(
+        label(&board, &target("docs/ready.png").key()),
+        Some("ready"),
+        "a finished picture is kept"
+    );
+    assert!(
+        board.state(&target("docs/pending.png").key()).is_none(),
+        "an unfinished picture is forgotten rather than stuck loading"
+    );
+    // The next frame asks again, so a new provider receives the request.
+    assert_eq!(board.want(1, target("docs/pending.png")).label(), "loading");
+    assert!(board.has_pending());
+}

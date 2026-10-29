@@ -161,14 +161,6 @@ impl RepositoryImageService {
         }
     }
 
-    /// Overrides the JSON read limits used for commit/tree/blob requests.
-    pub fn with_repository_limits(mut self, limits: RepositoryLimits) -> Self {
-        Arc::get_mut(&mut self.inner)
-            .expect("service not yet shared")
-            .repository_limits = limits;
-        self
-    }
-
     /// The repository identity this service reads.
     pub fn repository(&self) -> &RepositoryIdentity {
         &self.inner.repository

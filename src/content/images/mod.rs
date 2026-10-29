@@ -27,7 +27,6 @@ mod decode;
 #[allow(unused_imports)]
 pub use decode::{DecodedImage, ImageFormat, decode_image, detect_format, is_svg_like};
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -289,35 +288,6 @@ pub trait ImageProvider: Send + Sync + 'static {
     /// generation). Safe to call repeatedly, and it must not affect any other
     /// scope, including the same generation number in another reader.
     fn cancel(&self, scope: ImageScope);
-}
-
-/// The per-document queue state kept by the reader while it decides what to
-/// hand to the provider.
-#[derive(Default)]
-pub(crate) struct PendingRequests {
-    queue: VecDeque<ImageRequest>,
-}
-
-impl PendingRequests {
-    pub(crate) fn push(&mut self, request: ImageRequest) {
-        self.queue.push_back(request);
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// Takes up to `max` requests, preserving order.
-    pub(crate) fn take(&mut self, max: usize) -> Vec<ImageRequest> {
-        let mut taken = Vec::with_capacity(max.min(self.queue.len()));
-        while taken.len() < max {
-            match self.queue.pop_front() {
-                Some(request) => taken.push(request),
-                None => break,
-            }
-        }
-        taken
-    }
 }
 
 #[cfg(test)]
