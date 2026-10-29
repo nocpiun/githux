@@ -1,0 +1,24 @@
+SQLite is in the Public Domain.
+<https://www.sqlite.org/copyright.html>
+
+`rusqlite 0.37.0` is built with the `bundled` feature, which compiles the SQLite
+amalgamation (`libsqlite3-sys 0.35.0/sqlite3/sqlite3.c`) into the Githux binary.
+The amalgamation carries this notice instead of a copyright line (from
+`sqlite3.h`):
+
+    /*
+    ** 2001-09-15
+    **
+    ** The author disclaims copyright to this source code.  In place of
+    ** a legal notice, here is a blessing:
+    **
+    **    May you do good and not evil.
+    **    May you find forgiveness for yourself and forgive others.
+    **    May you share freely, never taking more than you give.
+    **
+    *************************************************************************
+    */
+
+The `libsqlite3-sys` wrapper itself is MIT (see the `rusqlite` / `libsqlite3-sys`
+`LICENSE` files in the crate sources). SQLite is public domain; this file is
+informational and does not relicense SQLite.
