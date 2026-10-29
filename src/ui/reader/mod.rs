@@ -25,6 +25,7 @@
 #![allow(dead_code)]
 
 pub mod fixtures;
+mod images;
 #[cfg(test)]
 mod layout_tests;
 mod links;
@@ -35,13 +36,19 @@ mod source;
 #[cfg(test)]
 mod tests;
 
+// The picture contract a host implements or drives. Re-exported so an
+// integration layer depends on the reader module alone.
+#[allow(unused_imports)]
+pub use crate::content::images::{
+    DecodedImage, ImageCompletion, ImageFailure, ImageFormat, ImageKey, ImageLimits, ImageProvider,
+    ImageRefusal, ImageRequest, ImageScope, ImageSink, ImageTarget,
+};
 pub use links::LinkTarget;
 pub use source::SourceView;
 
 use std::{cell::Cell, rc::Rc, time::Instant};
 
 use crate::ui::scroll;
-
 /// One owner clock for fade and wheel presentation. Tests pin the same time used by real events.
 #[derive(Clone)]
 pub(super) struct ScrollClock {
@@ -210,6 +217,11 @@ pub enum ReaderAction {
 /// The reader's action sink.
 pub type OnAction = Rc<dyn Fn(ReaderAction, &mut Window, &mut App)>;
 
+/// Called after the document's natural height may have changed (a picture landed,
+/// the text re-wrapped, the document was replaced). A Flow host re-lays out its
+/// own scroll container from here; a bounded host ignores it.
+pub type OnLayoutChanged = Rc<dyn Fn(&mut Window, &mut App)>;
+
 enum ReaderState {
     Empty,
     Unsupported(UnsupportedContent),
@@ -218,15 +230,35 @@ enum ReaderState {
     Source(Entity<SourceView>),
 }
 
-/// Host-specific Markdown spacing; source and status presentations are unaffected.
+/// How a Markdown document is sized vertically.
+///
+/// The layout is a host decision and never changes the document model:
+/// selection, copying, code, tables, picture state and the top/bottom content
+/// inset are identical in every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MarkdownLayout {
-    /// Existing hosts keep the original fixed outer spacing.
+    /// Existing hosts keep the original fixed outer spacing inside a bounded,
+    /// self-scrolling viewport.
     #[default]
     Default,
     /// Full-height repository viewport, scrolling top/bottom content inset,
     /// and four additional logical pixels of horizontal spacing per side.
+    /// Still a bounded viewport with its own scrollbar.
     Repository,
+    /// Natural height: the document lays out every block in one column and
+    /// reports its full height to the parent layout, so the host's own scroll
+    /// container scrolls it. The reader draws no inner scrollbar, captures no
+    /// wheel input and does not clip the document. Use this when the reader is
+    /// one section of a larger scrolling page (a profile README, an article).
+    Flow,
+}
+
+impl MarkdownLayout {
+    /// Whether the reader reports the document's natural height instead of
+    /// scrolling inside a bounded viewport.
+    pub fn is_flow(self) -> bool {
+        matches!(self, Self::Flow)
+    }
 }
 
 /// The reader view.
@@ -237,6 +269,9 @@ pub struct ReaderView {
     state: ReaderState,
     last_action: Option<ReaderAction>,
     on_action: Option<OnAction>,
+    on_layout_changed: Option<OnLayoutChanged>,
+    /// The last reported natural height, so a repeat report is not forwarded.
+    reported_height: Option<gpui::Pixels>,
     _document_observer: Option<Subscription>,
     pending_markdown: Option<Task<()>>,
     /// The Markdown bar's fade and drag, on the same shared [`crate::ui::scroll::Bars`]
@@ -245,6 +280,16 @@ pub struct ReaderView {
     scroll_clock: ScrollClock,
     _activation: Subscription,
     _visibility: Subscription,
+    /// Pictures of the current document generation. Reading a document without
+    /// a provider keeps one honest, clearly-labelled placeholder per picture.
+    images: std::rc::Rc<std::cell::RefCell<images::ImageBoard>>,
+    image_provider: Option<std::sync::Arc<dyn ImageProvider>>,
+    image_pump: Option<Task<()>>,
+    /// Incremented for every document generation; a completion for any other
+    /// generation is discarded. Paired with a per-reader id so two readers
+    /// sharing one provider never cancel or accept each other's work.
+    image_generation: u64,
+    image_limits: ImageLimits,
 }
 
 impl ReaderView {
@@ -260,17 +305,27 @@ impl ReaderView {
             build_state(body, &kind, &context, cx.entity().downgrade(), window, cx);
         cx.on_release(|view, cx| view.cancel_scroll_app(cx))
             .detach();
-        Self {
+        let image_limits = ImageLimits::default();
+        let mut view = Self {
             context,
             kind,
             markdown_layout: MarkdownLayout::Default,
             state,
             last_action: None,
             on_action: None,
+            on_layout_changed: None,
+            reported_height: None,
             _document_observer: observer,
             pending_markdown: pending,
             bars: crate::ui::scroll::Bars::new(),
             scroll_clock: ScrollClock::new(),
+            images: std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(
+                image_limits.clone(),
+            ))),
+            image_provider: None,
+            image_pump: None,
+            image_generation: 0,
+            image_limits,
             _activation: cx.observe_window_activation(window, |view, window, cx| {
                 if !window.is_window_active() {
                     view.cancel_scroll(cx);
@@ -279,9 +334,12 @@ impl ReaderView {
             _visibility: cx.observe_window_visibility(window, |view, visibility, _, cx| {
                 if !visibility.is_visible() {
                     view.cancel_scroll(cx);
+                    view.suspend_images(cx);
                 }
             }),
-        }
+        };
+        view.advance_images(cx);
+        view
     }
 
     /// A view of already-prepared content; the context comes from its identity.
@@ -324,12 +382,119 @@ impl ReaderView {
         self.pending_markdown = pending;
         self.last_action = None;
         self.bars = crate::ui::scroll::Bars::new();
+        // A new document is a new picture generation: every old picture and
+        // every old failure is dropped, and in-flight loads are cancelled.
+        self.advance_images(cx);
         cx.notify();
+    }
+
+    /// Attaches the host's picture service. Reading without one keeps an honest
+    /// "no image service attached" placeholder per picture; nothing pretends to
+    /// have loaded.
+    ///
+    /// The reader never holds a PAT: the provider owns authorization and
+    /// decoding, and the reader only decides when, for which generation and for
+    /// which resolved source a picture is wanted.
+    pub fn set_image_provider(
+        &mut self,
+        provider: Option<std::sync::Arc<dyn ImageProvider>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = self.image_provider.take() {
+            previous.cancel(self.image_scope());
+        }
+        self.image_provider = provider;
+        let attached = self.image_provider.is_some();
+        self.images.borrow_mut().set_attached(attached);
+        self.attach_images_to_document(cx);
+        self.ensure_image_pump(cx);
+        cx.notify();
+    }
+
+    /// Stops every in-flight picture load and turns unfinished ones back into
+    /// demand. Called when a retained reader's host invalidates its context.
+    fn suspend_images(&mut self, cx: &mut Context<Self>) {
+        if let Some(provider) = self.image_provider.clone() {
+            provider.cancel(self.image_scope());
+        }
+        self.image_pump = None;
+        self.images.borrow_mut().suspend();
+        cx.notify();
+    }
+
+    /// Replaces the picture budgets. Limits set after pictures were requested
+    /// re-create the board, so the next frame resolves and requests again.
+    pub fn set_image_limits(&mut self, limits: ImageLimits, cx: &mut Context<Self>) {
+        if self.image_limits == limits {
+            return;
+        }
+        self.image_limits = limits.clone();
+        let attached = self.image_provider.is_some();
+        self.image_pump = None;
+        self.images = std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(limits)));
+        self.images.borrow_mut().set_attached(attached);
+        self.image_generation += 1;
+        let generation = self.image_generation;
+        self.images.borrow_mut().begin(generation);
+        self.attach_images_to_document(cx);
+        self.ensure_image_pump(cx);
+        cx.notify();
+    }
+
+    /// The picture budgets this reader applies.
+    pub fn image_limits(&self) -> &ImageLimits {
+        &self.image_limits
+    }
+
+    /// This reader's current document generation scope. A host that wants to
+    /// cancel the reader's picture work explicitly cancels exactly this scope.
+    pub fn image_scope(&self) -> ImageScope {
+        self.images.borrow().scope()
+    }
+
+    /// The state of one picture source, for tests and previews. `None` when the
+    /// source was never requested in the current generation.
+    #[cfg(test)]
+    pub fn image_state(&self, key: &ImageKey) -> Option<String> {
+        self.images
+            .borrow()
+            .state(key)
+            .map(|state| state.label().to_string())
+    }
+
+    /// How many picture sources the current generation knows about.
+    #[cfg(test)]
+    pub fn known_image_states(&self) -> usize {
+        self.images.borrow().known_states()
+    }
+
+    /// `(key, label)` for every picture the current generation knows, for test
+    /// failure messages. Keys are the resolved source identities, so a failure
+    /// shows which picture is stuck and in what state.
+    #[cfg(test)]
+    pub fn image_states_debug(&self) -> Vec<(String, &'static str)> {
+        self.images.borrow().debug_states()
+    }
+
+    /// Whether the picture pump still has queued or outstanding work.
+    #[cfg(test)]
+    pub fn has_pending_images(&self) -> bool {
+        self.images.borrow().work_outstanding()
+    }
+
+    /// Runs one picture beat immediately. The reader already beats on its own
+    /// light timer; hosts and tests call this to advance deterministically
+    /// instead of waiting for the timer.
+    #[cfg(test)]
+    pub fn beat_images(&mut self, cx: &mut Context<Self>) {
+        self.pump_images(cx);
     }
 
     /// Changes Markdown layout without replacing the document, selection or reader entity.
     /// Repeated application of the same value is a no-op. Other hosts default to
-    /// their previous spacing; the repository host sets this once at construction.
+    /// their previous spacing; the repository host sets this once at construction,
+    /// and a page that wants the README to expand into its own scroll container
+    /// sets [`MarkdownLayout::Flow`].
     pub fn set_markdown_layout(&mut self, layout: MarkdownLayout, cx: &mut Context<Self>) {
         if self.markdown_layout == layout {
             return;
@@ -339,6 +504,11 @@ impl ReaderView {
             document.update(cx, |document, cx| document.set_layout(layout, cx));
         }
         cx.notify();
+    }
+
+    /// Whether the document currently expands to its natural height.
+    pub fn is_flow(&self) -> bool {
+        self.markdown_layout.is_flow()
     }
 
     /// Ends scrolling/selection gestures before a retained reader's host invalidates its account
@@ -387,6 +557,31 @@ impl ReaderView {
     /// Takes actions instead of leaving them to the caller.
     pub fn on_action(&mut self, handler: OnAction) {
         self.on_action = Some(handler);
+    }
+
+    /// Observes natural-height changes. A Flow host uses this to re-lay out its
+    /// own scroll container after a picture lands or the text re-wraps; a
+    /// bounded host does not need it.
+    pub fn on_layout_changed(&mut self, handler: OnLayoutChanged) {
+        self.on_layout_changed = Some(handler);
+    }
+
+    /// Records the document height measured by the frame that just laid out.
+    /// A changed height is forwarded once to the host through `defer`, so the
+    /// host re-lays out its own scroll container outside this dispatch.
+    fn note_document_height(
+        &mut self,
+        height: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if height <= gpui::Pixels::ZERO || self.reported_height == Some(height) {
+            return;
+        }
+        self.reported_height = Some(height);
+        if let Some(handler) = self.on_layout_changed.clone() {
+            window.defer(cx, move |window, cx| handler(window, cx));
+        }
     }
 
     /// Resolves and records one link press. The renderer calls this through the
@@ -494,6 +689,125 @@ fn human_size(bytes: u64) -> String {
 }
 
 impl ReaderView {
+    /// Starts a new picture generation: old pictures, old failures, queued
+    /// requests and in-flight loads all belong to the previous document.
+    fn advance_images(&mut self, cx: &mut Context<Self>) {
+        if let Some(provider) = self.image_provider.clone() {
+            provider.cancel(self.image_scope());
+        }
+        self.image_pump = None;
+        self.image_generation = self.image_generation.wrapping_add(1);
+        let generation = self.image_generation;
+        let attached = self.image_provider.is_some();
+        {
+            let mut board = self.images.borrow_mut();
+            board.begin(generation);
+            board.set_attached(attached);
+        }
+        self.attach_images_to_document(cx);
+        self.ensure_image_pump(cx);
+    }
+
+    /// Hands the board and the fixed resource context to the Markdown document.
+    fn attach_images_to_document(&self, cx: &mut Context<Self>) {
+        if let Some(document) = self.markdown().cloned() {
+            let board = self.images.clone();
+            let context = self.context.clone();
+            document.update(cx, |document, _| document.set_images(board, context));
+        }
+    }
+
+    /// Drains completions of the current generation and starts a receiver while
+    /// a provider is attached. Only this reader's own generation is applied.
+    /// Starts the picture pump when work is outstanding.
+    ///
+    /// The pump is a light beat on the GPUI executor, not a cross-thread wake
+    /// and not a per-frame loop: it self-terminates as soon as nothing is queued
+    /// or owed, and the next frame that meets an unrequested picture starts it
+    /// again. No I/O or decoding happens here.
+    fn ensure_image_pump(&mut self, cx: &mut Context<Self>) {
+        if self.image_provider.is_none() {
+            self.images.borrow_mut().clear_pending();
+            self.image_pump = None;
+            return;
+        }
+        self.dispatch_images(cx);
+        if self.image_pump.is_some() || !self.images.borrow().work_outstanding() {
+            return;
+        }
+        self.image_pump = Some(cx.spawn(async move |view: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(20))
+                    .await;
+                let more = view
+                    .update(cx, |view, cx| view.pump_images(cx))
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// One pump beat: apply what finished, hand out what is queued, and report
+    /// whether anything is still outstanding.
+    fn pump_images(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.image_provider.is_none() {
+            self.images.borrow_mut().clear_pending();
+            self.image_pump = None;
+            return false;
+        }
+        self.drain_images(cx);
+        self.dispatch_images(cx);
+        let more = self.images.borrow().work_outstanding();
+        if !more {
+            self.image_pump = None;
+        }
+        more
+    }
+
+    /// Applies finished loads. A completion from another generation, another
+    /// reader or a replaced document is dropped without touching state.
+    fn drain_images(&mut self, cx: &mut Context<Self>) {
+        let completions = self.images.borrow().sink().drain();
+        if completions.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for completion in completions {
+            let blocks = self.images.borrow_mut().apply(completion);
+            if blocks.is_empty() {
+                continue;
+            }
+            changed = true;
+            if let Some(document) = self.markdown().cloned() {
+                for block in blocks {
+                    document.update(cx, |document, cx| document.remeasure_block(block, cx));
+                }
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Hands queued requests to the provider, bounded by the in-flight budget.
+    fn dispatch_images(&mut self, _cx: &mut Context<Self>) {
+        let Some(provider) = self.image_provider.clone() else {
+            return;
+        };
+        let (requests, sink) = {
+            let mut board = self.images.borrow_mut();
+            let max = board.limits().max_in_flight.max(1);
+            (board.take_pending(max), board.sink())
+        };
+        for request in requests {
+            provider.start(request, sink.clone());
+        }
+        self.images.borrow_mut().evict();
+    }
+
     fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
         self.cancel_scroll_app(cx);
         cx.notify();
@@ -542,6 +856,12 @@ impl ReaderView {
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lifetime = scroll_lifetime(cx, Self::cancel_scroll);
+        // A frame that first meets a picture queues it on the board; this only
+        // restarts the pump a hidden window or a replaced provider stopped. No
+        // fetch or decode happens here.
+        if self.image_provider.is_some() && self.image_pump.is_none() {
+            self.ensure_image_pump(cx);
+        }
         let theme = cx.theme();
         let body = match &self.state {
             ReaderState::Empty => status_panel(
@@ -574,6 +894,37 @@ impl Render for ReaderView {
                 )),
                 cx,
             ),
+            ReaderState::Markdown(document) if self.markdown_layout.is_flow() => {
+                // Natural height: the document column measures every block and
+                // the host's scroll container scrolls it. No inner bar, no
+                // wheel capture and no clipping here. The height is recorded in
+                // prepaint and reported on the next frame, so a host can re-lay
+                // out its page after a picture lands or the text re-wraps.
+                let this = cx.entity().downgrade();
+                div()
+                    .debug_selector(|| "reader-flow".to_string())
+                    .w_full()
+                    .min_w_0()
+                    .on_children_prepainted(move |painted, window, cx| {
+                        let Some(bounds) = painted.first().copied() else {
+                            return;
+                        };
+                        if bounds.size.height <= gpui::Pixels::ZERO {
+                            return;
+                        }
+                        // Prepaint already ran this frame, so the report is
+                        // deferred: the host's relayout happens after this
+                        // dispatch instead of re-entering it.
+                        let this = this.clone();
+                        window.defer(cx, move |window, cx| {
+                            let _ = this.update(cx, |view, cx| {
+                                view.note_document_height(bounds.size.height, window, cx);
+                            });
+                        });
+                    })
+                    .child(document.clone())
+                    .into_any_element()
+            }
             ReaderState::Markdown(document) => {
                 let document = document.clone();
                 let state = document.read(cx).motion().clone();

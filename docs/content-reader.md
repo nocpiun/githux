@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-28（公共 Motion 接线）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读网络、不读凭据、不落盘、不下载图片。
+更新：2026-10-29（可选 README 图片能力）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读凭据、不落盘。图片能力是可注入的（`set_image_provider`），**由宿主提供的 provider 执行读取与解码**，reader 自身不在 render 中发网络或解码；不传 provider 时所有图片保持诚实的 alt/占位状态，见 [README 图片](reader-images.md)。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -39,7 +39,7 @@ view.update(cx, |view, _| {
 | `//host/path` | `Refused { reason: ProtocolRelative }` | 无仓库语义 |
 | 空地址、空路径、`%XX` 非法、含反斜杠或控制字符 | `Refused { reason }` | 含反斜杠的路径在 Windows 语义下不可判定 |
 
-`..` 向仓库根攀升并在根处停止（与浏览器一致）；查询串按静态文件地址丢弃；`%XX` 严格解码，坏转义整体拒绝。**没有** `AssetService`、网络图片下载或磁盘缓存。仓库 reader 在图片 loader 创建前拒绝所有文件系统与 data 来源（含 `file:`、绝对路径、UNC、带本地 base 的相对路径）；网络图片显示「未从网络载入」，相对资源只显示提示。图片不会绕过链接的危险 scheme 边界发起本地/SMB 读取。
+`..` 向仓库根攀升并在根处停止（与浏览器一致）；查询串按静态文件地址丢弃；`%XX` 严格解码，坏转义整体拒绝。图片地址复用同一边界转成 `ImageTarget`：相对/根路径固定到当前 commit，`https:` 进独立无凭据通路，`http:` 与 `file:`/`data:`/其他 scheme、UNC/反斜杠、空地址一律拒绝；图片不会绕过链接的危险 scheme 边界发起本地/SMB 读取。完整图片契约见 [README 图片](reader-images.md)。
 
 `raw HTML` 由 Ely 的 GFM 标签过滤器处理：`script`/`style`/`iframe` 等按文本显示而不执行，`<a href>`/`<img src>` 转为文本与普通链接，因此也不存在走 HTML 执行脚本的路径。
 
@@ -83,7 +83,7 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
 - fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
 - 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding、边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
-- 图片不加载，HTML 惰性显示，链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，2 MiB 边界保持在内容层。
+- 图片按注入的 provider 显示（未注入时保留 alt/未载入占位），HTML 惰性显示，链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。
 - Source gutter 仍为原 0.75rem 加 6px。
 
 ## 滚动条（共享核心）
@@ -102,9 +102,9 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 
 - **真实 Windows 窗口**：鼠标拖选、`Ctrl+C`、Shift+滚轮横向滚动、中文 IME 组合态在源码视图中的行为、emoji 与中文字形回退、多 DPI。测试平台不经过 Windows 原生输入分发，不能替代。
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
-- **图片**：仓库模式不允许本地文件/data 图片，图片/HTML 在交给上游文档前被移除；没有网络下载、资产缓存或受控版本化 resolver。
+- **表格单元格内图片**：仍只显示 alt 文本（AST 在 cell 中没有块列表可挂图片）；行内图片被提取为段落后的图片块，不是文字行内原位置。SVG 等未支持格式明确 Unsupported。细节与支持边界见 [README 图片](reader-images.md#支持边界明确未覆盖)。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 表格布局、脚注样式、绝对 URL 重写）。无法支持的语法按 Ely 的现有行为显示或按文本显示，不在本模块另造。
-- **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有。本轮的预览与 fixture 只用于验收，不冒充真实数据。
+- **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有；README 图片能力也只在独立预览中验收，正式 Shell 的 provider 接线契约见 [README 图片](reader-images.md#后续正式接线契约)。本轮的预览与 fixture 只用于验收，不冒充真实数据。
 
 
 ## Repository 专用正文留白配置（2026-10-28）
@@ -116,3 +116,21 @@ Repository模式下Markdown根无固定上下padding，真实ListState视口从�
 **为何不用list.py_3**：锁定GPUI的native wheel及set_offset会考虑list padding，但公开`max_offset_for_scrollbar()`忽略它；共享Motion/Bar据较小reach clamp会截掉底部inset。这一中间实现已被实际反馈否定，现改为首尾真实块测量，wheel/thumb/程序跳转共同看到包含inset的item总高度。`scroll_to_end()`临时使用item_count末尾锚点；repository模式在其反向惰性测量前不按旧reach clamp，待真实list布局后继续Motion tick。未改共享scroll或依赖缓存。
 
 回归验证全高viewport、AST块数不变、重复layout不丢选区、上下空白点击清选、段落/列表/代码/表格末块各由wheel和同一thumb target到底，正文bounds下方仍有inset，以及source实体/gutter不变。原生长README的段落/列表/表格wheel末尾截图已实际查看；最终code在实际HWND投递native wheel及mouse drag消息后取帧，代码容器下方到语言条之间有明确留白；这是Windows消息驱动验证，实体设备thumb手感仍受前台/Access denied限制，未冒充负责人原生验收。
+
+## 自然高度布局（Flow，2026-10-29）
+
+`MarkdownLayout::Flow` 是同一 reader 的第三种纵向尺寸归属，用于「reader 是一个更大滚动页面里的一节」的场景（典型是 Profile README）：
+
+| 布局 | 纵向尺寸 | 谁滚动 | 内部滚动条/滚轮 |
+| --- | --- | --- | --- |
+| `Default` | 有界视口 | reader 自身 | 自身（Markdown 纵条） |
+| `Repository` | 全高有界视口 + 内容 inset | reader 自身 | 自身（共享 `Motion`/`Bar`） |
+| `Flow` | 文档真实高度 | **宿主页面** | 无：不绘制、不捕获、不裁剪 |
+
+`ReaderView::set_markdown_layout(MarkdownLayout::Flow, cx)` 设置后可经 `ReaderView::is_flow()` 查询；重复设置同值是 no-op，换正文的 `show` 保留该配置。`MarkdownLayout::is_flow()` 是同一判定的纯函数。
+
+Flow 不复制第二套 Markdown 渲染：`MarkdownView::render_flow` 用与虚拟列表**相同的** `item()` 逐块构建一个纵向列，因此正文排版、行内代码、围栏代码、表格字号、图片状态、`DocText` 单元与选区坐标完全一致。差别只有尺寸：Flow 不使用 `ListState` 视口，块数不受视口/overdraw 影响，首/末块仍带与 Repository 相同量级的真实内容 padding（文末不会贴边）。
+
+高度回报：Flow 在 prepaint 里记录真实文档高度，并在**下一帧之前**通过 `ReaderView::on_layout_changed`（`Rc<dyn Fn(&mut Window, &mut App)>`）通知宿主；同一高度不重复通知，稳定文档不会让宿主持续重排。图片落地（`remeasure_block` 在 Flow 下退化为一次重绘）、窗口 resize 折行、换文档都会改变高度并触发一次通知。宿主用它在自己的滚动容器里重新布局；reader 不持有宿主的滚动偏移。
+
+边界：Flow 下 `scroll_to_end`、`list_state()`、仓库 tail 测量与 inset 特例都不适用（外层滚动由宿主负责），`ReaderView::cancel_interactions`、`show`、图片代次、`set_image_provider` 语义不变。selection 的按下/拖动/清空、`Ctrl+A`/`Ctrl+C` 仍走文档模型，不依赖可见块。`flow_layout_reports_natural_height_and_has_no_inner_scroll_region`、`flow_layout_keeps_selection_and_copy_working`、`flow_layout_reports_height_changes_to_its_host` 覆盖自然高度、选择复制与高度通知；`examples/reader_images.rs` 的「Natural height (page scroll)」场景提供原生预览（README 完整展开，只有外层页面滚动）。宿主接入说明见本地交接 `reader-flow-contract.md`。
