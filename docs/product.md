@@ -110,7 +110,7 @@ account-shell 在正式 Shell 中加入的 **Settings › Accounts** 只承担�
 
 配色、控件及状态画风沿用 Ely 原型；概念图不引入新主题。使用统一 token，信息密度靠组织和行高，不能一直缩小字体。
 
-UI 默认 **Noto Sans**，代码默认 **Google Sans Code**。建议随包固定字体发行版及许可证；中文/其他语言、Emoji 回退和静态/可变字重仍需实测，不把默认字体选择误认为已解决所有字符覆盖。不要手工按字符猜字宽，测量、选区和绘制应使用一致的布局结果。
+UI 默认 **Noto Sans**，代码默认 **Google Sans Code**。Noto Sans 以 Regular/Medium/SemiBold 三份静态字面入包，因为 GPUI 按请求字重选面；仅设 family 不等于 500/600 会命中 Noto。tooltip 由 GPUI 作为独立根绘制，壳层 tip 需自带 UI family。2026-10-29 已在 Windows 原生窗口核实 400/500/600 的真实字面与 tip 继承，见[开发日志](devlog/2026-10-29-ui-fonts.md)；中文/其他语言、Emoji 回退、CJK 字重和其余 DPI/跨平台仍需实测，不把默认字体选择误认为已解决所有字符覆盖。不要手工按字符猜字宽，测量、选区和绘制应使用一致的布局结果。
 
 首版真实窗口需要验证：Windows 多 DPI 和跨屏、缩放、文本混排、中文 IME 预编辑与候选确认、焦点和键盘操作、选取复制、长列表滚动、窗口状态变化、island 裁切和浮层。macOS/Linux 原生验收延后；截图不能证明帧率、内存或输入行为。
 

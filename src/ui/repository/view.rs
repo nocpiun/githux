@@ -9,6 +9,7 @@
 //! Nothing here performs I/O: the view only reads the page's already-checked
 //! state and asks it for the next step.
 
+use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
 use std::rc::Rc;
 
 use ely_core::{
@@ -430,7 +431,7 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     };
     div()
         .id("repository-branch-container")
-        .tooltip(Tooltip::text(
+        .tooltip(ui_tooltip(
             page.selected_branch().unwrap_or("Branch").to_string(),
         ))
         .debug_selector(|| "repository-branch".to_string())
@@ -951,7 +952,7 @@ fn tree_row(
     div()
         .id(SharedString::from(format!("repository-row-{path}")))
         .debug_selector(move || format!("repository-row-{debug_path}"))
-        .tooltip(Tooltip::text(tooltip_path))
+        .tooltip(ui_tooltip(tooltip_path))
         .flex()
         .items_center()
         .gap_1p5()

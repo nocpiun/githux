@@ -15,6 +15,7 @@ mod rows;
 mod tests;
 mod time;
 
+use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1015,7 +1016,7 @@ fn render_panel<T: PanelRows + 'static>(
             .debug_selector(move || format!("{}-refresh-spinner", column_name(column)))
             .role(gpui::Role::ProgressIndicator)
             .aria_label(tooltip.clone())
-            .tooltip(Tooltip::text(tooltip))
+            .tooltip(ui_tooltip(tooltip))
             .flex()
             .items_center()
             .justify_center()
@@ -1023,17 +1024,25 @@ fn render_panel<T: PanelRows + 'static>(
             .child(Spinner::new(format!("{}-spinner", column_name(column))).size(icon_size))
             .into_any_element()
     } else {
-        IconButton::new(
-            format!("{}-refresh", column_name(column)),
-            IconName::RotateCw,
-        )
-        .size(ControlSize::Sm)
-        .disabled(disabled)
-        .tooltip(tooltip)
-        .on_click(move |_, window, cx| {
-            let _ = panel.update(cx, |view, cx| view.refresh(column, window, cx));
-        })
-        .into_any_element()
+        // The wrapper is exactly the button's slot; the tip itself must set the UI family because
+        // GPUI prepaints it as a separate root (Ely's own `IconButton` tip would use the default
+        // system face).
+        div()
+            .id(format!("{}-refresh-slot", column_name(column)))
+            .flex_none()
+            .tooltip(ui_tooltip(tooltip.clone()))
+            .child(
+                IconButton::new(
+                    format!("{}-refresh", column_name(column)),
+                    IconName::RotateCw,
+                )
+                .size(ControlSize::Sm)
+                .disabled(disabled)
+                .on_click(move |_, window, cx| {
+                    let _ = panel.update(cx, |view, cx| view.refresh(column, window, cx));
+                }),
+            )
+            .into_any_element()
     };
     div()
         .debug_selector(move || format!("{}-panel", column_name(column)))

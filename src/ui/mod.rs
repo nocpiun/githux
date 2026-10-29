@@ -49,6 +49,7 @@ pub(crate) mod scroll;
 mod sidebar;
 mod sidebar_state;
 mod tabs;
+pub(crate) mod tooltip;
 
 #[cfg(test)]
 mod sidebar_tests;

@@ -1,5 +1,6 @@
 //! Flat profile identity header. Public metadata is secondary to the person.
 use super::{ProfileActionKind, ProfileView, SectionState};
+use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
 use ely_core::{
     primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, IconSize, TextSize},
@@ -64,7 +65,7 @@ impl ProfileView {
                         .color(theme.colors.fg_muted),
                 )
                 .child(div().hover(|s| s.underline()).child(label))
-                .tooltip(Tooltip::text(url.clone()))
+                .tooltip(ui_tooltip(url.clone()))
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if view.accepts(&request) {
                         view.emit(

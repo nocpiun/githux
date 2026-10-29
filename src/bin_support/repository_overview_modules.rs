@@ -7,3 +7,5 @@ pub mod badge;
 pub mod compact_status;
 #[path = "../ui/repository_overview/mod.rs"]
 pub mod repository_overview;
+#[path = "../ui/tooltip.rs"]
+pub mod tooltip;

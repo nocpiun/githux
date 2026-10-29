@@ -402,10 +402,9 @@ impl RepositoryOverview {
                     .flex_none()
                     .bg(cx.theme().colors.chart[segment.color])
                     .aria_label(label.clone())
-                    .tooltip(Tooltip::rich(move |_, _| {
-                        div()
+                    .tooltip(Tooltip::rich(move |_, cx| {
+                        crate::ui::tooltip::ui_tooltip_content(label.clone(), cx)
                             .debug_selector(|| "repository-language-tooltip".into())
-                            .child(label.clone())
                             .into_any_element()
                     }))
             }))

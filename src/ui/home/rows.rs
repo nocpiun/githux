@@ -1,6 +1,7 @@
 //! Content targets and activity cards; all navigation stays typed.
 use super::{Column, HomeAction, HomeView, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
+use crate::ui::tooltip::{ui_tooltip, ui_tooltip_content};
 use ely_core::{
     data_display::Avatar,
     primitives::{FocusRing, Icon, IconName, Tooltip},
@@ -82,7 +83,7 @@ fn timestamp(value: Option<&str>, name: String, now: SystemTime, cx: &App) -> An
         .min_w_0()
         .text_size(cx.theme().text_size(TextSize::Xs))
         .text_color(cx.theme().colors.fg_subtle)
-        .tooltip(Tooltip::text(full))
+        .tooltip(ui_tooltip(full))
         .child(label)
         .into_any_element()
 }
@@ -115,7 +116,7 @@ fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>
                 view.activate(column, index, window, cx);
             });
         })
-        .tooltip(Tooltip::text(label.clone()))
+        .tooltip(ui_tooltip(label.clone()))
         .child(Ellipsis::new(label))
         .into_any_element()
 }

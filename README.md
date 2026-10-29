@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/windows-runtim
 - Rust edition 2024，工具链 1.98.1；单 Cargo package 与 binary，`Cargo.lock` 纳入版本控制。
 - `gpui-pre = 0.3.10`、`gpui-pre-platform = 0.3.10`，启用 `font-kit`；Linux 额外启用平台的 `x11` 与 `wayland` 窗口后端。
 - [Ely 上游](https://github.com/ELY-Open-Source/Ely-GPUI-Components) 固定 revision `30c66fe1d5d23db769a6c834b771d054d7f288cf`；当前外壳直接依赖 `ely-core 0.2.0`，使用 `ely_core::*`，不经过汇总所有组件的 facade，也不复制上游源码或应用本地补丁。关闭默认 `fonts`（保留上游必需的 IBM Plex Sans SVG 字体），启用 `runtime_shaders` 保持 macOS 构建方式。迁移范围、上游接口变化与保留的适配见 [迁移记录](docs/devlog/2026-10-27-ely-migration.md)。搜索浮层没有复用 Ely 的 `CommandPalette`（它在任何 Enter 上运行高亮行），改用自绘卡片并在按键绑定前拦截 Enter、检查查询框的 marked 区间；未来引入只读编辑器时仍先重现相关问题再决定补丁。
-- UI 默认 Noto Sans，代码默认 Google Sans Code。固定官方字体文件与许可证见 [字体来源](assets/fonts/README.md)，编译进 binary。中文回退、复杂排版和 IME 尚未验收。
+- UI 默认 Noto Sans（Regular/Medium/SemiBold 三份静态字面），代码默认 Google Sans Code。固定官方字体文件与许可证见 [字体来源](assets/fonts/README.md)，编译进 binary。中文回退、复杂排版、其余 DPI 和 IME 尚未验收；2026-10-29 的字体命中排查见[开发日志](docs/devlog/2026-10-29-ui-fonts.md)。
 - 网络与服务层：`reqwest = 0.13.5`（`default-features = false`，启用 `native-tls`、`http2`、`charset`、`system-proxy`）与 `tokio`（`rt`/`sync`/`time`/`macros`/`net`）；另有 `serde`/`serde_json`/`thiserror`。选型理由、取消与关闭模型见 [认证与网络](docs/auth-and-network.md#4-网络与执行模型)。
 
 ## 源码目录

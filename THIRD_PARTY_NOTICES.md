@@ -15,7 +15,7 @@ Baseline: `730d2292dcd5bb981928341259c971e42ff497b5`.
 
 | Font | License | Copyright | Full text |
 | --- | --- | --- | --- |
-| Noto Sans Regular (NotoSans-v2.015) | SIL OFL 1.1 | Copyright 2022 The Noto Project Authors | [assets/fonts/noto-sans/OFL.txt](assets/fonts/noto-sans/OFL.txt) |
+| Noto Sans Regular / Medium / SemiBold (NotoSans-v2.015) | SIL OFL 1.1 | Copyright 2022 The Noto Project Authors | [assets/fonts/noto-sans/OFL.txt](assets/fonts/noto-sans/OFL.txt) |
 | Google Sans Code (v7.001) | SIL OFL 1.1 | Copyright 2025 The Google Sans Code Project Authors | [assets/fonts/google-sans-code/OFL.txt](assets/fonts/google-sans-code/OFL.txt) |
 | IBM Plex Sans Regular (via `ely-core`) | SIL OFL 1.1 | Copyright © 2017 IBM Corp. with Reserved Font Name "Plex" | [assets/licenses/ibm-plex-sans-ofl.txt](assets/licenses/ibm-plex-sans-ofl.txt) |
 
