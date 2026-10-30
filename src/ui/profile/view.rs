@@ -8,7 +8,7 @@ use crate::{
     content::{PreparedBody, PreparedContent},
     domain::{ContributionCalendar, ContributionRange, ProfileBasic, ProfilePinned},
     ui::{
-        reader::{DocumentKind, ReaderAction, ReaderView, ResourceContext},
+        reader::{DocumentKind, MarkdownLayout, ReaderAction, ReaderView, ResourceContext},
         scroll::{self, Bars, Motion},
     },
 };
@@ -347,6 +347,15 @@ impl ProfileView {
                 let reader = cx.new(|cx| {
                     let mut reader =
                         ReaderView::new(body, DocumentKind::Markdown, context, window, cx);
+                    // The README is one section of the Profile page's own scrolling flow: the
+                    // reader must report its natural height instead of owning a bounded viewport.
+                    reader.set_markdown_layout(MarkdownLayout::Flow, cx);
+                    let layout_view = cx.entity().downgrade();
+                    reader.on_layout_changed(Rc::new(move |_, cx| {
+                        if let Some(view) = layout_view.upgrade() {
+                            view.update(cx, |_, cx| cx.notify());
+                        }
+                    }));
                     reader.on_action(Rc::new(move |action, window, cx| {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |view, cx| {

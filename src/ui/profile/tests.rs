@@ -398,6 +398,103 @@ fn partial_failures_do_not_blank_successful_sections(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn flow_readme_reports_its_whole_document_and_outer_scroll_reaches_later_sections(
+    cx: &mut TestAppContext,
+) {
+    let text = "# Profile README
+
+"
+        .to_string()
+        + &(0..18)
+            .map(|index| {
+                format!(
+                    "Paragraph {index}: 中文介绍、long English prose and a little more detail for wrapping.
+
+"
+                )
+            })
+            .collect::<String>()
+        + "## End marker
+
+The final sentence is still inside the document.
+";
+    let (view, cx) = open(cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.update_basic(&request, SectionState::Ready(basic("person")), cx));
+        assert!(view.update_repositories(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos: vec![repo(1, "one"), repo(2, "two")],
+                total_repos: 2,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            cx
+        ));
+        assert!(view.update_contributions(
+            &request,
+            &range(),
+            SectionState::Ready(calendar(vec![
+                day("2024-02-27", 0, "NONE"),
+                day("2024-02-28", 1, "FIRST_QUARTILE"),
+            ])),
+            cx
+        ));
+        assert!(view.update_readme(
+            &request,
+            SectionState::Ready(readme("person", &text)),
+            window,
+            cx
+        ));
+    });
+    cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
+    frames(cx);
+    frames(cx);
+
+    let reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
+    assert!(reader.read_with(cx, |reader, _| reader.is_flow()));
+    let wrapper = cx.debug_bounds("profile-readme-reader").unwrap();
+    let document = cx
+        .debug_bounds("reader-markdown")
+        .expect("Flow document is laid out");
+    assert!(
+        document.size.height > px(400.0),
+        "the README must expose real document height, got {document:?}"
+    );
+    assert!(
+        wrapper.size.height >= document.size.height - px(2.0),
+        "the Profile wrapper must not shrink the Flow document: {wrapper:?} vs {document:?}"
+    );
+    // The title, a middle paragraph and the end marker are all inside the document bounds.
+    let heading = cx.debug_bounds("markdown-heading-0").unwrap();
+    let middle = cx.debug_bounds("markdown-block-10").unwrap();
+    let end = cx.debug_bounds("markdown-heading-19").unwrap();
+    assert!(heading.top() >= document.top() && middle.top() > heading.bottom());
+    assert!(
+        end.bottom() <= document.bottom() + px(1.0),
+        "{end:?} vs {document:?}"
+    );
+    assert!(
+        end.top() > middle.bottom(),
+        "the last section lies below the middle of the document"
+    );
+    // Only the Profile page scrolls: moving it brings the later sections into view.
+    let page_before = view.read_with(cx, |view, _| view.page_scroll.offset().y);
+    view.update(cx, |view, _| {
+        let max = view.page_scroll.max_offset().y;
+        view.page_motion.set_offset(point(px(0.0), -max));
+    });
+    frames(cx);
+    assert!(view.read_with(cx, |view, _| view.page_scroll.offset().y) < page_before);
+    let repositories = cx.debug_bounds("profile-repositories-section").unwrap();
+    assert!(
+        repositories.top() < px(560.0),
+        "outer scrolling reaches Pinned repositories: {repositories:?}"
+    );
+    assert!(cx.debug_bounds("profile-contribution-day-0").is_some());
+}
+
+#[gpui::test]
 fn readme_uses_reader_and_actions_keep_the_current_target(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
@@ -691,6 +788,111 @@ fn page_wheel_reaches_sections_below_the_viewport(cx: &mut TestAppContext) {
     assert!(
         view.read_with(cx, |view, _| view.page_scroll.offset().y < before_wheel),
         "the Profile page still owns its own scroll target"
+    );
+}
+
+#[gpui::test]
+fn repository_descriptions_use_up_to_three_real_lines_and_grow_the_card(cx: &mut TestAppContext) {
+    // Four cards in one real grid: one-, two-, three- and more-than-three-line descriptions.
+    let (view, cx) = open(cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    let descriptions = [
+        "Short one-line description.",
+        "A two-line description that keeps wrapping once when the card is narrow enough for two lines.",
+        "A three-line description that wraps across three lines on a narrow card, still fitting exactly without any character guessing or truncation.",
+        "A deliberately long description that keeps going well past three full lines, forcing the third line to end with an ellipsis while the card still keeps only the height of three lines. This tail must never expand the card to its full text height.",
+    ];
+    view.update_in(cx, |view, window, cx| {
+        let mut repos = Vec::new();
+        for (index, description) in descriptions.iter().enumerate() {
+            let mut item = repo(index as u64 + 1, &format!("card-{index}"));
+            item.description = Some(description.to_string());
+            repos.push(item);
+        }
+        assert!(view.update_basic(&request, SectionState::Ready(basic("person")), cx));
+        assert!(view.update_repositories(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos,
+                total_repos: 4,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            cx
+        ));
+        assert!(view.update_contributions(
+            &request,
+            &range(),
+            SectionState::Ready(calendar(vec![])),
+            cx
+        ));
+        assert!(view.update_readme(
+            &request,
+            SectionState::Unavailable("No README".into()),
+            window,
+            cx
+        ));
+    });
+    cx.simulate_resize(gpui::size(px(680.0), px(900.0)));
+    frames(cx);
+    frames(cx);
+    let card = |index: usize, cx: &mut VisualTestContext| {
+        cx.debug_bounds(Box::leak(
+            format!("profile-repository-{index}").into_boxed_str(),
+        ))
+        .unwrap_or_else(|| panic!("card {index}"))
+    };
+    let description = |index: usize, cx: &mut VisualTestContext| {
+        cx.debug_bounds(Box::leak(
+            format!("profile-repository-description-{index}").into_boxed_str(),
+        ))
+        .unwrap_or_else(|| panic!("description {index}"))
+    };
+    let one = card(0, cx);
+    let two = card(1, cx);
+    let longer = card(3, cx);
+    let one_line = description(0, cx).size.height;
+    let two_lines = description(1, cx).size.height;
+    // 1 → 2 lines: both the text box and the whole card really grow.
+    assert!(
+        two_lines > one_line * 1.5,
+        "a two-line description occupies two real lines: {two_lines:?} vs {one_line:?}"
+    );
+    assert!(
+        two.size.height > one.size.height,
+        "a two-line card ({:?}) is taller than a one-line card ({:?})",
+        two.size,
+        one.size
+    );
+    // The >3-line description is clamped by real line layout to exactly three line boxes: it
+    // never grows to the full overflowing paragraph and never expands the card past three lines.
+    let clamped = description(3, cx).size.height;
+    assert!(
+        clamped <= one_line * 3.05,
+        "more than three lines render as three lines: {clamped:?} vs one line {one_line:?}"
+    );
+    let three_line_card_growth = (clamped - one_line) + px(1.0);
+    assert!(
+        longer.size.height <= one.size.height + three_line_card_growth + px(1.0),
+        "the card only grows by the three-line description: {:?} vs {:?}",
+        longer.size,
+        one.size
+    );
+    // The card is no longer pinned to a fixed 94px viewport: a taller description yields a
+    // taller card than a short one.
+    assert!(
+        longer.size.height > one.size.height,
+        "cards grow with their descriptions"
+    );
+    // A wider window wraps the same text into fewer lines, and the card shrinks with it.
+    let narrow_two = card(1, cx).size.height;
+    cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+    frames(cx);
+    frames(cx);
+    let wide_two = card(1, cx);
+    assert!(
+        wide_two.size.height <= narrow_two,
+        "a wide layout does not add wrapped lines: {:?} vs {narrow_two:?}",
+        wide_two.size
     );
 }
 

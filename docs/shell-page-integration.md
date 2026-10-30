@@ -88,7 +88,8 @@ Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`
 - Profile section loading 使用 spinner；section error 使用 warning+tooltip，具体原因保留可读文本。
 - Profile Pinned 卡片的描述和 language/star/fork 行按卡片内容起点对齐；文字层级与卡片布局不变。
 - 本人 Profile 打开时，侧栏账户行不再显示仓库/导航行的选中线；头像、current 身份与账户交互不变。
-- Profile README 已移除自身固定 280px 高度；在 Reader 的共享自然高度/Flow API 提供前，内容区仍不能完整参与页面流。本轮没有用固定大高度冒充完成，也没有修改 reader 源码。该项保持未完成，等待 reader owner。
+- Profile README 已移除自身固定 280px 高度；当时 Reader 的共享自然高度/Flow API 尚未合入，因此正文区塌缩，该项保持未完成而非假装完成。
+- 2026-10-30：`reader-images`（PR #45，main `9522eee`）合入 Flow 后，Profile 在构造 README 时设置 `MarkdownLayout::Flow` 并注册 `on_layout_changed`。正文按真实高度完整展开、只由 Profile 外层滚动，文末 inset 保留。Pinned 简介同时改为自然换行、最多三行，卡片随内容长高。
 
 ## 验证与限制
 

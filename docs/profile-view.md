@@ -22,7 +22,16 @@
 - Pinned/Popular 卡片的描述与 language/star/fork 行改为按卡片内容起点对齐，不再跟随标题文字的图标缩进；名称层级、两列/单列、键盘行为不变。
 - Profile section loading 使用 Ely spinner 加可读标签；section error 使用 warning 图标 + tooltip，原因文本保留。确认缺失/不确定的 README 仍使用中性 `Unavailable`。
 - 本人 Profile 打开时侧栏账户行不再显示导航选中线；头像、current 身份与账户点击不变。
-- README 自身的固定 280px 高度和 overflow 容器已移除。共享 Reader 的自然高度/Flow API 仍由 reader owner 提供；在该能力落地前 README 内容区不能完整参与 Profile 页面流，本项保持未完成，不用固定大高度或前端 strip 冒充。
+- README 自身的固定 280px 高度和 overflow 容器已移除；该条在当时的 reader Flow API 落地前保持未完成，不用固定大高度或前端 strip 冒充。
+
+## 2026-10-30 README 自然高度 Flow 与简介三行
+
+Reader 的自然高度 Flow 能力已随 `reader-images`（PR #45，main `9522eee`）合入。Profile 现在构造 README 的 `ReaderView` 时设置 `MarkdownLayout::Flow`，并注册 `on_layout_changed` 让页面在文档高度变化后重新布局：
+
+- 正文按真实块高完整展开，由 Profile 外层页面滚动；reader 不再持有有界视口、内部竖向滚动条或滚轮捕获，文末内容 inset 随文档测量保留。
+- 上一轮"移除固定 280px 后正文塌缩"的缺陷因此真正修复；当时的实现只是删掉了宿主高度，没有消费方 Flow API，属于已知未完成，不是已完成状态。
+
+Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_clamp(3)` 按真实排版换行并在第三行末省略，卡片高度上限取同一字号/行高的三个行盒，因此 1–3 行完整占高、卡片与 grid 行随内容增长，超过三行不再撑高卡片。名称截断、链接、Public badge、语言/Star/Fork 左对齐与边框不变。
 
 ## Host adapter / mounting 职责
 

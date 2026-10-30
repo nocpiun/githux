@@ -7,7 +7,7 @@ use ely_core::{
 use gpui::{
     AnyElement, App, Axis, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
-    Window, div, px,
+    Window, div, px, relative,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -437,7 +437,8 @@ impl ProfileView {
             .aria_label(format!("Open repository {name}"))
             .cursor_pointer()
             .min_w_0()
-            .h(px(94.0))
+            // No fixed card height: a 1–3 line description makes the card and its grid row grow,
+            // while the description itself is clamped by real line layout, never by char count.
             .p_3()
             .flex()
             .flex_col()
@@ -491,16 +492,29 @@ impl ProfileView {
                             .child(label)
                     })),
             )
-            .child(
+            .child({
+                // Real wrapping plus a three-line clamp: `line_clamp` truncates the glyphs with an
+                // ellipsis on the third line, and `max_h` is exactly three of the same measured
+                // line boxes, so a longer description cannot grow the card further. The height
+                // comes from the text metrics, never a character count.
+                let line = theme.text_size(TextSize::Sm);
+                let three_lines = line * 1.45 * 3.0;
                 div()
                     .id(("profile-repository-description", index))
                     .debug_selector(move || format!("profile-repository-description-{index}"))
                     .tooltip(ui_tooltip(description.clone()))
                     .min_w_0()
-                    .text_size(theme.text_size(TextSize::Sm))
+                    // The text wraps and clamps by real line layout; this maximum is the height of
+                    // three of those real lines, so 1–3 lines keep their natural height while a
+                    // longer description cannot grow the card past the third line.
+                    .max_h(three_lines)
+                    .overflow_hidden()
+                    .text_size(line)
+                    .line_height(relative(1.45))
                     .text_color(theme.colors.fg_muted)
-                    .child(Ellipsis::new(description)),
-            )
+                    .line_clamp(3)
+                    .child(description)
+            })
             .child(
                 // The footer starts at the card's content edge, directly under the repository
                 // icon column. It does not inherit the title text's 24px icon offset.
