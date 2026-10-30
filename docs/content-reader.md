@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-29（可选 README 图片能力）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读凭据、不落盘。图片能力是可注入的（`set_image_provider`），**由宿主提供的 provider 执行读取与解码**，reader 自身不在 render 中发网络或解码；不传 provider 时所有图片保持诚实的 alt/占位状态，见 [README 图片](reader-images.md)。
+更新：2026-10-30（可选 README 图片能力；Flow 背景由宿主负责）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读凭据、不落盘。图片能力是可注入的（`set_image_provider`），**由宿主提供的 provider 执行读取与解码**，reader 自身不在 render 中发网络或解码；不传 provider 时所有图片保持诚实的 alt/占位状态，见 [README 图片](reader-images.md)。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -132,5 +132,7 @@ Repository模式下Markdown根无固定上下padding，真实ListState视口从�
 Flow 不复制第二套 Markdown 渲染：`MarkdownView::render_flow` 用与虚拟列表**相同的** `item()` 逐块构建一个纵向列，因此正文排版、行内代码、围栏代码、表格字号、图片状态、`DocText` 单元与选区坐标完全一致。差别只有尺寸：Flow 不使用 `ListState` 视口，块数不受视口/overdraw 影响，首/末块仍带与 Repository 相同量级的真实内容 padding（文末不会贴边）。
 
 高度回报：Flow 在 prepaint 里记录真实文档高度，并在**下一帧之前**通过 `ReaderView::on_layout_changed`（`Rc<dyn Fn(&mut Window, &mut App)>`）通知宿主；同一高度不重复通知，稳定文档不会让宿主持续重排。图片落地（`remeasure_block` 在 Flow 下退化为一次重绘）、窗口 resize 折行、换文档都会改变高度并触发一次通知。宿主用它在自己的滚动容器里重新布局；reader 不持有宿主的滚动偏移。
+
+背景：Flow 下 `ReaderView` 根与 `MarkdownView` 根不绘制 `theme.colors.surface`，因为 reader 只是宿主页面的一节，页面背景归宿主；有界 `Default`/`Repository` 布局保持原 `surface`。代码围栏、inline code 与引用的语义色不受影响。Profile README 的实际表现见 [Profile 视图](profile-view.md#2026-10-30-readme-可选缺省与无灰底)。
 
 边界：Flow 下 `scroll_to_end`、`list_state()`、仓库 tail 测量与 inset 特例都不适用（外层滚动由宿主负责），`ReaderView::cancel_interactions`、`show`、图片代次、`set_image_provider` 语义不变。selection 的按下/拖动/清空、`Ctrl+A`/`Ctrl+C` 仍走文档模型，不依赖可见块。`flow_layout_reports_natural_height_and_has_no_inner_scroll_region`、`flow_layout_keeps_selection_and_copy_working`、`flow_layout_reports_height_changes_to_its_host` 覆盖自然高度、选择复制与高度通知；`examples/reader_images.rs` 的「Natural height (page scroll)」场景提供原生预览（README 完整展开，只有外层页面滚动）。宿主接入说明见本地交接 `reader-flow-contract.md`。
