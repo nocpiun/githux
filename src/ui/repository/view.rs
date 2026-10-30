@@ -1020,7 +1020,7 @@ fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         .child(
             div()
                 .id("repository-selected-path")
-                .tooltip(Tooltip::text(
+                .tooltip(ui_tooltip(
                     path.clone().unwrap_or_else(|| "No file selected".into()),
                 ))
                 .debug_selector(|| "repository-selected-path".to_string())

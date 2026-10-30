@@ -42,7 +42,8 @@ def signature(font, cp):
     name = font.getBestCmap()[cp]
     glyph = font["glyf"][name]
     coords, ends, flags = glyph.getCoordinates(font["glyf"])
-    return list(coords), list(ends), list(flags), font["hmtx"][name]
+    program = bytes(glyph.program.getBytecode()) if hasattr(glyph, "program") else b""
+    return list(coords), list(ends), list(flags), font["hmtx"][name], program
 
 
 def build(cache):
@@ -60,7 +61,7 @@ def build(cache):
     out_dir = ROOT / "assets/fonts/githux-ui"
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = {}
-    for weight, style in [(400, "Regular"), (500, "Medium"), (600, "SemiBold"), (700, "Bold")]: 
+    for weight, style in [(400, "Regular"), (500, "Medium"), (600, "SemiBold"), (700, "Bold")]:
         base = TTFont(io.BytesIO(zipfile.ZipFile(latin).read(
             f"NotoSans/hinted/ttf/NotoSans-{style}.ttf"
         )))
