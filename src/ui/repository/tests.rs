@@ -1817,6 +1817,45 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
         });
     assert!(first.origin.x > outer.origin.x && first.origin.y > outer.origin.y);
     assert!(first.right() < outer.right());
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
+    cx.simulate_mouse_move(outer.center(), None, Modifiers::none());
+    frames(cx);
+    let line = cx.debug_bounds("repository-tree-scrollbar-line").unwrap();
+    let hit = cx.debug_bounds("repository-tree-scrollbar-thumb").unwrap();
+    let content = cx.debug_bounds("repository-tree-scroll-viewport").unwrap();
+    assert_eq!(
+        outer.right() - line.right(),
+        px(2.5),
+        "measure against the pane, not the padded list"
+    );
+    assert_eq!(hit.right(), outer.right());
+    assert_eq!(hit.size.width, px(8.0));
+    assert_eq!(content.origin.x - outer.origin.x, px(7.0));
+    assert_eq!(outer.right() - content.right(), px(7.0));
+    assert_eq!(line.size.width, px(crate::ui::scroll::THICKNESS));
+    assert!(
+        line.left() >= first.right(),
+        "visible thumb stays in the row's right whitespace"
+    );
+    // Press outside the painted line, inside the pane-anchored hit strip. Moving
+    // the overlay must still drive the inset list's real handle.
+    let press = gpui::point(hit.right() - px(0.5), hit.center().y);
+    cx.simulate_mouse_down(press, gpui::MouseButton::Left, Modifiers::none());
+    for step in 1..=5 {
+        cx.simulate_mouse_move(
+            press + gpui::point(px(0.0), px(12.0 * step as f32)),
+            Some(gpui::MouseButton::Left),
+            Modifiers::none(),
+        );
+        frames(cx);
+    }
+    cx.simulate_mouse_up(
+        press + gpui::point(px(0.0), px(60.0)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    frames(cx);
+    assert!(page.read_with(cx, |p, _| p.tree_base_handle().offset().y) < px(-100.0));
     page.update_in(cx, |p, w, cx| w.focus(&p.tree_focus.clone(), cx));
     cx.simulate_keystrokes("end");
     frames(cx);
