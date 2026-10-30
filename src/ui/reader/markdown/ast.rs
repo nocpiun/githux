@@ -397,7 +397,10 @@ pub fn parse(markdown: &str) -> Document {
         // Inline HTML is handled by its builder, which owns the same spans
         // between `InlineHtml` events.
         if let Some(name) = dropped.clone() {
-            if let Event::Html(text) = &event {
+            // A closing tag can arrive as block HTML or, when the blank line
+            // already ended the block and the tag sits in a paragraph, as
+            // inline HTML. Both end the dropped span.
+            if let Event::Html(text) | Event::InlineHtml(text) = &event {
                 // Only the dropped span disappears: keep the readable prefix
                 // and suffix of the fragment that also carries its close.
                 // While suppressing, only markup after the real closing tag

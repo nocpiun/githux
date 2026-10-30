@@ -605,3 +605,24 @@ fn a_list_that_opens_the_dropped_span_still_closes_normally() {
         "the trailing paragraph lands in the root, not a stale list: {doc:?}"
     );
 }
+
+#[test]
+fn inline_closing_tags_end_block_suppression() {
+    let doc = parse("<template>\n\nhidden </template>\n\nafter");
+    let text = copied(&doc.blocks);
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}
+
+#[test]
+fn textarea_content_is_dropped_whole() {
+    for source in [
+        "<textarea>hidden</textarea>",
+        "<textarea>\n\nhidden\n\n</textarea>\n\nafter",
+        "<p>a</p><textarea>hidden</textarea><p>b</p>",
+    ] {
+        let doc = parse(source);
+        let text = copied(&doc.blocks);
+        assert!(!text.contains("hidden"), "{source:?} -> {doc:?}");
+    }
+}

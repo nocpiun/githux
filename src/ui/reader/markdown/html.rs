@@ -160,6 +160,7 @@ pub fn is_dropped(name: &str) -> bool {
             | "script"
             | "style"
             | "template"
+            | "textarea"
             | "title"
     )
 }
