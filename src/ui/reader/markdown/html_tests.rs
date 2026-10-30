@@ -809,6 +809,17 @@ fn nested_raw_text_does_not_close_inline_suppression() {
 }
 
 #[test]
+fn nested_raw_text_survives_inline_to_document_transfer() {
+    let doc = parse(
+        "before <template><script>\n\n</template>\n\n![hidden](secret.png)\n\n</script></template>\n\nafter",
+    );
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    let text = copied(&doc.blocks);
+    assert!(text.contains("before"), "{doc:?}");
+    assert!(text.contains("after"), "{doc:?}");
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

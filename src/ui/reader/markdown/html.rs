@@ -166,7 +166,6 @@ pub fn is_dropped(name: &str) -> bool {
 }
 
 /// Elements whose text content is raw: tags inside them are literal text.
-/// Elements whose text content is raw: tags inside them are literal text.
 ///
 /// `template` is not here: it can nest, so it is parsed as a normal element
 /// whose whole subtree is dropped by `is_dropped`.
@@ -783,11 +782,34 @@ pub fn outstanding_span(fragment: &str, name: &str) -> DroppedSpan {
 /// elements are still open, so an inner close in a later block cannot release
 /// the outer one. Contents of other raw-text elements such as `script` are
 /// skipped, so a `"</template>"` string inside a script is not a real close.
-pub fn dropped_span(fragment: &str, name: &str, mut depth: usize) -> DroppedSpan {
+pub fn dropped_span(fragment: &str, name: &str, depth: usize) -> DroppedSpan {
+    scan_dropped_span(fragment, name, depth, &mut None)
+}
+
+/// Scan a completed block while preserving an inner raw-text element left
+/// open by an earlier inline event or block.
+pub fn scan_dropped_span(
+    fragment: &str,
+    name: &str,
+    mut depth: usize,
+    raw: &mut Option<String>,
+) -> DroppedSpan {
     let bytes = fragment.as_bytes();
     let len = bytes.len();
     let mut head_end = len;
     let mut i = 0;
+    if let Some(open) = raw.clone() {
+        let (_, after, closed) = raw_content(fragment, 0, &open);
+        if !closed {
+            return DroppedSpan {
+                head_end,
+                tail_start: None,
+                depth,
+            };
+        }
+        *raw = None;
+        i = after;
+    }
     while i < len {
         if bytes[i] != b'<' {
             i += 1;
@@ -807,6 +829,9 @@ pub fn dropped_span(fragment: &str, name: &str, mut depth: usize) -> DroppedSpan
                     // Skip another raw-text element's body wholesale, so a
                     // closing-tag-like string inside it cannot end the span.
                     let (_, after, closed) = raw_content(fragment, next, &tag_name);
+                    if !closed && tag_name != name {
+                        *raw = Some(tag_name.clone());
+                    }
                     if tag_name == name {
                         head_end = head_end.min(i);
                         if closed {
