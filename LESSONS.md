@@ -93,3 +93,10 @@
 - **原因**：Profile README 上一轮删除了自身 280px 固定高度与 overflow 容器，但 ReaderView 根仍是 `size_full()`、MarkdownLayout 只有有界视口，父容器自然高度与内部虚拟列表不匹配，正文区域变成空壳。真实窗口只看到空白 README，而"移除固定高度"这一步本身通过了编译与既有测试。缺陷根因是宿主约束与消费方能力必须成对交付。
 - **证据**：2026-10-29 第二轮交付记录把该项标为未完成；2026-10-30 在 main 合入 Reader `MarkdownLayout::Flow` 与 `on_layout_changed`（PR #45，`9522eee`）后，Profile 设置 Flow 才真正显示正文，并由 `flow_readme_reports_its_whole_document_and_outer_scroll_reaches_later_sections` 断言文档真实高度、文末位置与仅外层滚动可达后续 section。见 [开发日志](docs/devlog/2026-10-30-shell-pages-profile-flow.md)。
 - **范围**：把虚拟化/自滚动组件（Markdown reader、列表、编辑器）嵌入更大滚动页面的接线；也适用于"先删父级限制"的重构。回归测试应断言内容真实尺寸与最末内容位置，而不只断言容器被移除。
+
+## L014：可选内容缺失不是错误卡片
+
+- **规则**："有就显示、没有就算了"的可选区块，其确认缺失/不可见应作为正常缺省：不渲染错误文案、不显示 Retry、不保留占位或空行间距，必要时整段省略。诊断语义（缺失 vs 不确定 vs 真实失败）留在内部状态，可见呈现只与影响相称：加载用动画，真实可操作失败才用一个小 warning 图标加 tooltip/无障碍名称，并且只在确实存在重试回调时提供重试。不要写服务实现解释给用户。
+- **原因**：负责人连续反馈 Profile README 把正常缺省渲染成故障：先是 "This section was not found or is not visible." 文本面板，再是 "Unavailable · Retry" 式大错误块。这类呈现既误导用户、占用可省略的空间，又把"缺失"和"网络/认证/限流失败"混成同一种可见状态，掩盖真正可操作的失败。根因不是文案，而是把可选缺省错误地当成必须显式呈现的错误。
+- **证据**：2026-10-30 `profile-readme-polish` 把 README 的 `SectionState::Unavailable` 改为整段省略（`src/ui/profile/render.rs` 的 `render_readme` 返回 `None`），真实 `SectionState::Error` 改用 `compact_status::failed` 单个 warning 图标；同名仓库 404 在 `src/app/pages/profile.rs` 归入缺省。回归 `confirmed_readme_absence_omits_the_whole_optional_section`、`actionable_readme_failure_keeps_a_compact_mark_not_absence`、`ready_to_absent_to_another_account_never_reuses_the_old_reader`。见 [开发日志](docs/devlog/2026-10-30-profile-readme-polish.md)。
+- **范围**：外部数据驱动的可选区块（个人 README、附加资料、可选摘要）。本条目不授权把真实失败静默成成功缺省，也不要求所有 section 都省略；判断依据是该内容对页面是否必需，以及失败是否可操作。

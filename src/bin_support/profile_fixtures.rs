@@ -18,6 +18,7 @@ pub enum Scenario {
     Sparse,
     Errors,
     Empty,
+    NoReadme,
 }
 
 pub const SCENARIOS: &[(Scenario, &str)] = &[
@@ -30,6 +31,7 @@ pub const SCENARIOS: &[(Scenario, &str)] = &[
     (Scenario::Sparse, "Missing fields"),
     (Scenario::Errors, "Errors"),
     (Scenario::Empty, "Real empty"),
+    (Scenario::NoReadme, "No README (absent)"),
 ];
 
 pub fn rolling_year() -> ContributionRange {
@@ -177,7 +179,7 @@ pub fn repositories(scenario: Scenario) -> SectionState<ProfilePinned> {
                 _ => unreachable!(),
             }
         }),
-        Scenario::Complete | Scenario::Sparse => {
+        Scenario::Complete | Scenario::Sparse | Scenario::NoReadme => {
             let repos = vec![
                 repo(1, "githux"),
                 repo(2, "notes"),
@@ -289,6 +291,12 @@ pub fn readme(scenario: Scenario) -> SectionState<PreparedBody> {
         Scenario::Errors => SectionState::Error(PresentationError::Offline),
         Scenario::Empty => SectionState::Ready(PreparedBody::Empty),
         Scenario::Sparse => SectionState::Loading,
+        // A confirmed optional absence: the whole README section must disappear, not show a
+        // "not found" card. The real Shell reaches this from Missing/NotEligible/a 404; the
+        // example exposes it as a selectable scenario so the omission is natively previewable.
+        Scenario::NoReadme => SectionState::Unavailable(
+            "No visible public same-name profile repository or root README.".into(),
+        ),
         _ => SectionState::Ready(PreparedBody::Utf8 {
             text: if matches!(scenario, Scenario::Partial) {
                 format!(

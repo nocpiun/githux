@@ -1407,7 +1407,6 @@ impl MarkdownView {
     /// so selection units, links, code, tables and pictures behave exactly as in
     /// the virtualized viewport. Only the sizing differs.
     fn render_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors.clone();
         let horizontal = window.rem_size() * 0.5;
         self.visible_units.borrow_mut().clear();
         let blocks = self.parsed.blocks.len();
@@ -1423,7 +1422,9 @@ impl MarkdownView {
             .relative()
             .w_full()
             .min_w_0()
-            .bg(colors.surface)
+            // Flow is a section of the host's page: the host owns the background, so the
+            // document paints none and the surrounding section shows through. Code fences,
+            // inline code and quotes keep their own semantic fills.
             .px(horizontal)
             .py_3()
             .child(column)

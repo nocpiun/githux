@@ -520,6 +520,123 @@ fn readme_uses_reader_and_actions_keep_the_current_target(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn confirmed_readme_absence_omits_the_whole_optional_section(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    cx.simulate_resize(gpui::size(px(880.0), px(700.0)));
+    frames(cx);
+    assert!(cx.debug_bounds("profile-readme-section").is_some());
+    let with_readme = cx
+        .debug_bounds("profile-repositories-section")
+        .unwrap()
+        .top();
+
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update(cx, |view, cx| {
+        assert!(view.set_readme_unavailable(&request, "No root README.", cx));
+    });
+    frames(cx);
+
+    assert!(
+        cx.debug_bounds("profile-readme-section").is_none(),
+        "the entire optional README section, including its border and header, is omitted"
+    );
+    assert!(cx.debug_bounds("profile-readme-reader").is_none());
+    assert!(cx.debug_bounds("profile-readme-unavailable").is_none());
+    assert!(cx.debug_bounds("profile-readme-error").is_none());
+    assert!(
+        cx.debug_bounds("profile-section-error").is_none(),
+        "a confirmed absence is not an error panel"
+    );
+    assert!(view.read_with(cx, |view, _| view.reader().is_none()));
+    // No leftover gap: the following section rises to the normal inter-section spacing.
+    let without_readme = cx
+        .debug_bounds("profile-repositories-section")
+        .unwrap()
+        .top();
+    assert!(
+        without_readme < with_readme,
+        "removing the section must not leave an empty gap: {without_readme:?} vs {with_readme:?}"
+    );
+    // Unrelated sections stay usable.
+    assert!(cx.debug_bounds("profile-repository-0").is_some());
+    assert!(cx.debug_bounds("profile-contribution-day-0").is_some());
+}
+
+#[gpui::test]
+fn actionable_readme_failure_keeps_a_compact_mark_not_absence(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.update_readme(
+            &request,
+            SectionState::Error(PresentationError::RateLimited),
+            window,
+            cx
+        ));
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("profile-readme-error").is_some(),
+        "a real failure keeps one compact warning mark"
+    );
+    assert!(cx.debug_bounds("profile-readme-unavailable").is_none());
+    assert!(
+        cx.debug_bounds("profile-section-error").is_none(),
+        "the README does not use the large shared error panel"
+    );
+    assert!(cx.debug_bounds("profile-readme-reader").is_none());
+    assert!(view.read_with(cx, |view, _| view.reader().is_none()));
+    // The internal state still distinguishes a failure from a confirmed absence.
+    assert!(view.read_with(cx, |view, _| matches!(
+        view.readme_state(),
+        SectionState::Error(PresentationError::RateLimited)
+    )));
+}
+
+#[gpui::test]
+fn ready_to_absent_to_another_account_never_reuses_the_old_reader(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let old_reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update(cx, |view, cx| {
+        assert!(view.set_readme_unavailable(&request, "absent", cx));
+    });
+    assert!(view.read_with(cx, |view, _| view.reader().is_none()));
+    // The detached reader cannot emit into the page any more.
+    old_reader.update_in(cx, |reader, window, cx| {
+        reader.handle_link("https://example.invalid/old", window, cx)
+    });
+    assert!(view.read_with(cx, |view, _| view.last_action().is_none()));
+
+    // A new account gets a new binding and only its own README is mounted.
+    view.update_in(cx, |view, window, cx| {
+        let request = view.bind(target(99), binding(8, 2), range(), cx);
+        assert!(view.update_readme(
+            &request,
+            SectionState::Ready(readme("other", "# Other account")),
+            window,
+            cx
+        ));
+    });
+    let owner = view.read_with(cx, |view, cx| {
+        view.reader()
+            .expect("the new README mounts a reader")
+            .read(cx)
+            .context()
+            .owner()
+            .to_string()
+    });
+    assert_eq!(
+        owner, "other",
+        "the page shows the new account's README only"
+    );
+}
+
+#[gpui::test]
 fn replaced_readme_cannot_emit_and_rebind_drops_focused_actions(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);

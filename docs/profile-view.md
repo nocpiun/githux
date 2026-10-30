@@ -1,13 +1,13 @@
 # Profile Overview 展示组件
 
-更新：2026-10-28。**负责人已确认当前其余视觉无问题，主 Agent 补齐 Overview tab 居中修正；PR 尚未合并。** 已实现可复用的只读 Profile Overview，位于 [`src/ui/profile/`](../src/ui/profile/)。独立开发预览为 `examples/profile.rs`，测试装配为 `tests/profile.rs` 与 `src/bin_support/profile_modules.rs`。**尚未接入 Shell、路由、workspace、账户服务或真实页面数据；预览中的合成数据不表示生产集成完成。**
+更新：2026-10-30。**负责人已确认当前其余视觉无问题，主 Agent 补齐 Overview tab 居中修正；PR 尚未合并。** 已实现可复用的只读 Profile Overview，位于 [`src/ui/profile/`](../src/ui/profile/)。独立开发预览为 `examples/profile.rs`，测试装配为 `tests/profile.rs` 与 `src/bin_support/profile_modules.rs`。**尚未接入 Shell、路由、workspace、账户服务或真实页面数据；预览中的合成数据不表示生产集成完成。**
 
 ## 已实现的展示范围
 
 顺序固定为：
 
 1. 公开基本资料：采用无外层卡片的横向头像/资料布局，name、login 上下排列，随后 bio 与自然换行的 location/实际 website 显示文本/followers/following/company。public repos/public gists/created_at 保留于传入模型，不在主视图堆叠。空字符串与缺失字段不显示；name 缺失时回退 login，头像只显示首字母/字素，**不请求 avatar_url，也不推断私有资料**。
-2. 个人 README：消费 host 准备的 `PreparedContent`，直接复用现有 `ReaderView` 的 Markdown、选择、链接与有界滚动行为。外层已改为一层细边框与实际 owner/path 文件身份。**自然内容流尚未实现：现有 Reader 只有固定 viewport，旧高度仍作为明确未完成的兼容接线；不作为新版验收标准。**
+2. 个人 README：消费 host 准备的 `PreparedContent`，直接复用现有 `ReaderView` 的 Markdown、选择、链接与自然高度 Flow 行为。外层是一层细边框与实际 owner/path 文件身份。正文不再自绘灰色底，随 Profile 页面背景；确认缺失/不确定/不适用时整段省略，真实失败保留紧凑 warning 图标。详见 [2026-10-30 README 可选缺省与无灰底](#2026-10-30-readme-可选缺省与无灰底)。
 3. Pinned/Popular repositories：保持服务顺序，显示紧凑仓库摘要：链接层级名称、实际 Public/Private（未知省略）、描述 ellipsis/tooltip、语言点和 star/fork。语言点为中性 token，未发明 API 语言色。正常两列，组件宽度小于 700px 转单列，键盘步长随列数变化。没有 star 排序、自动导航或自动网络调用。
 4. 贡献热力图：消费明确 `ContributionRange` 与 `ContributionCalendar`，展示服务总计和真实 day/count tooltip。键盘聚焦后方向键/Home/End 与 hover 都更新同一天数据说明；左右移动一周、上下移动一天，键盘操作同时滚动显示选中的周；长区间使用共享横向滚动。
 
@@ -15,12 +15,12 @@
 
 ## 正式 Shell 接入（2026-10-29）
 
-`app::pages::ProfilePage` 已把本组件接入正式 Shell。host 先用目标 login 读取 `ProfileBasic`，只有服务器返回后才用真实数字 id/canonical login 建立 `ProfileTarget`；随后独立读取 pins、host 生成的最近滚动一年贡献区间和同名公开仓库根 README。README 的缺失/不确定/不适用通过新增 `SectionState::Unavailable` 中性呈现，不作为认证或网络错误。Header 头像通过新增 `set_avatar` 只接收 `app::avatar` 已解码图片；原有圆形、首字母 fallback 与尺寸不变。本人/他人由 `Route::Profile` / `Route::UserProfile` 统一寻址，canonical 更新只作用于原 TabId。接入细节与真实验证边界见 [Shell 页面接入](shell-page-integration.md)。
+`app::pages::ProfilePage` 已把本组件接入正式 Shell。host 先用目标 login 读取 `ProfileBasic`，只有服务器返回后才用真实数字 id/canonical login 建立 `ProfileTarget`；随后独立读取 pins、host 生成的最近滚动一年贡献区间和同名公开仓库根 README。README 的缺失/不确定/不适用通过新增 `SectionState::Unavailable` 中性呈现，不作为认证或网络错误；2026-10-30 起该中性状态不再绘制任何区块，真实失败仍走 `SectionState::Error`。Header 头像通过新增 `set_avatar` 只接收 `app::avatar` 已解码图片；原有圆形、首字母 fallback 与尺寸不变。本人/他人由 `Route::Profile` / `Route::UserProfile` 统一寻址，canonical 更新只作用于原 TabId。接入细节与真实验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
 ## 2026-10-29 第二轮反馈
 
 - Pinned/Popular 卡片的描述与 language/star/fork 行改为按卡片内容起点对齐，不再跟随标题文字的图标缩进；名称层级、两列/单列、键盘行为不变。
-- Profile section loading 使用 Ely spinner 加可读标签；section error 使用 warning 图标 + tooltip，原因文本保留。确认缺失/不确定的 README 仍使用中性 `Unavailable`。
+- Profile section loading 使用 Ely spinner 加可读标签；section error 使用 warning 图标 + tooltip，原因文本保留。确认缺失/不确定的 README 使用中性 `Unavailable`；该状态在 2026-10-30 调整为整段省略，见下一节。
 - 本人 Profile 打开时侧栏账户行不再显示导航选中线；头像、current 身份与账户点击不变。
 - README 自身的固定 280px 高度和 overflow 容器已移除；该条在当时的 reader Flow API 落地前保持未完成，不用固定大高度或前端 strip 冒充。
 
@@ -32,6 +32,14 @@ Reader 的自然高度 Flow 能力已随 `reader-images`（PR #45，main `9522ee
 - 上一轮"移除固定 280px 后正文塌缩"的缺陷因此真正修复；当时的实现只是删掉了宿主高度，没有消费方 Flow API，属于已知未完成，不是已完成状态。
 
 Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_clamp(3)` 按真实排版换行并在第三行末省略，卡片高度上限取同一字号/行高的三个行盒，因此 1–3 行完整占高、卡片与 grid 行随内容增长，超过三行不再撑高卡片。名称截断、链接、Public badge、语言/Star/Fork 左对齐与边框不变。
+
+## 2026-10-30 README 可选缺省与无灰底
+
+- **正文不再自绘灰色矩形底。** Flow 布局下 `ReaderView` 根与 Markdown 根不再绘制 `theme.colors.surface`；宿主页面（Profile 的 section 背景）透出，正文与卡片背景一致。有界/Repository 布局的 `surface` 不变，代码围栏、inline code 与引用的语义色保留。见 [内容阅读器 Flow](content-reader.md#自然高度布局flow2026-10-29)。
+- **确认缺失的 README 整段省略。** `SectionState::Unavailable` 不再渲染 border、header、说明文字或占位，`render_readme` 返回 `None`，因此也不会留下空行间距；Pinned 与贡献区块不受影响。该状态内部仍与 `SectionState::Error` 分开。
+- **真实失败使用紧凑指示。** README 的 `SectionState::Error` 改为 `compact_status::failed` 的单个 warning 图标，原因在 tooltip 与无障碍名称里；本组件没有真实 retry 回调，因此不显示 Retry。不再使用共享大错误面板。
+- **404 归入可选缺省。** 同名仓库读取返回的 `GitHubError::NotFound`（GitHub 用 404 同时表示不存在与不可见）在 `app::pages::ProfilePage` 映射为 `Unavailable`，不显示 “not found or is not visible” 文案；网络、认证、限流、解析失败仍为 `Error`。
+- **无残留旧 README。** `bind`、`set_readme_unavailable`、非 Ready 的 `update_readme*` 都会取消并丢弃旧 `ReaderView`；ready→缺失→换账户不会复用旧正文、旧 action 或旧图片请求。
 
 ## Host adapter / mounting 职责
 
