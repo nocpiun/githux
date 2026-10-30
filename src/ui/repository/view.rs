@@ -549,6 +549,22 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
         .into_any_element()
 }
 
+/// Both Code columns use the same border-box height, including room for the
+/// optional reader button. Content and font metrics must not size either row.
+fn code_header(cx: &App) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .min_w_0()
+        .h(theme.control_height(ControlSize::Sm) + gpui::rems(0.5))
+        .border_b_1()
+        .border_color(theme.colors.border)
+        .whitespace_nowrap()
+}
+
 /// The bounded file tree: the visible rows only, with a chevron slot, a kind
 /// icon and a full-width hit area.
 fn tree_column(
@@ -624,7 +640,7 @@ fn tree_column(
     }
     .render(cx);
     let wheel = scroll::wheel_overlay("repository-tree", gpui::Axis::Vertical, motion);
-    // The commit is secondary information: a quiet short id under the header.
+    // The commit shares the header row with Files.
     let commit = page.fixed_commit().map(|commit| {
         div()
             .debug_selector(|| "repository-commit".to_string())
@@ -662,16 +678,10 @@ fn tree_column(
             }
         }))
         .child(
-            div()
-                .flex()
-                .items_center()
+            code_header(cx)
+                .debug_selector(|| "repository-tree-header".into())
                 .justify_between()
-                .gap_2()
-                .flex_none()
                 .px_3()
-                .py_2()
-                .border_b_1()
-                .border_color(border)
                 .child(
                     div()
                         .text_size(small)
@@ -979,27 +989,25 @@ fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     let small = theme.text_size(TextSize::Xs);
     let path = page.current_path().map(str::to_string);
     let entity = cx.entity();
-    let border = colors.border;
-    let header = div()
+    let header = code_header(cx)
         .debug_selector(|| "repository-reader-header".to_string())
-        .flex()
-        .items_center()
-        .gap_2()
-        .flex_none()
         .px_4()
-        .py_2()
-        .border_b_1()
-        .border_color(border)
         .child(
-            Icon::new(match page.selection() {
-                Selection::Readme => IconName::BookOpen,
-                Selection::File(_) => IconName::FileText,
-            })
-            .size(IconSize::Xs)
-            .color(colors.fg_subtle),
+            div().flex_none().child(
+                Icon::new(match page.selection() {
+                    Selection::Readme => IconName::BookOpen,
+                    Selection::File(_) => IconName::FileText,
+                })
+                .size(IconSize::Xs)
+                .color(colors.fg_subtle),
+            ),
         )
         .child(
             div()
+                .id("repository-selected-path")
+                .tooltip(Tooltip::text(
+                    path.clone().unwrap_or_else(|| "No file selected".into()),
+                ))
                 .debug_selector(|| "repository-selected-path".to_string())
                 .flex_1()
                 .min_w_0()
@@ -1012,12 +1020,20 @@ fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         )
         // Only when a usable README exists and a different file is shown.
         .children(page.can_return_to_readme().then(|| {
-            Button::new("repository-back-to-readme", "Back to README")
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.show_readme(cx));
-                })
+            div()
+                .debug_selector(|| "repository-back-to-readme".into())
+                .flex()
+                .min_w_0()
+                .flex_shrink_0()
+                .max_w_full()
+                .child(
+                    Button::new("repository-back-to-readme", "Back to README")
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |page, cx| page.show_readme(cx));
+                        }),
+                )
         }));
     let body: AnyElement = match (page.reader_status().clone(), page.reader()) {
         (ReaderStatus::Showing, Some(reader)) => reader.clone().into_any_element(),
