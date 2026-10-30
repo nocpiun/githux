@@ -15,3 +15,5 @@ pub mod profile;
 pub mod reader;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
+#[path = "../ui/tooltip.rs"]
+pub mod tooltip;

@@ -9,13 +9,14 @@
 //! Nothing here performs I/O: the view only reads the page's already-checked
 //! state and asks it for the next step.
 
+use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;
 
 use ely_core::{
     buttons::{Button, ButtonVariant},
     data_display::Tone,
     forms::{Choice, Select},
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
@@ -430,7 +431,7 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     };
     div()
         .id("repository-branch-container")
-        .tooltip(Tooltip::text(
+        .tooltip(ui_tooltip(
             page.selected_branch().unwrap_or("Branch").to_string(),
         ))
         .debug_selector(|| "repository-branch".to_string())
@@ -748,7 +749,7 @@ fn tree_warnings(
             div()
                 .id("repository-tree-incomplete")
                 .debug_selector(|| "repository-tree-incomplete".to_string())
-                .tooltip(Tooltip::text(
+                .tooltip(ui_tooltip(
                     "This directory listing is truncated or incomplete; it is not a complete empty directory.",
                 ))
                 .px_2()
@@ -789,7 +790,7 @@ fn tree_warnings(
             div()
                 .id("repository-tree-capped")
                 .debug_selector(|| "repository-tree-capped".to_string())
-                .tooltip(Tooltip::text(format!(
+                .tooltip(ui_tooltip(format!(
                     "More rows are loaded than the {}-row tree cap. Collapse directories to review the rest; nothing was fetched recursively.",
                     super::navigation::MAX_TREE_ROWS
                 )))
@@ -913,7 +914,7 @@ fn tree_row(
                 .id(SharedString::from(format!("repository-row-incomplete-{path}")))
                 .debug_selector(|| "repository-row-incomplete".into())
                 .aria_label("Incomplete directory listing")
-                .tooltip(Tooltip::text(
+                .tooltip(ui_tooltip(
                     "This directory listing is truncated or incomplete; it is not a complete empty directory.",
                 ))
                 .text_color(colors.warning)
@@ -951,7 +952,7 @@ fn tree_row(
     div()
         .id(SharedString::from(format!("repository-row-{path}")))
         .debug_selector(move || format!("repository-row-{debug_path}"))
-        .tooltip(Tooltip::text(tooltip_path))
+        .tooltip(ui_tooltip(tooltip_path))
         .flex()
         .items_center()
         .gap_1p5()
@@ -1019,7 +1020,7 @@ fn reader_column(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         .child(
             div()
                 .id("repository-selected-path")
-                .tooltip(Tooltip::text(
+                .tooltip(ui_tooltip(
                     path.clone().unwrap_or_else(|| "No file selected".into()),
                 ))
                 .debug_selector(|| "repository-selected-path".to_string())

@@ -1,5 +1,6 @@
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
@@ -79,7 +80,7 @@ pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
         .bg(theme.colors.bg)
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(theme.colors.warning)
-        .tooltip(Tooltip::text(message))
+        .tooltip(ui_tooltip(message))
         .child(
             Icon::new(IconName::TriangleAlert)
                 .size(IconSize::Sm)
@@ -450,7 +451,7 @@ impl ProfileView {
             })
             .bg(theme.colors.surface.opacity(0.35))
             .hover(|s| s.bg(theme.colors.hover.opacity(0.5)))
-            .tooltip(Tooltip::text(name.clone()))
+            .tooltip(ui_tooltip(name.clone()))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(move |view, _, window, cx| {
                 if view.accepts(&request) {
@@ -494,7 +495,7 @@ impl ProfileView {
                 div()
                     .id(("profile-repository-description", index))
                     .debug_selector(move || format!("profile-repository-description-{index}"))
-                    .tooltip(Tooltip::text(description.clone()))
+                    .tooltip(ui_tooltip(description.clone()))
                     .min_w_0()
                     .text_size(theme.text_size(TextSize::Sm))
                     .text_color(theme.colors.fg_muted)
@@ -882,7 +883,7 @@ impl ProfileView {
             } else {
                 cx.theme().colors.border.opacity(0.35)
             })
-            .tooltip(Tooltip::text(detail.clone()))
+            .tooltip(ui_tooltip(detail.clone()))
             .on_mouse_move(cx.listener(move |view, _, _, cx| {
                 if view.selected_day != Some(index) {
                     view.selected_day = Some(index);

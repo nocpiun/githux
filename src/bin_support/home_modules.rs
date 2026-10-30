@@ -13,3 +13,5 @@ pub mod geometry;
 pub mod home;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
+#[path = "../ui/tooltip.rs"]
+pub mod tooltip;
