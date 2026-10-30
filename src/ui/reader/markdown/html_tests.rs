@@ -626,3 +626,26 @@ fn textarea_content_is_dropped_whole() {
         assert!(!text.contains("hidden"), "{source:?} -> {doc:?}");
     }
 }
+
+#[test]
+fn void_elements_and_comments_never_start_suppression() {
+    for source in [
+        "<meta charset=\"utf-8\">\n\n# Visible",
+        "<link rel=\"stylesheet\" href=\"a.css\">\n\n# Visible",
+        "<!--\n<script>\n-->\n\nVisible",
+        "<div data-tag=\"<script>\">\n\nVisible",
+    ] {
+        let doc = parse(source);
+        let text = copied(&doc.blocks);
+        assert!(text.contains("Visible"), "{source:?} -> {doc:?}");
+    }
+}
+
+#[test]
+fn an_inline_opening_keeps_suppressing_after_its_paragraph_ends() {
+    let doc = parse("before <template>\n\n![hidden](secret.png)\n\n</template>\n\nafter");
+    let text = copied(&doc.blocks);
+    assert!(text.contains("before"), "{text:?}");
+    assert!(!text.contains("secret.png"), "{doc:?}");
+    assert!(text.contains("after"), "{text:?}");
+}

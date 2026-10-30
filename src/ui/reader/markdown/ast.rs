@@ -344,10 +344,19 @@ pub fn parse(markdown: &str) -> Document {
     let mut html_buffer = String::new();
     let mut footnotes: Vec<String> = Vec::new();
 
-    fn finish_inline(inline: &mut Option<(Option<u8>, Building)>, stack: &mut [Container]) {
+    fn finish_inline(
+        inline: &mut Option<(Option<u8>, Building)>,
+        stack: &mut [Container],
+        dropped: &mut Option<String>,
+    ) {
         let Some((heading, mut building)) = inline.take() else {
             return;
         };
+        // A dropped element opened by inline HTML must keep suppressing after
+        // this paragraph ends: the rest of it is ordinary Markdown events.
+        if dropped.is_none() {
+            *dropped = building.suppressed.clone();
+        }
         while !building.open.is_empty() {
             let end = building.inline.text.len();
             building.close(end);
@@ -427,17 +436,6 @@ pub fn parse(markdown: &str) -> Document {
                 _ => {}
             }
             continue;
-        } else if let Event::Html(text) = &event
-            && let Some(open) = unclosed_dropped(text)
-        {
-            // Convert the part before the dropped element, then suppress the
-            // rest of this fragment and everything until its closing tag.
-            let (head, _) = split_dropped(text, &open);
-            for block in html_blocks(&head) {
-                push_block(&mut stack, block);
-            }
-            dropped = Some(open);
-            continue;
         }
         // Inside a table cell an image note has nowhere to go, so the alt
         // text must stay in place instead of being moved after the cell.
@@ -481,11 +479,11 @@ pub fn parse(markdown: &str) -> Document {
         }
         match event {
             Event::Start(Tag::Paragraph) => inline = Some((None, Building::default())),
-            Event::End(TagEnd::Paragraph) => finish_inline(&mut inline, &mut stack),
+            Event::End(TagEnd::Paragraph) => finish_inline(&mut inline, &mut stack, &mut dropped),
             Event::Start(Tag::Heading { level: l, .. }) => {
                 inline = Some((Some(level(l)), Building::default()))
             }
-            Event::End(TagEnd::Heading(_)) => finish_inline(&mut inline, &mut stack),
+            Event::End(TagEnd::Heading(_)) => finish_inline(&mut inline, &mut stack, &mut dropped),
             Event::Start(Tag::Emphasis) => open(&mut inline, Open::Style(Style::Emphasis), in_cell),
             Event::Start(Tag::Strong) => open(&mut inline, Open::Style(Style::Strong), in_cell),
             Event::Start(Tag::Strikethrough) => {
@@ -556,7 +554,7 @@ pub fn parse(markdown: &str) -> Document {
                 });
             }
             Event::DisplayMath(tex) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 push_block(
                     &mut stack,
                     Block::Math {
@@ -571,7 +569,7 @@ pub fn parse(markdown: &str) -> Document {
                 building.push_text(&format!("[{label}]"));
             }),
             Event::Rule => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 push_block(&mut stack, Block::Rule);
             }
             Event::TaskListMarker(done) => {
@@ -580,14 +578,14 @@ pub fn parse(markdown: &str) -> Document {
                 }
             }
             Event::Start(Tag::BlockQuote(kind)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 stack.push(Container::Blocks {
                     out: Vec::new(),
                     quote: alert(kind),
                 });
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 let Some(Container::Blocks { out, quote }) = stack.pop() else {
                     continue;
                 };
@@ -600,7 +598,7 @@ pub fn parse(markdown: &str) -> Document {
                 );
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 let language = match kind {
                     CodeBlockKind::Fenced(info) => {
                         let name = info.trim();
@@ -619,7 +617,7 @@ pub fn parse(markdown: &str) -> Document {
                 }
             }
             Event::Start(Tag::List(start)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 stack.push(Container::List {
                     start,
                     items: Vec::new(),
@@ -628,10 +626,10 @@ pub fn parse(markdown: &str) -> Document {
                 });
             }
             Event::Start(Tag::Item) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
             }
             Event::End(TagEnd::Item) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 if let Some(Container::List {
                     items,
                     current,
@@ -643,13 +641,13 @@ pub fn parse(markdown: &str) -> Document {
                 }
             }
             Event::End(TagEnd::List(_)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 if let Some(Container::List { start, items, .. }) = stack.pop() {
                     push_block(&mut stack, Block::List { start, items });
                 }
             }
             Event::Start(Tag::Table(aligns)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 stack.push(Container::Table {
                     aligns,
                     head: Vec::new(),
@@ -658,7 +656,7 @@ pub fn parse(markdown: &str) -> Document {
                 });
             }
             Event::Start(Tag::TableCell) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 stack.push(Container::Cell(Building {
                     in_cell: true,
                     ..Building::default()
@@ -731,7 +729,7 @@ pub fn parse(markdown: &str) -> Document {
                 }
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 stack.push(Container::Blocks {
                     out: Vec::new(),
                     quote: None,
@@ -739,7 +737,7 @@ pub fn parse(markdown: &str) -> Document {
                 footnotes.push(label.to_string());
             }
             Event::End(TagEnd::FootnoteDefinition) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 if let Some(Container::Cell(_)) = stack.last() {
                     stack.pop();
                 }
@@ -754,7 +752,7 @@ pub fn parse(markdown: &str) -> Document {
                 }
             }
             Event::Start(Tag::HtmlBlock) => {
-                finish_inline(&mut inline, &mut stack);
+                finish_inline(&mut inline, &mut stack, &mut dropped);
                 html_buffer.clear();
             }
             // Block HTML is buffered until its closing event. Inline HTML
@@ -776,8 +774,17 @@ pub fn parse(markdown: &str) -> Document {
                 }
             },
             Event::End(TagEnd::HtmlBlock) => {
+                // Judge the whole block, not its individual line events: a
+                // multiline comment or attribute can contain a tag that looks
+                // like a dropped opening but is still markup context.
                 let text = std::mem::take(&mut html_buffer);
-                if !text.trim().is_empty() {
+                if let Some(open) = unclosed_dropped(&text) {
+                    let (head, _) = split_dropped(&text, &open);
+                    for block in html_blocks(&head) {
+                        push_block(&mut stack, block);
+                    }
+                    dropped = Some(open);
+                } else if !text.trim().is_empty() {
                     for block in html_blocks(&text) {
                         push_block(&mut stack, block);
                     }
@@ -787,7 +794,7 @@ pub fn parse(markdown: &str) -> Document {
             Event::Start(_) => {}
         }
     }
-    finish_inline(&mut inline, &mut stack);
+    finish_inline(&mut inline, &mut stack, &mut dropped);
     let blocks = match stack.pop() {
         Some(Container::Blocks { out, .. }) => out,
         _ => Vec::new(),
@@ -893,7 +900,11 @@ fn unclosed_node(nodes: &[Node]) -> Option<String> {
     for node in nodes.iter().rev() {
         match node {
             Node::Suppressed(name) => return Some(name.clone()),
-            Node::Element(element) if html::is_dropped(&element.name) && !element.closed => {
+            Node::Element(element)
+                if html::is_dropped(&element.name)
+                    && !html::is_void(&element.name)
+                    && !element.closed =>
+            {
                 return Some(element.name.clone());
             }
             Node::Element(element) => {
