@@ -68,8 +68,9 @@ use ely_core::{
     theme::{ActiveTheme, Mode, TextSize, Theme},
 };
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, IntoElement, ParentElement, Render, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, div, px, size,
 };
 
 use crate::auth::token::Pat;
@@ -181,6 +182,10 @@ struct Preview {
     scene: Scene,
     actions: Vec<String>,
     mismatches: usize,
+    /// Development-only switch: show the island with the rounded-corner clip, or the
+    /// previous rounded-surface-only frame, so the reported defect and its fix can be
+    /// compared in one native window. The product always uses the clipped frame.
+    corner_clip: bool,
 }
 
 impl Preview {
@@ -198,6 +203,7 @@ impl Preview {
             scene: Scene::Normal,
             actions: Vec::new(),
             mismatches: 0,
+            corner_clip: true,
         };
         this.wire_actions(cx);
         this
@@ -317,6 +323,24 @@ impl Preview {
                     let _ = entity.update(cx, |preview, cx| preview.reset(window, cx));
                 })
         };
+        let corner_clip = {
+            let entity = cx.weak_entity();
+            Button::new(
+                "preview-corner-clip",
+                if self.corner_clip {
+                    "Corner clip: on"
+                } else {
+                    "Corner clip: off"
+                },
+            )
+            .size(ely_core::theme::ControlSize::Sm)
+            .on_click(move |_, _, cx| {
+                let _ = entity.update(cx, |preview, cx| {
+                    preview.corner_clip = !preview.corner_clip;
+                    cx.notify();
+                });
+            })
+        };
         let log = if self.actions.is_empty() {
             "No page actions reported yet.".to_string()
         } else {
@@ -363,7 +387,8 @@ impl Preview {
                     .min_w_0()
                     .child(scene_picker)
                     .child(reset)
-                    .child(theme_toggle),
+                    .child(theme_toggle)
+                    .child(corner_clip),
             )
             .child(
                 div()
@@ -390,12 +415,56 @@ impl Preview {
 impl Render for Preview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors.clone();
+        // The same island geometry the product uses: the real page and its real bottom
+        // language bar inside a 6px corner with a 1px border.
+        let frame = div()
+            .debug_selector(|| "preview-island".to_string())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .rounded(gpui::px(ui::geometry::ISLAND_RADIUS))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            // The Shell's `island-page`: one vertical scroll region for the page. The page
+            // root is `size_full`, so its bottom language bar sits on the island's bottom
+            // edge whenever the content fits, which is when the square-corner artifact
+            // shows.
+            .child(
+                div()
+                    .id("preview-island-page")
+                    .debug_selector(|| "preview-island-page".to_string())
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .child(self.page.clone()),
+            )
+            .into_any_element();
+        let island = if self.corner_clip {
+            ui::island::rounded_island(frame, colors.bg, colors.border)
+        } else {
+            frame
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(colors.bg)
             .child(self.toolbar(cx))
-            .child(div().flex_1().min_h_0().w_full().child(self.page.clone()))
+            .child(
+                // A flex row, like the shell body, so the island's own `flex_1` fills the
+                // remaining height instead of collapsing to its content.
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .p(gpui::px(ui::geometry::ISLAND_INSET))
+                    .child(island),
+            )
     }
 }

@@ -143,3 +143,12 @@ Releases版本前为Ely Tag图标，链接后为Success Outline `Latest`。仅�
 Repository Markdown启用`MarkdownLayout::Repository`，根不保留固定上下空带，正文首尾0.75rem量级inset属于真实块测量内容，随文档滚动且计入wheel/thumb最大reach；左右各比原间距增加4px。源码/非文本状态和其他宿主默认不变。实现与GPUI padding/reach差异的原因见[reader布局契约](content-reader.md#repository-专用正文留白配置2026-10-28)。底部语言条不盖住内容inset；没有第二滚动容器或假AST条目。
 
 统一场景新增README paragraph/list/code/table end，全部走现有真实服务fixture管线，供实际wheel/thumb到底检查。自动测试分别验证每种正文末块的内容bounds到viewport底边仍有留白，不以块自身边框或末条目存在冒充。
+
+
+## 底部语言条与 island 圆角裁切（2026-10-29）
+
+Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：4px 高、按真实比例分块、不合并 Other、hover tooltip 由 GPUI 原生拟合。**但 GPUI 0.3.10 的 `ContentMask` 只有矩形边界**，"rounded + overflow_hidden" 只把圆角画在元素自己的背景与边框 quad 上，不裁子元素。所以只有色条有真实数据并贴到底边时，它会在 island 底部两个圆角处以方形越过弧线。
+
+修复位于 [`ui::island`](../src/ui/island.rs) 的 `RoundedClip`：它只包一个子元素、直接复用该子元素的 layout（不加 padding/尺寸/新布局盒），在子元素之后按 island 的**外**半径擦除四个 `radius × radius` 角方块中弧外的部分（用窗口背景色），再用同一半径重画 island 的 1px 边框。`Shell::island` 通过 `rounded_island(frame, outside, border)` 使用它。色条的比例、颜色、底部位置、hover/百分比 tooltip，以及文件树、README reader、滚动区域和 tab strip 的几何均未改动。
+
+边界说明：这是绘制层补偿，不是真正的几何裁切——若将来升级到支持非矩形 mask 的 GPUI，应换成真实 mask 并删除角擦除。开发预览 `cargo run --example repository` 另有一个**仅预览**的 `Corner clip: on/off` 开关，用于在同一真实窗口对比修复前后；产品始终开启。原生对照与像素边界见 [开发日志](devlog/2026-10-29-repository-language-clip.md)。
