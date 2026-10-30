@@ -172,7 +172,7 @@ impl Render for ProfileView {
                 name: "profile-page-scrollbar",
                 axis: Axis::Vertical,
             },
-            placement: Placement::overlay(4.0, 8.0),
+            placement: Placement::overlay(1.5, 8.0),
             style: Style::DEFAULT,
             opacity: page_opacity,
             on_drag: std::rc::Rc::new(move |axis, active, _, cx| {
@@ -690,7 +690,7 @@ impl ProfileView {
                 name: "profile-heatmap-scrollbar",
                 axis: Axis::Horizontal,
             },
-            placement: Placement::overlay(3.0, 8.0),
+            placement: Placement::overlay(1.5, 8.0),
             style: Style::DEFAULT,
             opacity,
             on_drag: std::rc::Rc::new(move |axis, active, _, cx| {
