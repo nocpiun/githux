@@ -877,6 +877,17 @@ fn hidden_inline_spans_close_after_suppression_without_popping_visible_links() {
 }
 
 #[test]
+fn existing_html_spans_close_inside_a_dropped_element() {
+    let doc = parse("<a href=\"guide.md\">before <template></a></template> after");
+    let text = find_paragraph(&doc.blocks, "before");
+    assert_eq!(text.text, "before after");
+    assert_eq!(text.links, vec![(0..7, "guide.md".into())]);
+    let doc = parse("<b>before <template></b></template> after");
+    let text = find_paragraph(&doc.blocks, "before");
+    assert_eq!(text.styles, vec![(0..7, Style::Strong)]);
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

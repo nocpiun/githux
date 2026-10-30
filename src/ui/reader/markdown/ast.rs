@@ -225,6 +225,16 @@ impl Building {
         let notes = self.notes.len();
         let opens = self.html.len();
         if let Some((name, mut depth)) = self.suppressed.clone() {
+            if !html::is_raw_text(&name) && self.suppressed_raw.is_none() {
+                for node in &nodes {
+                    if let Node::End(end) = node {
+                        // These closes can end visible HTML spans that began
+                        // before suppression. Hidden starts never entered this
+                        // stack, so their content and formatting stay absent.
+                        close_html(&mut self.html, end, &mut self.inline);
+                    }
+                }
+            }
             let closed = html::inline_span(fragment, &name, &mut depth, &mut self.suppressed_raw);
             self.suppressed = (!closed).then_some((name, depth));
             self.html_gap = true;
