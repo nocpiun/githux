@@ -337,6 +337,7 @@ fn counts_are_independent_and_actions_are_host_entries(cx: &mut TestAppContext) 
     let received = Arc::new(Mutex::new(Vec::new()));
     let sink = received.clone();
     page.update(cx, |p, cx| {
+        p.enable_mutations(true);
         p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
         cx.notify();
     });
@@ -459,6 +460,7 @@ fn action_count_pills_are_inside_one_action_and_expire_with_binding(cx: &mut Tes
     let calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     page.update(cx, |p, cx| {
+        p.enable_mutations(true);
         p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
         cx.notify();
     });

@@ -36,3 +36,9 @@
 - **重复解码 contributor 头像**：`sync_repository_avatars` 由 Shell 每帧调用，原实现每帧把已缓存的 `Image` 重新转成 `RenderImage`，`set_avatar_image` 才丢弃。新增 `RepositoryOverview::has_avatar_image(binding, user_id)`，同步时先查询，已附加者直接跳过，不再解码。回归：`avatar_image_presence_is_queryable_so_hosts_skip_repeated_decoding`。
 - **本人 contributor 链接重复建页**：repository contributor 原先硬编码 `Route::UserProfile`，与侧栏/Home 的 `Route::Profile` 键不同，导致本人已开 Profile 标签不被复用。改为统一 `Route::profile(login, active_account)` 归一化；回归：`own_contributor_link_activates_the_existing_profile_tab` 断言路由、复用同一 TabId、只新增仓库标签。
 - 检查：fmt/clippy `-D warnings`/`test --locked`（主 binary 795 项及全部 target）通过。
+
+## 审查反馈修复（Star/Fork 禁用）
+
+- 发现问题：`RepositoryPage::on_action` 注册后，`repository_actions` 将 `page.on_action.is_some() && binding.is_some()` 当作启用条件，导致生产 Shell 中未实现写操作的 Star/Fork 被绘制为可点击的启用按钮，点击后被 match arm 静默丢弃。
+- 修复：增加 `RepositoryPage::enable_mutations(bool)`，默认 `false`；只有显式声明支持写操作的宿主才启用这两个按钮，普通只读导航宿主保持禁用。开发 example 显式启用以保留组件演示，生产 Shell 保持默认禁用。
+- 回归测试：新增 `repository_star_and_fork_remain_disabled_in_production`；既有只读计数与点击用例同步更新为显式启用。

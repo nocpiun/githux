@@ -827,6 +827,17 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub fn active_repository_mutations_enabled(&self, cx: &App) -> Option<bool> {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Repository { page }) => {
+                Some(page.read(cx).mutations_enabled())
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub fn expire_feed_cooldown_for_test(&mut self, cx: &mut Context<Self>) {
         let id = self.workspace.active_id();
         if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {

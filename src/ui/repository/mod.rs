@@ -329,6 +329,10 @@ pub struct RepositoryPage {
     tree_focus: FocusHandle,
     star_focus: FocusHandle,
     fork_focus: FocusHandle,
+    /// Whether Star/Fork actions are accepted by the host. The first release has no remote write
+    /// operations, so a host that only handles navigation leaves this false and the buttons stay
+    /// honestly disabled instead of claiming to perform a mutation.
+    mutations_enabled: bool,
     clock: std::time::Instant,
     #[cfg(test)]
     pinned_clock: Option<u64>,
@@ -391,6 +395,7 @@ impl RepositoryPage {
             tree_focus: cx.focus_handle().tab_stop(true),
             star_focus: cx.focus_handle().tab_stop(true),
             fork_focus: cx.focus_handle().tab_stop(true),
+            mutations_enabled: false,
             clock: std::time::Instant::now(),
             #[cfg(test)]
             pinned_clock: None,
@@ -416,6 +421,15 @@ impl RepositoryPage {
     /// Takes page actions (external links and unfollowed repository links).
     pub fn on_action(&mut self, handler: OnPageAction) {
         self.on_action = Some(handler);
+    }
+
+    /// Explicitly declares that the host implements Star/Fork remote write operations.
+    pub fn enable_mutations(&mut self, enabled: bool) {
+        self.mutations_enabled = enabled;
+    }
+
+    pub fn mutations_enabled(&self) -> bool {
+        self.mutations_enabled
     }
 
     /// Whether a browsing generation is running.

@@ -203,7 +203,7 @@ fn repository_actions(
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
     let binding = page.repository_binding();
-    let enabled = page.on_action.is_some() && binding.is_some();
+    let enabled = page.on_action.is_some() && page.mutations_enabled() && binding.is_some();
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let height = theme.control_height(ControlSize::Md);

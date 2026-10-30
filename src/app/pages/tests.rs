@@ -332,6 +332,30 @@ fn repository_contributor_navigation_is_deferred_and_opens_a_profile(cx: &mut Te
 }
 
 #[gpui::test]
+fn repository_star_and_fork_remain_disabled_in_production(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    let rows = view.read_with(cx, |shell, _| shell.repositories().to_vec());
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::repository(&rows[0]), window, cx);
+    });
+    cx.run_until_parked();
+    // In production Shell the buttons must stay disabled because no remote write is implemented.
+    assert_eq!(
+        view.read_with(cx, |shell, cx| shell
+            .active_repository_mutations_enabled(cx)),
+        Some(false),
+        "Star and Fork must remain disabled when only navigation is handled"
+    );
+}
+
+#[gpui::test]
 fn own_contributor_link_activates_the_existing_profile_tab(cx: &mut TestAppContext) {
     let transport = Arc::new(PageTransport::default());
     let (view, controller, cx) = open_shell(cx, transport.clone());
