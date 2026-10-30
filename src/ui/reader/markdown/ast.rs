@@ -405,28 +405,38 @@ pub fn parse(markdown: &str) -> Document {
         // so this state lives here rather than only inside an inline builder.
         // Inline HTML is handled by its builder, which owns the same spans
         // between `InlineHtml` events.
-        if let Some(name) = dropped.clone() {
-            // A closing tag can arrive as block HTML or, when the blank line
-            // already ended the block and the tag sits in a paragraph, as
-            // inline HTML. Both end the dropped span.
-            if let Event::Html(text) | Event::InlineHtml(text) = &event {
-                // Only the dropped span disappears: keep the readable prefix
-                // and suffix of the fragment that also carries its close.
-                // While suppressing, only markup after the real closing tag
-                // is readable; everything before it belongs to the dropped
-                // element even when this fragment also carries other tags.
-                let (_, tail) = split_dropped(text, &name);
-                if let Some(tail) = tail {
-                    dropped = None;
-                    for block in html_blocks(&tail) {
-                        push_block(&mut stack, block);
-                    }
-                }
-            }
-            // Container structure still has to balance so an item or list that
-            // opened before the dropped element can close; its content does
-            // not reach the model.
+        if dropped.is_some() {
+            // Block HTML arrives line by line, so its closing tag must be
+            // judged with the whole block: a `</template>` inside a multiline
+            // comment is not a real close. Buffer the block and decide at its
+            // end. Inline HTML (a closing tag inside a paragraph) is complete
+            // by itself.
             match &event {
+                Event::Html(text) => {
+                    html_buffer.push_str(text);
+                    // A block may also be delivered without `Start(HtmlBlock)`.
+                    let Some(name) = dropped.clone() else {
+                        continue;
+                    };
+                    if let Some(tail) = after_close_in_block(&html_buffer, &name) {
+                        html_buffer.clear();
+                        dropped = None;
+                        apply_block_suffix(&mut stack, &mut dropped, &tail);
+                    }
+                    continue;
+                }
+                Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock) => continue,
+                Event::InlineHtml(text) => {
+                    let name = dropped.clone().expect("checked above");
+                    let (_, tail) = split_dropped(text, &name);
+                    if let Some(tail) = tail {
+                        dropped = None;
+                        for block in html_blocks(&tail) {
+                            push_block(&mut stack, block);
+                        }
+                    }
+                    continue;
+                }
                 Event::Start(Tag::List(_))
                 | Event::End(TagEnd::List(_))
                 | Event::Start(Tag::Item)
@@ -778,7 +788,15 @@ pub fn parse(markdown: &str) -> Document {
                 // multiline comment or attribute can contain a tag that looks
                 // like a dropped opening but is still markup context.
                 let text = std::mem::take(&mut html_buffer);
-                if let Some(open) = unclosed_dropped(&text) {
+                let tail = dropped
+                    .clone()
+                    .and_then(|name| after_close_in_block(&text, &name));
+                if let Some(tail) = tail {
+                    dropped = None;
+                    apply_block_suffix(&mut stack, &mut dropped, &tail);
+                } else if dropped.is_some() {
+                    // Still inside the dropped span; the block is not content.
+                } else if let Some(open) = unclosed_dropped(&text) {
                     let (head, _) = split_dropped(&text, &open);
                     for block in html_blocks(&head) {
                         push_block(&mut stack, block);
@@ -928,6 +946,30 @@ fn split_dropped(fragment: &str, name: &str) -> (String, Option<String>) {
     let head = fragment[..head_end.min(fragment.len())].to_string();
     let tail = tail_start.map(|start| fragment[start.min(fragment.len())..].to_string());
     (head, tail)
+}
+
+/// The readable suffix after `name`'s real closing tag inside one block.
+///
+/// The search runs on the complete block text, so a `</template>` inside a
+/// multiline comment never counts as the close.
+fn after_close_in_block(block: &str, name: &str) -> Option<String> {
+    split_dropped(block, name).1
+}
+
+/// Convert the readable text after a dropped close, then resume suppression if
+/// that suffix itself opens another dropped element.
+fn apply_block_suffix(stack: &mut [Container], dropped: &mut Option<String>, tail: &str) {
+    if let Some(open) = unclosed_dropped(tail) {
+        let (head, _) = split_dropped(tail, &open);
+        for block in html_blocks(&head) {
+            push_block(stack, block);
+        }
+        *dropped = Some(open);
+    } else if !tail.trim().is_empty() {
+        for block in html_blocks(tail) {
+            push_block(stack, block);
+        }
+    }
 }
 
 /// Apply a container event while its content is suppressed, keeping the

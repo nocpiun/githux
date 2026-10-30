@@ -649,3 +649,24 @@ fn an_inline_opening_keeps_suppressing_after_its_paragraph_ends() {
     assert!(!text.contains("secret.png"), "{doc:?}");
     assert!(text.contains("after"), "{text:?}");
 }
+
+#[test]
+fn a_multiline_comment_cannot_close_a_dropped_span() {
+    let doc = parse(
+        "<template>\n\n<!--\n</template>\n-->\n\n![hidden](secret.png)\n\n</template>\n\nafter",
+    );
+    let text = copied(&doc.blocks);
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}
+
+#[test]
+fn a_new_dropped_opening_after_the_close_is_suppressed_too() {
+    let doc =
+        parse("<template>\n\n</template><iframe>\n\n![hidden](secret.png)\n\n</iframe>\n\nafter");
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    let text = copied(&doc.blocks);
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}
