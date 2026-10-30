@@ -832,6 +832,18 @@ fn raw_text_context_transfers_from_cells_and_block_openings() {
 }
 
 #[test]
+fn an_active_raw_text_span_does_not_nest_in_later_blocks() {
+    for tag in ["script", "style", "title", "textarea"] {
+        let doc = parse(&format!("before <{tag}>\n\n<{tag}>\n</{tag}>\n\nafter"));
+        let text = copied(&doc.blocks);
+        assert!(text.contains("before"), "{tag}: {doc:?}");
+        assert!(text.contains("after"), "{tag}: {doc:?}");
+        let span = html::scan_dropped_span(&format!("<{tag}>\n</{tag}>"), tag, 1, &mut None);
+        assert_eq!(span.depth, 0, "{tag}: {span:?}");
+    }
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

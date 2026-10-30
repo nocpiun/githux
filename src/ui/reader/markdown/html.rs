@@ -805,6 +805,16 @@ pub fn scan_dropped_span(
     let len = bytes.len();
     let mut head_end = len;
     let mut i = 0;
+    if depth > 0 && is_raw_text(name) {
+        // Inside an already active raw-text element, same-name starts are
+        // literal text. The first genuine end closes the existing span.
+        let (_, after, closed) = raw_content(fragment, 0, name);
+        return DroppedSpan {
+            head_end,
+            tail_start: closed.then_some(after),
+            depth: if closed { 0 } else { depth },
+        };
+    }
     if let Some(open) = raw.clone() {
         let (_, after, closed) = raw_content(fragment, 0, &open);
         if !closed {
