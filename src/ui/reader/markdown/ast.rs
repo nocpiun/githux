@@ -180,6 +180,9 @@ struct Building {
     /// The raw-text element inside a dropped inline span. Its closing-looking
     /// strings arrive as ordinary Markdown text, so never scan those as tags.
     suppressed_raw: Option<String>,
+    /// Openings discarded inside suppression still own their eventual ends,
+    /// including ends that arrive after the dropped region closes.
+    html_visibility: std::collections::HashMap<String, Vec<bool>>,
 }
 
 enum Open {
@@ -227,11 +230,19 @@ impl Building {
         if let Some((name, mut depth)) = self.suppressed.clone() {
             if !html::is_raw_text(&name) && self.suppressed_raw.is_none() {
                 for node in &nodes {
-                    if let Node::End(end) = node {
-                        // These closes can end visible HTML spans that began
-                        // before suppression. Hidden starts never entered this
-                        // stack, so their content and formatting stay absent.
-                        close_html(&mut self.html, end, &mut self.inline);
+                    match node {
+                        Node::Element(element)
+                            if !element.closed && !html::is_void(&element.name) =>
+                        {
+                            self.html_visibility
+                                .entry(element.name.clone())
+                                .or_default()
+                                .push(false);
+                        }
+                        Node::End(end) if !self.consume_hidden_end(end) => {
+                            close_html(&mut self.html, end, &mut self.inline);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -242,6 +253,7 @@ impl Building {
         }
         for node in &nodes {
             match node {
+                Node::End(end) if self.consume_hidden_end(end) => {}
                 Node::Suppressed(name) => self.suppressed = Some((name.clone(), 1)),
                 Node::Element(element)
                     if html::is_dropped(&element.name)
@@ -250,18 +262,40 @@ impl Building {
                 {
                     self.suppressed = Some((element.name.clone(), 1));
                 }
-                _ => append_html_inline(
-                    std::slice::from_ref(node),
-                    &mut self.inline,
-                    &mut self.notes,
-                    &mut self.html,
-                    self.in_cell,
-                ),
+                _ => {
+                    if let Node::Element(element) = node
+                        && !element.closed
+                        && !html::is_void(&element.name)
+                    {
+                        self.html_visibility
+                            .entry(element.name.clone())
+                            .or_default()
+                            .push(true);
+                    }
+                    append_html_inline(
+                        std::slice::from_ref(node),
+                        &mut self.inline,
+                        &mut self.notes,
+                        &mut self.html,
+                        self.in_cell,
+                    );
+                }
             }
         }
         // A comment or dropped element glues the surrounding text runs.
         self.html_gap =
             self.inline.text.len() == text && self.notes.len() == notes && self.html.len() == opens;
+    }
+
+    fn consume_hidden_end(&mut self, name: &str) -> bool {
+        let Some(visibility) = self.html_visibility.get_mut(name) else {
+            return false;
+        };
+        let hidden = visibility.pop() == Some(false);
+        if visibility.is_empty() {
+            self.html_visibility.remove(name);
+        }
+        hidden
     }
 
     /// Close any HTML element still open at the end of this builder.

@@ -22,7 +22,7 @@ HTML 树与跨事件行内栈都有 256 层上限；表格补齐单元格前检�
 所有重型 cargo 命令经本 worktree 的 `.agents/task/cargo-serialized.ps1`，独立 target，`CARGO_BUILD_JOBS=1`。
 
 - `cargo fmt --all -- --check`、`git diff --check` 通过。
-- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 在与 reader-images 组合后通过；本轮 Reader 目标 224 项通过，包含抑制事件、真实 provider/剪贴板、单元格关闭范围和 inline title 回归，完整检查结果在 PR 与本地 delivery-state 绑定最新 head。
+- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 在与 reader-images 组合后通过；本轮 Reader 目标 225 项通过，包含抑制事件、真实 provider/剪贴板、单元格关闭范围和 inline title 回归，完整检查结果在 PR 与本地 delivery-state 绑定最新 head。
 - 本轮完整 `cargo test --locked` 的 Repository 目标出现一次网络 mock 连接错误（`chunked_and_no_length_stop_before_eof_on_success_and_errors` 返回 Network，预期 ResponseTooLarge）；其余已执行目标通过。单独重跑 Repository 全目标与 repository_overview 均通过。该时序失败与 HTML 解析路径分开记录，未修改网络模块。
 - `cargo build --locked --example reader` 通过。运行 `reader.exe 1` 展示 HTML fixture，不注入图片 provider，因此明确显示“no image service attached”，不把占位当作真实网络图片验收。
 - 真实 Windows 窗口，同一 fixture，1280×900、DPI 144：修复前截图 `.agents/output/evidence-before.png`；本轮修复后 `final-html-top.png` 显示图片占位、强调/链接/代码、表格列对齐和列表；向真实 HWND 投递 wheel 消息后 `final-html-bottom.png` 显示代码中的标签/注释原样、正文注释消失、尾部文字可达。这些帧已实际查看。
@@ -31,6 +31,8 @@ HTML 树与跨事件行内栈都有 256 层上限；表格补齐单元格前检�
 未覆盖真实账户/网络 README、多 DPI、跨屏、实体鼠标手感和 IME；synthetic fixture、provider 记录测试与真实实网验收分别说明。最终人工验收仍须由负责人完成。
 
 ## 审查处理与后续
+
+2026-10-30 继续处理 `cd014c0` 的隐藏 HTML 同名 span 审查：每种 HTML 标签的行内开闭记录可见归属，隐藏内层的关闭只消费其自身，不提前关闭可见外层；关闭在抑制结束后到达也遵循相同规则。新增三种嵌套/延迟关闭/恢复可见同名标签回归。
 
 2026-10-30 继续处理 `5f79de3` 的既有 HTML span 关闭审查：非 raw-text 抑制期间，真实 HTML 结束标签同时闭合抑制前已打开的 HTML 范围；隐藏内容仍不写入模型。新增外层 a/b 在 template 内关闭的范围回归。
 

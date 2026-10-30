@@ -888,6 +888,24 @@ fn existing_html_spans_close_inside_a_dropped_element() {
 }
 
 #[test]
+fn hidden_html_openings_own_their_closes_inside_and_after_suppression() {
+    for source in [
+        "<b>before <template><b>hidden</b></template> after</b>",
+        "<b>before <template><b>hidden</template></b> after</b>",
+    ] {
+        let doc = parse(source);
+        let text = find_paragraph(&doc.blocks, "before");
+        assert_eq!(text.text, "before after");
+        assert_eq!(text.styles, vec![(0..12, Style::Strong)], "{doc:?}");
+    }
+    let doc = parse("<b>before <template><b>hidden</template><b>visible</b></b> after</b>");
+    let text = find_paragraph(&doc.blocks, "before");
+    assert_eq!(text.text, "before visible after");
+    assert!(text.styles.contains(&(7..14, Style::Strong)), "{doc:?}");
+    assert!(text.styles.contains(&(0..20, Style::Strong)), "{doc:?}");
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",
