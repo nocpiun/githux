@@ -856,6 +856,27 @@ fn inline_spans_opened_before_suppression_close_at_their_real_end() {
 }
 
 #[test]
+fn hidden_inline_spans_close_after_suppression_without_popping_visible_links() {
+    let doc = parse("[visible <template>*hidden</template> tail* rest](guide.md)");
+    let text = find_paragraph(&doc.blocks, "visible");
+    assert_eq!(text.text, "visible tail rest");
+    assert_eq!(text.links, vec![(0..17, "guide.md".into())]);
+    assert!(text.styles.is_empty(), "{text:?}");
+
+    // A visible span nested inside the formerly hidden span still owns its
+    // own end. Later suppression must not inherit stale hidden bookkeeping.
+    let doc = parse(
+        "[visible <template>*hidden</template> **bold** tail* rest](guide.md)\n\n*before <script>hidden*</script> after",
+    );
+    let text = find_paragraph(&doc.blocks, "visible");
+    assert_eq!(text.text, "visible bold tail rest");
+    assert_eq!(text.links, vec![(0..22, "guide.md".into())]);
+    assert_eq!(text.styles, vec![(8..12, Style::Strong)]);
+    let later = find_paragraph(&doc.blocks, "before");
+    assert_eq!(later.styles, vec![(0..7, Style::Emphasis)]);
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",
