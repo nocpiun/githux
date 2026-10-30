@@ -38,6 +38,7 @@ mod chrome;
 pub(crate) mod compact_status;
 pub(crate) mod geometry;
 pub mod home;
+mod island;
 mod page;
 mod palette;
 pub mod profile;
@@ -2042,8 +2043,9 @@ impl Shell {
     /// The island: the session tab strip, then the active page's own scroll area.
     fn island(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
-        let colors = &theme.colors;
+        let colors = theme.colors.clone();
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
+        let outside = colors.bg;
         let strip = self.tab_strip(window, cx);
         let settings_route = self.workspace.route() == &Route::Settings;
         let session_id = self.workspace.active_id();
@@ -2091,7 +2093,7 @@ impl Shell {
             None
         };
 
-        div()
+        let frame = div()
             .debug_selector(|| "island".to_string())
             .flex()
             .flex_col()
@@ -2149,8 +2151,13 @@ impl Shell {
                         region.child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth))
                     })
                     .children(settings_bar),
-            )
-            .into_any_element()
+            );
+        // GPUI 0.3.10 only has rectangular `ContentMask` bounds: `rounded` + `overflow_hidden`
+        // draws a rounded surface but clips children to a rectangle, so a child that fills the
+        // bottom edge (the language bar) keeps painting square over the corner arcs. The wrapper
+        // erases only those corner squares and repaints the outline, leaving layout, hit targets,
+        // scrolling and window-fitted tooltips on their own geometry.
+        island::rounded_island(frame.into_any_element(), outside, border)
     }
 
     /// The application session strip. Each tab activates its session on click or Enter/Space, its
