@@ -86,3 +86,10 @@
 - **原因**：repository-overview 最初独立于 browser 交付，独立示例下方使用模拟阅读区，真实 browser 未挂载该组件。分别验证无法证明摘要、Tabs、文件树与真实 reader 同页时的空间分配、分支切换与局部失败行为。后续将两任务合并，由 browser 单一执行者统一组合和验收。这是共享记录中的集成缺口；负责人对密度和布局的新选择不作为技术故障归因。
 - **证据**：[overview 初始结果与未接入边界](docs/devlog/2026-10-28-repository-overview.md#未执行--后续)、[任务合并与统一页面集成](docs/devlog/2026-10-28-repository-overview.md#合并任务与统一页面集成由-browser-执行)及 [browser 组合记录](docs/devlog/2026-10-28-repository-browser.md#owner-合并-browser--compact-overview统一页面)记录 PR #37 由统一 PR #35 取代。组合后的 [联合回归](src/ui/repository/extras_tests.rs) 中，`scoped_retry_keeps_source_and_sibling_groups` 验证 extras 失败/重试保留 reader，`overview_reads_once_and_branch_changes_keep_the_embedded_entity` 验证分支切换不倍增 extras 请求；日志另记录桌面与 880×560 的原生同页检查。当前联合入口与组件探针定位见 [统一页面契约](docs/repository-browser.md#统一页面与-overview-服务组合)。
 - **范围**：同页多个组件的并行实现、预览与交接。组件内部仍可独立开发和测试；联合 example 的验证不能推导正式 Shell 已接线，原生证据仍遵循 [L002](#l002模拟验证要写清边界)。
+
+## L013：删掉宿主约束不等于拿到了消费方能力
+
+- **规则**：页面内嵌一个可滚动/虚拟化组件并希望它参与外层页面流时，必须先确认该组件提供自然高度测量与布局通知的 API，并在同一改动中接上；只删掉宿主的固定高度/overflow 只会让内容塌缩或消失。若消费方能力尚未合入，明确标记该项未完成，不要以"已移除固定高度"作为完成证据。
+- **原因**：Profile README 上一轮删除了自身 280px 固定高度与 overflow 容器，但 ReaderView 根仍是 `size_full()`、MarkdownLayout 只有有界视口，父容器自然高度与内部虚拟列表不匹配，正文区域变成空壳。真实窗口只看到空白 README，而"移除固定高度"这一步本身通过了编译与既有测试。缺陷根因是宿主约束与消费方能力必须成对交付。
+- **证据**：2026-10-29 第二轮交付记录把该项标为未完成；2026-10-30 在 main 合入 Reader `MarkdownLayout::Flow` 与 `on_layout_changed`（PR #45，`9522eee`）后，Profile 设置 Flow 才真正显示正文，并由 `flow_readme_reports_its_whole_document_and_outer_scroll_reaches_later_sections` 断言文档真实高度、文末位置与仅外层滚动可达后续 section。见 [开发日志](docs/devlog/2026-10-30-shell-pages-profile-flow.md)。
+- **范围**：把虚拟化/自滚动组件（Markdown reader、列表、编辑器）嵌入更大滚动页面的接线；也适用于"先删父级限制"的重构。回归测试应断言内容真实尺寸与最末内容位置，而不只断言容器被移除。
