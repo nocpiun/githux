@@ -798,6 +798,17 @@ fn hidden_blocks_emit_no_empty_shells_or_labels() {
 }
 
 #[test]
+fn nested_raw_text_does_not_close_inline_suppression() {
+    let doc = parse(
+        "before <template><script>const s = \"</template>\";</script>![hidden](secret.png)</template> after",
+    );
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    let text = copied(&doc.blocks);
+    assert!(text.contains("before after"), "{doc:?}");
+    assert!(!text.contains("const s"), "{doc:?}");
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

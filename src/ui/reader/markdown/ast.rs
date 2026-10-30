@@ -177,6 +177,9 @@ struct Building {
     /// ...). Its tags and text arrive as separate events, so suppression must
     /// survive the HTML helper returning.
     suppressed: Option<(String, usize)>,
+    /// The raw-text element inside a dropped inline span. Its closing-looking
+    /// strings arrive as ordinary Markdown text, so never scan those as tags.
+    suppressed_raw: Option<String>,
 }
 
 enum Open {
@@ -221,30 +224,13 @@ impl Building {
         let text = self.inline.text.len();
         let notes = self.notes.len();
         let opens = self.html.len();
+        if let Some((name, mut depth)) = self.suppressed.clone() {
+            let closed = html::inline_span(fragment, &name, &mut depth, &mut self.suppressed_raw);
+            self.suppressed = (!closed).then_some((name, depth));
+            self.html_gap = true;
+            return;
+        }
         for node in &nodes {
-            if let Some((name, depth)) = self.suppressed.clone() {
-                // Nested same-name elements must close in order, so the span
-                // ends only when its outermost copy closes.
-                match node {
-                    Node::Element(element) if element.name == name && !element.closed => {
-                        self.suppressed = Some((name, depth + 1));
-                    }
-                    Node::Suppressed(open) if *open == name && !html::is_raw_text(&name) => {
-                        self.suppressed = Some((name, depth + 1));
-                    }
-                    Node::End(end) if *end == name => {
-                        if depth > 1 {
-                            self.suppressed = Some((name, depth - 1));
-                        } else {
-                            self.suppressed = None;
-                        }
-                    }
-                    // Only a real parsed end tag counts: a `</scripture>` or a
-                    // tag inside a comment never ends the span.
-                    _ => {}
-                }
-                continue;
-            }
             match node {
                 Node::Suppressed(name) => self.suppressed = Some((name.clone(), 1)),
                 Node::Element(element)
@@ -738,7 +724,7 @@ pub fn parse(markdown: &str) -> Document {
                 if let Some(Container::Cell(cell)) = stack.last_mut()
                     && let Some((_, pending)) = inline.take()
                 {
-                    if dropped.is_none() {
+                    if dropped.is_none() && pending.suppressed_raw.is_none() {
                         dropped = pending.suppressed.clone();
                     }
                     merge_cell_builder(cell, pending);

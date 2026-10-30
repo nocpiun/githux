@@ -355,6 +355,63 @@ pub fn collapse_whitespace(text: &str) -> String {
     out
 }
 
+/// Scan only tags in one inline-HTML event, preserving depth and raw-text
+/// element names. Unlike `dropped_span`, this never treats tag-like text in an
+/// unclosed raw-text element as markup: pulldown-cmark delivers it separately.
+pub fn inline_span(
+    fragment: &str,
+    name: &str,
+    depth: &mut usize,
+    raw: &mut Option<String>,
+) -> bool {
+    let mut i = 0;
+    while i < fragment.len() {
+        if fragment.as_bytes()[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let Some((tag, next)) = scan_tag(fragment, i) else {
+            i += 1;
+            continue;
+        };
+        if let Some(open) = raw.as_ref() {
+            if matches!(&tag, Tag::End { name: end } if end == open) {
+                *raw = None;
+            }
+        } else if is_raw_text(name) {
+            // Raw-text elements never nest; only their own real end closes
+            // them. Same-name starts are literal content.
+            if matches!(&tag, Tag::End { name: end } if end == name) {
+                *depth = 0;
+                return true;
+            }
+        } else {
+            match tag {
+                Tag::Start {
+                    name: tag_name,
+                    self_closing,
+                    ..
+                } => {
+                    if is_raw_text(&tag_name) {
+                        *raw = Some(tag_name);
+                    } else if tag_name == name && !self_closing {
+                        *depth += 1;
+                    }
+                }
+                Tag::End { name: tag_name } if tag_name == name => {
+                    *depth = depth.saturating_sub(1);
+                    if *depth == 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i = next;
+    }
+    false
+}
+
 /// The ASCII whitespace the HTML parser itself treats as collapsible.
 pub fn is_html_whitespace(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{0c}')
@@ -759,7 +816,9 @@ pub fn dropped_span(fragment: &str, name: &str, mut depth: usize) -> DroppedSpan
                                 depth,
                             };
                         }
-                        depth += 1;
+                        if !closed {
+                            depth += 1;
+                        }
                     }
                     i = after;
                     continue;
