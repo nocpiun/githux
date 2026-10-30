@@ -1,16 +1,22 @@
 //! `GET /users/{login}/received_events`.
 //!
+//! The adapter parses every received event into the minimal typed payload, then
+//! applies the confirmed Feed product policy ([`classify_feed_activity`]) so the
+//! published list contains only retained activities in source order. Technical
+//! events (push, issues, comments, releases, forks, membership, public,
+//! branch/tag create-or-delete, unknown types) are removed without a placeholder
+//! or fallback card.
+//!
 //! The adapter surfaces `ETag`, `X-Poll-Interval` and `304 Not Modified` so the
 //! caller can schedule its own polling; it never polls in the background, never
-//! uses web cookies and never calls an internal endpoint. Only the minimal typed
-//! payload for recognised event types is retained; unknown types keep just the
-//! type name, so a new payload shape cannot grow without bound.
+//! uses web cookies and never calls an internal endpoint. Unknown types keep just
+//! the type name, so a new payload shape cannot grow without bound.
 
 use crate::auth::token::Pat;
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    FeedActor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason, FeedPayload,
-    FeedReadiness, FeedRepository, HomeError, Login,
+    FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason,
+    FeedPayload, FeedReadiness, FeedRepository, HomeError, Login, classify_feed_activity,
 };
 use crate::github::client::GitHubClient;
 use crate::github::error::{classify_status, classify_transport};
@@ -26,6 +32,8 @@ use std::collections::HashSet;
 const EVENTS_WINDOW_LIMIT: usize = 300;
 
 /// Defensive budgets for the feed adapter, bounded by the Events window.
+/// `max_events` counts parsed source events, not retained activities: the
+/// product filter is not allowed to trigger extra fetching to fill a page.
 #[derive(Debug, Clone)]
 pub struct FeedLimits {
     pub max_pages: usize,
@@ -103,6 +111,11 @@ pub async fn fetch_received_events(
     let mut etag: Option<String> = None;
     let mut poll_interval_seconds: Option<u64> = None;
     let mut pages_fetched = 0usize;
+    // Budgets count **parsed source events**, not retained activities: the Feed
+    // policy removes non-activities, and a filtered list must never trigger extra
+    // requests to fill a page. This is also why the retention filter below cannot
+    // be confused with truncation.
+    let mut parsed_events = 0usize;
 
     loop {
         if page as usize > limits.max_pages {
@@ -226,12 +239,19 @@ pub async fn fetch_received_events(
 
         let mut truncated = false;
         for raw in raw_events {
-            if events.len() >= limits.max_events {
+            if parsed_events >= limits.max_events {
                 truncated = true;
                 break;
             }
+            parsed_events += 1;
             let event = convert_event(raw)?;
-            if seen.insert(event.id.clone()) {
+            // Identity de-duplication uses the event id across pages, so a
+            // retained activity keeps its real source identity and a repeated
+            // non-activity cannot re-trigger it later.
+            if !seen.insert(event.id.clone()) {
+                continue;
+            }
+            if classify_feed_activity(&event).is_some() {
                 events.push(event);
             }
         }
@@ -239,7 +259,9 @@ pub async fn fetch_received_events(
             reasons.push(FeedPartialReason::EntryLimit);
             break;
         }
-
+        // A page that contained only non-activities is still a successfully read
+        // page: keep following `Link` within the same page budget instead of
+        // reporting a policy result as a truncated read.
         match next_page(client, response.header("link"), page)? {
             NextPage::None => break,
             NextPage::Page(next) => page = next,
@@ -359,6 +381,10 @@ fn convert_payload(type_name: &str, payload: &Value) -> (FeedEventType, FeedPayl
                 html_url: string_at(payload, &["pull_request", "html_url"]),
                 state: string_at(payload, &["pull_request", "state"]),
                 merged: bool_at(payload, &["pull_request", "merged"]),
+                // The real contributor, from the authoritative payload, so a
+                // maintainer's merge click is never credited as authorship and
+                // no extra pull-request request is needed.
+                author: author_at(payload, &["pull_request", "user"]),
             },
         ),
         "IssuesEvent" => (
@@ -457,6 +483,30 @@ fn bool_at(value: &Value, path: &[&str]) -> Option<bool> {
         current = current.get(*key)?;
     }
     current.as_bool()
+}
+
+/// Read a `{id, login, avatar_url}` user object. A user without both a numeric
+/// id and a non-empty login is not usable attribution evidence, so it is treated
+/// as absent rather than as a partial author.
+fn author_at(value: &Value, path: &[&str]) -> Option<FeedAuthor> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    let id = current.get("id")?.as_u64()?;
+    let login = current.get("login")?.as_str()?.trim();
+    if login.is_empty() {
+        return None;
+    }
+    Some(FeedAuthor {
+        id,
+        login: login.to_string(),
+        avatar_url: current
+            .get("avatar_url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+            .map(str::to_string),
+    })
 }
 
 enum NextPage {

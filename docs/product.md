@@ -98,13 +98,19 @@ account-shell 在正式 Shell 中加入的 **Settings › Accounts** 只承担�
 
 ### Home 与 Feed 的数据范围
 
-左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。负责人 2026-10-28 确认：查询固定为 `involves:当前已认证登录`，**不添加时间窗口**，按 `updated` 降序；不额外扩大到仅被请求评审等关系。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
+左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。负责人 2026-10-28 确认查询固定为 `involves:当前已认证登录`，**不添加时间窗口**，按 `updated` 降序；2026-10-30 追加确认**实际搜索查询必须包含 `is:open`**，Home 最终可见条目只能是 open 的 Issue/PR。不额外扩大到仅被请求评审等关系。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
 
-右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。已确认 Feed 保留服务返回顺序，展示现有 typed event 覆盖，未知类型简洁回退；不过滤，初始只提供手动刷新，不自动轮询，刷新遵守服务端限制。展示名称为 Feed，不要求每张卡片标注“API 事件流”。组件契约见 [Home / Feed 页面视图](home-view.md)，来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
+右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。负责人 2026-10-30 确认 Feed **只保留明确允许的活动**，去掉 Push 等技术噪声；当前实现三类：合并的 PR（标题为“<user> contributed to <owner>/<repo>”，`<user>` 取事件 payload 中真实的 PR 作者，而不是点了 merge 的维护者 actor）、星标仓库（`WatchEvent action=started`）与创建仓库（`CreateEvent ref_type=repository`）。Push、issue、评论、Release、Fork、成员、公开仓库、分支/标签创建删除、未知类型与非合并 PR 都不得生成卡片或占位回退。筛选后为空是正常最小空态，不是 API 错误或不完整页。
+
+**Follow 两类暂缓**：当前官方 Events API 事件类型列表没有 FollowEvent，followers/following 端点只返回关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types) 与 [followers](https://docs.github.com/en/rest/users/followers)）。负责人回答“先实现三类，关注两类暂缓”：本轮不实现 follow 卡片、不伪造时间戳、不抓取私有网页端点，也没有占位卡；“Followed someone / Followed me”保留为待可靠来源的后续需求，详见 [Home 视图](home-view.md) 与 [Home 查询服务](home-query-service.md)。
+
+组件契约见 [Home / Feed 页面视图](home-view.md)，来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
 
 ### Profile 的已确认读取与回退
 
 个人 README 来自目标用户公开的同名仓库（canonical owner/name 均为该用户 login）的**根目录普通 `README.md`**，按固定 commit/blob 读取；不把 `.github/` 或 `docs/` 下的 README 当作 Profile README。仓库 pins 保持服务顺序；观察到 gist pin 时只提示，不增加 gist 功能。**只有无 pin 且服务明确给出 Popular 回退时才展示 Popular**；gist-only、截断或不确定结果不擅自转 Popular。贡献图由正式 host 提供**最近滚动一年**的范围。当前这些是已合并 page-data 与 Profile 组件的已接受契约，正式 Shell 尚未调用；详见 [账户页面数据服务](page-data-service.md) 和 [Profile 展示组件](profile-view.md)。
+
+负责人 2026-10-30 另确认 Profile README 的呈现边界：**可选 README 缺失/不可用时，Profile 不渲染该 section，也不显示错误句**；README 可用时正文与 Profile 背景自然融合，保留文档自然完整高度与内部 padding；只有真实操作错误才保留内部诊断含义，并以紧凑、可操作的呈现给出。这是已确认意图；实现与真实窗口验证状态以 Profile 任务自身记录为准，不因写在本节而视为已验证。
 
 ## 视觉、字体与原生体验
 

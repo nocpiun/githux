@@ -100,8 +100,8 @@ async fn query_is_encoded_and_fixed_to_involves() {
     let url = &recorded[0].0;
     assert_eq!(
         query_of(url, "q").as_deref(),
-        Some("involves:test-user"),
-        "the query must be a fixed involves lookup"
+        Some("involves:test-user is:open"),
+        "the query must be a fixed involves lookup limited to open entries"
     );
     assert_eq!(query_of(url, "sort").as_deref(), Some("updated"));
     assert_eq!(query_of(url, "order").as_deref(), Some("desc"));
@@ -127,7 +127,7 @@ async fn updated_window_is_explicit_and_optional() {
     let url = &mock.recorded().await[0].0;
     assert_eq!(
         query_of(url, "q").as_deref(),
-        Some("involves:test-user"),
+        Some("involves:test-user is:open"),
         "no product default time window may be added"
     );
 
@@ -146,7 +146,7 @@ async fn updated_window_is_explicit_and_optional() {
     let url = &mock.recorded().await[0].0;
     assert_eq!(
         query_of(url, "q").as_deref(),
-        Some("involves:test-user updated:>=2024-01-01 updated:<=2024-12-31")
+        Some("involves:test-user is:open updated:>=2024-01-01 updated:<=2024-12-31")
     );
 }
 
@@ -460,7 +460,7 @@ async fn next_link_cannot_change_the_query_identity() {
     // The second request must still use our query, not the link's.
     assert_eq!(
         query_of(&recorded[1].0, "q").as_deref(),
-        Some("involves:test-user")
+        Some("involves:test-user is:open")
     );
     assert_eq!(query_of(&recorded[1].0, "sort").as_deref(), Some("updated"));
     assert_eq!(query_of(&recorded[1].0, "page").as_deref(), Some("2"));
@@ -488,6 +488,92 @@ async fn cancellation_is_a_hard_error() {
         mock.recorded().await.is_empty(),
         "cancelled call must not connect"
     );
+}
+
+#[tokio::test]
+async fn non_open_items_are_dropped_from_the_returned_list() {
+    // A cached/mocked or otherwise non-conforming response can still contain
+    // closed/merged/unknown entries even though the query asks for `is:open`.
+    // They must not reach the caller as rows, counts or selection indices.
+    let mut closed = item(1, 1, false);
+    closed["state"] = serde_json::json!("closed");
+    let mut merged_pr = item(2, 2, true);
+    merged_pr["state"] = serde_json::json!("closed");
+    let mut unknown = item(3, 3, false);
+    unknown["state"] = serde_json::json!("something-new");
+    let mut missing = item(4, 4, false);
+    missing.as_object_mut().unwrap().remove("state");
+
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        body(
+            6,
+            false,
+            vec![
+                item(5, 5, false),
+                closed,
+                item(6, 6, true),
+                merged_pr,
+                unknown,
+            ],
+        ),
+        None,
+    )))
+    .await;
+
+    let outcome = run(
+        &mock,
+        &HomeQuery::new(login("test-user")),
+        &HomeSearchLimits::default(),
+    )
+    .await
+    .expect("ok");
+    let ids: Vec<u64> = outcome.items.iter().map(|item| item.id).collect();
+    assert_eq!(ids, vec![5, 6], "only open entries may be returned");
+    assert!(
+        outcome.items.iter().all(|item| item.is_open()),
+        "no non-open item may be presented as open"
+    );
+    // Filtering out a non-open entry is not truncation and not an error.
+    assert_eq!(outcome.readiness, HomeReadiness::Complete);
+
+    // A missing `state` is not a parse failure of the page, it is simply not open.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(body(1, false, vec![missing]), None)))
+        .await;
+    let outcome = run(
+        &mock,
+        &HomeQuery::new(login("test-user")),
+        &HomeSearchLimits::default(),
+    )
+    .await
+    .expect("ok");
+    assert!(outcome.items.is_empty());
+    assert_eq!(outcome.readiness, HomeReadiness::Complete);
+}
+
+#[tokio::test]
+async fn the_open_filter_is_not_an_unrestricted_limit_page_hidden_afterwards() {
+    // The filter is part of the request, so the fetched page is the open set
+    // rather than a mixed page whose closed rows are hidden after the fact.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(body(0, false, vec![]), None))).await;
+    run(
+        &mock,
+        &HomeQuery::new(login("test-user")),
+        &HomeSearchLimits::default(),
+    )
+    .await
+    .expect("ok");
+    let url = &mock.recorded().await[0].0;
+    let q = query_of(url, "q").expect("q");
+    assert!(q.starts_with("involves:test-user "), "got {q}");
+    assert!(q.split(' ').any(|term| term == "is:open"), "got {q}");
+    // Ordering and pagination are unchanged by the filter.
+    assert_eq!(query_of(url, "sort").as_deref(), Some("updated"));
+    assert_eq!(query_of(url, "order").as_deref(), Some("desc"));
+    assert_eq!(query_of(url, "per_page").as_deref(), Some("100"));
+    assert_eq!(query_of(url, "page").as_deref(), Some("1"));
 }
 
 #[test]

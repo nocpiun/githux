@@ -227,6 +227,9 @@ pub(super) fn feed_repository(event: &FeedEvent) -> RepositoryIdentity {
     }
 }
 
+/// **Confirmed product policy:** only retained activities reach this renderer.
+/// A row whose event is not a retained activity has nothing truthful to show, so
+/// it renders nothing at all rather than a fallback or placeholder card.
 pub(super) fn feed_row(
     event: &FeedEvent,
     index: usize,
@@ -235,15 +238,20 @@ pub(super) fn feed_row(
     real_avatar: Option<AnyElement>,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
+    let Some(activity) = classify_feed_activity(event) else {
+        return div().into_any_element();
+    };
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let radius = theme.radius(Radius::Md);
     let body_size = theme.text_size(TextSize::Base);
     let tiny = theme.text_size(TextSize::Xs);
-    let actor = actor_name(&event.actor);
+    // The credited subject is the pull-request author for a merge and the event
+    // actor otherwise; the avatar renderer resolved the same identity.
+    let actor = actor_name(&activity.subject);
     let profile = ProfileIdentity {
-        id: Some(event.actor.id),
-        login: event.actor.login.clone(),
+        id: Some(activity.subject.id),
+        login: activity.subject.login.clone(),
     };
     let actor_link = if profile.login.trim().is_empty() {
         div().child(actor.clone()).into_any_element()
@@ -287,9 +295,22 @@ pub(super) fn feed_row(
         now,
         cx,
     );
-    let details = event_details(event);
     let repo = repository_links(feed_repository(event), &format!("feed-{index}"), cx);
-    let mut inset = div()
+    // The merged card reads exactly `<contributor> contributed to <owner>/<repo>`,
+    // so its repository target sits on the header line; the inset then carries the
+    // pull-request title. Star/create cards keep the repository in the inset. No
+    // branch, ref, SHA or commit prose appears in either case.
+    let merged = activity.kind == FeedActivityKind::PullRequestMerged;
+    let sentence = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .text_size(body_size)
+        .child(actor_link)
+        .child(div().min_w_0().child(action_sentence(event)));
+    let inset = div()
         .debug_selector(move || format!("feed-details-{index}"))
         .flex()
         .flex_col()
@@ -297,24 +318,35 @@ pub(super) fn feed_row(
         .min_w_0()
         .p_3()
         .rounded(radius)
-        .bg(colors.sunken)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .text_size(tiny)
-                .text_color(colors.fg_muted)
-                .child(Icon::new(IconName::Folder).size(IconSize::Xs))
-                .child(div().min_w_0().child(repo)),
-        );
-    if let Some(label) = details.title {
-        let icon = if matches!(event.event_type, FeedEventType::PullRequest) {
-            IconName::GitPullRequest
-        } else {
-            IconName::CircleDot
-        };
+        .bg(colors.sunken);
+    // Exactly one of the two cards owns the repository element.
+    let (sentence, inset) = if merged {
+        (sentence.child(div().min_w_0().child(repo)), inset)
+    } else {
+        (
+            sentence,
+            inset.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .text_size(tiny)
+                    .text_color(colors.fg_muted)
+                    .child(Icon::new(IconName::Folder).size(IconSize::Xs))
+                    .child(div().min_w_0().child(repo)),
+            ),
+        )
+    };
+    let mut inset = inset;
+    if let Some(target) = &activity.pull_request {
+        let mut label = target
+            .title
+            .clone()
+            .unwrap_or_else(|| "Pull request".to_string());
+        if let Some(number) = target.number {
+            label.push_str(&format!(" #{number}"));
+        }
         inset = inset.child(
             div()
                 .flex()
@@ -322,35 +354,12 @@ pub(super) fn feed_row(
                 .gap_2()
                 .min_w_0()
                 .text_size(body_size)
-                .child(Icon::new(icon).size(IconSize::Sm).color(if details.merged {
-                    colors.accent
-                } else {
-                    colors.fg_muted
-                }))
+                .child(
+                    Icon::new(IconName::GitPullRequest)
+                        .size(IconSize::Sm)
+                        .color(colors.accent),
+                )
                 .child(title(Column::Feed, index, label, cx)),
-        );
-    }
-    if let Some(status) = details.status {
-        inset = inset.child(
-            div()
-                .debug_selector(move || format!("feed-item-status-{index}"))
-                .text_size(tiny)
-                .text_color(if details.merged {
-                    colors.accent
-                } else {
-                    colors.fg_subtle
-                })
-                .child(status),
-        );
-    }
-    for detail in details.lines {
-        inset = inset.child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_size(tiny)
-                .text_color(colors.fg_subtle)
-                .child(detail),
         );
     }
     div()
@@ -391,17 +400,7 @@ pub(super) fn feed_row(
                                 .gap_1()
                                 .flex_1()
                                 .min_w_0()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_1()
-                                        .min_w_0()
-                                        .text_size(body_size)
-                                        .child(actor_link)
-                                        .child(div().min_w_0().child(action_sentence(event))),
-                                )
+                                .child(sentence)
                                 .child(when),
                         ),
                 )
@@ -417,6 +416,10 @@ pub(super) struct EventDetails {
     pub lines: Vec<String>,
 }
 
+/// Details for a retained activity. The three kinds that survive
+/// [`classify_feed_activity`] are the only ones with a description; anything else
+/// has no truthful details and yields the empty shape. No branch, ref, SHA or
+/// commit-count prose is produced.
 pub(super) fn event_details(event: &FeedEvent) -> EventDetails {
     let mut details = EventDetails {
         title: None,
@@ -424,166 +427,31 @@ pub(super) fn event_details(event: &FeedEvent) -> EventDetails {
         merged: false,
         lines: Vec::new(),
     };
-    match (&event.event_type, &event.payload) {
-        (
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                number,
-                title,
-                state,
-                merged,
-                ..
-            },
-        ) => {
-            details.title = Some(format!(
-                "{}{}",
-                nonempty(
-                    title.as_deref().unwrap_or(""),
-                    "Pull request title unavailable"
-                ),
-                optional_number(*number)
-            ));
-            details.merged = *merged == Some(true);
-            details.status = Some(if details.merged {
-                "Merged".to_string()
-            } else {
-                nonempty(state.as_deref().unwrap_or(""), "Status unavailable")
-            });
-        }
-        (
-            FeedEventType::Issues,
-            FeedPayload::Issues {
-                number,
-                title,
-                state,
-                ..
-            },
-        ) => {
-            details.title = Some(format!(
-                "{}{}",
-                nonempty(title.as_deref().unwrap_or(""), "Issue title unavailable"),
-                optional_number(*number)
-            ));
-            details.status = Some(nonempty(
-                state.as_deref().unwrap_or(""),
-                "Status unavailable",
-            ));
-        }
-        (FeedEventType::IssueComment, FeedPayload::IssueComment { issue_number, .. }) => {
-            details.title = Some(format!("Issue{}", optional_number(*issue_number)));
-            details
-                .lines
-                .push("Comment body is not supplied by this event.".into());
-        }
-        (
-            FeedEventType::Push,
-            FeedPayload::Push {
-                git_ref,
-                before,
-                head,
-                size,
-            },
-        ) => {
-            details.lines.push(size.map_or_else(
-                || "Commit count unavailable".into(),
-                |count| {
-                    format!(
-                        "{count} {} pushed",
-                        if count == 1 { "commit" } else { "commits" }
-                    )
-                },
-            ));
-            details.lines.push(format!(
-                "Ref: {}",
-                nonempty(git_ref.as_deref().unwrap_or(""), "unavailable")
-            ));
-            if let Some(before) = before.as_deref().filter(|v| !v.trim().is_empty()) {
-                details.lines.push(format!("Before: {before}"));
-            }
-            if let Some(head) = head.as_deref().filter(|v| !v.trim().is_empty()) {
-                details.lines.push(format!("Head: {head}"));
-            }
-        }
-        (FeedEventType::Create, FeedPayload::Create { ref_type, git_ref })
-        | (FeedEventType::Delete, FeedPayload::Delete { ref_type, git_ref }) => {
-            details.lines.push(format!(
-                "{}{}",
-                nonempty(
-                    ref_type.as_deref().unwrap_or(""),
-                    "Resource type unavailable"
-                ),
-                optional_suffix(": ", git_ref.as_deref())
-            ));
-        }
-        (FeedEventType::Fork, FeedPayload::Fork { forkee_full_name }) => {
-            details.lines.push(format!(
-                "Fork: {}",
-                nonempty(
-                    forkee_full_name.as_deref().unwrap_or(""),
-                    "name unavailable"
-                )
-            ))
-        }
-        (FeedEventType::Release, FeedPayload::Release { tag_name, name, .. }) => {
-            details.lines.push(format!(
-                "Release: {}",
-                nonempty(name.as_deref().unwrap_or(""), "name unavailable")
-            ));
-            details.lines.push(format!(
-                "Tag: {}",
-                nonempty(tag_name.as_deref().unwrap_or(""), "unavailable")
-            ));
-        }
-        (FeedEventType::Member, FeedPayload::Member { member_login, .. }) => {
-            details.lines.push(format!(
-                "Member: {}",
-                nonempty(member_login.as_deref().unwrap_or(""), "login unavailable")
-            ))
-        }
-        (FeedEventType::Unknown(name), _) => details.lines.push(format!(
-            "{} · Event details unavailable",
-            nonempty(name, "Unknown event")
-        )),
-        (FeedEventType::Watch, _) | (FeedEventType::Public, _) => {}
-        _ => details.lines.push("Event details unavailable".into()),
+    let Some(activity) = classify_feed_activity(event) else {
+        return details;
+    };
+    if let Some(target) = &activity.pull_request {
+        details.merged = true;
+        details.title = Some(match &target.title {
+            Some(title) => format!("{title}{}", optional_number(target.number)),
+            None => format!("Pull request{}", optional_number(target.number)),
+        });
+        details.status = Some("Merged".to_string());
     }
     details
 }
 
+/// The compact actor/action sentence of a retained activity.
 pub(super) fn action_sentence(event: &FeedEvent) -> String {
-    match (&event.event_type, &event.payload) {
-        (FeedEventType::Push, _) => "pushed to the repository".into(),
-        (FeedEventType::PullRequest, FeedPayload::PullRequest { action, merged, .. }) => format!(
-            "{} a pull request",
-            if *merged == Some(true) {
-                "merged".into()
-            } else {
-                nonempty(action, "updated")
-            }
-        ),
-        (FeedEventType::Issues, FeedPayload::Issues { action, .. }) => {
-            format!("{} an issue", nonempty(action, "updated"))
-        }
-        (FeedEventType::IssueComment, FeedPayload::IssueComment { action, .. }) => {
-            format!("{} a comment", nonempty(action, "updated"))
-        }
-        (FeedEventType::Watch, _) => "starred the repository".into(),
-        (FeedEventType::Create, _) => "created a repository resource".into(),
-        (FeedEventType::Delete, _) => "deleted a repository resource".into(),
-        (FeedEventType::Fork, _) => "forked the repository".into(),
-        (FeedEventType::Release, FeedPayload::Release { action, .. }) => {
-            format!("{} a release", nonempty(action, "updated"))
-        }
-        (FeedEventType::Public, _) => "made the repository public".into(),
-        (FeedEventType::Member, FeedPayload::Member { action, .. }) => {
-            format!("{} a repository member", nonempty(action, "updated"))
-        }
-        (FeedEventType::Unknown(name), _) => {
-            format!("shared {} activity", nonempty(name, "unknown"))
-        }
-        _ => "updated repository activity".into(),
+    match classify_feed_activity(event).map(|activity| activity.kind) {
+        Some(FeedActivityKind::PullRequestMerged) => "contributed to ".into(),
+        Some(FeedActivityKind::RepositoryStarred) => "starred the repository".into(),
+        Some(FeedActivityKind::RepositoryCreated) => "created the repository".into(),
+        // Not a retained activity: it renders no card, so no sentence is invented.
+        None => String::new(),
     }
 }
+
 fn actor_name(actor: &FeedActor) -> String {
     actor
         .display_login
@@ -593,14 +461,22 @@ fn actor_name(actor: &FeedActor) -> String {
         .unwrap_or("Unknown actor")
         .to_string()
 }
+/// Accessibility/one-line description of a retained activity. It credits the
+/// activity subject (the pull-request author for a merge), never the actor who
+/// merely clicked merge.
 pub(super) fn event_description(event: &FeedEvent) -> String {
+    let Some(activity) = classify_feed_activity(event) else {
+        return String::new();
+    };
     let details = event_details(event);
     format!(
         "{} {} {}",
-        actor_name(&event.actor),
+        actor_name(&activity.subject),
         action_sentence(event),
         details.title.unwrap_or_default()
     )
+    .trim()
+    .to_string()
 }
 fn nonempty(value: &str, fallback: &str) -> String {
     if value.trim().is_empty() {
@@ -611,9 +487,4 @@ fn nonempty(value: &str, fallback: &str) -> String {
 }
 fn optional_number(number: Option<u64>) -> String {
     number.map_or_else(String::new, |number| format!(" #{number}"))
-}
-fn optional_suffix(prefix: &str, value: Option<&str>) -> String {
-    value
-        .filter(|v| !v.trim().is_empty())
-        .map_or_else(String::new, |value| format!("{prefix}{value}"))
 }

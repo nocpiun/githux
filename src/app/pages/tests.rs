@@ -112,14 +112,23 @@ impl Transport for PageTransport {
                 ));
             }
             if url.contains("/search/issues") {
+                // One open item and one closed item: the confirmed Home rule must
+                // return only the open one even if a non-conforming page leaks a
+                // closed row.
                 return Ok(json(
                     200,
                     serde_json::json!({
-                        "total_count": 1, "incomplete_results": false,
+                        "total_count": 2, "incomplete_results": false,
                         "items": [{
                             "id": 900, "number": 12, "title": "Synthetic involved issue",
                             "html_url": "https://github.com/alice/demo/issues/12",
                             "state": "open", "updated_at": "2026-10-28T10:00:00Z",
+                            "repository_url": "https://api.github.com/repos/alice/demo",
+                            "pull_request": null
+                        }, {
+                            "id": 901, "number": 13, "title": "Synthetic closed issue",
+                            "html_url": "https://github.com/alice/demo/issues/13",
+                            "state": "closed", "updated_at": "2026-10-28T09:00:00Z",
                             "repository_url": "https://api.github.com/repos/alice/demo",
                             "pull_request": null
                         }]
@@ -136,6 +145,9 @@ impl Transport for PageTransport {
                 ));
             }
             if url.contains("/received_events") {
+                // A retained star and a retained merged pull request, plus a push
+                // and an issue event that the Feed policy must drop without a
+                // placeholder card.
                 return Ok(HttpResponse {
                     status: 200,
                     headers: vec![("x-poll-interval".into(), "1".into())],
@@ -145,6 +157,24 @@ impl Transport for PageTransport {
                         "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
                         "payload": {"action": "started"},
                         "created_at": "2026-10-28T09:00:00Z"
+                    }, {
+                        "id": "evt-2", "type": "PushEvent",
+                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
+                        "payload": {"ref": "refs/heads/main", "before": "a", "head": "b", "size": 1},
+                        "created_at": "2026-10-28T08:00:00Z"
+                    }, {
+                        "id": "evt-3", "type": "PullRequestEvent",
+                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
+                        "payload": {
+                            "action": "closed", "number": 5,
+                            "pull_request": {
+                                "title": "Synthetic merged pull request", "state": "closed", "merged": true,
+                                "user": {"id": 8, "login": "carol", "avatar_url": null}
+                            }
+                        },
+                        "created_at": "2026-10-28T07:00:00Z"
                     }])
                     .to_string(),
                 });
@@ -510,6 +540,31 @@ fn the_shell_mounts_real_home_and_reads_its_two_columns(cx: &mut TestAppContext)
         "Feed requests the received-events endpoint"
     );
     assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
+    // The real adapter filtered the closed search hit and the push event before
+    // the view published them: only the open Home item and the two retained Feed
+    // activities have rows.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("home-item-row-0").is_some(),
+        "the open Home item is visible"
+    );
+    assert!(
+        cx.debug_bounds("home-item-row-1").is_none(),
+        "the closed Home item must not have a row"
+    );
+    assert!(
+        cx.debug_bounds("feed-event-row-0").is_some(),
+        "the retained star is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-event-row-1").is_some(),
+        "the retained merged pull request is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-event-row-2").is_none(),
+        "the push event must not have a row"
+    );
 }
 
 #[gpui::test]

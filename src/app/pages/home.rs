@@ -66,7 +66,6 @@ pub struct HomePage {
     feed_ready: Option<Instant>,
     feed_cooldown_task: Option<gpui::Task<()>>,
     view: Entity<HomeView>,
-    avatars: PageAvatars,
     navigation: NavigationSink,
     _changed: Subscription,
 }
@@ -84,43 +83,18 @@ impl HomePage {
         let binding = RequestBinding::new(format!("home:{}:{incarnation}", tab.get()));
         let view = cx.new(|cx| HomeView::new(binding.clone(), 0, window, cx));
         // Feed images resolve through the same controller-owned loader as the sidebar. The view
-        // receives decoded images only; it never sees a URL or performs a request.
-        let avatar_page = cx.weak_entity();
-        view.update(cx, |view, _| {
-            view.set_avatar_renderer(Rc::new(move |event, index, cx| {
-                let page = avatar_page.upgrade()?;
-                let avatars = page.read(cx).avatars.clone();
-                let key = AvatarKey::new(
-                    "github.com",
-                    event.actor.id,
-                    event.actor.avatar_url.clone()?,
-                );
-                avatars
-                    .element(
-                        &format!("home-feed-avatar-{}-{index}", event.actor.id),
-                        &format!("home-feed-real-avatar-{index}"),
-                        &event.actor.login,
-                        Some(key),
-                        AvatarSlot::Size(ely_core::theme::AvatarSize::Lg),
-                        cx,
-                    )
-                    .into()
-            }));
-        });
-        // One callback handles refresh locally and all typed navigation in this host.
+        // receives decoded images only; it never sees a URL or performs a request. The renderer
+        // is installed exactly once and receives the credited activity subject, which for a merged
+        // pull request is the payload author, not the maintainer actor.
         let page_weak = cx.weak_entity();
         let avatar_loader = avatars.clone();
         view.update(cx, |view, _| {
-            view.set_avatar_renderer(Rc::new(move |event, index, cx| {
-                let key = AvatarKey::new(
-                    "github.com",
-                    event.actor.id,
-                    event.actor.avatar_url.clone()?,
-                );
+            view.set_avatar_renderer(Rc::new(move |subject, index, cx| {
+                let key = AvatarKey::new("github.com", subject.id, subject.avatar_url.clone()?);
                 Some(avatar_loader.element(
-                    &format!("home-feed-avatar-{}-{index}", event.actor.id),
+                    &format!("home-feed-avatar-{}-{index}", subject.id),
                     &format!("home-feed-real-avatar-{index}"),
-                    &event.actor.login,
+                    &subject.login,
                     Some(key),
                     AvatarSlot::Size(ely_core::theme::AvatarSize::Lg),
                     cx,
@@ -153,7 +127,6 @@ impl HomePage {
             feed_ready: None,
             feed_cooldown_task: None,
             view,
-            avatars,
             navigation,
             _changed,
         };

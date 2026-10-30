@@ -32,10 +32,11 @@ pub use account::{AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId
 pub use error::GitHubError;
 #[allow(unused_imports)]
 pub use home::{
-    DateBound, FeedActor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason,
-    FeedPayload, FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind,
-    HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
-    UpdatedWindow,
+    DateBound, FeedActivity, FeedActivityKind, FeedActivityTarget, FeedActor, FeedAuthor,
+    FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason, FeedPayload,
+    FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind, HomePartialReason, HomeQuery,
+    HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login, UpdatedWindow,
+    classify_feed_activity,
 };
 #[allow(unused_imports)]
 pub use profile::{

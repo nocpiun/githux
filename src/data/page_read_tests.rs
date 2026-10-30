@@ -240,7 +240,9 @@ async fn home_and_feed_use_captured_login_credentials_bounds_and_no_validators()
     assert!(
         requests[2]
             .url
-            .contains("q=involves%3Aauthoritative+updated%3A%3E%3D2026-10-01")
+            .contains("q=involves%3Aauthoritative+is%3Aopen+updated%3A%3E%3D2026-10-01"),
+        "the confirmed Home query keeps involves + is:open and the explicit window: {}",
+        requests[2].url
     );
     assert!(
         requests[2].url.contains("sort=updated")

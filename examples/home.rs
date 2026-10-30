@@ -27,7 +27,7 @@ use gpui::{
 
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    FeedActor, FeedEvent, FeedEventType, FeedOutcome, FeedPartialReason, FeedPayload,
+    FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedOutcome, FeedPartialReason, FeedPayload,
     FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind, HomePartialReason,
     HomeReadiness, HomeRepositoryRef, HomeSearchOutcome,
 };
@@ -51,6 +51,10 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         label: "Partial",
         build: partial,
+    },
+    Scenario {
+        label: "Filtered out",
+        build: filtered_out,
     },
     Scenario {
         label: "Empty / unavailable",
@@ -90,7 +94,9 @@ impl Preview {
         });
         let mut preview = Self {
             home: home.clone(),
-            scenario: 0,
+            // A preview-only switch so a capture/verification run can start on a
+            // named scenario without a click. It never affects product code.
+            scenario: initial_scenario(),
             binding,
             generation: 1,
             action,
@@ -271,6 +277,23 @@ impl Render for Preview {
     }
 }
 
+/// Parse the optional preview-only scenario selector: a label (case-insensitive)
+/// or a 0-based index. Unknown values fall back to the first scenario.
+fn initial_scenario() -> usize {
+    let Some(argument) = std::env::args().nth(1) else {
+        return 0;
+    };
+    if let Ok(index) = argument.parse::<usize>()
+        && index < SCENARIOS.len()
+    {
+        return index;
+    }
+    SCENARIOS
+        .iter()
+        .position(|scenario| scenario.label.eq_ignore_ascii_case(&argument))
+        .unwrap_or(0)
+}
+
 fn fixture_time(index: usize) -> Option<String> {
     match index % 8 {
         0 => Some("2026-10-28T11:50:00Z".into()),
@@ -284,6 +307,9 @@ fn fixture_time(index: usize) -> Option<String> {
     }
 }
 
+/// Home only presents open entries. The fixtures therefore contain open items
+/// only: closed/merged/unknown states are covered by the view/adapter tests,
+/// which assert they never become a row.
 fn item(index: usize) -> HomeItem {
     HomeItem {
         id: 9_000 + index as u64,
@@ -299,12 +325,7 @@ fn item(index: usize) -> HomeItem {
             format!("Synthetic work item {index}")
         },
         html_url: String::new(),
-        state: if index.is_multiple_of(2) {
-            "open"
-        } else {
-            "closed"
-        }
-        .to_string(),
+        state: "open".to_string(),
         updated_at: fixture_time(index).unwrap_or_default(),
         repository: HomeRepositoryRef {
             owner: "synthetic-owner".to_string(),
@@ -313,93 +334,40 @@ fn item(index: usize) -> HomeItem {
     }
 }
 
+/// The merged pull request is authored by a contributor and produced by a
+/// different (maintainer) actor, so the credited identity is visible in preview.
+const CONTRIBUTOR_LOGIN: &str = "synthetic-contributor";
+
 fn event(index: usize) -> FeedEvent {
-    let kind = index % 12;
-    let (event_type, payload) = match kind {
+    let (event_type, payload) = match index % 3 {
         0 => (
-            FeedEventType::Push,
-            FeedPayload::Push {
-                git_ref: Some("refs/heads/main".into()),
-                before: None,
-                head: None,
-                size: Some(3),
+            FeedEventType::PullRequest,
+            FeedPayload::PullRequest {
+                action: "closed".into(),
+                number: Some(42),
+                title: Some("Synthetic merged pull request".into()),
+                html_url: None,
+                state: Some("closed".into()),
+                merged: Some(true),
+                author: Some(FeedAuthor {
+                    id: 90_001,
+                    login: CONTRIBUTOR_LOGIN.into(),
+                    avatar_url: None,
+                }),
             },
         ),
         1 => (
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "opened".into(),
-                number: Some(42),
-                title: Some("Synthetic pull request".into()),
-                html_url: None,
-                state: Some("open".into()),
-                merged: None,
-            },
-        ),
-        2 => (
-            FeedEventType::Issues,
-            FeedPayload::Issues {
-                action: "closed".into(),
-                number: Some(7),
-                title: Some("Synthetic issue".into()),
-                html_url: None,
-                state: Some("closed".into()),
-            },
-        ),
-        3 => (
-            FeedEventType::IssueComment,
-            FeedPayload::IssueComment {
-                action: "created".into(),
-                issue_number: Some(7),
-                comment_url: None,
-            },
-        ),
-        4 => (
             FeedEventType::Watch,
             FeedPayload::Watch {
                 action: "started".into(),
             },
         ),
-        5 => (
+        _ => (
             FeedEventType::Create,
             FeedPayload::Create {
-                ref_type: Some("branch".into()),
-                git_ref: Some("preview".into()),
+                ref_type: Some("repository".into()),
+                git_ref: None,
             },
-        ),
-        6 => (
-            FeedEventType::Delete,
-            FeedPayload::Delete {
-                ref_type: Some("branch".into()),
-                git_ref: Some("preview".into()),
-            },
-        ),
-        7 => (
-            FeedEventType::Fork,
-            FeedPayload::Fork {
-                forkee_full_name: Some("synthetic-user/fork".into()),
-            },
-        ),
-        8 => (
-            FeedEventType::Release,
-            FeedPayload::Release {
-                action: "published".into(),
-                tag_name: Some("v1.0.0".into()),
-                name: None,
-                html_url: None,
-            },
-        ),
-        9 => (FeedEventType::Public, FeedPayload::Public),
-        10 => (
-            FeedEventType::Member,
-            FeedPayload::Member {
-                action: "added".into(),
-                member_login: Some("synthetic-member".into()),
-            },
-        ),
-        _ => (
-            FeedEventType::Unknown("FutureSyntheticEvent".into()),
-            FeedPayload::Unknown,
         ),
     };
     FeedEvent {
@@ -420,6 +388,117 @@ fn event(index: usize) -> FeedEvent {
         public: true,
         payload,
     }
+}
+
+/// Events the Feed product policy must exclude. They are passed through the real
+/// `apply_feed` (which filters them) so the preview proves no placeholder card
+/// appears for push/issue/comment/release/fork/membership/branch/tag/unknown or
+/// non-merged pull requests.
+fn filtered_noise() -> Vec<FeedEvent> {
+    let base = |index: usize, event_type: FeedEventType, payload: FeedPayload| {
+        let mut event = event(index);
+        event.id = format!("synthetic-noise-{index}");
+        event.event_type = event_type;
+        event.payload = payload;
+        event
+    };
+    vec![
+        base(
+            100,
+            FeedEventType::Push,
+            FeedPayload::Push {
+                git_ref: Some("refs/heads/main".into()),
+                before: None,
+                head: None,
+                size: Some(3),
+            },
+        ),
+        base(
+            101,
+            FeedEventType::Issues,
+            FeedPayload::Issues {
+                action: "closed".into(),
+                number: Some(7),
+                title: Some("Synthetic issue".into()),
+                html_url: None,
+                state: Some("closed".into()),
+            },
+        ),
+        base(
+            102,
+            FeedEventType::IssueComment,
+            FeedPayload::IssueComment {
+                action: "created".into(),
+                issue_number: Some(7),
+                comment_url: None,
+            },
+        ),
+        base(
+            103,
+            FeedEventType::Release,
+            FeedPayload::Release {
+                action: "published".into(),
+                tag_name: Some("v1.0.0".into()),
+                name: None,
+                html_url: None,
+            },
+        ),
+        base(
+            104,
+            FeedEventType::Create,
+            FeedPayload::Create {
+                ref_type: Some("branch".into()),
+                git_ref: Some("preview".into()),
+            },
+        ),
+        base(
+            105,
+            FeedEventType::Delete,
+            FeedPayload::Delete {
+                ref_type: Some("branch".into()),
+                git_ref: Some("preview".into()),
+            },
+        ),
+        base(
+            106,
+            FeedEventType::PullRequest,
+            FeedPayload::PullRequest {
+                action: "opened".into(),
+                number: Some(43),
+                title: Some("Synthetic open pull request".into()),
+                html_url: None,
+                state: Some("open".into()),
+                merged: None,
+                author: Some(FeedAuthor {
+                    id: 90_002,
+                    login: "synthetic-contributor".into(),
+                    avatar_url: None,
+                }),
+            },
+        ),
+        base(
+            107,
+            FeedEventType::PullRequest,
+            FeedPayload::PullRequest {
+                action: "closed".into(),
+                number: Some(44),
+                title: Some("Synthetic unmerged pull request".into()),
+                html_url: None,
+                state: Some("closed".into()),
+                merged: Some(false),
+                author: Some(FeedAuthor {
+                    id: 90_003,
+                    login: "synthetic-contributor".into(),
+                    avatar_url: None,
+                }),
+            },
+        ),
+        base(
+            108,
+            FeedEventType::Unknown("FutureSyntheticEvent".into()),
+            FeedPayload::Unknown,
+        ),
+    ]
 }
 
 fn search(items: Vec<HomeItem>, readiness: HomeReadiness) -> HomeSearchOutcome {
@@ -469,6 +548,15 @@ fn partial() -> (HomeSearchOutcome, FeedOutcome) {
                 reasons: vec![FeedPartialReason::PageLimit],
             },
         ),
+    )
+}
+
+/// Every received event is technical noise, so the Feed column must be the
+/// normal minimal empty state while Home stays populated.
+fn filtered_out() -> (HomeSearchOutcome, FeedOutcome) {
+    (
+        search((0..3).map(item).collect(), HomeReadiness::Complete),
+        feed(filtered_noise(), FeedReadiness::Complete),
     )
 }
 

@@ -30,7 +30,9 @@ use gpui::{
     Pixels, Point, Render, Subscription, Task, Window, div, prelude::*, px,
 };
 
-use crate::domain::home::{FeedOutcome, HomeError, HomeItem, HomeSearchOutcome};
+use crate::domain::home::{
+    FeedOutcome, HomeError, HomeItem, HomeSearchOutcome, classify_feed_activity,
+};
 use crate::ui::scroll::{self, Bars, Motion, ScrollTarget};
 
 use presentation::home_summary;
@@ -121,10 +123,12 @@ pub enum HomeAction {
 }
 
 pub type OnAction = Rc<dyn Fn(HomeAction, &mut Window, &mut App)>;
-/// Optional host presentation hook. The component supplies a stable actor identity and receives
-/// an already-resolved avatar element; no image request or cache belongs to HomeView.
+/// Optional host presentation hook. The component supplies the stable identity of the
+/// credited activity subject (the pull-request author for a merge, the event actor
+/// otherwise) and receives an already-resolved avatar element; no image request or
+/// cache belongs to HomeView.
 pub type AvatarRenderer =
-    Rc<dyn Fn(&crate::domain::home::FeedEvent, usize, &mut App) -> Option<AnyElement>>;
+    Rc<dyn Fn(&crate::domain::home::FeedActor, usize, &mut App) -> Option<AnyElement>>;
 
 /// Successful data, a hard failure, or a host-declared no-data state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -560,16 +564,23 @@ impl HomeView {
     /// Applies a typed result only if it belongs to the current binding and
     /// generation. The keyboard selection is cleared so it can never keep
     /// pointing at an entry from an older snapshot.
+    ///
+    /// Non-open entries are dropped here as well as in the adapter. The adapter
+    /// already asks GitHub for `is:open`, so this is a defense for fixtures,
+    /// retained/partial snapshots and any future non-conforming data path: a
+    /// closed, merged or unknown state must never become a visible row, a
+    /// keyboard selection index or an activation target.
     pub fn apply_home(
         &mut self,
         binding: &RequestBinding,
         generation: u64,
-        outcome: HomeSearchOutcome,
+        mut outcome: HomeSearchOutcome,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.accepts(binding, generation) {
             return false;
         }
+        outcome.items.retain(HomeItem::is_open);
         self.home_view.motion.cancel();
         self.home_view.pending_reveal = None;
         self.home_view
@@ -594,6 +605,12 @@ impl HomeView {
         if !self.accepts(binding, generation) {
             return false;
         }
+        // One policy rule for every data path: only retained activities are
+        // published, in source order. The filtered count is what rows, keyboard
+        // selection and activation indices refer to. Readiness is untouched, so
+        // a policy-only empty Feed stays Complete instead of looking partial (and
+        // a genuinely truncated source read stays Partial).
+        let outcome = outcome.filtered();
         self.feed_view.motion.cancel();
         self.feed_view.pending_reveal = None;
         self.feed_view
@@ -1136,14 +1153,19 @@ impl PanelRows for FeedOutcome {
         cx: &mut Context<HomeView>,
     ) -> AnyElement {
         let event = view.feed.state.data().unwrap().events[index].clone();
+        // The avatar belongs to the credited subject, which can differ from the
+        // event actor for a merged pull request.
+        let subject = classify_feed_activity(&event).map(|activity| activity.subject);
         feed_row(
             &event,
             index,
             view.feed_view.selected == Some(index),
             view.now,
-            view.avatar_renderer
-                .as_ref()
-                .and_then(|render| render(&event, index, cx)),
+            subject.as_ref().and_then(|subject| {
+                view.avatar_renderer
+                    .as_ref()
+                    .and_then(|render| render(subject, index, cx))
+            }),
             cx,
         )
     }
@@ -1262,8 +1284,8 @@ fn panel_body<T: PanelRows + 'static>(
         .text_center()
         .text_color(colors.fg_subtle)
         .child(match column {
-            Column::Home => "No Issues or pull requests matched this search.",
-            Column::Feed => "No events were returned in this Feed snapshot.",
+            Column::Home => "No open Issues or pull requests matched this search.",
+            Column::Feed => "No starred repositories, new repositories, or merged pull requests in this Feed snapshot.",
         })
         .into_any_element();
     div()

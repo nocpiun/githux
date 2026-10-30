@@ -1,6 +1,6 @@
 # Home / Profile / 仓库附加资料的账户数据服务
 
-更新：2026-10-28。已实现于 `src/data/page_reads.rs`；它是现有低层 GitHub 适配器与后续页面集成之间的**账户作用域在线读取 facade**，不是 UI view model，也不表示三个页面已经接入真实数据。低层接口、字段和错误契约继续分别见 [Home/Feed](home-query-service.md)、[Profile](profile-api-service.md)、[仓库附加资料](repository-extras-service.md)，本文不替代这些文档。
+更新：2026-10-30。已实现于 `src/data/page_reads.rs`；它是现有低层 GitHub 适配器与后续页面集成之间的**账户作用域在线读取 facade**，不是 UI view model，也不表示三个页面已经接入真实数据。低层接口、字段和错误契约继续分别见 [Home/Feed](home-query-service.md)、[Profile](profile-api-service.md)、[仓库附加资料](repository-extras-service.md)，本文不替代这些文档。
 
 ## 一个 session，一个授权归属
 
@@ -30,8 +30,9 @@ let home = pages.home(updated_window, &HomeSearchLimits::default(), cancel.clone
 let feed = pages.feed(&FeedLimits::default(), cancel).await?;
 ```
 
-- `home` 固定使用捕获活动账户的 login，查询仍为 `involves:<login>`、`updated` 降序。`Option<UpdatedWindow>` 是显式调用参数；传 `None` 不加时间窗口，不提供隐藏默认日期，不增加筛选或 review-requested 关系。
-- `feed` 同样派生捕获 login，是显式在线 received-events 读取；不自动轮询。`FeedOutcome` 原样保留 ETag、`X-Poll-Interval` 和分页 readiness 供未来刷新集成。
+- `home` 固定使用捕获活动账户的 login，查询为 `involves:<login> is:open`、`updated` 降序，最终只发布 open 条目。`Option<UpdatedWindow>` 是显式调用参数；传 `None` 不加时间窗口，不提供隐藏默认日期，不增加 review-requested 关系。
+- `feed` 同样派生捕获 login，是显式在线 received-events 读取；不自动轮询。低层适配器已应用 `classify_feed_activity`，所以 `FeedOutcome.events` 只含合并 PR、星标仓库、创建仓库三类活动，保持服务顺序；`FeedOutcome` 原样保留 ETag、`X-Poll-Interval` 和分页 readiness。
+- 策略过滤不是分页失败：整页都是技术噪声时仍是 `Complete` 空 Feed，真实上游分页失败仍为对应 Partial。Follow 两类暂缓，不在此层合成事件。
 - 本切片不接受、保存或发送 Feed 条件验证器。无验证器却收到 304 时，facade 返回 `HomeError::InvalidResponse`，绝不发布 `NotModified` 或空事件。未来只有具备相同账户/参数/表示的已验证缓存值后，才能另接条件读取。
 - `HomeReadiness` / `FeedReadiness` 的 Partial、空集合、SSO、分页、限流和错误语义不变。
 
@@ -84,7 +85,7 @@ let languages = pages.languages(&repository, &extras_limits, cancel).await?;
 
 本层不建立第二套 DTO：`HomeSearchOutcome`、`FeedFetch`、`ProfileBasic`、`ProfilePinned`、`ContributionCalendar`、`ReleasesOutcome`、`LatestReleaseOutcome`、`ContributorsOutcome`、`LanguagesOutcome` 和 `PreparedContent` 直接供页面消费。UI 自己决定展示策略和本地 request identity，不接触 PAT。
 
-本轮没有 UI/Shell/repository-browser 挂载、缓存或存储、请求合并、轮询、自动刷新、离线读取、条件重验证、图片下载或 Home 新筛选。fixture preview 与真实数据接入是不同事项；即使后续页面接受这些模型，也不表示已完成生产接线。离线缓存、验证器与表示的对应关系、账户移除后的私有内容政策仍待相应集成任务明确实现。
+本轮没有缓存或存储、请求合并、轮询、自动刷新、离线读取、条件重验证或图片下载。fixture preview 与真实数据接入是不同事项；即使后续页面接受这些模型，也不表示已完成生产接线。离线缓存、验证器与表示的对应关系、账户移除后的私有内容政策仍待相应集成任务明确实现。
 
 ## 验证
 
