@@ -713,6 +713,27 @@ fn template_nesting_is_tracked_across_blocks() {
 }
 
 #[test]
+fn tables_balance_when_suppression_ends_inside_a_cell() {
+    let doc = parse("<template>\n\n| header |\n| --- |\n| </template> visible |\n\nafter");
+    let text = copied(&doc.blocks);
+    assert!(text.contains("visible"), "{doc:?}");
+    assert!(text.contains("after"), "{doc:?}");
+    assert!(!text.contains("header"), "{doc:?}");
+}
+
+#[test]
+fn completed_templates_do_not_hide_the_prefix_of_an_unclosed_one() {
+    let doc = parse(
+        "<template>closed</template><p>visible</p><template>\n\nhidden\n\n</template>\n\nafter",
+    );
+    let text = copied(&doc.blocks);
+    assert!(text.contains("visible"), "{doc:?}");
+    assert!(text.contains("after"), "{doc:?}");
+    assert!(!text.contains("hidden"), "{doc:?}");
+    assert!(!text.contains("closed"), "{doc:?}");
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

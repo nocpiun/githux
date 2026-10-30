@@ -689,6 +689,24 @@ pub struct DroppedSpan {
     pub depth: usize,
 }
 
+/// Find the actual outstanding opening, continuing past completed same-name
+/// spans. Its byte position is the boundary of the readable prefix.
+pub fn outstanding_span(fragment: &str, name: &str) -> DroppedSpan {
+    let mut offset = 0;
+    loop {
+        let mut span = dropped_span(&fragment[offset..], name, 0);
+        if let Some(after) = span.tail_start {
+            offset += after;
+            if offset < fragment.len() {
+                continue;
+            }
+        }
+        span.head_end += offset;
+        span.tail_start = None;
+        return span;
+    }
+}
+
 /// Locate the dropped span `name` inside `fragment`.
 ///
 /// Nesting is counted across fragments: `depth` carries how many same-name

@@ -453,15 +453,26 @@ pub fn parse(markdown: &str) -> Document {
                     }
                     continue;
                 }
-                Event::Start(Tag::List(_))
-                | Event::End(TagEnd::List(_))
-                | Event::Start(Tag::Item)
-                | Event::End(TagEnd::Item)
-                | Event::Start(Tag::BlockQuote(_))
-                | Event::End(TagEnd::BlockQuote(_)) => balance_suppressed(&event, &mut stack),
-                _ => {}
+                // Keep every block container balanced, including tables and
+                // footnotes. Inline output remains suppressed, but their end
+                // events must never pop a container that was never opened.
+                Event::Start(
+                    Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Strikethrough
+                    | Tag::Link { .. }
+                    | Tag::Image { .. },
+                )
+                | Event::End(
+                    TagEnd::Emphasis
+                    | TagEnd::Strong
+                    | TagEnd::Strikethrough
+                    | TagEnd::Link
+                    | TagEnd::Image,
+                ) => continue,
+                Event::Start(_) | Event::End(_) => {}
+                _ => continue,
             }
-            continue;
         }
         // Inside a table cell an image note has nowhere to go, so the alt
         // text must stay in place instead of being moved after the cell.
@@ -819,7 +830,7 @@ pub fn parse(markdown: &str) -> Document {
                         dropped = Some((name, span.depth));
                     }
                 } else if let Some((open, depth)) = unclosed_dropped(&text) {
-                    let head_end = html::dropped_span(&text, &open, 0).head_end;
+                    let head_end = html::outstanding_span(&text, &open).head_end;
                     for block in html_blocks(&text[..head_end]) {
                         push_block(&mut stack, block);
                     }
@@ -941,7 +952,7 @@ fn unclosed_node(nodes: &[Node], fragment: &str) -> Option<(String, usize)> {
     for node in nodes.iter().rev() {
         match node {
             Node::Suppressed(name) => {
-                return Some((name.clone(), html::dropped_span(fragment, name, 0).depth));
+                return Some((name.clone(), html::outstanding_span(fragment, name).depth));
             }
             Node::Element(element)
                 if html::is_dropped(&element.name)
@@ -950,7 +961,7 @@ fn unclosed_node(nodes: &[Node], fragment: &str) -> Option<(String, usize)> {
             {
                 return Some((
                     element.name.clone(),
-                    html::dropped_span(fragment, &element.name, 0).depth,
+                    html::outstanding_span(fragment, &element.name).depth,
                 ));
             }
             Node::Element(element) => {
@@ -964,26 +975,11 @@ fn unclosed_node(nodes: &[Node], fragment: &str) -> Option<(String, usize)> {
     None
 }
 
-/// Split a fragment around the dropped element `name`.
-///
-/// `head` is the readable markup before the element opens, or before its close
-/// when suppression is already active. `tail` is `Some` only when this
-/// fragment carries the outermost closing tag, holding the readable markup
-/// after it.
-fn split_dropped(fragment: &str, name: &str, depth: usize) -> (String, Option<String>) {
-    let span = html::dropped_span(fragment, name, depth);
-    let head = fragment[..span.head_end.min(fragment.len())].to_string();
-    let tail = span
-        .tail_start
-        .map(|start| fragment[start.min(fragment.len())..].to_string());
-    (head, tail)
-}
-
 /// Convert the readable text after a dropped close, then resume suppression if
 /// that suffix itself opens another dropped element.
 fn apply_block_suffix(stack: &mut [Container], dropped: &mut Option<(String, usize)>, tail: &str) {
     if let Some((open, depth)) = unclosed_dropped(tail) {
-        let head_end = html::dropped_span(tail, &open, 0).head_end;
+        let head_end = html::outstanding_span(tail, &open).head_end;
         for block in html_blocks(&tail[..head_end]) {
             push_block(stack, block);
         }
@@ -992,51 +988,6 @@ fn apply_block_suffix(stack: &mut [Container], dropped: &mut Option<(String, usi
         for block in html_blocks(tail) {
             push_block(stack, block);
         }
-    }
-}
-
-/// Apply a container event while its content is suppressed, keeping the
-/// stack balanced.
-fn balance_suppressed(event: &Event<'_>, stack: &mut Vec<Container>) {
-    match event {
-        Event::Start(Tag::List(start)) => stack.push(Container::List {
-            start: *start,
-            items: Vec::new(),
-            current: Vec::new(),
-            task: None,
-        }),
-        Event::End(TagEnd::Item) => {
-            if let Some(Container::List {
-                items,
-                current,
-                task,
-                ..
-            }) = stack.last_mut()
-            {
-                items.push((task.take(), std::mem::take(current)));
-            }
-        }
-        Event::End(TagEnd::List(_)) => {
-            if let Some(Container::List { start, items, .. }) = stack.pop() {
-                push_block(stack, Block::List { start, items });
-            }
-        }
-        Event::Start(Tag::BlockQuote(_)) => stack.push(Container::Blocks {
-            out: Vec::new(),
-            quote: None,
-        }),
-        Event::End(TagEnd::BlockQuote(_)) => {
-            if let Some(Container::Blocks { out, .. }) = stack.pop() {
-                push_block(
-                    stack,
-                    Block::Quote {
-                        kind: None,
-                        body: out,
-                    },
-                );
-            }
-        }
-        _ => {}
     }
 }
 
