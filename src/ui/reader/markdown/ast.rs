@@ -397,16 +397,42 @@ pub fn parse(markdown: &str) -> Document {
         // Inline HTML is handled by its builder, which owns the same spans
         // between `InlineHtml` events.
         if let Some(name) = dropped.clone() {
-            if let Event::Html(text) = &event
-                && closes_dropped(text, &name)
-            {
-                dropped = None;
+            if let Event::Html(text) = &event {
+                // Only the dropped span disappears: keep the readable prefix
+                // and suffix of the fragment that also carries its close.
+                // While suppressing, only markup after the real closing tag
+                // is readable; everything before it belongs to the dropped
+                // element even when this fragment also carries other tags.
+                let (_, tail) = split_dropped(text, &name);
+                if let Some(tail) = tail {
+                    dropped = None;
+                    for block in html_blocks(&tail) {
+                        push_block(&mut stack, block);
+                    }
+                }
+            }
+            // Container structure still has to balance so an item or list that
+            // opened before the dropped element can close; its content does
+            // not reach the model.
+            match &event {
+                Event::Start(Tag::List(_))
+                | Event::End(TagEnd::List(_))
+                | Event::Start(Tag::Item)
+                | Event::End(TagEnd::Item)
+                | Event::Start(Tag::BlockQuote(_))
+                | Event::End(TagEnd::BlockQuote(_)) => balance_suppressed(&event, &mut stack),
+                _ => {}
             }
             continue;
-        }
-        if let Event::Html(text) = &event
+        } else if let Event::Html(text) = &event
             && let Some(open) = unclosed_dropped(text)
         {
+            // Convert the part before the dropped element, then suppress the
+            // rest of this fragment and everything until its closing tag.
+            let (head, _) = split_dropped(text, &open);
+            for block in html_blocks(&head) {
+                push_block(&mut stack, block);
+            }
             dropped = Some(open);
             continue;
         }
@@ -878,14 +904,61 @@ fn unclosed_node(nodes: &[Node]) -> Option<String> {
     None
 }
 
-/// Whether `fragment` contains the closing tag of a dropped element `name`.
+/// Split a fragment around the dropped element `name`.
 ///
-/// Only real end tags count: a `</template>` inside a comment or a longer name
-/// such as `</templates>` must not resume suppression.
-fn closes_dropped(fragment: &str, name: &str) -> bool {
-    html::parse(fragment)
-        .iter()
-        .any(|node| matches!(node, Node::End(end) if end == name))
+/// `head` is the readable markup before the element opens, or before its close
+/// when suppression is already active. `tail` is `Some` only when this
+/// fragment carries the real closing tag, holding the readable markup after it.
+fn split_dropped(fragment: &str, name: &str) -> (String, Option<String>) {
+    let (head_end, tail_start) = html::dropped_bounds(fragment, name);
+    let head = fragment[..head_end.min(fragment.len())].to_string();
+    let tail = tail_start.map(|start| fragment[start.min(fragment.len())..].to_string());
+    (head, tail)
+}
+
+/// Apply a container event while its content is suppressed, keeping the
+/// stack balanced.
+fn balance_suppressed(event: &Event<'_>, stack: &mut Vec<Container>) {
+    match event {
+        Event::Start(Tag::List(start)) => stack.push(Container::List {
+            start: *start,
+            items: Vec::new(),
+            current: Vec::new(),
+            task: None,
+        }),
+        Event::End(TagEnd::Item) => {
+            if let Some(Container::List {
+                items,
+                current,
+                task,
+                ..
+            }) = stack.last_mut()
+            {
+                items.push((task.take(), std::mem::take(current)));
+            }
+        }
+        Event::End(TagEnd::List(_)) => {
+            if let Some(Container::List { start, items, .. }) = stack.pop() {
+                push_block(stack, Block::List { start, items });
+            }
+        }
+        Event::Start(Tag::BlockQuote(_)) => stack.push(Container::Blocks {
+            out: Vec::new(),
+            quote: None,
+        }),
+        Event::End(TagEnd::BlockQuote(_)) => {
+            if let Some(Container::Blocks { out, .. }) = stack.pop() {
+                push_block(
+                    stack,
+                    Block::Quote {
+                        kind: None,
+                        body: out,
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Walk `nodes` as block content, turning inline runs into paragraphs.

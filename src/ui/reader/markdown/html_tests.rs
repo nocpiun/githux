@@ -582,3 +582,26 @@ fn html_entities_keep_non_breaking_spaces() {
         "ordinary HTML ASCII runs keep collapsing"
     );
 }
+
+#[test]
+fn a_dropped_span_keeps_the_content_before_and_after_it() {
+    let doc = parse("<p>before</p><template>\n\nhidden\n\n</template>\n\nafter");
+    let text = copied(&doc.blocks);
+    assert!(text.contains("before"), "{text:?}");
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}
+
+#[test]
+fn a_list_that_opens_the_dropped_span_still_closes_normally() {
+    let doc = parse("- <template>\n\nhidden\n\n</template>\n\nafter");
+    let text = copied(&doc.blocks);
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+    assert!(
+        doc.blocks.iter().any(
+            |block| matches!(block, Block::Paragraph(inline) if inline.text.contains("after"))
+        ),
+        "the trailing paragraph lands in the root, not a stale list: {doc:?}"
+    );
+}

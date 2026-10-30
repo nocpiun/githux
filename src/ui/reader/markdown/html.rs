@@ -671,3 +671,67 @@ fn push_text(stack: &mut [Element], roots: &mut Vec<Node>, text: String) {
         attach(stack, roots, Node::Text(text));
     }
 }
+
+/// Byte bounds of the span occupied by element `name` in `fragment`.
+///
+/// Returns `(head_end, tail_start)`. `head_end` is where readable content ends:
+/// the opening tag when the element opens here, or the start of the closing tag
+/// when the fragment only closes a span opened in an earlier fragment.
+/// `tail_start` is `Some` only when this fragment contains the real end tag, and
+/// marks where readable content can resume.
+///
+/// Only the tokenizer's own view counts, so a `</template>` inside a comment or
+/// a longer name such as `</templates>` never closes the span.
+pub fn dropped_bounds(fragment: &str, name: &str) -> (usize, Option<usize>) {
+    let bytes = fragment.as_bytes();
+    let len = bytes.len();
+    let mut depth = 0usize;
+    let mut head_end = len;
+    let mut i = 0;
+    while i < len {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let Some((tag, next)) = scan_tag(fragment, i) else {
+            i += 1;
+            continue;
+        };
+        match tag {
+            Tag::Start {
+                name: tag_name,
+                self_closing,
+                ..
+            } if tag_name == name => {
+                if depth == 0 {
+                    head_end = head_end.min(i);
+                }
+                if is_raw_text(&tag_name) {
+                    let (_, after, closed) = raw_content(fragment, next, &tag_name);
+                    if closed && depth == 0 {
+                        return (head_end, Some(after));
+                    }
+                    i = after;
+                    continue;
+                }
+                if !self_closing && !is_void(&tag_name) {
+                    depth += 1;
+                }
+            }
+            Tag::End { name: tag_name } if tag_name == name => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (head_end, Some(next));
+                    }
+                } else {
+                    // This fragment only closes a span opened earlier.
+                    return (i, Some(next));
+                }
+            }
+            _ => {}
+        }
+        i = next;
+    }
+    (head_end, None)
+}
