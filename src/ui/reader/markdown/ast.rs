@@ -456,7 +456,7 @@ pub fn parse(markdown: &str) -> Document {
                             dropped = Some((name, span.depth));
                         }
                         let tail = &text[start..];
-                        apply_block_suffix(&mut stack, &mut dropped, tail);
+                        apply_block_suffix(&mut stack, &mut dropped, &mut dropped_raw, tail);
                     } else {
                         dropped = Some((name, span.depth));
                     }
@@ -731,7 +731,7 @@ pub fn parse(markdown: &str) -> Document {
                 if let Some(Container::Cell(cell)) = stack.last_mut()
                     && let Some((_, pending)) = inline.take()
                 {
-                    if dropped.is_none() && pending.suppressed_raw.is_none() {
+                    if dropped.is_none() {
                         dropped = pending.suppressed.clone();
                         dropped_raw = pending.suppressed_raw.clone();
                     }
@@ -845,13 +845,15 @@ pub fn parse(markdown: &str) -> Document {
                             dropped = Some((name, span.depth));
                         }
                         let tail = text[start..].to_string();
-                        apply_block_suffix(&mut stack, &mut dropped, &tail);
+                        apply_block_suffix(&mut stack, &mut dropped, &mut dropped_raw, &tail);
                     } else {
                         // Still inside the dropped span; the block is content.
                         dropped = Some((name, span.depth));
                     }
                 } else if let Some((open, depth)) = unclosed_dropped(&text) {
-                    let head_end = html::outstanding_span(&text, &open).head_end;
+                    let (span, raw) = html::outstanding_span_context(&text, &open);
+                    let head_end = span.head_end;
+                    dropped_raw = raw;
                     for block in html_blocks(&text[..head_end]) {
                         push_block(&mut stack, block);
                     }
@@ -1024,9 +1026,16 @@ fn unclosed_node(nodes: &[Node], fragment: &str) -> Option<(String, usize)> {
 
 /// Convert the readable text after a dropped close, then resume suppression if
 /// that suffix itself opens another dropped element.
-fn apply_block_suffix(stack: &mut [Container], dropped: &mut Option<(String, usize)>, tail: &str) {
+fn apply_block_suffix(
+    stack: &mut [Container],
+    dropped: &mut Option<(String, usize)>,
+    dropped_raw: &mut Option<String>,
+    tail: &str,
+) {
     if let Some((open, depth)) = unclosed_dropped(tail) {
-        let head_end = html::outstanding_span(tail, &open).head_end;
+        let (span, raw) = html::outstanding_span_context(tail, &open);
+        let head_end = span.head_end;
+        *dropped_raw = raw;
         for block in html_blocks(&tail[..head_end]) {
             push_block(stack, block);
         }

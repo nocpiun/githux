@@ -820,6 +820,18 @@ fn nested_raw_text_survives_inline_to_document_transfer() {
 }
 
 #[test]
+fn raw_text_context_transfers_from_cells_and_block_openings() {
+    for source in [
+        "| h |\n|---|\n| before <template><script> |\n\n![hidden](secret.png)\n\n</script></template>\n\nafter",
+        "<template><script>\n\n</template>\n\n![hidden](secret.png)\n\n</script></template>\n\nafter",
+    ] {
+        let doc = parse(source);
+        assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+        assert!(copied(&doc.blocks).contains("after"), "{doc:?}");
+    }
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

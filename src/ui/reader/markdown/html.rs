@@ -761,9 +761,16 @@ pub struct DroppedSpan {
 /// Find the actual outstanding opening, continuing past completed same-name
 /// spans. Its byte position is the boundary of the readable prefix.
 pub fn outstanding_span(fragment: &str, name: &str) -> DroppedSpan {
+    outstanding_span_context(fragment, name).0
+}
+
+/// Keep the raw-text context alongside the outstanding opening; dropping it
+/// during inline/cell/block transfers could accept an outer close in a script.
+pub fn outstanding_span_context(fragment: &str, name: &str) -> (DroppedSpan, Option<String>) {
     let mut offset = 0;
     loop {
-        let mut span = dropped_span(&fragment[offset..], name, 0);
+        let mut raw = None;
+        let mut span = scan_dropped_span(&fragment[offset..], name, 0, &mut raw);
         if let Some(after) = span.tail_start {
             offset += after;
             if offset < fragment.len() {
@@ -772,7 +779,7 @@ pub fn outstanding_span(fragment: &str, name: &str) -> DroppedSpan {
         }
         span.head_end += offset;
         span.tail_start = None;
-        return span;
+        return (span, raw);
     }
 }
 
