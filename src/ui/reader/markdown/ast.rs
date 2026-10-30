@@ -612,11 +612,19 @@ pub fn parse(markdown: &str) -> Document {
                     in_cell: true,
                     ..Building::default()
                 }));
+                // Keep every inline event in one builder from the first cell
+                // byte onward. Starting one only when Markdown emphasis opens
+                // splits the HTML stack and loses closing-tag positions.
+                inline = Some((
+                    None,
+                    Building {
+                        in_cell: true,
+                        ..Building::default()
+                    },
+                ));
             }
             Event::End(TagEnd::TableCell) => {
-                // `open()` may have started a separate builder for emphasis or
-                // a link. Flush it into the cell before collecting the cell,
-                // otherwise its text and link are lost with the builder.
+                // Collect the single builder used by this cell.
                 if let Some(Container::Cell(cell)) = stack.last_mut()
                     && let Some((_, pending)) = inline.take()
                 {

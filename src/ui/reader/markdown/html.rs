@@ -184,11 +184,6 @@ pub(crate) const MAX_DEPTH: usize = 256;
 /// arbitrary `u64` from `<ol start="…">` could overflow. This leaves room for
 /// far more items than a 2 MiB document can hold.
 pub(crate) const MAX_LIST_START: u64 = u64::MAX - (1 << 32);
-/// Elements dropped with their entire raw content (no readable text).
-fn is_raw_dropped(name: &str) -> bool {
-    matches!(name, "script" | "style" | "template")
-}
-
 /// Parse an HTML fragment into a tolerant element tree.
 ///
 /// Unmatched end tags are ignored, unmatched start tags stay open until the
@@ -228,15 +223,15 @@ pub fn parse(fragment: &str) -> Vec<Node> {
                 self_closing,
             } => {
                 if is_raw_text(&name) {
-                    let (content, next) = raw_content(fragment, next, &name);
-                    if is_raw_dropped(&name) && next >= len {
+                    let (content, next, closed) = raw_content(fragment, next, &name);
+                    if is_dropped(&name) && !closed {
                         attach(&mut stack, &mut roots, Node::Suppressed(name));
-                    } else if !is_raw_dropped(&name) {
+                    } else if !is_dropped(&name) {
                         let element = Element {
                             name,
                             attrs,
                             children: vec![Node::Text(decode_entities(&content))],
-                            closed: true,
+                            closed,
                         };
                         attach(&mut stack, &mut roots, Node::Element(element));
                     }
@@ -606,7 +601,7 @@ fn scan_tag(fragment: &str, i: usize) -> Option<(Tag, usize)> {
     ))
 }
 
-fn raw_content(fragment: &str, start: usize, name: &str) -> (String, usize) {
+fn raw_content(fragment: &str, start: usize, name: &str) -> (String, usize, bool) {
     let needle = format!("</{name}");
     let mut search = start;
     while let Some(offset) = find_ci(&fragment[search..], &needle) {
@@ -616,15 +611,18 @@ fn raw_content(fragment: &str, start: usize, name: &str) -> (String, usize) {
         let boundary = fragment.as_bytes().get(after).copied();
         if boundary.is_none_or(|byte| byte == b'>' || byte == b'/' || byte.is_ascii_whitespace()) {
             let content_end = search + offset;
-            let next = fragment[content_end..]
-                .find('>')
-                .map(|gt| content_end + gt + 1)
-                .unwrap_or(fragment.len());
-            return (fragment[start..content_end].to_string(), next);
+            if let Some(gt) = fragment[content_end..].find('>') {
+                return (
+                    fragment[start..content_end].to_string(),
+                    content_end + gt + 1,
+                    true,
+                );
+            }
+            break;
         }
         search = after;
     }
-    (fragment[start..].to_string(), fragment.len())
+    (fragment[start..].to_string(), fragment.len(), false)
 }
 
 fn find_ci(haystack: &str, needle: &str) -> Option<usize> {

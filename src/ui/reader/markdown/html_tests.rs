@@ -450,6 +450,43 @@ fn html_links_survive_markdown_emphasis_inside_a_cell() {
 }
 
 #[test]
+fn mixed_markdown_cells_close_html_before_the_trailing_text() {
+    let doc = parse(
+        "| link | style |\n|---|---|\n| <a href=\"guide.md\">read *this*</a> outside | <b>bold *word*</b> outside |",
+    );
+    let Block::Table { rows, .. } = &doc.blocks[0] else {
+        panic!("expected table: {doc:?}");
+    };
+    let link = &rows[0][0];
+    assert_eq!(link.text, "read this outside");
+    assert_eq!(link.links, vec![(0..9, "guide.md".into())]);
+    let style = &rows[0][1];
+    assert_eq!(style.text, "bold word outside");
+    assert!(style.styles.contains(&(0..9, Style::Strong)), "{style:?}");
+    assert!(style.styles.contains(&(5..9, Style::Emphasis)), "{style:?}");
+}
+
+#[test]
+fn inline_title_content_is_dropped_until_its_real_closing_tag() {
+    for source in [
+        "before <title>hidden</title> after",
+        "| heading |\n|---|\n| before <title>hidden</title> after |",
+    ] {
+        let doc = parse(source);
+        let text = copied(&doc.blocks);
+        assert!(text.contains("before after"), "{text:?}");
+        assert!(!text.contains("hidden"), "{text:?}");
+    }
+    // An end tag at the exact end of the fragment is still a real close.
+    let nodes = html::parse("<title>hidden</title>");
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| matches!(node, html::Node::Suppressed(_)))
+    );
+}
+
+#[test]
 fn html_ranges_never_point_into_removed_image_alt_text() {
     let doc = parse("![ab<b>x](a)中文</b>");
     let paragraph = find_paragraph(&doc.blocks, "中文");
