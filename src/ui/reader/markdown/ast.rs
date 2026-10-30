@@ -338,6 +338,8 @@ pub fn parse(markdown: &str) -> Document {
     }];
     // Paragraph or heading text being collected.
     let mut inline: Option<(Option<u8>, Building)> = None;
+    // The dropped element whose closing tag has not arrived yet.
+    let mut dropped: Option<String> = None;
     let mut code: Option<(Option<String>, String)> = None;
     let mut html_buffer = String::new();
     let mut footnotes: Vec<String> = Vec::new();
@@ -388,6 +390,26 @@ pub fn parse(markdown: &str) -> Document {
     }
 
     for event in Parser::new_ext(markdown, options) {
+        // Dropped HTML can span several pulldown-cmark blocks: a blank line
+        // ends one `HtmlBlock`, and the elements inside it arrive as ordinary
+        // Markdown events. Finalizing that block must not end the suppression,
+        // so this state lives here rather than only inside an inline builder.
+        // Inline HTML is handled by its builder, which owns the same spans
+        // between `InlineHtml` events.
+        if let Some(name) = dropped.clone() {
+            if let Event::Html(text) = &event
+                && closes_dropped(text, &name)
+            {
+                dropped = None;
+            }
+            continue;
+        }
+        if let Event::Html(text) = &event
+            && let Some(open) = unclosed_dropped(text)
+        {
+            dropped = Some(open);
+            continue;
+        }
         // Inside a table cell an image note has nowhere to go, so the alt
         // text must stay in place instead of being moved after the cell.
         let in_cell = matches!(stack.last(), Some(Container::Cell(_)));
@@ -826,6 +848,44 @@ fn html_blocks(fragment: &str) -> Vec<Block> {
     let mut out = Vec::new();
     blocks_from_nodes(&nodes, &mut out);
     out
+}
+
+/// The dropped element a fragment opens without closing, if any.
+///
+/// A block-HTML fragment can end at a blank line while the element is still
+/// open; its content continues as ordinary Markdown, so the caller keeps
+/// suppressing until the matching end tag arrives in a later fragment.
+fn unclosed_dropped(fragment: &str) -> Option<String> {
+    let nodes = html::parse(fragment);
+    unclosed_node(&nodes)
+}
+
+fn unclosed_node(nodes: &[Node]) -> Option<String> {
+    for node in nodes.iter().rev() {
+        match node {
+            Node::Suppressed(name) => return Some(name.clone()),
+            Node::Element(element) if html::is_dropped(&element.name) && !element.closed => {
+                return Some(element.name.clone());
+            }
+            Node::Element(element) => {
+                if let Some(open) = unclosed_node(&element.children) {
+                    return Some(open);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether `fragment` contains the closing tag of a dropped element `name`.
+///
+/// Only real end tags count: a `</template>` inside a comment or a longer name
+/// such as `</templates>` must not resume suppression.
+fn closes_dropped(fragment: &str, name: &str) -> bool {
+    html::parse(fragment)
+        .iter()
+        .any(|node| matches!(node, Node::End(end) if end == name))
 }
 
 /// Walk `nodes` as block content, turning inline runs into paragraphs.

@@ -314,11 +314,14 @@ fn collect_raw_text(nodes: &[Node], out: &mut String) {
 
 /// Collapse HTML whitespace runs to one space, keeping one leading/trailing
 /// space when the input had whitespace there.
+///
+/// Only HTML's ASCII whitespace collapses. `&nbsp;` and other Unicode spaces
+/// are content: they keep the author's spacing and prevent wrapping.
 pub fn collapse_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut pending = false;
     for ch in text.chars() {
-        if ch.is_whitespace() {
+        if is_html_whitespace(ch) {
             pending = true;
         } else {
             if pending {
@@ -332,6 +335,11 @@ pub fn collapse_whitespace(text: &str) -> String {
         out.push(' ');
     }
     out
+}
+
+/// The ASCII whitespace the HTML parser itself treats as collapsible.
+pub fn is_html_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{0c}')
 }
 
 /// Decode the HTML character references this reader supports.

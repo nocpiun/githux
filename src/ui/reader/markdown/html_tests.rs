@@ -553,3 +553,32 @@ fn html_inline_style_ranges_stay_on_char_boundaries() {
         );
     }
 }
+
+#[test]
+fn dropped_elements_stay_dropped_across_html_block_boundaries() {
+    for tag in ["template", "iframe", "object", "style", "script"] {
+        let source = format!("<{tag}>\n\n![hidden](secret.png)\n\n</{tag}>\n\nafter");
+        let doc = parse(&source);
+        assert!(!debug(&doc.blocks).contains("secret.png"), "{tag}: {doc:?}");
+        assert_eq!(copied(&doc.blocks).trim(), "after", "{tag}: {doc:?}");
+    }
+    // A comment or a longer name must not resume the dropped span.
+    let doc = parse(
+        "<template>\n\n![hidden](secret.png)\n\n<!-- </template> -->\n\n</templates>\n\nstill hidden\n\n</template>\n\nafter",
+    );
+    let text = copied(&doc.blocks);
+    assert!(!text.contains("still hidden"), "{text:?}");
+    assert_eq!(text.trim(), "after", "{text:?}");
+}
+
+#[test]
+fn html_entities_keep_non_breaking_spaces() {
+    let doc = parse("<p>a&nbsp;&nbsp;b</p>\n\n<p>c   d</p>");
+    let text = find_paragraph(&doc.blocks, "a\u{a0}");
+    assert_eq!(text.text, "a\u{a0}\u{a0}b");
+    assert_eq!(
+        find_paragraph(&doc.blocks, "c").text,
+        "c d",
+        "ordinary HTML ASCII runs keep collapsing"
+    );
+}
