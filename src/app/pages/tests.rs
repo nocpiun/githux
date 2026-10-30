@@ -332,6 +332,50 @@ fn repository_contributor_navigation_is_deferred_and_opens_a_profile(cx: &mut Te
 }
 
 #[gpui::test]
+fn own_contributor_link_activates_the_existing_profile_tab(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    // Open the signed-in user's own profile from the sidebar first.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Profile, window, cx);
+    });
+    cx.run_until_parked();
+    let own = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let tabs = view.read_with(cx, |shell, _| shell.tab_count());
+    // Then follow the same user's contributor link from a repository page.
+    let rows = view.read_with(cx, |shell, _| shell.repositories().to_vec());
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::repository(&rows[0]), window, cx);
+    });
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate_contributor_for_test("alice", window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Profile,
+        "the signed-in user's contributor link resolves to the own-profile route"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        own,
+        "it activates the already-open profile tab"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_count()),
+        tabs + 1,
+        "only the repository tab was added; no second profile page"
+    );
+}
+
+#[gpui::test]
 fn feed_refresh_is_reenabled_when_its_server_poll_interval_expires(cx: &mut TestAppContext) {
     let transport = Arc::new(PageTransport::default());
     let (view, controller, cx) = open_shell(cx, transport.clone());

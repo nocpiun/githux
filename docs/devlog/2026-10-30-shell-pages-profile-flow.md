@@ -30,3 +30,9 @@
 
 - 真实窗口的原生鼠标/键盘、IME、多 DPI、触控板仍未由本轮自动化证明；本机远程会话中窗口会被系统最小化，截取的整页画面不能证明原生交互。
 - 负责人已在本地查看窗口；本轮不把合成截屏当作验收证据。
+
+## 审查反馈修复（同 head 后续）
+
+- **重复解码 contributor 头像**：`sync_repository_avatars` 由 Shell 每帧调用，原实现每帧把已缓存的 `Image` 重新转成 `RenderImage`，`set_avatar_image` 才丢弃。新增 `RepositoryOverview::has_avatar_image(binding, user_id)`，同步时先查询，已附加者直接跳过，不再解码。回归：`avatar_image_presence_is_queryable_so_hosts_skip_repeated_decoding`。
+- **本人 contributor 链接重复建页**：repository contributor 原先硬编码 `Route::UserProfile`，与侧栏/Home 的 `Route::Profile` 键不同，导致本人已开 Profile 标签不被复用。改为统一 `Route::profile(login, active_account)` 归一化；回归：`own_contributor_link_activates_the_existing_profile_tab` 断言路由、复用同一 TabId、只新增仓库标签。
+- 检查：fmt/clippy `-D warnings`/`test --locked`（主 binary 795 项及全部 target）通过。

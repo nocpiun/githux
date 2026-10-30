@@ -798,6 +798,8 @@ impl Shell {
         }
     }
 
+    /// Routes a contributor link exactly like the production repository host: through
+    /// `Route::profile` so the signed-in user's own profile reuses `Route::Profile`.
     #[cfg(test)]
     pub fn navigate_contributor_for_test(
         &mut self,
@@ -805,15 +807,23 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let active = self
+            .accounts
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .and_then(|accounts| {
+                let accounts = accounts.read(cx);
+                let snapshot = accounts.snapshot();
+                let key = snapshot.active.clone()?;
+                snapshot
+                    .accounts
+                    .iter()
+                    .find(|summary| summary.identity.key == key)
+                    .cloned()
+            });
+        let route = Route::profile(login, active.as_ref());
         let sink = self.page_navigation_sink(cx);
-        sink(
-            crate::app::pages::PageNavigation::Open(Route::UserProfile {
-                host: crate::domain::HostId::github(),
-                login: login.to_string(),
-            }),
-            window,
-            cx,
-        );
+        sink(crate::app::pages::PageNavigation::Open(route), window, cx);
     }
 
     #[cfg(test)]

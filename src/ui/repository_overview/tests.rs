@@ -183,6 +183,32 @@ fn ready(h: &Entity<Harness>, cx: &mut VisualTestContext) {
     apply_languages(h, &b, SectionState::Ready(fixtures::ready_languages()), cx);
 }
 #[gpui::test]
+fn avatar_image_presence_is_queryable_so_hosts_skip_repeated_decoding(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    ready(&h, cx);
+    let view = overview(&h, cx);
+    let binding = view.read_with(cx, |v, _| v.binding().clone());
+    // Nothing attached yet: a host must decode on the first frame.
+    assert!(!view.read_with(cx, |v, _| v.has_avatar_image(&binding, 100)));
+    let pixels = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 200, 30, 255]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let image = cx.update(|_, cx| {
+        gpui::Image::from_bytes(gpui::ImageFormat::Png, png.into_inner())
+            .to_image_data(cx.svg_renderer())
+            .unwrap()
+    });
+    view.update(cx, |v, cx| {
+        assert!(v.set_avatar_image(&binding, 100, image.clone(), cx));
+    });
+    // Attached: the host can skip the decode entirely on later repaints.
+    assert!(view.read_with(cx, |v, _| v.has_avatar_image(&binding, 100)));
+    // A different contributor or a stale binding is still a miss.
+    assert!(!view.read_with(cx, |v, _| v.has_avatar_image(&binding, 101)));
+    assert!(!view.read_with(cx, |v, _| v.has_avatar_image(&fixtures::binding(2), 100)));
+}
+
+#[gpui::test]
 fn actions_are_scoped_and_anonymous_is_not_navigable(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     ready(&h, cx);

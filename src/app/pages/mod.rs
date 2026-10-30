@@ -131,6 +131,9 @@ pub fn repository_page(
     let locator = crate::domain::repository::RepositoryLocator::new(namespace, name).ok()?;
     let page_services =
         RepositoryPageServices::new(services.accounts().clone(), services.executor().clone());
+    // Captured once for the contributor route, so a contributor link resolves like every other
+    // profile link without reaching back into the service from the action closure.
+    let active_account = services.accounts().active_summary();
     let page = cx.new(|cx| {
         let mut page = RepositoryPage::new(page_services, locator, intent, window, cx);
         page.on_action(Rc::new(move |action, window, cx| match action {
@@ -140,14 +143,16 @@ pub fn repository_page(
                     login: Some(login),
                     ..
                 },
-            ) => navigation(
-                PageNavigation::Open(Route::UserProfile {
-                    host: crate::domain::HostId::github(),
-                    login,
-                }),
-                window,
-                cx,
-            ),
+            ) => {
+                // Contributors are hosted on the same unified profile route as the sidebar and
+                // Home: signing in as that user must activate the existing own-profile tab rather
+                // than creating a second page under the UserProfile key.
+                navigation(
+                    PageNavigation::Open(Route::profile(login, active_account.as_ref())),
+                    window,
+                    cx,
+                );
+            }
             PageAction::Overview(crate::ui::repository_overview::OverviewAction::OpenRelease {
                 html_url: Some(url),
                 ..
@@ -162,7 +167,8 @@ pub fn repository_page(
         page.activate(cx);
         page
     });
-    // Contributor images still go through the single account avatar loader.
+    // Contributor images still go through the single account avatar loader. The Shell repeats this
+    // on later frames, so it only decodes pictures the overview does not already hold.
     sync_repository_avatars(&page, &avatars, cx);
     Some(MountedPage::Repository { page })
 }
@@ -181,11 +187,21 @@ pub fn sync_repository_avatars(page: &Entity<RepositoryPage>, avatars: &PageAvat
     }) else {
         return;
     };
+    // Only decode a contributor picture the overview does not already hold. This runs from the
+    // Shell's render path, so re-decoding unchanged avatars on every repaint (resize, tab scroll)
+    // would stall interaction for no visual change.
     let mut ready = Vec::new();
     for contributor in contributors {
         let (Some(id), Some(url)) = (contributor.id, contributor.avatar_url) else {
             continue;
         };
+        let already_attached = page
+            .read(cx)
+            .overview()
+            .is_some_and(|overview| overview.read(cx).has_avatar_image(&binding, id));
+        if already_attached {
+            continue;
+        }
         let key = AvatarKey::new("github.com", id, url);
         if let Some(gpui::ImageSource::Image(image)) = avatars.image(key, cx)
             && let Ok(render) = image.to_image_data(cx.svg_renderer())

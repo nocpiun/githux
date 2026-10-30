@@ -53,6 +53,13 @@ impl RepositoryOverview {
     pub fn on_action(&mut self, handler: OnAction) {
         self.on_action = Some(handler);
     }
+    /// Whether a decoded picture is already attached for this contributor, so a host can skip
+    /// re-decoding it on later frames. `binding` is the host's request scope, not an authorization
+    /// proof; the host still verifies the service context before publishing anything.
+    pub fn has_avatar_image(&self, binding: &OverviewBinding, user_id: u64) -> bool {
+        binding == &self.binding && self.avatar_images.contains_key(&user_id)
+    }
+
     /// Host-supplied decoded image. Never pass a remote URL to the renderer.
     pub fn set_avatar_image(
         &mut self,
