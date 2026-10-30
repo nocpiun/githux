@@ -700,3 +700,25 @@ fn a_long_suppressed_block_is_judged_once_per_block() {
         started.elapsed()
     );
 }
+
+#[test]
+fn template_nesting_is_tracked_across_blocks() {
+    let doc = parse(
+        "<template>\n\n<template>\n\n</template>\n\n![hidden](secret.png)\n\n</template>\n\nafter",
+    );
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    let text = copied(&doc.blocks);
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}
+
+#[test]
+fn a_script_string_cannot_close_a_dropped_template() {
+    let doc = parse(
+        "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",
+    );
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    let text = copied(&doc.blocks);
+    assert!(!text.contains("hidden"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}

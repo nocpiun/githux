@@ -350,8 +350,9 @@ pub fn parse(markdown: &str) -> Document {
     }];
     // Paragraph or heading text being collected.
     let mut inline: Option<(Option<u8>, Building)> = None;
-    // The dropped element whose closing tag has not arrived yet.
-    let mut dropped: Option<String> = None;
+    // The dropped element whose closing tag has not arrived yet, with how
+    // many same-name copies are still open across fragments.
+    let mut dropped: Option<(String, usize)> = None;
     let mut code: Option<(Option<String>, String)> = None;
     let mut html_buffer = String::new();
     let mut footnotes: Vec<String> = Vec::new();
@@ -359,7 +360,7 @@ pub fn parse(markdown: &str) -> Document {
     fn finish_inline(
         inline: &mut Option<(Option<u8>, Building)>,
         stack: &mut [Container],
-        dropped: &mut Option<String>,
+        dropped: &mut Option<(String, usize)>,
     ) {
         let Some((heading, mut building)) = inline.take() else {
             return;
@@ -367,7 +368,7 @@ pub fn parse(markdown: &str) -> Document {
         // A dropped element opened by inline HTML must keep suppressing after
         // this paragraph ends: the rest of it is ordinary Markdown events.
         if dropped.is_none() {
-            *dropped = building.suppressed.clone().map(|(name, _)| name);
+            *dropped = building.suppressed.clone();
         }
         while !building.open.is_empty() {
             let end = building.inline.text.len();
@@ -437,13 +438,18 @@ pub fn parse(markdown: &str) -> Document {
                     continue;
                 }
                 Event::InlineHtml(text) => {
-                    let name = dropped.clone().expect("checked above");
-                    let (_, tail) = split_dropped(text, &name);
-                    if let Some(tail) = tail {
-                        dropped = None;
-                        for block in html_blocks(&tail) {
-                            push_block(&mut stack, block);
+                    let (name, depth) = dropped.clone().expect("checked above");
+                    let span = html::dropped_span(text, &name, depth);
+                    if let Some(start) = span.tail_start {
+                        if span.depth == 0 {
+                            dropped = None;
+                        } else {
+                            dropped = Some((name, span.depth));
                         }
+                        let tail = &text[start..];
+                        apply_block_suffix(&mut stack, &mut dropped, tail);
+                    } else {
+                        dropped = Some((name, span.depth));
                     }
                     continue;
                 }
@@ -798,20 +804,26 @@ pub fn parse(markdown: &str) -> Document {
                 // multiline comment or attribute can contain a tag that looks
                 // like a dropped opening but is still markup context.
                 let text = std::mem::take(&mut html_buffer);
-                let tail = dropped
-                    .clone()
-                    .and_then(|name| after_close_in_block(&text, &name));
-                if let Some(tail) = tail {
-                    dropped = None;
-                    apply_block_suffix(&mut stack, &mut dropped, &tail);
-                } else if dropped.is_some() {
-                    // Still inside the dropped span; the block is not content.
-                } else if let Some(open) = unclosed_dropped(&text) {
-                    let (head, _) = split_dropped(&text, &open);
-                    for block in html_blocks(&head) {
+                if let Some((name, depth)) = dropped.clone() {
+                    let span = html::dropped_span(&text, &name, depth);
+                    if let Some(start) = span.tail_start {
+                        if span.depth == 0 {
+                            dropped = None;
+                        } else {
+                            dropped = Some((name, span.depth));
+                        }
+                        let tail = text[start..].to_string();
+                        apply_block_suffix(&mut stack, &mut dropped, &tail);
+                    } else {
+                        // Still inside the dropped span; the block is content.
+                        dropped = Some((name, span.depth));
+                    }
+                } else if let Some((open, depth)) = unclosed_dropped(&text) {
+                    let head_end = html::dropped_span(&text, &open, 0).head_end;
+                    for block in html_blocks(&text[..head_end]) {
                         push_block(&mut stack, block);
                     }
-                    dropped = Some(open);
+                    dropped = Some((open, depth));
                 } else if !text.trim().is_empty() {
                     for block in html_blocks(&text) {
                         push_block(&mut stack, block);
@@ -914,29 +926,35 @@ fn html_blocks(fragment: &str) -> Vec<Block> {
     out
 }
 
-/// The dropped element a fragment opens without closing, if any.
+/// The dropped element a fragment opens without closing, if any, with the
+/// number of same-name copies it leaves open.
 ///
 /// A block-HTML fragment can end at a blank line while the element is still
 /// open; its content continues as ordinary Markdown, so the caller keeps
 /// suppressing until the matching end tag arrives in a later fragment.
-fn unclosed_dropped(fragment: &str) -> Option<String> {
+fn unclosed_dropped(fragment: &str) -> Option<(String, usize)> {
     let nodes = html::parse(fragment);
-    unclosed_node(&nodes)
+    unclosed_node(&nodes, fragment)
 }
 
-fn unclosed_node(nodes: &[Node]) -> Option<String> {
+fn unclosed_node(nodes: &[Node], fragment: &str) -> Option<(String, usize)> {
     for node in nodes.iter().rev() {
         match node {
-            Node::Suppressed(name) => return Some(name.clone()),
+            Node::Suppressed(name) => {
+                return Some((name.clone(), html::dropped_span(fragment, name, 0).depth));
+            }
             Node::Element(element)
                 if html::is_dropped(&element.name)
                     && !html::is_void(&element.name)
                     && !element.closed =>
             {
-                return Some(element.name.clone());
+                return Some((
+                    element.name.clone(),
+                    html::dropped_span(fragment, &element.name, 0).depth,
+                ));
             }
             Node::Element(element) => {
-                if let Some(open) = unclosed_node(&element.children) {
+                if let Some(open) = unclosed_node(&element.children, fragment) {
                     return Some(open);
                 }
             }
@@ -950,31 +968,26 @@ fn unclosed_node(nodes: &[Node]) -> Option<String> {
 ///
 /// `head` is the readable markup before the element opens, or before its close
 /// when suppression is already active. `tail` is `Some` only when this
-/// fragment carries the real closing tag, holding the readable markup after it.
-fn split_dropped(fragment: &str, name: &str) -> (String, Option<String>) {
-    let (head_end, tail_start) = html::dropped_bounds(fragment, name);
-    let head = fragment[..head_end.min(fragment.len())].to_string();
-    let tail = tail_start.map(|start| fragment[start.min(fragment.len())..].to_string());
+/// fragment carries the outermost closing tag, holding the readable markup
+/// after it.
+fn split_dropped(fragment: &str, name: &str, depth: usize) -> (String, Option<String>) {
+    let span = html::dropped_span(fragment, name, depth);
+    let head = fragment[..span.head_end.min(fragment.len())].to_string();
+    let tail = span
+        .tail_start
+        .map(|start| fragment[start.min(fragment.len())..].to_string());
     (head, tail)
-}
-
-/// The readable suffix after `name`'s real closing tag inside one block.
-///
-/// The search runs on the complete block text, so a `</template>` inside a
-/// multiline comment never counts as the close.
-fn after_close_in_block(block: &str, name: &str) -> Option<String> {
-    split_dropped(block, name).1
 }
 
 /// Convert the readable text after a dropped close, then resume suppression if
 /// that suffix itself opens another dropped element.
-fn apply_block_suffix(stack: &mut [Container], dropped: &mut Option<String>, tail: &str) {
-    if let Some(open) = unclosed_dropped(tail) {
-        let (head, _) = split_dropped(tail, &open);
-        for block in html_blocks(&head) {
+fn apply_block_suffix(stack: &mut [Container], dropped: &mut Option<(String, usize)>, tail: &str) {
+    if let Some((open, depth)) = unclosed_dropped(tail) {
+        let head_end = html::dropped_span(tail, &open, 0).head_end;
+        for block in html_blocks(&tail[..head_end]) {
             push_block(stack, block);
         }
-        *dropped = Some(open);
+        *dropped = Some((open, depth));
     } else if !tail.trim().is_empty() {
         for block in html_blocks(tail) {
             push_block(stack, block);

@@ -677,20 +677,27 @@ fn push_text(stack: &mut [Element], roots: &mut Vec<Node>, text: String) {
     }
 }
 
-/// Byte bounds of the span occupied by element `name` in `fragment`.
+/// What one fragment says about the dropped span `name`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DroppedSpan {
+    /// Readable content before the span when it opens here, or before its close
+    /// when this fragment only closes a span opened in an earlier fragment.
+    pub head_end: usize,
+    /// Where readable content resumes, once the outermost copy closes here.
+    pub tail_start: Option<usize>,
+    /// Same-name elements left open after this fragment.
+    pub depth: usize,
+}
+
+/// Locate the dropped span `name` inside `fragment`.
 ///
-/// Returns `(head_end, tail_start)`. `head_end` is where readable content ends:
-/// the opening tag when the element opens here, or the start of the closing tag
-/// when the fragment only closes a span opened in an earlier fragment.
-/// `tail_start` is `Some` only when this fragment contains the real end tag, and
-/// marks where readable content can resume.
-///
-/// Only the tokenizer's own view counts, so a `</template>` inside a comment or
-/// a longer name such as `</templates>` never closes the span.
-pub fn dropped_bounds(fragment: &str, name: &str) -> (usize, Option<usize>) {
+/// Nesting is counted across fragments: `depth` carries how many same-name
+/// elements are still open, so an inner close in a later block cannot release
+/// the outer one. Contents of other raw-text elements such as `script` are
+/// skipped, so a `"</template>"` string inside a script is not a real close.
+pub fn dropped_span(fragment: &str, name: &str, mut depth: usize) -> DroppedSpan {
     let bytes = fragment.as_bytes();
     let len = bytes.len();
-    let mut depth = 0usize;
     let mut head_end = len;
     let mut i = 0;
     while i < len {
@@ -707,19 +714,18 @@ pub fn dropped_bounds(fragment: &str, name: &str) -> (usize, Option<usize>) {
                 name: tag_name,
                 self_closing,
                 ..
-            } if tag_name == name => {
-                if depth == 0 {
-                    head_end = head_end.min(i);
-                }
+            } => {
                 if is_raw_text(&tag_name) {
-                    let (_, after, closed) = raw_content(fragment, next, &tag_name);
-                    if closed && depth == 0 {
-                        return (head_end, Some(after));
-                    }
+                    // Skip another raw-text element's body wholesale, so a
+                    // closing-tag-like string inside it cannot end the span.
+                    let (_, after, _) = raw_content(fragment, next, &tag_name);
                     i = after;
                     continue;
                 }
-                if !self_closing && !is_void(&tag_name) {
+                if tag_name == name && !self_closing && !is_void(&tag_name) {
+                    if depth == 0 {
+                        head_end = head_end.min(i);
+                    }
                     depth += 1;
                 }
             }
@@ -727,16 +733,28 @@ pub fn dropped_bounds(fragment: &str, name: &str) -> (usize, Option<usize>) {
                 if depth > 0 {
                     depth -= 1;
                     if depth == 0 {
-                        return (head_end, Some(next));
+                        return DroppedSpan {
+                            head_end,
+                            tail_start: Some(next),
+                            depth,
+                        };
                     }
                 } else {
                     // This fragment only closes a span opened earlier.
-                    return (i, Some(next));
+                    return DroppedSpan {
+                        head_end: i,
+                        tail_start: Some(next),
+                        depth,
+                    };
                 }
             }
             _ => {}
         }
         i = next;
     }
-    (head_end, None)
+    DroppedSpan {
+        head_end,
+        tail_start: None,
+        depth,
+    }
 }
