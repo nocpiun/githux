@@ -1,6 +1,6 @@
 # 第三方资产与依赖许可清单
 
-更新：2026-10-29。任务 `dependency-licenses`，基线 `730d2292dcd5bb981928341259c971e42ff497b5`。
+字体章节更新：2026-10-30（ui-fonts）；其余章节为 2026-10-29 任务 `dependency-licenses`，基线 `730d2292dcd5bb981928341259c971e42ff497b5`。
 
 本文记录当前首版**实际分发**的字体、图标、复制的 Markdown 代码、Rust 依赖与 Windows App SDK 运行时的来源、固定版本、哈希、许可证文本与实际分发形态，并区分已验证与未覆盖。它是后续打包的依据，不是法律结论，也不代表整个应用已通过发布验收。
 
@@ -11,7 +11,7 @@
 - 只核对本基线真正进入分发的对象：`Cargo.lock` 解析图、`assets/` 中的字体与 manifest、`src/platform/fonts.rs` 与 `ely-core` 的 `include_bytes!`、复制的 `src/ui/reader/markdown/` 源码、Windows App SDK 运行时。不扫描上游全部文件，也不把整库搬进仓库。
 - 依赖清单来自 `cargo metadata --locked --offline --format-version 1`（Rust 1.98.1）。其 `license` 字段是 **SPDX 声明**，用于筛选与分类；**SPDX 字符串不等于已逐项核验全量许可合规**。
 - 固定版本的许可文本从本机已获取的 cargo registry 源码与 Ely git checkout 按精确版本/修订读取；本机缺失的固定版本从官方精确 tag/revision 查证。
-- 未升级依赖、未改 `Cargo.lock`、未改缓存源码、未改项目许可证、未复制或替换字体/图标二进制。
+- 原清单不修改依赖或图标；2026-10-30 字体资源替换与衍生字面生成单独记录在第 1 节，未改 Cargo.lock。
 
 ### 复现命令
 
@@ -184,9 +184,9 @@ grep -c '^\[\[package\]\]' Cargo.lock
 
 **本轮已验证：**
 
-- 五份打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；两份 `OFL.txt` 各自与其字体匹配（仅版权行与 FAQ 链接不同）。Noto 归档的 SHA-256 本轮已按官方 release 重新下载核验为 `0c34df07…`。
+- 五份打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；三个来源的 OFL 与其字体匹配。Noto 归档的 SHA-256 本轮已按官方 release 重新下载核验为 `0c34df07…`。
 - Noto v2.015 与 Google Sans Code v7.001 的官方 release tag 存在（GitHub API 核验）。
-- `include_bytes!` 路径与 `assets/fonts/README.md` 的 include 描述一致；仓库内只有 `src/platform/fonts.rs` 两处 `include_bytes!`。
+- `include_bytes!` 路径与 `assets/fonts/README.md` 的 include 描述一致；仓库内`src/platform/fonts.rs` 五处 `include_bytes!`。
 - Ely 修订 `30c66fe1` 的 MIT 文本、`gpui-pre 0.3.10` 的 Apache-2.0 文本、Lucide 的 ISC+Feather MIT、IBM Plex OFL、pulldown-cmark MIT 均已按原文复制到 `assets/licenses/` 并计算 SHA-256。
 - `cargo metadata --locked --offline` 成功，得到 748 个 package 的版本与 SPDX 声明。
 - Windows App SDK 的固定包哈希与“脚本已复制 license.txt”在 [`scripts/windows-runtime-lib.ps1`](../scripts/windows-runtime-lib.ps1) 与测试中已有覆盖。
