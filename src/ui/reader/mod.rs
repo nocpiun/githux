@@ -1088,11 +1088,20 @@ impl Render for ReaderView {
         // provider without needing an unrelated redraw. It covers both the
         // bounded viewport and the natural-height presentation.
         let demand = cx.entity().downgrade();
+        // Flow means the reader is one section of a larger host page, so the host owns the page
+        // background. Painting the reader surface there would show as an opaque slab inside an
+        // otherwise transparent section; bounded and Repository layouts keep their existing
+        // surface.
+        let background = if self.markdown_layout.is_flow() {
+            gpui::transparent_black()
+        } else {
+            theme.colors.surface
+        };
         let element = div()
             .debug_selector(|| "reader".to_string())
             .size_full()
             .min_h_0()
-            .bg(theme.colors.surface)
+            .bg(background)
             .text_color(theme.colors.fg)
             .on_children_prepainted(move |_, window, cx| {
                 // Blocks queue their picture demand while `body` is built, which

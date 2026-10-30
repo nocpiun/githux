@@ -534,20 +534,38 @@ impl ProfilePage {
                                 });
                             }
                             Err(error) => {
-                                view.update(cx, |view, cx| {
-                                    view.update_readme_with_context(
-                                        &request,
-                                        SectionState::Error(repository_error(error)),
-                                        crate::ui::reader::ResourceContext::new(
-                                            &reply.login,
-                                            &reply.login,
-                                            "0".repeat(40),
-                                            "README.md",
-                                        ),
-                                        window,
-                                        cx,
-                                    );
-                                });
+                                // A 404 from the same-name repository (or its fixed tree/blob)
+                                // lookup is how GitHub reports an absent or not-visible profile
+                                // repository: it hides missing and private resources the same
+                                // way. That is a quiet optional absence, so it must not surface
+                                // the generic "not found" error sentence. Real network, auth,
+                                // rate-limit and parse failures keep their typed error and the
+                                // compact warning mark.
+                                if matches!(&error, RepositoryError::GitHub(GitHubError::NotFound))
+                                {
+                                    view.update(cx, |view, cx| {
+                                        view.set_readme_unavailable(
+                                            &request,
+                                            "No visible public same-name profile repository or root README.",
+                                            cx,
+                                        );
+                                    });
+                                } else {
+                                    view.update(cx, |view, cx| {
+                                        view.update_readme_with_context(
+                                            &request,
+                                            SectionState::Error(repository_error(error)),
+                                            crate::ui::reader::ResourceContext::new(
+                                                &reply.login,
+                                                &reply.login,
+                                                "0".repeat(40),
+                                                "README.md",
+                                            ),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
                             }
                         }
                     }

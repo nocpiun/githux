@@ -227,7 +227,7 @@ impl Render for ProfileView {
                             .gap_3()
                             .child(header)
                             .child(self.overview_marker(cx))
-                            .child(readme)
+                            .children(readme)
                             .child(repositories)
                             .child(contributions),
                     ),
@@ -267,25 +267,33 @@ impl ProfileView {
             .into_any_element()
     }
 
-    fn render_readme(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_readme(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let body = match &self.readme {
+            // A confirmed absence — no eligible public same-name repository, no root README, or
+            // an unproven/incomplete discovery — is a normal optional outcome. The whole
+            // optional section is omitted, including its border, header and any error sentence,
+            // so it leaves no empty gap. The distinction from a real failure stays internal in
+            // `SectionState`.
+            SectionState::Unavailable(_) => return None,
             SectionState::Loading => loading("Loading profile README…", cx),
-            SectionState::Error(error) => state_panel(error, cx),
-            SectionState::Unavailable(message) => div()
-                .debug_selector(|| "profile-readme-unavailable".to_string())
-                .p_3()
-                .text_size(cx.theme().text_size(TextSize::Sm))
-                .text_color(cx.theme().colors.fg_subtle)
-                .child(message.clone())
-                .into_any_element(),
+            // A real failure keeps one compact warning mark with its reason in the tooltip and
+            // accessible name. No retry is offered because this view has no retry callback.
+            SectionState::Error(error) => crate::ui::compact_status::failed(
+                "profile-readme-error",
+                "Profile README could not be loaded",
+                error.message(),
+                None::<fn(&mut Window, &mut App)>,
+                Some("profile-readme-error"),
+                cx,
+            ),
             SectionState::Ready(()) => div()
                 .debug_selector(|| "profile-readme-reader".to_string())
                 .w_full()
                 .max_w_full()
                 .min_w_0()
-                // The README participates in the Profile page's own flow. It deliberately has no
-                // Profile-owned fixed height or overflow viewport here; ReaderView's shared Flow
-                // layout is supplied by the reader owner once that API lands.
+                // The README participates in the Profile page's own flow: ReaderView's Flow layout
+                // reports natural height and the page scrolls it. No Profile-owned fixed height or
+                // overflow viewport here.
                 .child(self.reader.clone().expect("ready README owns a ReaderView"))
                 .into_any_element(),
         };
@@ -293,26 +301,28 @@ impl ProfileView {
             let context = reader.read(cx).context();
             format!("{} / {}", context.owner(), context.path())
         });
-        div()
-            .debug_selector(|| "profile-readme-section".to_string())
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_3()
-            .rounded(cx.theme().radius(Radius::Md))
-            .border_1()
-            .border_color(cx.theme().colors.border)
-            .children(identity.map(|identity| {
-                div()
-                    .font_family(cx.theme().mono_family.clone())
-                    .text_size(cx.theme().text_size(TextSize::Xs))
-                    .text_color(cx.theme().colors.fg_muted)
-                    .child(identity)
-            }))
-            .child(body)
-            .into_any_element()
+        Some(
+            div()
+                .debug_selector(|| "profile-readme-section".to_string())
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_3()
+                .rounded(cx.theme().radius(Radius::Md))
+                .border_1()
+                .border_color(cx.theme().colors.border)
+                .children(identity.map(|identity| {
+                    div()
+                        .font_family(cx.theme().mono_family.clone())
+                        .text_size(cx.theme().text_size(TextSize::Xs))
+                        .text_color(cx.theme().colors.fg_muted)
+                        .child(identity)
+                }))
+                .child(body)
+                .into_any_element(),
+        )
     }
 
     fn render_repositories(&mut self, cx: &mut Context<Self>) -> AnyElement {
