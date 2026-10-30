@@ -844,6 +844,18 @@ fn an_active_raw_text_span_does_not_nest_in_later_blocks() {
 }
 
 #[test]
+fn inline_spans_opened_before_suppression_close_at_their_real_end() {
+    let doc = parse("*before <script>hidden*</script> after");
+    let text = find_paragraph(&doc.blocks, "before");
+    assert_eq!(text.text, "before after");
+    assert_eq!(text.styles, vec![(0..7, Style::Emphasis)]);
+    let doc = parse("[before <script>hidden](guide.md)</script> after");
+    let text = find_paragraph(&doc.blocks, "before");
+    assert_eq!(text.text, "before after");
+    assert_eq!(text.links, vec![(0..7, "guide.md".into())]);
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",

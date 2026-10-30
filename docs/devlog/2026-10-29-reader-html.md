@@ -22,7 +22,7 @@ HTML 树与跨事件行内栈都有 256 层上限；表格补齐单元格前检�
 所有重型 cargo 命令经本 worktree 的 `.agents/task/cargo-serialized.ps1`，独立 target，`CARGO_BUILD_JOBS=1`。
 
 - `cargo fmt --all -- --check`、`git diff --check` 通过。
-- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 在与 reader-images 组合后通过；本轮 Reader 目标 221 项通过，包含抑制事件、真实 provider/剪贴板、单元格关闭范围和 inline title 回归，完整检查结果在 PR 与本地 delivery-state 绑定最新 head。
+- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 在与 reader-images 组合后通过；本轮 Reader 目标 222 项通过，包含抑制事件、真实 provider/剪贴板、单元格关闭范围和 inline title 回归，完整检查结果在 PR 与本地 delivery-state 绑定最新 head。
 - `cargo build --locked --example reader` 通过。运行 `reader.exe 1` 展示 HTML fixture，不注入图片 provider，因此明确显示“no image service attached”，不把占位当作真实网络图片验收。
 - 真实 Windows 窗口，同一 fixture，1280×900、DPI 144：修复前截图 `.agents/output/evidence-before.png`；本轮修复后 `final-html-top.png` 显示图片占位、强调/链接/代码、表格列对齐和列表；向真实 HWND 投递 wheel 消息后 `final-html-bottom.png` 显示代码中的标签/注释原样、正文注释消失、尾部文字可达。这些帧已实际查看。
 - 截图曾因 CopyFromScreen 抓到锁屏壁纸，已改用 Win32 PrintWindow 重新核验。壁纸帧不作为验收证据；截图/辅助脚本仅留本地 `.agents/output`/`.agents/task`。
@@ -30,6 +30,8 @@ HTML 树与跨事件行内栈都有 256 层上限；表格补齐单元格前检�
 未覆盖真实账户/网络 README、多 DPI、跨屏、实体鼠标手感和 IME；synthetic fixture、provider 记录测试与真实实网验收分别说明。最终人工验收仍须由负责人完成。
 
 ## 审查处理与后续
+
+2026-10-30 继续处理 `706b629` 的预先打开行内 span 审查：抑制期间新开的 Markdown span 只记账不输出；没有隐藏 span 对应的结束事件则闭合抑制前已经打开的 span，避免强调/链接延伸到 after。新增强调与链接两种范围回归。
 
 2026-10-30 继续处理 `5eda30d` 的文档级 raw-text 审查：已处于 script/style/title/textarea 的状态时直接找同名真实结束标签，不把后来块中的同名开始标签再计为嵌套；新增四种 raw-text 标签的跨段恢复与扫描深度回归。
 

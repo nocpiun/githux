@@ -350,6 +350,7 @@ pub fn parse(markdown: &str) -> Document {
     // empty containers or labels. The destination vector length marks where
     // any output from that hidden block would have been appended.
     let mut hidden_blocks: Vec<(TagEnd, usize)> = Vec::new();
+    let mut hidden_inline = 0usize;
 
     fn finish_inline(
         inline: &mut Option<(Option<u8>, Building)>,
@@ -408,6 +409,38 @@ pub fn parse(markdown: &str) -> Document {
     }
 
     for event in Parser::new_ext(markdown, options) {
+        let hiding =
+            dropped.is_some() || inline.as_ref().is_some_and(|(_, b)| b.suppressed.is_some());
+        if hiding {
+            match &event {
+                Event::Start(
+                    Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Strikethrough
+                    | Tag::Link { .. }
+                    | Tag::Image { .. },
+                ) => {
+                    hidden_inline += 1;
+                    continue;
+                }
+                Event::End(
+                    TagEnd::Emphasis
+                    | TagEnd::Strong
+                    | TagEnd::Strikethrough
+                    | TagEnd::Link
+                    | TagEnd::Image,
+                ) => {
+                    if hidden_inline > 0 {
+                        hidden_inline -= 1;
+                    } else if let Some((_, building)) = inline.as_mut() {
+                        let end = building.inline.text.len();
+                        building.close(end);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
         if dropped.is_some()
             && let Event::Start(tag) = &event
             && matches!(
