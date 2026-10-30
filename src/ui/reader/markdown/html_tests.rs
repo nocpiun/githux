@@ -670,3 +670,33 @@ fn a_new_dropped_opening_after_the_close_is_suppressed_too() {
     assert!(!text.contains("hidden"), "{text:?}");
     assert!(text.contains("after"), "{text:?}");
 }
+
+#[test]
+fn nested_templates_drop_their_whole_subtree() {
+    let doc =
+        parse("<template><template>inner</template><img src=\"secret.png\" alt=\"x\"></template>");
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    // The outer element closes here, so the trailing text stays readable.
+    let doc = parse(
+        "<template><template>inner</template><img src=\"secret.png\">\n\n</template>\n\nafter",
+    );
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    assert!(copied(&doc.blocks).contains("after"), "{doc:?}");
+}
+
+#[test]
+fn a_long_suppressed_block_is_judged_once_per_block() {
+    let mut input = String::from("<template>\n\n<div>\n");
+    for _ in 0..20_000 {
+        input.push_str("x\n");
+    }
+    input.push_str("</template>\n\nafter");
+    let started = std::time::Instant::now();
+    let doc = parse(&input);
+    assert!(copied(&doc.blocks).contains("after"), "{doc:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "suppressed block parsing stayed linear: {:?}",
+        started.elapsed()
+    );
+}

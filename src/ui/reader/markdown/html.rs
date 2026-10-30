@@ -166,8 +166,12 @@ pub fn is_dropped(name: &str) -> bool {
 }
 
 /// Elements whose text content is raw: tags inside them are literal text.
+/// Elements whose text content is raw: tags inside them are literal text.
+///
+/// `template` is not here: it can nest, so it is parsed as a normal element
+/// whose whole subtree is dropped by `is_dropped`.
 fn is_raw_text(name: &str) -> bool {
-    matches!(name, "script" | "style" | "template" | "title" | "textarea")
+    matches!(name, "script" | "style" | "title" | "textarea")
 }
 
 /// Maximum element nesting this parser builds.

@@ -176,7 +176,7 @@ struct Building {
     /// An inline element whose whole content is dropped (`script`, `style`,
     /// ...). Its tags and text arrive as separate events, so suppression must
     /// survive the HTML helper returning.
-    suppressed: Option<String>,
+    suppressed: Option<(String, usize)>,
 }
 
 enum Open {
@@ -222,22 +222,34 @@ impl Building {
         let notes = self.notes.len();
         let opens = self.html.len();
         for node in &nodes {
-            if let Some(name) = &self.suppressed {
-                // Only a matching parsed end tag ends suppression. A prefix
-                // such as `</scripture>` or a tag inside a comment cannot do so.
-                if matches!(node, Node::End(end) if end == name) {
-                    self.suppressed = None;
+            if let Some((name, depth)) = self.suppressed.clone() {
+                // Nested same-name elements must close in order, so the span
+                // ends only when its outermost copy closes.
+                match node {
+                    Node::Element(element) if element.name == name => {
+                        self.suppressed = Some((name, depth + 1));
+                    }
+                    Node::End(end) if *end == name => {
+                        if depth > 1 {
+                            self.suppressed = Some((name, depth - 1));
+                        } else {
+                            self.suppressed = None;
+                        }
+                    }
+                    // Only a real parsed end tag counts: a `</scripture>` or a
+                    // tag inside a comment never ends the span.
+                    _ => {}
                 }
                 continue;
             }
             match node {
-                Node::Suppressed(name) => self.suppressed = Some(name.clone()),
+                Node::Suppressed(name) => self.suppressed = Some((name.clone(), 1)),
                 Node::Element(element)
                     if html::is_dropped(&element.name)
                         && !html::is_void(&element.name)
                         && !element.closed =>
                 {
-                    self.suppressed = Some(element.name.clone());
+                    self.suppressed = Some((element.name.clone(), 1));
                 }
                 _ => append_html_inline(
                     std::slice::from_ref(node),
@@ -355,7 +367,7 @@ pub fn parse(markdown: &str) -> Document {
         // A dropped element opened by inline HTML must keep suppressing after
         // this paragraph ends: the rest of it is ordinary Markdown events.
         if dropped.is_none() {
-            *dropped = building.suppressed.clone();
+            *dropped = building.suppressed.clone().map(|(name, _)| name);
         }
         while !building.open.is_empty() {
             let end = building.inline.text.len();
@@ -405,7 +417,12 @@ pub fn parse(markdown: &str) -> Document {
         // so this state lives here rather than only inside an inline builder.
         // Inline HTML is handled by its builder, which owns the same spans
         // between `InlineHtml` events.
-        if dropped.is_some() {
+        if dropped.is_some()
+            && !matches!(
+                &event,
+                Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock)
+            )
+        {
             // Block HTML arrives line by line, so its closing tag must be
             // judged with the whole block: a `</template>` inside a multiline
             // comment is not a real close. Buffer the block and decide at its
@@ -413,19 +430,12 @@ pub fn parse(markdown: &str) -> Document {
             // by itself.
             match &event {
                 Event::Html(text) => {
+                    // Accumulate only. Searching the growing prefix on every
+                    // line would be quadratic; the block is judged once, at
+                    // `End(HtmlBlock)`.
                     html_buffer.push_str(text);
-                    // A block may also be delivered without `Start(HtmlBlock)`.
-                    let Some(name) = dropped.clone() else {
-                        continue;
-                    };
-                    if let Some(tail) = after_close_in_block(&html_buffer, &name) {
-                        html_buffer.clear();
-                        dropped = None;
-                        apply_block_suffix(&mut stack, &mut dropped, &tail);
-                    }
                     continue;
                 }
-                Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock) => continue,
                 Event::InlineHtml(text) => {
                     let name = dropped.clone().expect("checked above");
                     let (_, tail) = split_dropped(text, &name);
