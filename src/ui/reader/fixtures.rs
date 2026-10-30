@@ -111,6 +111,65 @@ pub fn markdown() -> PreparedBody {
     }
 }
 
+/// The raw-HTML acceptance fixture: a README-like document that mixes Markdown
+/// with the HTML users actually write (centred `div`, commented-out markup,
+/// `img`, `details`, `table`, lists, inline formatting) and shows that HTML
+/// inside code stays verbatim.
+pub const HTML: &str = r##"# HTML 混排
+
+<div align="center">
+  <img src="https://example.com/logo.png" alt="项目徽标">
+  <!-- 下面是已废弃的旧表格：
+  <table>
+    <tr><td>hidden cell</td></tr>
+  </table>
+  -->
+</div>
+
+普通段落，带 <strong>加粗</strong>、<em>斜体</em>、<code>inline &lt;tag&gt;</code> 与 <a href="guide.md#setup">相对链接</a>。
+
+<details>
+<summary>展开说明</summary>
+<p>内部段落与 <kbd>Ctrl</kbd> 键。</p>
+</details>
+
+<table align="center">
+  <thead>
+    <tr><th align="left">列</th><th align="right">含义</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>空文件</td><td align="right">0 字节</td></tr>
+    <tr><td>二进制</td><td align="right">非 UTF-8</td></tr>
+  </tbody>
+</table>
+
+列表：
+
+<ul>
+  <li>第一项</li>
+  <li>第二项<br>换行</li>
+</ul>
+
+行内代码里的 HTML 必须原样显示：`<div align="center">` 与 ``<span>x</span>``。
+
+```html
+<!-- 代码块中的注释保留 -->
+<div align="center">raw</div>
+```
+
+<script>alert("never runs")</script>
+
+<!-- 单行注释不进入正文 -->
+尾部文本。
+"##;
+
+pub fn html() -> PreparedBody {
+    PreparedBody::Utf8 {
+        text: HTML.to_string(),
+        has_bom: false,
+    }
+}
+
 pub fn link_only() -> PreparedBody {
     PreparedBody::Utf8 {
         text: LINK_ONLY.to_string(),
