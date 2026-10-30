@@ -633,7 +633,7 @@ fn tree_column(
             name: "repository-tree-scrollbar",
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(1.5, 8.0),
+        placement: scroll::Placement::overlay(2.5, 8.0),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,
@@ -705,15 +705,29 @@ fn tree_column(
                 .on_key_down(cx.listener(|page, event, window, cx| {
                     page.press_tree_key_event(event, window, cx);
                 }))
-                .p(px(7.0))
+                .overflow_hidden()
                 .child(
+                    // Row whitespace belongs to the content, not to the scrollbar's anchor.
+                    div().size_full().p(px(7.0)).child(
+                        div()
+                            .relative()
+                            .size_full()
+                            .min_h_0()
+                            .debug_selector(|| "repository-tree-scroll-viewport".into())
+                            .child(div().size_full().overflow_hidden().child(list))
+                            .child(wheel),
+                    ),
+                )
+                .child(
+                    // Keep the track's height equal to the real list viewport for thumb/drag
+                    // math, while anchoring its trailing edge at the pane's inner boundary.
                     div()
-                        .relative()
-                        .size_full()
-                        .min_h_0()
-                        .debug_selector(|| "repository-tree-scroll-viewport".into())
-                        .child(div().size_full().overflow_hidden().child(list))
-                        .child(wheel)
+                        .debug_selector(|| "repository-tree-bar-region".into())
+                        .absolute()
+                        .top(px(7.0))
+                        .bottom(px(7.0))
+                        .left_0()
+                        .right_0()
                         .child(bar),
                 ),
         )

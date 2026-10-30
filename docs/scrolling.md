@@ -43,7 +43,7 @@
 | 闲置透明度 | `fg` 0.20 | 无 tracks 背景 |
 | thumb hover | `fg` 0.38 | 仅指针在 thumb 上时加深 |
 | 淡入/淡出 | 140 ms smoothstep | 反向从当前已绘制值继续 |
-| 尾侧可见间隙 | 1.5 logical px | `Placement::overlay` 的 `inset`；`BAND` 仍为 0 |
+| 尾侧可见间隙 | 通常 1.5 logical px；文件树 2.5 px | `Placement::overlay` 的 `inset`；锚点须在真实 pane 内边缘，不能嵌在内容 padding 内；`BAND` 仍为 0 |
 | 命中区 | 由 `Placement::hit` 给出 | 可宽于可见线宽；完全隐藏时不构建元素 |
 
 两轴、所有区域共用同一 `Style::DEFAULT`。区域差异只允许出现在 `Placement` 与区域自身的布局常量里。
@@ -60,12 +60,18 @@
 | Shell Settings 页 | `src/ui/mod.rs`，`settings-scrollbar-y` |
 | Home 双列 | `src/ui/home/mod.rs`，`home-scrollbar-y` / `feed-scrollbar-y` |
 | Profile 页面与 heatmap | `src/ui/profile/render.rs`，`profile-page-scrollbar` / `profile-heatmap-scrollbar` |
-| 仓库浏览文件树 | `src/ui/repository/view.rs`，`repository-tree-scrollbar` |
+| 仓库浏览文件树 | `src/ui/repository/view.rs`，`repository-tree-scrollbar`；2026-10-30 改为 `overlay(2.5, 8.0)`，见下方真实 pane 边界 |
 | Reader 源码双轴 | `src/ui/reader/source.rs`，`reader-scrollbar-y` / `reader-scrollbar-x` |
 | Reader Markdown | `src/ui/reader/mod.rs`，`reader-markdown-scrollbar` |
 | 账户预览（开发样例） | `src/bin_support/account_example.rs`，`account-preview-scrollbar-y` |
 
 标签条 `Placement::BAND` 及其专属 band 布局未改；`clear_of` 的角落避让按新的命中轨道重算，双轴 corner 仍保留 2 px 间隙。
+
+### 文件树真实 pane 边界（2026-10-30 返工）
+
+前轮文件树测量选错基准：`repository-tree-scroll-viewport` 位于 `.p(7)` 内，所以其“2 物理 px”并不表示到 Files/Reader 分隔线只有 2px；实际 gap 为内容 padding 7 + overlay 1.5 = 8.5 逻辑 px。此前日志/PR 中将其称为 pane 尾侧距离的结论作废，保留为测量错误的历史证据。
+
+文件树现在把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是无 padding 的 pane 内容区，内部列表单独保留四侧 7px padding；`repository-tree-bar-region` 横向覆盖该 pane，纵向仍留上下 7px，以维持 track 与真实滚动 viewport 同高。Bar 使用 `overlay(2.5, 8.0)`，可见线在列表右侧留白内，8px 命中条留在 pane 内；没有负 margin，没有删除选中行四侧留白。测量基准是外层 Files/Reader 边框的内边缘，不是列表 viewport。144 DPI 原生 Shell 帧中边框从 x=773 开始，可见 thumb 覆盖 x=765..768，外缘 x=769，到边框留 4 物理 px（约 2.67 逻辑 px；配置 2.5）。顶部/中间/底部和宽窗均复核；实际证据与限制见本任务日志。Sidebar/Profile 的内容 padding 位于 scroll 内容内，Bar 是外层的直接兄弟，没有文件树这层额外缩进。
 
 ## 状态归属
 

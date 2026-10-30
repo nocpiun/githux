@@ -35,7 +35,7 @@
 | --- | --- | --- |
 | 正式 Shell 仓库列表 | 10 → 2 物理 px（约 6.67 → 1.33 逻辑 px） | 在命中区内侧拖动，列表从首行移动到第 21 行附近，固定 footer 保持位置 |
 | Profile 外层 | 10 → 2 物理 px | 在 8px 命中区内侧拖动，身份区向上滚动并露出 Contributions；不修改 Profile 内容 Flow |
-| Repository tree | 10 → 2 物理 px | 在命中区内侧拖动，400 项列表从 `file-0000` 移到 `file-0173` 附近，Reader 内容保持原位 |
+| Repository tree | **此处旧测量基准错误，作废：10 → 2 物理 px 是相对内部 viewport，未计入外层 7px padding** | 在命中区内侧拖动，400 项列表从 `file-0000` 移到 `file-0173` 附近，Reader 内容保持原位 |
 | Repository 内 Markdown Reader | 修复后的可见条靠近右缘 | wheel 实际把 README 从标题段移到下方列表/“Try it”段 |
 | Repository 内 Source Reader | 纵横条均在真实内容 viewport 内显示 | 纵向拖动从第 1 行移动到第 87 行附近；横向条显示，但本轮窗口消息未证实横拖成功 |
 
@@ -51,6 +51,26 @@
 - `cargo build --locked`：通过；原生组合 example 构建并运行成功。
 
 本轮没有新的产品源码修改；最终文档提交同样重新触发 CI/Codex review。实时 head、对应 CI/review 收据及目标基线保存在 PR 和本地 delivery progress；旧 `b8a4f1b` 的通过记录不用于放行本轮。保持人工验收 `pending`，即使检查全绿也不合并到 `feature/shell-pages`。
+
+## 2026-10-30 验收返工：以真实 pane 为边界
+
+负责人指出文件树仍离边缘过远，亲自复核确认前轮测量错误：`repository-tree-viewport.p(7)` 内才是 `repository-tree-scroll-viewport` 与 Bar；`combined-gap-evidence.json` 的 x=763 是内部 viewport 右侧，真正 Files/Reader 分隔线内缘约 x=773。内部 2px 不能证明 pane gap 已收紧；旧配置实际约 8.5 逻辑 px。本轮承认并修正此结论，不将旧证据重复用作验收。
+
+实现仅改变树的相关 scroll/overlay 结构：列表四侧 7px 留白继续由独立内容 wrapper 持有，Bar 在无 padding 的外层 pane 内单独定位；上下仍留 7px 以保证 track 几何与真实 list viewport 同高。树条改为 `overlay(2.5, 8)`；可见线完全在右侧留白内，命中区从 pane 内缘向内展开，未使用负 margin，未改圆角行、选择/账户/Reader 业务逻辑。Sidebar、Profile 外层核对过：Bar 与 scroll 内容为外层兄弟，内容 padding 不影响 Bar 锚点，无需结构调整。
+
+先在本任务分支 rebase 到 `b85284d`（Shell 含 #44），提交前再次 fetch 发现基线推进，已再次 rebase 到 `9225787df66aaf0715042d9b4d45e62f5e7390e0`（含 #44/#46），并重新构建和运行原生组合、完整测试；没有写入 Shell 分支/worktree。继续原 PR #48，目标 `feature/shell-pages`，保留负责人 `blocked`，返工完成加回 `pending`，不合并。
+
+原生使用正式 Shell 与页面 host 的既有合成 transport 组合（临时 example、内存凭据/临时 SQLite、不联网）。通过 Win32 窗口消息驱动实际行选择、wheel、thumb drag，再以 DPI-aware PrintWindow 抓完整窗口。144 DPI / 150%，窄窗完整帧 1342×896（client 880×560 logical），宽窗 1792×1286（client 1180×820 logical）：
+
+- `pane-tree-top.png` / `pane-tree-middle.png` / `pane-bottom-visible.png` / `pane-wide-hover.png`：真实 Files/Reader 边框从 x=773 开始，thumb 实际覆盖 x=765..768、外缘 x=769，留白 4 物理 px = 2.67 逻辑 px（标称配置 2.5）。上下/中间/底部及宽窗一致。
+- `pane-selected-first.png` 和 `pane-bottom-visible.png`：首行、末行选中，圆角行左右约 7px 留白保持；顶部/底部内容留白不被条结构挤掉。
+- thumb 在 pane 右侧真实命中区内拖动，400 行列表从 `file-0000` → 中间 `file-0172` → 底部 `file-0399`；源码 Reader 与 Shell footer 保持各自位置，wheel 可回顶部。
+- `9225787` 最终组合原生帧为 `pane-final-top.png` / `pane-final-middle.png` / `pane-final-bottom-visible.png` / `pane-final-wide-hover.png`；对应 `*-annotated.png` 青线明确真实 pane 分隔线 x=773，黄线明确 thumb 外缘 x=769。最终数值在 `pane-final-edge-evidence.json`（宽窗取 y=1240 的滑块中段，排除 tooltip 覆盖行）；前一基线的 `pane-*-edge-zoom.png` 是实际像素最近邻放大。所有原生材料仅在 `.agents/output/`，没有上传凭据或会话。
+- 100% 原生 DPI 仍未覆盖；上述是 Windows 消息分发验证，不冒充人工鼠标/触控板验收。
+
+回归在现有 `inset_tree_reveals_last_row_and_keeps_padding_after_collapse` 增加外层 pane → line 2.5px、外层 pane → 内容 7px、完整 8px hitbox、visible thumb 不盖行、按可见线之外的 hitbox 拖动真实列表，以及 End/Home 首尾 reveal。测试已实际通过；其几何直接对照外层 pane，避免再次仅测内部 viewport。最终组合 `fmt` / `git diff --check` / `clippy --locked --all-targets -- -D warnings` / `build --locked` 均通过；`check --locked --all-targets` 在前一基线通过，最终 all-targets clippy 同样完成类型检查。`cargo test --locked` 7 目标分别 731/731/56/159/136/498/18，合计 2329 次执行、0 失败（跨目标重复模块分别计数）。重型 Cargo 全部经串行锁/jobs=1，独立 target。
+
+本轮可复用教训候选（由共享 LESSONS 唯一写入者汇入）：**验收必须把视觉测量端点绑定到用户指认的实际容器边界**。嵌套 viewport 自身的 gap 可能正确，但祖先 padding 会累加到用户看到的 pane gap；原生像素测量同样可能“精确地量错对象”。在标注帧中同时标 pane/sash、内容 viewport、thumb，回归断言外层边界而非复述实现锚点。证据是本轮旧 x=763 与真实 x=773 混淆造成验收误判，适用于有祖先 padding、边框或内部 wrapper 的 overlay 位置验证。
 
 ## 后续
 
