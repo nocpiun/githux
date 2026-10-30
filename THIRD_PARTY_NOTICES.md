@@ -15,7 +15,7 @@ Baseline: `730d2292dcd5bb981928341259c971e42ff497b5`.
 
 | Font | License | Copyright | Full text |
 | --- | --- | --- | --- |
-| Noto Sans Regular / Medium / SemiBold (NotoSans-v2.015) | SIL OFL 1.1 | Copyright 2022 The Noto Project Authors | [assets/fonts/noto-sans/OFL.txt](assets/fonts/noto-sans/OFL.txt) |
+| Githux UI derivative: Noto Sans v2.015 + Noto Sans SC 2.004-H2 (400/500/600/700) | SIL OFL 1.1 | Copyright 2022 The Noto Project Authors; Copyright 2014–2021 Adobe | [Noto Sans OFL](assets/fonts/githux-ui/OFL-NotoSans.txt), [Noto Sans SC OFL](assets/fonts/githux-ui/OFL-NotoSansSC.txt) |
 | Google Sans Code (v7.001) | SIL OFL 1.1 | Copyright 2025 The Google Sans Code Project Authors | [assets/fonts/google-sans-code/OFL.txt](assets/fonts/google-sans-code/OFL.txt) |
 | IBM Plex Sans Regular (via `ely-core`) | SIL OFL 1.1 | Copyright © 2017 IBM Corp. with Reserved Font Name "Plex" | [assets/licenses/ibm-plex-sans-ofl.txt](assets/licenses/ibm-plex-sans-ofl.txt) |
 
@@ -79,7 +79,7 @@ pinned NuGet packages, and that script already copies each package's
 
 ## Required files at packaging time
 
-1. `assets/fonts/noto-sans/OFL.txt` and `assets/fonts/google-sans-code/OFL.txt`
+1. `assets/fonts/githux-ui/OFL-NotoSans.txt`, `assets/fonts/githux-ui/OFL-NotoSansSC.txt` and `assets/fonts/google-sans-code/OFL.txt`
    (not embedded in the binary).
 2. `assets/licenses/ibm-plex-sans-ofl.txt`.
 3. `assets/licenses/ely-mit.txt`.

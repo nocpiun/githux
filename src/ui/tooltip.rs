@@ -10,7 +10,7 @@ use gpui::{AnyView, App, Div, IntoElement, ParentElement, SharedString, Styled, 
 
 /// Tooltip content on the theme's UI family, for callers that need custom children.
 ///
-/// The product theme sets Noto Sans; a standalone component assembly sets whatever family it
+/// The product theme selects the bundled Noto Sans / Noto Sans SC composite; a standalone component assembly sets whatever family it
 /// renders with, so reading the theme keeps the tip on the same face without importing the
 /// application's font registration into every preview tree.
 pub(crate) fn ui_tooltip_content(text: impl Into<SharedString>, cx: &App) -> Div {

@@ -23,19 +23,13 @@ cargo metadata --locked --offline --format-version 1
 
 ## 1. 字体
 
-`src/platform/fonts.rs` 用 `include_bytes!` 把四个文件编译进 binary，启动时注册为 GPUI 字体：
+`src/platform/fonts.rs` 嵌入四个应用私有 UI 字面（Githux UI）与原 Google Sans Code。UI 衍生字面保留 Noto Sans v2.015 的全部 2,965 字符映射，补入 Noto Sans SC 2.004-H2 的 30,361 映射；400/500/600/700 均使用源字体对应权重，主字族改名以避免与上游/系统字体混淆。官方固定来源、每个文件体积/哈希与可复现生成过程统一维护于 [字体清单](../assets/fonts/README.md)，生成脚本为 [build-ui-fonts.py](../scripts/build-ui-fonts.py)。
 
-| 字体 | 固定版本 | 仓库文件（`include_bytes!` 路径） | 文件 SHA-256 | 大小 | 许可证 | 相邻许可文件 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Noto Sans Regular | [NotoSans-v2.015](https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSans-v2.015)（release commitish `c4a321e123e4d4ff315f57f4e0adf294fe3a95be`，2024-11-20） | `assets/fonts/noto-sans/NotoSans-Regular.ttf` | `478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823` | 621572 B | SIL OFL 1.1 | `assets/fonts/noto-sans/OFL.txt`（SHA-256 `303aa29b5fe1a05733ddfa4c68971e417df7fa05c4ea5ebc3bb897a261595700`） |
-| Noto Sans Medium | NotoSans-v2.015（同上归档） | `assets/fonts/noto-sans/NotoSans-Medium.ttf` | `635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb` | 619976 B | SIL OFL 1.1 | 同上 |
-| Noto Sans SemiBold | NotoSans-v2.015（同上归档） | `assets/fonts/noto-sans/NotoSans-SemiBold.ttf` | `a4e91fd530ac2b4ef5367240144ff37d7d65d66cf76f2e9a2187b93c676f92d0` | 625052 B | SIL OFL 1.1 | 同上 |
-| Google Sans Code | [v7.001](https://github.com/googlefonts/googlesans-code/releases/tag/v7.001)（2026-06-09） | `assets/fonts/google-sans-code/GoogleSansCode.ttf`（上游 `GoogleSansCode[MONO,wght].ttf`） | `74642762fae66d5883077794a763e1086394b8cb72f2623e456e06359dc5c64b` | 268264 B | SIL OFL 1.1 | `assets/fonts/google-sans-code/OFL.txt`（SHA-256 `550bdaa8fa49333ab3b9a6b6cb6f60d3c6c082b4bb2f99da2f28f8991e168387`） |
-
-- 官方 release tag 已用 GitHub API 核验存在；下载地址与归档 SHA-256 记录在 [`assets/fonts/README.md`](../assets/fonts/README.md)。**归档 SHA-256 本轮未重新下载核验**（Noto 归档约 117 MB）；两个**实际打包的 ttf 文件哈希本轮已重新计算并与清单一致**。
-- 相邻 `OFL.txt` 只保留在仓库，**没有**编译进 binary。因此当前开发构建里没有随字体携带的 OFL 文本；打包时必须单独随附（见第 8 节）。
-- 三份 Noto Sans 静态字面来自同一官方发行归档（SHA-256 与 [字体来源](../assets/fonts/README.md) 记录一致），因为 GPUI/DirectWrite 按请求字重选面：只注册 Regular 时 Medium/SemiBold 请求会得到替代或合成字面。600 字重未被当前 Shell 直接使用，但 Medium 用于活动行、标签与按钮，Semibold 用于标题与徽标，均为可见 UI。Bold（700）未打包，也没有当前 UI 依赖它。
-- 实际用法：Noto Sans 是 UI 字体（`src/app/mod.rs` 设为主题 `font_family`），Google Sans Code 是代码字体（主题 `mono_family`，用于 Source 查看器、Markdown 围栏代码与行内代码）。旧 `assets/fonts/README.md` 里“Hello heading/button / counter”的描述属于已删除的 Hello 原型，已更正；同处“Ely additionally bundles its own upstream assets and fonts”也已改为第 3 节的事实。
+- 四份 UI 字面共 43,707,220 B（41.68 MiB），替换旧 Latin-only 的 1,866,600 B。仅包含这两个 Noto 来源，没有引入其他语言字体集。
+- Noto Sans 与 Noto Sans SC 均为 SIL OFL 1.1；随包携带 `assets/fonts/githux-ui/OFL-NotoSans.txt`、`OFL-NotoSansSC.txt`。SC 来源原声明含 Reserved Font Name `Source`，衍生字体使用 `Githux UI` 名称。两份来源的版权和许可文本保留，未改写。
+- Google Sans Code v7.001 原文件 268,264 B，SHA-256 `74642762fae66d5883077794a763e1086394b8cb72f2623e456e06359dc5c64b`；字体与许可均未改。
+- CI artifact 打包步骤同时携带两份 UI 来源 OFL 及 Google Sans Code OFL。许可文本不嵌入 binary，单独分发时仍必须随附。
+- Windows GPUI 0.3.10 的显式 fallback 查询只使用系统字体集合。合成字面让中文直接命中应用内注册字体，不依赖系统安装；逐映射轮廓/advance 比对和原生 shaping 证据见[字体开发日志](devlog/2026-10-29-ui-fonts.md)。
 
 ### 上游 Ely 附带的字体（非本仓库文件）
 
@@ -177,7 +171,7 @@ grep -c '^\[\[package\]\]' Cargo.lock
 
 当前没有任何安装包/发布产物。未来打包/分发时，至少需要随附：
 
-1. 两个字族的 `OFL.txt`：`assets/fonts/noto-sans/OFL.txt`、`assets/fonts/google-sans-code/OFL.txt`（**未编译进 binary**，三份 Noto 字面共用同一份 OFL）。
+1. UI 两份来源 OFL（`assets/fonts/githux-ui/OFL-NotoSans.txt`、`OFL-NotoSansSC.txt`）及 `assets/fonts/google-sans-code/OFL.txt`。
 2. IBM Plex Sans 的 OFL：`assets/licenses/ibm-plex-sans-ofl.txt`（binary 内也有一份 asset，但打包仍应显式随附）。
 3. Ely MIT：`assets/licenses/ely-mit.txt`（覆盖 `ely-core`/`ely-settings`/`ely-canvas` 与提取的 Markdown 派生代码）。
 4. Lucide 图标 ISC + Feather MIT：`assets/licenses/lucide-icons-isc.txt`。
@@ -190,7 +184,7 @@ grep -c '^\[\[package\]\]' Cargo.lock
 
 **本轮已验证：**
 
-- 四份打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；两份 `OFL.txt` 各自与其字体匹配（仅版权行与 FAQ 链接不同）。Noto 归档的 SHA-256 本轮已按官方 release 重新下载核验为 `0c34df07…`。
+- 五份打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；两份 `OFL.txt` 各自与其字体匹配（仅版权行与 FAQ 链接不同）。Noto 归档的 SHA-256 本轮已按官方 release 重新下载核验为 `0c34df07…`。
 - Noto v2.015 与 Google Sans Code v7.001 的官方 release tag 存在（GitHub API 核验）。
 - `include_bytes!` 路径与 `assets/fonts/README.md` 的 include 描述一致；仓库内只有 `src/platform/fonts.rs` 两处 `include_bytes!`。
 - Ely 修订 `30c66fe1` 的 MIT 文本、`gpui-pre 0.3.10` 的 Apache-2.0 文本、Lucide 的 ISC+Feather MIT、IBM Plex OFL、pulldown-cmark MIT 均已按原文复制到 `assets/licenses/` 并计算 SHA-256。
