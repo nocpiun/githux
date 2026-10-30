@@ -226,7 +226,10 @@ impl Building {
                 // Nested same-name elements must close in order, so the span
                 // ends only when its outermost copy closes.
                 match node {
-                    Node::Element(element) if element.name == name => {
+                    Node::Element(element) if element.name == name && !element.closed => {
+                        self.suppressed = Some((name, depth + 1));
+                    }
+                    Node::Suppressed(open) if *open == name => {
                         self.suppressed = Some((name, depth + 1));
                     }
                     Node::End(end) if *end == name => {
@@ -714,6 +717,9 @@ pub fn parse(markdown: &str) -> Document {
                 if let Some(Container::Cell(cell)) = stack.last_mut()
                     && let Some((_, pending)) = inline.take()
                 {
+                    if dropped.is_none() {
+                        dropped = pending.suppressed.clone();
+                    }
                     merge_cell_builder(cell, pending);
                 }
                 let Some(Container::Cell(mut building)) = stack.pop() else {

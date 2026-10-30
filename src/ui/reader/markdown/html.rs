@@ -243,6 +243,19 @@ pub fn parse(fragment: &str) -> Vec<Node> {
                     i = next;
                     continue;
                 }
+                // Dropped subtrees do not need a recursive tree at all. Skip
+                // them before the depth limiter can flatten their opening tag
+                // and expose readable/image children under a retained parent.
+                if is_dropped(&name) && !is_void(&name) {
+                    let span = dropped_span(&fragment[i..], &name, 0);
+                    if let Some(after) = span.tail_start {
+                        i += after;
+                        continue;
+                    }
+                    attach(&mut stack, &mut roots, Node::Suppressed(name));
+                    i = len;
+                    continue;
+                }
                 let element = Element {
                     name,
                     attrs,
@@ -736,7 +749,18 @@ pub fn dropped_span(fragment: &str, name: &str, mut depth: usize) -> DroppedSpan
                 if is_raw_text(&tag_name) {
                     // Skip another raw-text element's body wholesale, so a
                     // closing-tag-like string inside it cannot end the span.
-                    let (_, after, _) = raw_content(fragment, next, &tag_name);
+                    let (_, after, closed) = raw_content(fragment, next, &tag_name);
+                    if tag_name == name {
+                        head_end = head_end.min(i);
+                        if closed {
+                            return DroppedSpan {
+                                head_end,
+                                tail_start: Some(after),
+                                depth,
+                            };
+                        }
+                        depth += 1;
+                    }
                     i = after;
                     continue;
                 }

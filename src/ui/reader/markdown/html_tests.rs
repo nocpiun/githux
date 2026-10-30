@@ -734,6 +734,44 @@ fn completed_templates_do_not_hide_the_prefix_of_an_unclosed_one() {
 }
 
 #[test]
+fn cell_suppression_continues_after_the_table() {
+    let doc = parse(
+        "| h |\n|---|\n| before <template> |\n\n![hidden](secret.png)\n\n</template>\n\nafter",
+    );
+    assert!(!debug(&doc.blocks).contains("secret.png"), "{doc:?}");
+    let text = copied(&doc.blocks);
+    assert!(text.contains("before"), "{doc:?}");
+    assert!(text.contains("after"), "{doc:?}");
+}
+
+#[test]
+fn dropped_subtrees_stay_hidden_beyond_the_depth_limit() {
+    for tag in ["template", "iframe", "object"] {
+        let source = format!(
+            "{}<{tag}><img src=\"secret.png\"></{tag}>{}",
+            "<div>".repeat(256),
+            "</div>".repeat(256)
+        );
+        let doc = parse(&source);
+        assert!(!debug(&doc.blocks).contains("secret.png"), "{tag}: {doc:?}");
+    }
+}
+
+#[test]
+fn raw_text_spans_keep_their_own_open_state() {
+    for tag in ["script", "style", "title", "textarea"] {
+        let open = format!("prefix<{tag}>body");
+        let span = html::outstanding_span(&open, tag);
+        assert_eq!(span.head_end, 6, "{tag}: {span:?}");
+        assert_eq!(span.depth, 1, "{tag}: {span:?}");
+        assert_eq!(span.tail_start, None, "{tag}: {span:?}");
+        let complete = format!("<{tag}>body</{tag}>suffix");
+        let span = html::dropped_span(&complete, tag, 0);
+        assert_eq!(&complete[span.tail_start.unwrap()..], "suffix");
+    }
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",
