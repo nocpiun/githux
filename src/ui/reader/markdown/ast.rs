@@ -229,7 +229,7 @@ impl Building {
                     Node::Element(element) if element.name == name && !element.closed => {
                         self.suppressed = Some((name, depth + 1));
                     }
-                    Node::Suppressed(open) if *open == name => {
+                    Node::Suppressed(open) if *open == name && !html::is_raw_text(&name) => {
                         self.suppressed = Some((name, depth + 1));
                     }
                     Node::End(end) if *end == name => {
@@ -359,6 +359,10 @@ pub fn parse(markdown: &str) -> Document {
     let mut code: Option<(Option<String>, String)> = None;
     let mut html_buffer = String::new();
     let mut footnotes: Vec<String> = Vec::new();
+    // Preserve parser bookkeeping for hidden blocks without publishing their
+    // empty containers or labels. The destination vector length marks where
+    // any output from that hidden block would have been appended.
+    let mut hidden_blocks: Vec<(TagEnd, usize)> = Vec::new();
 
     fn finish_inline(
         inline: &mut Option<(Option<u8>, Building)>,
@@ -415,6 +419,19 @@ pub fn parse(markdown: &str) -> Document {
     }
 
     for event in Parser::new_ext(markdown, options) {
+        if dropped.is_some()
+            && let Event::Start(tag) = &event
+            && matches!(
+                tag,
+                Tag::CodeBlock(_)
+                    | Tag::List(_)
+                    | Tag::BlockQuote(_)
+                    | Tag::Table(_)
+                    | Tag::FootnoteDefinition(_)
+            )
+        {
+            hidden_blocks.push((tag.to_end(), output_len(&stack)));
+        }
         // Dropped HTML can span several pulldown-cmark blocks: a blank line
         // ends one `HtmlBlock`, and the elements inside it arrive as ordinary
         // Markdown events. Finalizing that block must not end the suppression,
@@ -517,6 +534,10 @@ pub fn parse(markdown: &str) -> Document {
         {
             continue;
         }
+        let closing_event = match &event {
+            Event::End(end) => Some(*end),
+            _ => None,
+        };
         match event {
             Event::Start(Tag::Paragraph) => inline = Some((None, Building::default())),
             Event::End(TagEnd::Paragraph) => finish_inline(&mut inline, &mut stack, &mut dropped),
@@ -850,6 +871,16 @@ pub fn parse(markdown: &str) -> Document {
             Event::End(_) => {}
             Event::Start(_) => {}
         }
+        if let Some(end) = closing_event
+            && hidden_blocks.last().is_some_and(|(tag, _)| *tag == end)
+        {
+            let (_, len) = hidden_blocks.pop().expect("matched hidden block");
+            // If suppression ended inside this block, retain newly visible
+            // content; otherwise discard its purely hidden empty shell.
+            if dropped.is_some() {
+                truncate_output(&mut stack, len);
+            }
+        }
     }
     finish_inline(&mut inline, &mut stack, &mut dropped);
     let blocks = match stack.pop() {
@@ -924,6 +955,22 @@ fn merge_cell_builder(cell: &mut Building, mut pending: Building) {
     // A cell keeps a picture's alt text in place; it has no notes to attach.
     if !cell.in_cell {
         cell.notes.append(&mut pending.notes);
+    }
+}
+
+fn output_len(stack: &[Container]) -> usize {
+    match stack.last() {
+        Some(Container::Blocks { out, .. }) => out.len(),
+        Some(Container::List { current, .. }) => current.len(),
+        _ => 0,
+    }
+}
+
+fn truncate_output(stack: &mut [Container], len: usize) {
+    match stack.last_mut() {
+        Some(Container::Blocks { out, .. }) => out.truncate(len),
+        Some(Container::List { current, .. }) => current.truncate(len),
+        _ => {}
     }
 }
 

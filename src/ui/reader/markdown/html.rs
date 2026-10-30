@@ -170,7 +170,7 @@ pub fn is_dropped(name: &str) -> bool {
 ///
 /// `template` is not here: it can nest, so it is parsed as a normal element
 /// whose whole subtree is dropped by `is_dropped`.
-fn is_raw_text(name: &str) -> bool {
+pub(super) fn is_raw_text(name: &str) -> bool {
     matches!(name, "script" | "style" | "title" | "textarea")
 }
 

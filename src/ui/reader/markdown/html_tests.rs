@@ -772,6 +772,32 @@ fn raw_text_spans_keep_their_own_open_state() {
 }
 
 #[test]
+fn raw_text_tag_strings_do_not_increment_inline_nesting() {
+    for tag in ["script", "style", "title", "textarea"] {
+        let doc = parse(&format!(
+            "before <{tag}>const example = \"<{tag}>\";</{tag}> after\n\ntail"
+        ));
+        let text = copied(&doc.blocks);
+        assert!(text.contains("before after"), "{tag}: {doc:?}");
+        assert!(text.contains("tail"), "{tag}: {doc:?}");
+    }
+}
+
+#[test]
+fn hidden_blocks_emit_no_empty_shells_or_labels() {
+    for hidden in [
+        "```hidden-language\nsecret\n```",
+        "- secret\n- hidden",
+        "> [!WARNING]\n> secret",
+        "| secret |\n|---|\n| hidden |",
+    ] {
+        let doc = parse(&format!("<template>\n\n{hidden}\n\n</template>\n\nvisible"));
+        assert_eq!(doc.blocks.len(), 1, "{hidden}: {doc:?}");
+        assert_eq!(copied(&doc.blocks).trim(), "visible", "{doc:?}");
+    }
+}
+
+#[test]
 fn a_script_string_cannot_close_a_dropped_template() {
     let doc = parse(
         "<template>\n\n<script>const example = \"</template>\";</script>\n\n![hidden](secret.png)\n\n</template>\n\nafter",
