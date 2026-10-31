@@ -559,3 +559,92 @@ fn a_merge_candidate_without_a_usable_repository_identity_is_not_retained() {
     empty_owner.repository.name = "/libdc".to_string();
     assert!(merge_candidate(&empty_owner).is_none());
 }
+
+#[test]
+fn feed_page_appends_without_duplicating_overlapping_events() {
+    let following = following(&[("shulaoda", 31), ("friend", 1)], complete());
+    let mut authors = AuthorResolutions::new();
+    authors.insert(
+        "subsurface/libdc#144",
+        ResolvedPullRequest {
+            author: FeedAuthor {
+                id: 31,
+                login: "shulaoda".into(),
+                avatar_url: None,
+            },
+            merged: true,
+            title: None,
+            html_url: None,
+        },
+    );
+
+    // First page: one star and a merged contribution.
+    let first_page = FeedSourcePage {
+        events: vec![
+            starred("s1", actor(1, "friend")),
+            live_merged("m1", 144, actor(10, "maintainer")),
+        ],
+        next: Some(FeedSourceCursor { page: 2 }),
+        reasons: vec![],
+        etag: Some("\"feed\"".into()),
+        poll_interval_seconds: Some(60),
+    };
+    let mut seen = HashSet::new();
+    let first = build_feed_page(&first_page, &following, &authors, &mut seen);
+    let mut outcome = first.into_outcome();
+    assert_eq!(outcome.activities.len(), 2);
+    assert_eq!(outcome.next_page, Some(FeedSourceCursor { page: 2 }));
+
+    // Second page overlaps one event and adds one new star; the overlapped merged
+    // event must not add a duplicate card.
+    let second_page = FeedSourcePage {
+        events: vec![
+            live_merged("m1", 144, actor(10, "maintainer")), // duplicate
+            starred("s2", actor(1, "friend")),               // new
+        ],
+        next: None,
+        reasons: vec![],
+        etag: None,
+        poll_interval_seconds: None,
+    };
+    let page = build_feed_page(&second_page, &following, &authors, &mut seen);
+    outcome.extend(page);
+    let ids: Vec<&str> = outcome
+        .activities
+        .iter()
+        .map(|activity| activity.event.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["s1", "m1", "s2"], "overlap must not duplicate");
+    assert_eq!(outcome.next_page, None, "second page ends the timeline");
+}
+
+#[test]
+fn a_filtered_empty_page_keeps_the_cursor_for_the_next_page() {
+    // A page that parses to zero visible activities is not end-of-history when a
+    // next page exists: the cursor must survive so the host can continue.
+    let following = following(&[("friend", 1)], complete());
+    let page = FeedSourcePage {
+        events: vec![
+            // All technical noise / unfollowed subjects.
+            event(
+                "push1",
+                FeedEventType::Push,
+                FeedPayload::Push {
+                    git_ref: None,
+                    before: None,
+                    head: None,
+                    size: None,
+                },
+                actor(9, "noise"),
+            ),
+        ],
+        next: Some(FeedSourceCursor { page: 3 }),
+        reasons: vec![],
+        etag: None,
+        poll_interval_seconds: None,
+    };
+    let mut seen = HashSet::new();
+    let built = build_feed_page(&page, &following, &AuthorResolutions::new(), &mut seen);
+    assert!(built.activities.is_empty());
+    assert_eq!(built.next_page, Some(FeedSourceCursor { page: 3 }));
+}

@@ -170,11 +170,19 @@ impl Transport for PageTransport {
             if url.contains("/received_events") {
                 // Live shapes: a star by a followed account, a push (never a card),
                 // a star by an unfollowed account, and a live `action=merged` event
-                // whose slim pull_request carries no author.
-                return Ok(HttpResponse {
-                    status: 200,
-                    headers: vec![("x-poll-interval".into(), "1".into())],
-                    body: serde_json::json!([{
+                // whose slim pull_request carries no author. Page 2 serves one more
+                // followed star so the append path can be exercised.
+                let page_two = url.contains("page=2");
+                let events = if page_two {
+                    serde_json::json!([{
+                        "id": "evt-5", "type": "WatchEvent",
+                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
+                        "payload": {"action": "started"},
+                        "created_at": "2026-10-28T06:00:00Z"
+                    }])
+                } else {
+                    serde_json::json!([{
                         "id": "evt-1", "type": "WatchEvent",
                         "actor": {"id": 7, "login": "bob", "avatar_url": null},
                         "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
@@ -207,7 +215,19 @@ impl Transport for PageTransport {
                         },
                         "created_at": "2026-10-28T07:00:00Z"
                     }])
-                    .to_string(),
+                };
+                let mut headers = vec![("x-poll-interval".into(), "1".into())];
+                if !page_two {
+                    headers.push((
+                        "link".into(),
+                        "<https://api.github.com/users/alice/received_events?per_page=100&page=2>; rel=\"next\""
+                            .to_string(),
+                    ));
+                }
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers,
+                    body: events.to_string(),
                 });
             }
             if url.ends_with("/graphql") {
@@ -485,6 +505,16 @@ fn feed_refresh_is_reenabled_when_its_server_poll_interval_expires(cx: &mut Test
     // The synthetic Feed response requests a one-second poll interval. Refresh stays disabled
     // while that interval runs, then the host restores the control without issuing a read.
     assert!(!view.read_with(cx, |shell, cx| shell.feed_refresh_available_for_test(cx)));
+    // The first page also exposes a next page, and the short feed is underfilled, so the
+    // legitimate end-of-scroll append settles once before we measure the cooldown.
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if transport.seen("/received_events") >= 2 {
+            break;
+        }
+    }
     let feed_reads = transport.seen("/received_events");
     // Drive the same expiry boundary the real timer reaches, without depending on the test
     // scheduler's wall clock or introducing a real sleep.
@@ -887,5 +917,76 @@ fn compact_retry_state_is_readable_and_retries_once(cx: &mut TestAppContext) {
         view.read_with(cx, |probe, _| probe.retries.get()),
         1,
         "a warning mark carries exactly one retry"
+    );
+}
+
+#[gpui::test]
+fn feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.home_mount_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)) {
+            break;
+        }
+    }
+    assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
+    // The first page produced the followed star and the merged contribution; the
+    // push and the unfollowed star did not. The first page also exposes page 2.
+    let reads_before = transport.seen("/received_events");
+    // Drive the real end-of-scroll append through the host.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.load_more_home_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if transport.seen("/received_events?per_page=100&page=2")
+            + transport.seen("/received_events?page=2")
+            >= 1
+        {
+            break;
+        }
+    }
+    assert!(
+        transport.seen("/received_events?per_page=100&page=2")
+            + transport.seen("/received_events?page=2")
+            >= 1,
+        "append fetched the second source page, not a fresh first page"
+    );
+    assert!(
+        transport.seen("/received_events") > reads_before,
+        "append issued exactly one new source read"
+    );
+    // The appended star's row is visible after the append; the first-page rows
+    // remain, so the list grew in place rather than resetting.
+    assert!(cx.debug_bounds("feed-event-row-0").is_some());
+    assert!(cx.debug_bounds("feed-event-row-1").is_some());
+    assert!(cx.debug_bounds("feed-event-row-2").is_some());
+    // Page 2 exposed no next link, so no further append fires.
+    let after = transport.seen("/received_events");
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.load_more_home_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+    assert_eq!(
+        transport.seen("/received_events"),
+        after,
+        "true exhaustion must not issue another read"
     );
 }

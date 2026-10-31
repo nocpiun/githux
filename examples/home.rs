@@ -83,13 +83,23 @@ impl Preview {
         let home = cx.new(|cx| HomeView::new(binding.clone(), 1, window, cx));
         let action = Rc::new(RefCell::new(None));
         let sink = action.clone();
+        let weak = cx.weak_entity();
         home.update(cx, |home, cx| {
             // Fixture clock: 2026-10-28 12:00 UTC, independent of wall time.
             home.set_now(
                 Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_188_800)),
                 cx,
             );
-            home.on_action(Rc::new(move |action, _, _| {
+            home.on_action(Rc::new(move |action, window, cx| {
+                if let crate::ui::home::HomeAction::LoadMoreFeed(_) = action {
+                    // Defer like the real host: the emitting HomeView is still on
+                    // the update stack, so append after this dispatch completes.
+                    let weak = weak.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = weak.update(cx, |preview, cx| preview.load_more(window, cx));
+                    });
+                    return;
+                }
                 *sink.borrow_mut() = Some(format!("{action:?}"));
             }));
         });
@@ -150,6 +160,40 @@ impl Preview {
                 });
             }
         }
+    }
+
+    /// The preview host's own load-more: a synthetic second source page whose
+    /// author/subject is already followed, appended through the real view API.
+    /// This exercises the same scroll->append path as the real Shell host.
+    fn load_more(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.home.update(cx, |home, cx| {
+            home.feed_append_loading(&self.binding, self.generation, cx);
+        });
+        // A synthetic page-2: one merged contribution plus one star by a
+        // followed account, so an append visibly extends the Feed.
+        let mut second = build_feed(
+            vec![
+                merged_event(10, FOLLOWER_LOGIN, "synthetic-owner/older-repo", 43),
+                starred_event(11, FOLLOWER_LOGIN, "synthetic-owner/older-repo"),
+            ],
+            Vec::new(),
+            &preview_following(),
+            &preview_authors_older(),
+        );
+        second.next_page = None;
+        self.home.update(cx, |home, cx| {
+            let existing = match home.feed_state() {
+                crate::ui::home::PanelState::Ready {
+                    content: crate::ui::home::PanelContent::Ready(outcome),
+                    ..
+                } => outcome.clone(),
+                _ => return,
+            };
+            let mut outcome = existing;
+            outcome.activities.extend(second.activities.clone());
+            outcome.next_page = None;
+            home.apply_feed_page(&self.binding, self.generation, outcome, cx);
+        });
     }
 
     fn switch(&mut self, scenario: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -542,6 +586,25 @@ fn preview_authors() -> AuthorResolutions {
     authors
 }
 
+/// Author resolutions for the preview's second source page.
+fn preview_authors_older() -> AuthorResolutions {
+    let mut authors = AuthorResolutions::new();
+    authors.insert(
+        "synthetic-owner/older-repo#43",
+        ResolvedPullRequest {
+            author: FeedAuthor {
+                id: 90_001,
+                login: CONTRIBUTOR_LOGIN.into(),
+                avatar_url: None,
+            },
+            merged: true,
+            title: Some("Older synthetic merged pull request".into()),
+            html_url: None,
+        },
+    );
+    authors
+}
+
 /// Three live-shaped source events: the merged contribution (author resolved from
 /// the detail endpoint), a star and a repository creation, all by followed
 /// accounts.
@@ -565,13 +628,16 @@ fn search(items: Vec<HomeItem>, readiness: HomeReadiness) -> HomeSearchOutcome {
 
 fn feed() -> FeedOutcome {
     // Every preview scenario goes through the real product policy, exactly as the
-    // app's data layer does.
-    build_feed(
+    // app's data layer does. The Mixed scenario exposes a next page so the
+    // preview can actually scroll and append (not just render a first frame).
+    let mut outcome = build_feed(
         retained_events(),
         Vec::new(),
         &preview_following(),
         &preview_authors(),
-    )
+    );
+    outcome.next_page = Some(crate::domain::home::FeedSourceCursor { page: 2 });
+    outcome
 }
 
 fn feed_with(readiness: FeedReadiness) -> FeedOutcome {
@@ -588,7 +654,12 @@ fn mixed() -> (HomeSearchOutcome, FeedOutcome) {
         {
             let mut source = retained_events();
             source.extend(excluded_events());
-            build_feed(source, Vec::new(), &preview_following(), &preview_authors())
+            let mut outcome =
+                build_feed(source, Vec::new(), &preview_following(), &preview_authors());
+            // Expose a second source page so the preview can actually scroll and
+            // append, not just render a first frame.
+            outcome.next_page = Some(crate::domain::home::FeedSourceCursor { page: 2 });
+            outcome
         },
     )
 }

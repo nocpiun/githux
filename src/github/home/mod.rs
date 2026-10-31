@@ -29,7 +29,7 @@ pub mod following;
 pub mod pull_request;
 pub mod search;
 
-pub use events::{FeedLimits, fetch_received_events};
+pub use events::{FeedLimits, fetch_received_events, fetch_received_events_page};
 pub use following::{FollowingLimits, fetch_following};
 pub use pull_request::{PullRequestDetailLimits, fetch_pull_request_detail};
 pub use search::{HomeSearchLimits, search_involving};

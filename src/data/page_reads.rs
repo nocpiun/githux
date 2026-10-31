@@ -8,7 +8,8 @@ use crate::domain::blob::{BlobIdentity, BlobLimits};
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
     AuthorResolutions, FeedEventsRead, FeedFetch, FeedOutcome, Following, HomeError, HomeQuery,
-    HomeSearchOutcome, Login, UpdatedWindow, build_feed, is_retained_activity, merge_candidate,
+    HomeSearchOutcome, Login, UpdatedWindow, build_feed_page, is_retained_activity,
+    merge_candidate,
 };
 use crate::domain::profile::{
     ContributionCalendar, ContributionRange, ProfileBasic, ProfileError, ProfilePinned,
@@ -194,18 +195,88 @@ impl PageReadSession {
             .await
     }
 
-    /// Feed: read the source events, resolve the merged-pull-request authors that
-    /// need it, and apply the followed-account constraint.
+    /// One source page of received events from a validated cursor.
     ///
-    /// Both auxiliary reads are bounded, deduplicated and cancellable:
-    /// - followed accounts are read once with their own page/item budget;
-    /// - author lookups are one request per distinct merged pull request, capped
-    ///   by `max_author_lookups` and de-duplicated by PR identity, so a
-    ///   page of repeated events cannot fan out.
+    /// Unlike [`Self::feed_events`], this does not re-read the whole timeline: it
+    /// fetches exactly the requested page and returns its next-page cursor. The
+    /// caller owns continuation state so account switches and refresh cannot mix
+    /// generations.
+    pub async fn feed_source_page(
+        &self,
+        cursor: crate::domain::home::FeedSourceCursor,
+        limits: &FeedLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<crate::domain::home::FeedSourcePage>, HomeError> {
+        let login = self.login.clone();
+        self.repository
+            .read(cancel, async move |pat, cancel| {
+                github::home::fetch_received_events_page(
+                    &self.client,
+                    &pat,
+                    &login,
+                    cursor,
+                    limits,
+                    cancel,
+                )
+                .await
+            })
+            .await
+    }
+
+    /// One older Feed page applied to an existing visible list.
     ///
-    /// A failed or partial auxiliary read is not a successful empty Feed: the
-    /// affected cards are withheld and the outcome stays `Partial` with the
-    /// reason, so the UI never claims completeness it does not have.
+    /// Fetches the source page at `cursor`, re-reads the followed-account set and
+    /// resolves any missing merged authors, then applies the product policy and
+    /// de-duplicates against `seen_ids`. The returned [`FeedPage`] carries its own
+    /// next cursor and reasons; the host folds it into the retained outcome.
+    /// A failed page is a hard error so the host retries the same cursor.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn feed_page(
+        &self,
+        cursor: crate::domain::home::FeedSourceCursor,
+        limits: &FeedLimits,
+        following_limits: &FollowingLimits,
+        author_limits: &PullRequestDetailLimits,
+        max_author_lookups: usize,
+        seen_ids: &mut std::collections::HashSet<String>,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<crate::domain::home::FeedPage>, HomeError> {
+        let page = self
+            .feed_source_page(cursor, limits, cancel.clone())
+            .await?
+            .value;
+        let following = self
+            .following(following_limits, cancel.clone())
+            .await?
+            .value;
+        let authors = self
+            .resolve_authors(
+                &page.events,
+                author_limits,
+                max_author_lookups,
+                cancel.clone(),
+            )
+            .await?;
+        if cancel.is_cancelled() {
+            return Err(GitHubError::Cancelled.into());
+        }
+        let built = build_feed_page(&page, &following, &authors, seen_ids);
+        if !self.verify() {
+            return Err(GitHubError::StaleContext.into());
+        }
+        Ok(Scoped {
+            context: self.context().clone(),
+            value: built,
+        })
+    }
+
+    /// Feed: read the first source page, resolve the merged-pull-request authors
+    /// that need it, and apply the followed-account constraint.
+    ///
+    /// The returned outcome exposes the validated next source page, so the host
+    /// fetches older pages incrementally on end-of-scroll instead of eagerly
+    /// reading the whole (bounded) timeline upfront. A failed or partial
+    /// auxiliary read is never reported as a complete empty Feed.
     pub async fn feed(
         &self,
         limits: &FeedLimits,
@@ -214,7 +285,14 @@ impl PageReadSession {
         max_author_lookups: usize,
         cancel: CancellationToken,
     ) -> Result<Scoped<FeedOutcome>, HomeError> {
-        let events = self.feed_events(limits, cancel.clone()).await?.value;
+        let page = self
+            .feed_source_page(
+                crate::domain::home::FeedSourceCursor { page: 1 },
+                limits,
+                cancel.clone(),
+            )
+            .await?
+            .value;
         let following = match self.following(following_limits, cancel.clone()).await {
             Ok(following) => following.value,
             Err(error) if matches!(error, HomeError::GitHub(GitHubError::Cancelled)) => {
@@ -224,10 +302,9 @@ impl PageReadSession {
             // failure instead of publishing an empty, complete-looking Feed.
             Err(error) => return Err(error),
         };
-        let source_reasons = events.source_reasons();
         let authors = self
             .resolve_authors(
-                &events.events,
+                &page.events,
                 author_limits,
                 max_author_lookups,
                 cancel.clone(),
@@ -236,23 +313,14 @@ impl PageReadSession {
         if cancel.is_cancelled() {
             return Err(GitHubError::Cancelled.into());
         }
-        let outcome = build_feed(events.events, source_reasons, &following, &authors);
+        let mut seen = std::collections::HashSet::new();
+        let built = build_feed_page(&page, &following, &authors, &mut seen);
         if !self.verify() {
             return Err(GitHubError::StaleContext.into());
         }
         Ok(Scoped {
             context: self.context().clone(),
-            value: FeedOutcome {
-                // An incomplete relationship/author read must not expose a
-                // validator that could suppress the next repair attempt.
-                etag: if outcome.readiness.is_complete() {
-                    events.etag
-                } else {
-                    None
-                },
-                poll_interval_seconds: events.poll_interval_seconds,
-                ..outcome
-            },
+            value: built.into_outcome(),
         })
     }
 

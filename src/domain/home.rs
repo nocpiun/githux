@@ -13,6 +13,8 @@
 use crate::domain::error::GitHubError;
 use thiserror::Error;
 
+use std::collections::HashSet;
+
 /// Hard errors from the Home query adapters. A genuinely empty result and a
 /// truncated (partial) result are **not** errors; they are returned with
 /// [`HomeReadiness`]/[`FeedReadiness`] instead.
@@ -787,7 +789,7 @@ impl AuthorResolutions {
 /// the resolved pull-request authors.
 ///
 /// This is the single place the product policy is applied, so every data path —
-/// first load, refresh, 304 replay and retained snapshots — produces the same
+/// first load, refresh, appended page and retained snapshot — produces the same
 /// result:
 ///
 /// 1. keep only the three retained activity kinds;
@@ -806,10 +808,76 @@ pub fn build_feed(
     following: &Following,
     authors: &AuthorResolutions,
 ) -> FeedOutcome {
-    let mut activities: Vec<FeedActivity> = Vec::new();
+    let page = FeedSourcePage {
+        events,
+        next: None,
+        reasons: source_reasons,
+        etag: None,
+        poll_interval_seconds: None,
+    };
+    let mut seen = HashSet::new();
+    build_feed_page(&page, following, authors, &mut seen).into_outcome()
+}
+
+/// Apply the product policy to one source page, de-duplicating against
+/// `seen_ids` so overlapping pages cannot add a duplicate card.
+///
+/// This is the append path's counterpart of [`build_feed`]: it returns a
+/// [`FeedPage`] whose reasons include the source page's own partials, any unknown
+/// membership from an incomplete following list, and any unresolved merged
+/// authors on this page. The caller folds it into a [`FeedOutcome`] with
+/// [`FeedOutcome::extend`].
+pub fn build_feed_page(
+    page: &FeedSourcePage,
+    following: &Following,
+    authors: &AuthorResolutions,
+    seen_ids: &mut HashSet<String>,
+) -> FeedPage {
     let mut unresolved = 0usize;
+    let activities =
+        build_feed_activities(&page.events, following, authors, seen_ids, &mut unresolved);
+    let mut reasons = page.reasons.clone();
+    if let FollowingReadiness::Partial {
+        reasons: following_reasons,
+    } = &following.readiness
+    {
+        reasons.push(FeedPartialReason::FollowingIncomplete {
+            details: following_reasons.iter().map(following_reason).collect(),
+        });
+    }
+    if unresolved > 0 {
+        reasons.push(FeedPartialReason::AuthorUnresolved { count: unresolved });
+    }
+    FeedPage {
+        activities,
+        next_page: page.next,
+        reasons,
+        etag: page.etag.clone(),
+        poll_interval_seconds: page.poll_interval_seconds,
+    }
+}
+
+/// Produce visible activities from one source batch without mutating the shared
+/// relationship/author state.
+///
+/// `seen_ids` lets the caller de-duplicate across the whole feed, not just one
+/// batch, so overlapping pages cannot add a duplicate card. `unresolved_out` is
+/// incremented by the number of merged contributions this batch could not resolve
+/// (missing author or contradictory evidence); that count becomes a Partial reason
+/// rather than a complete empty result.
+pub fn build_feed_activities(
+    events: &[FeedEvent],
+    following: &Following,
+    authors: &AuthorResolutions,
+    seen_ids: &mut HashSet<String>,
+    unresolved_out: &mut usize,
+) -> Vec<FeedActivity> {
+    let mut activities: Vec<FeedActivity> = Vec::new();
     for event in events {
-        if let Some(candidate) = merge_candidate(&event) {
+        if !seen_ids.insert(event.id.clone()) {
+            continue;
+        }
+        if let Some(candidate) = merge_candidate(event) {
             let resolved = candidate
                 .embedded_author
                 .clone()
@@ -822,13 +890,11 @@ pub fn build_feed(
                 })
                 .or_else(|| authors.get(&candidate.key()).cloned().flatten());
             let Some(resolved) = resolved else {
-                unresolved += 1;
+                *unresolved_out += 1;
                 continue;
             };
             if !resolved.merged || resolved.author.login.trim().is_empty() {
-                // Contradictory/missing detail evidence is unresolved, not proof
-                // of a complete empty Feed.
-                unresolved += 1;
+                *unresolved_out += 1;
                 continue;
             }
             let subject = FeedActor {
@@ -848,11 +914,11 @@ pub fn build_feed(
                     title: resolved.title.or(candidate.pull_request.title),
                     html_url: resolved.html_url.or(candidate.pull_request.html_url),
                 }),
-                event,
+                event: event.clone(),
             });
             continue;
         }
-        let Some((kind, subject)) = local_activity(&event) else {
+        let Some((kind, subject)) = local_activity(event) else {
             continue;
         };
         if !following.follows_subject(&subject) {
@@ -862,29 +928,10 @@ pub fn build_feed(
             kind,
             subject,
             pull_request: None,
-            event,
+            event: event.clone(),
         });
     }
-
-    let mut reasons = source_reasons;
-    if let FollowingReadiness::Partial {
-        reasons: following_reasons,
-    } = &following.readiness
-    {
-        reasons.push(FeedPartialReason::FollowingIncomplete {
-            details: following_reasons.iter().map(following_reason).collect(),
-        });
-    }
-    if unresolved > 0 {
-        reasons.push(FeedPartialReason::AuthorUnresolved { count: unresolved });
-    }
-
-    FeedOutcome {
-        activities,
-        etag: None,
-        poll_interval_seconds: None,
-        readiness: FeedReadiness::from_reasons(reasons),
-    }
+    activities
 }
 
 fn following_reason(reason: &FollowingPartialReason) -> String {
@@ -930,7 +977,67 @@ pub struct FeedOutcome {
     pub activities: Vec<FeedActivity>,
     pub etag: Option<String>,
     pub poll_interval_seconds: Option<u64>,
+    /// The validated next source page, when the server exposed one. `None` means
+    /// the source timeline is exhausted (or the page budget was hit).
+    pub next_page: Option<FeedSourceCursor>,
     pub readiness: FeedReadiness,
+}
+
+impl FeedOutcome {
+    /// Append the policy-applied activities of one older source page in place.
+    ///
+    /// The appended activities were already de-duplicated against the caller's
+    /// seen set, so overlapping pages cannot add a duplicate card. The cursor
+    /// advances and new source reasons are merged into readiness; a partial append
+    /// keeps the validator empty so a repair is never suppressed.
+    pub fn extend(&mut self, page: FeedPage) {
+        self.activities.extend(page.activities);
+        self.next_page = page.next_page;
+        let mut reasons = self.readiness.reasons().to_vec();
+        reasons.extend(page.reasons);
+        let readiness = FeedReadiness::from_reasons(reasons);
+        self.etag = if readiness.is_complete() {
+            page.etag
+        } else {
+            None
+        };
+        if let Some(poll) = page.poll_interval_seconds {
+            self.poll_interval_seconds = Some(poll);
+        }
+        self.readiness = readiness;
+    }
+}
+
+/// One policy-applied source page, before it is folded into a [`FeedOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedPage {
+    /// Visible activities from this page, in source order, de-duplicated against
+    /// the caller's seen set.
+    pub activities: Vec<FeedActivity>,
+    pub next_page: Option<FeedSourceCursor>,
+    /// Reasons collected on this page (source partials, unknown membership,
+    /// unresolved authors).
+    pub reasons: Vec<FeedPartialReason>,
+    pub etag: Option<String>,
+    pub poll_interval_seconds: Option<u64>,
+}
+
+impl FeedPage {
+    pub fn into_outcome(self) -> FeedOutcome {
+        let readiness = FeedReadiness::from_reasons(self.reasons);
+        let etag = if readiness.is_complete() {
+            self.etag
+        } else {
+            None
+        };
+        FeedOutcome {
+            activities: self.activities,
+            next_page: self.next_page,
+            etag,
+            poll_interval_seconds: self.poll_interval_seconds,
+            readiness,
+        }
+    }
 }
 
 /// One raw events read, before the product policy is applied.
@@ -965,6 +1072,29 @@ pub enum FeedFetch {
         etag: Option<String>,
         poll_interval_seconds: Option<u64>,
     },
+}
+
+/// Which older-source page to fetch next, as a validated integer page number.
+///
+/// The next page must be strictly greater than the current one and the request is
+/// rebuilt from the account's own endpoint identity; the adapter never trusts a
+/// raw payload URL. `None` means the source timeline is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedSourceCursor {
+    pub page: u32,
+}
+
+/// One source page plus whether the server exposed another older page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedSourcePage {
+    /// Parsed events in server order (newest first).
+    pub events: Vec<FeedEvent>,
+    pub next: Option<FeedSourceCursor>,
+    /// Source-level problems on this page (kept separate from the cursor).
+    pub reasons: Vec<FeedPartialReason>,
+    /// First-page scheduler metadata, so an append keeps the same refresh cycle.
+    pub etag: Option<String>,
+    pub poll_interval_seconds: Option<u64>,
 }
 
 #[cfg(test)]

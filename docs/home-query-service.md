@@ -66,7 +66,7 @@ Feed 由三段有界读取组成，**策略只在 `domain::home::build_feed` 里
 
 | 读取 | 入口 | 端点 |
 | --- | --- | --- |
-| 1. 源事件 | `github::home::fetch_received_events` | `GET /users/<login>/received_events` |
+| 1. 源事件 | `github::home::fetch_received_events`（首页）/ `fetch_received_events_page`（逐页） | `GET /users/<login>/received_events` |
 | 2. 关注关系 | `github::home::fetch_following` | `GET /user/following` |
 | 3. 贡献作者 | `github::home::fetch_pull_request_detail` | `GET /repos/{owner}/{repo}/pulls/{number}` |
 
@@ -80,7 +80,8 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 ```
 
 - 保留 `actor{id,login,display_login,avatar_url}`、`repo{id,name,url}`、`created_at`、`id`、`type`、`public` 与最小 typed payload；**未知 type 不 panic**，`FeedEventType::Unknown(name)` + `FeedPayload::Unknown`，不保留整个 payload。
-- 适配器**发布源列表**：筛选、作者解析与关注关系过滤都在 `build_feed`。首次加载与刷新都重读源事件、关系与作者，再应用策略。正式数据层不发送条件验证器；意外 304 返回错误，不能复活旧卡片。低层适配器仍独立支持 304，但尚无可发布的缓存重放路径。
+- 适配器**发布源列表**：筛选、作者解析与关注关系过滤都在 `build_feed`/`build_feed_page`。首次加载与触底追加都重读源事件、关系与作者，再应用策略；每个源页返回经过同源校验的 `next` 页码游标（`FeedSourceCursor`），游标只含页码、请求由本层按账户身份重建。正式数据层不发送条件验证器；意外 304 返回错误，不能复活旧卡片。低层适配器仍独立支持 304，但尚无可发布的缓存重放路径。
+- **增量分页**：`fetch_received_events_page` 一次只取一页，`FeedOutcome.next_page` 暴露下一页游标；host 触底时逐页追加，而不是预先读完整条时间线。空/短页或全被过滤的页只要还有 `next` 就继续，只有服务端无 `next` 链接（或本地页预算用尽）才视为耗尽。重复/重叠页按源事件 id 去重。
 - **数据源语义**：`received_events` 合并“关注的人”和“watch 的仓库”产生的事件，**不等价于只含关注用户的 Feed**。因此关注关系必须显式过滤，不能假定事件 actor 一定被关注。
 - 调度信息：返回 `etag` 与 `poll_interval_seconds`（`X-Poll-Interval`）；`304` 返回 `FeedFetch::NotModified`，不是错误。分页未完整（`Partial`）时不返回可复用 ETag，避免把部分结果 `304` 成“完整”。
 - 本层不自己轮询、不使用网页 Cookie、不调用内部端点。
@@ -134,7 +135,7 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 | `HomeSearchLimits::max_pages` / `max_items` | 10 / 1000 | 搜索服务上限对齐 |
 | `HomeSearchLimits::per_page` | 100 | 端点上限 |
 | `HomeSearchLimits::response_bytes` | 4 MiB | `execute_bounded` 接收期限制 |
-| `FeedLimits::max_pages` / `max_events` | 3 / 300 | 对齐 Events 窗口 |
+| `FeedLimits::max_pages` / `max_events` | 3 / 300 | 对齐 Events 窗口（300 条/30 天）；逐页追加仍受同一源预算约束 |
 | `FeedLimits::per_page` | 100 | 端点上限 |
 | `FeedLimits::response_bytes` | 4 MiB | 接收期限制 |
 | `FollowingLimits::max_pages` / `max_accounts` | 10 / 1000 | 关注关系的防御预算 |

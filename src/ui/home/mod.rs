@@ -118,6 +118,10 @@ pub enum HomeAction {
     Profile(ProfileIdentity),
     ActivateWorkItem(WorkItemIdentity),
     ActivateFeed(FeedIdentity),
+    /// The Feed column reached its end and asks the host for the next older
+    /// source page. Carries the binding/generation the view observed, so the host
+    /// can reject a stale request after an account switch or refresh.
+    LoadMoreFeed(RefreshRequest),
 }
 
 pub type OnAction = Rc<dyn Fn(HomeAction, &mut Window, &mut App)>;
@@ -335,6 +339,9 @@ pub struct HomeView {
     feed: PanelModel<FeedOutcome>,
     home_view: PanelView,
     feed_view: PanelView,
+    /// End-of-scroll append state for the Feed column. `None` means not loading
+    /// and no pending failure; a failure is retryable and preserves the cursor.
+    feed_append: FeedAppendState,
     on_action: Option<OnAction>,
     avatar_renderer: Option<AvatarRenderer>,
     last_action: Option<HomeAction>,
@@ -344,6 +351,18 @@ pub struct HomeView {
     time_task: Option<Task<()>>,
     _activation: Subscription,
     _visibility: Subscription,
+}
+
+/// End-of-scroll append state for the Feed column.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FeedAppendState {
+    #[default]
+    Idle,
+    Loading,
+    Failed {
+        /// The cursor to retry. Preserved so a refresh cannot lose continuation.
+        page: u32,
+    },
 }
 
 impl HomeView {
@@ -363,6 +382,7 @@ impl HomeView {
             feed: PanelModel::new(),
             home_view: PanelView::new(cx),
             feed_view: PanelView::new(cx),
+            feed_append: FeedAppendState::Idle,
             on_action: None,
             avatar_renderer: None,
             last_action: None,
@@ -460,6 +480,7 @@ impl HomeView {
         self.feed.reset();
         self.home_view.reset(window, cx);
         self.feed_view.reset(window, cx);
+        self.feed_append = FeedAppendState::Idle;
         self.last_action = None;
         cx.notify();
     }
@@ -492,6 +513,10 @@ impl HomeView {
             Column::Home => self.home_view.offset(),
             Column::Feed => self.feed_view.offset(),
         }
+    }
+
+    pub fn feed_append_state(&self) -> &FeedAppendState {
+        &self.feed_append
     }
 
     pub fn on_action(&mut self, handler: OnAction) {
@@ -618,8 +643,82 @@ impl HomeView {
             refreshing: false,
         };
         self.feed_view.selected = None;
+        self.feed_append = FeedAppendState::Idle;
         cx.notify();
         true
+    }
+
+    /// Appends one policy-applied page to the retained Feed without resetting
+    /// scroll or selection. The caller passes a merged outcome (retained + new
+    /// activities) so the list grows in place; the host reports append failure
+    /// separately via [`Self::feed_append_failed`].
+    pub fn apply_feed_page(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        outcome: FeedOutcome,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        // Keep the scroll anchor: `splice` grows the list in place without moving
+        // the logical scroll top, so already-rendered items stay stable while the
+        // appended older items extend the reachable range.
+        let old_count = self.item_count(Column::Feed);
+        self.feed_view
+            .scroll
+            .splice(0..old_count, outcome.activities.len());
+        self.feed.state = PanelState::Ready {
+            content: PanelContent::Ready(outcome),
+            refreshing: false,
+        };
+        self.feed_append = FeedAppendState::Idle;
+        cx.notify();
+        true
+    }
+
+    /// Marks an append request in flight so repeated end-of-scroll notifications
+    /// cannot duplicate it. The host calls this when it begins a load-more.
+    pub fn feed_append_loading(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        self.feed_append = FeedAppendState::Loading;
+        cx.notify();
+        true
+    }
+
+    /// Records a retryable append failure while keeping the visible list intact.
+    pub fn feed_append_failed(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        page: u32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        self.feed_append = FeedAppendState::Failed { page };
+        cx.notify();
+        true
+    }
+
+    /// Whether the host has more older pages to load and no append is in flight.
+    pub fn feed_can_load_more(&self) -> bool {
+        matches!(self.feed_append, FeedAppendState::Idle)
+            && self
+                .feed
+                .state
+                .data()
+                .and_then(|outcome| outcome.next_page)
+                .is_some()
     }
 
     pub fn apply_error(
@@ -741,6 +840,41 @@ impl HomeView {
             Column::Home => self.home.refresh.available && !self.home.state.is_busy(),
             Column::Feed => self.feed.refresh.available && !self.feed.state.is_busy(),
         }
+    }
+
+    /// Emits one load-more request when the Feed list is at its end, there is a
+    /// validated next source page and no append is already in flight. The caller
+    /// marks the request loading, so repeated notifications cannot duplicate it.
+    pub fn request_more_feed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.feed_can_load_more() {
+            return;
+        }
+        // Emit at the end, or when the content does not fill the viewport (so a
+        // filtered-empty or short first page is never stranded and unreachable).
+        if !self.feed_at_end_or_underfilled() {
+            return;
+        }
+        self.feed_append = FeedAppendState::Loading;
+        self.emit(
+            HomeAction::LoadMoreFeed(RefreshRequest {
+                column: Column::Feed,
+                binding: self.binding.clone(),
+                generation: self.generation,
+            }),
+            window,
+            cx,
+        );
+    }
+
+    /// Whether the Feed list is scrolled to the end, or has no scrollable
+    /// overflow yet (an empty/short first batch), so older pages should continue.
+    fn feed_at_end_or_underfilled(&self) -> bool {
+        // Underfilled: no scrollable reach means the content does not fill the
+        // viewport, so a short/empty batch must continue instead of stranding.
+        if self.feed_view.scroll.max_offset_for_scrollbar().y <= px(0.0) {
+            return true;
+        }
+        self.feed_view.scroll.is_scrolled_to_end() == Some(true)
     }
 
     fn emit(&mut self, action: HomeAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -949,13 +1083,37 @@ impl Render for HomeView {
             let _ = column;
         }
 
+        // Feed end-of-scroll: emit at most one load-more per append; the host
+        // re-validates binding/generation before starting any read. Rendering,
+        // resize and repeated scroll callbacks all funnel through this single
+        // in-flight guard. An empty/short first page continues automatically so
+        // a filtered middle page cannot strand the Feed.
+        if self.feed_append == FeedAppendState::Idle
+            && self.feed_can_load_more()
+            && self.feed_at_end_or_underfilled()
+        {
+            self.request_more_feed(window, cx);
+        }
+
         let narrow = window.viewport_size().width < px(760.0);
         let home_opacity = self.home_view.bars.opacity(self.home_view.now_ms());
         let feed_opacity = self.feed_view.bars.opacity(self.feed_view.now_ms());
         let home_handles = self.home_view.handles();
         let feed_handles = self.feed_view.handles();
+        let feed_append_binding = self.binding.clone();
+        let feed_append_generation = self.generation;
+        let feed_append_state = self.feed_append.clone();
         let home = render_panel(Column::Home, &self.home, home_opacity, &home_handles, cx);
-        let feed = render_panel(Column::Feed, &self.feed, feed_opacity, &feed_handles, cx);
+        let feed = render_panel_with(
+            Column::Feed,
+            &self.feed,
+            feed_opacity,
+            &feed_handles,
+            Some(&feed_append_state),
+            feed_append_binding,
+            feed_append_generation,
+            cx,
+        );
         let columns = div()
             .debug_selector(|| "home-columns".to_string())
             .flex()
@@ -997,6 +1155,29 @@ fn render_panel<T: PanelRows + 'static>(
     handles: &PanelHandles,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
+    render_panel_with(
+        column,
+        model,
+        opacity,
+        handles,
+        None,
+        RequestBinding::new(""),
+        0,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_panel_with<T: PanelRows + 'static>(
+    column: Column,
+    model: &PanelModel<T>,
+    opacity: f32,
+    handles: &PanelHandles,
+    append_state: Option<&FeedAppendState>,
+    append_binding: RequestBinding,
+    append_generation: u64,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
     let (heading_size, side, icon_size) = {
         let theme = cx.theme();
         (
@@ -1009,7 +1190,16 @@ fn render_panel<T: PanelRows + 'static>(
         Column::Home => "Home",
         Column::Feed => "Feed",
     };
-    let body = panel_body(column, model, opacity, handles, cx);
+    let body = panel_body_with(
+        column,
+        model,
+        opacity,
+        handles,
+        append_state,
+        append_binding,
+        append_generation,
+        cx,
+    );
     let busy = model.state.is_busy();
     let disabled = !model.refresh.available || busy;
     let tooltip = if busy {
@@ -1173,6 +1363,29 @@ fn panel_body<T: PanelRows + 'static>(
     handles: &PanelHandles,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
+    panel_body_with(
+        column,
+        model,
+        opacity,
+        handles,
+        None,
+        RequestBinding::new(""),
+        0,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn panel_body_with<T: PanelRows + 'static>(
+    column: Column,
+    model: &PanelModel<T>,
+    opacity: f32,
+    handles: &PanelHandles,
+    append_state: Option<&FeedAppendState>,
+    append_binding: RequestBinding,
+    append_generation: u64,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
     let (colors, tiny, radius) = {
         let theme = cx.theme();
         (
@@ -1268,6 +1481,12 @@ fn panel_body<T: PanelRows + 'static>(
     let summary = T::summary(data);
     let partial = summary.notice;
     let list = list_rows::<T>(column, opacity, handles, cx);
+    let append_footer = if column == Column::Feed {
+        let state = append_state.unwrap_or(&FeedAppendState::Idle);
+        feed_append_footer(state, append_binding, append_generation, cx)
+    } else {
+        div().into_any_element()
+    };
     let empty_panel = div()
         .debug_selector(move || format!("{}-empty", column_name(column)))
         .flex_1()
@@ -1303,6 +1522,7 @@ fn panel_body<T: PanelRows + 'static>(
                 .child(text)
         }))
         .child(if empty { empty_panel } else { list })
+        .child(append_footer)
         .into_any_element()
 }
 
@@ -1310,6 +1530,71 @@ fn column_name(column: Column) -> &'static str {
     match column {
         Column::Home => "home",
         Column::Feed => "feed",
+    }
+}
+
+/// Compact end-of-scroll append indicator for the Feed column. Loading is an
+/// animated icon; a failed append keeps the visible list and shows a yellow
+/// warning with click-to-retry, never a `Loading…`/`Load more` prose button.
+fn feed_append_footer(
+    state: &FeedAppendState,
+    binding: RequestBinding,
+    generation: u64,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
+    match state {
+        FeedAppendState::Idle => div().into_any_element(),
+        FeedAppendState::Loading => div()
+            .id("feed-append-loading")
+            .debug_selector(|| "feed-append-loading".to_string())
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .py_2()
+            .child(crate::ui::compact_status::loading(
+                "feed-append-spinner",
+                "Loading older activity…",
+                cx,
+            ))
+            .into_any_element(),
+        FeedAppendState::Failed { page } => {
+            let retry = {
+                let entity = cx.entity().downgrade();
+                let binding = binding.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    let _ = entity.update(cx, |view, cx| {
+                        view.feed_append = FeedAppendState::Loading;
+                        view.emit(
+                            HomeAction::LoadMoreFeed(RefreshRequest {
+                                column: Column::Feed,
+                                binding: binding.clone(),
+                                generation,
+                            }),
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            };
+            div()
+                .id("feed-append-failed")
+                .debug_selector(|| "feed-append-failed".to_string())
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .py_2()
+                .child(crate::ui::compact_status::failed(
+                    "feed-append-retry",
+                    "Could not load older activity",
+                    format!("Retry page {page}"),
+                    Some(retry),
+                    Some("feed-append-retry"),
+                    cx,
+                ))
+                .into_any_element()
+        }
     }
 }
 

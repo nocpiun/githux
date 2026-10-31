@@ -57,6 +57,15 @@ struct Reply {
     result: ColumnResult,
 }
 
+/// An end-of-scroll append result, routed separately from the column reply so it
+/// can never be mistaken for a fresh first-page read.
+struct AppendReply {
+    generation: u64,
+    selection: u64,
+    context: RepositoryReadContext,
+    result: Result<(FeedOutcome, std::collections::HashSet<String>), HomeError>,
+}
+
 pub struct HomePage {
     tab: TabId,
     services: Option<AccountServices>,
@@ -67,10 +76,16 @@ pub struct HomePage {
     requests: [u64; 2],
     work: [Option<Work>; 2],
     inbox: Arc<Mutex<VecDeque<Reply>>>,
+    append_inbox: Arc<Mutex<VecDeque<AppendReply>>>,
     alive: Arc<watch::Sender<bool>>,
     receiver: Option<gpui::Task<()>>,
     feed_ready: Option<Instant>,
     feed_cooldown_task: Option<gpui::Task<()>>,
+    /// Continuation state for Feed end-of-scroll pagination, scoped to the
+    /// current binding/generation. Cleared on rebind/refresh.
+    feed_next_page: Option<crate::domain::home::FeedSourceCursor>,
+    feed_seen_ids: std::collections::HashSet<String>,
+    feed_append: Option<Work>,
     view: Entity<HomeView>,
     navigation: NavigationSink,
     _changed: Subscription,
@@ -128,10 +143,14 @@ impl HomePage {
             requests: [0, 0],
             work: [None, None],
             inbox: Arc::new(Mutex::new(VecDeque::new())),
+            append_inbox: Arc::new(Mutex::new(VecDeque::new())),
             alive: Arc::new(alive),
             receiver: None,
             feed_ready: None,
             feed_cooldown_task: None,
+            feed_next_page: None,
+            feed_seen_ids: std::collections::HashSet::new(),
+            feed_append: None,
             view,
             navigation,
             _changed,
@@ -162,6 +181,8 @@ impl HomePage {
             self.selection
         ));
         self.feed_ready = None;
+        self.feed_next_page = None;
+        self.feed_seen_ids.clear();
         let binding = self.binding.clone();
         let generation = self.generation;
         self.view.update(cx, |view, cx| {
@@ -221,6 +242,13 @@ impl HomePage {
             {
                 self.start(request.column, false, cx);
             }
+            HomeAction::LoadMoreFeed(request)
+                if request.binding == self.binding
+                    && request.generation == self.generation
+                    && request.column == Column::Feed =>
+            {
+                self.load_more_feed(request, cx);
+            }
             HomeAction::Repository(repository) => (self.navigation)(
                 PageNavigation::Open(Route::Repository {
                     namespace: repository.owner,
@@ -243,7 +271,8 @@ impl HomePage {
             // Issue/PR detail is deliberately not routed in this release.
             HomeAction::ActivateWorkItem(_)
             | HomeAction::ActivateFeed(_)
-            | HomeAction::Refresh(_) => {}
+            | HomeAction::Refresh(_)
+            | HomeAction::LoadMoreFeed(_) => {}
         }
     }
 
@@ -401,6 +430,66 @@ impl HomePage {
         for reply in replies {
             self.apply(reply, cx);
         }
+        let appends: Vec<_> = self
+            .append_inbox
+            .lock()
+            .expect("home append inbox")
+            .drain(..)
+            .collect();
+        for append in appends {
+            self.apply_append(append, cx);
+        }
+    }
+
+    fn apply_append(&mut self, append: AppendReply, cx: &mut Context<Self>) {
+        if append.generation != self.generation
+            || append.selection != self.selection
+            || !self
+                .services
+                .as_ref()
+                .is_some_and(|services| services.repositories().is_current(&append.context))
+            || !self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.context() == &append.context)
+        {
+            return;
+        }
+        self.feed_append = None;
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        match append.result {
+            Ok((page, seen)) => {
+                self.feed_seen_ids = seen;
+                self.feed_next_page = page.next_page;
+                let _ = page.activities.len();
+                // Merge into the retained outcome in place.
+                self.view.update(cx, |view, cx| {
+                    if let crate::ui::home::PanelState::Ready {
+                        content: crate::ui::home::PanelContent::Ready(existing),
+                        ..
+                    } = view.feed_state()
+                    {
+                        let mut merged = existing.clone();
+                        merged.activities.extend(page.activities.clone());
+                        merged.next_page = page.next_page;
+                        merged.readiness = page.readiness.clone();
+                        merged.etag = page.etag;
+                        if let Some(poll) = page.poll_interval_seconds {
+                            merged.poll_interval_seconds = Some(poll);
+                        }
+                        view.apply_feed_page(&binding, generation, merged, cx);
+                    }
+                });
+            }
+            Err(_error) => {
+                let page = self.feed_next_page.map(|cursor| cursor.page).unwrap_or(1);
+                self.view.update(cx, |view, cx| {
+                    view.feed_append_failed(&binding, generation, page, cx);
+                });
+            }
+        }
+        cx.notify();
     }
 
     fn apply(&mut self, reply: Reply, cx: &mut Context<Self>) {
@@ -423,6 +512,13 @@ impl HomePage {
                     self.feed_ready = Some(Instant::now() + Duration::from_secs(seconds.max(1)));
                 } else {
                     self.feed_ready = None;
+                }
+                // Seed continuation from the first page: the validated next
+                // source cursor and the seen event ids become the append
+                // baseline, scoped to this generation.
+                self.feed_next_page = outcome.next_page;
+                for activity in &outcome.activities {
+                    self.feed_seen_ids.insert(activity.event.id.clone());
                 }
                 view.apply_feed(&binding, generation, outcome, cx);
             }
@@ -507,6 +603,12 @@ impl HomePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn load_more_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.view
+            .update(cx, |view, cx| view.request_more_feed(window, cx));
+    }
+
+    #[cfg(test)]
     pub(crate) fn expire_feed_cooldown_for_test(&mut self, cx: &mut Context<Self>) {
         let Some(ready) = self.feed_ready else {
             return;
@@ -559,10 +661,108 @@ impl HomePage {
                 work.source.cancel();
             }
         }
+        if let Some(append) = self.feed_append.take() {
+            append.source.cancel();
+        }
         self.inbox.lock().expect("home inbox").clear();
+        self.append_inbox.lock().expect("home append inbox").clear();
         self.feed_cooldown_task = None;
         self.feed_ready = None;
+        self.feed_next_page = None;
+        self.feed_seen_ids.clear();
         self.session = None;
+    }
+
+    /// Starts one bounded load-more of the Feed's next older source page.
+    ///
+    /// At most one append runs per account/generation: the in-flight guard plus
+    /// the view's loading state prevent duplicates from repeated scroll/resize
+    /// callbacks. The request uses the same captured session and account context
+    /// as the first read, so account switches and refresh reject stale replies.
+    fn load_more_feed(&mut self, request: crate::ui::home::RefreshRequest, cx: &mut Context<Self>) {
+        if self.feed_append.is_some() {
+            return;
+        }
+        let Some(next) = self.feed_next_page else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        let context = session.context().clone();
+        if !services.repositories().is_current(&context) {
+            self.feed_append_failed(request.generation, next.page, cx);
+            return;
+        }
+        let work = Work::new();
+        let cancel = work.token.clone();
+        self.feed_append = Some(work);
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        self.view.update(cx, |view, cx| {
+            view.feed_append_loading(&binding, generation, cx);
+        });
+        let append_inbox = self.append_inbox.clone();
+        let alive = self.alive.clone();
+        let selection = self.selection;
+        let reply_context = context.clone();
+        let mut seen = self.feed_seen_ids.clone();
+        let submitted = services.executor().handle().spawn(async move {
+            let result = session
+                .feed_page(
+                    next,
+                    &FeedLimits::default(),
+                    &FollowingLimits::default(),
+                    &PullRequestDetailLimits::default(),
+                    FEED_AUTHOR_LOOKUP_LIMIT,
+                    &mut seen,
+                    cancel,
+                )
+                .await;
+            if *alive.borrow() {
+                append_inbox
+                    .lock()
+                    .expect("home append inbox")
+                    .push_back(AppendReply {
+                        generation,
+                        selection,
+                        context: reply_context,
+                        result: result.map(|page| {
+                            (
+                                FeedOutcome {
+                                    activities: page.value.activities,
+                                    etag: page.value.etag,
+                                    poll_interval_seconds: page.value.poll_interval_seconds,
+                                    next_page: page.value.next_page,
+                                    readiness: crate::domain::home::FeedReadiness::from_reasons(
+                                        page.value.reasons,
+                                    ),
+                                },
+                                seen,
+                            )
+                        }),
+                    });
+            }
+        });
+        if submitted.is_err() {
+            self.feed_append = None;
+            self.feed_append_failed(generation, next.page, cx);
+        }
+    }
+
+    fn feed_append_failed(&mut self, generation: u64, page: u32, cx: &mut Context<Self>) {
+        if generation != self.generation {
+            return;
+        }
+        self.feed_append = None;
+        let binding = self.binding.clone();
+        self.view.update(cx, |view, cx| {
+            view.feed_append_failed(&binding, generation, page, cx);
+        });
+        cx.notify();
     }
 }
 

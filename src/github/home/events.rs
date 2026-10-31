@@ -22,7 +22,7 @@ use crate::auth::token::Pat;
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
     FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedEventsRead, FeedFetch, FeedPartialReason,
-    FeedPayload, FeedReadiness, FeedRepository, HomeError, Login,
+    FeedPayload, FeedReadiness, FeedRepository, FeedSourceCursor, FeedSourcePage, HomeError, Login,
 };
 use crate::github::client::GitHubClient;
 use crate::github::error::{classify_status, classify_transport};
@@ -90,6 +90,96 @@ struct RawRepo {
     name: String,
     #[serde(default)]
     url: String,
+}
+
+/// Fetch exactly one page of received events, returning the parsed source events
+/// and the validated next-page cursor (when the server offered one).
+///
+/// The next cursor is `None` only when the server exposed no `rel="next"` link or
+/// the timeline hit the 300-event window; an untrusted/invalid/cycling link is a
+/// typed partial reason and stops this batch. A failed page is a hard error: the
+/// caller retries the same cursor, it does not advance.
+pub async fn fetch_received_events_page(
+    client: &GitHubClient,
+    token: &Pat,
+    login: &Login,
+    cursor: FeedSourceCursor,
+    limits: &FeedLimits,
+    cancel: CancellationToken,
+) -> Result<FeedSourcePage, HomeError> {
+    validate_limits(limits)?;
+    if cancel.is_cancelled() {
+        return Err(GitHubError::Cancelled.into());
+    }
+    let url = feed_url(client, login, limits.per_page, cursor.page)?;
+    let response = client
+        .transport()
+        .execute_bounded(
+            client.build_get(url.as_str(), token),
+            cancel.clone(),
+            limits.response_bytes,
+        )
+        .await
+        .map_err(|error| match error {
+            TransportError::ResponseTooLarge { limit } => HomeError::LimitExceeded {
+                resource: "events response bytes",
+                limit,
+            },
+            other => classify_transport(other).into(),
+        })?;
+    if cancel.is_cancelled() {
+        return Err(GitHubError::Cancelled.into());
+    }
+    // Defense for custom transports that do not enforce the receive bound.
+    if response.body.len() > limits.response_bytes {
+        return Err(HomeError::LimitExceeded {
+            resource: "events response bytes",
+            limit: limits.response_bytes,
+        });
+    }
+    let mut reasons = Vec::new();
+    if let Some(organizations) = parse_sso_header(response.header("x-github-sso")) {
+        // Partial SSO still carries events; preserve the reason, do not drop them.
+        reasons.push(FeedPartialReason::SsoPartial { organizations });
+    }
+    if let Some(error) = classify_status(&response) {
+        return Err(error.into());
+    }
+    let raw_events: Vec<RawEvent> =
+        serde_json::from_str(&response.body).map_err(|error| GitHubError::Parse {
+            message: error.to_string(),
+        })?;
+    let etag = response.header("etag").map(str::to_string);
+    let poll_interval_seconds = response
+        .header("x-poll-interval")
+        .and_then(|value| value.parse().ok());
+    let mut events = Vec::with_capacity(raw_events.len());
+    for raw in raw_events {
+        events.push(convert_event(raw)?);
+    }
+    let next = match next_page(client, response.header("link"), cursor.page)? {
+        NextPage::None => None,
+        NextPage::Page(next) => Some(FeedSourceCursor { page: next }),
+        NextPage::Untrusted => {
+            reasons.push(FeedPartialReason::UntrustedPagination);
+            None
+        }
+        NextPage::Invalid => {
+            reasons.push(FeedPartialReason::InvalidPagination);
+            None
+        }
+        NextPage::Cycle => {
+            reasons.push(FeedPartialReason::PaginationCycle);
+            None
+        }
+    };
+    Ok(FeedSourcePage {
+        events,
+        next,
+        reasons,
+        etag,
+        poll_interval_seconds,
+    })
 }
 
 /// Fetch events received by `login`.

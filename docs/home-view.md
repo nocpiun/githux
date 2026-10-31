@@ -32,6 +32,9 @@ pub fn bind(&mut self, binding: RequestBinding, generation: u64, ...);
 pub fn set_loading(&mut self, column, binding, generation, ...) -> bool;
 pub fn apply_home(&mut self, binding, generation, HomeSearchOutcome, ...) -> bool;
 pub fn apply_feed(&mut self, binding, generation, FeedOutcome, ...) -> bool;
+pub fn apply_feed_page(&mut self, binding, generation, FeedOutcome, ...) -> bool; // 触底追加，不重置滚动/选择
+pub fn feed_append_loading(&mut self, binding, generation, ...) -> bool;
+pub fn feed_append_failed(&mut self, binding, generation, page, ...) -> bool;
 pub fn apply_error(&mut self, column, binding, generation, HomeError, ...) -> bool;
 pub fn set_unavailable(&mut self, column, binding, generation, message, ...) -> bool;
 pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshAvailability, ...) -> bool;
@@ -52,6 +55,7 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 | 动作 | 内容 |
 | --- | --- |
 | `Refresh(RefreshRequest)` | `column`、触发时观察到的 binding 与 generation |
+| `LoadMoreFeed(RefreshRequest)` | Feed 触底时请求下一页更旧的活动；携带 binding/generation，host 重新核验后按 cursor 追加 |
 | `Repository(RepositoryIdentity)` | `id`（Feed 有，Home 搜索模型无）、owner、name |
 | `Profile(ProfileIdentity)` | `Option<u64>` id 与 canonical 登录名；actor 保留真实 id，owner-only 为 None |
 | `ActivateWorkItem(WorkItemIdentity)` | Home 条目的全局 id、number、Issue/PR kind、仓库 |
@@ -72,14 +76,17 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 ## 滚动与键盘
 
+## 滚动与键盘
+
 - 每栏使用真实 GPUI `ListState`、共享 `scroll::Bar`/`Bars` 与 `scroll::Motion<ListState>`，只渲染可见行。Home 保持固定行高，Feed 自然测量可变卡片高度；不调用 measure_all，不新建滚动几何。键盘远跳使用原生 logical item anchor，在 Motion tick 后应用，避免旧范围 clamp 覆盖末项 reveal。
+- **Feed 触底追加**：视图在列表到底（或首屏内容不满一屏、无法滚动）时发一次 `LoadMoreFeed`；每账户/代次同一时刻至多一次在途追加，渲染、resize、重复滚动回调与刷新都不能重复请求。追加用 `ListState::splice` 在原列表尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中用紧凑动画图标，失败保留现有内容并显示黄色告警图标 + 点击重试，真正耗尽（服务端无 next 链接）后停止请求。
 - 捕获阶段 `wheel_overlay` 每区域只消费一次，测试验证一次精确滚轮只改变目标栏且偏移恰好等于输入。
 - 每栏是独立 Tab stop。列表根聚焦时 Up/Down/Home/End 移动选择，Enter/Space 激活所选 Home 条目或 Feed 事件；各内容链接也是独立键盘入口，键盘激活不抢回列表焦点。
 - 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。每个链接阻止冒泡，不发生卡片/列表二次激活。
 
 ## 正式 Shell 接入（2026-10-29）
 
-本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；Feed 的数据层负责源事件、`/user/following` 与有界 PR 作者详情读取，并在发布前完成策略过滤（`FEED_AUTHOR_LOOKUP_LIMIT = 30`、关注列表最多 1,000 账户/10 页）；两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经 `set_avatar_renderer` 只传入已解码元素；renderer 接收的是 credited subject（合并 PR 时为 PR 作者）。`FeedOutcome` 只含已通过策略的 `FeedActivity`，视图不会再自行过滤，也无法从显示字符串推断关注状态。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
+本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；Feed 的数据层负责源事件、`/user/following` 与有界 PR 作者详情读取，并在发布前完成策略过滤（`FEED_AUTHOR_LOOKUP_LIMIT = 30`、关注列表最多 1,000 账户/10 页）；`FeedOutcome` 带 `next_page` 游标，host 在 `LoadMoreFeed` 时按游标逐页追加，而不是预先读完整条（至多 300 条/30 天）时间线。两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经 `set_avatar_renderer` 只传入已解码元素；renderer 接收的是 credited subject（合并 PR 时为 PR 作者）。`FeedOutcome` 只含已通过策略的 `FeedActivity`，视图不会再自行过滤，也无法从显示字符串推断关注状态。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
 ## 2026-10-29 第二轮状态呈现
 
@@ -116,7 +123,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本机 Windows 使用序列化 Cargo helper，独立 target/：fmt、locked all-target check、clippy -D warnings、完整测试、产品与 home example 构建、diff check。最终结果与 PR head 见 PR34 交付评论，不以旧 head 结果代替当前 head。
 
-Home 装配当前 79 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。2026-10-30 新增：closed/merged/未知/缺失 Home 状态永不成为行、选择索引或激活目标；只保留三类 Feed 活动且不产生占位卡；合并 PR 归因 PR 作者而非 merge actor；全噪声 Feed 仍是正常空态且 readiness 保持 Complete；仅含 closed 的刷新不会让旧 open 行残留。第二轮新增：视图直接渲染 `build_feed` 的真实策略输出（关注主语过滤 + 瘦 `action=merged` 事件 + 作者解析），断言被过滤事件没有行与占位、合并卡片链接到作者；关注关系不完整时显示 Partial 提示而不是空 Feed。
+Home 装配当前 84 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。2026-10-30 新增：closed/merged/未知/缺失 Home 状态永不成为行、选择索引或激活目标；只保留三类 Feed 活动且不产生占位卡；合并 PR 归因 PR 作者而非 merge actor；全噪声 Feed 仍是正常空态且 readiness 保持 Complete；仅含 closed 的刷新不会让旧 open 行残留。第二轮新增：视图直接渲染 `build_feed` 的真实策略输出（关注主语过滤 + 瘦 `action=merged` 事件 + 作者解析），断言被过滤事件没有行与占位、合并卡片链接到作者；关注关系不完整时显示 Partial 提示而不是空 Feed。第三轮新增：触底单次 `LoadMoreFeed`、在途去重、`splice` 追加保留滚动锚点与选择、追加失败告警+点击重试、真正耗尽停止。
 
 本轮实际查看 Windows 原生 PrintWindow 帧：144 DPI，宽布局 2130×1425 物理像素与窄布局 990×1000；计数/列框/分割线/右侧导航按钮消失，Home icon 对齐标题，Feed 卡片 header/inset 详情及相对时间正常。通过本任务 HWND 的消息切换 Mixed/Loading-error/Large，并取得 owner-only 与 repo-only hover underline 帧。未拿源码推断或测试平台代替视觉核验。
 

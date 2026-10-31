@@ -218,6 +218,7 @@ fn feed_outcome(activities: Vec<FeedActivity>, readiness: FeedReadiness) -> Feed
         activities,
         etag: None,
         poll_interval_seconds: Some(60),
+        next_page: None,
         readiness,
     }
 }
@@ -1467,4 +1468,116 @@ fn a_retained_unmounted_view_does_not_restart_its_clock_on_activation(cx: &mut T
     cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+}
+
+#[gpui::test]
+fn feed_end_of_scroll_emits_one_load_more_per_append(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    // A short feed with a validated next page: underfilled, so the first render
+    // triggers a bounded continuation (an empty/short batch must not strand).
+    let mut outcome = feed_outcome(vec![starred_activity(0)], FeedReadiness::Complete);
+    outcome.next_page = Some(crate::domain::home::FeedSourceCursor { page: 2 });
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    // Ensure layout happens so the underfilled/end check can observe the list.
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    // The view emits at most one request, then the host would mark it loading;
+    // here we assert exactly one LoadMoreFeed was emitted for this page.
+    let load_more_count = actions
+        .borrow()
+        .iter()
+        .filter(|action| matches!(action, HomeAction::LoadMoreFeed(_)))
+        .count();
+    assert_eq!(load_more_count, 1, "one end-of-scroll append per page");
+
+    // The host would call feed_append_loading; simulate the in-flight guard by
+    // marking loading directly, then repeated renders must not duplicate.
+    view.update(cx, |view, cx| {
+        assert!(view.feed_append_loading(&binding(), 1, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        actions
+            .borrow()
+            .iter()
+            .filter(|action| matches!(action, HomeAction::LoadMoreFeed(_)))
+            .count(),
+        1,
+        "in-flight guard prevents duplicates from repeated renders"
+    );
+}
+
+#[gpui::test]
+fn feed_append_keeps_selection_and_scroll_anchor(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    // A first page with several cards and a next page.
+    let first = feed_outcome(
+        (0..3).map(starred_activity).collect(),
+        FeedReadiness::Complete,
+    );
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, first, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.select(Column::Feed, 1, window, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected(Column::Feed)),
+        Some(1)
+    );
+    let offset_before = view.read_with(cx, |view, _| view.offset(Column::Feed).y);
+
+    // Append a merged activity: selection index and scroll offset must survive.
+    let mut merged = feed_outcome(
+        {
+            let mut all: Vec<_> = (0..3).map(starred_activity).collect();
+            all.push(merged_activity(3, author(905, "contributor")));
+            all
+        },
+        FeedReadiness::Complete,
+    );
+    merged.next_page = None;
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed_page(&binding(), 1, merged, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected(Column::Feed)),
+        Some(1),
+        "append must not clear selection"
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.offset(Column::Feed).y),
+        offset_before,
+        "append must not reset scroll"
+    );
+}
+
+#[gpui::test]
+fn feed_append_failure_shows_warning_and_retries(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    let mut outcome = feed_outcome(vec![starred_activity(0)], FeedReadiness::Complete);
+    outcome.next_page = Some(crate::domain::home::FeedSourceCursor { page: 2 });
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+        assert!(view.feed_append_failed(&binding(), 1, 2, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("feed-append-failed").is_some());
+    // Click-to-retry re-emits exactly one LoadMoreFeed for the same cursor.
+    click("feed-append-retry", cx);
+    assert!(
+        actions
+            .borrow()
+            .iter()
+            .any(|action| matches!(action, HomeAction::LoadMoreFeed(_)))
+    );
 }

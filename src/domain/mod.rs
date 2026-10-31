@@ -34,11 +34,12 @@ pub use error::GitHubError;
 pub use home::{
     AuthorResolutions, DateBound, FeedActivity, FeedActivityKind, FeedActivityTarget, FeedActor,
     FeedAuthor, FeedEvent, FeedEventType, FeedEventsRead, FeedFetch, FeedMergeCandidate,
-    FeedOutcome, FeedPartialReason, FeedPayload, FeedReadiness, FeedRepository, FollowedAccount,
-    Following, FollowingPartialReason, FollowingReadiness, HomeError, HomeItem, HomeItemKind,
-    HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
-    PullRequestDetail, PullRequestDetailOutcome, ResolvedPullRequest, UpdatedWindow, build_feed,
-    is_retained_activity, local_activity, merge_candidate,
+    FeedOutcome, FeedPage, FeedPartialReason, FeedPayload, FeedReadiness, FeedRepository,
+    FeedSourceCursor, FeedSourcePage, FollowedAccount, Following, FollowingPartialReason,
+    FollowingReadiness, HomeError, HomeItem, HomeItemKind, HomePartialReason, HomeQuery,
+    HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login, PullRequestDetail,
+    PullRequestDetailOutcome, ResolvedPullRequest, UpdatedWindow, build_feed,
+    build_feed_activities, build_feed_page, is_retained_activity, local_activity, merge_candidate,
 };
 #[allow(unused_imports)]
 pub use profile::{

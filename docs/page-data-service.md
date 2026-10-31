@@ -39,15 +39,28 @@ let feed = pages
     .await?;
 // Lower-level pieces, for callers that need one of them directly:
 let following = pages.following(&FollowingLimits::default(), cancel.clone()).await?;
-let events = pages.feed_events(&FeedLimits::default(), cancel.clone()).await?;
+let first = pages.feed_source_page(
+    FeedSourceCursor { page: 1 },
+    &FeedLimits::default(),
+    cancel.clone(),
+).await?;
+let page = pages.feed_page(
+    FeedSourceCursor { page: 2 },
+    &FeedLimits::default(),
+    &FollowingLimits::default(),
+    &PullRequestDetailLimits::default(),
+    /* max author lookups */ 30,
+    &mut seen_ids,
+    cancel,
+).await?;
 let detail = pages
     .pull_request_detail("owner", "repo", 42, &PullRequestDetailLimits::default(), cancel)
     .await?;
 ```
 
 - `home` 固定使用捕获活动账户的 login，查询为 `involves:<login> is:open`、`updated` 降序，最终只发布 open 条目。`Option<UpdatedWindow>` 是显式调用参数；传 `None` 不加时间窗口，不提供隐藏默认日期，不增加 review-requested 关系。
-- `feed` 派生捕获 login，按固定顺序做三段有界读取（作者读取并发为 1，复用当前调用内的解析结果）：源 `received_events` → `/user/following` → 每个尚无作者的合并 PR 一次详情读取（按 PR 身份去重，受调用方给出的上限约束）。随后 `domain::home::build_feed` 应用唯一一次产品策略，`FeedOutcome.activities` 只含“主语是当前账户关注的人”的合并贡献/星标/建库三类，保持源顺序与真实事件身份。`FeedOutcome` 仍带 ETag、`X-Poll-Interval` 与 readiness。
-- `following` 单独暴露关注关系（`Following` + `FollowingReadiness`），供需要原始关系状态的调用方；`feed_events` 暴露未过滤源列表；`pull_request_detail` 暴露单条作者解析。三者返回的 `Scoped` 上下文与 `feed` 相同，都经过同一 `RepoService::read_authenticated` 与 `is_current` 校验。
+- `feed` 派生捕获 login，只取**第一源页**并返回 `FeedOutcome.next_page` 游标；随后 `domain::home::build_feed_page` 应用产品策略，`FeedOutcome.activities` 只含“主语是当前账户关注的人”的合并贡献/星标/建库三类，保持源顺序与真实事件身份。触底追加调用 `feed_page(cursor, …, &mut seen_ids, …)`，重读关注关系、按 PR 身份去重解析作者，并用 `build_feed_page` 与调用方传入的 `seen_ids` 跨页去重。`FeedOutcome` 仍带 ETag、`X-Poll-Interval` 与 readiness。
+- `following` 单独暴露关注关系（`Following` + `FollowingReadiness`），供需要原始关系状态的调用方；`feed_events` 暴露未过滤的完整源列表；`feed_source_page` 只取一个游标页；`feed_page` 完成一页“源事件 + 关系 + 作者”并返回策略应用后的 `FeedPage`；`pull_request_detail` 暴露单条作者解析。各返回的 `Scoped` 上下文与 `feed` 相同，都经过同一 `RepoService::read_authenticated` 与 `is_current` 校验。
 - **失败与完整性语义**：关注关系第一页失败或完全读不到 ⇒ `feed` 返回 `Err`（不是空 Feed）；后续页失败或预算截断 ⇒ 相关主语按“未知”扣留并追加 `FollowingIncomplete`；作者详情失败、编号不匹配或详情未确认合并 ⇒ 该贡献扣留并追加 `AuthorUnresolved`；整页都是噪声或都不满足关注关系、且源与关系都完整 ⇒ `Complete` 空 Feed。Follow 两类**事件卡片**仍暂缓，不在此层合成事件。
 - 本切片不接受、保存或发送 Feed 条件验证器。无验证器却收到 304 时，facade 返回 `HomeError::InvalidResponse`，绝不发布 `NotModified` 或空事件。未来只有具备相同账户/参数/表示的已验证缓存值后，才能另接条件读取。
 - `HomeReadiness` / `FeedReadiness` 的 Partial、空集合、SSO、分页、限流和错误语义不变；`FeedReadiness` 另有 `FollowingIncomplete` 与 `AuthorUnresolved` 两种 Partial 原因。

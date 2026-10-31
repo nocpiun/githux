@@ -814,12 +814,18 @@ async fn unexpected_304_and_rate_limit_remain_errors_not_empty_values() {
         headers: vec![],
         body: String::new(),
     });
-    assert!(matches!(
-        feed_call(&session, &Default::default(), Default::default())
-            .await
-            .unwrap_err(),
-        HomeError::InvalidResponse { .. }
-    ));
+    let error = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .unwrap_err();
+    // No validator is sent, so an unexpected 304 is a genuine unexpected status,
+    // not a NotModified replay; it is never a successful empty Feed.
+    assert!(
+        matches!(
+            error,
+            HomeError::GitHub(GitHubError::UnexpectedStatus { status: 304 })
+        ),
+        "{error:?}"
+    );
     transport.push(200, extras_details());
     let repository = svc
         .repo_service()
