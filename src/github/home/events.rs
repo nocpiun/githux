@@ -169,21 +169,17 @@ pub async fn fetch_received_events_page(
         }
         events.push(convert_event(raw)?);
     }
-    // Enforce the page budget before honoring a next link: a caller-supplied
-    // `max_pages` is a bound on the whole incremental walk, not a soft hint.
-    if cursor.page as usize >= limits.max_pages {
-        reasons.push(FeedPartialReason::PageLimit);
-        return Ok(FeedSourcePage {
-            events,
-            next: None,
-            reasons,
-            etag,
-            poll_interval_seconds,
-        });
-    }
-    let next = match next_page(client, response.header("link"), cursor.page)? {
-        NextPage::None => None,
+    // Validate any continuation first: only then can we know whether reaching the
+    // page budget actually prevented another page. A complete final page that
+    // lands exactly on `max_pages` is not truncation.
+    let validated_next = next_page(client, response.header("link"), cursor.page)?;
+    let next = match validated_next {
+        NextPage::Page(_next) if cursor.page as usize >= limits.max_pages => {
+            reasons.push(FeedPartialReason::PageLimit);
+            None
+        }
         NextPage::Page(next) => Some(FeedSourceCursor { page: next }),
+        NextPage::None => None,
         NextPage::Untrusted => {
             reasons.push(FeedPartialReason::UntrustedPagination);
             None

@@ -653,4 +653,37 @@ async fn incremental_page_path_enforces_max_events_and_max_pages() {
         "the page budget bounds the incremental walk"
     );
     assert!(page.reasons.contains(&FeedPartialReason::PageLimit));
+
+    // A complete final page that lands exactly on the page budget (no next link)
+    // is NOT truncation: importing 201-300 events must stay Complete.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![event(
+            "1",
+            "WatchEvent",
+            serde_json::json!({"action": "started"}),
+        )]),
+        vec![],
+    )))
+    .await;
+    let limits = FeedLimits {
+        max_pages: 3,
+        ..FeedLimits::default()
+    };
+    let page = fetch_received_events_page(
+        &client(mock.clone()),
+        &pat(),
+        &login("test-user"),
+        FeedSourceCursor { page: 3 },
+        &limits,
+        CancellationToken::default(),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(page.next, None);
+    assert!(
+        page.reasons.is_empty(),
+        "a complete final page at the page budget is not partial: {:?}",
+        page.reasons
+    );
 }
