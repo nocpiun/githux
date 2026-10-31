@@ -585,3 +585,72 @@ async fn localhost_304_round_trip_returns_not_modified() {
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].header("if-none-match"), Some("\"feed-1\""));
 }
+
+#[tokio::test]
+async fn incremental_page_path_enforces_max_events_and_max_pages() {
+    // max_events: a page with more events than the budget truncates and reports
+    // EntryLimit, exposing no continuation.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![
+            event("1", "WatchEvent", serde_json::json!({"action": "started"})),
+            event("2", "WatchEvent", serde_json::json!({"action": "started"})),
+        ]),
+        vec![(
+            "Link",
+            "<https://api.github.com/users/test-user/received_events?page=2>; rel=\"next\"",
+        )],
+    )))
+    .await;
+    let limits = FeedLimits {
+        max_events: 1,
+        ..FeedLimits::default()
+    };
+    let page = fetch_received_events_page(
+        &client(mock.clone()),
+        &pat(),
+        &login("test-user"),
+        FeedSourceCursor { page: 1 },
+        &limits,
+        CancellationToken::default(),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.next, None, "truncation must not expose a continuation");
+    assert!(page.reasons.contains(&FeedPartialReason::EntryLimit));
+
+    // max_pages: the current page equals the budget, so no next link is honored.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![event(
+            "1",
+            "WatchEvent",
+            serde_json::json!({"action": "started"}),
+        )]),
+        vec![(
+            "Link",
+            "<https://api.github.com/users/test-user/received_events?page=2>; rel=\"next\"",
+        )],
+    )))
+    .await;
+    let limits = FeedLimits {
+        max_pages: 1,
+        ..FeedLimits::default()
+    };
+    let page = fetch_received_events_page(
+        &client(mock.clone()),
+        &pat(),
+        &login("test-user"),
+        FeedSourceCursor { page: 1 },
+        &limits,
+        CancellationToken::default(),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(
+        page.next, None,
+        "the page budget bounds the incremental walk"
+    );
+    assert!(page.reasons.contains(&FeedPartialReason::PageLimit));
+}

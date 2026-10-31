@@ -712,6 +712,12 @@ impl HomePage {
         if self.feed_append.is_some() {
             return;
         }
+        // A replacement (first-page) Feed read owns the continuation state; never
+        // start an append while it is running, or it could capture a stale cursor
+        // and skip the pages between the old and new snapshots.
+        if self.work[Self::index(Column::Feed)].is_some() {
+            return;
+        }
         let Some(next) = self.feed_next_page else {
             return;
         };

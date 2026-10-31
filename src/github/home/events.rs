@@ -153,9 +153,33 @@ pub async fn fetch_received_events_page(
     let poll_interval_seconds = response
         .header("x-poll-interval")
         .and_then(|value| value.parse().ok());
-    let mut events = Vec::with_capacity(raw_events.len());
+    let mut events = Vec::with_capacity(raw_events.len().min(limits.max_events));
     for raw in raw_events {
+        if events.len() >= limits.max_events {
+            // The source budget was hit on this page: stop and report truncation,
+            // and do not expose a continuation cursor that would bypass the limit.
+            reasons.push(FeedPartialReason::EntryLimit);
+            return Ok(FeedSourcePage {
+                events,
+                next: None,
+                reasons,
+                etag,
+                poll_interval_seconds,
+            });
+        }
         events.push(convert_event(raw)?);
+    }
+    // Enforce the page budget before honoring a next link: a caller-supplied
+    // `max_pages` is a bound on the whole incremental walk, not a soft hint.
+    if cursor.page as usize >= limits.max_pages {
+        reasons.push(FeedPartialReason::PageLimit);
+        return Ok(FeedSourcePage {
+            events,
+            next: None,
+            reasons,
+            etag,
+            poll_interval_seconds,
+        });
     }
     let next = match next_page(client, response.header("link"), cursor.page)? {
         NextPage::None => None,
