@@ -130,4 +130,6 @@ powershell -File .agents/task/capture.ps1 -Scenario 3 -Out .agents/task/home-rew
 - **虚拟列表测量修正**：首次布局/变宽时 GPUI 会丢弃未测量高度，直接用 scrollbar 最大偏移判断“接近底部”会误读完整长列表。改用已测量尾部行的位置与逻辑锚点，保持按需加载。
 - 回归用可控异步闸门证明四个详情请求在任何响应释放前都已进入；先释放第四个可启动第五个，最后仍按源顺序输出，并且重复目标不消耗预算。真实 GPUI 测试覆盖长首屏不预取、未到末尾提前读取、完全过滤空页继续、末页停止，并保留原有追加锚点/失败重试/账户代次测试。
 
-本轮最终验证（2026-10-31）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked --bin githux --example home` 均退出 0；此前 `cargo test --locked --bin githux feed_` 的 42 项定向回归通过。完整测试的主程序目标为 862 项通过，其余集成目标也全部通过。检查通过后只补本段验证记录；代码未再变更。此次没有重新进行真实 PAT 原生操作或网络性能基准，不将 GPUI 测试平台结果写成实机加速倍数，遵循 L002。
+本轮验证（2026-10-31）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked --bin githux --example home` 均退出 0；此前 `cargo test --locked --bin githux feed_` 的 42 项定向回归通过。完整测试的主程序目标为 862 项通过，其余集成目标也全部通过。产品实现提交 `952f052` 的最新审查与 CI 已通过，CI 组合基线为 `35ac169`。
+
+随后收紧并发测试 fixture：凭据读取会经过 blocking worker，详情请求到达顺序并非契约；模拟详情响应改为按 URL 匹配，闸门仍独立控制完成顺序，避免 FIFO 响应偶然配错 PR。只修改测试，产品实现不变；`cargo test --locked --bin githux data::page_read_tests` 的 25 项通过，格式与 all-targets clippy 复验通过，新提交仍单独触发 CI/审查。此次没有重新进行真实 PAT 原生操作或网络性能基准，不将 GPUI 测试平台结果写成实机加速倍数，遵循 L002。

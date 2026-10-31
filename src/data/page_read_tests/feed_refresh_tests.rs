@@ -37,10 +37,17 @@ async fn author_reads_overlap_with_four_workers_and_preserve_source_order_and_bu
         ]),
     );
     transport.push(200, json!([{"id":31,"login":"friend"}]));
-    let gates: Vec<_> = (1..=4)
-        .map(|number| transport.block(200, detail(number)))
-        .collect();
-    let (fifth_entered, fifth_release) = transport.block(200, detail(5));
+    // Credential loads run on blocking workers, so request arrival order is
+    // deliberately not part of this fixture's contract.
+    let block_detail = |number| {
+        transport.block_url(
+            format!("https://api.github.com/repos/acme/widgets/pulls/{number}"),
+            200,
+            detail(number),
+        )
+    };
+    let gates: Vec<_> = (1..=4).map(block_detail).collect();
+    let (fifth_entered, fifth_release) = block_detail(5);
     let read = tokio::spawn(async move {
         session
             .feed(

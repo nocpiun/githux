@@ -102,6 +102,7 @@ type Step = (
 #[derive(Default)]
 struct Controlled {
     steps: Mutex<VecDeque<Step>>,
+    routed_steps: Mutex<std::collections::HashMap<String, Step>>,
     requests: Mutex<Vec<HttpRequest>>,
 }
 impl Controlled {
@@ -131,6 +132,28 @@ impl Controlled {
     fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+
+    fn block_url(
+        &self,
+        url: String,
+        status: u16,
+        body: Value,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        self.routed_steps.lock().unwrap().insert(
+            url,
+            (
+                json_response(status, &body.to_string()),
+                Some(gate),
+                Some(entered),
+            ),
+        );
+        (ready, release)
+    }
 }
 impl Transport for Controlled {
     fn execute<'a>(
@@ -139,13 +162,15 @@ impl Transport for Controlled {
         _cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
+            let routed = self.routed_steps.lock().unwrap().remove(&request.url);
             self.requests.lock().unwrap().push(request);
-            let (response, gate, entered) = self
-                .steps
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("scripted response");
+            let (response, gate, entered) = routed.unwrap_or_else(|| {
+                self.steps
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("scripted response")
+            });
             if let Some(entered) = entered {
                 let _ = entered.send(());
             }
