@@ -40,17 +40,18 @@ PR 使用 base 与 head 的 merge-base 三点差异，覆盖整个 PR；后续�
 
 ## 当前可运行检查
 
-CI 范围策略、审查等待和任务派发脚本均有 Node 离线测试。范围策略在 Linux `changes` 中验证，后两项按需在 Windows `script-check` 中运行（Node 24，无依赖缓存）：
+CI 范围策略、审查等待、任务派发和验证 runner 均有 Node 离线测试。范围策略在 Linux `changes` 中验证，后三项按需在 Windows `script-check` 中运行（Node 24，无依赖缓存）：
 
 ```sh
 node --test .github/scripts/ci-scope.test.mjs
 node --test .agents/skills/githux-pr-review/scripts/wait-review.test.mjs
 node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
+node --test scripts/verify.test.mjs
 git diff --check
 git diff --cached --check
 ```
 
-Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发测试在系统临时目录建立一次性 Git 仓库和假 CLI，不访问模型、不打开可见窗口；Windows 进程身份与编码桥有专项覆盖。这两项 Agent 测试已从 Rust 检查拆为独立 Windows `script-check`；纯文档不触发。涉及真实 CLI、可见 CMD/TTY 接管或会话恢复的改动仍需相应真实验证，模拟测试不能替代；当前实现的本机实测证据见 [派发开发日志](devlog/2026-10-21-agent-dispatch.md)。
+Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发测试在系统临时目录建立一次性 Git 仓库和假 CLI，不访问模型、不打开可见窗口；Windows 进程身份与编码桥有专项覆盖。验证 runner 测试覆盖真实 Cargo 失败/成功调用、exit code 保留、stdout/stderr 捕获、空格/Unicode 参数、超时与 Windows mutex 串行化，全部离线运行，不依赖网络或真实构建产物。这三项 Agent 测试已从 Rust 检查拆为独立 Windows `script-check`；纯文档不触发。涉及真实 CLI、可见 CMD/TTY 接管或会话恢复的改动仍需相应真实验证，模拟测试不能替代；当前实现的本机实测证据见 [派发开发日志](devlog/2026-10-21-agent-dispatch.md)。
 
 正式应用是单 Cargo package，固定 Rust 1.98.1。Windows 应用检查如下，CI 配置见 [ci.yml](../.github/workflows/ci.yml)：
 

@@ -22,6 +22,8 @@
 
 派发包至少包含：任务 ID、目标与验收场景、范围/不做的内容、依赖和共享接口、相关文档版本、worktree/分支/base SHA、执行会话、所需检查。全体共识从 `docs/` 读取，任务专属上下文放该 worktree 的 `.agents/task/`。模型接入与私人调度配置留在本机，派发时明确提供，不要求云端 Bot 获取。
 
+**验证命令约定**：所有 Cargo check/test/build/fmt/clippy 均通过共享 runner 执行：`node scripts/verify.mjs [options] -- cargo <args...>`。参数以数组形式在 `--` 后传递，不做 shell 文本插值。每次运行自动在 `.agents/task/runs/<run_id>.json` 记录 exit code、stdout/stderr 日志路径、source identity、时序与结果。Windows 下 runner 持有共享 mutex `Local\Githux-Cargo-20261029`，禁止并发重编译。失败日志直接读取，不为修改 grep 表达式而重新编译。最终检查通过后，仅在发生实际变更、失败或未解决疑虑时重跑，并记录原因。
+
 基层 Agents 的 worktree/上下文生成和可见会话启动使用 [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md)：create 不自动启动，start 在 Windows 可见 CMD 中运行配置的交互 CLI，status 只报告进程事实，resume 严格恢复原会话。负责人可在该终端阅读、补充和接管；本机真实 CLI 启动、键盘输入、正常退出及同会话恢复已验证，见 [开发日志](devlog/2026-10-21-agent-dispatch.md)。脚本没有自动唤醒、调度或自行合并。手工外部 attach 不受脚本锁保护，不能与已有 TUI/RPC 同时使用。后续多实现者并行集成仍待验证。
 
 ## 执行成本与交接
@@ -47,6 +49,8 @@
 等待器按 [完整流程图](pr-review-flow.md) 分别报告本轮审查、历史/人工线程、CI 和集成状态。本轮 clean 不代表旧线程已关闭；执行者核对当前代码与讨论后收尾已解决且无争议的线程，争议继续走永久裁决记录。正文反馈不要求行内评论；证据缺失或冲突默认最多复查两分钟后交回，不持续等不存在的反馈。CI 绑定最新 run/attempt 与真实 checkout 基线，额外检查不能移除 CI 汇总。
 
 结果使用本次 run_id；启动先写 running，错误/取消同样落盘。执行者读取完整 JSON 和原始退出码，不通过 tail/echo 或旧成功文件判断通过。主 Agent 亲自实现的任务也使用同一契约。
+
+**本地验证顺序**：当前 target baseline 与真实外部输入契约 → 明确验收用例 → 实现/聚焦回归 → 必要的原生/组合预览与文档 → 最终完整验证 → commit/push/review 交接。最终检查通过后，仅在发生实际变更、失败或未解决疑虑时重跑，并记录原因。新的 target baseline 仍需组合验证。
 
 ### 首版 Milestone
 

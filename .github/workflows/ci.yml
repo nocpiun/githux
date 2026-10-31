@@ -56,6 +56,9 @@ jobs:
       - name: Test agent dispatch skill
         run: node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
 
+      - name: Test verification runner
+        run: node --test scripts/verify.test.mjs
+
   code-check:
     needs: changes
     if: ${{ needs.changes.outputs.app == 'true' }}

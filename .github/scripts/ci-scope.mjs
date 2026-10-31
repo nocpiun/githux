@@ -12,6 +12,8 @@ export function classifyChanges(files) {
     else if (file.startsWith('docs/') || /^[^/]+\.md$/i.test(file)) continue;
     else if (file.startsWith('.agents/skills/')) {
       if (!/\.md$/i.test(file)) scripts = true;
+    } else if (file === 'scripts/verify.mjs' || file === 'scripts/verify.test.mjs') {
+      scripts = true;
     } else app = true;
   }
   return { app, scripts };
