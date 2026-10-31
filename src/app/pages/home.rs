@@ -61,6 +61,10 @@ struct Reply {
 /// can never be mistaken for a fresh first-page read.
 struct AppendReply {
     generation: u64,
+    /// Monotonic append epoch, bumped whenever the Feed starts a replacement
+    /// (first-page) read. An append started before that read carries a lower
+    /// epoch and is rejected, so a refresh can never be skipped or overwritten.
+    append_epoch: u64,
     selection: u64,
     context: RepositoryReadContext,
     result: Result<(FeedOutcome, std::collections::HashSet<String>), HomeError>,
@@ -86,6 +90,9 @@ pub struct HomePage {
     feed_next_page: Option<crate::domain::home::FeedSourceCursor>,
     feed_seen_ids: std::collections::HashSet<String>,
     feed_append: Option<Work>,
+    /// Monotonic append epoch; bumped before every replacement Feed read so an
+    /// in-flight append from before a refresh is rejected and cancelled.
+    feed_append_epoch: u64,
     view: Entity<HomeView>,
     navigation: NavigationSink,
     _changed: Subscription,
@@ -151,6 +158,7 @@ impl HomePage {
             feed_next_page: None,
             feed_seen_ids: std::collections::HashSet::new(),
             feed_append: None,
+            feed_append_epoch: 0,
             view,
             navigation,
             _changed,
@@ -290,6 +298,14 @@ impl HomePage {
         }
         if column == Column::Feed && self.feed_ready.is_some_and(|ready| Instant::now() < ready) {
             return;
+        }
+        if column == Column::Feed {
+            // A replacement Feed read invalidates any outstanding append: cancel it
+            // and bump the append epoch so its late reply is rejected.
+            if let Some(append) = self.feed_append.take() {
+                append.source.cancel();
+            }
+            self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         }
         let Some(session) = self.session.clone() else {
             return;
@@ -443,6 +459,7 @@ impl HomePage {
 
     fn apply_append(&mut self, append: AppendReply, cx: &mut Context<Self>) {
         if append.generation != self.generation
+            || append.append_epoch != self.feed_append_epoch
             || append.selection != self.selection
             || !self
                 .services
@@ -462,8 +479,9 @@ impl HomePage {
             Ok((page, seen)) => {
                 self.feed_seen_ids = seen;
                 self.feed_next_page = page.next_page;
-                let _ = page.activities.len();
-                // Merge into the retained outcome in place.
+                // Merge into the retained outcome in place, preserving the
+                // earlier snapshot's partial reasons so an append can never make
+                // a previously-withheld set look complete.
                 self.view.update(cx, |view, cx| {
                     if let crate::ui::home::PanelState::Ready {
                         content: crate::ui::home::PanelContent::Ready(existing),
@@ -471,10 +489,17 @@ impl HomePage {
                     } = view.feed_state()
                     {
                         let mut merged = existing.clone();
+                        let mut reasons = merged.readiness.reasons().to_vec();
+                        reasons.extend(page.readiness.reasons().iter().cloned());
                         merged.activities.extend(page.activities.clone());
                         merged.next_page = page.next_page;
-                        merged.readiness = page.readiness.clone();
-                        merged.etag = page.etag;
+                        merged.readiness =
+                            crate::domain::home::FeedReadiness::from_reasons(reasons);
+                        merged.etag = if merged.readiness.is_complete() {
+                            page.etag
+                        } else {
+                            None
+                        };
                         if let Some(poll) = page.poll_interval_seconds {
                             merged.poll_interval_seconds = Some(poll);
                         }
@@ -515,8 +540,11 @@ impl HomePage {
                 }
                 // Seed continuation from the first page: the validated next
                 // source cursor and the seen event ids become the append
-                // baseline, scoped to this generation.
+                // baseline, scoped to this generation. Replace (not extend) the
+                // seen set so a refresh can re-reveal previously viewed older
+                // activities that are no longer in the new first-page snapshot.
                 self.feed_next_page = outcome.next_page;
+                self.feed_seen_ids.clear();
                 for activity in &outcome.activities {
                     self.feed_seen_ids.insert(activity.event.id.clone());
                 }
@@ -664,6 +692,7 @@ impl HomePage {
         if let Some(append) = self.feed_append.take() {
             append.source.cancel();
         }
+        self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         self.inbox.lock().expect("home inbox").clear();
         self.append_inbox.lock().expect("home append inbox").clear();
         self.feed_cooldown_task = None;
@@ -708,6 +737,7 @@ impl HomePage {
         let append_inbox = self.append_inbox.clone();
         let alive = self.alive.clone();
         let selection = self.selection;
+        let append_epoch = self.feed_append_epoch;
         let reply_context = context.clone();
         let mut seen = self.feed_seen_ids.clone();
         let submitted = services.executor().handle().spawn(async move {
@@ -728,6 +758,7 @@ impl HomePage {
                     .expect("home append inbox")
                     .push_back(AppendReply {
                         generation,
+                        append_epoch,
                         selection,
                         context: reply_context,
                         result: result.map(|page| {

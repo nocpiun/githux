@@ -310,3 +310,36 @@ async fn append_deduplicates_overlap_and_failure_preserves_cursor() {
         .collect();
     assert_eq!(ids, vec!["s1", "s2"]);
 }
+
+/// A refresh replaces the first-page snapshot and must reseed the dedup set, so
+/// previously viewed older activities become reachable again by scrolling.
+#[tokio::test]
+async fn refresh_reseeds_the_dedup_set_so_older_pages_can_be_reappended() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 2).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    // First read: page 1 with next, then following.
+    transport.push_response(with_link(
+        starred_page(&["s1"]),
+        Some("<https://api.github.com/users/viewer/received_events?per_page=100&page=2>; rel=\"next\""),
+    ));
+    transport.push(200, json!([{"id":31,"login":"friend"}]));
+    let first = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(first.activities.len(), 1);
+
+    // Refresh: same page-1 body again (no next link this time), following again.
+    transport.push_response(with_link(starred_page(&["s1"]), None));
+    transport.push(200, json!([{"id":31,"login":"friend"}]));
+    let refreshed = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .unwrap()
+        .value;
+    assert!(refreshed.activities.len() == 1);
+    assert_eq!(refreshed.next_page, None);
+}
