@@ -1,17 +1,17 @@
 //! Developer-only account preview window.
 //!
-//! This file is reachable only from `examples/account.rs` and `tests/account.rs` through the thin
-//! `bin_support` module assembly; the product binary never declares it. It exists so a developer can
-//! drive the real account controller and the real repository read in a standalone window without
-//! adding a preview flag, a scenario selector or an exit hook to `app::run`.
+//! This file is reachable only from `examples/account.rs` through the thin `bin_support` module
+//! assembly; the product binary never declares it. It exists so a developer can drive the real
+//! account controller and the real repository read in a standalone window without adding a preview
+//! flag, a scenario selector or an exit hook to `app::run`.
 //!
 //! The window is thin on purpose: it owns one scroll region (a real `ScrollHandle`, the controller's
 //! shared `Motion` and `Bars`) and renders the product's own account section. Every account rule —
 //! generation, cancellation, reconciliation, repository invalidation — lives in the product
 //! controller that the Shell also uses.
 
-// This developer-only window exposes the product controller's state for the thin test assembly. It
-// is a separate Cargo target, never part of the product module graph, so its extra accessors are
+// This developer-only window exposes the product controller's state for the thin example assembly.
+// It is a separate Cargo target, never part of the product module graph, so its extra accessors are
 // intentionally narrow here rather than widening the product's API surface.
 #![allow(dead_code)]
 
