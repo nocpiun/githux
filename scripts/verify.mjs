@@ -472,6 +472,13 @@ export async function executeVerifiedCommand({
               spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
             } else {
               child.kill('SIGTERM');
+              // Escalate to SIGKILL after a grace period if SIGTERM is ignored
+              const killTimer = setTimeout(() => {
+                if (child && !ended) {
+                  try { child.kill('SIGKILL'); } catch {}
+                }
+              }, 3000);
+              killTimer.unref();
             }
           } catch {}
         }
@@ -548,7 +555,7 @@ async function main() {
   const rawArgs = process.argv.slice(2);
   const sepIndex = rawArgs.indexOf('--');
   const runnerArgs = sepIndex >= 0 ? rawArgs.slice(0, sepIndex) : rawArgs;
-  if (runnerArgs.length === 0 || runnerArgs.includes('--help') || runnerArgs.includes('-h')) {
+  if (rawArgs.length === 0 || runnerArgs.includes('--help') || runnerArgs.includes('-h')) {
     console.log(`Githux Verification Runner
 Usage:
   node scripts/verify.mjs [options] -- <executable> [args...]
