@@ -1515,48 +1515,65 @@ fn feed_end_of_scroll_emits_one_load_more_per_append(cx: &mut TestAppContext) {
 #[gpui::test]
 fn feed_append_keeps_selection_and_scroll_anchor(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
-    // A first page with several cards and a next page.
+    // A tall first page so the list is actually scrollable, then scroll down to a
+    // non-zero offset before appending. The previous bug replaced every item and
+    // reset the anchor to the first row.
     let first = feed_outcome(
-        (0..3).map(starred_activity).collect(),
+        (0..40).map(starred_activity).collect(),
         FeedReadiness::Complete,
     );
     view.update(cx, |view, cx| {
         assert!(view.apply_feed(&binding(), 1, first, cx));
     });
+    cx.simulate_resize(size(px(800.0), px(500.0)));
     cx.run_until_parked();
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.select(Column::Feed, 1, window, cx));
+    let rows = bounds("feed-rows", cx);
+    cx.simulate_mouse_move(rows.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollEvent {
+        position: rows.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-900.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: Default::default(),
+        source: ScrollSource::Pointer,
     });
     cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.select(Column::Feed, 20, window, cx));
+    });
+    cx.run_until_parked();
+    let offset_before = view.read_with(cx, |view, _| view.offset(Column::Feed).y);
+    assert!(
+        offset_before < px(-100.0),
+        "the list must really be scrolled, got {offset_before:?}"
+    );
     assert_eq!(
         view.read_with(cx, |view, _| view.selected(Column::Feed)),
-        Some(1)
+        Some(20)
     );
-    let offset_before = view.read_with(cx, |view, _| view.offset(Column::Feed).y);
 
-    // Append a merged activity: selection index and scroll offset must survive.
-    let mut merged = feed_outcome(
+    // Append older cards at the tail: selection and the real scroll offset survive.
+    let merged = feed_outcome(
         {
-            let mut all: Vec<_> = (0..3).map(starred_activity).collect();
-            all.push(merged_activity(3, author(905, "contributor")));
+            let mut all: Vec<_> = (0..40).map(starred_activity).collect();
+            all.push(merged_activity(40, author(905, "contributor")));
+            all.push(merged_activity(41, author(906, "contributor")));
             all
         },
         FeedReadiness::Complete,
     );
-    merged.next_page = None;
     view.update(cx, |view, cx| {
         assert!(view.apply_feed_page(&binding(), 1, merged, cx));
     });
     cx.run_until_parked();
     assert_eq!(
         view.read_with(cx, |view, _| view.selected(Column::Feed)),
-        Some(1),
+        Some(20),
         "append must not clear selection"
     );
     assert_eq!(
         view.read_with(cx, |view, _| view.offset(Column::Feed).y),
         offset_before,
-        "append must not reset scroll"
+        "append must preserve the scroll anchor"
     );
 }
 

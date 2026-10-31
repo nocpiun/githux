@@ -662,13 +662,16 @@ impl HomeView {
         if !self.accepts(binding, generation) {
             return false;
         }
-        // Keep the scroll anchor: `splice` grows the list in place without moving
-        // the logical scroll top, so already-rendered items stay stable while the
-        // appended older items extend the reachable range.
+        // Keep the scroll anchor: insert only the newly appended rows at the tail
+        // (`splice(old..old, new_count)`), so GPUI preserves the existing items and
+        // their anchor. Replacing the whole range would reset the anchor to the
+        // start and jump the viewport to the first activity.
         let old_count = self.item_count(Column::Feed);
-        self.feed_view
-            .scroll
-            .splice(0..old_count, outcome.activities.len());
+        if outcome.activities.len() > old_count {
+            self.feed_view
+                .scroll
+                .splice(old_count..old_count, outcome.activities.len() - old_count);
+        }
         self.feed.state = PanelState::Ready {
             content: PanelContent::Ready(outcome),
             refreshing: false,
