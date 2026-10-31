@@ -185,6 +185,46 @@ test('executeVerifiedCommand handles timeout and preserves record', async t => {
   assert.ok(savedRecord.timed_out);
 });
 
+test('CLI returns nonzero exit code for timed-out runs', async t => {
+  const root = makeFixtureRoot(t);
+  initGitRepo(root);
+
+  const result = await new Promise(resolve => {
+    const child = spawn(process.execPath, [verifyScript, '--no-lock', '--timeout', '1000', '--', process.execPath, '-e', 'setTimeout(() => {}, 60000);'], {
+      cwd: root,
+      stdio: 'pipe',
+      windowsHide: true,
+    });
+    let output = '';
+    child.stdout.on('data', d => output += d.toString());
+    child.stderr.on('data', d => output += d.toString());
+    child.on('close', code => resolve({ code, output }));
+  });
+
+  assert.ok(result.code !== 0, `Expected nonzero exit for timeout, got ${result.code}`);
+  assert.match(result.output, /TIMED OUT/);
+});
+
+test('CLI help detection only applies before command separator', async t => {
+  const root = makeFixtureRoot(t);
+  initGitRepo(root);
+
+  const result = await new Promise(resolve => {
+    const child = spawn(process.execPath, [verifyScript, '--no-lock', '--', process.execPath, '-e', 'console.log("child-help"); process.exit(42);', '--', '--help'], {
+      cwd: root,
+      stdio: 'pipe',
+      windowsHide: true,
+    });
+    let output = '';
+    child.stdout.on('data', d => output += d.toString());
+    child.stderr.on('data', d => output += d.toString());
+    child.on('close', code => resolve({ code, output }));
+  });
+
+  assert.strictEqual(result.code, 42);
+  assert.match(result.output, /child-help/);
+});
+
 test('executeVerifiedCommand serializes runs with Windows mutex using harmless fixture children', async t => {
   if (process.platform !== 'win32') {
     t.skip('Windows mutex test only applies on Windows');

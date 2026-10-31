@@ -429,6 +429,39 @@ export async function executeVerifiedCommand({
     record.child_pid = child.pid ?? null;
     atomicWriteJson(recordFile, record);
 
+    const signalHandler = (signal) => {
+      if (ended) return;
+      ended = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      process.removeListener('SIGINT', signalHandler);
+      process.removeListener('SIGTERM', signalHandler);
+      logStream.write(`\n[Runner] Received ${signal}. Terminating child and waiting for confirmation...\n`);
+      if (child && child.pid) {
+        try {
+          if (process.platform === 'win32') {
+            spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+          } else {
+            child.kill('SIGKILL');
+          }
+        } catch {}
+      }
+      logStream.end(async () => {
+        if (slot) {
+          await slot.release().catch(() => {});
+        }
+        record.status = 'cancelled';
+        record.signal = signal;
+        record.finished_at = nowIso();
+        record.running_duration_ms = Date.now() - runStartTime;
+        record.wall_duration_ms = Date.now() - startTime;
+        atomicWriteJson(recordFile, record);
+        resolve({ record });
+      });
+    };
+
+    process.on('SIGINT', signalHandler);
+    process.on('SIGTERM', signalHandler);
+
     if (timeoutMs > 0) {
       timeoutTimer = setTimeout(() => {
         timedOut = true;
@@ -461,6 +494,8 @@ export async function executeVerifiedCommand({
       if (ended) return;
       ended = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      process.removeListener('SIGINT', signalHandler);
+      process.removeListener('SIGTERM', signalHandler);
       logStream.write(`\nChild error: ${err.message}\n`);
       logStream.end(async () => {
         if (slot) {
@@ -476,10 +511,12 @@ export async function executeVerifiedCommand({
       });
     });
 
-    child.on('exit', (code, signal) => {
+    child.on('close', (code, signal) => {
       if (ended) return;
       ended = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      process.removeListener('SIGINT', signalHandler);
+      process.removeListener('SIGTERM', signalHandler);
       logStream.end(async () => {
         if (slot) {
           await slot.release().catch(() => {});
@@ -509,7 +546,9 @@ export async function executeVerifiedCommand({
 // CLI Entry point
 async function main() {
   const rawArgs = process.argv.slice(2);
-  if (rawArgs.length === 0 || rawArgs.includes('--help') || rawArgs.includes('-h')) {
+  const sepIndex = rawArgs.indexOf('--');
+  const runnerArgs = sepIndex >= 0 ? rawArgs.slice(0, sepIndex) : rawArgs;
+  if (runnerArgs.length === 0 || runnerArgs.includes('--help') || runnerArgs.includes('-h')) {
     console.log(`Githux Verification Runner
 Usage:
   node scripts/verify.mjs [options] -- <executable> [args...]
@@ -549,7 +588,7 @@ Options:
     console.log(`Log path: ${record.log_path}`);
   }
 
-  if (record.exit_code !== 0) {
+  if (record.status !== 'success' || record.exit_code !== 0) {
     process.exit(record.exit_code ?? 1);
   }
 }
