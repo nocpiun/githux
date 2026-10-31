@@ -50,9 +50,17 @@
 
 - 源事件适配器新增 `fetch_received_events_page`（一次一页，返回经同源校验的 `FeedSourceCursor` 页码游标）；`feed` 只取第一页，`FeedOutcome.next_page` 暴露下一页。数据层 `feed_source_page`/`feed_page` 按游标逐页读，每页重读关注关系并按 PR 去重解析作者，再用 `build_feed_page` + 跨页 `seen_ids` 去重。
 - 视图触底（或首屏不满一屏、无法滚动）发一次 `LoadMoreFeed`；每账户/代次至多一次在途追加，渲染/resize/重复回调/刷新都不能重复。`apply_feed_page` 用 `ListState::splice` 尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中显示紧凑动画图标，失败保留内容并显示黄色告警 + 点击重试，真正耗尽（无 next 链接）停止。
-- 官方 Events 文档确认时间线只含**最近 300 条/30 天**事件，不是无限归档；逐页追加仍受同一源预算约束，不假装有更旧的历史。
+- 官方 Events 文档确认时间线只含**最近 300 条/30 天**事件，不是无限归档；逐页追加仍受同一源预算约束（`max_events` 返回 `EntryLimit` 并停止游标；`max_pages` 仅在**确实存在下一页**时报 `PageLimit`），不假装有更旧的历史。
 
-回归：`feed_page_appends_without_duplicating_overlapping_events`、`a_filtered_empty_page_keeps_the_cursor_for_the_next_page`（域）；`filtered_empty_page_keeps_continuation_and_later_page_appends`、`append_deduplicates_overlap_and_failure_preserves_cursor`（数据层）；`feed_end_of_scroll_emits_one_load_more_per_append`、`feed_append_keeps_selection_and_scroll_anchor`、`feed_append_failure_shows_warning_and_retries`（视图）；`feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host`（真实 Shell）。示例预览在 Mixed 场景提供第二页，可真实滚动并追加。
+审查反馈修复（本轮）：
+- 刷新替换第一页时**重置**（而非追加）`feed_seen_ids`，使之前看过但不在新快照的旧活动能重新滚出。
+- 新增 `feed_append_epoch`：替换型 Feed 读开始 / stop 时自增并取消在途 append，`apply_append` 同时校验 epoch，避免刷新前的旧 append 晚到混入并跳过页。
+- 替换型 Feed 读在途时禁止 `load_more_feed`（`work[Feed]` 占用时不发）。
+- `apply_append` 将旧快照与追加页的 `reasons` 合并（不直接覆盖 readiness），避免已扣留的活动被“追加页 Complete”洗白。
+- `fetch_received_events_page` 实施 `max_events`/`max_pages` 预算；`PageLimit` 只在有 next 链接且预算阻止继续时报告，完整末页落在预算上不算截断。
+- `apply_feed_page` 只 `splice(old..old, 新增行数)` 尾部插入，保留 GPUI 滚动锚点与选择；反向验证：改回 `splice(0..old, new)` 时 `feed_append_keeps_selection_and_scroll_anchor` 在非零偏移下失败。
+
+回归：`feed_page_appends_without_duplicating_overlapping_events`、`a_filtered_empty_page_keeps_the_cursor_for_the_next_page`（域）；`filtered_empty_page_keeps_continuation_and_later_page_appends`、`append_deduplicates_overlap_and_failure_preserves_cursor`、`refresh_reseeds_the_dedup_set_so_older_pages_can_be_reappended`、`incremental_page_path_enforces_max_events_and_max_pages`（数据层/适配器）；`feed_end_of_scroll_emits_one_load_more_per_append`、`feed_append_keeps_selection_and_scroll_anchor`、`feed_append_failure_shows_warning_and_retries`（视图）；`feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host`（真实 Shell）。示例预览在 Mixed 场景提供第二页，可真实滚动并追加。
 
 ## 验证
 
