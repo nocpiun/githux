@@ -62,6 +62,7 @@ let detail = pages
 - `feed` 派生捕获 login，只取**第一源页**并返回 `FeedOutcome.next_page` 游标；随后 `domain::home::build_feed_page` 应用产品策略，`FeedOutcome.activities` 只含“主语是当前账户关注的人”的合并贡献/星标/建库三类，保持源顺序与真实事件身份。触底追加调用 `feed_page(cursor, …, &mut seen_ids, …)`，重读关注关系、按 PR 身份去重解析作者，并用 `build_feed_page` 与调用方传入的 `seen_ids` 跨页去重。`FeedOutcome` 仍带 ETag、`X-Poll-Interval` 与 readiness。
 - `following` 单独暴露关注关系（`Following` + `FollowingReadiness`），供需要原始关系状态的调用方；`feed_events` 暴露未过滤的完整源列表；`feed_source_page` 只取一个游标页；`feed_page` 完成一页“源事件 + 关系 + 作者”并返回策略应用后的 `FeedPage`；`pull_request_detail` 暴露单条作者解析。各返回的 `Scoped` 上下文与 `feed` 相同，都经过同一 `RepoService::read_authenticated` 与 `is_current` 校验。
 - **失败与完整性语义**：关注关系第一页失败或完全读不到 ⇒ `feed` 返回 `Err`（不是空 Feed）；后续页失败或预算截断 ⇒ 相关主语按“未知”扣留并追加 `FollowingIncomplete`；作者详情失败、编号不匹配或详情未确认合并 ⇒ 该贡献扣留并追加 `AuthorUnresolved`；整页都是噪声或都不满足关注关系、且源与关系都完整 ⇒ `Complete` 空 Feed。Follow 两类**事件卡片**仍暂缓，不在此层合成事件。
+- 作者补全采用至多 4 个并行 worker，全部属于同一次读取的 future；取消时结束这一组读取，不派生脱离宿主生命周期的任务。先按 PR 身份去重并分配预算，再通过原授权读取路径请求详情；结果按身份归集，最终卡片仍按源事件顺序输出。每页最多 30 次详情的预算不变。
 - 本切片不接受、保存或发送 Feed 条件验证器。无验证器却收到 304 时，facade 返回 `HomeError::InvalidResponse`，绝不发布 `NotModified` 或空事件。未来只有具备相同账户/参数/表示的已验证缓存值后，才能另接条件读取。
 - `HomeReadiness` / `FeedReadiness` 的 Partial、空集合、SSO、分页、限流和错误语义不变；`FeedReadiness` 另有 `FollowingIncomplete` 与 `AuthorUnresolved` 两种 Partial 原因。
 - 关注关系与作者解析都使用同一捕获账户的凭据，切换账户后旧结果由 `is_current` 判为 `StaleContext`；本层不做缓存，因此不存在跨账户复用关系或长期保留已取关主语的问题。

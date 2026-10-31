@@ -1471,6 +1471,85 @@ fn a_retained_unmounted_view_does_not_restart_its_clock_on_activation(cx: &mut T
 }
 
 #[gpui::test]
+fn feed_prefetches_before_the_end_but_does_not_drain_a_tall_initial_page(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    let mut outcome = feed_outcome(
+        (0..40).map(starred_activity).collect(),
+        FeedReadiness::Complete,
+    );
+    outcome.next_page = Some(crate::domain::home::FeedSourceCursor { page: 2 });
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(
+        actions.borrow().is_empty(),
+        "layout must not treat a tall new list as empty"
+    );
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.select(Column::Feed, 37, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_ne!(
+        view.read_with(cx, |view, _| view.feed_view.scroll.is_scrolled_to_end()),
+        Some(true),
+        "prefetch starts before the bottom"
+    );
+    assert_eq!(
+        actions
+            .borrow()
+            .iter()
+            .filter(|a| matches!(a, HomeAction::LoadMoreFeed(_)))
+            .count(),
+        1
+    );
+    // Exhaustion must stop automatic requests even when the viewport is short.
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(vec![], FeedReadiness::Complete),
+            cx
+        ));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        actions
+            .borrow()
+            .iter()
+            .filter(|a| matches!(a, HomeAction::LoadMoreFeed(_)))
+            .count(),
+        1
+    );
+}
+
+#[gpui::test]
+fn completely_filtered_feed_continues_without_a_list_viewport(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    let mut empty = feed_outcome(vec![], FeedReadiness::Complete);
+    empty.next_page = Some(crate::domain::home::FeedSourceCursor { page: 2 });
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, empty, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        actions
+            .borrow()
+            .iter()
+            .filter(|a| matches!(a, HomeAction::LoadMoreFeed(_)))
+            .count(),
+        1
+    );
+}
+
+#[gpui::test]
 fn feed_end_of_scroll_emits_one_load_more_per_append(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     let actions = action_sink(&view, cx);

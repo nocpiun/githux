@@ -945,20 +945,13 @@ fn feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host(cx: &mut
     assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
     // The first page produced the followed star and the merged contribution; the
     // push and the unfollowed star did not. The first page also exposes page 2.
-    let reads_before = transport.seen("/received_events");
-    // Drive the real end-of-scroll append through the host.
-    cx.update_window_entity(&view, |shell, window, cx| {
-        shell.load_more_home_for_test(window, cx)
-    });
-    cx.run_until_parked();
+    // A short first page automatically continues through the real host; no
+    // synthetic LoadMore action or additional user scroll should be required.
     for _ in 0..400 {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
-        if transport.seen("/received_events?per_page=100&page=2")
-            + transport.seen("/received_events?page=2")
-            >= 1
-        {
+        if cx.debug_bounds("feed-event-row-2").is_some() {
             break;
         }
     }
@@ -968,9 +961,10 @@ fn feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host(cx: &mut
             >= 1,
         "append fetched the second source page, not a fresh first page"
     );
-    assert!(
-        transport.seen("/received_events") > reads_before,
-        "append issued exactly one new source read"
+    assert_eq!(
+        transport.seen("/received_events"),
+        2,
+        "one first page and exactly one automatic continuation"
     );
     // The appended star's row is visible after the append; the first-page rows
     // remain, so the list grew in place rather than resetting.

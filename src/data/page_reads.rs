@@ -339,7 +339,7 @@ impl PageReadSession {
         cancel: CancellationToken,
     ) -> Result<AuthorResolutions, HomeError> {
         let mut authors = AuthorResolutions::new();
-        let mut attempted = 0usize;
+        let mut pending = Vec::new();
         for event in events.iter().filter(|event| is_retained_activity(event)) {
             let Some(candidate) = merge_candidate(event) else {
                 continue;
@@ -356,36 +356,50 @@ impl PageReadSession {
                 authors.mark_unresolved(key);
                 continue;
             };
-            if attempted >= max_lookups {
-                authors.mark_unresolved(key);
+            // Reserve the key before scheduling, including budget-exhausted
+            // targets, so duplicate events never consume another lookup.
+            authors.mark_unresolved(key.clone());
+            if pending.len() >= max_lookups {
                 continue;
             }
-            attempted += 1;
-            match self
-                .pull_request_detail(
-                    &candidate.owner,
-                    &candidate.repository,
-                    number,
-                    limits,
-                    cancel.clone(),
-                )
-                .await
+            pending.push((key, candidate.owner, candidate.repository, number));
+        }
+
+        // Four workers share the bounded queue. These futures belong to this
+        // read (no detached tasks); cancellation drops all in-flight workers.
+        // Every request still acquires the account service's shared permit and
+        // validates the captured account. Results are keyed, so completion order
+        // cannot change the source order of the eventual Feed cards.
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let worker = || async {
+            let mut resolved = Vec::new();
+            while let Some((key, owner, repository, number)) =
+                pending.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
             {
-                Ok(detail) => match detail.value.outcome {
-                    crate::domain::home::PullRequestDetailOutcome::Attributed(resolved) => {
-                        authors.insert(key, resolved);
+                match self
+                    .pull_request_detail(owner, repository, *number, limits, cancel.clone())
+                    .await
+                {
+                    Ok(detail) => {
+                        if let crate::domain::home::PullRequestDetailOutcome::Attributed(author) =
+                            detail.value.outcome
+                        {
+                            resolved.push((key.clone(), author));
+                        }
                     }
-                    crate::domain::home::PullRequestDetailOutcome::Unattributable => {
-                        authors.mark_unresolved(key);
+                    Err(error) if matches!(error, HomeError::GitHub(GitHubError::Cancelled)) => {
+                        return Err(error);
                     }
-                },
-                Err(error) if matches!(error, HomeError::GitHub(GitHubError::Cancelled)) => {
-                    return Err(error);
+                    // Failed/unattributable reads remain unresolved; never
+                    // guess the author from the merge actor.
+                    Err(_) => {}
                 }
-                // A failed or stale detail read leaves the author unknown; the
-                // contribution is withheld and the outcome reports it.
-                Err(_) => authors.mark_unresolved(key),
             }
+            Ok::<_, HomeError>(resolved)
+        };
+        let (a, b, c, d) = tokio::try_join!(biased; worker(), worker(), worker(), worker())?;
+        for (key, author) in a.into_iter().chain(b).chain(c).chain(d) {
+            authors.insert(key, author);
         }
         Ok(authors)
     }

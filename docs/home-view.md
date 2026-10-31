@@ -79,7 +79,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 ## 滚动与键盘
 
 - 每栏使用真实 GPUI `ListState`、共享 `scroll::Bar`/`Bars` 与 `scroll::Motion<ListState>`，只渲染可见行。Home 保持固定行高，Feed 自然测量可变卡片高度；不调用 measure_all，不新建滚动几何。键盘远跳使用原生 logical item anchor，在 Motion tick 后应用，避免旧范围 clamp 覆盖末项 reveal。
-- **Feed 触底追加**：视图在列表到底（或首屏内容不满一屏、无法滚动）时发一次 `LoadMoreFeed`；每账户/代次同一时刻至多一次在途追加，渲染、resize、重复滚动回调与刷新都不能重复请求。追加用 `ListState::splice` 在原列表尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中用紧凑动画图标，失败保留现有内容并显示黄色告警图标 + 点击重试，真正耗尽（服务端无 next 链接）后停止请求。
+- **Feed 自动追加**：最后三张卡片之一进入可见区时提前发一次 `LoadMoreFeed`；空页和不足三张卡片的首屏自动继续。使用已测量行的位置与原生逻辑滚动锚点，不把虚拟列表未知高度当成内容耗尽；每帧布局后也核验一次，首屏无需等待额外 hover/时钟通知。每账户/代次同一时刻至多一次在途追加，渲染、resize、重复滚动回调与刷新都不能重复请求。追加用 `ListState::splice` 在原列表尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中用紧凑动画图标，失败保留现有内容并显示黄色告警图标 + 点击重试，真正耗尽（服务端无 next 链接）后停止请求。
 - 捕获阶段 `wheel_overlay` 每区域只消费一次，测试验证一次精确滚轮只改变目标栏且偏移恰好等于输入。
 - 每栏是独立 Tab stop。列表根聚焦时 Up/Down/Home/End 移动选择，Enter/Space 激活所选 Home 条目或 Feed 事件；各内容链接也是独立键盘入口，键盘激活不抢回列表焦点。
 - 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。每个链接阻止冒泡，不发生卡片/列表二次激活。

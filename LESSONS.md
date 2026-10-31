@@ -101,3 +101,10 @@
 - **原因**：负责人连续反馈 Profile README 把正常缺省渲染成故障：先是 "This section was not found or is not visible." 文本面板，再是 "Unavailable · Retry" 式大错误块。这类呈现既误导用户、占用可省略的空间，又把"缺失"和"网络/认证/限流失败"混成同一种可见状态，掩盖真正可操作的失败。根因不是文案，而是把可选缺省错误地当成必须显式呈现的错误。
 - **证据**：2026-10-30 `profile-readme-polish` 把 README 的 `SectionState::Unavailable` 改为整段省略（`src/ui/profile/render.rs` 的 `render_readme` 返回 `None`），真实 `SectionState::Error` 改用 `compact_status::failed` 单个 warning 图标；同名仓库 404 在 `src/app/pages/profile.rs` 归入缺省。回归 `confirmed_readme_absence_omits_the_whole_optional_section`、`actionable_readme_failure_keeps_a_compact_mark_not_absence`、`ready_to_absent_to_another_account_never_reuses_the_old_reader`。见 [开发日志](docs/devlog/2026-10-30-profile-readme-polish.md)。
 - **范围**：外部数据驱动的可选区块（个人 README、附加资料、可选摘要）。本条目不授权把真实失败静默成成功缺省，也不要求所有 section 都省略；判断依据是该内容对页面是否必需，以及失败是否可操作。
+
+## L015：虚拟列表的未知高度不能当成内容耗尽
+
+- **规则**：依据虚拟列表位置触发翻页时，要区分尚未测量与真实短列表；使用已测量行边界或逻辑索引，并在布局完成后核验。不能仅凭 scrollbar 最大偏移为零/很小就认定已到尾部。首屏少量内容与过滤空页也须有自动续读路径，不能依赖用户再次滚动或无关定时器。
+- **原因**：GPUI 列表首次布局及变宽会清除未测量行的高度提示。Feed 的“剩余滚动距离”此时只包含已测量部分，可能把长列表当短列表、提前耗尽源页；相反，在布局前只检查一次可能让短首屏等待下一次通知才续读。
+- **证据**：2026-10-31 `feed_prefetches_before_the_end_but_does_not_drain_a_tall_initial_page` 在用最大偏移判断的实现上失败；修正为尾部行位置/逻辑锚点与布局后检查。详情见 [Feed 开发日志](docs/devlog/2026-10-30-home-feed-focus.md)。
+- **范围**：虚拟化列表的自动翻页、预加载与首屏填充；测试应同时覆盖长列表、少量可见内容、全过滤空页和真实末页。

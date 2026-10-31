@@ -845,16 +845,16 @@ impl HomeView {
         }
     }
 
-    /// Emits one load-more request when the Feed list is at its end, there is a
+    /// Emits one load-more request when the Feed list is near its end, there is a
     /// validated next source page and no append is already in flight. The caller
     /// marks the request loading, so repeated notifications cannot duplicate it.
     pub fn request_more_feed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.feed_can_load_more() {
             return;
         }
-        // Emit at the end, or when the content does not fill the viewport (so a
+        // Prefetch near the end, or when the content does not fill the viewport (so a
         // filtered-empty or short first page is never stranded and unreachable).
-        if !self.feed_at_end_or_underfilled() {
+        if !self.feed_needs_more() {
             return;
         }
         self.feed_append = FeedAppendState::Loading;
@@ -869,15 +869,25 @@ impl HomeView {
         );
     }
 
-    /// Whether the Feed list is scrolled to the end, or has no scrollable
-    /// overflow yet (an empty/short first batch), so older pages should continue.
-    fn feed_at_end_or_underfilled(&self) -> bool {
-        // Underfilled: no scrollable reach means the content does not fill the
-        // viewport, so a short/empty batch must continue instead of stranding.
-        if self.feed_view.scroll.max_offset_for_scrollbar().y <= px(0.0) {
+    /// Prefetch when one of the last three cards enters the viewport. Use actual
+    /// row bounds: a virtual list's unmeasured rows contribute no scroll height,
+    /// so its scrollbar extent alone can mistake a tall list for a short one.
+    fn feed_needs_more(&self) -> bool {
+        // A fully filtered page has no list to lay out at all.
+        if self.item_count(Column::Feed) == 0 {
             return true;
         }
-        self.feed_view.scroll.is_scrolled_to_end() == Some(true)
+        let scroll = &self.feed_view.scroll;
+        let viewport = scroll.viewport_bounds();
+        if viewport.size.height <= px(0.0) {
+            return false;
+        }
+        // The anchor may already have scrolled above the viewport.
+        let tail = self.item_count(Column::Feed).saturating_sub(3);
+        scroll.logical_scroll_top().item_ix >= tail
+            || scroll
+                .bounds_for_item(tail)
+                .is_some_and(|row| row.top() <= viewport.bottom())
     }
 
     fn emit(&mut self, action: HomeAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -1093,7 +1103,7 @@ impl Render for HomeView {
         // a filtered middle page cannot strand the Feed.
         if self.feed_append == FeedAppendState::Idle
             && self.feed_can_load_more()
-            && self.feed_at_end_or_underfilled()
+            && self.feed_needs_more()
         {
             self.request_more_feed(window, cx);
         }
@@ -1660,6 +1670,27 @@ fn list_rows<T: PanelRows + 'static>(
         .min_w_0()
         .overflow_hidden()
         .child(list)
+        .when(column == Column::Feed, |container| {
+            let owner = cx.entity().downgrade();
+            container.child(
+                gpui::canvas(
+                    move |_, window, cx| {
+                        let owner = owner.clone();
+                        // The list has now measured this frame's visible rows.
+                        // A short first page needs no unrelated timer/hover to
+                        // continue; this check schedules no animation loop.
+                        window.defer(cx, move |window, cx| {
+                            let _ = owner.update(cx, |view, cx| {
+                                view.request_more_feed(window, cx);
+                            });
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0(),
+            )
+        })
         .child(scroll::wheel_overlay_with(
             match column {
                 Column::Home => "home-rows",

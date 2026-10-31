@@ -1,6 +1,97 @@
 use super::*;
 
 #[tokio::test]
+async fn author_reads_overlap_with_four_workers_and_preserve_source_order_and_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    // More service permits than workers: the Feed must impose its own bound.
+    let svc = service(&temp, transport.clone(), 8).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+    let merged = |number| {
+        json!({
+            "id":format!("merge-{number}"), "type":"PullRequestEvent",
+            "actor":{"id":10,"login":"maintainer"},
+            "repo":{"id":99,"name":"acme/widgets"},
+            "payload":{"action":"merged", "number":number,
+                "pull_request":{"id":number,"number":number,"head":{},"base":{}}}
+        })
+    };
+    let detail = |number| {
+        json!({
+            "id":number,"number":number,"merged":true,
+            "user":{"id":31,"login":"friend"},"title":format!("PR {number}")
+        })
+    };
+    // Duplicate targets must not reserve a second worker or spend the budget.
+    transport.push(
+        200,
+        json!([
+            merged(1),
+            merged(1),
+            merged(2),
+            merged(3),
+            merged(4),
+            merged(5),
+            merged(6)
+        ]),
+    );
+    transport.push(200, json!([{"id":31,"login":"friend"}]));
+    let gates: Vec<_> = (1..=4)
+        .map(|number| transport.block(200, detail(number)))
+        .collect();
+    let (fifth_entered, fifth_release) = transport.block(200, detail(5));
+    let read = tokio::spawn(async move {
+        session
+            .feed(
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                5,
+                Default::default(),
+            )
+            .await
+    });
+    let mut releases = Vec::new();
+    for (entered, release) in gates {
+        // These all enter before ANY response is released. Serial code times out.
+        ready(entered).await;
+        releases.push(release);
+    }
+    assert_eq!(
+        transport.count(),
+        7,
+        "login + events + following + four details"
+    );
+    assert!(!read.is_finished());
+    // A fast worker starts the fifth lookup while the first three are blocked.
+    releases.pop().unwrap().send(()).unwrap();
+    ready(fifth_entered).await;
+    fifth_release.send(()).unwrap();
+    for release in releases.into_iter().rev() {
+        release.send(()).unwrap();
+    }
+    let outcome = read.await.unwrap().unwrap().value;
+    assert_eq!(
+        outcome
+            .activities
+            .iter()
+            .map(|a| a.event.id.as_str())
+            .collect::<Vec<_>>(),
+        ["merge-1", "merge-2", "merge-3", "merge-4", "merge-5"]
+    );
+    assert!(
+        matches!(outcome.readiness, FeedReadiness::Partial { ref reasons }
+        if reasons.contains(&FeedPartialReason::AuthorUnresolved { count: 1 }))
+    );
+    assert_eq!(
+        transport.count(),
+        8,
+        "only five distinct details within the budget"
+    );
+}
+
+#[tokio::test]
 async fn author_budget_withholds_remaining_contributions_and_never_backfills() {
     let temp = tempfile::tempdir().unwrap();
     let transport = Arc::new(Controlled::default());
