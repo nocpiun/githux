@@ -1,22 +1,25 @@
 # Home / Feed 页面视图
 
-更新：2026-10-28。本文记录可复用 Home/Feed 页面视图的接口、已确认默认值、失败与完整性语义，以及尚未接入的 host/data 职责。底层查询能力见 [Home / Feed 查询服务](home-query-service.md)；本视图不请求网络、不读取凭据，也尚未挂载到正式 Shell。
+更新：2026-10-30（第二轮）。本文记录可复用 Home/Feed 页面视图的接口、已确认默认值、失败与完整性语义，以及 host/data 职责。底层查询能力见 [Home / Feed 查询服务](home-query-service.md)；本视图不请求网络、不读取凭据、不做关注关系判断。
 
 ## 状态与范围
 
 - 已实现：`src/ui/home/**` 的双列呈现、独立状态、绑定/generation 隔离、虚拟化列表、共享滚动条与 wheel motion、键盘选择、typed 动作回调。
-- 独立预览：`examples/home.rs` 通过 `src/bin_support/home_modules.rs` 的薄 `#[path]` 装配复用真实组件，提供合成 Mixed / Loading-error / Partial / Empty-unavailable / Large 场景。
+- 独立预览：`examples/home.rs` 通过 `src/bin_support/home_modules.rs` 的薄 `#[path]` 装配复用真实组件，提供合成 Mixed / Loading-error / Partial / Filtered-out / Empty-unavailable / Large 场景；可选首个参数按标签或 0-based 索引选择初始场景（仅预览用）。Mixed 与 Filtered-out 都通过真实 `build_feed`；前者混合合法活动与被过滤来源，后者仅含技术噪声和未被关注的主语，验证正常最小空态。
 - 测试：`tests/home.rs` 在 GPUI 测试平台执行真实组件，测试代码位于 `src/ui/home/tests.rs`。
 - 未实现：正式 Shell 挂载、账户作用域请求、host 适配器、Issue/PR 详情、URL 打开、轮询、筛选、缓存 TTL。示例场景与 fixtures 不是产品路由或运行时开关。
 
-## 已确认默认值（负责人 2026-10-28）
+## 已确认默认值（负责人 2026-10-28，2026-10-30 补充筛选）
 
-- Home 只使用 `involves:当前已认证登录`，无时间窗口，按 `updated` 降序。
-- Feed 按服务器顺序展示现有 typed event 覆盖，未知类型使用简洁回退，初始只提供手动刷新。
-- 不扩大 review-requested、不把结果解释为未读、不做事件过滤、不自动轮询。
-- 搜索最多返回 1,000 条、Events 只覆盖最近 30 天且最多 300 条；页面不得把这些边界伪装成完整历史。
+- Home 只使用 `involves:当前已认证登录 is:open`，无时间窗口，按 `updated` 降序。`is:open` 是实际请求的一部分，最终可见条目只能是 open 的 Issue/PR。
+- Feed 只保留三类产品活动：合并的 PR、星标仓库（`WatchEvent action=started`）、创建仓库（`CreateEvent ref_type=repository`）；保留源返回顺序与真实事件身份。Push、issue、评论、Release、Fork、成员、公开仓库、分支/标签创建删除、未知类型与非合并 PR 都不生成卡片、占位卡或回退句。
+- **每条卡片的主语必须是当前账户关注的人**（负责人 2026-10-30 补充）。合并 PR 卡片标题为 `<user> contributed to <owner>/<repo>`，`<user>` 是 PR 作者，不是点了 merge 的维护者 actor；星标/建库主语是事件 actor。合并证据为 `action=merged`，或旧形状的 `action=closed` + `pull_request.merged=true`；`closed` 单独不算合并。`action=merged` 的 payload 没有作者，作者来自 PR 详情读取；作者缺失、读取失败或详情未确认合并时整条不显示，并在 Partial 原因里报告。
+- **关注关系语义**：关注列表不完整/读取失败时，缺失的登录属于“未知”，既不当“已关注”也不当“未关注”，相关卡片扣留并显示 Partial；只有完整空列表才表示谁都没关注。策略在 host 里执行一次，视图不在 `apply_*` 里重算。
+- **Follow 两类事件暂缓**（负责人 2026-10-30“先实现三类，关注两类暂缓”）：没有可靠事件来源前不实现、不占位、不伪造时间戳。暂缓的只是那两类事件卡片，**读取关注关系本身是已实现且必需的**；见 [Home 查询服务](home-query-service.md#35-follow-事件两类暂缓负责人-2026-10-30-确认)。
+- 不扩大 review-requested、不把结果解释为未读、不自动轮询；初始只提供手动刷新。
+- 搜索最多返回 1,000 条、Events 只覆盖最近 30 天且最多 300 条；页面不得把这些边界伪装成完整历史。筛选后为空是正常最小空态，不是 API 错误或不完整页；真实上游分页失败仍单独保留为 Partial。
 
-这些默认值记录在本组件及预览中；`product.md` 仍由 account-shell 任务维护，本任务未修改。
+这些默认值记录在本组件及预览中；产品范围见 [产品约定](product.md)。
 
 ## 输入契约
 
@@ -29,6 +32,9 @@ pub fn bind(&mut self, binding: RequestBinding, generation: u64, ...);
 pub fn set_loading(&mut self, column, binding, generation, ...) -> bool;
 pub fn apply_home(&mut self, binding, generation, HomeSearchOutcome, ...) -> bool;
 pub fn apply_feed(&mut self, binding, generation, FeedOutcome, ...) -> bool;
+pub fn apply_feed_page(&mut self, binding, generation, FeedOutcome, ...) -> bool; // 触底追加，不重置滚动/选择
+pub fn feed_append_loading(&mut self, binding, generation, ...) -> bool;
+pub fn feed_append_failed(&mut self, binding, generation, page, ...) -> bool;
 pub fn apply_error(&mut self, column, binding, generation, HomeError, ...) -> bool;
 pub fn set_unavailable(&mut self, column, binding, generation, message, ...) -> bool;
 pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshAvailability, ...) -> bool;
@@ -49,10 +55,11 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 | 动作 | 内容 |
 | --- | --- |
 | `Refresh(RefreshRequest)` | `column`、触发时观察到的 binding 与 generation |
+| `LoadMoreFeed(RefreshRequest)` | Feed 触底时请求下一页更旧的活动；携带 binding/generation，host 重新核验后按 cursor 追加 |
 | `Repository(RepositoryIdentity)` | `id`（Feed 有，Home 搜索模型无）、owner、name |
 | `Profile(ProfileIdentity)` | `Option<u64>` id 与 canonical 登录名；actor 保留真实 id，owner-only 为 None |
 | `ActivateWorkItem(WorkItemIdentity)` | Home 条目的全局 id、number、Issue/PR kind、仓库 |
-| `ActivateFeed(FeedIdentity)` | Feed 事件 id、typed event kind、仓库 |
+| `ActivateFeed(FeedIdentity)` | Feed 卡片来源事件的真实 id、typed event kind、仓库 |
 
 Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会把仓库内 `number` 冒充为全局 id；需要详情导航的 host 应使用 `ActivateFeed` 的事件 id/kind，或在未来 data 层补充字段后再扩展。
 
@@ -61,7 +68,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。
 - 单栏最多同时呈现 loading、empty、error、unavailable 或 Ready 中的一种；Partial 仍保留已取条目并显示原因提示。
 - Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。owner/name 分段导航，更新时间为相对时间，标题和长名称有界截断。
-- Feed 是有间距的活动卡片：avatar、可点击 actor、动作句与相对时间组成 header，详情在下面的 inset repository panel。Issue/PR 显示可用 title/number/status（merged 优先）；Push/ref/release/member/comment/unknown 使用既有 typed payload，缺字段安全回退，不补造仓库统计或正文。
+- Feed 是紧凑的活动卡片：avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 只放目标仓库与（合并 PR 时的）PR 标题/#号。没有 branch/ref/SHA/commit 数等 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
 - 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。
 - 双列模式使用约 32 logical px 的间距、等宽列；窗口较窄（小于 760 logical px）时上下堆叠，纵向间距保持约 16px。顶部/左右留白不变，底部约 8px；生命周期 canvas 以绝对定位零尺寸参与 render，不再作为 flex child 留出额外 gap。
@@ -69,14 +76,17 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 ## 滚动与键盘
 
+## 滚动与键盘
+
 - 每栏使用真实 GPUI `ListState`、共享 `scroll::Bar`/`Bars` 与 `scroll::Motion<ListState>`，只渲染可见行。Home 保持固定行高，Feed 自然测量可变卡片高度；不调用 measure_all，不新建滚动几何。键盘远跳使用原生 logical item anchor，在 Motion tick 后应用，避免旧范围 clamp 覆盖末项 reveal。
+- **Feed 自动追加**：最后三张卡片之一进入可见区时提前发一次 `LoadMoreFeed`；空页和不足三张卡片的首屏自动继续。使用已测量行的位置与原生逻辑滚动锚点，不把虚拟列表未知高度当成内容耗尽；每帧布局后也核验一次，首屏无需等待额外 hover/时钟通知。每账户/代次同一时刻至多一次在途追加，渲染、resize、重复滚动回调与刷新都不能重复请求。追加用 `ListState::splice` 在原列表尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中用紧凑动画图标，失败保留现有内容并显示黄色告警图标 + 点击重试，真正耗尽（服务端无 next 链接）后停止请求。
 - 捕获阶段 `wheel_overlay` 每区域只消费一次，测试验证一次精确滚轮只改变目标栏且偏移恰好等于输入。
 - 每栏是独立 Tab stop。列表根聚焦时 Up/Down/Home/End 移动选择，Enter/Space 激活所选 Home 条目或 Feed 事件；各内容链接也是独立键盘入口，键盘激活不抢回列表焦点。
 - 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。每个链接阻止冒泡，不发生卡片/列表二次激活。
 
 ## 正式 Shell 接入（2026-10-29）
 
-本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经新增 `set_avatar_renderer` 只传入已解码元素。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
+本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；Feed 的数据层负责源事件、`/user/following` 与有界 PR 作者详情读取，并在发布前完成策略过滤（`FEED_AUTHOR_LOOKUP_LIMIT = 30`、关注列表最多 1,000 账户/10 页）；`FeedOutcome` 带 `next_page` 游标，host 在 `LoadMoreFeed` 时按游标逐页追加，而不是预先读完整条（至多 300 条/30 天）时间线。两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经 `set_avatar_renderer` 只传入已解码元素；renderer 接收的是 credited subject（合并 PR 时为 PR 作者）。`FeedOutcome` 只含已通过策略的 `FeedActivity`，视图不会再自行过滤，也无法从显示字符串推断关注状态。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
 ## 2026-10-29 第二轮状态呈现
 
@@ -113,8 +123,8 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本机 Windows 使用序列化 Cargo helper，独立 target/：fmt、locked all-target check、clippy -D warnings、完整测试、产品与 home example 构建、diff check。最终结果与 PR head 见 PR34 交付评论，不以旧 head 结果代替当前 head。
 
-Home 装配当前 54 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。
+Home 装配当前 84 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。2026-10-30 新增：closed/merged/未知/缺失 Home 状态永不成为行、选择索引或激活目标；只保留三类 Feed 活动且不产生占位卡；合并 PR 归因 PR 作者而非 merge actor；全噪声 Feed 仍是正常空态且 readiness 保持 Complete；仅含 closed 的刷新不会让旧 open 行残留。第二轮新增：视图直接渲染 `build_feed` 的真实策略输出（关注主语过滤 + 瘦 `action=merged` 事件 + 作者解析），断言被过滤事件没有行与占位、合并卡片链接到作者；关注关系不完整时显示 Partial 提示而不是空 Feed。第三轮新增：触底单次 `LoadMoreFeed`、在途去重、`splice` 追加保留滚动锚点与选择、追加失败告警+点击重试、真正耗尽停止。
 
 本轮实际查看 Windows 原生 PrintWindow 帧：144 DPI，宽布局 2130×1425 物理像素与窄布局 990×1000；计数/列框/分割线/右侧导航按钮消失，Home icon 对齐标题，Feed 卡片 header/inset 详情及相对时间正常。通过本任务 HWND 的消息切换 Mixed/Loading-error/Large，并取得 owner-only 与 repo-only hover underline 帧。未拿源码推断或测试平台代替视觉核验。
 
-限制：原生消息驱动不等于真人输入手感；未确认触控板、IME、多屏/DPI、原生滚轮手感或所有键盘流程。UI 未获负责人验收，PR 保持 pending；最终 exe/PID/head 记录在任务交付状态与 PR 评论。无真实 PAT/GitHub 请求，正式 data/Shell 适配仍待后续集成。
+限制：原生消息驱动不等于真人输入手感；未确认触控板、IME、多屏/DPI、原生滚轮手感或所有键盘流程。UI 未获负责人验收，PR 保持 pending；最终 exe/PID/head 记录在任务交付状态与 PR 评论。本轮另做无凭据公开 API 形状核对，见任务 devlog；未做真实 PAT 的认证 Feed 验收。正式 data/Shell 已接线，其状态不等于真实账户验收通过。

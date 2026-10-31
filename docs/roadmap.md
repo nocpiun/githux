@@ -128,7 +128,7 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 | 全局与仓库 Settings | 经确认的最小设置项目、统一行式风格 | 本地设置重启仍保留；区分本应用偏好与 GitHub 远端设置，不能把本地保存显示成远端成功 |
 | Command palette 数据 | 经确认的搜索类别和结果路由 | 查询变化取消/淘汰旧结果；结果打开正确会话；离线不冒充已完成实时搜索 |
 
-Feed 已选择 Events API，负责人接受其延迟；当前 typed 卡片覆盖、服务顺序、未知类型回退和初始手动刷新已确认，不自动轮询、不过滤，也不承诺复刻网站全部 Feed。Home 无时间窗口、按 updated 降序；Profile 的公开同名根 README、pins/gist 提示、仅无 pin 才 Popular 与最近一年范围已确认。具体边界统一见[产品约定](product.md#home-与-feed-的数据范围)。
+Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确认只保留合并 PR、星标仓库、创建仓库三类活动、保持服务顺序，且每条卡片主语必须是当前账户关注的人（合并贡献取 PR 作者，需读 PR 详情确认），初始手动刷新，不自动轮询，也不承诺复刻网站全部 Feed；Follow 两类事件卡片暂缓。Home 查询为 `involves:` + `is:open`、无时间窗口、按 updated 降序；Profile 的公开同名根 README、pins/gist 提示、仅无 pin 才 Popular 与最近一年范围已确认。具体边界统一见[产品约定](product.md#home-与-feed-的数据范围)。
 
 **当前状态：** PR #34/#35/#36 已合并三个可复用视图，PR #33 等已提供账户作用域数据接口；但正式 Home/Profile/Repository 三个产品路由仍待 shell-pages 统一接线，Settings 仍是过渡 Accounts 页面。表中“保留页面全部使用真实数据入口”的验收尚未因此完成。
 

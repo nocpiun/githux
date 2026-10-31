@@ -112,14 +112,23 @@ impl Transport for PageTransport {
                 ));
             }
             if url.contains("/search/issues") {
+                // One open item and one closed item: the confirmed Home rule must
+                // return only the open one even if a non-conforming page leaks a
+                // closed row.
                 return Ok(json(
                     200,
                     serde_json::json!({
-                        "total_count": 1, "incomplete_results": false,
+                        "total_count": 2, "incomplete_results": false,
                         "items": [{
                             "id": 900, "number": 12, "title": "Synthetic involved issue",
                             "html_url": "https://github.com/alice/demo/issues/12",
                             "state": "open", "updated_at": "2026-10-28T10:00:00Z",
+                            "repository_url": "https://api.github.com/repos/alice/demo",
+                            "pull_request": null
+                        }, {
+                            "id": 901, "number": 13, "title": "Synthetic closed issue",
+                            "html_url": "https://github.com/alice/demo/issues/13",
+                            "state": "closed", "updated_at": "2026-10-28T09:00:00Z",
                             "repository_url": "https://api.github.com/repos/alice/demo",
                             "pull_request": null
                         }]
@@ -135,18 +144,90 @@ impl Transport for PageTransport {
                     }),
                 ));
             }
+            // The active account follows bob and carol, not dave.
+            if url.contains("/user/following") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([
+                        {"id": 7, "login": "bob", "avatar_url": null},
+                        {"id": 8, "login": "carol", "avatar_url": null}
+                    ]),
+                ));
+            }
+            // Real detail-endpoint shape for the merged contribution: the author
+            // lives here, not in the slim event payload.
+            if lower.contains("/repos/alice/demo/pulls/5") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 555, "number": 5, "state": "closed", "merged": true,
+                        "title": "Synthetic merged pull request",
+                        "html_url": "https://github.com/alice/demo/pull/5",
+                        "user": {"id": 8, "login": "carol", "avatar_url": null}
+                    }),
+                ));
+            }
             if url.contains("/received_events") {
-                return Ok(HttpResponse {
-                    status: 200,
-                    headers: vec![("x-poll-interval".into(), "1".into())],
-                    body: serde_json::json!([{
+                // Live shapes: a star by a followed account, a push (never a card),
+                // a star by an unfollowed account, and a live `action=merged` event
+                // whose slim pull_request carries no author. Page 2 serves one more
+                // followed star so the append path can be exercised.
+                let page_two = url.contains("page=2");
+                let events = if page_two {
+                    serde_json::json!([{
+                        "id": "evt-5", "type": "WatchEvent",
+                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
+                        "payload": {"action": "started"},
+                        "created_at": "2026-10-28T06:00:00Z"
+                    }])
+                } else {
+                    serde_json::json!([{
                         "id": "evt-1", "type": "WatchEvent",
                         "actor": {"id": 7, "login": "bob", "avatar_url": null},
                         "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
                         "payload": {"action": "started"},
                         "created_at": "2026-10-28T09:00:00Z"
+                    }, {
+                        "id": "evt-2", "type": "PushEvent",
+                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
+                        "payload": {"ref": "refs/heads/main", "before": "a", "head": "b", "size": 1},
+                        "created_at": "2026-10-28T08:00:00Z"
+                    }, {
+                        "id": "evt-3", "type": "WatchEvent",
+                        "actor": {"id": 9, "login": "dave", "avatar_url": null},
+                        "repo": {"id": 11, "name": "alice/other", "url": "https://api.github.com/repos/alice/other"},
+                        "payload": {"action": "started"},
+                        "created_at": "2026-10-28T07:30:00Z"
+                    }, {
+                        "id": "evt-4", "type": "PullRequestEvent",
+                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
+                        "payload": {
+                            "action": "merged", "number": 5,
+                            "pull_request": {
+                                "url": "https://api.github.com/repos/alice/demo/pulls/5",
+                                "id": 555, "number": 5,
+                                "head": {"ref": "feature", "sha": "aaaa"},
+                                "base": {"ref": "main", "sha": "bbbb"}
+                            }
+                        },
+                        "created_at": "2026-10-28T07:00:00Z"
                     }])
-                    .to_string(),
+                };
+                let mut headers = vec![("x-poll-interval".into(), "1".into())];
+                if !page_two {
+                    headers.push((
+                        "link".into(),
+                        "<https://api.github.com/users/alice/received_events?per_page=100&page=2>; rel=\"next\""
+                            .to_string(),
+                    ));
+                }
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers,
+                    body: events.to_string(),
                 });
             }
             if url.ends_with("/graphql") {
@@ -424,6 +505,16 @@ fn feed_refresh_is_reenabled_when_its_server_poll_interval_expires(cx: &mut Test
     // The synthetic Feed response requests a one-second poll interval. Refresh stays disabled
     // while that interval runs, then the host restores the control without issuing a read.
     assert!(!view.read_with(cx, |shell, cx| shell.feed_refresh_available_for_test(cx)));
+    // The first page also exposes a next page, and the short feed is underfilled, so the
+    // legitimate end-of-scroll append settles once before we measure the cooldown.
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if transport.seen("/received_events") >= 2 {
+            break;
+        }
+    }
     let feed_reads = transport.seen("/received_events");
     // Drive the same expiry boundary the real timer reaches, without depending on the test
     // scheduler's wall clock or introducing a real sleep.
@@ -509,7 +600,36 @@ fn the_shell_mounts_real_home_and_reads_its_two_columns(cx: &mut TestAppContext)
         transport.seen("/received_events") >= 1,
         "Feed requests the received-events endpoint"
     );
+    assert!(
+        transport.seen("/user/following") >= 1,
+        "Feed reads the followed-account set for the membership constraint"
+    );
     assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
+    // Through the real adapters: Home keeps only the open item; Feed keeps the
+    // followed star and the merged contribution (author resolved from the detail
+    // endpoint), dropping the push and the unfollowed account's star.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("home-item-row-0").is_some(),
+        "the open Home item is visible"
+    );
+    assert!(
+        cx.debug_bounds("home-item-row-1").is_none(),
+        "the closed Home item must not have a row"
+    );
+    assert!(
+        cx.debug_bounds("feed-event-row-0").is_some(),
+        "the followed star is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-event-row-1").is_some(),
+        "the merged contribution is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-event-row-2").is_none(),
+        "the push event and the unfollowed star must not have rows"
+    );
 }
 
 #[gpui::test]
@@ -797,5 +917,70 @@ fn compact_retry_state_is_readable_and_retries_once(cx: &mut TestAppContext) {
         view.read_with(cx, |probe, _| probe.retries.get()),
         1,
         "a warning mark carries exactly one retry"
+    );
+}
+
+#[gpui::test]
+fn feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.home_mount_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)) {
+            break;
+        }
+    }
+    assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
+    // The first page produced the followed star and the merged contribution; the
+    // push and the unfollowed star did not. The first page also exposes page 2.
+    // A short first page automatically continues through the real host; no
+    // synthetic LoadMore action or additional user scroll should be required.
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if cx.debug_bounds("feed-event-row-2").is_some() {
+            break;
+        }
+    }
+    assert!(
+        transport.seen("/received_events?per_page=100&page=2")
+            + transport.seen("/received_events?page=2")
+            >= 1,
+        "append fetched the second source page, not a fresh first page"
+    );
+    assert_eq!(
+        transport.seen("/received_events"),
+        2,
+        "one first page and exactly one automatic continuation"
+    );
+    // The appended star's row is visible after the append; the first-page rows
+    // remain, so the list grew in place rather than resetting.
+    assert!(cx.debug_bounds("feed-event-row-0").is_some());
+    assert!(cx.debug_bounds("feed-event-row-1").is_some());
+    assert!(cx.debug_bounds("feed-event-row-2").is_some());
+    // Page 2 exposed no next link, so no further append fires.
+    let after = transport.seen("/received_events");
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.load_more_home_for_test(window, cx)
+    });
+    cx.run_until_parked();
+    view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+    assert_eq!(
+        transport.seen("/received_events"),
+        after,
+        "true exhaustion must not issue another read"
     );
 }

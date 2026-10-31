@@ -49,7 +49,7 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 ## Home 与 Feed
 
 - Home 固定 `involves:<当前认证 login>`、无时间窗口、`updated` 降序。
-- Feed 使用服务端顺序和已有 typed event；未知类型保留简短 fallback；不自动轮询。Poll-Interval 只控制刷新按钮何时重新可用，到期不会自行发起读取。
+- Feed 使用服务端顺序，只发布合并 PR、星标仓库、创建仓库三类活动，且主语必须是当前账户关注的人（合并贡献取 PR 作者）；host 负责读取 `/user/following` 与有界 PR 作者详情（`FEED_AUTHOR_LOOKUP_LIMIT = 30`）。Push、issue、未知类型等不生成卡片或 fallback 占位；不自动轮询。Poll-Interval 只控制刷新按钮何时重新可用，到期不会自行发起读取。
 - 页面组件发出的 action 在组件更新栈结束后才交给 host；Shell 的统一导航 sink 同样延后执行，覆盖 Home/Profile 链接及 Repository contributor，避免 refresh/navigation 重入正在更新的同一实体。
 - 两栏独立加载、错误、Partial、空态和刷新；一栏失败不擦另一栏。
 - 刷新按钮由 host 提供可用性。Feed 收到 `X-Poll-Interval` 后在该窗口内禁用刷新，不另建计时轮询。

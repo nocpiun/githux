@@ -94,6 +94,9 @@ async fn parses_common_event_types() {
     else {
         panic!("expected events");
     };
+    // The adapter publishes the parsed **source** list: selecting retained
+    // activities is the product policy applied later by `build_feed`, so nothing
+    // is dropped here.
     assert_eq!(outcome.events.len(), 5);
     assert_eq!(outcome.etag.as_deref(), Some("\"feed-1\""));
     assert_eq!(outcome.poll_interval_seconds, Some(60));
@@ -122,6 +125,105 @@ async fn parses_common_event_types() {
 }
 
 #[tokio::test]
+async fn a_source_page_keeps_every_event_in_server_order_and_identity() {
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![
+            event("1", "WatchEvent", serde_json::json!({"action": "started"})),
+            event(
+                "2",
+                "PushEvent",
+                serde_json::json!({"ref": "refs/heads/main", "size": 2}),
+            ),
+            event(
+                "3",
+                "PullRequestEvent",
+                serde_json::json!({
+                    "action": "merged", "number": 5,
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/acme/repo/pulls/5",
+                        "id": 55, "number": 5,
+                        "head": {"ref": "x", "sha": "a"},
+                        "base": {"ref": "main", "sha": "b"}
+                    }
+                }),
+            ),
+            event(
+                "4",
+                "CreateEvent",
+                serde_json::json!({"ref_type": "repository", "ref": null}),
+            ),
+        ]),
+        vec![],
+    )))
+    .await;
+
+    let FeedFetch::Events(outcome) = run(&mock, None, &FeedLimits::default()).await.expect("ok")
+    else {
+        panic!("expected events");
+    };
+    let ids: Vec<&str> = outcome
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["1", "2", "3", "4"],
+        "the source list keeps server order and every event"
+    );
+    assert_eq!(outcome.events[2].repository.name, "acme/repo");
+}
+
+/// The live `action=merged` shape observed from the public Events API: the
+/// payload contains a slim `pull_request` object with only
+/// `url/id/number/head/base`, no `merged` flag and no `user`. Parsing must keep
+/// the action and the target identity, and must not invent an author.
+#[tokio::test]
+async fn parses_a_live_merged_event_with_a_slim_pull_request_object() {
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![event(
+            "1",
+            "PullRequestEvent",
+            serde_json::json!({
+                "action": "merged",
+                "number": 144,
+                "pull_request": {
+                    "url": "https://api.github.com/repos/subsurface/libdc/pulls/144",
+                    "id": 4838297932u64,
+                    "number": 144,
+                    "head": {"ref": "feat/x", "sha": "8cc8ec82a733ac545195ce5d6f04e8939cd706b1"},
+                    "base": {"ref": "master", "sha": "8d3f629702a7de2f510186614e293260a1dd6f70"}
+                }
+            }),
+        )]),
+        vec![],
+    )))
+    .await;
+
+    let FeedFetch::Events(outcome) = run(&mock, None, &FeedLimits::default()).await.expect("ok")
+    else {
+        panic!("expected events");
+    };
+    assert_eq!(outcome.events.len(), 1);
+    assert!(
+        matches!(
+            &outcome.events[0].payload,
+            FeedPayload::PullRequest {
+                action,
+                number: Some(144),
+                merged: None,
+                author: None,
+                ..
+            } if action == "merged"
+        ),
+        "the merged action and target survive; no author is invented: {:?}",
+        outcome.events[0].payload
+    );
+}
+
+#[tokio::test]
 async fn unknown_event_type_is_compatible_and_keeps_no_payload() {
     let mock = Arc::new(MockTransport::new());
     mock.enqueue(Ok(ok(
@@ -138,6 +240,9 @@ async fn unknown_event_type_is_compatible_and_keeps_no_payload() {
     else {
         panic!("expected events");
     };
+    // The source list keeps the event; the product policy drops it later. The
+    // parser deliberately keeps no payload, so a future shape cannot grow.
+    assert_eq!(outcome.events.len(), 1);
     assert_eq!(
         outcome.events[0].event_type,
         FeedEventType::Unknown("SomeFutureEvent".to_string())
@@ -156,6 +261,9 @@ async fn missing_payload_does_not_panic() {
     else {
         panic!("expected events");
     };
+    // A missing payload must not panic the parser; the source list keeps it and
+    // the product policy is what eventually excludes it.
+    assert_eq!(outcome.events.len(), 1);
     assert_eq!(outcome.events[0].event_type, FeedEventType::Public);
     assert_eq!(outcome.events[0].payload, FeedPayload::Public);
 }
@@ -476,4 +584,106 @@ async fn localhost_304_round_trip_returns_not_modified() {
     let recorded = server.recorded();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].header("if-none-match"), Some("\"feed-1\""));
+}
+
+#[tokio::test]
+async fn incremental_page_path_enforces_max_events_and_max_pages() {
+    // max_events: a page with more events than the budget truncates and reports
+    // EntryLimit, exposing no continuation.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![
+            event("1", "WatchEvent", serde_json::json!({"action": "started"})),
+            event("2", "WatchEvent", serde_json::json!({"action": "started"})),
+        ]),
+        vec![(
+            "Link",
+            "<https://api.github.com/users/test-user/received_events?page=2>; rel=\"next\"",
+        )],
+    )))
+    .await;
+    let limits = FeedLimits {
+        max_events: 1,
+        ..FeedLimits::default()
+    };
+    let page = fetch_received_events_page(
+        &client(mock.clone()),
+        &pat(),
+        &login("test-user"),
+        FeedSourceCursor { page: 1 },
+        &limits,
+        CancellationToken::default(),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.next, None, "truncation must not expose a continuation");
+    assert!(page.reasons.contains(&FeedPartialReason::EntryLimit));
+
+    // max_pages: the current page equals the budget, so no next link is honored.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![event(
+            "1",
+            "WatchEvent",
+            serde_json::json!({"action": "started"}),
+        )]),
+        vec![(
+            "Link",
+            "<https://api.github.com/users/test-user/received_events?page=2>; rel=\"next\"",
+        )],
+    )))
+    .await;
+    let limits = FeedLimits {
+        max_pages: 1,
+        ..FeedLimits::default()
+    };
+    let page = fetch_received_events_page(
+        &client(mock.clone()),
+        &pat(),
+        &login("test-user"),
+        FeedSourceCursor { page: 1 },
+        &limits,
+        CancellationToken::default(),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(
+        page.next, None,
+        "the page budget bounds the incremental walk"
+    );
+    assert!(page.reasons.contains(&FeedPartialReason::PageLimit));
+
+    // A complete final page that lands exactly on the page budget (no next link)
+    // is NOT truncation: importing 201-300 events must stay Complete.
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(ok(
+        events_body(vec![event(
+            "1",
+            "WatchEvent",
+            serde_json::json!({"action": "started"}),
+        )]),
+        vec![],
+    )))
+    .await;
+    let limits = FeedLimits {
+        max_pages: 3,
+        ..FeedLimits::default()
+    };
+    let page = fetch_received_events_page(
+        &client(mock.clone()),
+        &pat(),
+        &login("test-user"),
+        FeedSourceCursor { page: 3 },
+        &limits,
+        CancellationToken::default(),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(page.next, None);
+    assert!(
+        page.reasons.is_empty(),
+        "a complete final page at the page budget is not partial: {:?}",
+        page.reasons
+    );
 }

@@ -9,8 +9,8 @@ use tokio::sync::watch;
 use crate::app::accounts::AccountServices;
 use crate::app::avatar::AvatarKey;
 use crate::data::{PageReadSession, RepositoryReadContext};
-use crate::domain::home::{FeedFetch, FeedOutcome, HomeError, HomeSearchOutcome};
-use crate::github::home::{FeedLimits, HomeSearchLimits};
+use crate::domain::home::{FeedOutcome, HomeError, HomeSearchOutcome};
+use crate::github::home::{FeedLimits, FollowingLimits, HomeSearchLimits, PullRequestDetailLimits};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::ui::avatar::AvatarSlot;
 use crate::ui::home::{Column, HomeAction, HomeView, RefreshAvailability, RequestBinding};
@@ -18,6 +18,12 @@ use crate::workspace::TabId;
 
 use super::{NavigationSink, PageAvatars, PageNavigation};
 use crate::workspace::Route;
+
+/// Upper bound on merged pull-request detail reads per Feed refresh. A 300-event
+/// window with a handful of merges stays far below this; the cap exists so a
+/// pathological page cannot turn into dozens of sequential requests. Targets over
+/// the cap are reported as unresolved rather than silently dropped.
+const FEED_AUTHOR_LOOKUP_LIMIT: usize = 30;
 
 /// The deadline is presentation-only. Expiring it restores the Feed refresh control; it never
 /// initiates a request. Extracted so the expiry rule can be exercised without a wall-clock sleep.
@@ -51,6 +57,19 @@ struct Reply {
     result: ColumnResult,
 }
 
+/// An end-of-scroll append result, routed separately from the column reply so it
+/// can never be mistaken for a fresh first-page read.
+struct AppendReply {
+    generation: u64,
+    /// Monotonic append epoch, bumped whenever the Feed starts a replacement
+    /// (first-page) read. An append started before that read carries a lower
+    /// epoch and is rejected, so a refresh can never be skipped or overwritten.
+    append_epoch: u64,
+    selection: u64,
+    context: RepositoryReadContext,
+    result: Result<(FeedOutcome, std::collections::HashSet<String>), HomeError>,
+}
+
 pub struct HomePage {
     tab: TabId,
     services: Option<AccountServices>,
@@ -61,12 +80,20 @@ pub struct HomePage {
     requests: [u64; 2],
     work: [Option<Work>; 2],
     inbox: Arc<Mutex<VecDeque<Reply>>>,
+    append_inbox: Arc<Mutex<VecDeque<AppendReply>>>,
     alive: Arc<watch::Sender<bool>>,
     receiver: Option<gpui::Task<()>>,
     feed_ready: Option<Instant>,
     feed_cooldown_task: Option<gpui::Task<()>>,
+    /// Continuation state for Feed end-of-scroll pagination, scoped to the
+    /// current binding/generation. Cleared on rebind/refresh.
+    feed_next_page: Option<crate::domain::home::FeedSourceCursor>,
+    feed_seen_ids: std::collections::HashSet<String>,
+    feed_append: Option<Work>,
+    /// Monotonic append epoch; bumped before every replacement Feed read so an
+    /// in-flight append from before a refresh is rejected and cancelled.
+    feed_append_epoch: u64,
     view: Entity<HomeView>,
-    avatars: PageAvatars,
     navigation: NavigationSink,
     _changed: Subscription,
 }
@@ -84,43 +111,18 @@ impl HomePage {
         let binding = RequestBinding::new(format!("home:{}:{incarnation}", tab.get()));
         let view = cx.new(|cx| HomeView::new(binding.clone(), 0, window, cx));
         // Feed images resolve through the same controller-owned loader as the sidebar. The view
-        // receives decoded images only; it never sees a URL or performs a request.
-        let avatar_page = cx.weak_entity();
-        view.update(cx, |view, _| {
-            view.set_avatar_renderer(Rc::new(move |event, index, cx| {
-                let page = avatar_page.upgrade()?;
-                let avatars = page.read(cx).avatars.clone();
-                let key = AvatarKey::new(
-                    "github.com",
-                    event.actor.id,
-                    event.actor.avatar_url.clone()?,
-                );
-                avatars
-                    .element(
-                        &format!("home-feed-avatar-{}-{index}", event.actor.id),
-                        &format!("home-feed-real-avatar-{index}"),
-                        &event.actor.login,
-                        Some(key),
-                        AvatarSlot::Size(ely_core::theme::AvatarSize::Lg),
-                        cx,
-                    )
-                    .into()
-            }));
-        });
-        // One callback handles refresh locally and all typed navigation in this host.
+        // receives decoded images only; it never sees a URL or performs a request. The renderer
+        // is installed exactly once and receives the credited activity subject, which for a merged
+        // pull request is the payload author, not the maintainer actor.
         let page_weak = cx.weak_entity();
         let avatar_loader = avatars.clone();
         view.update(cx, |view, _| {
-            view.set_avatar_renderer(Rc::new(move |event, index, cx| {
-                let key = AvatarKey::new(
-                    "github.com",
-                    event.actor.id,
-                    event.actor.avatar_url.clone()?,
-                );
+            view.set_avatar_renderer(Rc::new(move |subject, index, cx| {
+                let key = AvatarKey::new("github.com", subject.id, subject.avatar_url.clone()?);
                 Some(avatar_loader.element(
-                    &format!("home-feed-avatar-{}-{index}", event.actor.id),
+                    &format!("home-feed-avatar-{}-{index}", subject.id),
                     &format!("home-feed-real-avatar-{index}"),
-                    &event.actor.login,
+                    &subject.login,
                     Some(key),
                     AvatarSlot::Size(ely_core::theme::AvatarSize::Lg),
                     cx,
@@ -148,12 +150,16 @@ impl HomePage {
             requests: [0, 0],
             work: [None, None],
             inbox: Arc::new(Mutex::new(VecDeque::new())),
+            append_inbox: Arc::new(Mutex::new(VecDeque::new())),
             alive: Arc::new(alive),
             receiver: None,
             feed_ready: None,
             feed_cooldown_task: None,
+            feed_next_page: None,
+            feed_seen_ids: std::collections::HashSet::new(),
+            feed_append: None,
+            feed_append_epoch: 0,
             view,
-            avatars,
             navigation,
             _changed,
         };
@@ -183,6 +189,8 @@ impl HomePage {
             self.selection
         ));
         self.feed_ready = None;
+        self.feed_next_page = None;
+        self.feed_seen_ids.clear();
         let binding = self.binding.clone();
         let generation = self.generation;
         self.view.update(cx, |view, cx| {
@@ -242,6 +250,13 @@ impl HomePage {
             {
                 self.start(request.column, false, cx);
             }
+            HomeAction::LoadMoreFeed(request)
+                if request.binding == self.binding
+                    && request.generation == self.generation
+                    && request.column == Column::Feed =>
+            {
+                self.load_more_feed(request, cx);
+            }
             HomeAction::Repository(repository) => (self.navigation)(
                 PageNavigation::Open(Route::Repository {
                     namespace: repository.owner,
@@ -264,7 +279,8 @@ impl HomePage {
             // Issue/PR detail is deliberately not routed in this release.
             HomeAction::ActivateWorkItem(_)
             | HomeAction::ActivateFeed(_)
-            | HomeAction::Refresh(_) => {}
+            | HomeAction::Refresh(_)
+            | HomeAction::LoadMoreFeed(_) => {}
         }
     }
 
@@ -282,6 +298,14 @@ impl HomePage {
         }
         if column == Column::Feed && self.feed_ready.is_some_and(|ready| Instant::now() < ready) {
             return;
+        }
+        if column == Column::Feed {
+            // A replacement Feed read invalidates any outstanding append: cancel it
+            // and bump the append epoch so its late reply is rejected.
+            if let Some(append) = self.feed_append.take() {
+                append.source.cancel();
+            }
+            self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         }
         let Some(session) = self.session.clone() else {
             return;
@@ -329,17 +353,23 @@ impl HomePage {
                         .await
                         .map(|value| value.value),
                 ),
-                Column::Feed => {
-                    ColumnResult::Feed(match session.feed(&FeedLimits::default(), cancel).await {
-                        Ok(value) => match value.value {
-                            FeedFetch::Events(events) => Ok(events),
-                            FeedFetch::NotModified { .. } => Err(HomeError::InvalidResponse {
-                                message: "unexpected 304 without a Feed validator".into(),
-                            }),
-                        },
-                        Err(error) => Err(error),
-                    })
-                }
+                // The data layer composes the raw events read, the followed-account
+                // read and the bounded merged-author lookups, then applies the
+                // product policy. Bounds keep one snapshot from fanning out: a
+                // followed list of at most 1,000 accounts and at most 30 distinct
+                // author lookups per refresh.
+                Column::Feed => ColumnResult::Feed(
+                    session
+                        .feed(
+                            &FeedLimits::default(),
+                            &FollowingLimits::default(),
+                            &PullRequestDetailLimits::default(),
+                            FEED_AUTHOR_LOOKUP_LIMIT,
+                            cancel,
+                        )
+                        .await
+                        .map(|value| value.value),
+                ),
             };
             if *alive.borrow() {
                 inbox.lock().expect("home inbox").push_back(Reply {
@@ -416,6 +446,75 @@ impl HomePage {
         for reply in replies {
             self.apply(reply, cx);
         }
+        let appends: Vec<_> = self
+            .append_inbox
+            .lock()
+            .expect("home append inbox")
+            .drain(..)
+            .collect();
+        for append in appends {
+            self.apply_append(append, cx);
+        }
+    }
+
+    fn apply_append(&mut self, append: AppendReply, cx: &mut Context<Self>) {
+        if append.generation != self.generation
+            || append.append_epoch != self.feed_append_epoch
+            || append.selection != self.selection
+            || !self
+                .services
+                .as_ref()
+                .is_some_and(|services| services.repositories().is_current(&append.context))
+            || !self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.context() == &append.context)
+        {
+            return;
+        }
+        self.feed_append = None;
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        match append.result {
+            Ok((page, seen)) => {
+                self.feed_seen_ids = seen;
+                self.feed_next_page = page.next_page;
+                // Merge into the retained outcome in place, preserving the
+                // earlier snapshot's partial reasons so an append can never make
+                // a previously-withheld set look complete.
+                self.view.update(cx, |view, cx| {
+                    if let crate::ui::home::PanelState::Ready {
+                        content: crate::ui::home::PanelContent::Ready(existing),
+                        ..
+                    } = view.feed_state()
+                    {
+                        let mut merged = existing.clone();
+                        let mut reasons = merged.readiness.reasons().to_vec();
+                        reasons.extend(page.readiness.reasons().iter().cloned());
+                        merged.activities.extend(page.activities.clone());
+                        merged.next_page = page.next_page;
+                        merged.readiness =
+                            crate::domain::home::FeedReadiness::from_reasons(reasons);
+                        merged.etag = if merged.readiness.is_complete() {
+                            page.etag
+                        } else {
+                            None
+                        };
+                        if let Some(poll) = page.poll_interval_seconds {
+                            merged.poll_interval_seconds = Some(poll);
+                        }
+                        view.apply_feed_page(&binding, generation, merged, cx);
+                    }
+                });
+            }
+            Err(_error) => {
+                let page = self.feed_next_page.map(|cursor| cursor.page).unwrap_or(1);
+                self.view.update(cx, |view, cx| {
+                    view.feed_append_failed(&binding, generation, page, cx);
+                });
+            }
+        }
+        cx.notify();
     }
 
     fn apply(&mut self, reply: Reply, cx: &mut Context<Self>) {
@@ -438,6 +537,16 @@ impl HomePage {
                     self.feed_ready = Some(Instant::now() + Duration::from_secs(seconds.max(1)));
                 } else {
                     self.feed_ready = None;
+                }
+                // Seed continuation from the first page: the validated next
+                // source cursor and the seen event ids become the append
+                // baseline, scoped to this generation. Replace (not extend) the
+                // seen set so a refresh can re-reveal previously viewed older
+                // activities that are no longer in the new first-page snapshot.
+                self.feed_next_page = outcome.next_page;
+                self.feed_seen_ids.clear();
+                for activity in &outcome.activities {
+                    self.feed_seen_ids.insert(activity.event.id.clone());
                 }
                 view.apply_feed(&binding, generation, outcome, cx);
             }
@@ -522,6 +631,12 @@ impl HomePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn load_more_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.view
+            .update(cx, |view, cx| view.request_more_feed(window, cx));
+    }
+
+    #[cfg(test)]
     pub(crate) fn expire_feed_cooldown_for_test(&mut self, cx: &mut Context<Self>) {
         let Some(ready) = self.feed_ready else {
             return;
@@ -574,10 +689,117 @@ impl HomePage {
                 work.source.cancel();
             }
         }
+        if let Some(append) = self.feed_append.take() {
+            append.source.cancel();
+        }
+        self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         self.inbox.lock().expect("home inbox").clear();
+        self.append_inbox.lock().expect("home append inbox").clear();
         self.feed_cooldown_task = None;
         self.feed_ready = None;
+        self.feed_next_page = None;
+        self.feed_seen_ids.clear();
         self.session = None;
+    }
+
+    /// Starts one bounded load-more of the Feed's next older source page.
+    ///
+    /// At most one append runs per account/generation: the in-flight guard plus
+    /// the view's loading state prevent duplicates from repeated scroll/resize
+    /// callbacks. The request uses the same captured session and account context
+    /// as the first read, so account switches and refresh reject stale replies.
+    fn load_more_feed(&mut self, request: crate::ui::home::RefreshRequest, cx: &mut Context<Self>) {
+        if self.feed_append.is_some() {
+            return;
+        }
+        // A replacement (first-page) Feed read owns the continuation state; never
+        // start an append while it is running, or it could capture a stale cursor
+        // and skip the pages between the old and new snapshots.
+        if self.work[Self::index(Column::Feed)].is_some() {
+            return;
+        }
+        let Some(next) = self.feed_next_page else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        let context = session.context().clone();
+        if !services.repositories().is_current(&context) {
+            self.feed_append_failed(request.generation, next.page, cx);
+            return;
+        }
+        let work = Work::new();
+        let cancel = work.token.clone();
+        self.feed_append = Some(work);
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        self.view.update(cx, |view, cx| {
+            view.feed_append_loading(&binding, generation, cx);
+        });
+        let append_inbox = self.append_inbox.clone();
+        let alive = self.alive.clone();
+        let selection = self.selection;
+        let append_epoch = self.feed_append_epoch;
+        let reply_context = context.clone();
+        let mut seen = self.feed_seen_ids.clone();
+        let submitted = services.executor().handle().spawn(async move {
+            let result = session
+                .feed_page(
+                    next,
+                    &FeedLimits::default(),
+                    &FollowingLimits::default(),
+                    &PullRequestDetailLimits::default(),
+                    FEED_AUTHOR_LOOKUP_LIMIT,
+                    &mut seen,
+                    cancel,
+                )
+                .await;
+            if *alive.borrow() {
+                append_inbox
+                    .lock()
+                    .expect("home append inbox")
+                    .push_back(AppendReply {
+                        generation,
+                        append_epoch,
+                        selection,
+                        context: reply_context,
+                        result: result.map(|page| {
+                            (
+                                FeedOutcome {
+                                    activities: page.value.activities,
+                                    etag: page.value.etag,
+                                    poll_interval_seconds: page.value.poll_interval_seconds,
+                                    next_page: page.value.next_page,
+                                    readiness: crate::domain::home::FeedReadiness::from_reasons(
+                                        page.value.reasons,
+                                    ),
+                                },
+                                seen,
+                            )
+                        }),
+                    });
+            }
+        });
+        if submitted.is_err() {
+            self.feed_append = None;
+            self.feed_append_failed(generation, next.page, cx);
+        }
+    }
+
+    fn feed_append_failed(&mut self, generation: u64, page: u32, cx: &mut Context<Self>) {
+        if generation != self.generation {
+            return;
+        }
+        self.feed_append = None;
+        let binding = self.binding.clone();
+        self.view.update(cx, |view, cx| {
+            view.feed_append_failed(&binding, generation, page, cx);
+        });
+        cx.notify();
     }
 }
 
