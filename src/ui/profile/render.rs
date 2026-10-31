@@ -1,12 +1,13 @@
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
 use gpui::{
     AnyElement, App, Axis, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
-    Window, div, prelude::*, px,
+    Window, div, px, relative,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -67,7 +68,9 @@ fn panel(child: AnyElement, cx: &App) -> AnyElement {
 
 pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
     let theme = cx.theme();
+    let message = state.message();
     div()
+        .id("profile-section-error")
         .debug_selector(|| "profile-section-error".to_string())
         .flex()
         .items_start()
@@ -77,17 +80,30 @@ pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
         .bg(theme.colors.bg)
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(theme.colors.warning)
-        .child(Icon::new(IconName::CircleAlert).size(IconSize::Sm))
-        .child(state.message())
+        .tooltip(ui_tooltip(message))
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size(IconSize::Sm)
+                .color(theme.colors.warning),
+        )
+        .child(message)
         .into_any_element()
 }
 
 pub(super) fn loading(label: &'static str, cx: &App) -> AnyElement {
     div()
         .debug_selector(|| "profile-section-loading".to_string())
+        .flex()
+        .items_center()
+        .gap_2()
         .p_3()
         .text_size(cx.theme().text_size(TextSize::Sm))
         .text_color(cx.theme().colors.fg_subtle)
+        .child(crate::ui::compact_status::loading(
+            label.replace(' ', "-"),
+            label,
+            cx,
+        ))
         .child(label)
         .into_any_element()
 }
@@ -157,7 +173,7 @@ impl Render for ProfileView {
                 name: "profile-page-scrollbar",
                 axis: Axis::Vertical,
             },
-            placement: Placement::overlay(4.0, 8.0),
+            placement: Placement::overlay(1.5, 8.0),
             style: Style::DEFAULT,
             opacity: page_opacity,
             on_drag: std::rc::Rc::new(move |axis, active, _, cx| {
@@ -211,7 +227,7 @@ impl Render for ProfileView {
                             .gap_3()
                             .child(header)
                             .child(self.overview_marker(cx))
-                            .child(readme)
+                            .children(readme)
                             .child(repositories)
                             .child(contributions),
                     ),
@@ -251,20 +267,33 @@ impl ProfileView {
             .into_any_element()
     }
 
-    fn render_readme(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_readme(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let body = match &self.readme {
+            // A confirmed absence — no eligible public same-name repository, no root README, or
+            // an unproven/incomplete discovery — is a normal optional outcome. The whole
+            // optional section is omitted, including its border, header and any error sentence,
+            // so it leaves no empty gap. The distinction from a real failure stays internal in
+            // `SectionState`.
+            SectionState::Unavailable(_) => return None,
             SectionState::Loading => loading("Loading profile README…", cx),
-            SectionState::Error(error) => state_panel(error, cx),
+            // A real failure keeps one compact warning mark with its reason in the tooltip and
+            // accessible name. No retry is offered because this view has no retry callback.
+            SectionState::Error(error) => crate::ui::compact_status::failed(
+                "profile-readme-error",
+                "Profile README could not be loaded",
+                error.message(),
+                None::<fn(&mut Window, &mut App)>,
+                Some("profile-readme-error"),
+                cx,
+            ),
             SectionState::Ready(()) => div()
                 .debug_selector(|| "profile-readme-reader".to_string())
                 .w_full()
                 .max_w_full()
                 .min_w_0()
-                .flex_none()
-                // Legacy viewport pending the coordinated Reader Flow API.
-                // This does not satisfy the rework's intrinsic README acceptance.
-                .h(px(280.0))
-                .overflow_hidden()
+                // The README participates in the Profile page's own flow: ReaderView's Flow layout
+                // reports natural height and the page scrolls it. No Profile-owned fixed height or
+                // overflow viewport here.
                 .child(self.reader.clone().expect("ready README owns a ReaderView"))
                 .into_any_element(),
         };
@@ -272,26 +301,28 @@ impl ProfileView {
             let context = reader.read(cx).context();
             format!("{} / {}", context.owner(), context.path())
         });
-        div()
-            .debug_selector(|| "profile-readme-section".to_string())
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_3()
-            .rounded(cx.theme().radius(Radius::Md))
-            .border_1()
-            .border_color(cx.theme().colors.border)
-            .children(identity.map(|identity| {
-                div()
-                    .font_family(cx.theme().mono_family.clone())
-                    .text_size(cx.theme().text_size(TextSize::Xs))
-                    .text_color(cx.theme().colors.fg_muted)
-                    .child(identity)
-            }))
-            .child(body)
-            .into_any_element()
+        Some(
+            div()
+                .debug_selector(|| "profile-readme-section".to_string())
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_3()
+                .rounded(cx.theme().radius(Radius::Md))
+                .border_1()
+                .border_color(cx.theme().colors.border)
+                .children(identity.map(|identity| {
+                    div()
+                        .font_family(cx.theme().mono_family.clone())
+                        .text_size(cx.theme().text_size(TextSize::Xs))
+                        .text_color(cx.theme().colors.fg_muted)
+                        .child(identity)
+                }))
+                .child(body)
+                .into_any_element(),
+        )
     }
 
     fn render_repositories(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -299,6 +330,11 @@ impl ProfileView {
             let body = match &self.repositories {
                 SectionState::Loading => loading("Loading repository pins…", cx),
                 SectionState::Error(error) => state_panel(error, cx),
+                SectionState::Unavailable(message) => div()
+                    .p_3()
+                    .text_color(cx.theme().colors.fg_subtle)
+                    .child(message.clone())
+                    .into_any_element(),
                 SectionState::Ready(_) => unreachable!(),
             };
             return div()
@@ -411,7 +447,8 @@ impl ProfileView {
             .aria_label(format!("Open repository {name}"))
             .cursor_pointer()
             .min_w_0()
-            .h(px(94.0))
+            // No fixed card height: a 1–3 line description makes the card and its grid row grow,
+            // while the description itself is clamped by real line layout, never by char count.
             .p_3()
             .flex()
             .flex_col()
@@ -425,7 +462,7 @@ impl ProfileView {
             })
             .bg(theme.colors.surface.opacity(0.35))
             .hover(|s| s.bg(theme.colors.hover.opacity(0.5)))
-            .tooltip(Tooltip::text(name.clone()))
+            .tooltip(ui_tooltip(name.clone()))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(move |view, _, window, cx| {
                 if view.accepts(&request) {
@@ -465,21 +502,35 @@ impl ProfileView {
                             .child(label)
                     })),
             )
-            .child(
+            .child({
+                // Real wrapping plus a three-line clamp: `line_clamp` truncates the glyphs with an
+                // ellipsis on the third line, and `max_h` is exactly three of the same measured
+                // line boxes, so a longer description cannot grow the card further. The height
+                // comes from the text metrics, never a character count.
+                let line = theme.text_size(TextSize::Sm);
+                let three_lines = line * 1.45 * 3.0;
                 div()
                     .id(("profile-repository-description", index))
                     .debug_selector(move || format!("profile-repository-description-{index}"))
-                    .tooltip(Tooltip::text(description.clone()))
-                    .pl(px(24.0))
+                    .tooltip(ui_tooltip(description.clone()))
                     .min_w_0()
-                    .text_size(theme.text_size(TextSize::Sm))
+                    // The text wraps and clamps by real line layout; this maximum is the height of
+                    // three of those real lines, so 1–3 lines keep their natural height while a
+                    // longer description cannot grow the card past the third line.
+                    .max_h(three_lines)
+                    .overflow_hidden()
+                    .text_size(line)
+                    .line_height(relative(1.45))
                     .text_color(theme.colors.fg_muted)
-                    .child(Ellipsis::new(description)),
-            )
+                    .line_clamp(3)
+                    .child(description)
+            })
             .child(
+                // The footer starts at the card's content edge, directly under the repository
+                // icon column. It does not inherit the title text's 24px icon offset.
                 div()
+                    .debug_selector(move || format!("profile-repository-stats-{index}"))
                     .mt_auto()
-                    .pl(px(24.0))
                     .flex()
                     .items_center()
                     .gap_4()
@@ -556,6 +607,11 @@ impl ProfileView {
             let body = match &self.contributions {
                 SectionState::Loading => loading("Loading contributions…", cx),
                 SectionState::Error(error) => state_panel(error, cx),
+                SectionState::Unavailable(message) => div()
+                    .p_3()
+                    .text_color(cx.theme().colors.fg_subtle)
+                    .child(message.clone())
+                    .into_any_element(),
                 SectionState::Ready(_) => unreachable!(),
             };
             return div()
@@ -659,7 +715,7 @@ impl ProfileView {
                 name: "profile-heatmap-scrollbar",
                 axis: Axis::Horizontal,
             },
-            placement: Placement::overlay(3.0, 8.0),
+            placement: Placement::overlay(1.5, 8.0),
             style: Style::DEFAULT,
             opacity,
             on_drag: std::rc::Rc::new(move |axis, active, _, cx| {
@@ -851,7 +907,7 @@ impl ProfileView {
             } else {
                 cx.theme().colors.border.opacity(0.35)
             })
-            .tooltip(Tooltip::text(detail.clone()))
+            .tooltip(ui_tooltip(detail.clone()))
             .on_mouse_move(cx.listener(move |view, _, _, cx| {
                 if view.selected_day != Some(index) {
                     view.selected_day = Some(index);

@@ -364,7 +364,7 @@ fn rail_rows_share_square_hitboxes_and_avatar_diameter(cx: &mut TestAppContext) 
         bounds("sidebar-account-avatar", cx).size,
         bounds("sidebar-repo-avatar-0", cx).size
     );
-    for selector in ["nav-home", "repo-row-0", "account-row"] {
+    for selector in ["nav-home", "repo-row-0"] {
         click(selector, cx);
         let marker = bounds("sidebar-indicator", cx);
         let row = bounds(selector, cx);
@@ -478,7 +478,7 @@ fn indicator_paint_has_square_left_corners_and_clips_scrolled_repo(cx: &mut Test
     let (view, cx) = shell(cx);
     cx.simulate_scale_factor_change(1.5);
     cx.run_until_parked();
-    for selector in ["nav-home", "repo-row-0", "account-row"] {
+    for selector in ["nav-home", "repo-row-0"] {
         click(selector, cx);
         let marker = bounds("sidebar-indicator", cx);
         cx.update(|window, _| {
@@ -594,6 +594,17 @@ fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestApp
     // The compact identity cluster opens the profile.
     click("account-identity", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
+    // The account row is the current identity, not a navigable page row: it must not gain the
+    // shared selection lane merely because Profile is open.
+    let identity = bounds("account-identity", cx);
+    assert!(
+        cx.debug_bounds("sidebar-indicator").is_none(),
+        "own Profile must not draw the shared selection lane on the account row"
+    );
+    assert!(
+        identity.size.width > px(0.0),
+        "identity itself stays visible"
+    );
     // The blank space between the identity and the status is not a Profile hit area.
     cx.update_window_entity(&view, |s, window, cx| {
         s.navigate(Route::Home, window, cx);
@@ -674,12 +685,14 @@ fn touch_pan_applies_directly_without_a_second_inertia(cx: &mut TestAppContext) 
 #[gpui::test]
 fn wheel_over_the_palette_scrolls_the_palette_not_the_page(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
-    // A short window makes the Home page scrollable behind the palette.
+    // Home owns its own two scrolling viewports; the Shell must not wrap it in another page
+    // scroller. A short window still has to leave the palette's own list scrollable.
     cx.simulate_resize(size(px(900.0), px(500.0)));
     cx.run_until_parked();
-    assert!(
-        f32::from(view.read_with(cx, |s, _| s.page_max_offset().y)) > 0.0,
-        "the Home page must be scrollable for this regression"
+    assert_eq!(
+        view.read_with(cx, |s, _| s.page_max_offset()),
+        gpui::Point::default(),
+        "the mounted Home page must not use the Shell's outer page scroller"
     );
     click("search-entry", cx);
     let list = bounds("palette-list", cx);

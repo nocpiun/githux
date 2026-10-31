@@ -14,6 +14,8 @@
 
 #[path = "extras_tests.rs"]
 mod extras_tests;
+#[path = "header_tests.rs"]
+mod header_tests;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -662,6 +664,37 @@ fn switching_to_another_tab_clears_the_code_area_and_returning_restores_it(
 }
 
 #[gpui::test]
+fn branch_failure_keeps_the_fallback_branch_and_offers_a_retry(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(Scene::BranchesFailure);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.selected_branch().map(str::to_string)),
+        Some("main".to_string()),
+        "the default branch remains browsable"
+    );
+    assert!(page.read_with(cx, |page, _| page.branches_error().is_some()));
+    frames(cx);
+    assert!(
+        cx.debug_bounds("repository-branch-fallback").is_some(),
+        "the fallback branch remains visible"
+    );
+    let mark = cx
+        .debug_bounds("repository-retry-branches")
+        .expect("the failed enumeration keeps a retry mark");
+    cx.simulate_click(mark.center(), Modifiers::none());
+    settle(&page, cx, |page| page.branches().is_some());
+    frames(cx);
+    assert!(page.read_with(cx, |page, _| page.branches_error().is_none()));
+    assert!(cx.debug_bounds("repository-retry-branches").is_none());
+    assert!(page.read_with(cx, |page, _| page.reader().is_some()));
+}
+
+#[gpui::test]
 fn a_directory_failure_is_scoped_to_that_row_and_one_retry_recovers(cx: &mut TestAppContext) {
     let fixture = Fixture::new(Scene::DirectoryFailure);
     fixture.login(1);
@@ -705,6 +738,39 @@ fn a_directory_failure_is_scoped_to_that_row_and_one_retry_recovers(cx: &mut Tes
             .any(|row| row.path == "docs/guide.md")
     );
     assert!(page.read_with(cx, |page, _| page.tree_failure("docs").is_none()));
+}
+
+#[gpui::test]
+fn failed_directory_uses_one_compact_retry_mark_that_disappears_after_recovery(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(Scene::DirectoryFailure);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.update(cx, |page, cx| page.toggle_directory("docs", cx));
+    settle(&page, cx, |page| page.tree_failure("docs").is_some());
+    frames(cx);
+    let mark = cx
+        .debug_bounds("repository-row-failed")
+        .expect("the failed directory keeps one compact warning mark");
+    assert!(
+        cx.debug_bounds("repository-row-failed").is_some(),
+        "the row owns the mark, not a separate text and button pair"
+    );
+    // The mark is the retry target: a single click starts one scoped read.
+    cx.simulate_click(mark.center(), Modifiers::none());
+    settle(&page, cx, |page| page.tree("docs").is_some());
+    frames(cx);
+    assert!(
+        cx.debug_bounds("compact-failed-Failed to load docs")
+            .is_none(),
+        "recovery removes the warning mark"
+    );
+    assert!(cx.debug_bounds("repository-row-docs").is_some());
 }
 
 #[gpui::test]
@@ -1751,6 +1817,45 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
         });
     assert!(first.origin.x > outer.origin.x && first.origin.y > outer.origin.y);
     assert!(first.right() < outer.right());
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
+    cx.simulate_mouse_move(outer.center(), None, Modifiers::none());
+    frames(cx);
+    let line = cx.debug_bounds("repository-tree-scrollbar-line").unwrap();
+    let hit = cx.debug_bounds("repository-tree-scrollbar-thumb").unwrap();
+    let content = cx.debug_bounds("repository-tree-scroll-viewport").unwrap();
+    assert_eq!(
+        outer.right() - line.right(),
+        px(2.5),
+        "measure against the pane, not the padded list"
+    );
+    assert_eq!(hit.right(), outer.right());
+    assert_eq!(hit.size.width, px(8.0));
+    assert_eq!(content.origin.x - outer.origin.x, px(7.0));
+    assert_eq!(outer.right() - content.right(), px(7.0));
+    assert_eq!(line.size.width, px(crate::ui::scroll::THICKNESS));
+    assert!(
+        line.left() >= first.right(),
+        "visible thumb stays in the row's right whitespace"
+    );
+    // Press outside the painted line, inside the pane-anchored hit strip. Moving
+    // the overlay must still drive the inset list's real handle.
+    let press = gpui::point(hit.right() - px(0.5), hit.center().y);
+    cx.simulate_mouse_down(press, gpui::MouseButton::Left, Modifiers::none());
+    for step in 1..=5 {
+        cx.simulate_mouse_move(
+            press + gpui::point(px(0.0), px(12.0 * step as f32)),
+            Some(gpui::MouseButton::Left),
+            Modifiers::none(),
+        );
+        frames(cx);
+    }
+    cx.simulate_mouse_up(
+        press + gpui::point(px(0.0), px(60.0)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    frames(cx);
+    assert!(page.read_with(cx, |p, _| p.tree_base_handle().offset().y) < px(-100.0));
     page.update_in(cx, |p, w, cx| w.focus(&p.tree_focus.clone(), cx));
     cx.simulate_keystrokes("end");
     frames(cx);

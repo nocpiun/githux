@@ -15,13 +15,14 @@ mod rows;
 mod tests;
 mod time;
 
+use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use ely_core::{
     buttons::IconButton,
     motion::Spinner,
-    primitives::{IconName, Tooltip},
+    primitives::IconName,
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
@@ -120,6 +121,10 @@ pub enum HomeAction {
 }
 
 pub type OnAction = Rc<dyn Fn(HomeAction, &mut Window, &mut App)>;
+/// Optional host presentation hook. The component supplies a stable actor identity and receives
+/// an already-resolved avatar element; no image request or cache belongs to HomeView.
+pub type AvatarRenderer =
+    Rc<dyn Fn(&crate::domain::home::FeedEvent, usize, &mut App) -> Option<AnyElement>>;
 
 /// Successful data, a hard failure, or a host-declared no-data state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -329,6 +334,7 @@ pub struct HomeView {
     home_view: PanelView,
     feed_view: PanelView,
     on_action: Option<OnAction>,
+    avatar_renderer: Option<AvatarRenderer>,
     last_action: Option<HomeAction>,
     now: SystemTime,
     fixed_now: bool,
@@ -356,6 +362,7 @@ impl HomeView {
             home_view: PanelView::new(cx),
             feed_view: PanelView::new(cx),
             on_action: None,
+            avatar_renderer: None,
             last_action: None,
             now: SystemTime::now(),
             fixed_now: false,
@@ -487,6 +494,10 @@ impl HomeView {
 
     pub fn on_action(&mut self, handler: OnAction) {
         self.on_action = Some(handler);
+    }
+
+    pub fn set_avatar_renderer(&mut self, renderer: AvatarRenderer) {
+        self.avatar_renderer = Some(renderer);
     }
 
     /// The last emitted action, useful for a host status line and preview.
@@ -704,6 +715,11 @@ impl HomeView {
                 .data()
                 .map_or(0, |outcome| outcome.events.len()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn feed_refresh_available(&self) -> bool {
+        !self.feed.state.is_busy() && self.feed.refresh.available
     }
 
     fn can_refresh(&self, column: Column) -> bool {
@@ -1000,7 +1016,7 @@ fn render_panel<T: PanelRows + 'static>(
             .debug_selector(move || format!("{}-refresh-spinner", column_name(column)))
             .role(gpui::Role::ProgressIndicator)
             .aria_label(tooltip.clone())
-            .tooltip(Tooltip::text(tooltip))
+            .tooltip(ui_tooltip(tooltip))
             .flex()
             .items_center()
             .justify_center()
@@ -1008,17 +1024,25 @@ fn render_panel<T: PanelRows + 'static>(
             .child(Spinner::new(format!("{}-spinner", column_name(column))).size(icon_size))
             .into_any_element()
     } else {
-        IconButton::new(
-            format!("{}-refresh", column_name(column)),
-            IconName::RotateCw,
-        )
-        .size(ControlSize::Sm)
-        .disabled(disabled)
-        .tooltip(tooltip)
-        .on_click(move |_, window, cx| {
-            let _ = panel.update(cx, |view, cx| view.refresh(column, window, cx));
-        })
-        .into_any_element()
+        // The wrapper is exactly the button's slot; the tip itself must set the UI family because
+        // GPUI prepaints it as a separate root (Ely's own `IconButton` tip would use the default
+        // system face).
+        div()
+            .id(format!("{}-refresh-slot", column_name(column)))
+            .flex_none()
+            .tooltip(ui_tooltip(tooltip.clone()))
+            .child(
+                IconButton::new(
+                    format!("{}-refresh", column_name(column)),
+                    IconName::RotateCw,
+                )
+                .size(ControlSize::Sm)
+                .disabled(disabled)
+                .on_click(move |_, window, cx| {
+                    let _ = panel.update(cx, |view, cx| view.refresh(column, window, cx));
+                }),
+            )
+            .into_any_element()
     };
     div()
         .debug_selector(move || format!("{}-panel", column_name(column)))
@@ -1117,6 +1141,9 @@ impl PanelRows for FeedOutcome {
             index,
             view.feed_view.selected == Some(index),
             view.now,
+            view.avatar_renderer
+                .as_ref()
+                .and_then(|render| render(&event, index, cx)),
             cx,
         )
     }
@@ -1137,26 +1164,64 @@ fn panel_body<T: PanelRows + 'static>(
             theme.radius(Radius::Md),
         )
     };
+    // A hard failure is a compact warning with a readable reason in its tooltip. A first load
+    // or an empty/unavailable state stays a short written status: it is not an error mark, and a
+    // spinner alone would leave "no data" and "not signed in" indistinguishable.
+    if let PanelState::Ready {
+        content: PanelContent::Error(error),
+        ..
+    } = &model.state
+    {
+        let reason = presentation::error_message(error);
+        return div()
+            .debug_selector(move || format!("{}-status", column_name(column)))
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_5()
+            .text_center()
+            .child(crate::ui::compact_status::failed(
+                format!("{}-error-mark", column_name(column)),
+                "This column could not be loaded",
+                reason,
+                None::<fn(&mut gpui::Window, &mut gpui::App)>,
+                None,
+                cx,
+            ))
+            .into_any_element();
+    }
     let status = match &model.state {
-        PanelState::Loading => Some(("Loading…", colors.fg_subtle, None)),
-        PanelState::Ready {
-            content: PanelContent::Error(error),
-            ..
-        } => Some((
-            "This column could not be loaded.",
-            colors.danger,
-            Some(presentation::error_message(error)),
+        PanelState::Loading => Some((
+            "Loading…",
+            colors.fg_subtle,
+            None,
+            crate::ui::compact_status::loading(
+                format!("{}-loading-mark", column_name(column)),
+                "Loading this column…",
+                cx,
+            ),
         )),
         PanelState::Ready {
             content: PanelContent::Unavailable { message },
             ..
-        } => Some(("No current data.", colors.fg_subtle, Some(message.clone()))),
+        } => Some((
+            "No current data.",
+            colors.fg_subtle,
+            Some(message.clone()),
+            { crate::ui::compact_status::empty("No current data", cx) },
+        )),
         PanelState::Ready {
             content: PanelContent::Ready(_),
             ..
+        }
+        | PanelState::Ready {
+            content: PanelContent::Error(_),
+            ..
         } => None,
     };
-    if let Some((title, color, detail)) = status {
+    if let Some((title, color, detail, mark)) = status {
         return div()
             .debug_selector(move || format!("{}-status", column_name(column)))
             .flex_1()
@@ -1168,6 +1233,7 @@ fn panel_body<T: PanelRows + 'static>(
             .gap_2()
             .p_5()
             .text_center()
+            .child(mark)
             .child(div().text_color(color).child(title))
             .children(detail.map(|detail| {
                 div()
@@ -1270,7 +1336,7 @@ fn list_rows<T: PanelRows + 'static>(
             },
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(4.0, 8.0),
+        placement: scroll::Placement::overlay(1.5, 8.0),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,

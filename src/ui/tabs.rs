@@ -23,9 +23,10 @@
 
 use std::rc::Rc;
 
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
     buttons::{ButtonVariant, IconButton},
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
@@ -91,7 +92,7 @@ pub(super) fn route_icon(route: &Route) -> IconName {
     match route {
         Route::Home => IconName::House,
         Route::Settings => IconName::Settings,
-        Route::Profile => IconName::User,
+        Route::Profile | Route::UserProfile { .. } => IconName::User,
         Route::Notifications => IconName::Bell,
         Route::Issues => IconName::CircleDot,
         Route::PullRequests => IconName::GitPullRequest,
@@ -223,14 +224,21 @@ pub(super) fn toolbar() -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            div().debug_selector(|| "tab-refresh".to_string()).child(
-                IconButton::new("tab-refresh", IconName::RotateCw)
-                    .size(ControlSize::Sm)
-                    .variant(ButtonVariant::Ghost)
-                    // Disabled: this round adds the entry, not the refresh it runs later.
-                    .disabled(true)
-                    .tooltip("Refresh"),
-            ),
+            // The wrapper is exactly the button's slot, so the tip's hover area is unchanged. GPUI
+            // paints a tooltip as its own root, and Ely's `IconButton` builds one with the default
+            // system face; the shell's helper is what puts it on the theme's UI family. Keep the
+            // established `tab-refresh` debug selector on the clickable slot.
+            div()
+                .id("tab-refresh-slot")
+                .debug_selector(|| "tab-refresh".to_string())
+                .tooltip(ui_tooltip("Refresh"))
+                .child(
+                    IconButton::new("tab-refresh", IconName::RotateCw)
+                        .size(ControlSize::Sm)
+                        .variant(ButtonVariant::Ghost)
+                        // Disabled: this round adds the entry, not the refresh it runs later.
+                        .disabled(true),
+                ),
         )
         .into_any_element()
 }
@@ -365,7 +373,7 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
             // position. The drag's own flag, not a forced hover, keeps the scrollbar visible.
             moved(event.drag(cx).id, event.event.position, window, cx);
         })
-        .tooltip(Tooltip::text(tooltip))
+        .tooltip(ui_tooltip(tooltip))
         .child(Icon::new(entry.icon).size(IconSize::Xs).color(icon_color))
         .child(
             div()
@@ -402,7 +410,7 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
                     close(window, cx);
                 })
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .tooltip(Tooltip::text("Close tab"))
+                .tooltip(ui_tooltip("Close tab"))
                 .child(Icon::new(IconName::X).size(IconSize::Xs).color(muted)),
         )
         .into_any_element()

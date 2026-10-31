@@ -39,6 +39,8 @@ pub enum Scene {
     NoReadme,
     /// The first attempt to open `docs` fails; a retry succeeds.
     DirectoryFailure,
+    /// Branch enumeration fails once while the default branch still browses.
+    BranchesFailure,
     /// The first attempt to read `src/main.rs` fails; a retry succeeds.
     FileFailure,
     /// A complete, empty branch list: no commit can be selected.
@@ -59,6 +61,7 @@ pub enum Scene {
     OverviewZero,
     OverviewLong,
     LatestUnavailable,
+    ReleasesFailure,
     ReadmeParagraphEnd,
     ReadmeListEnd,
     ReadmeCodeEnd,
@@ -67,12 +70,13 @@ pub enum Scene {
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 22] = [
+    pub const ALL: [Scene; 24] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
         Scene::NoReadme,
         Scene::DirectoryFailure,
+        Scene::BranchesFailure,
         Scene::FileFailure,
         Scene::NoBranches,
         Scene::TruncatedTree,
@@ -86,6 +90,7 @@ impl Scene {
         Scene::OverviewZero,
         Scene::OverviewLong,
         Scene::LatestUnavailable,
+        Scene::ReleasesFailure,
         Scene::ReadmeParagraphEnd,
         Scene::ReadmeListEnd,
         Scene::ReadmeCodeEnd,
@@ -100,6 +105,7 @@ impl Scene {
             Scene::OverviewZero => "Overview zero",
             Scene::OverviewLong => "Overview long",
             Scene::LatestUnavailable => "Latest unavailable",
+            Scene::ReleasesFailure => "Releases failure",
             Scene::ReadmeParagraphEnd => "README paragraph end",
             Scene::ReadmeListEnd => "README list end",
             Scene::ReadmeCodeEnd => "README code end",
@@ -109,6 +115,7 @@ impl Scene {
             Scene::ReadmeUncertain => "README uncertain",
             Scene::NoReadme => "No README",
             Scene::DirectoryFailure => "Directory failure",
+            Scene::BranchesFailure => "Branches failure",
             Scene::FileFailure => "File failure",
             Scene::NoBranches => "No branches",
             Scene::TruncatedTree => "Truncated tree",
@@ -140,6 +147,9 @@ impl Scene {
             Scene::LatestUnavailable => {
                 "The list contains releases but latest is 404: latest unavailable does not prove no releases."
             }
+            Scene::ReleasesFailure => {
+                "The first latest request fails once; the compact warning mark retries only Releases and recovers."
+            }
             Scene::ReadmeParagraphEnd
             | Scene::ReadmeListEnd
             | Scene::ReadmeCodeEnd
@@ -160,6 +170,9 @@ impl Scene {
             }
             Scene::DirectoryFailure => {
                 "Opening docs fails once; the directory row reports it and one retry succeeds."
+            }
+            Scene::BranchesFailure => {
+                "The first branch listing fails; the default branch stays readable and the retry restores the picker."
             }
             Scene::FileFailure => {
                 "Reading src/main.rs fails once; the reader reports it and one retry succeeds."
@@ -322,6 +335,8 @@ fn locator_path() -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArmedFailure {
     Languages,
+    Releases,
+    Branches,
     Root,
     Directory,
     File,
@@ -497,6 +512,9 @@ impl FixtureTransport {
     fn branches(&self, scene: Scene, url: &str) -> HttpResponse {
         if scene == Scene::NoBranches {
             return json_response(200, "[]");
+        }
+        if scene == Scene::BranchesFailure && self.take_armed(ArmedFailure::Branches) {
+            return json_response(500, "{}");
         }
         let names: Vec<&str> = BRANCHES
             .iter()
@@ -768,6 +786,7 @@ impl FixtureTransport {
         });
         let body = match resource {
             "/releases/latest" if matches!(scene, Scene::LatestUnavailable | Scene::OverviewZero) => return json_response(404,"{}"),
+            "/releases/latest" if scene == Scene::ReleasesFailure && self.take_armed(ArmedFailure::Releases) => return json_response(500,"{}"),
             "/releases/latest" => release,
             "/releases" => if scene == Scene::OverviewZero {serde_json::json!([])} else {serde_json::json!([release])},
             "/contributors" => serde_json::Value::Array((0..if scene == Scene::OverviewZero {0} else if scene == Scene::OverviewLong {35} else {4})
@@ -804,8 +823,10 @@ impl FixtureTransport {
 fn armed_for(scene: Scene) -> Option<ArmedFailure> {
     match scene {
         Scene::DirectoryFailure => Some(ArmedFailure::Directory),
+        Scene::BranchesFailure => Some(ArmedFailure::Branches),
         Scene::RootFailure => Some(ArmedFailure::Root),
         Scene::OverviewError => Some(ArmedFailure::Languages),
+        Scene::ReleasesFailure => Some(ArmedFailure::Releases),
         Scene::FileFailure => Some(ArmedFailure::File),
         _ => None,
     }

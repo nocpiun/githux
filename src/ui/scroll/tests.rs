@@ -146,8 +146,8 @@ impl Render for Probe {
         let wide_target = self.wide.clone();
         let list_on_drag = self.on_drag(Region::List, cx);
         let wide_on_drag = self.on_drag(Region::Wide, cx);
-        let vertical = Placement::overlay(4.0, 8.0);
-        let horizontal = Placement::overlay(4.0, 8.0).clear_of(&vertical, 2.0);
+        let vertical = Placement::overlay(1.5, 8.0);
+        let horizontal = Placement::overlay(1.5, 8.0).clear_of(&vertical, 2.0);
         let vertical = vertical.clear_of(&horizontal, 2.0);
 
         let list_bar = Bar {
@@ -396,7 +396,49 @@ fn the_two_tracks_do_not_meet_in_the_corner(cx: &mut TestAppContext) {
         "the vertical track ends above the horizontal one: {vertical:?} vs {horizontal:?}"
     );
     let region = bounds("probe-wide", cx);
-    assert_eq!(vertical.bottom(), region.bottom() - px(4.0 + 14.0));
+    assert_eq!(vertical.bottom(), region.bottom() - px(10.0));
+}
+
+/// The line stays near the edge while the full 8px hit strip remains inside the
+/// region. Pressing the invisible inward part must still move the real target.
+#[gpui::test]
+fn visual_gap_is_independent_of_the_inward_hit_area(cx: &mut TestAppContext) {
+    let (probe, cx) = probe(cx);
+    cx.simulate_resize(size(px(600.0), px(400.0)));
+    cx.run_until_parked();
+    probe.update(cx, |probe, cx| probe.show(Region::Wide, cx));
+    frames(cx);
+
+    let region = bounds("probe-wide", cx);
+    let vertical = bounds("probe-wide-v-thumb", cx);
+    let v_line = bounds("probe-wide-v-line", cx);
+    let horizontal = bounds("probe-wide-h-thumb", cx);
+    let h_line = bounds("probe-wide-h-line", cx);
+    assert_eq!(region.right() - v_line.right(), px(1.5));
+    assert_eq!(region.bottom() - h_line.bottom(), px(1.5));
+    assert_eq!(vertical.right(), region.right());
+    assert_eq!(horizontal.bottom(), region.bottom());
+    assert_eq!(vertical.size.width, px(8.0));
+    assert_eq!(horizontal.size.height, px(8.0));
+    assert_eq!(v_line.size.width, px(THICKNESS));
+    assert_eq!(h_line.size.height, px(THICKNESS));
+
+    let start = point(vertical.left() + px(0.5), vertical.center().y);
+    assert!(start.x < v_line.left());
+    drag(cx, start, point(px(0.0), px(15.0)));
+    frames(cx);
+    let after_v = probe.read_with(cx, |probe, _| probe.wide.offset());
+    assert!(after_v.y < px(0.0));
+    assert_eq!(after_v.x, px(0.0));
+
+    let horizontal = bounds("probe-wide-h-thumb", cx);
+    let start = point(horizontal.center().x, horizontal.top() + px(0.5));
+    assert!(start.y < h_line.top());
+    drag(cx, start, point(px(15.0), px(0.0)));
+    frames(cx);
+    let after_h = probe.read_with(cx, |probe, _| probe.wide.offset());
+    assert!(after_h.x < px(0.0));
+    assert_eq!(after_h.y, after_v.y);
 }
 
 #[gpui::test]

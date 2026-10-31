@@ -22,7 +22,7 @@
 
 use gpui::{App, FocusHandle, ScrollHandle};
 
-use crate::domain::{AccountKey, RepoSummary};
+use crate::domain::{AccountKey, AccountSummary, RepoSummary};
 
 /// Stable identity of one session. Ids increase monotonically and a closed id is never handed out
 /// again.
@@ -43,10 +43,17 @@ pub enum RouteKey {
     Home,
     Settings,
     Profile,
+    UserProfile {
+        host: crate::domain::HostId,
+        login: String,
+    },
     Notifications,
     Issues,
     PullRequests,
-    Repository { namespace: String, name: String },
+    Repository {
+        namespace: String,
+        name: String,
+    },
 }
 
 /// One addressable page in the workspace.
@@ -57,8 +64,14 @@ pub enum Route {
     Home,
     /// Global settings. Options are not designed yet; the page is intentionally empty.
     Settings,
-    /// The signed-in profile. Overview content is not implemented this round.
+    /// The signed-in profile.
     Profile,
+    /// Another user's public profile, addressed by host and canonical-or-requested login until
+    /// the server confirms its stable numeric identity and canonical spelling.
+    UserProfile {
+        host: crate::domain::HostId,
+        login: String,
+    },
     /// Notification center. Content is not designed yet; the page is intentionally empty.
     Notifications,
     /// Cross-repository personal issues. Content is not designed yet.
@@ -83,12 +96,37 @@ impl Route {
         self.key() == Self::repository(repo).key()
     }
 
+    /// Route a profile link through the same own/other-user identity rules everywhere.
+    pub fn profile(login: impl Into<String>, account: Option<&AccountSummary>) -> Self {
+        let login = login.into();
+        if account.is_some_and(|account| account.identity.login.eq_ignore_ascii_case(&login)) {
+            Self::Profile
+        } else {
+            Self::UserProfile {
+                host: crate::domain::HostId::github(),
+                login,
+            }
+        }
+    }
+
+    pub fn profile_login(&self, account: Option<&AccountSummary>) -> Option<String> {
+        match self {
+            Self::Profile => account.map(|account| account.identity.login.clone()),
+            Self::UserProfile { login, .. } => Some(login.clone()),
+            _ => None,
+        }
+    }
+
     /// The comparable resource identity; see [`RouteKey`].
     pub fn key(&self) -> RouteKey {
         match self {
             Self::Home => RouteKey::Home,
             Self::Settings => RouteKey::Settings,
             Self::Profile => RouteKey::Profile,
+            Self::UserProfile { host, login } => RouteKey::UserProfile {
+                host: host.clone(),
+                login: login.to_ascii_lowercase(),
+            },
             Self::Notifications => RouteKey::Notifications,
             Self::Issues => RouteKey::Issues,
             Self::PullRequests => RouteKey::PullRequests,
@@ -106,6 +144,7 @@ impl Route {
             Self::Home => "Home".to_string(),
             Self::Settings => "Settings".to_string(),
             Self::Profile => "Profile".to_string(),
+            Self::UserProfile { login, .. } => login.clone(),
             Self::Notifications => "Notifications".to_string(),
             Self::Issues => "Issues".to_string(),
             Self::PullRequests => "Pull requests".to_string(),
@@ -144,6 +183,9 @@ pub struct PageState {
     pub bars: crate::ui::scroll::Bars,
     pub focus: FocusHandle,
     pub strip_focus: FocusHandle,
+    /// Navigation intent for a repository tab. The live page host owns fetched content; this
+    /// field is what survives an ordinary tab switch and the shell's routing tests.
+    #[allow(dead_code)]
     pub repository: Option<RepositorySession>,
 }
 
@@ -179,6 +221,10 @@ impl Session {
 
     pub fn state(&self) -> &PageState {
         &self.state
+    }
+
+    pub(crate) fn replace_route(&mut self, route: Route) {
+        self.route = route;
     }
 
     /// The reader that arrives in R3 mutates this; tests drive it until then.
@@ -269,6 +315,14 @@ impl Workspace {
     pub fn active(&self) -> &Session {
         self.session(self.active)
             .expect("the active session is always present")
+    }
+
+    /// A canonical server identity may replace only the requested resource's route. Never use
+    /// this for an unrelated late response: the caller has already checked the original request.
+    pub(crate) fn canonicalize(&mut self, id: TabId, route: Route) {
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            session.replace_route(route);
+        }
     }
 
     pub fn route(&self) -> &Route {

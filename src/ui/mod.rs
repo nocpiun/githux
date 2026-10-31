@@ -5,6 +5,7 @@
 //! resized. The island's top holds the application session tab strip, then the active page.
 //! Sessions, their routes and their page-local state live in [`crate::workspace`].
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use ely_core::{
@@ -34,15 +35,21 @@ pub mod accounts;
 pub mod avatar;
 pub(crate) mod badge;
 mod chrome;
-pub mod fixtures;
+pub(crate) mod compact_status;
 pub(crate) mod geometry;
+pub mod home;
+mod island;
 mod page;
 mod palette;
+pub mod profile;
 pub mod reader;
+pub mod repository;
+pub mod repository_overview;
 pub(crate) mod scroll;
 mod sidebar;
 mod sidebar_state;
 mod tabs;
+pub(crate) mod tooltip;
 
 #[cfg(test)]
 mod sidebar_tests;
@@ -65,6 +72,22 @@ pub struct Shell {
     /// One workspace per account plus the logged-out one. Deref reaches the visible workspace, so
     /// routing, tab handling and focus keep one code path.
     workspace: Sessions,
+    /// Real mounted page hosts, keyed by the never-reused workspace TabId.
+    pages: HashMap<TabId, crate::app::pages::MountedPage>,
+    /// Last authorization/service context mounted into page hosts. A change clears old data
+    /// before anything is read again, even when the visible AccountKey is unchanged.
+    page_services: Option<crate::auth::AuthContext>,
+    /// Repository navigation intent saved when authorization changes. Content, fixed commits and
+    /// service contexts are deliberately not saved; only branch/path/expanded directories.
+    page_intents: HashMap<TabId, crate::ui::repository::RepositoryNavigation>,
+    /// The mounted page that currently receives interaction state. Only a real transition
+    /// suspends/resumes; an ordinary repaint never touches a page's reader or scroll gesture.
+    active_page: Option<TabId>,
+    /// A mount is needed (account settled or no page existed for the active tab). It is performed
+    /// by a small foreground tick, never inside `render`, so no request starts during paint.
+    pages_dirty: bool,
+    window_handle: gpui::AnyWindowHandle,
+    mount_scheduled: bool,
     /// The account controller, when the application installed one. The app-global owns the
     /// controller; the Shell keeps only a weak handle so it never creates a strong cycle that would
     /// stop the controller's `Drop` (and the account-runtime teardown) from running.
@@ -296,6 +319,13 @@ impl Shell {
             sidebar_state: sidebar_state::SidebarState::default(),
             sidebar_activation,
             workspace: Sessions::new(cx),
+            pages: HashMap::new(),
+            page_services: None,
+            page_intents: HashMap::new(),
+            active_page: None,
+            pages_dirty: true,
+            window_handle: window.window_handle(),
+            mount_scheduled: false,
             accounts: accounts.clone(),
             account_state,
             repositories,
@@ -351,6 +381,12 @@ impl Shell {
             accounts.as_ref().and_then(|weak| weak.upgrade()).as_ref(),
             cx,
         );
+        // The constructor is an event-context callback, not a paint callback, so the initial
+        // workspace page can be mounted immediately. Without an installed controller it stays a
+        // real unavailable page rather than fixture data.
+        if this.pages.is_empty() {
+            this.ensure_active_page(None, window, cx);
+        }
         this
     }
 
@@ -387,6 +423,198 @@ impl Shell {
                 .set_offset(gpui::Point::new(gpui::Pixels::ZERO, gpui::Pixels::ZERO));
         }
         self.account_state = snapshot;
+        self.pages_dirty = true;
+    }
+
+    /// Reconcile only cheap in-memory lifecycle state. Mounting a page is deferred so a frame
+    /// never opens a request; the deferred callback runs outside paint.
+    fn sync_pages(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let auth = self
+            .accounts
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .and_then(|accounts| accounts.read(cx).services())
+            .and_then(|services| services.accounts().active_context());
+        if self.page_services != auth {
+            // Drop hosts first: this cancels their work and guarantees no old-authorized data can
+            // survive into the next workspace incarnation, including a same-account PAT replace.
+            for (id, page) in std::mem::take(&mut self.pages) {
+                page.suspend(cx);
+                if let crate::app::pages::MountedPage::Repository { page, .. } = &page {
+                    self.page_intents.insert(id, page.read(cx).navigation());
+                }
+            }
+            self.page_services = auth;
+            self.active_page = None;
+            self.pages_dirty = true;
+        }
+        let active = self.workspace.active_id();
+        if self.active_page != Some(active) {
+            if let Some(previous) = self.active_page.and_then(|id| self.pages.get(&id)) {
+                previous.suspend(cx);
+            }
+            if let Some(page) = self.pages.get(&active) {
+                page.resume(cx);
+            }
+            self.active_page = Some(active);
+        }
+        // Mounting is done from navigate/activate/close or the low-frequency tick. It is safe
+        // here too because `sync_pages` itself is only called from Shell constructors/observers,
+        // but route changes use the explicit paths above.
+        if !self.pages.contains_key(&active) {
+            if cx.background_executor().is_test() {
+                // The test scheduler does not run on_next_frame callbacks while its clock is
+                // advanced; this method is still reached from a test/event context, never paint.
+                self.ensure_active_page(None, _window, cx);
+            } else {
+                self.pages_dirty = true;
+                self.schedule_mount(_window, cx);
+            }
+        }
+    }
+
+    /// Schedule a mount for the next frame. Registering is the only paint-time action; the
+    /// callback itself runs after this frame and may create entities and start reads.
+    fn schedule_mount(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mount_scheduled {
+            return;
+        }
+        self.mount_scheduled = true;
+        self.pages_dirty = false;
+        let weak = cx.weak_entity();
+        let handle = self.window_handle;
+        window.on_next_frame(move |window, cx| {
+            let _ = weak.update(cx, |shell, cx| {
+                shell.mount_scheduled = false;
+                let _ = handle;
+                let services = shell
+                    .accounts
+                    .as_ref()
+                    .and_then(|weak| weak.upgrade())
+                    .and_then(|accounts| accounts.read(cx).services());
+                shell.ensure_active_page(services, window, cx);
+            });
+        });
+    }
+
+    fn ensure_active_page(
+        &mut self,
+        services: Option<crate::app::accounts::AccountServices>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pages_dirty = false;
+        let id = self.workspace.active_id();
+        if self.pages.contains_key(&id) {
+            return;
+        }
+        if self.active_page != Some(id) {
+            if let Some(previous) = self.active_page.and_then(|id| self.pages.get(&id)) {
+                previous.suspend(cx);
+            }
+            self.active_page = Some(id);
+        }
+        let route = self.workspace.route().clone();
+        let avatars = crate::app::pages::PageAvatars::new(self.accounts.clone());
+        let navigation = self.page_navigation_sink(cx);
+        let page = match &route {
+            Route::Home => Some(crate::app::pages::MountedPage::Home(cx.new(|cx| {
+                crate::app::pages::HomePage::new(
+                    id,
+                    services,
+                    self.workspace.incarnation(),
+                    navigation,
+                    avatars,
+                    window,
+                    cx,
+                )
+            }))),
+            Route::Profile | Route::UserProfile { .. } => {
+                self.active_account().and_then(|account| {
+                    route.profile_login(Some(account)).map(|login| {
+                        crate::app::pages::MountedPage::Profile(cx.new(|cx| {
+                            crate::app::pages::ProfilePage::new(
+                                id, login, services, navigation, avatars, cx,
+                            )
+                        }))
+                    })
+                })
+            }
+            Route::Repository { .. } => services.and_then(|services| {
+                let intent = self.page_intents.remove(&id).unwrap_or_default();
+                crate::app::pages::repository_page(
+                    id, &route, services, intent, navigation, avatars, window, cx,
+                )
+            }),
+            Route::Settings | Route::Notifications | Route::Issues | Route::PullRequests => None,
+        };
+        if let Some(page) = page {
+            self.pages.insert(id, page);
+        }
+    }
+
+    fn page_navigation_sink(&self, cx: &Context<Self>) -> crate::app::pages::NavigationSink {
+        let weak = cx.weak_entity();
+        Rc::new(move |action, window, cx| {
+            // A page can emit a typed navigation while its own entity is still being updated
+            // (for example a contributor action handled by RepositoryPage). Shell navigation may
+            // suspend that same page, so dispatch only after the emitting update completes.
+            let weak = weak.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = weak.update(cx, |shell, cx| match action {
+                    crate::app::pages::PageNavigation::Open(route) => {
+                        shell.navigate(route, window, cx);
+                    }
+                    crate::app::pages::PageNavigation::External(url) => {
+                        if url.starts_with("https://") || url.starts_with("http://") {
+                            cx.open_url(&url);
+                        }
+                    }
+                    crate::app::pages::PageNavigation::CanonicalProfile { tab, login } => {
+                        // Only a tab that still addresses a user profile may be renamed by this reply;
+                        // the host has already checked its service, login and request generation.
+                        let valid = shell.workspace.session(tab).is_some_and(|session| {
+                            matches!(session.route(), Route::UserProfile { .. })
+                        });
+                        if valid {
+                            shell.workspace.canonicalize(
+                                tab,
+                                Route::UserProfile {
+                                    host: crate::domain::HostId::github(),
+                                    login,
+                                },
+                            );
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        })
+    }
+
+    fn mounted_page(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let page = self.pages.get(&id)?;
+        let body = page.render(window, cx);
+        if let crate::app::pages::MountedPage::Home(page) = page {
+            // The Home host renders the accepted component even while its columns are loading or
+            // unavailable; this is not the fallback page.
+            let _ = page;
+        }
+        if let crate::app::pages::MountedPage::Repository { page } = page
+            && let Some(accounts) = self.accounts.as_ref().and_then(|weak| weak.upgrade())
+        {
+            crate::app::pages::sync_repository_avatars(
+                page,
+                &crate::app::pages::PageAvatars::new(Some(accounts.downgrade())),
+                cx,
+            );
+        }
+        Some(body)
     }
 
     /// Drops every piece of view state that belonged to the workspace that just stopped being
@@ -450,6 +678,191 @@ impl Shell {
             .collect();
         self.revealed_row = None;
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn mount_active_page_for_test_windowless(&mut self, cx: &mut Context<Self>) {
+        let services = self
+            .accounts
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .and_then(|accounts| accounts.read(cx).services());
+        let id = self.workspace.active_id();
+        if self.pages.contains_key(&id) {
+            return;
+        }
+        let route = self.workspace.route().clone();
+        let avatars = crate::app::pages::PageAvatars::new(self.accounts.clone());
+        let navigation = self.page_navigation_sink(cx);
+        let page = match &route {
+            Route::Profile | Route::UserProfile { .. } => {
+                self.active_account().and_then(|account| {
+                    route.profile_login(Some(account)).map(|login| {
+                        crate::app::pages::MountedPage::Profile(cx.new(|cx| {
+                            crate::app::pages::ProfilePage::new(
+                                id, login, services, navigation, avatars, cx,
+                            )
+                        }))
+                    })
+                })
+            }
+            _ => None,
+        };
+        if let Some(page) = page {
+            self.pages.insert(id, page);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn home_mount_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let services = self
+            .accounts
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .and_then(|accounts| accounts.read(cx).services());
+        self.pages.remove(&self.workspace.active_id());
+        self.ensure_active_page(services, window, cx);
+    }
+
+    #[cfg(test)]
+    pub fn home_debug_reads(&self, cx: &App) -> (&'static str, ([u64; 2], bool)) {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Home(page)) => {
+                ("home", page.read(cx).debug_reads())
+            }
+            Some(crate::app::pages::MountedPage::Profile(_)) => ("profile", ([0, 0], false)),
+            Some(crate::app::pages::MountedPage::Repository { .. }) => {
+                ("repository", ([0, 0], false))
+            }
+            None => ("none", ([0, 0], false)),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn drain_profile_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Profile(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.drain_for_test(window, cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn profile_target_for_test(&self, cx: &App) -> Option<(crate::domain::HostId, u64)> {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Profile(page)) => {
+                page.read(cx).target_for_test(cx)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn workspace(&mut self) -> &mut Sessions {
+        &mut self.workspace
+    }
+
+    #[cfg(test)]
+    pub fn mounted_repository_context_for_test(
+        &self,
+        tab: TabId,
+        cx: &App,
+    ) -> Option<crate::data::RepositoryReadContext> {
+        match self.pages.get(&tab) {
+            Some(crate::app::pages::MountedPage::Repository { page, .. }) => {
+                page.read(cx).context_for_test()
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn drain_home_for_test(&mut self, cx: &mut Context<Self>) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.drain_for_test(cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn refresh_home_for_test(
+        &mut self,
+        column: crate::ui::home::Column,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.refresh_for_test(column, window, cx));
+        }
+    }
+
+    /// Routes a contributor link exactly like the production repository host: through
+    /// `Route::profile` so the signed-in user's own profile reuses `Route::Profile`.
+    #[cfg(test)]
+    pub fn navigate_contributor_for_test(
+        &mut self,
+        login: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self
+            .accounts
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .and_then(|accounts| {
+                let accounts = accounts.read(cx);
+                let snapshot = accounts.snapshot();
+                let key = snapshot.active.clone()?;
+                snapshot
+                    .accounts
+                    .iter()
+                    .find(|summary| summary.identity.key == key)
+                    .cloned()
+            });
+        let route = Route::profile(login, active.as_ref());
+        let sink = self.page_navigation_sink(cx);
+        sink(crate::app::pages::PageNavigation::Open(route), window, cx);
+    }
+
+    #[cfg(test)]
+    pub fn active_repository_mutations_enabled(&self, cx: &App) -> Option<bool> {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Repository { page }) => {
+                Some(page.read(cx).mutations_enabled())
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn expire_feed_cooldown_for_test(&mut self, cx: &mut Context<Self>) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.expire_feed_cooldown_for_test(cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn feed_refresh_available_for_test(&self, cx: &App) -> bool {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Home(page)) => {
+                page.read(cx).feed_refresh_available_for_test(cx)
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn home_is_ready_for_test(&self, cx: &App) -> bool {
+        let id = self.workspace.active_id();
+        self.pages.get(&id).is_some_and(|page| match page {
+            crate::app::pages::MountedPage::Home(page) => page.read(cx).is_ready_for_test(cx),
+            _ => false,
+        })
     }
 
     /// Sets the real account identity used by the account row and the profile page in tests that
@@ -650,6 +1063,23 @@ impl Shell {
         };
         self.follow_page_focus(previous, id, window, cx);
         self.reveal_tab(id);
+        if previous != id
+            && let Some(page) = self.pages.get(&previous)
+        {
+            page.suspend(cx);
+        }
+        let services = self
+            .accounts
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .and_then(|accounts| accounts.read(cx).services());
+        self.ensure_active_page(services, window, cx);
+        if self.active_page != Some(id) {
+            if let Some(page) = self.pages.get(&id) {
+                page.resume(cx);
+            }
+            self.active_page = Some(id);
+        }
         cx.notify();
         previous != id
     }
@@ -675,6 +1105,14 @@ impl Shell {
         let Some(result) = self.workspace.close(id, cx) else {
             return;
         };
+        // Dropping this one host cancels only this tab's requests; all other page entities and
+        // their verified state remain untouched.
+        self.pages.remove(&id);
+        self.page_intents.remove(&id);
+        if self.active_page == Some(id) {
+            self.active_page = None;
+            self.pages_dirty = true;
+        }
         self.tab_motion.cancel();
         // A drag of the tab that just closed is over: keeping it would let a stale slot move
         // whichever tab now sits at that index.
@@ -1381,7 +1819,7 @@ impl Shell {
                 name: "repo-scrollbar",
                 axis: gpui::Axis::Vertical,
             },
-            placement: scroll::Placement::overlay(4.0, 8.0),
+            placement: scroll::Placement::overlay(1.5, 8.0),
             style: scroll::Style::DEFAULT,
             opacity: self.repo_bars.opacity(self.tab_now_ms()),
             on_drag: {
@@ -1460,7 +1898,10 @@ impl Shell {
             sidebar::account_row(
                 display,
                 account_avatar,
-                route == Route::Profile,
+                // The account row is the signed-in identity, not a page-selection item. Its own
+                // Profile page therefore keeps the avatar/current identity but does not draw the
+                // navigation selection lane that Home/Settings/repository rows use.
+                false,
                 frame,
                 move |window, cx| {
                     let target = target.clone();
@@ -1624,26 +2065,19 @@ impl Shell {
     /// The island: the session tab strip, then the active page's own scroll area.
     fn island(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
-        let colors = &theme.colors;
+        let colors = theme.colors.clone();
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
+        let outside = colors.bg;
         let strip = self.tab_strip(window, cx);
         let settings_route = self.workspace.route() == &Route::Settings;
         let session_id = self.workspace.active_id();
         let settings = settings_route.then(|| self.settings_accounts(window, cx));
-        let account = self.active_account().cloned();
+        let mounted = self.mounted_page(session_id, window, cx);
+        let outer_scroll = mounted.is_none();
         let (body, scroll, smooth, focus) = {
             let session = self.workspace.active();
-            let body = page::page(
-                session,
-                page::PageData {
-                    account: account.as_ref(),
-                    repositories: &self.repositories,
-                    settings,
-                },
-                cx,
-            );
             (
-                body,
+                mounted.unwrap_or_else(|| page::page(session, page::PageData { settings }, cx)),
                 session.state().scroll.clone(),
                 session.state().smooth.clone(),
                 session.state().focus.clone(),
@@ -1670,7 +2104,7 @@ impl Shell {
                         name: "settings-scrollbar-y",
                         axis: gpui::Axis::Vertical,
                     },
-                    placement: scroll::Placement::overlay(4.0, 8.0),
+                    placement: scroll::Placement::overlay(1.5, 8.0),
                     style: scroll::Style::DEFAULT,
                     opacity,
                     on_drag,
@@ -1681,7 +2115,7 @@ impl Shell {
             None
         };
 
-        div()
+        let frame = div()
             .debug_selector(|| "island".to_string())
             .flex()
             .flex_col()
@@ -1735,10 +2169,17 @@ impl Shell {
                             })
                             .child(body),
                     )
-                    .child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth))
+                    .when(outer_scroll, |region| {
+                        region.child(scroll::wheel_overlay("page", gpui::Axis::Vertical, smooth))
+                    })
                     .children(settings_bar),
-            )
-            .into_any_element()
+            );
+        // GPUI 0.3.10 only has rectangular `ContentMask` bounds: `rounded` + `overflow_hidden`
+        // draws a rounded surface but clips children to a rectangle, so a child that fills the
+        // bottom edge (the language bar) keeps painting square over the corner arcs. The wrapper
+        // erases only those corner squares and repaints the outline, leaving layout, hit targets,
+        // scrolling and window-fitted tooltips on their own geometry.
+        island::rounded_island(frame.into_any_element(), outside, border)
     }
 
     /// The application session strip. Each tab activates its session on click or Enter/Space, its
@@ -2286,6 +2727,7 @@ impl Render for Shell {
             self.tab_reach = reach;
             window.request_animation_frame();
         }
+        self.sync_pages(window, cx);
         self.reveal_pending_tabs(window);
         if self.revealed_tab.is_some() {
             window.request_animation_frame();

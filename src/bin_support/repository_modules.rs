@@ -13,10 +13,14 @@
 
 #[path = "../ui/badge.rs"]
 pub mod badge;
+#[path = "../ui/compact_status.rs"]
+pub mod compact_status;
 #[path = "repository_fixture.rs"]
 pub mod fixture;
 #[path = "../ui/geometry.rs"]
 pub mod geometry;
+#[path = "../ui/island.rs"]
+pub mod island;
 #[path = "../ui/reader/mod.rs"]
 pub mod reader;
 #[path = "../ui/repository/mod.rs"]
@@ -25,3 +29,5 @@ pub mod repository;
 pub mod repository_overview;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
+#[path = "../ui/tooltip.rs"]
+pub mod tooltip;

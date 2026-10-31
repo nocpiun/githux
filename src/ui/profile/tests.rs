@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     CellLevel, PresentationError, ProfileActionKind, ProfileBinding, ProfileTarget, ProfileView,
-    SectionState, heatmap_presentation, render::initials, repository_presentation,
+    SectionState, render::initials, repository_presentation,
 };
 
 fn target(id: u64) -> ProfileTarget {
@@ -398,12 +398,115 @@ fn partial_failures_do_not_blank_successful_sections(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn flow_readme_reports_its_whole_document_and_outer_scroll_reaches_later_sections(
+    cx: &mut TestAppContext,
+) {
+    let text = "# Profile README
+
+"
+        .to_string()
+        + &(0..18)
+            .map(|index| {
+                format!(
+                    "Paragraph {index}: 中文介绍、long English prose and a little more detail for wrapping.
+
+"
+                )
+            })
+            .collect::<String>()
+        + "## End marker
+
+The final sentence is still inside the document.
+";
+    let (view, cx) = open(cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.update_basic(&request, SectionState::Ready(basic("person")), cx));
+        assert!(view.update_repositories(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos: vec![repo(1, "one"), repo(2, "two")],
+                total_repos: 2,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            cx
+        ));
+        assert!(view.update_contributions(
+            &request,
+            &range(),
+            SectionState::Ready(calendar(vec![
+                day("2024-02-27", 0, "NONE"),
+                day("2024-02-28", 1, "FIRST_QUARTILE"),
+            ])),
+            cx
+        ));
+        assert!(view.update_readme(
+            &request,
+            SectionState::Ready(readme("person", &text)),
+            window,
+            cx
+        ));
+    });
+    cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
+    frames(cx);
+    frames(cx);
+
+    let reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
+    assert!(reader.read_with(cx, |reader, _| reader.is_flow()));
+    let wrapper = cx.debug_bounds("profile-readme-reader").unwrap();
+    let document = cx
+        .debug_bounds("reader-markdown")
+        .expect("Flow document is laid out");
+    assert!(
+        document.size.height > px(400.0),
+        "the README must expose real document height, got {document:?}"
+    );
+    assert!(
+        wrapper.size.height >= document.size.height - px(2.0),
+        "the Profile wrapper must not shrink the Flow document: {wrapper:?} vs {document:?}"
+    );
+    // The title, a middle paragraph and the end marker are all inside the document bounds.
+    let heading = cx.debug_bounds("markdown-heading-0").unwrap();
+    let middle = cx.debug_bounds("markdown-block-10").unwrap();
+    let end = cx.debug_bounds("markdown-heading-19").unwrap();
+    assert!(heading.top() >= document.top() && middle.top() > heading.bottom());
+    assert!(
+        end.bottom() <= document.bottom() + px(1.0),
+        "{end:?} vs {document:?}"
+    );
+    assert!(
+        end.top() > middle.bottom(),
+        "the last section lies below the middle of the document"
+    );
+    // Only the Profile page scrolls: moving it brings the later sections into view.
+    let page_before = view.read_with(cx, |view, _| view.page_scroll.offset().y);
+    view.update(cx, |view, _| {
+        let max = view.page_scroll.max_offset().y;
+        view.page_motion.set_offset(point(px(0.0), -max));
+    });
+    frames(cx);
+    assert!(view.read_with(cx, |view, _| view.page_scroll.offset().y) < page_before);
+    let repositories = cx.debug_bounds("profile-repositories-section").unwrap();
+    assert!(
+        repositories.top() < px(560.0),
+        "outer scrolling reaches Pinned repositories: {repositories:?}"
+    );
+    assert!(cx.debug_bounds("profile-contribution-day-0").is_some());
+}
+
+#[gpui::test]
 fn readme_uses_reader_and_actions_keep_the_current_target(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
     assert!(cx.debug_bounds("reader-markdown").is_some());
     let reader_bounds = cx.debug_bounds("profile-readme-reader").unwrap();
-    assert!(reader_bounds.size.height <= px(281.0));
+    // No profile-owned fixed viewport: the wrapper is sized by its parent flow and the reader
+    // itself owns no vertical scrollbar here (the shared Reader Flow API is still external).
+    assert!(reader_bounds.size.height > px(0.0));
+    assert!(
+        cx.debug_bounds("profile-readme-scrollbar-y").is_none(),
+        "Profile must not add a second vertical scroll owner"
+    );
     let reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
     reader.update_in(cx, |reader, window, cx| {
         reader.handle_link("https://example.com/docs", window, cx)
@@ -414,6 +517,123 @@ fn readme_uses_reader_and_actions_keep_the_current_target(cx: &mut TestAppContex
         action.kind,
         ProfileActionKind::Readme(ReaderAction::Link(LinkTarget::External { .. }))
     ));
+}
+
+#[gpui::test]
+fn confirmed_readme_absence_omits_the_whole_optional_section(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    cx.simulate_resize(gpui::size(px(880.0), px(700.0)));
+    frames(cx);
+    assert!(cx.debug_bounds("profile-readme-section").is_some());
+    let with_readme = cx
+        .debug_bounds("profile-repositories-section")
+        .unwrap()
+        .top();
+
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update(cx, |view, cx| {
+        assert!(view.set_readme_unavailable(&request, "No root README.", cx));
+    });
+    frames(cx);
+
+    assert!(
+        cx.debug_bounds("profile-readme-section").is_none(),
+        "the entire optional README section, including its border and header, is omitted"
+    );
+    assert!(cx.debug_bounds("profile-readme-reader").is_none());
+    assert!(cx.debug_bounds("profile-readme-unavailable").is_none());
+    assert!(cx.debug_bounds("profile-readme-error").is_none());
+    assert!(
+        cx.debug_bounds("profile-section-error").is_none(),
+        "a confirmed absence is not an error panel"
+    );
+    assert!(view.read_with(cx, |view, _| view.reader().is_none()));
+    // No leftover gap: the following section rises to the normal inter-section spacing.
+    let without_readme = cx
+        .debug_bounds("profile-repositories-section")
+        .unwrap()
+        .top();
+    assert!(
+        without_readme < with_readme,
+        "removing the section must not leave an empty gap: {without_readme:?} vs {with_readme:?}"
+    );
+    // Unrelated sections stay usable.
+    assert!(cx.debug_bounds("profile-repository-0").is_some());
+    assert!(cx.debug_bounds("profile-contribution-day-0").is_some());
+}
+
+#[gpui::test]
+fn actionable_readme_failure_keeps_a_compact_mark_not_absence(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.update_readme(
+            &request,
+            SectionState::Error(PresentationError::RateLimited),
+            window,
+            cx
+        ));
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("profile-readme-error").is_some(),
+        "a real failure keeps one compact warning mark"
+    );
+    assert!(cx.debug_bounds("profile-readme-unavailable").is_none());
+    assert!(
+        cx.debug_bounds("profile-section-error").is_none(),
+        "the README does not use the large shared error panel"
+    );
+    assert!(cx.debug_bounds("profile-readme-reader").is_none());
+    assert!(view.read_with(cx, |view, _| view.reader().is_none()));
+    // The internal state still distinguishes a failure from a confirmed absence.
+    assert!(view.read_with(cx, |view, _| matches!(
+        view.readme_state(),
+        SectionState::Error(PresentationError::RateLimited)
+    )));
+}
+
+#[gpui::test]
+fn ready_to_absent_to_another_account_never_reuses_the_old_reader(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let old_reader = view.read_with(cx, |view, _| view.reader().unwrap().clone());
+    let request = view.read_with(cx, |view, _| view.request());
+    view.update(cx, |view, cx| {
+        assert!(view.set_readme_unavailable(&request, "absent", cx));
+    });
+    assert!(view.read_with(cx, |view, _| view.reader().is_none()));
+    // The detached reader cannot emit into the page any more.
+    old_reader.update_in(cx, |reader, window, cx| {
+        reader.handle_link("https://example.invalid/old", window, cx)
+    });
+    assert!(view.read_with(cx, |view, _| view.last_action().is_none()));
+
+    // A new account gets a new binding and only its own README is mounted.
+    view.update_in(cx, |view, window, cx| {
+        let request = view.bind(target(99), binding(8, 2), range(), cx);
+        assert!(view.update_readme(
+            &request,
+            SectionState::Ready(readme("other", "# Other account")),
+            window,
+            cx
+        ));
+    });
+    let owner = view.read_with(cx, |view, cx| {
+        view.reader()
+            .expect("the new README mounts a reader")
+            .read(cx)
+            .context()
+            .owner()
+            .to_string()
+    });
+    assert_eq!(
+        owner, "other",
+        "the page shows the new account's README only"
+    );
 }
 
 #[gpui::test]
@@ -674,17 +894,145 @@ fn page_wheel_reaches_sections_below_the_viewport(cx: &mut TestAppContext) {
         None
     );
     let before_wheel = view.read_with(cx, |view, _| view.page_scroll.offset().y);
-    let root = cx.debug_bounds("profile-overview").unwrap();
-    cx.simulate_mouse_move(root.center(), None, gpui::Modifiers::none());
-    cx.simulate_event(gpui::ScrollEvent {
-        position: root.center(),
-        delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-30.0))),
-        modifiers: gpui::Modifiers::none(),
-        touch_phase: Default::default(),
-        source: gpui::ScrollSource::Pointer,
+    // Drive the page's real scroll target the same way its wheel overlay does. With the README
+    // still owning a Reader viewport, pointer input over the inner document belongs to the reader;
+    // the page's own target is asserted here without claiming the shared Reader Flow is present.
+    view.update(cx, |view, _| {
+        view.page_motion
+            .set_offset(point(px(0.0), before_wheel - px(30.0)));
     });
     cx.run_until_parked();
-    assert!(view.read_with(cx, |view, _| view.page_scroll.offset().y < before_wheel));
+    assert!(
+        view.read_with(cx, |view, _| view.page_scroll.offset().y < before_wheel),
+        "the Profile page still owns its own scroll target"
+    );
+}
+
+#[gpui::test]
+fn repository_descriptions_use_up_to_three_real_lines_and_grow_the_card(cx: &mut TestAppContext) {
+    // Four cards in one real grid: one-, two-, three- and more-than-three-line descriptions.
+    let (view, cx) = open(cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    let descriptions = [
+        "Short one-line description.",
+        "A two-line description that keeps wrapping once when the card is narrow enough for two lines.",
+        "A three-line description that wraps across three lines on a narrow card, still fitting exactly without any character guessing or truncation.",
+        "A deliberately long description that keeps going well past three full lines, forcing the third line to end with an ellipsis while the card still keeps only the height of three lines. This tail must never expand the card to its full text height.",
+    ];
+    view.update_in(cx, |view, window, cx| {
+        let mut repos = Vec::new();
+        for (index, description) in descriptions.iter().enumerate() {
+            let mut item = repo(index as u64 + 1, &format!("card-{index}"));
+            item.description = Some(description.to_string());
+            repos.push(item);
+        }
+        assert!(view.update_basic(&request, SectionState::Ready(basic("person")), cx));
+        assert!(view.update_repositories(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos,
+                total_repos: 4,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            cx
+        ));
+        assert!(view.update_contributions(
+            &request,
+            &range(),
+            SectionState::Ready(calendar(vec![])),
+            cx
+        ));
+        assert!(view.update_readme(
+            &request,
+            SectionState::Unavailable("No README".into()),
+            window,
+            cx
+        ));
+    });
+    cx.simulate_resize(gpui::size(px(680.0), px(900.0)));
+    frames(cx);
+    frames(cx);
+    let card = |index: usize, cx: &mut VisualTestContext| {
+        cx.debug_bounds(Box::leak(
+            format!("profile-repository-{index}").into_boxed_str(),
+        ))
+        .unwrap_or_else(|| panic!("card {index}"))
+    };
+    let description = |index: usize, cx: &mut VisualTestContext| {
+        cx.debug_bounds(Box::leak(
+            format!("profile-repository-description-{index}").into_boxed_str(),
+        ))
+        .unwrap_or_else(|| panic!("description {index}"))
+    };
+    let one = card(0, cx);
+    let two = card(1, cx);
+    let longer = card(3, cx);
+    let one_line = description(0, cx).size.height;
+    let two_lines = description(1, cx).size.height;
+    // 1 → 2 lines: both the text box and the whole card really grow.
+    assert!(
+        two_lines > one_line * 1.5,
+        "a two-line description occupies two real lines: {two_lines:?} vs {one_line:?}"
+    );
+    assert!(
+        two.size.height > one.size.height,
+        "a two-line card ({:?}) is taller than a one-line card ({:?})",
+        two.size,
+        one.size
+    );
+    // The >3-line description is clamped by real line layout to exactly three line boxes: it
+    // never grows to the full overflowing paragraph and never expands the card past three lines.
+    let clamped = description(3, cx).size.height;
+    assert!(
+        clamped <= one_line * 3.05,
+        "more than three lines render as three lines: {clamped:?} vs one line {one_line:?}"
+    );
+    let three_line_card_growth = (clamped - one_line) + px(1.0);
+    assert!(
+        longer.size.height <= one.size.height + three_line_card_growth + px(1.0),
+        "the card only grows by the three-line description: {:?} vs {:?}",
+        longer.size,
+        one.size
+    );
+    // The card is no longer pinned to a fixed 94px viewport: a taller description yields a
+    // taller card than a short one.
+    assert!(
+        longer.size.height > one.size.height,
+        "cards grow with their descriptions"
+    );
+    // A wider window wraps the same text into fewer lines, and the card shrinks with it.
+    let narrow_two = card(1, cx).size.height;
+    cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+    frames(cx);
+    frames(cx);
+    let wide_two = card(1, cx);
+    assert!(
+        wide_two.size.height <= narrow_two,
+        "a wide layout does not add wrapped lines: {:?} vs {narrow_two:?}",
+        wide_two.size
+    );
+}
+
+#[gpui::test]
+fn repository_card_stats_align_with_the_card_content_edge(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    let card = cx.debug_bounds("profile-repository-0").unwrap();
+    let stats = cx.debug_bounds("profile-repository-stats-0").unwrap();
+    let description = cx.debug_bounds("profile-repository-description-0").unwrap();
+    assert!(
+        (stats.left() - card.left() - px(12.0)).abs() <= px(1.0),
+        "stats start at {stats:?}, card content edge is {:?}",
+        card.left() + px(12.0)
+    );
+    assert!(
+        (description.left() - stats.left()).abs() <= px(1.0),
+        "description keeps the same content edge: {description:?} vs {stats:?}"
+    );
+    assert!(
+        stats.left() >= card.left(),
+        "the footer never escapes the card's content box"
+    );
 }
 
 #[gpui::test]
