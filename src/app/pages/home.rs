@@ -9,8 +9,8 @@ use tokio::sync::watch;
 use crate::app::accounts::AccountServices;
 use crate::app::avatar::AvatarKey;
 use crate::data::{PageReadSession, RepositoryReadContext};
-use crate::domain::home::{FeedFetch, FeedOutcome, HomeError, HomeSearchOutcome};
-use crate::github::home::{FeedLimits, HomeSearchLimits};
+use crate::domain::home::{FeedOutcome, HomeError, HomeSearchOutcome};
+use crate::github::home::{FeedLimits, FollowingLimits, HomeSearchLimits, PullRequestDetailLimits};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::ui::avatar::AvatarSlot;
 use crate::ui::home::{Column, HomeAction, HomeView, RefreshAvailability, RequestBinding};
@@ -18,6 +18,12 @@ use crate::workspace::TabId;
 
 use super::{NavigationSink, PageAvatars, PageNavigation};
 use crate::workspace::Route;
+
+/// Upper bound on merged pull-request detail reads per Feed refresh. A 300-event
+/// window with a handful of merges stays far below this; the cap exists so a
+/// pathological page cannot turn into dozens of sequential requests. Targets over
+/// the cap are reported as unresolved rather than silently dropped.
+const FEED_AUTHOR_LOOKUP_LIMIT: usize = 30;
 
 /// The deadline is presentation-only. Expiring it restores the Feed refresh control; it never
 /// initiates a request. Extracted so the expiry rule can be exercised without a wall-clock sleep.
@@ -302,17 +308,23 @@ impl HomePage {
                         .await
                         .map(|value| value.value),
                 ),
-                Column::Feed => {
-                    ColumnResult::Feed(match session.feed(&FeedLimits::default(), cancel).await {
-                        Ok(value) => match value.value {
-                            FeedFetch::Events(events) => Ok(events),
-                            FeedFetch::NotModified { .. } => Err(HomeError::InvalidResponse {
-                                message: "unexpected 304 without a Feed validator".into(),
-                            }),
-                        },
-                        Err(error) => Err(error),
-                    })
-                }
+                // The data layer composes the raw events read, the followed-account
+                // read and the bounded merged-author lookups, then applies the
+                // product policy. Bounds keep one snapshot from fanning out: a
+                // followed list of at most 1,000 accounts and at most 30 distinct
+                // author lookups per refresh.
+                Column::Feed => ColumnResult::Feed(
+                    session
+                        .feed(
+                            &FeedLimits::default(),
+                            &FollowingLimits::default(),
+                            &PullRequestDetailLimits::default(),
+                            FEED_AUTHOR_LOOKUP_LIMIT,
+                            cancel,
+                        )
+                        .await
+                        .map(|value| value.value),
+                ),
             };
             if *alive.borrow() {
                 inbox.lock().expect("home inbox").push_back(Reply {

@@ -27,9 +27,10 @@ use gpui::{
 
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedOutcome, FeedPartialReason, FeedPayload,
-    FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind, HomePartialReason,
-    HomeReadiness, HomeRepositoryRef, HomeSearchOutcome,
+    AuthorResolutions, FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedOutcome,
+    FeedPartialReason, FeedPayload, FeedReadiness, FeedRepository, FollowedAccount, Following,
+    FollowingReadiness, HomeError, HomeItem, HomeItemKind, HomePartialReason, HomeReadiness,
+    HomeRepositoryRef, HomeSearchOutcome, ResolvedPullRequest, build_feed,
 };
 use crate::ui::home::{Column, HomeView, RefreshAvailability, RequestBinding};
 
@@ -162,6 +163,9 @@ impl Preview {
         let theme = cx.theme();
         div()
             .debug_selector(|| "home-preview-toolbar".to_string())
+            .w_full()
+            .min_w_0()
+            .flex_none()
             .flex()
             .flex_wrap()
             .items_center()
@@ -337,167 +341,215 @@ fn item(index: usize) -> HomeItem {
 /// The merged pull request is authored by a contributor and produced by a
 /// different (maintainer) actor, so the credited identity is visible in preview.
 const CONTRIBUTOR_LOGIN: &str = "synthetic-contributor";
+/// The followed account that stars and creates repositories in the preview.
+const FOLLOWER_LOGIN: &str = "synthetic-user";
+/// An account nobody follows in the preview: its activities must never appear.
+const STRANGER_LOGIN: &str = "synthetic-stranger";
 
-fn event(index: usize) -> FeedEvent {
-    let (event_type, payload) = match index % 3 {
-        0 => (
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "closed".into(),
-                number: Some(42),
-                title: Some("Synthetic merged pull request".into()),
-                html_url: None,
-                state: Some("closed".into()),
-                merged: Some(true),
-                author: Some(FeedAuthor {
-                    id: 90_001,
-                    login: CONTRIBUTOR_LOGIN.into(),
-                    avatar_url: None,
-                }),
-            },
-        ),
-        1 => (
-            FeedEventType::Watch,
-            FeedPayload::Watch {
-                action: "started".into(),
-            },
-        ),
-        _ => (
-            FeedEventType::Create,
-            FeedPayload::Create {
-                ref_type: Some("repository".into()),
-                git_ref: None,
-            },
-        ),
-    };
+fn event(index: usize, actor_login: &str, repository: &str) -> FeedEvent {
     FeedEvent {
         id: format!("synthetic-event-{index}"),
-        event_type,
+        event_type: FeedEventType::Watch,
         actor: FeedActor {
-            id: 50 + index as u64,
-            login: "synthetic-user".into(),
+            id: if actor_login == FOLLOWER_LOGIN {
+                50
+            } else {
+                60
+            },
+            login: actor_login.to_string(),
             display_login: None,
             avatar_url: None,
         },
         repository: FeedRepository {
             id: 70 + index as u64,
-            name: "synthetic-owner/repository".into(),
+            name: repository.into(),
             url: String::new(),
         },
         created_at: fixture_time(index),
         public: true,
-        payload,
+        payload: FeedPayload::Watch {
+            action: "started".into(),
+        },
     }
 }
 
-/// Events the Feed product policy must exclude. They are passed through the real
-/// `apply_feed` (which filters them) so the preview proves no placeholder card
-/// appears for push/issue/comment/release/fork/membership/branch/tag/unknown or
-/// non-merged pull requests.
-fn filtered_noise() -> Vec<FeedEvent> {
-    let base = |index: usize, event_type: FeedEventType, payload: FeedPayload| {
-        let mut event = event(index);
-        event.id = format!("synthetic-noise-{index}");
-        event.event_type = event_type;
-        event.payload = payload;
-        event
+/// A live `action=merged` event: the payload's `pull_request` carries only
+/// url/id/number/head/base, so the preview also demonstrates author enrichment
+/// from the detail endpoint via `AuthorResolutions`.
+fn merged_event(index: usize, merger: &str, repository: &str, number: u64) -> FeedEvent {
+    let mut event = event(index, merger, repository);
+    event.event_type = FeedEventType::PullRequest;
+    event.payload = FeedPayload::PullRequest {
+        action: "merged".into(),
+        number: Some(number),
+        title: None,
+        html_url: None,
+        state: None,
+        merged: None,
+        author: None,
     };
+    event
+}
+
+fn created_repository_event(index: usize, actor_login: &str, repository: &str) -> FeedEvent {
+    let mut event = event(index, actor_login, repository);
+    event.event_type = FeedEventType::Create;
+    event.payload = FeedPayload::Create {
+        ref_type: Some("repository".into()),
+        git_ref: None,
+    };
+    event
+}
+
+fn starred_event(index: usize, actor_login: &str, repository: &str) -> FeedEvent {
+    event(index, actor_login, repository)
+}
+
+/// Events the Feed product policy must exclude. They run through the real
+/// `build_feed` so the preview proves no card or placeholder appears for
+/// push/issue/comment/release/fork/membership/branch/tag/unknown, non-merged pull
+/// requests, and activities by an account that is not followed.
+fn excluded_events() -> Vec<FeedEvent> {
+    let mut noise = Vec::new();
+
+    let mut push = event(100, FOLLOWER_LOGIN, "synthetic-owner/repository");
+    push.event_type = FeedEventType::Push;
+    push.payload = FeedPayload::Push {
+        git_ref: Some("refs/heads/main".into()),
+        before: None,
+        head: None,
+        size: Some(3),
+    };
+    noise.push(push);
+
+    let mut issue = event(101, FOLLOWER_LOGIN, "synthetic-owner/repository");
+    issue.event_type = FeedEventType::Issues;
+    issue.payload = FeedPayload::Issues {
+        action: "closed".into(),
+        number: Some(7),
+        title: Some("Synthetic issue".into()),
+        html_url: None,
+        state: Some("closed".into()),
+    };
+    noise.push(issue);
+
+    let mut branch = event(102, FOLLOWER_LOGIN, "synthetic-owner/repository");
+    branch.event_type = FeedEventType::Create;
+    branch.payload = FeedPayload::Create {
+        ref_type: Some("branch".into()),
+        git_ref: Some("preview".into()),
+    };
+    noise.push(branch);
+
+    let mut opened = event(103, FOLLOWER_LOGIN, "synthetic-owner/repository");
+    opened.event_type = FeedEventType::PullRequest;
+    opened.payload = FeedPayload::PullRequest {
+        action: "opened".into(),
+        number: Some(43),
+        title: Some("Synthetic open pull request".into()),
+        html_url: None,
+        state: Some("open".into()),
+        merged: None,
+        author: None,
+    };
+    noise.push(opened);
+
+    let mut closed_unmerged = event(104, FOLLOWER_LOGIN, "synthetic-owner/repository");
+    closed_unmerged.event_type = FeedEventType::PullRequest;
+    closed_unmerged.payload = FeedPayload::PullRequest {
+        action: "closed".into(),
+        number: Some(44),
+        title: Some("Synthetic unmerged pull request".into()),
+        html_url: None,
+        state: Some("closed".into()),
+        merged: Some(false),
+        author: None,
+    };
+    noise.push(closed_unmerged);
+
+    let mut unknown = event(105, FOLLOWER_LOGIN, "synthetic-owner/repository");
+    unknown.event_type = FeedEventType::Unknown("FutureSyntheticEvent".into());
+    unknown.payload = FeedPayload::Unknown;
+    noise.push(unknown);
+
+    // Retained activity **types**, but by an account the preview does not follow.
+    noise.push(created_repository_event(
+        106,
+        STRANGER_LOGIN,
+        "synthetic-stranger/private-repo",
+    ));
+    noise.push(starred_event(
+        107,
+        STRANGER_LOGIN,
+        "synthetic-stranger/another-repo",
+    ));
+    // A merged contribution whose author is not followed.
+    let unfollowed_merge = merged_event(108, FOLLOWER_LOGIN, "synthetic-owner/other", 501);
+    noise.push(unfollowed_merge);
+
+    noise
+}
+
+/// The followed-account set used by every preview scenario.
+fn preview_following() -> Following {
+    Following {
+        accounts: vec![
+            FollowedAccount {
+                id: 50,
+                login: FOLLOWER_LOGIN.into(),
+                avatar_url: None,
+            },
+            FollowedAccount {
+                id: 90_001,
+                login: CONTRIBUTOR_LOGIN.into(),
+                avatar_url: None,
+            },
+        ],
+        readiness: FollowingReadiness::Complete,
+    }
+}
+
+/// The author resolutions a real host would obtain from the pull-request detail
+/// endpoint for the preview's merged events.
+fn preview_authors() -> AuthorResolutions {
+    let mut authors = AuthorResolutions::new();
+    authors.insert(
+        "synthetic-owner/repository#42",
+        ResolvedPullRequest {
+            author: FeedAuthor {
+                id: 90_001,
+                login: CONTRIBUTOR_LOGIN.into(),
+                avatar_url: None,
+            },
+            merged: true,
+            title: Some("Synthetic merged pull request".into()),
+            html_url: None,
+        },
+    );
+    authors.insert(
+        "synthetic-owner/other#501",
+        ResolvedPullRequest {
+            author: FeedAuthor {
+                id: 60,
+                login: STRANGER_LOGIN.into(),
+                avatar_url: None,
+            },
+            merged: true,
+            title: Some("Unfollowed author's contribution".into()),
+            html_url: None,
+        },
+    );
+    authors
+}
+
+/// Three live-shaped source events: the merged contribution (author resolved from
+/// the detail endpoint), a star and a repository creation, all by followed
+/// accounts.
+fn retained_events() -> Vec<FeedEvent> {
     vec![
-        base(
-            100,
-            FeedEventType::Push,
-            FeedPayload::Push {
-                git_ref: Some("refs/heads/main".into()),
-                before: None,
-                head: None,
-                size: Some(3),
-            },
-        ),
-        base(
-            101,
-            FeedEventType::Issues,
-            FeedPayload::Issues {
-                action: "closed".into(),
-                number: Some(7),
-                title: Some("Synthetic issue".into()),
-                html_url: None,
-                state: Some("closed".into()),
-            },
-        ),
-        base(
-            102,
-            FeedEventType::IssueComment,
-            FeedPayload::IssueComment {
-                action: "created".into(),
-                issue_number: Some(7),
-                comment_url: None,
-            },
-        ),
-        base(
-            103,
-            FeedEventType::Release,
-            FeedPayload::Release {
-                action: "published".into(),
-                tag_name: Some("v1.0.0".into()),
-                name: None,
-                html_url: None,
-            },
-        ),
-        base(
-            104,
-            FeedEventType::Create,
-            FeedPayload::Create {
-                ref_type: Some("branch".into()),
-                git_ref: Some("preview".into()),
-            },
-        ),
-        base(
-            105,
-            FeedEventType::Delete,
-            FeedPayload::Delete {
-                ref_type: Some("branch".into()),
-                git_ref: Some("preview".into()),
-            },
-        ),
-        base(
-            106,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "opened".into(),
-                number: Some(43),
-                title: Some("Synthetic open pull request".into()),
-                html_url: None,
-                state: Some("open".into()),
-                merged: None,
-                author: Some(FeedAuthor {
-                    id: 90_002,
-                    login: "synthetic-contributor".into(),
-                    avatar_url: None,
-                }),
-            },
-        ),
-        base(
-            107,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "closed".into(),
-                number: Some(44),
-                title: Some("Synthetic unmerged pull request".into()),
-                html_url: None,
-                state: Some("closed".into()),
-                merged: Some(false),
-                author: Some(FeedAuthor {
-                    id: 90_003,
-                    login: "synthetic-contributor".into(),
-                    avatar_url: None,
-                }),
-            },
-        ),
-        base(
-            108,
-            FeedEventType::Unknown("FutureSyntheticEvent".into()),
-            FeedPayload::Unknown,
-        ),
+        merged_event(0, FOLLOWER_LOGIN, "synthetic-owner/repository", 42),
+        starred_event(1, FOLLOWER_LOGIN, "synthetic-owner/repository"),
+        created_repository_event(2, FOLLOWER_LOGIN, "synthetic-owner/repository"),
     ]
 }
 
@@ -511,19 +563,33 @@ fn search(items: Vec<HomeItem>, readiness: HomeReadiness) -> HomeSearchOutcome {
     }
 }
 
-fn feed(events: Vec<FeedEvent>, readiness: FeedReadiness) -> FeedOutcome {
+fn feed() -> FeedOutcome {
+    // Every preview scenario goes through the real product policy, exactly as the
+    // app's data layer does.
+    build_feed(
+        retained_events(),
+        Vec::new(),
+        &preview_following(),
+        &preview_authors(),
+    )
+}
+
+fn feed_with(readiness: FeedReadiness) -> FeedOutcome {
     FeedOutcome {
-        events,
-        etag: None,
         poll_interval_seconds: Some(60),
         readiness,
+        ..feed()
     }
 }
 
 fn mixed() -> (HomeSearchOutcome, FeedOutcome) {
     (
         search((0..6).map(item).collect(), HomeReadiness::Complete),
-        feed((0..12).map(event).collect(), FeedReadiness::Complete),
+        {
+            let mut source = retained_events();
+            source.extend(excluded_events());
+            build_feed(source, Vec::new(), &preview_following(), &preview_authors())
+        },
     )
 }
 
@@ -542,28 +608,38 @@ fn partial() -> (HomeSearchOutcome, FeedOutcome) {
                 ],
             },
         ),
-        feed(
-            (0..5).map(event).collect(),
-            FeedReadiness::Partial {
-                reasons: vec![FeedPartialReason::PageLimit],
-            },
-        ),
+        feed_with(FeedReadiness::Partial {
+            reasons: vec![FeedPartialReason::FollowingIncomplete {
+                details: vec!["a later followed-accounts page failed".into()],
+            }],
+        }),
     )
 }
 
-/// Every received event is technical noise, so the Feed column must be the
-/// normal minimal empty state while Home stays populated.
+/// Every source event is technical noise, an unfollowed activity, or an unmerged
+/// pull request, so the Feed column must be the normal minimal empty state while
+/// Home stays populated.
 fn filtered_out() -> (HomeSearchOutcome, FeedOutcome) {
     (
         search((0..3).map(item).collect(), HomeReadiness::Complete),
-        feed(filtered_noise(), FeedReadiness::Complete),
+        build_feed(
+            excluded_events(),
+            Vec::new(),
+            &preview_following(),
+            &preview_authors(),
+        ),
     )
 }
 
 fn empty_unavailable() -> (HomeSearchOutcome, FeedOutcome) {
     (
         search(Vec::new(), HomeReadiness::Complete),
-        feed(Vec::new(), FeedReadiness::Complete),
+        build_feed(
+            Vec::new(),
+            Vec::new(),
+            &preview_following(),
+            &preview_authors(),
+        ),
     )
 }
 
@@ -575,7 +651,7 @@ fn large() -> (HomeSearchOutcome, FeedOutcome) {
                 reasons: vec![HomePartialReason::ResultLimit],
             },
         ),
-        feed((0..300).map(event).collect(), FeedReadiness::Complete),
+        feed_with(FeedReadiness::Complete),
     )
 }
 

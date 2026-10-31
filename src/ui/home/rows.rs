@@ -227,20 +227,21 @@ pub(super) fn feed_repository(event: &FeedEvent) -> RepositoryIdentity {
     }
 }
 
-/// **Confirmed product policy:** only retained activities reach this renderer.
-/// A row whose event is not a retained activity has nothing truthful to show, so
-/// it renders nothing at all rather than a fallback or placeholder card.
+/// Renders one already-validated Feed activity.
+///
+/// The host applies the product policy before publishing: only retained activity
+/// kinds whose subject is a followed account reach this renderer, and a merged
+/// contribution already carries its resolved author. This function therefore has
+/// no fallback or placeholder path — there is nothing untruthful to draw.
 pub(super) fn feed_row(
-    event: &FeedEvent,
+    activity: &FeedActivity,
     index: usize,
     selected: bool,
     now: SystemTime,
     real_avatar: Option<AnyElement>,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
-    let Some(activity) = classify_feed_activity(event) else {
-        return div().into_any_element();
-    };
+    let event = &activity.event;
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let radius = theme.radius(Radius::Md);
@@ -309,7 +310,7 @@ pub(super) fn feed_row(
         .min_w_0()
         .text_size(body_size)
         .child(actor_link)
-        .child(div().min_w_0().child(action_sentence(event)));
+        .child(div().min_w_0().child(action_sentence(activity)));
     let inset = div()
         .debug_selector(move || format!("feed-details-{index}"))
         .flex()
@@ -416,19 +417,14 @@ pub(super) struct EventDetails {
     pub lines: Vec<String>,
 }
 
-/// Details for a retained activity. The three kinds that survive
-/// [`classify_feed_activity`] are the only ones with a description; anything else
-/// has no truthful details and yields the empty shape. No branch, ref, SHA or
-/// commit-count prose is produced.
-pub(super) fn event_details(event: &FeedEvent) -> EventDetails {
+/// Details for a retained activity. No branch, ref, SHA or commit-count prose is
+/// produced; only the pull-request target of a merged contribution is described.
+pub(super) fn event_details(activity: &FeedActivity) -> EventDetails {
     let mut details = EventDetails {
         title: None,
         status: None,
         merged: false,
         lines: Vec::new(),
-    };
-    let Some(activity) = classify_feed_activity(event) else {
-        return details;
     };
     if let Some(target) = &activity.pull_request {
         details.merged = true;
@@ -441,14 +437,13 @@ pub(super) fn event_details(event: &FeedEvent) -> EventDetails {
     details
 }
 
-/// The compact actor/action sentence of a retained activity.
-pub(super) fn action_sentence(event: &FeedEvent) -> String {
-    match classify_feed_activity(event).map(|activity| activity.kind) {
-        Some(FeedActivityKind::PullRequestMerged) => "contributed to ".into(),
-        Some(FeedActivityKind::RepositoryStarred) => "starred the repository".into(),
-        Some(FeedActivityKind::RepositoryCreated) => "created the repository".into(),
-        // Not a retained activity: it renders no card, so no sentence is invented.
-        None => String::new(),
+/// The compact subject/action sentence of a retained activity. A merged
+/// contribution reads `<author> contributed to <owner>/<repo>`.
+pub(super) fn action_sentence(activity: &FeedActivity) -> String {
+    match activity.kind {
+        FeedActivityKind::PullRequestMerged => "contributed to".into(),
+        FeedActivityKind::RepositoryStarred => "starred the repository".into(),
+        FeedActivityKind::RepositoryCreated => "created the repository".into(),
     }
 }
 
@@ -464,19 +459,17 @@ fn actor_name(actor: &FeedActor) -> String {
 /// Accessibility/one-line description of a retained activity. It credits the
 /// activity subject (the pull-request author for a merge), never the actor who
 /// merely clicked merge.
-pub(super) fn event_description(event: &FeedEvent) -> String {
-    let Some(activity) = classify_feed_activity(event) else {
-        return String::new();
-    };
-    let details = event_details(event);
-    format!(
-        "{} {} {}",
-        actor_name(&activity.subject),
-        action_sentence(event),
-        details.title.unwrap_or_default()
-    )
-    .trim()
-    .to_string()
+pub(super) fn event_description(activity: &FeedActivity) -> String {
+    let details = event_details(activity);
+    let repository = feed_repository(&activity.event);
+    let mut parts = vec![actor_name(&activity.subject), action_sentence(activity)];
+    // A merged contribution reads `<author> contributed to <owner>/<repo>`; the
+    // other cards name their repository too, matching what is on screen.
+    parts.push(repository.full_name());
+    if let Some(title) = details.title {
+        parts.push(title);
+    }
+    parts.join(" ").trim().to_string()
 }
 fn nonempty(value: &str, fallback: &str) -> String {
     if value.trim().is_empty() {

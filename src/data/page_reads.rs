@@ -7,7 +7,8 @@ use crate::content::PreparedContent;
 use crate::domain::blob::{BlobIdentity, BlobLimits};
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    FeedFetch, HomeError, HomeQuery, HomeSearchOutcome, Login, UpdatedWindow,
+    AuthorResolutions, FeedEventsRead, FeedFetch, FeedOutcome, Following, HomeError, HomeQuery,
+    HomeSearchOutcome, Login, UpdatedWindow, build_feed, is_retained_activity, merge_candidate,
 };
 use crate::domain::profile::{
     ContributionCalendar, ContributionRange, ProfileBasic, ProfileError, ProfilePinned,
@@ -21,7 +22,7 @@ use crate::domain::repository_extras::{
     ContributorsOutcome, LanguagesOutcome, LatestReleaseOutcome, ReleasesOutcome,
     RepositoryExtrasError,
 };
-use crate::github::home::{FeedLimits, HomeSearchLimits};
+use crate::github::home::{FeedLimits, FollowingLimits, HomeSearchLimits, PullRequestDetailLimits};
 use crate::github::profile::ProfileLimits;
 use crate::github::repository_extras::RepositoryExtrasLimits;
 use crate::github::{self, RepositoryLimits};
@@ -114,13 +115,35 @@ impl PageReadSession {
             .await
     }
 
-    /// Explicit online Feed read. No validator is accepted or sent; an
-    /// unexpected 304 is a typed HomeError, never NotModified/empty events.
-    pub async fn feed(
+    /// Read the accounts the captured login follows.
+    ///
+    /// Membership is **evidence**, not a boolean default: an `Err` or a
+    /// `Partial` readiness means the relationship set is unknown for accounts
+    /// outside the returned list, and callers must not present those subjects as
+    /// followed or not followed.
+    pub async fn following(
+        &self,
+        limits: &FollowingLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<Following>, HomeError> {
+        let login = self.login.clone();
+        self.repository
+            .read(cancel, async move |pat, cancel| {
+                github::home::fetch_following(&self.client, &pat, &login, limits, cancel).await
+            })
+            .await
+    }
+
+    /// Raw received-events read (source list + scheduler metadata). The product
+    /// policy is applied by [`Self::feed`].
+    ///
+    /// No validator is sent: without an account-bound source snapshot a 304
+    /// cannot be safely replayed. An unexpected 304 is a typed HomeError.
+    pub async fn feed_events(
         &self,
         limits: &FeedLimits,
         cancel: CancellationToken,
-    ) -> Result<Scoped<FeedFetch>, HomeError> {
+    ) -> Result<Scoped<FeedEventsRead>, HomeError> {
         let login = self.login.clone();
         self.repository
             .read(
@@ -136,12 +159,167 @@ impl PageReadSession {
                 .await?
                 {
                     FeedFetch::NotModified { .. } => Err(HomeError::InvalidResponse {
-                        message: "unexpected 304 without a conditional validator".into(),
+                        message: "unexpected 304 without a validated local snapshot".into(),
                     }),
-                    events => Ok(events),
+                    FeedFetch::Events(events) => Ok(events),
                 },
             )
             .await
+    }
+
+    /// One merged pull request's detail, used to resolve the contribution author.
+    pub async fn pull_request_detail(
+        &self,
+        owner: &str,
+        repository: &str,
+        number: u64,
+        limits: &PullRequestDetailLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<crate::domain::home::PullRequestDetail>, HomeError> {
+        let owner = owner.to_string();
+        let repository = repository.to_string();
+        self.repository
+            .read(cancel, async move |pat, cancel| {
+                github::home::fetch_pull_request_detail(
+                    &self.client,
+                    &pat,
+                    &owner,
+                    &repository,
+                    number,
+                    limits,
+                    cancel,
+                )
+                .await
+            })
+            .await
+    }
+
+    /// Feed: read the source events, resolve the merged-pull-request authors that
+    /// need it, and apply the followed-account constraint.
+    ///
+    /// Both auxiliary reads are bounded, deduplicated and cancellable:
+    /// - followed accounts are read once with their own page/item budget;
+    /// - author lookups are one request per distinct merged pull request, capped
+    ///   by `max_author_lookups` and de-duplicated by PR identity, so a
+    ///   page of repeated events cannot fan out.
+    ///
+    /// A failed or partial auxiliary read is not a successful empty Feed: the
+    /// affected cards are withheld and the outcome stays `Partial` with the
+    /// reason, so the UI never claims completeness it does not have.
+    pub async fn feed(
+        &self,
+        limits: &FeedLimits,
+        following_limits: &FollowingLimits,
+        author_limits: &PullRequestDetailLimits,
+        max_author_lookups: usize,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<FeedOutcome>, HomeError> {
+        let events = self.feed_events(limits, cancel.clone()).await?.value;
+        let following = match self.following(following_limits, cancel.clone()).await {
+            Ok(following) => following.value,
+            Err(error) if matches!(error, HomeError::GitHub(GitHubError::Cancelled)) => {
+                return Err(error);
+            }
+            // Membership is unknown, so no card can be certified. Report the read
+            // failure instead of publishing an empty, complete-looking Feed.
+            Err(error) => return Err(error),
+        };
+        let source_reasons = events.source_reasons();
+        let authors = self
+            .resolve_authors(
+                &events.events,
+                author_limits,
+                max_author_lookups,
+                cancel.clone(),
+            )
+            .await?;
+        if cancel.is_cancelled() {
+            return Err(GitHubError::Cancelled.into());
+        }
+        let outcome = build_feed(events.events, source_reasons, &following, &authors);
+        if !self.verify() {
+            return Err(GitHubError::StaleContext.into());
+        }
+        Ok(Scoped {
+            context: self.context().clone(),
+            value: FeedOutcome {
+                // An incomplete relationship/author read must not expose a
+                // validator that could suppress the next repair attempt.
+                etag: if outcome.readiness.is_complete() {
+                    events.etag
+                } else {
+                    None
+                },
+                poll_interval_seconds: events.poll_interval_seconds,
+                ..outcome
+            },
+        })
+    }
+
+    /// Resolve authors for the merged pull requests in `events` that do not carry
+    /// an embedded author.
+    ///
+    /// Each distinct target is read at most once per call. When the lookup budget
+    /// is exhausted the remaining targets are recorded as unresolved (not as "no
+    /// author"), so the outcome reports withheld contributions rather than
+    /// silently dropping them.
+    async fn resolve_authors(
+        &self,
+        events: &[crate::domain::home::FeedEvent],
+        limits: &PullRequestDetailLimits,
+        max_lookups: usize,
+        cancel: CancellationToken,
+    ) -> Result<AuthorResolutions, HomeError> {
+        let mut authors = AuthorResolutions::new();
+        let mut attempted = 0usize;
+        for event in events.iter().filter(|event| is_retained_activity(event)) {
+            let Some(candidate) = merge_candidate(event) else {
+                continue;
+            };
+            let key = candidate.key();
+            if authors.get(&key).is_some() {
+                continue;
+            }
+            if candidate.embedded_author.is_some() {
+                // No detail read needed; build_feed uses the embedded author.
+                continue;
+            }
+            let Some(number) = candidate.pull_request.number else {
+                authors.mark_unresolved(key);
+                continue;
+            };
+            if attempted >= max_lookups {
+                authors.mark_unresolved(key);
+                continue;
+            }
+            attempted += 1;
+            match self
+                .pull_request_detail(
+                    &candidate.owner,
+                    &candidate.repository,
+                    number,
+                    limits,
+                    cancel.clone(),
+                )
+                .await
+            {
+                Ok(detail) => match detail.value.outcome {
+                    crate::domain::home::PullRequestDetailOutcome::Attributed(resolved) => {
+                        authors.insert(key, resolved);
+                    }
+                    crate::domain::home::PullRequestDetailOutcome::Unattributable => {
+                        authors.mark_unresolved(key);
+                    }
+                },
+                Err(error) if matches!(error, HomeError::GitHub(GitHubError::Cancelled)) => {
+                    return Err(error);
+                }
+                // A failed or stale detail read leaves the author unknown; the
+                // contribution is withheld and the outcome reports it.
+                Err(_) => authors.mark_unresolved(key),
+            }
+        }
+        Ok(authors)
     }
 
     pub async fn profile(

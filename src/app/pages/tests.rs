@@ -144,10 +144,33 @@ impl Transport for PageTransport {
                     }),
                 ));
             }
+            // The active account follows bob and carol, not dave.
+            if url.contains("/user/following") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([
+                        {"id": 7, "login": "bob", "avatar_url": null},
+                        {"id": 8, "login": "carol", "avatar_url": null}
+                    ]),
+                ));
+            }
+            // Real detail-endpoint shape for the merged contribution: the author
+            // lives here, not in the slim event payload.
+            if lower.contains("/repos/alice/demo/pulls/5") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 555, "number": 5, "state": "closed", "merged": true,
+                        "title": "Synthetic merged pull request",
+                        "html_url": "https://github.com/alice/demo/pull/5",
+                        "user": {"id": 8, "login": "carol", "avatar_url": null}
+                    }),
+                ));
+            }
             if url.contains("/received_events") {
-                // A retained star and a retained merged pull request, plus a push
-                // and an issue event that the Feed policy must drop without a
-                // placeholder card.
+                // Live shapes: a star by a followed account, a push (never a card),
+                // a star by an unfollowed account, and a live `action=merged` event
+                // whose slim pull_request carries no author.
                 return Ok(HttpResponse {
                     status: 200,
                     headers: vec![("x-poll-interval".into(), "1".into())],
@@ -164,14 +187,22 @@ impl Transport for PageTransport {
                         "payload": {"ref": "refs/heads/main", "before": "a", "head": "b", "size": 1},
                         "created_at": "2026-10-28T08:00:00Z"
                     }, {
-                        "id": "evt-3", "type": "PullRequestEvent",
+                        "id": "evt-3", "type": "WatchEvent",
+                        "actor": {"id": 9, "login": "dave", "avatar_url": null},
+                        "repo": {"id": 11, "name": "alice/other", "url": "https://api.github.com/repos/alice/other"},
+                        "payload": {"action": "started"},
+                        "created_at": "2026-10-28T07:30:00Z"
+                    }, {
+                        "id": "evt-4", "type": "PullRequestEvent",
                         "actor": {"id": 7, "login": "bob", "avatar_url": null},
                         "repo": {"id": 10, "name": "alice/demo", "url": "https://api.github.com/repos/alice/demo"},
                         "payload": {
-                            "action": "closed", "number": 5,
+                            "action": "merged", "number": 5,
                             "pull_request": {
-                                "title": "Synthetic merged pull request", "state": "closed", "merged": true,
-                                "user": {"id": 8, "login": "carol", "avatar_url": null}
+                                "url": "https://api.github.com/repos/alice/demo/pulls/5",
+                                "id": 555, "number": 5,
+                                "head": {"ref": "feature", "sha": "aaaa"},
+                                "base": {"ref": "main", "sha": "bbbb"}
                             }
                         },
                         "created_at": "2026-10-28T07:00:00Z"
@@ -539,10 +570,14 @@ fn the_shell_mounts_real_home_and_reads_its_two_columns(cx: &mut TestAppContext)
         transport.seen("/received_events") >= 1,
         "Feed requests the received-events endpoint"
     );
+    assert!(
+        transport.seen("/user/following") >= 1,
+        "Feed reads the followed-account set for the membership constraint"
+    );
     assert!(view.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)));
-    // The real adapter filtered the closed search hit and the push event before
-    // the view published them: only the open Home item and the two retained Feed
-    // activities have rows.
+    // Through the real adapters: Home keeps only the open item; Feed keeps the
+    // followed star and the merged contribution (author resolved from the detail
+    // endpoint), dropping the push and the unfollowed account's star.
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert!(
@@ -555,15 +590,15 @@ fn the_shell_mounts_real_home_and_reads_its_two_columns(cx: &mut TestAppContext)
     );
     assert!(
         cx.debug_bounds("feed-event-row-0").is_some(),
-        "the retained star is visible"
+        "the followed star is visible"
     );
     assert!(
         cx.debug_bounds("feed-event-row-1").is_some(),
-        "the retained merged pull request is visible"
+        "the merged contribution is visible"
     );
     assert!(
         cx.debug_bounds("feed-event-row-2").is_none(),
-        "the push event must not have a row"
+        "the push event and the unfollowed star must not have rows"
     );
 }
 

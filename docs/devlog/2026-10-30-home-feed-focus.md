@@ -1,6 +1,6 @@
-# Home 仅 open、Feed 三类活动筛选
+# Home 仅 open、Feed 三类活动（主语必须被关注）
 
-- 2026-10-30，任务 `home-feed-focus`，执行者：基层实现 Agent。
+- 2026-10-30，任务 `home-feed-focus`，执行者：基层实现 Agent。文件覆盖两轮：首轮信息筛选与第二轮真实数据更正。
 - 目标与状态：实现负责人 2026-10-30 的 Home/Feed 信息筛选，等待 PR 审查；PR 目标分支为 `feature/shell-pages`，保持 `pending`，不自行合并。
 
 ## 背景与决定
@@ -9,31 +9,72 @@
 
 1. Home 保持 `involves:<当前登录>`、无时间窗口、`updated` 降序，但**实际查询必须加 `is:open`**；最终可见条目只能是 open 的 Issue/PR，closed/merged/未知状态不得泄漏。不能只请求无限制页面再在本地隐藏 closed 行。
 2. Feed 只保留明确允许的活动，去掉 Push 等技术噪声；**先实现三类，关注两类暂缓**（负责人回答）：
-   - 合并的 PR：标题 `<user> contributed to <owner>/<repo>`，`<user>` 取 payload 中真实 PR 作者，而不是点 merge 的维护者 actor；
+   - 合并的 PR：标题 `<user> contributed to <owner>/<repo>`，`<user>` 是**真实的 PR 作者**，不是点 merge 的维护者 actor；
    - 星标仓库：`WatchEvent action=started`；
    - 创建仓库：`CreateEvent ref_type=repository`。
-3. Follow 两类（“Followed someone / Followed me”）暂缓：当前官方 Events API 事件类型列表没有 `FollowEvent`，followers/following 端点只返回关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types)、[followers](https://docs.github.com/en/rest/users/followers)）。本轮不实现、不占位、不伪造时间戳、不抓取私有网页端点。保存的确认见 `.agents/task/follow-decision.md`。
+3. **第二轮补充（负责人）**：三条卡片的主语**都必须是当前账户关注的人**；合并贡献的主语是 PR 作者（需可靠解析），星标/建库主语是事件 actor。关注关系与作者解析失败不得显示为完整空 Feed。
+4. Follow 两类（“Followed someone / Followed me”）暂缓：当前官方 Events API 事件类型列表没有 `FollowEvent`，followers/following 端点只返回关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types)、[followers](https://docs.github.com/en/rest/users/followers)）。本轮不实现、不占位、不伪造时间戳、不抓取私有网页端点。保存的确认见 `.agents/task/follow-decision.md`。
+
+## 数据源更正（第二轮）
+
+首轮实现有一个被真实公开数据推翻的假设，必须先记录下来：
+
+- 首轮源码注释、`docs/github-api-capabilities.md` 与一条回归都断言 **`PullRequestEvent.action` 没有 `merged`**，只接受 `action=closed` + `pull_request.merged=true`，并把作者读自 payload 内嵌的 `pull_request.user`。
+- 官方 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types?apiVersion=2022-11-28) 明确列出 `opened`、`closed`、**`merged`**、`reopened`、`assigned`、`unassigned`、`labeled`、`unlabeled`。
+- 用无凭据公开端点（`X-GitHub-Api-Version: 2022-11-28`，与应用声明一致）核对 `GET /users/torvalds/received_events/public`：70 条事件里有 4 条 `action=merged`，其 `payload.pull_request` 只有 `url`、`id`、`number`、`head`、`base`——**既没有 `merged` 标记也没有 `user`**。
+- 因此首轮判定在真实数据上等于“一条合并都收不到”，而合成 fixture 恰好按错误假设构造，测试全绿也发现不了。
+- 修复：合并证据改为 `action == "merged"`（或旧形状 `closed` + `merged=true`），作者改读 `GET /repos/{owner}/{repo}/pulls/{number}` 的 `user`（公开核对示例：[subsurface/libdc#144](https://github.com/subsurface/libdc/pull/144) 返回 `merged: true` 与 `user.login`）。
+- 教训写入 [L002](../../LESSONS.md#l002模拟验证要写清边界) 的补充证据，不新增重复条目。
+
+同样地，协调者 2026-10-30T14:41:52Z 的公开探针发现 `received_events` 混合“关注的人”与“watch 的仓库”，13 条 `WatchEvent` 里有 8 条主语未被关注。初次派发没有写明三类活动统一的关注主语约束，这是派发缺口，不是负责人意图含糊。现在按补充指令显式读取 `/user/following`，优先按稳定 ID 过滤。
 
 ## 改动
 
-- **Home 查询**（`src/github/home/search.rs`）：`q=involves:<login> is:open [updated:…]`，顺序、排序与分页不变；`state` 改为可选并在转换时归一化为 `open`，closed/merged/未知/缺失一律不返回，作为缓存/mock/非合规数据路径的防御。筛选不是截断，`readiness` 与 `total_count` 语义不变。
-- **Feed 策略**（`src/domain/home.rs`）：新增纯函数 `classify_feed_activity`，三类活动的唯一判定。合并证据为 `action=closed` + `pull_request.merged=true`；官方 `PullRequestEvent.action` 没有 `merged`，`closed` 单独不算合并。作者来自同一 payload 的 `pull_request.user`（`FeedAuthor`），不额外请求。未知事件仍解析为 `Unknown`/`Unknown` payload，不 panic 也不保留大 payload。
-- **Feed 适配器**（`src/github/home/events.rs`）：解析后按策略过滤，保留服务顺序与真实事件 id；`FeedLimits::max_events` 统计解析到的事件，过滤不会触发额外分页/请求来填满页面。整页噪声仍是 `Complete` 空 Feed；真实上游分页失败仍为对应 Partial。ETag/`X-Poll-Interval`/304 语义不变。
-- **视图**（`src/ui/home/**`）：`apply_feed` 对每个 `FeedOutcome` 再过滤一次，`apply_home` 丢弃非 open 条目，作为 retained/partial/fixture/未来数据路径的防御；选择索引、滚动与激活都基于过滤后的列表。Feed 卡片改为紧凑的 credited 用户 + 动作句 + 目标仓库/PR + 相对时间；删除 Push/ref/SHA/commit 数等 prose 与所有未知类型回退句。空态文案区分正常空 Feed 与真实错误。
-- **头像归因**（`src/app/pages/home.rs`、`src/ui/home/mod.rs`）：`AvatarRenderer` 接收 credited subject（合并 PR 时为 PR 作者）；同时移除原先重复安装 renderer 的死代码与不再使用的 `avatars` 字段。
-- **fixture**（`examples/home.rs`、`src/ui/home/tests.rs`、`src/app/pages/tests.rs`）：更新为 open-only Home 与三类 Feed；新增 `Filtered out` 预览场景；Shell 端到端 transport 混入 closed issue、Push 与合并 PR，断言只显示合法行。
-- **文档**：`product.md`（Home 查询、Feed 三类与 Follow 暂缓、Profile README 确认意图）、`home-view.md`、`home-query-service.md`、`page-data-service.md`、`github-api-capabilities.md` 同步；旧的“Feed 不过滤/未知回退/Home 可含 closed”表述已被本轮负责人指令取代。
+- **Home 查询**（`src/github/home/search.rs`）：`q=involves:<login> is:open [updated:…]`，顺序、排序与分页不变；`state` 改为可选并在转换时归一化为 `open`，closed/merged/未知/缺失一律不返回。筛选不是截断，`readiness` 与 `total_count` 语义不变。
+- **Feed 策略**（`src/domain/home.rs` + `src/domain/home/feed_policy_tests.rs`）：`build_feed` 是唯一策略点，输入是源事件、关注关系与作者解析结果。
+  - `merge_candidate`：`action=merged` 或 `closed`+`merged=true`；`closed` 单独不算合并，也不触发详情读取。
+  - `local_activity`：星标（`started`）与仓库创建（`ref_type=repository`）的主语是事件 actor。
+  - 顺序：先取作者（内嵌优先，否则用 `AuthorResolutions` 命中的详情结果），再校验主语是否被关注。作者缺失/失败/详情未确认合并 ⇒ 扣留并计入 `AuthorUnresolved`；关注列表不完整且主语不在其中 ⇒ 扣留并计入 `FollowingIncomplete`；两者都不添加“过滤导致”的 Partial。
+  - 真实事件 `id`、时间戳、仓库与源顺序原样保留（`FeedActivity { kind, subject, pull_request, event }`）。
+- **关注关系适配器**（`src/github/home/following.rs`）：`GET /user/following`，完整跟随 `Link`（官方 next 写作 `/user/{id}/following`，只取页码并按 `/user/following` 重建），校验同源、拒绝循环/无效链接，页数/账户数/字节预算；`FollowingReadiness::Complete` 与 `Partial` 区分“明确未关注”和“未知”。
+- **PR 作者适配器**（`src/github/home/pull_request.rs`）：`GET /repos/{owner}/{repo}/pulls/{number}`，owner/name/number 取自解析后的事件，URL 由受信 base 重建（拒绝 `.`/`..`、路径分隔符、`?`、`#`、`@`），从不请求 payload 的 `url`；编号不匹配视为不可用证据；无 `user` 返回 `Unattributable`，绝不回退到 merger。
+- **数据层**（`src/data/page_reads.rs`）：`PageReadSession::feed` 固定顺序执行 源事件 → 关注关系 → 去重后的作者详情（受 `max_author_lookups` 约束），然后调用 `build_feed`；暴露 `following` / `feed_events` / `pull_request_detail`。关注关系第一页失败即返回 `Err`（不是空 Feed）；作者详情失败只扣留该条。切换账户由既有 `is_current` 判为 `StaleContext`，没有跨账户缓存。
+- **视图**（`src/ui/home/**`）：只渲染 `FeedOutcome.activities`；不再在 `apply_*` 里重算策略。合并卡片 header 是 `<author> contributed to <owner>/<repo>`，inset 放 PR 标题/#号；星标/建库卡片 inset 放仓库。空态与 Partial 文案区分“正常空”“关注关系不完整”“作者未解析”。选择/激活使用卡片来源事件的真实 id。
+- **host**（`src/app/pages/home.rs`）：传入 `FeedLimits`/`FollowingLimits`/`PullRequestDetailLimits` 与 `FEED_AUTHOR_LOOKUP_LIMIT = 30`（每次刷新最多 30 次作者详情读取，按 PR 去重），并把 renderer 改为接收 credited subject。
+- **fixture 与预览**（`examples/home.rs`、`src/ui/home/tests.rs`、`src/app/pages/tests.rs`、`src/data/page_read_tests.rs`）：全部按真实形状重建——瘦 `action=merged` + 详情端点作者、被关注/未被关注的星标与建库、关注列表分页与失败；Shell 端到端 transport 也提供 `/user/following` 与 `/pulls/{n}`。
+- **文档**：`product.md`、`home-view.md`、`home-query-service.md`、`page-data-service.md`、`github-api-capabilities.md`、`roadmap.md`、`shell-page-integration.md` 同步；旧的“官方 action 没有 merged / 作者来自内嵌 payload”表述已删除。
 
 ## 验证
 
-- 串行 Cargo helper（`.agents/task/cargo-serialized.ps1`，共享 build mutex、独立 `target/`）：`fmt --all --check`、`check --locked --all-targets`、`clippy --locked --all-targets -- -D warnings`、`test --locked`、`build --locked` 全部通过（退出码 0）。
-- 测试计数：主 binary 805、home 60、profile 194、reader 168、repository 565、repository_overview 20。
-- 新增回归：
-  - 搜索：`query_is_encoded_and_fixed_to_involves`、`the_open_filter_is_not_an_unrestricted_limit_page_hidden_afterwards`、`non_open_items_are_dropped_from_the_returned_list`（closed/merged/未知/缺失 state 均不返回，且仍是 Complete）。
-  - Feed 适配器：`retained_activities_keep_source_order_and_identity`（顺序/身份/PR 作者归因）、`wrong_actions_ref_types_and_missing_merge_evidence_are_excluded`、`an_all_filtered_feed_stays_complete_and_empty`、`filtered_activities_do_not_trigger_extra_fetching_to_fill_the_page`。
-  - 视图：`closed_merged_and_unknown_home_states_never_become_rows_or_targets`、`a_refresh_that_returns_only_closed_items_clears_the_previous_open_snapshot`、`only_retained_activities_make_feed_cards_and_no_placeholder_appears`、`a_merged_pull_request_credits_the_author_not_the_merging_actor`、`feed_merge_evidence_follows_the_official_event_shape`。
-  - 正式 Shell 端到端：`the_shell_mounts_real_home_and_reads_its_two_columns` 在真实 adapter/data/view 路径下断言 closed Home 行与 Push 事件都没有行。
-- 测试执行期间遇到一次与本次改动无关的既有 flaky 用例 `network::transport::bounded_tests::chunked_and_no_length_stop_before_eof_on_success_and_errors`（本地 socket 时序，单独或重跑通过）；不影响本轮结论，未修改该模块。
+- 串行 Cargo helper（`.agents/task/cargo-serialized.ps1`，共享 build mutex、独立 `target/`）：`fmt --all --check`、`check --locked --all-targets`、`clippy --locked --all-targets -- -D warnings`、`test --locked`、`build --locked` 全部通过（退出码 0），在整合当前 `feature/shell-pages` 基线（`1721eec`）之后运行。
+- 最终检查使用独立日志与 JSON 保存每个 Cargo 退出码及耗时；此前编译阶段曾超过工具一小时超时，随后恢复，不把超时日志当作测试通过证据。最终 fmt/check/clippy/test/build/example-build 全部退出 0，耗时约 7s/1s/38s/360s/39s/1s；测试的 360s 中编译 255s，实际用例执行约 105s，本轮未出现 mutex 等待日志。测试计数依次为主程序 849、account 装配 849、home 79、profile 214、reader 185、reader_images 530、repository 604、repository_overview 37。
+- 补充边界回归：`membership_uses_stable_ids_across_renames_and_login_reuse`、`refresh_reloads_membership_so_an_unfollowed_subject_disappears`、`switching_accounts_while_following_is_delayed_rejects_the_whole_feed`、`cancelled_delayed_following_does_not_publish_a_snapshot`、`author_budget_withholds_remaining_contributions_and_never_backfills`；视图在过滤后的最后一项按 End/Enter 仍激活真实源事件 `event-7`。
+- 新增/更新的回归（详见 [查询服务验证表](../home-query-service.md#72-离线回归)）：
+  - 真实形状：`parses_a_live_merged_event_with_a_slim_pull_request_object`、`a_live_merged_event_becomes_a_contribution_once_the_author_is_resolved`。
+  - 归因方向：`a_followed_author_qualifies_even_when_the_merger_is_not_followed`（作者被关注、merger 未关注 ⇒ 显示）、`a_followed_merger_does_not_qualify_when_the_author_is_not_followed`（反向 ⇒ 不显示）。
+  - 诚实失败：`a_failed_author_read_withholds_the_contribution_and_reports_partial`、`incomplete_following_read_withholds_unconfirmed_subjects`、`a_failed_following_read_is_an_error_not_an_empty_feed`、`an_unresolved_merged_event_is_withheld_and_reported_not_silently_dropped`。
+  - 关注语义：`reads_the_authenticated_following_endpoint_with_paging_and_membership`、`a_later_page_failure_is_partial_not_a_negative_answer`、`a_first_page_failure_is_a_hard_error_not_an_empty_list`、`truncated_pagination_budgets_are_partial`、`untrusted_or_cycling_pagination_never_extends_the_set`、`entries_without_a_login_are_not_membership_evidence`、`empty_following_list_is_a_complete_negative_answer`。
+  - 类别边界：`starred_and_created_repositories_require_a_followed_actor`、`watching_and_branch_or_tag_creation_never_produce_a_card`、`closed_events_never_qualify_without_merge_evidence`、`opened_and_reopened_pull_requests_are_never_contributions`。
+  - 真实适配器 → 可见模型：`real_adapter_shapes_produce_only_followed_contribution_star_and_create_cards`（断言只有 3 张卡、顺序、作者归因，以及请求数恰为 login + events + following + 1 次详情）、`duplicate_merged_events_share_one_author_lookup`。
+  - 视图：`the_visible_feed_is_the_policy_output_not_the_raw_event_list`（真实策略输出经真实组件渲染，断言无占位行、合并卡链接作者）、`a_policy_empty_feed_is_a_normal_minimal_state`、`an_incomplete_membership_read_shows_a_partial_notice_not_an_empty_feed`、`a_merged_pull_request_credits_the_author_not_the_merging_actor`。
+  - 正式 Shell 端到端：`the_shell_mounts_real_home_and_reads_its_two_columns` 经真实 adapter/data/view 断言 open-only Home、被关注星标、合并贡献有行，Push 与未被关注账号的星标无行，且 `/user/following` 被请求。
+- Home open-only 的旧回归（`closed_merged_and_unknown_home_states_never_become_rows_or_targets`、`a_refresh_that_returns_only_closed_items_clears_the_previous_open_snapshot`、`non_open_items_are_dropped_from_the_returned_list`）在合并基线后仍通过。
+- 首轮那条“`action=merged` 必须被拒绝”的错误回归已删除，并以真实形状回归替代。
+
+### 真实公开数据核对
+
+无凭据、`X-GitHub-Api-Version: 2022-11-28`，只用于核对字段形状（不是应用认证响应，Feed 会随时间变化）：
+
+| 观测 | 结果 |
+| --- | --- |
+| `GET /users/torvalds/received_events/public` | 70 条事件，4 条 `action=merged` |
+| merged `payload` 键 | `action`、`number`、`pull_request` |
+| merged `pull_request` 键 | `base`、`head`、`id`、`number`、`url`（无 `user`、无 `merged`） |
+| `GET /repos/subsurface/libdc/pulls/144` | `merged: true`、`merged_at`、`title`、`user.login` |
+| `GET /users/octocat/following?per_page=2&page=2` | next 链接为 `/user/583231/following?...` |
+| `GET /user/following`（无凭据） | `401`（必须认证，符合数据层用法） |
+
+聚合（脱敏、无凭据）保存在本地 `.agents/task/home-feed-public-verification-2026-10-30.json`，不进入仓库。
 
 ### 原生预览证据
 
@@ -41,19 +82,21 @@
 
 ```sh
 cargo build --locked --example home
-powershell -File .agents/task/capture.ps1 -Out .agents/task/home-preview.png          # Mixed
-powershell -File .agents/task/capture.ps1 -Scenario 3 -Out .agents/task/home-filtered.png  # Filtered out
+powershell -File .agents/task/capture.ps1 -Scenario 0 -Out .agents/task/home-rework-mixed.png
+powershell -File .agents/task/capture.ps1 -Scenario 3 -Out .agents/task/home-rework-empty.png
 ```
 
-- Mixed 帧（1195×837 物理像素）：Home 六项全部显示 `#N · open`；Feed 只有三张卡片——`synthetic-contributor` 的合并 PR（inset 显示 PR 标题）、`synthetic-user` 星标仓库、`synthetic-user` 创建仓库。没有 Push/issue/评论/Release/Fork/未知卡片。
-- Filtered-out 帧：同一预览场景把全部 Push/issue/评论/Release/Fork/分支/未合并 PR/未知事件交给真实 `apply_feed`；Home 三项正常，Feed 只显示正常最小空态文案（`No starred repositories, new repositories, or merged pull requests in this Feed snapshot.`），没有占位卡。
-- `examples/home.rs` 增加仅预览用的可选首场景参数（标签或 0-based 索引），不进入产品代码。
+- 预览 fixture 现在按真实形状构造：合并卡片的事件是瘦 `action=merged`（无作者），作者由 `AuthorResolutions`（相当于详情端点结果）提供；主语 `synthetic-contributor` 被关注，merger `synthetic-user` 也被关注但不会被冒充为作者；星标与建库由 `synthetic-user` 完成。
+- 2026-10-31 恢复工作后重新构建的两张完整 PrintWindow 帧均为 1792×1256 物理像素。Mixed 帧：Home 六项全部 `#N · open`；Feed 三张卡 —— 合并贡献（作者 `synthetic-contributor`）、星标仓库、创建仓库。没有 Push/issue/评论/Release/Fork/未知卡片。
+- Filtered-out 帧：把 Push、issue、评论、Release、分支、未合并 PR、未知事件，以及**未被关注账号**的星标/建库与未被关注作者的合并全部交给真实 `build_feed`；Home 三项正常，Feed 只显示正常最小空态文案（`No activities from accounts you follow in this Feed snapshot.`），没有占位卡。
+- `examples/home.rs` 保留仅预览用的可选首场景参数（标签或 0-based 索引），不进入产品代码。
 
 ## 未覆盖
 
-- 未对 `api.github.com` 发真实请求，未用真实 PAT 验证真实合并事件、Follow 关系或 Events 延迟；`action=merged` vs `closed+merged=true` 为官方文档静态核对，没有真实事件回放。原生预览使用合成 fixture，不代表真实账户数据。
-- 原生帧是 `PrintWindow` 抓取，窗口宽度大于可见区域，右侧被裁切；未做真实鼠标/键盘/IME/多 DPI/触控板交互验收。验证边界仍遵循 [L002](../../LESSONS.md#l002模拟验证要写清边界)。
-- Follow 两类仍待可靠来源；出现受支持的权威来源时先报告证据再扩大范围。
+- **未用真实 PAT 跑过应用自身的 Feed**：私有仓库事件、SSO 组织、真实关注列表分页与认证形态下的合并事件仍未验证。上表只核对字段形状。原生预览与自动化测试都使用合成 fixture，不代表真实账户数据。
+- 首轮原生帧右侧曾被裁切；第二轮约束预览工具栏宽度并启用 DPI 感知截图，新帧完整显示两栏和底部状态行。未做真人鼠标/键盘/IME/多 DPI/触控板交互验收。验证边界遵循 [L002](../../LESSONS.md#l002模拟验证要写清边界)。
+- 关系每次刷新重读；作者解析仅在当前调用内按 PR 去重复用（并发 1，最多 30 个详情）。没有跨刷新/跨账户缓存。页面保留快照表示上次读取状态，不承诺实时察觉外部取关；下一次成功刷新会移除对应卡片。正式数据层不发条件验证器，意外 304 报错，不复活旧卡片；尚未实现离线/304 缓存重放。
+- Follow 两类事件卡片仍待可靠来源；出现受支持的权威来源时先报告证据再扩大范围。
 
 ## 后续
 

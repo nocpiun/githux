@@ -72,7 +72,7 @@ pub(super) fn feed_summary(outcome: &FeedOutcome) -> Summary {
                 .collect::<Vec<_>>()
                 .join(" ");
             format!(
-                "Partial result · {details} This page only shows starred repositories, new repositories and merged pull requests from Received Events, which covers at most 30 days / 300 events and may be delayed."
+                "Partial result · {details} This page only shows activities by accounts you follow, from Received Events, which covers at most 30 days / 300 events and may be delayed."
             )
         }
     };
@@ -105,6 +105,14 @@ fn feed_partial(reason: &FeedPartialReason) -> String {
         FeedPartialReason::SsoPartial { organizations } => format!(
             "Some organizations require SSO authorization: {}.",
             safe_list(organizations)
+        ),
+        FeedPartialReason::FollowingIncomplete { details } => format!(
+            "Your followed accounts could not all be read ({}), so activities from accounts that may be followed were withheld.",
+            safe_list(details)
+        ),
+        FeedPartialReason::AuthorUnresolved { count } => format!(
+            "The author of {} merged pull request(s) could not be confirmed, so those contributions were withheld.",
+            count
         ),
     }
 }

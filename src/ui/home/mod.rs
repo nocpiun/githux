@@ -30,9 +30,7 @@ use gpui::{
     Pixels, Point, Render, Subscription, Task, Window, div, prelude::*, px,
 };
 
-use crate::domain::home::{
-    FeedOutcome, HomeError, HomeItem, HomeSearchOutcome, classify_feed_activity,
-};
+use crate::domain::home::{FeedOutcome, HomeError, HomeItem, HomeSearchOutcome};
 use crate::ui::scroll::{self, Bars, Motion, ScrollTarget};
 
 use presentation::home_summary;
@@ -605,17 +603,16 @@ impl HomeView {
         if !self.accepts(binding, generation) {
             return false;
         }
-        // One policy rule for every data path: only retained activities are
-        // published, in source order. The filtered count is what rows, keyboard
-        // selection and activation indices refer to. Readiness is untouched, so
-        // a policy-only empty Feed stays Complete instead of looking partial (and
-        // a genuinely truncated source read stays Partial).
-        let outcome = outcome.filtered();
+        // The host applies the product policy (retained activity kinds, resolved
+        // contribution author, followed-account membership) before publishing, so
+        // this view never re-derives membership from a display string. Row count,
+        // keyboard selection and activation indices all refer to the visible
+        // activity list.
         self.feed_view.motion.cancel();
         self.feed_view.pending_reveal = None;
         self.feed_view
             .scroll
-            .reset_with_uniform_height(outcome.events.len(), px(180.0));
+            .reset_with_uniform_height(outcome.activities.len(), px(180.0));
         self.feed.state = PanelState::Ready {
             content: PanelContent::Ready(outcome),
             refreshing: false,
@@ -730,7 +727,7 @@ impl HomeView {
                 .feed
                 .state
                 .data()
-                .map_or(0, |outcome| outcome.events.len()),
+                .map_or(0, |outcome| outcome.activities.len()),
         }
     }
 
@@ -812,7 +809,8 @@ impl HomeView {
     }
 
     fn feed_action(&self, index: usize) -> Option<HomeAction> {
-        let event = self.feed.state.data()?.events.get(index)?;
+        let activity = self.feed.state.data()?.activities.get(index)?;
+        let event = &activity.event;
         let (owner, name) = event
             .repository
             .name
@@ -1139,7 +1137,7 @@ impl PanelRows for HomeSearchOutcome {
 
 impl PanelRows for FeedOutcome {
     fn len(&self) -> usize {
-        self.events.len()
+        self.activities.len()
     }
 
     fn summary(&self) -> presentation::Summary {
@@ -1152,20 +1150,17 @@ impl PanelRows for FeedOutcome {
         _window: &mut Window,
         cx: &mut Context<HomeView>,
     ) -> AnyElement {
-        let event = view.feed.state.data().unwrap().events[index].clone();
-        // The avatar belongs to the credited subject, which can differ from the
-        // event actor for a merged pull request.
-        let subject = classify_feed_activity(&event).map(|activity| activity.subject);
+        let activity = view.feed.state.data().unwrap().activities[index].clone();
+        // The avatar belongs to the credited subject, which for a merged pull
+        // request is the author, not the merging actor.
         feed_row(
-            &event,
+            &activity,
             index,
             view.feed_view.selected == Some(index),
             view.now,
-            subject.as_ref().and_then(|subject| {
-                view.avatar_renderer
-                    .as_ref()
-                    .and_then(|render| render(subject, index, cx))
-            }),
+            view.avatar_renderer
+                .as_ref()
+                .and_then(|render| render(&activity.subject, index, cx)),
             cx,
         )
     }
@@ -1285,7 +1280,7 @@ fn panel_body<T: PanelRows + 'static>(
         .text_color(colors.fg_subtle)
         .child(match column {
             Column::Home => "No open Issues or pull requests matched this search.",
-            Column::Feed => "No starred repositories, new repositories, or merged pull requests in this Feed snapshot.",
+            Column::Feed => "No activities from accounts you follow in this Feed snapshot.",
         })
         .into_any_element();
     div()

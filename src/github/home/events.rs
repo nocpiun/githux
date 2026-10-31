@@ -1,11 +1,17 @@
 //! `GET /users/{login}/received_events`.
 //!
-//! The adapter parses every received event into the minimal typed payload, then
-//! applies the confirmed Feed product policy ([`classify_feed_activity`]) so the
-//! published list contains only retained activities in source order. Technical
-//! events (push, issues, comments, releases, forks, membership, public,
-//! branch/tag create-or-delete, unknown types) are removed without a placeholder
-//! or fallback card.
+//! The adapter parses every received event into the minimal typed payload and
+//! publishes the **source list** unchanged: selecting retained activities,
+//! resolving merged-pull-request authors and applying the followed-account
+//! constraint all happen in [`crate::domain::home::build_feed`], so one policy
+//! applies to every data path. Technical events (push, issues, comments,
+//! releases, forks, membership, public, branch/tag create-or-delete, unknown
+//! types) never become cards there.
+//!
+//! Source shape note: `received_events` merges activity from followed users and
+//! watched repositories, so it is **not** a followed-users-only feed. That is why
+//! the relationship filter is applied explicitly downstream instead of assuming
+//! every event actor is followed.
 //!
 //! The adapter surfaces `ETag`, `X-Poll-Interval` and `304 Not Modified` so the
 //! caller can schedule its own polling; it never polls in the background, never
@@ -15,8 +21,8 @@
 use crate::auth::token::Pat;
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason,
-    FeedPayload, FeedReadiness, FeedRepository, HomeError, Login, classify_feed_activity,
+    FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedEventsRead, FeedFetch, FeedPartialReason,
+    FeedPayload, FeedReadiness, FeedRepository, HomeError, Login,
 };
 use crate::github::client::GitHubClient;
 use crate::github::error::{classify_status, classify_transport};
@@ -32,8 +38,8 @@ use std::collections::HashSet;
 const EVENTS_WINDOW_LIMIT: usize = 300;
 
 /// Defensive budgets for the feed adapter, bounded by the Events window.
-/// `max_events` counts parsed source events, not retained activities: the
-/// product filter is not allowed to trigger extra fetching to fill a page.
+/// `max_events` counts parsed source events, exactly as read: selecting retained
+/// activities downstream must not trigger extra fetching to fill a page.
 #[derive(Debug, Clone)]
 pub struct FeedLimits {
     pub max_pages: usize,
@@ -88,9 +94,11 @@ struct RawRepo {
 
 /// Fetch events received by `login`.
 ///
-/// When `if_none_match` is supplied it is sent only on the first page. A `304`
-/// yields [`FeedFetch::NotModified`] with the current ETag and poll hint. A
-/// normal empty feed is `Complete` with zero events, not an error.
+/// The returned events are the **source** list in server order; the product
+/// policy is applied by [`crate::domain::home::build_feed`]. When `if_none_match`
+/// is supplied it is sent only on the first page. A `304` yields
+/// [`FeedFetch::NotModified`] with the current ETag and poll hint. A normal empty
+/// source is `Complete` with zero events, not an error.
 pub async fn fetch_received_events(
     client: &GitHubClient,
     token: &Pat,
@@ -245,13 +253,9 @@ pub async fn fetch_received_events(
             }
             parsed_events += 1;
             let event = convert_event(raw)?;
-            // Identity de-duplication uses the event id across pages, so a
-            // retained activity keeps its real source identity and a repeated
-            // non-activity cannot re-trigger it later.
-            if !seen.insert(event.id.clone()) {
-                continue;
-            }
-            if classify_feed_activity(&event).is_some() {
+            // Identity de-duplication uses the real event id across pages, so a
+            // retained activity keeps its source identity.
+            if seen.insert(event.id.clone()) {
                 events.push(event);
             }
         }
@@ -259,9 +263,6 @@ pub async fn fetch_received_events(
             reasons.push(FeedPartialReason::EntryLimit);
             break;
         }
-        // A page that contained only non-activities is still a successfully read
-        // page: keep following `Link` within the same page budget instead of
-        // reporting a policy result as a truncated read.
         match next_page(client, response.header("link"), page)? {
             NextPage::None => break,
             NextPage::Page(next) => page = next,
@@ -288,7 +289,7 @@ pub async fn fetch_received_events(
         FeedReadiness::Partial { .. } => None,
         FeedReadiness::Complete => etag,
     };
-    Ok(FeedFetch::Events(FeedOutcome {
+    Ok(FeedFetch::Events(FeedEventsRead {
         events,
         etag,
         poll_interval_seconds,

@@ -100,9 +100,11 @@ account-shell 在正式 Shell 中加入的 **Settings › Accounts** 只承担�
 
 左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。负责人 2026-10-28 确认查询固定为 `involves:当前已认证登录`，**不添加时间窗口**，按 `updated` 降序；2026-10-30 追加确认**实际搜索查询必须包含 `is:open`**，Home 最终可见条目只能是 open 的 Issue/PR。不额外扩大到仅被请求评审等关系。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
 
-右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。负责人 2026-10-30 确认 Feed **只保留明确允许的活动**，去掉 Push 等技术噪声；当前实现三类：合并的 PR（标题为“<user> contributed to <owner>/<repo>”，`<user>` 取事件 payload 中真实的 PR 作者，而不是点了 merge 的维护者 actor）、星标仓库（`WatchEvent action=started`）与创建仓库（`CreateEvent ref_type=repository`）。Push、issue、评论、Release、Fork、成员、公开仓库、分支/标签创建删除、未知类型与非合并 PR 都不得生成卡片或占位回退。筛选后为空是正常最小空态，不是 API 错误或不完整页。
+右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。负责人 2026-10-30 确认 Feed **只保留明确允许的活动**，去掉 Push 等技术噪声；当前实现三类：合并的 PR（标题为“<user> contributed to <owner>/<repo>”）、星标仓库（`WatchEvent action=started`）与创建仓库（`CreateEvent ref_type=repository`）。Push、issue、评论、Release、Fork、成员、公开仓库、分支/标签创建删除、未知类型与非合并 PR 都不得生成卡片或占位回退。
 
-**Follow 两类暂缓**：当前官方 Events API 事件类型列表没有 FollowEvent，followers/following 端点只返回关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types) 与 [followers](https://docs.github.com/en/rest/users/followers)）。负责人回答“先实现三类，关注两类暂缓”：本轮不实现 follow 卡片、不伪造时间戳、不抓取私有网页端点，也没有占位卡；“Followed someone / Followed me”保留为待可靠来源的后续需求，详见 [Home 视图](home-view.md) 与 [Home 查询服务](home-query-service.md)。
+**每条卡片的主语必须是当前账户关注的人**（负责人 2026-10-30 补充，适用于全部三类）。合并贡献的主语是**真实的 PR 作者**，不是点了 merge 的维护者 actor；当前线上 `action=merged` 的事件 payload 不携带作者，因此需要读该 PR 的详情确认作者与合并状态，作者无法可靠确定时宁可不显示。星标/建库主语是事件 actor。`received_events` 本身混合了“关注的人”与“watch 的仓库”，所以必须显式读取当前账户的关注关系再过滤。关注关系或作者解析不完整时不能显示成“完整空 Feed”，也不能把失败当作“没关注任何人”。筛选后为空是正常最小空态，不是 API 错误。
+
+**Follow 两类事件暂缓**：当前官方 Events API 事件类型列表没有 FollowEvent，followers/following 端点只返回关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types) 与 [followers](https://docs.github.com/en/rest/users/followers)）。负责人回答“先实现三类，关注两类暂缓”：本轮不实现 follow 卡片、不伪造时间戳、不抓取私有网页端点，也没有占位卡；“Followed someone / Followed me”保留为待可靠来源的后续需求。**暂缓的只是这两类事件卡片**；读取关注关系用于上面的主语过滤已经实现，不属于暂缓项。详见 [Home 视图](home-view.md) 与 [Home 查询服务](home-query-service.md)。
 
 组件契约见 [Home / Feed 页面视图](home-view.md)，来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
 

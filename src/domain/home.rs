@@ -3,12 +3,12 @@
 //!
 //! These types carry no credentials and perform no I/O. Home is confirmed as
 //! `involves:<login> is:open` with no default time window; callers supply an
-//! explicit login and, optionally, an explicit `updated` window. Feed is
-//! confirmed as a **filtered** set of received activities
-//! ([`classify_feed_activity`]). Neither list defines an "unread" meaning, a
-//! review-requested relationship or a browse-history interpretation. Truncation
-//! and missing data are represented by readiness, never by a silently
-//! complete-looking empty list.
+//! explicit login and, optionally, an explicit `updated` window. Feed is a
+//! **filtered** set of received activities whose subject is a followed account:
+//! [`build_feed`] is the single policy function. Neither list defines an
+//! "unread" meaning, a review-requested relationship or a browse-history
+//! interpretation. Truncation, unknown membership and unresolved authorship are
+//! represented by readiness, never by a silently complete-looking empty list.
 
 use crate::domain::error::GitHubError;
 use thiserror::Error;
@@ -393,18 +393,312 @@ pub struct FeedEvent {
     pub payload: FeedPayload,
 }
 
-/// Why a Feed result is only partial.
+/// Which received-event activities become Feed cards (owner decision,
+/// 2026-10-30, refined after live-data review).
+///
+/// **Every** retained card's subject must be an account the active account
+/// currently follows. Push, issue/comment, release, fork, membership, public,
+/// branch/tag create-or-delete, non-merged pull requests and unknown types are
+/// technical noise: they must not produce a card, a placeholder or a fallback
+/// sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedActivityKind {
+    /// A pull request was merged: `<author> contributed to <owner>/<repo>`, where
+    /// the subject is the pull request's **author**, not the actor who merged it.
+    PullRequestMerged,
+    /// `WatchEvent` with `action=started` (starring a repository, not a watch
+    /// subscription). Subject: the event actor.
+    RepositoryStarred,
+    /// `CreateEvent` with `ref_type=repository` (branch/tag creation excluded).
+    /// Subject: the event actor.
+    RepositoryCreated,
+}
+
+/// One retained Feed activity: the product decision plus the event it came from.
+///
+/// The original [`FeedEvent`] is kept whole so identity, timestamp, repository
+/// and event type stay exactly as received; nothing is re-derived from display
+/// strings. `subject` is already the validated, followed account, so the view
+/// never needs to re-run membership logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FeedPartialReason {
+pub struct FeedActivity {
+    pub kind: FeedActivityKind,
+    /// The followed account that the card credits and links.
+    pub subject: FeedActor,
+    /// Pull-request target, present only for [`FeedActivityKind::PullRequestMerged`].
+    pub pull_request: Option<FeedActivityTarget>,
+    /// The received event this activity was derived from (source order, real id).
+    pub event: FeedEvent,
+}
+
+/// The pull request an activity refers to, when the event payload has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedActivityTarget {
+    pub number: Option<u64>,
+    pub title: Option<String>,
+    pub html_url: Option<String>,
+}
+
+/// A merged pull request that still needs its author resolved.
+///
+/// A live `PullRequestEvent` with `action=merged` carries only a slim
+/// `pull_request` object (url/id/number/head/base) without `user`, so the author
+/// must come from the pull-request detail endpoint. This value carries the
+/// trusted, locally-derived coordinates for that read; the payload's own `url`
+/// is deliberately not stored for fetching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedMergeCandidate {
+    /// Repository owner and name from the event's `repo.name`.
+    pub owner: String,
+    pub repository: String,
+    pub pull_request: FeedActivityTarget,
+    /// The payload's embedded pull-request author, when the source supplied one.
+    pub embedded_author: Option<FeedAuthor>,
+}
+
+impl FeedMergeCandidate {
+    /// Cross-event de-duplication key for author lookups.
+    pub fn key(&self) -> String {
+        format!(
+            "{}/{}#{}",
+            self.owner.to_ascii_lowercase(),
+            self.repository.to_ascii_lowercase(),
+            self.pull_request
+                .number
+                .map_or_else(|| "?".to_string(), |number| number.to_string())
+        )
+    }
+}
+
+/// Local merge evidence for one event.
+///
+/// Official `PullRequestEvent.action` values include `merged`, so a live merge
+/// arrives as `action=merged`; an older/other source may instead report
+/// `action=closed` with `pull_request.merged=true`. Both are accepted, and
+/// `closed` **without** merge evidence is not a merge. `action=closed` with an
+/// absent `merged` flag is treated as unknown rather than as a merge: it neither
+/// qualifies nor triggers a detail read.
+pub fn merge_candidate(event: &FeedEvent) -> Option<FeedMergeCandidate> {
+    let (
+        FeedEventType::PullRequest,
+        FeedPayload::PullRequest {
+            action,
+            number,
+            title,
+            html_url,
+            merged,
+            author,
+            ..
+        },
+    ) = (&event.event_type, &event.payload)
+    else {
+        return None;
+    };
+    let merge_evidence = action == "merged" || (action == "closed" && *merged == Some(true));
+    if !merge_evidence {
+        return None;
+    }
+    let (owner, repository) = event
+        .repository
+        .name
+        .split_once('/')
+        .map_or(("", event.repository.name.as_str()), |(owner, name)| {
+            (owner, name)
+        });
+    if owner.trim().is_empty() || repository.trim().is_empty() {
+        // Without a usable repository identity the author cannot be resolved and
+        // the card target cannot be linked.
+        return None;
+    }
+    Some(FeedMergeCandidate {
+        owner: owner.to_string(),
+        repository: repository.to_string(),
+        pull_request: FeedActivityTarget {
+            number: *number,
+            title: title
+                .as_ref()
+                .map(|title| title.trim())
+                .filter(|title| !title.is_empty())
+                .map(str::to_string),
+            html_url: html_url.clone(),
+        },
+        embedded_author: author.clone(),
+    })
+}
+
+/// A non-merge retained activity plus its subject, decided locally.
+///
+/// Star and repository-create cards credit the event actor, so no extra read is
+/// needed; membership is applied by the caller.
+pub fn local_activity(event: &FeedEvent) -> Option<(FeedActivityKind, FeedActor)> {
+    match (&event.event_type, &event.payload) {
+        // Starring a repository, not watching it.
+        (FeedEventType::Watch, FeedPayload::Watch { action }) if action == "started" => {
+            Some((FeedActivityKind::RepositoryStarred, event.actor.clone()))
+        }
+        // Repository creation only; branch/tag creation is excluded.
+        (FeedEventType::Create, FeedPayload::Create { ref_type, .. })
+            if ref_type.as_deref() == Some("repository") =>
+        {
+            Some((FeedActivityKind::RepositoryCreated, event.actor.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the Feed product policy retains this event at all, ignoring
+/// membership. Used to decide which events are worth resolving.
+pub fn is_retained_activity(event: &FeedEvent) -> bool {
+    merge_candidate(event).is_some() || local_activity(event).is_some()
+}
+
+/// One account the active account follows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowedAccount {
+    pub id: u64,
+    pub login: String,
+    pub avatar_url: Option<String>,
+}
+
+/// Why the followed-account list is only partial. Any entry means membership is
+/// **unknown** for subjects that are absent from the list, so those subjects must
+/// not be displayed and the Feed must not be reported as a complete empty page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowingPartialReason {
     PageFailed { message: String },
     PageLimit,
-    EntryLimit,
+    AccountLimit,
     ResponseLimit,
     ParseFailed { message: String },
     UntrustedPagination,
     InvalidPagination,
     PaginationCycle,
     SsoPartial { organizations: Vec<String> },
+}
+
+/// Completeness of the followed-account list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowingReadiness {
+    Complete,
+    Partial {
+        reasons: Vec<FollowingPartialReason>,
+    },
+}
+
+impl FollowingReadiness {
+    pub(crate) fn from_reasons(reasons: Vec<FollowingPartialReason>) -> Self {
+        if reasons.is_empty() {
+            Self::Complete
+        } else {
+            Self::Partial { reasons }
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+/// The active account's followed accounts.
+///
+/// `accounts` is the set that was actually read; with a `Partial` readiness it is
+/// only a subset, so [`Following::follows`] returning `false` means "not in the
+/// list we could read", not "does not follow".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Following {
+    pub accounts: Vec<FollowedAccount>,
+    pub readiness: FollowingReadiness,
+}
+
+impl Following {
+    /// Login comparison is ASCII case-insensitive because GitHub logins are.
+    pub fn follows(&self, login: &str) -> bool {
+        let login = login.trim();
+        !login.is_empty()
+            && self
+                .accounts
+                .iter()
+                .any(|account| account.login.eq_ignore_ascii_case(login))
+    }
+
+    /// Match stable IDs when both endpoints supplied them, so renames cannot
+    /// transfer membership to a different account that later takes the old login.
+    pub fn follows_subject(&self, subject: &FeedActor) -> bool {
+        if subject.id != 0 {
+            self.accounts.iter().any(|account| account.id == subject.id)
+        } else {
+            self.follows(&subject.login)
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.accounts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.accounts.is_empty()
+    }
+}
+
+/// Result of resolving one merged pull request's author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullRequestDetailOutcome {
+    /// The detail endpoint supplied the author (and possibly a title/URL).
+    Attributed(ResolvedPullRequest),
+    /// The read succeeded but identified no author. The merger must never be
+    /// substituted, so this contribution is not shown.
+    Unattributable,
+}
+
+/// The identity a merged contribution needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPullRequest {
+    pub author: FeedAuthor,
+    /// `true` only when the detail response itself says `merged: true`.
+    pub merged: bool,
+    pub title: Option<String>,
+    pub html_url: Option<String>,
+}
+
+/// One pull-request detail read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDetail {
+    pub id: u64,
+    pub number: u64,
+    pub state: Option<String>,
+    pub merged: bool,
+    pub outcome: PullRequestDetailOutcome,
+}
+
+/// Why the Feed is only partial. Beyond the event-source reasons this includes
+/// the followed-relationship read and author enrichment, because either can leave
+/// real contributions unresolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedPartialReason {
+    PageFailed {
+        message: String,
+    },
+    PageLimit,
+    EntryLimit,
+    ResponseLimit,
+    ParseFailed {
+        message: String,
+    },
+    UntrustedPagination,
+    InvalidPagination,
+    PaginationCycle,
+    SsoPartial {
+        organizations: Vec<String>,
+    },
+    /// The followed-account list could not be read completely, so some subjects'
+    /// membership is unknown and those cards were withheld.
+    FollowingIncomplete {
+        details: Vec<String>,
+    },
+    /// One or more merged pull requests could not have their author resolved.
+    AuthorUnresolved {
+        count: usize,
+    },
 }
 
 /// Completeness of a Feed result. Events are only available for the last 30
@@ -427,138 +721,251 @@ impl FeedReadiness {
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
     }
-}
 
-/// The three received-event activities that become Feed cards (owner decision,
-/// 2026-10-30: "先实现三类，关注两类暂缓").
-///
-/// Push, issue/comment, release, fork, membership, public, branch/tag
-/// create-or-delete, non-merged pull requests and unknown types are technical
-/// noise for this page: they must not produce a card, a placeholder or a
-/// fallback sentence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FeedActivityKind {
-    /// A pull request was merged: `<author> contributed to <owner>/<repo>`.
-    PullRequestMerged,
-    /// `WatchEvent` with `action=started` (starring a repository, not a watch
-    /// subscription).
-    RepositoryStarred,
-    /// `CreateEvent` with `ref_type=repository` (branch/tag creation excluded).
-    RepositoryCreated,
-}
-
-/// One retained Feed activity, derived from a received event.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeedActivity {
-    pub kind: FeedActivityKind,
-    /// Whom the card credits and links. This is the event actor, except for a
-    /// merged pull request where it is the payload's pull-request author.
-    pub subject: FeedActor,
-    /// Pull-request target, present only for [`FeedActivityKind::PullRequestMerged`].
-    pub pull_request: Option<FeedActivityTarget>,
-}
-
-/// The pull request an activity refers to, when the event payload has one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeedActivityTarget {
-    pub number: Option<u64>,
-    pub title: Option<String>,
-}
-
-/// Product policy for the Feed column: which received events become cards.
-///
-/// This is deliberately a pure function of the already-parsed event, so the
-/// adapter, the account-scoped data facade, fixtures and the view apply exactly
-/// one rule. Filtering is a product decision, not a data-quality problem: an
-/// empty result after filtering is a normal empty Feed, never a partial page or
-/// an error.
-///
-/// Merge evidence follows the official Events API `PullRequestEvent` shape: a
-/// merge is reported as `action=closed` with `pull_request.merged=true`. There
-/// is no `action=merged`, so `closed` alone never qualifies, and an
-/// already-`merged` payload that does not say `closed` is contradictory.
-pub fn classify_feed_activity(event: &FeedEvent) -> Option<FeedActivity> {
-    match (&event.event_type, &event.payload) {
-        (
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action,
-                number,
-                title,
-                merged: Some(true),
-                author: Some(author),
-                ..
-            },
-        ) if action == "closed" && !author.login.trim().is_empty() => Some(FeedActivity {
-            kind: FeedActivityKind::PullRequestMerged,
-            subject: FeedActor {
-                id: author.id,
-                login: author.login.clone(),
-                display_login: None,
-                avatar_url: author.avatar_url.clone(),
-            },
-            pull_request: Some(FeedActivityTarget {
-                number: *number,
-                title: title
-                    .as_ref()
-                    .map(|title| title.trim())
-                    .filter(|title| !title.is_empty())
-                    .map(str::to_string),
-            }),
-        }),
-        (FeedEventType::Watch, FeedPayload::Watch { action }) if action == "started" => {
-            Some(FeedActivity {
-                kind: FeedActivityKind::RepositoryStarred,
-                subject: event.actor.clone(),
-                pull_request: None,
-            })
+    pub fn reasons(&self) -> &[FeedPartialReason] {
+        match self {
+            Self::Complete => &[],
+            Self::Partial { reasons } => reasons,
         }
-        (FeedEventType::Create, FeedPayload::Create { ref_type, .. })
-            if ref_type.as_deref() == Some("repository") =>
+    }
+}
+
+/// Author lookups for merged pull requests, keyed by
+/// [`FeedMergeCandidate::key`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthorResolutions {
+    entries: Vec<(String, Option<ResolvedPullRequest>)>,
+}
+
+impl AuthorResolutions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a resolved author. A later resolution for the same key replaces an
+    /// earlier one so a refresh cannot keep a stale author.
+    pub fn insert(&mut self, key: impl Into<String>, value: ResolvedPullRequest) {
+        self.set(key, Some(value));
+    }
+
+    /// Record that the author could not be resolved (read failure, missing user,
+    /// or budget exhaustion).
+    pub fn mark_unresolved(&mut self, key: impl Into<String>) {
+        self.set(key, None);
+    }
+
+    fn set(&mut self, key: impl Into<String>, value: Option<ResolvedPullRequest>) {
+        let key = key.into();
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|(existing, _)| existing == &key)
         {
-            Some(FeedActivity {
-                kind: FeedActivityKind::RepositoryCreated,
-                subject: event.actor.clone(),
-                pull_request: None,
-            })
+            entry.1 = value;
+            return;
         }
-        _ => None,
+        self.entries.push((key, value));
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Option<ResolvedPullRequest>> {
+        self.entries
+            .iter()
+            .find(|(existing, _)| existing == key)
+            .map(|(_, value)| value)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
-impl FeedOutcome {
-    /// Keep only product activities, preserving source order and real event
-    /// identity.
-    ///
-    /// Filtering is not truncation: `readiness` is left untouched, so a Feed whose
-    /// whole page was technical noise stays `Complete` and reads as a normal empty
-    /// Feed, while a genuinely truncated source read stays `Partial`. The retained
-    /// list is what the page shows and what selection indices refer to.
-    pub fn filtered(mut self) -> Self {
-        self.events
-            .retain(|event| classify_feed_activity(event).is_some());
-        self
+/// Build the visible Feed from the received events, the followed-account list and
+/// the resolved pull-request authors.
+///
+/// This is the single place the product policy is applied, so every data path —
+/// first load, refresh, 304 replay and retained snapshots — produces the same
+/// result:
+///
+/// 1. keep only the three retained activity kinds;
+/// 2. for a merged pull request take the **author** (embedded or resolved), never
+///    the merging actor; without a reliable author the contribution is withheld;
+/// 3. keep a card only when its subject is in the followed-account list. When that
+///    list is incomplete, absence is unknown rather than "not followed", so the
+///    card is withheld and the outcome is reported partial.
+///
+/// Source order, real event identity and the source's own readiness reasons are
+/// preserved. A policy-only empty result is `Complete`; unknown membership or an
+/// unresolved author is never reported as a complete empty Feed.
+pub fn build_feed(
+    events: Vec<FeedEvent>,
+    source_reasons: Vec<FeedPartialReason>,
+    following: &Following,
+    authors: &AuthorResolutions,
+) -> FeedOutcome {
+    let mut activities: Vec<FeedActivity> = Vec::new();
+    let mut unresolved = 0usize;
+    for event in events {
+        if let Some(candidate) = merge_candidate(&event) {
+            let resolved = candidate
+                .embedded_author
+                .clone()
+                .map(|author| ResolvedPullRequest {
+                    author,
+                    // Local merge evidence already established the merge.
+                    merged: true,
+                    title: candidate.pull_request.title.clone(),
+                    html_url: candidate.pull_request.html_url.clone(),
+                })
+                .or_else(|| authors.get(&candidate.key()).cloned().flatten());
+            let Some(resolved) = resolved else {
+                unresolved += 1;
+                continue;
+            };
+            if !resolved.merged || resolved.author.login.trim().is_empty() {
+                // Contradictory/missing detail evidence is unresolved, not proof
+                // of a complete empty Feed.
+                unresolved += 1;
+                continue;
+            }
+            let subject = FeedActor {
+                id: resolved.author.id,
+                login: resolved.author.login.clone(),
+                display_login: None,
+                avatar_url: resolved.author.avatar_url.clone(),
+            };
+            if !following.follows_subject(&subject) {
+                continue;
+            }
+            activities.push(FeedActivity {
+                kind: FeedActivityKind::PullRequestMerged,
+                subject,
+                pull_request: Some(FeedActivityTarget {
+                    number: candidate.pull_request.number,
+                    title: resolved.title.or(candidate.pull_request.title),
+                    html_url: resolved.html_url.or(candidate.pull_request.html_url),
+                }),
+                event,
+            });
+            continue;
+        }
+        let Some((kind, subject)) = local_activity(&event) else {
+            continue;
+        };
+        if !following.follows_subject(&subject) {
+            continue;
+        }
+        activities.push(FeedActivity {
+            kind,
+            subject,
+            pull_request: None,
+            event,
+        });
+    }
+
+    let mut reasons = source_reasons;
+    if let FollowingReadiness::Partial {
+        reasons: following_reasons,
+    } = &following.readiness
+    {
+        reasons.push(FeedPartialReason::FollowingIncomplete {
+            details: following_reasons.iter().map(following_reason).collect(),
+        });
+    }
+    if unresolved > 0 {
+        reasons.push(FeedPartialReason::AuthorUnresolved { count: unresolved });
+    }
+
+    FeedOutcome {
+        activities,
+        etag: None,
+        poll_interval_seconds: None,
+        readiness: FeedReadiness::from_reasons(reasons),
     }
 }
 
-/// A successful Feed fetch. `etag` and `poll_interval_seconds` are surfaced so
-/// the caller can schedule its own refresh; this adapter never polls itself.
-/// `events` contains retained activities only, in source order.
+fn following_reason(reason: &FollowingPartialReason) -> String {
+    match reason {
+        FollowingPartialReason::PageFailed { .. } => {
+            "a later followed-accounts page failed".to_string()
+        }
+        FollowingPartialReason::PageLimit => "the followed-accounts page budget was reached".into(),
+        FollowingPartialReason::AccountLimit => {
+            "the followed-accounts budget was reached".to_string()
+        }
+        FollowingPartialReason::ResponseLimit => {
+            "a followed-accounts response exceeded its size budget".to_string()
+        }
+        FollowingPartialReason::ParseFailed { .. } => {
+            "a followed-accounts page could not be parsed".to_string()
+        }
+        FollowingPartialReason::UntrustedPagination => {
+            "an untrusted followed-accounts pagination link was rejected".to_string()
+        }
+        FollowingPartialReason::InvalidPagination => {
+            "a followed-accounts pagination link was invalid".to_string()
+        }
+        FollowingPartialReason::PaginationCycle => {
+            "a followed-accounts pagination cycle was stopped".to_string()
+        }
+        FollowingPartialReason::SsoPartial { organizations } => format!(
+            "SSO authorization is missing for {}",
+            if organizations.is_empty() {
+                "some organizations".to_string()
+            } else {
+                organizations.join(", ")
+            }
+        ),
+    }
+}
+
+/// A successful Feed fetch: the visible, followed-subject activities plus the
+/// scheduling metadata of the underlying events read. `activities` is in source
+/// order and already policy-filtered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedOutcome {
-    pub events: Vec<FeedEvent>,
+    pub activities: Vec<FeedActivity>,
     pub etag: Option<String>,
     pub poll_interval_seconds: Option<u64>,
     pub readiness: FeedReadiness,
 }
 
-/// Outcome of a Feed request. `NotModified` is a distinct, non-error answer to
-/// a conditional request; it still carries the new poll hint.
+/// One raw events read, before the product policy is applied.
+///
+/// Keeping this shape separate from [`FeedOutcome`] makes it impossible to
+/// publish an unfiltered source list as Feed content: only
+/// [`build_feed`] can produce a [`FeedOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedEventsRead {
+    /// Every parsed source event in server order, deduplicated by event id.
+    pub events: Vec<FeedEvent>,
+    pub etag: Option<String>,
+    pub poll_interval_seconds: Option<u64>,
+    /// Readiness of the **source read** only; it says nothing about membership or
+    /// author resolution.
+    pub readiness: FeedReadiness,
+}
+
+impl FeedEventsRead {
+    /// Source-level partial reasons, to be carried into the built outcome.
+    pub fn source_reasons(&self) -> Vec<FeedPartialReason> {
+        self.readiness.reasons().to_vec()
+    }
+}
+
+/// Outcome of a raw Feed request. `NotModified` is a distinct, non-error answer
+/// to a conditional request; it still carries the new poll hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedFetch {
-    Events(FeedOutcome),
+    Events(FeedEventsRead),
     NotModified {
         etag: Option<String>,
         poll_interval_seconds: Option<u64>,
     },
 }
+
+#[cfg(test)]
+mod feed_policy_tests;

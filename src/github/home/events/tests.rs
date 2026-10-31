@@ -1,5 +1,4 @@
 use super::*;
-use crate::domain::home::FeedActivityKind;
 use crate::network::test_server::{LocalHttpServer, ScriptedResponse};
 use crate::network::transport::{HttpResponse, MockTransport, ReqwestTransport};
 use std::sync::Arc;
@@ -95,42 +94,57 @@ async fn parses_common_event_types() {
     else {
         panic!("expected events");
     };
-    // Only the starred repository is a retained Feed activity here: push,
-    // unmerged pull request, issue and release events are technical noise.
-    assert_eq!(outcome.events.len(), 1);
+    // The adapter publishes the parsed **source** list: selecting retained
+    // activities is the product policy applied later by `build_feed`, so nothing
+    // is dropped here.
+    assert_eq!(outcome.events.len(), 5);
     assert_eq!(outcome.etag.as_deref(), Some("\"feed-1\""));
     assert_eq!(outcome.poll_interval_seconds, Some(60));
-    assert_eq!(
-        outcome.readiness,
-        FeedReadiness::Complete,
-        "filtering is not truncation"
-    );
+    assert_eq!(outcome.readiness, FeedReadiness::Complete);
 
-    assert_eq!(outcome.events[0].event_type, FeedEventType::Watch);
+    assert_eq!(outcome.events[0].event_type, FeedEventType::Push);
     assert!(matches!(
         &outcome.events[0].payload,
-        FeedPayload::Watch { action } if action == "started"
+        FeedPayload::Push { git_ref, size: Some(2), .. }
+            if git_ref.as_deref() == Some("refs/heads/main")
+    ));
+    assert_eq!(outcome.events[1].event_type, FeedEventType::PullRequest);
+    assert!(matches!(
+        &outcome.events[1].payload,
+        FeedPayload::PullRequest { action, number: Some(5), merged: Some(false), .. }
+            if action == "opened"
+    ));
+    assert_eq!(outcome.events[2].event_type, FeedEventType::Issues);
+    assert_eq!(outcome.events[3].event_type, FeedEventType::Watch);
+    assert!(matches!(
+        &outcome.events[4].payload,
+        FeedPayload::Release { tag_name, .. } if tag_name.as_deref() == Some("v1.0.0")
     ));
     assert_eq!(outcome.events[0].actor.login, "actor-user");
     assert_eq!(outcome.events[0].repository.name, "acme/repo");
 }
 
 #[tokio::test]
-async fn retained_activities_keep_source_order_and_identity() {
+async fn a_source_page_keeps_every_event_in_server_order_and_identity() {
     let mock = Arc::new(MockTransport::new());
     mock.enqueue(Ok(ok(
         events_body(vec![
             event("1", "WatchEvent", serde_json::json!({"action": "started"})),
-            event("2", "PushEvent", serde_json::json!({"ref": "refs/heads/main", "size": 2})),
+            event(
+                "2",
+                "PushEvent",
+                serde_json::json!({"ref": "refs/heads/main", "size": 2}),
+            ),
             event(
                 "3",
                 "PullRequestEvent",
                 serde_json::json!({
-                    "action": "closed", "number": 5,
+                    "action": "merged", "number": 5,
                     "pull_request": {
-                        "title": "Fix", "html_url": "https://github.com/acme/repo/pull/5",
-                        "state": "closed", "merged": true,
-                        "user": {"id": 31, "login": "contributor", "avatar_url": "https://example.invalid/c.png"}
+                        "url": "https://api.github.com/repos/acme/repo/pulls/5",
+                        "id": 55, "number": 5,
+                        "head": {"ref": "x", "sha": "a"},
+                        "base": {"ref": "main", "sha": "b"}
                     }
                 }),
             ),
@@ -153,192 +167,36 @@ async fn retained_activities_keep_source_order_and_identity() {
         .iter()
         .map(|event| event.id.as_str())
         .collect();
-    assert_eq!(ids, vec!["1", "3", "4"], "source order is preserved");
-
-    // The merged pull request credits the payload author, not the event actor.
-    let merged = classify_feed_activity(&outcome.events[1]).expect("merged activity");
-    assert_eq!(merged.kind, FeedActivityKind::PullRequestMerged);
-    assert_eq!(merged.subject.id, 31);
-    assert_eq!(merged.subject.login, "contributor");
     assert_eq!(
-        merged.subject.avatar_url.as_deref(),
-        Some("https://example.invalid/c.png")
+        ids,
+        vec!["1", "2", "3", "4"],
+        "the source list keeps server order and every event"
     );
-    assert_ne!(merged.subject.login, outcome.events[1].actor.login);
-    let target = merged.pull_request.expect("pull request target");
-    assert_eq!(target.number, Some(5));
-    assert_eq!(target.title.as_deref(), Some("Fix"));
-
-    let starred = classify_feed_activity(&outcome.events[0]).expect("star activity");
-    assert_eq!(starred.kind, FeedActivityKind::RepositoryStarred);
-    let created = classify_feed_activity(&outcome.events[2]).expect("create activity");
-    assert_eq!(created.kind, FeedActivityKind::RepositoryCreated);
+    assert_eq!(outcome.events[2].repository.name, "acme/repo");
 }
 
+/// The live `action=merged` shape observed from the public Events API: the
+/// payload contains a slim `pull_request` object with only
+/// `url/id/number/head/base`, no `merged` flag and no `user`. Parsing must keep
+/// the action and the target identity, and must not invent an author.
 #[tokio::test]
-async fn wrong_actions_ref_types_and_missing_merge_evidence_are_excluded() {
+async fn parses_a_live_merged_event_with_a_slim_pull_request_object() {
     let mock = Arc::new(MockTransport::new());
-    let mut events = vec![
-        // Stopping a watch is not starring.
-        event("1", "WatchEvent", serde_json::json!({"action": "stopped"})),
-        // Branch/tag creation is not repository creation.
-        event(
-            "2",
-            "CreateEvent",
-            serde_json::json!({"ref_type": "branch", "ref": "feature"}),
-        ),
-        event(
-            "3",
-            "CreateEvent",
-            serde_json::json!({"ref_type": "tag", "ref": "v1.0.0"}),
-        ),
-        // Delete is never a create.
-        event(
-            "4",
-            "DeleteEvent",
-            serde_json::json!({"ref_type": "repository", "ref": null}),
-        ),
-        event(
-            "5",
-            "ForkEvent",
-            serde_json::json!({"forkee": {"full_name": "x/y"}}),
-        ),
-        event(
-            "6",
-            "ReleaseEvent",
-            serde_json::json!({"action": "published", "release": {"tag_name": "v1"}}),
-        ),
-        event(
-            "7",
-            "MemberEvent",
-            serde_json::json!({"action": "added", "member": {"login": "x"}}),
-        ),
-        event("8", "PublicEvent", serde_json::json!({})),
-        event(
-            "9",
-            "IssuesEvent",
-            serde_json::json!({"action": "closed", "issue": {"number": 1}}),
-        ),
-        event(
-            "10",
-            "IssueCommentEvent",
-            serde_json::json!({"action": "created", "issue": {"number": 1}}),
-        ),
-    ];
-    let pr = |id: &str, action: &str, merged: serde_json::Value, author: serde_json::Value| {
-        event(
-            id,
-            "PullRequestEvent",
-            serde_json::json!({
-                "action": action, "number": 1,
-                "pull_request": {"title": "T", "state": "closed", "merged": merged, "user": author}
-            }),
-        )
-    };
-    let author = serde_json::json!({"id": 31, "login": "contributor"});
-    events.push(pr("11", "opened", serde_json::Value::Null, author.clone()));
-    events.push(pr("12", "closed", serde_json::json!(false), author.clone()));
-    events.push(pr("13", "closed", serde_json::Value::Null, author.clone()));
-    // There is no `action=merged` in the official Events schema.
-    events.push(pr("14", "merged", serde_json::json!(true), author.clone()));
-    // No authoritative author: attribution would be a guess.
-    events.push(pr(
-        "15",
-        "closed",
-        serde_json::json!(true),
-        serde_json::Value::Null,
-    ));
-    // Unrecognised type.
-    events.push(event(
-        "16",
-        "SomeFutureEvent",
-        serde_json::json!({"secret": "x".repeat(100)}),
-    ));
-
-    mock.enqueue(Ok(ok(events_body(events), vec![]))).await;
-    let FeedFetch::Events(outcome) = run(&mock, None, &FeedLimits::default()).await.expect("ok")
-    else {
-        panic!("expected events");
-    };
-    assert!(
-        outcome.events.is_empty(),
-        "no non-activity may become a Feed card: {:?}",
-        outcome
-            .events
-            .iter()
-            .map(|event| (event.id.clone(), event.event_type.clone()))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        outcome.readiness,
-        FeedReadiness::Complete,
-        "an all-filtered page is a normal complete empty Feed"
-    );
-}
-
-#[tokio::test]
-async fn an_all_filtered_feed_stays_complete_and_empty() {
-    let mock = Arc::new(MockTransport::new());
-    mock.enqueue(Ok(ok(
-        events_body(vec![
-            event(
-                "1",
-                "PushEvent",
-                serde_json::json!({"ref": "refs/heads/main", "before": "a", "head": "b", "size": 1}),
-            ),
-            event(
-                "2",
-                "PullRequestEvent",
-                serde_json::json!({
-                    "action": "closed", "number": 9,
-                    "pull_request": {"title": "Abandoned", "state": "closed", "merged": false,
-                                     "user": {"id": 31, "login": "contributor"}}
-                }),
-            ),
-        ]),
-        vec![("ETag", "\"feed-1\""), ("X-Poll-Interval", "60")],
-    )))
-    .await;
-
-    let FeedFetch::Events(outcome) = run(&mock, None, &FeedLimits::default()).await.expect("ok")
-    else {
-        panic!("expected events");
-    };
-    assert!(outcome.events.is_empty());
-    assert_eq!(outcome.readiness, FeedReadiness::Complete);
-    // The validator still describes the read representation, and filtering does
-    // not make the page partial, so it is safe to reuse.
-    assert_eq!(outcome.etag.as_deref(), Some("\"feed-1\""));
-    assert_eq!(outcome.poll_interval_seconds, Some(60));
-}
-
-#[tokio::test]
-async fn filtered_activities_do_not_trigger_extra_fetching_to_fill_the_page() {
-    // One full page of noise plus a `next` link. The policy must not spend more
-    // requests to backfill: source caps and pagination semantics stay as read.
-    let noise: Vec<serde_json::Value> = (0..100)
-        .map(|index| {
-            event(
-                &format!("n{index}"),
-                "PushEvent",
-                serde_json::json!({"ref": "refs/heads/main", "size": 1}),
-            )
-        })
-        .collect();
-    let mock = Arc::new(MockTransport::new());
-    mock.enqueue(Ok(ok(
-        events_body(noise),
-        vec![(
-            "Link",
-            "<https://api.github.com/users/test-user/received_events?page=2>; rel=\"next\"",
-        )],
-    )))
-    .await;
     mock.enqueue(Ok(ok(
         events_body(vec![event(
-            "2",
-            "WatchEvent",
-            serde_json::json!({"action": "started"}),
+            "1",
+            "PullRequestEvent",
+            serde_json::json!({
+                "action": "merged",
+                "number": 144,
+                "pull_request": {
+                    "url": "https://api.github.com/repos/subsurface/libdc/pulls/144",
+                    "id": 4838297932u64,
+                    "number": 144,
+                    "head": {"ref": "feat/x", "sha": "8cc8ec82a733ac545195ce5d6f04e8939cd706b1"},
+                    "base": {"ref": "master", "sha": "8d3f629702a7de2f510186614e293260a1dd6f70"}
+                }
+            }),
         )]),
         vec![],
     )))
@@ -349,13 +207,20 @@ async fn filtered_activities_do_not_trigger_extra_fetching_to_fill_the_page() {
         panic!("expected events");
     };
     assert_eq!(outcome.events.len(), 1);
-    let recorded = mock.recorded().await;
-    assert_eq!(
-        recorded.len(),
-        2,
-        "the normal page walk (1 → 2) is used, with no extra requests"
+    assert!(
+        matches!(
+            &outcome.events[0].payload,
+            FeedPayload::PullRequest {
+                action,
+                number: Some(144),
+                merged: None,
+                author: None,
+                ..
+            } if action == "merged"
+        ),
+        "the merged action and target survive; no author is invented: {:?}",
+        outcome.events[0].payload
     );
-    assert_eq!(query_of(&recorded[1].0, "page").as_deref(), Some("2"));
 }
 
 #[tokio::test]
@@ -375,22 +240,14 @@ async fn unknown_event_type_is_compatible_and_keeps_no_payload() {
     else {
         panic!("expected events");
     };
-    assert!(
-        outcome.events.is_empty(),
-        "an unknown event type is not a Feed activity"
-    );
-
-    // The parser itself still tolerates it and deliberately keeps no payload, so
-    // a future event shape cannot grow without bound.
-    let (event_type, payload) = convert_payload(
-        "SomeFutureEvent",
-        &serde_json::json!({"secret": "x".repeat(1000)}),
-    );
+    // The source list keeps the event; the product policy drops it later. The
+    // parser deliberately keeps no payload, so a future shape cannot grow.
+    assert_eq!(outcome.events.len(), 1);
     assert_eq!(
-        event_type,
+        outcome.events[0].event_type,
         FeedEventType::Unknown("SomeFutureEvent".to_string())
     );
-    assert_eq!(payload, FeedPayload::Unknown);
+    assert_eq!(outcome.events[0].payload, FeedPayload::Unknown);
 }
 
 #[tokio::test]
@@ -404,15 +261,11 @@ async fn missing_payload_does_not_panic() {
     else {
         panic!("expected events");
     };
-    assert!(
-        outcome.events.is_empty(),
-        "publishing a repository is not a retained Feed activity"
-    );
-
-    // A missing payload must not panic the parser either.
-    let (event_type, payload) = convert_payload("PublicEvent", &serde_json::Value::Null);
-    assert_eq!(event_type, FeedEventType::Public);
-    assert_eq!(payload, FeedPayload::Public);
+    // A missing payload must not panic the parser; the source list keeps it and
+    // the product policy is what eventually excludes it.
+    assert_eq!(outcome.events.len(), 1);
+    assert_eq!(outcome.events[0].event_type, FeedEventType::Public);
+    assert_eq!(outcome.events[0].payload, FeedPayload::Public);
 }
 
 #[tokio::test]

@@ -19,9 +19,10 @@ use super::rows::event_description;
 use super::*;
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    FeedActivityKind, FeedActor, FeedAuthor, FeedEvent, FeedEventType, FeedPartialReason,
-    FeedPayload, FeedReadiness, FeedRepository, HomeItem, HomeItemKind, HomePartialReason,
-    HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, classify_feed_activity,
+    AuthorResolutions, FeedActivity, FeedActivityKind, FeedActivityTarget, FeedActor, FeedAuthor,
+    FeedEvent, FeedEventType, FeedPartialReason, FeedPayload, FeedReadiness, FeedRepository,
+    FollowedAccount, Following, FollowingReadiness, HomeItem, HomeItemKind, HomePartialReason,
+    HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, ResolvedPullRequest, build_feed,
 };
 
 fn setup(cx: &mut TestAppContext) {
@@ -120,48 +121,101 @@ fn author(id: u64, login: &str) -> FeedAuthor {
     }
 }
 
-/// A retained merged-pull-request activity. `actor-<index>` is the maintainer who
-/// clicked merge; the credited contributor is supplied separately.
-fn merged_pr(index: usize, author: FeedAuthor) -> FeedEvent {
-    feed_event(
-        index,
-        FeedEventType::PullRequest,
-        FeedPayload::PullRequest {
-            action: "closed".into(),
-            number: Some(40 + index as u64),
-            title: Some(format!("Contributor change {}", index)),
-            html_url: None,
-            state: Some("closed".into()),
-            merged: Some(true),
-            author: Some(author),
-        },
-    )
+/// A followed-account list of every actor/fixture login used by these tests, so
+/// the view receives already-certified activities.
+fn followed(accounts: &[(&str, u64)]) -> Following {
+    Following {
+        accounts: accounts
+            .iter()
+            .map(|(login, id)| FollowedAccount {
+                id: *id,
+                login: (*login).to_string(),
+                avatar_url: None,
+            })
+            .collect(),
+        readiness: FollowingReadiness::Complete,
+    }
 }
 
-fn starred(index: usize) -> FeedEvent {
-    feed_event(
+/// Build a visible activity directly, bypassing the host policy, for row/layout
+/// tests that are not about the policy itself. The policy is covered by
+/// `domain::home::feed_policy_tests` and by the adapter/data tests.
+fn activity(
+    kind: FeedActivityKind,
+    subject: FeedActor,
+    event: FeedEvent,
+    pull_request: Option<FeedActivityTarget>,
+) -> FeedActivity {
+    FeedActivity {
+        kind,
+        subject,
+        pull_request,
+        event,
+    }
+}
+
+fn starred_activity(index: usize) -> FeedActivity {
+    let event = feed_event(
         index,
         FeedEventType::Watch,
         FeedPayload::Watch {
             action: "started".into(),
         },
-    )
+    );
+    let subject = event.actor.clone();
+    activity(FeedActivityKind::RepositoryStarred, subject, event, None)
 }
 
-fn created_repository(index: usize) -> FeedEvent {
-    feed_event(
+fn created_activity(index: usize) -> FeedActivity {
+    let event = feed_event(
         index,
         FeedEventType::Create,
         FeedPayload::Create {
             ref_type: Some("repository".into()),
             git_ref: None,
         },
+    );
+    let subject = event.actor.clone();
+    activity(FeedActivityKind::RepositoryCreated, subject, event, None)
+}
+
+/// A merged contribution whose subject is an author different from the event
+/// actor (the maintainer who merged it).
+fn merged_activity(index: usize, author: FeedAuthor) -> FeedActivity {
+    let event = feed_event(
+        index,
+        FeedEventType::PullRequest,
+        FeedPayload::PullRequest {
+            action: "merged".into(),
+            number: Some(40 + index as u64),
+            title: None,
+            html_url: None,
+            state: None,
+            merged: None,
+            author: None,
+        },
+    );
+    let subject = FeedActor {
+        id: author.id,
+        login: author.login,
+        display_login: None,
+        avatar_url: author.avatar_url,
+    };
+    activity(
+        FeedActivityKind::PullRequestMerged,
+        subject,
+        event,
+        Some(FeedActivityTarget {
+            number: Some(40 + index as u64),
+            title: Some(format!("Contributor change {index}")),
+            html_url: None,
+        }),
     )
 }
 
-fn feed_outcome(events: Vec<FeedEvent>, readiness: FeedReadiness) -> FeedOutcome {
+fn feed_outcome(activities: Vec<FeedActivity>, readiness: FeedReadiness) -> FeedOutcome {
     FeedOutcome {
-        events,
+        activities,
         etag: None,
         poll_interval_seconds: Some(60),
         readiness,
@@ -181,17 +235,17 @@ fn mixed() -> (HomeSearchOutcome, FeedOutcome) {
             )
         })
         .collect();
-    // One card per retained activity kind, in source order. The merge credits
-    // its pull-request author, which is a different identity from the maintainer
+    // One card per retained activity kind, in source order. The merge credits its
+    // pull-request author, which is a different identity from the maintainer
     // actor that generated the event.
-    let events = vec![
-        starred(0),
-        created_repository(1),
-        merged_pr(2, author(900, "contributor-2")),
+    let activities = vec![
+        starred_activity(0),
+        created_activity(1),
+        merged_activity(2, author(900, "contributor-2")),
     ];
     (
         home_outcome(items, HomeReadiness::Complete),
-        feed_outcome(events, FeedReadiness::Complete),
+        feed_outcome(activities, FeedReadiness::Complete),
     )
 }
 
@@ -471,27 +525,15 @@ fn a_thousand_search_items_and_three_hundred_events_are_virtualized(cx: &mut Tes
                 cx,
             )
         );
-        assert!(
-            view.apply_feed(
-                &binding(),
-                1,
-                feed_outcome(
-                    (0..300)
-                        .map(|index| {
-                            feed_event(
-                                index,
-                                FeedEventType::Watch,
-                                FeedPayload::Watch {
-                                    action: "started".into(),
-                                },
-                            )
-                        })
-                        .collect(),
-                    FeedReadiness::Complete,
-                ),
-                cx,
-            )
-        );
+        assert!(view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(
+                (0..300).map(starred_activity).collect(),
+                FeedReadiness::Complete,
+            ),
+            cx,
+        ));
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("home-item-row-0").is_some());
@@ -525,27 +567,15 @@ fn precise_wheel_scrolls_only_the_targeted_column_exactly_once(cx: &mut TestAppC
                 cx,
             )
         );
-        assert!(
-            view.apply_feed(
-                &binding(),
-                1,
-                feed_outcome(
-                    (0..100)
-                        .map(|index| {
-                            feed_event(
-                                index,
-                                FeedEventType::Watch,
-                                FeedPayload::Watch {
-                                    action: "started".into(),
-                                },
-                            )
-                        })
-                        .collect(),
-                    FeedReadiness::Complete,
-                ),
-                cx,
-            )
-        );
+        assert!(view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(
+                (0..100).map(starred_activity).collect(),
+                FeedReadiness::Complete,
+            ),
+            cx,
+        ));
     });
     cx.run_until_parked();
     let home_rows = bounds("home-rows", cx);
@@ -885,71 +915,43 @@ fn narrow_windows_stack_both_columns_inside_the_view(cx: &mut TestAppContext) {
     );
 }
 
+/// End-to-end view test over the real product policy: live-shaped events go
+/// through `build_feed` (kind filter, followed-subject filter, merged-author
+/// attribution) and the resulting activities are what the view renders.
 #[gpui::test]
-fn only_retained_activities_make_feed_cards_and_no_placeholder_appears(cx: &mut TestAppContext) {
+fn the_visible_feed_is_the_policy_output_not_the_raw_event_list(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
-    // Every non-retained type that the adapter can still parse. None of them may
-    // become a card, a fallback sentence or a placeholder.
-    let noise = vec![
+    // Source events exactly as the adapter would parse them: a star by a followed
+    // account, a star by a non-followed account, a push, a branch creation, a
+    // repository creation by a followed account, an unmerged close, and a live
+    // `action=merged` event whose author (not actor) is followed.
+    let mut events = vec![
         feed_event(
-            10,
+            1,
+            FeedEventType::Watch,
+            FeedPayload::Watch {
+                action: "started".into(),
+            },
+        ),
+        feed_event(
+            2,
+            FeedEventType::Watch,
+            FeedPayload::Watch {
+                action: "started".into(),
+            },
+        ),
+        feed_event(
+            3,
             FeedEventType::Push,
             FeedPayload::Push {
                 git_ref: Some("refs/heads/main".into()),
-                before: Some("a".repeat(40)),
-                head: Some("b".repeat(40)),
+                before: None,
+                head: None,
                 size: Some(2),
             },
         ),
         feed_event(
-            11,
-            FeedEventType::Issues,
-            FeedPayload::Issues {
-                action: "opened".into(),
-                number: Some(8),
-                title: Some("Issue".into()),
-                html_url: None,
-                state: Some("open".into()),
-            },
-        ),
-        feed_event(
-            12,
-            FeedEventType::IssueComment,
-            FeedPayload::IssueComment {
-                action: "created".into(),
-                issue_number: Some(8),
-                comment_url: None,
-            },
-        ),
-        feed_event(
-            13,
-            FeedEventType::Release,
-            FeedPayload::Release {
-                action: "published".into(),
-                tag_name: Some("v1".into()),
-                name: None,
-                html_url: None,
-            },
-        ),
-        feed_event(
-            14,
-            FeedEventType::Fork,
-            FeedPayload::Fork {
-                forkee_full_name: Some("someone/fork".into()),
-            },
-        ),
-        feed_event(
-            15,
-            FeedEventType::Member,
-            FeedPayload::Member {
-                action: "added".into(),
-                member_login: Some("someone".into()),
-            },
-        ),
-        feed_event(16, FeedEventType::Public, FeedPayload::Public),
-        // Branch/tag creation is not repository creation.
-        feed_event(
-            17,
+            4,
             FeedEventType::Create,
             FeedPayload::Create {
                 ref_type: Some("branch".into()),
@@ -957,147 +959,72 @@ fn only_retained_activities_make_feed_cards_and_no_placeholder_appears(cx: &mut 
             },
         ),
         feed_event(
-            18,
+            5,
             FeedEventType::Create,
             FeedPayload::Create {
-                ref_type: Some("tag".into()),
-                git_ref: Some("v1".into()),
+                ref_type: Some("repository".into()),
+                git_ref: None,
             },
         ),
         feed_event(
-            19,
-            FeedEventType::Delete,
-            FeedPayload::Delete {
-                ref_type: Some("branch".into()),
-                git_ref: Some("feature".into()),
-            },
-        ),
-        // Watching a repository is not starring it.
-        feed_event(
-            20,
-            FeedEventType::Watch,
-            FeedPayload::Watch {
-                action: "stopped".into(),
-            },
-        ),
-        // Opened / reopened / closed-without-merge / unknown pull requests.
-        feed_event(
-            21,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "opened".into(),
-                number: Some(3),
-                title: Some("Open PR".into()),
-                html_url: None,
-                state: Some("open".into()),
-                merged: None,
-                author: Some(author(901, "contributor-21")),
-            },
-        ),
-        feed_event(
-            22,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "closed".into(),
-                number: Some(4),
-                title: Some("Abandoned PR".into()),
-                html_url: None,
-                state: Some("closed".into()),
-                merged: Some(false),
-                author: Some(author(902, "contributor-22")),
-            },
-        ),
-        // Closed without any merge evidence.
-        feed_event(
-            23,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "closed".into(),
-                number: Some(5),
-                title: Some("No evidence PR".into()),
-                html_url: None,
-                state: Some("closed".into()),
-                merged: None,
-                author: Some(author(903, "contributor-23")),
-            },
-        ),
-        // Contradictory: merged but the action is not `closed`.
-        feed_event(
-            24,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: "merged".into(),
-                number: Some(6),
-                title: Some("Contradictory PR".into()),
-                html_url: None,
-                state: Some("closed".into()),
-                merged: Some(true),
-                author: Some(author(904, "contributor-24")),
-            },
-        ),
-        // Merged without authoritative author evidence.
-        feed_event(
-            25,
+            6,
             FeedEventType::PullRequest,
             FeedPayload::PullRequest {
                 action: "closed".into(),
                 number: Some(7),
-                title: Some("Anonymous author PR".into()),
+                title: Some("Abandoned".into()),
                 html_url: None,
                 state: Some("closed".into()),
-                merged: Some(true),
-                author: None,
+                merged: Some(false),
+                author: Some(author(901, "contributor-6")),
             },
         ),
         feed_event(
-            26,
-            FeedEventType::Unknown("FutureEvent".into()),
-            FeedPayload::Unknown,
+            7,
+            FeedEventType::PullRequest,
+            FeedPayload::PullRequest {
+                action: "merged".into(),
+                number: Some(144),
+                title: None,
+                html_url: None,
+                state: None,
+                merged: None,
+                author: None,
+            },
         ),
     ];
+    events[6].repository.name = "subsurface/libdc".to_string();
+    // actor-1 and actor-5 are followed; actor-2 is not, so its star is excluded.
+    let base = followed(&[("actor-1", 501), ("actor-5", 505)]);
+    let mut resolutions = AuthorResolutions::new();
+    resolutions.insert(
+        "subsurface/libdc#144",
+        ResolvedPullRequest {
+            author: author(31, "shulaoda"),
+            merged: true,
+            title: Some("Slim merged contribution".into()),
+            html_url: None,
+        },
+    );
+    // `shulaoda` must be followed for the contribution to appear.
+    let following = Following {
+        accounts: [
+            base.accounts.clone(),
+            vec![FollowedAccount {
+                id: 31,
+                login: "shulaoda".into(),
+                avatar_url: None,
+            }],
+        ]
+        .concat(),
+        readiness: FollowingReadiness::Complete,
+    };
+    let outcome = build_feed(events, Vec::new(), &following, &resolutions);
+    assert_eq!(outcome.activities.len(), 3, "{:?}", outcome.activities);
+    assert_eq!(outcome.readiness, FeedReadiness::Complete);
 
     view.update(cx, |view, cx| {
-        assert!(view.apply_feed(
-            &binding(),
-            1,
-            feed_outcome(noise.clone(), FeedReadiness::Complete),
-            cx,
-        ));
-    });
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("feed-event-row-0").is_none(),
-        "no retained activity may render a card"
-    );
-    // A policy-only empty Feed is a normal minimal empty state, not loading,
-    // unavailable or an API error.
-    assert!(cx.debug_bounds("feed-empty").is_some());
-    assert!(cx.debug_bounds("feed-status").is_none());
-    assert!(cx.debug_bounds("feed-partial").is_none());
-    assert!(
-        view.read_with(cx, |view, _| matches!(
-            view.feed_state(),
-            PanelState::Ready {
-                content: PanelContent::Ready(outcome),
-                ..
-            } if outcome.events.is_empty() && outcome.readiness.is_complete()
-        )),
-        "filtering must not be reported as a partial or failed read"
-    );
-
-    // Retained activities survive in source order and keep working identity.
-    let retained = vec![
-        starred(30),
-        created_repository(31),
-        merged_pr(32, author(905, "contributor-32")),
-    ];
-    view.update(cx, |view, cx| {
-        assert!(view.apply_feed(
-            &binding(),
-            1,
-            feed_outcome(retained, FeedReadiness::Complete),
-            cx,
-        ));
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
     });
     cx.run_until_parked();
     for index in 0..3 {
@@ -1107,17 +1034,95 @@ fn only_retained_activities_make_feed_cards_and_no_placeholder_appears(cx: &mut 
             "retained card {index} must render"
         );
     }
-    assert!(cx.debug_bounds("feed-event-row-3").is_none());
+    assert!(
+        cx.debug_bounds("feed-event-row-3").is_none(),
+        "no filtered event may render a card or placeholder"
+    );
     assert!(cx.debug_bounds("feed-empty").is_none());
+
+    // The credited subject of the merged card is the author, and its link opens
+    // the author's profile.
+    let actions = action_sink(&view, cx);
+    click("feed-actor-2", cx);
+    assert_eq!(
+        actions.borrow().as_slice(),
+        &[HomeAction::Profile(ProfileIdentity {
+            id: Some(31),
+            login: "shulaoda".into(),
+        })],
+        "the merge card must link the contributor, not the merging actor"
+    );
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.feed_view.focus.focus(window, cx));
+    });
+    cx.simulate_keystrokes("end enter");
+    cx.run_until_parked();
+    assert!(
+        matches!(actions.borrow().last(), Some(HomeAction::ActivateFeed(identity))
+        if identity.id == "event-7" && identity.repository.full_name() == "subsurface/libdc")
+    );
+}
+
+#[gpui::test]
+fn a_policy_empty_feed_is_a_normal_minimal_state(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    // Complete source, complete following list, nothing followed did anything.
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(Vec::new(), FeedReadiness::Complete),
+            cx,
+        ));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("feed-empty").is_some());
+    assert!(cx.debug_bounds("feed-status").is_none());
+    assert!(
+        cx.debug_bounds("feed-partial").is_none(),
+        "an empty policy result is not a partial read"
+    );
+    assert!(cx.debug_bounds("feed-event-row-0").is_none());
+}
+
+#[gpui::test]
+fn an_incomplete_membership_read_shows_a_partial_notice_not_an_empty_feed(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(
+            &binding(),
+            1,
+            feed_outcome(
+                Vec::new(),
+                FeedReadiness::Partial {
+                    reasons: vec![FeedPartialReason::FollowingIncomplete {
+                        details: vec!["a later followed-accounts page failed".into()],
+                    }],
+                },
+            ),
+            cx,
+        ));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("feed-partial").is_some());
+    let notice = view.read_with(cx, |view, _| match view.feed_state() {
+        PanelState::Ready {
+            content: PanelContent::Ready(outcome),
+            ..
+        } => feed_summary(outcome).notice,
+        other => panic!("expected ready Feed, got {other:?}"),
+    });
+    let notice = notice.expect("partial notice");
+    assert!(notice.contains("followed accounts"), "{notice}");
 }
 
 #[gpui::test]
 fn a_merged_pull_request_credits_the_author_not_the_merging_actor(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
-    // The event actor is the maintainer who clicked merge; the payload author is
+    // The event actor is the maintainer who clicked merge; the activity subject is
     // the contributor who must be credited and linked.
-    let event = merged_pr(0, author(905, "contributor-login"));
-    let description = event_description(&event);
+    let merged = merged_activity(0, author(905, "contributor-login"));
+    let description = event_description(&merged);
     assert!(
         description.contains("contributor-login"),
         "the contributor must be credited: {description}"
@@ -1129,18 +1134,12 @@ fn a_merged_pull_request_credits_the_author_not_the_merging_actor(cx: &mut TestA
     assert!(description.contains("contributed to"));
     assert!(!description.contains('{'), "no raw payload is dumped");
 
-    let actions = Rc::new(RefCell::new(Vec::new()));
-    let sink = actions.clone();
-    view.update(cx, |view, _| {
-        view.on_action(Rc::new(move |action, _, _| {
-            sink.borrow_mut().push(action);
-        }));
-    });
+    let actions = action_sink(&view, cx);
     view.update(cx, |view, cx| {
         assert!(view.apply_feed(
             &binding(),
             1,
-            feed_outcome(vec![event], FeedReadiness::Complete),
+            feed_outcome(vec![merged], FeedReadiness::Complete),
             cx,
         ));
     });
@@ -1160,53 +1159,36 @@ fn a_merged_pull_request_credits_the_author_not_the_merging_actor(cx: &mut TestA
 }
 
 #[test]
-fn feed_merge_evidence_follows_the_official_event_shape() {
-    let base = |action: &str, merged: Option<bool>, author: Option<FeedAuthor>| {
-        feed_event(
-            0,
-            FeedEventType::PullRequest,
-            FeedPayload::PullRequest {
-                action: action.into(),
-                number: Some(1),
-                title: Some("Change".into()),
-                html_url: None,
-                state: Some("closed".into()),
-                merged,
-                author,
-            },
-        )
-    };
-    let evidence = |event: &FeedEvent| classify_feed_activity(event).map(|activity| activity.kind);
-    assert_eq!(
-        evidence(&base("closed", Some(true), Some(author(1, "contributor")))),
-        Some(FeedActivityKind::PullRequestMerged)
-    );
-    // Closed alone never means merged, and there is no `action=merged`.
-    assert_eq!(evidence(&base("closed", None, Some(author(1, "c")))), None);
-    assert_eq!(
-        evidence(&base("closed", Some(false), Some(author(1, "c")))),
-        None
-    );
-    assert_eq!(
-        evidence(&base("merged", Some(true), Some(author(1, "c")))),
-        None
-    );
-    assert_eq!(
-        evidence(&base("opened", Some(true), Some(author(1, "c")))),
-        None
-    );
-    // Attribution requires the authoritative payload author.
-    assert_eq!(evidence(&base("closed", Some(true), None)), None);
-    assert_eq!(
-        evidence(&base("closed", Some(true), Some(author(1, "  ")))),
-        None
-    );
+fn every_retained_activity_kind_has_a_concise_description() {
+    let activities = [
+        starred_activity(0),
+        created_activity(1),
+        merged_activity(2, author(905, "contributor")),
+    ];
+    for activity in &activities {
+        let description = event_description(activity);
+        assert!(!description.is_empty());
+        assert!(!description.contains('{'), "no raw payload: {description}");
+    }
+    assert!(event_description(&activities[0]).contains("starred the repository"));
+    assert!(event_description(&activities[1]).contains("created the repository"));
+    assert!(event_description(&activities[2]).contains("contributed to owner/repo"));
+    // No branch/ref/SHA/commit prose appears anywhere in a card description.
+    for activity in &activities {
+        let description = event_description(activity);
+        for forbidden in ["refs/heads", "Before:", "Head:", "commits"] {
+            assert!(
+                !description.contains(forbidden),
+                "{forbidden} must not appear: {description}"
+            );
+        }
+    }
 }
 
 #[test]
 fn feed_summary_states_the_events_window_without_claiming_full_history() {
     let outcome = feed_outcome(
-        vec![starred(0)],
+        vec![starred_activity(0)],
         FeedReadiness::Partial {
             reasons: vec![FeedPartialReason::PageLimit],
         },
@@ -1216,17 +1198,12 @@ fn feed_summary_states_the_events_window_without_claiming_full_history() {
     assert!(notice.contains("Partial"));
     assert!(notice.contains("300"));
     assert!(notice.contains("delayed"));
-    // The notice states the retained product activities, not a generic event dump.
-    assert!(notice.contains("merged pull requests"));
+    // The notice states the followed-account constraint, not a generic event dump.
+    assert!(notice.contains("accounts you follow"));
 
-    // A policy-only all-filtered page keeps the source's Complete readiness and
+    // A policy-only empty result keeps the source's Complete readiness and
     // therefore adds no partial warning at all.
-    let filtered = feed_outcome(
-        vec![feed_event(0, FeedEventType::Public, FeedPayload::Public)],
-        FeedReadiness::Complete,
-    )
-    .filtered();
-    assert!(filtered.events.is_empty());
+    let filtered = feed_outcome(Vec::new(), FeedReadiness::Complete);
     assert!(feed_summary(&filtered).notice.is_none());
 }
 
@@ -1236,13 +1213,13 @@ fn content_links_use_canonical_logins_and_never_double_dispatch(cx: &mut TestApp
     apply(&view, cx);
     view.update(cx, |view, cx| {
         // A retained activity with a real title, so the Feed card has a content
-        // link to activate. The credited subject is the payload author.
-        let mut event = merged_pr(0, author(905, "contributor-login"));
-        event.actor.display_login = Some("Display Name".into());
+        // link to activate. The credited subject is the contributor.
+        let mut merged = merged_activity(0, author(905, "contributor-login"));
+        merged.event.actor.display_login = Some("Display Name".into());
         view.apply_feed(
             &binding(),
             1,
-            feed_outcome(vec![event], FeedReadiness::Complete),
+            feed_outcome(vec![merged], FeedReadiness::Complete),
             cx,
         );
     });
@@ -1332,28 +1309,18 @@ fn variable_feed_cards_have_details_below_header_and_last_card_is_reachable(
     view.update(cx, |view, cx| {
         let mut events: Vec<_> = (0..300)
             .map(|index| {
-                // Both retained. A merged pull request keeps the taller card
-                // (repository + pull request) next to a shorter star, so the
-                // variable-height behaviour is still exercised; the extra
-                // details never come from branch/ref/SHA prose.
+                // A merged contribution keeps the taller card (repository on the
+                // header line plus the pull-request inset) next to a shorter star,
+                // so the variable-height behaviour is exercised without any
+                // branch/ref/SHA prose.
                 if index % 2 == 0 {
-                    let mut event = merged_pr(index, author(900 + index as u64, "contributor"));
-                    event.payload = FeedPayload::PullRequest {
-                        action: "closed".into(),
-                        number: Some(40 + index as u64),
-                        title: Some("A deliberately long synthetic pull request title that wraps within a narrow Feed card".into()),
-                        html_url: None,
-                        state: Some("closed".into()),
-                        merged: Some(true),
-                        author: Some(author(900 + index as u64, "contributor")),
-                    };
-                    event
+                    merged_activity(index, author(900 + index as u64, "contributor"))
                 } else {
-                    starred(index)
+                    starred_activity(index)
                 }
             })
             .collect();
-        events[0].actor.display_login =
+        events[0].event.actor.display_login =
             Some("A deliberately long actor display name that wraps within a narrow card".into());
         view.apply_feed(
             &binding(),
@@ -1411,32 +1378,20 @@ fn variable_feed_cards_have_details_below_header_and_last_card_is_reachable(
 
 #[test]
 fn merged_status_and_missing_details_are_truthful() {
-    let event = merged_pr(0, author(905, "contributor"));
-    let details = super::rows::event_details(&event);
+    let merged = merged_activity(0, author(905, "contributor"));
+    let details = super::rows::event_details(&merged);
     assert_eq!(details.status.as_deref(), Some("Merged"));
     assert!(details.title.unwrap().contains("#40"));
     assert!(details.lines.is_empty(), "no branch/ref/SHA prose");
 
-    // A non-retained event has no description at all, so nothing false can be
-    // rendered for it.
-    let unmerged = feed_event(
-        1,
-        FeedEventType::PullRequest,
-        FeedPayload::PullRequest {
-            action: "closed".into(),
-            number: Some(12),
-            title: Some("Closed without merge".into()),
-            html_url: None,
-            state: Some("closed".into()),
-            merged: Some(false),
-            author: Some(author(906, "contributor")),
-        },
-    );
-    let details = super::rows::event_details(&unmerged);
-    assert!(details.title.is_none());
-    assert!(details.status.is_none());
-    assert!(details.lines.is_empty());
-    assert_eq!(super::rows::event_description(&unmerged), "");
+    // Star / create cards carry no pull-request details, so nothing false is
+    // invented for them.
+    for activity in [starred_activity(1), created_activity(2)] {
+        let details = super::rows::event_details(&activity);
+        assert!(details.title.is_none());
+        assert!(details.status.is_none());
+        assert!(details.lines.is_empty());
+    }
 }
 
 #[gpui::test]
