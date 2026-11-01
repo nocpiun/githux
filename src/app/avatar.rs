@@ -30,9 +30,18 @@ use gpui::{Image, ImageFormat};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 pub use crate::ui::avatar::AvatarKey;
 
+impl crate::data::avatar_cache::AvatarKeyLike for AvatarKey {
+    fn subject(&self) -> &str {
+        &self.subject
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 /// Largest avatar payload accepted, in bytes. GitHub avatars are small; a larger body is treated as
 /// a failure instead of being decoded or buffered without bound.
-const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 
 /// How many decoded avatars stay cached. The sidebar shows at most a screenful of owners plus the
 /// saved accounts, so this is generous while still bounded.
@@ -149,6 +158,36 @@ pub trait AvatarBytes: Send + Sync + 'static {
     ) -> AvatarBytesFuture<'a>;
 }
 
+/// HTTP response headers relevant to caching and conditional requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AvatarResponseMetadata {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub cache_control: Option<String>,
+}
+
+/// The future one conditional avatar byte read resolves to: a status, optional metadata and the body.
+pub type AvatarDetailedFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(u16, AvatarResponseMetadata, Vec<u8>), ()>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Trait with conditional HTTP capabilities for avatar downloading.
+pub trait AvatarSource: Send + Sync + 'static {
+    /// Loads an avatar URL with optional conditional headers (`If-None-Match`, `If-Modified-Since`).
+    fn load_detailed<'a>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        etag: Option<&'a str>,
+        last_modified: Option<&'a str>,
+        cancel: CancellationToken,
+    ) -> AvatarDetailedFuture<'a>;
+}
+
 /// The production implementation: a dedicated reqwest client that follows redirects within the
 /// trusted CDN hosts and never carries an `Authorization` header. It is its own client so the
 /// shared REST client's credential injection cannot reach an image host by accident.
@@ -179,22 +218,49 @@ impl Default for ReqwestAvatars {
     }
 }
 
-impl AvatarBytes for ReqwestAvatars {
-    fn load<'a>(
+impl AvatarSource for ReqwestAvatars {
+    fn load_detailed<'a>(
         &'a self,
         url: &'a str,
         max_bytes: usize,
+        etag: Option<&'a str>,
+        last_modified: Option<&'a str>,
         cancel: CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(u16, Vec<u8>), ()>> + Send + 'a>>
-    {
+    ) -> AvatarDetailedFuture<'a> {
         Box::pin(async move {
-            let request = self.client.get(url);
+            let mut request = self.client.get(url);
+            if let Some(etag) = etag {
+                request = request.header("If-None-Match", etag);
+            }
+            if let Some(last_modified) = last_modified {
+                request = request.header("If-Modified-Since", last_modified);
+            }
             let response = tokio::select! {
                 biased;
                 _ = cancel.clone().cancelled() => return Err(()),
                 response = request.send() => response.map_err(|_| ())?,
             };
             let status = response.status().as_u16();
+            let metadata = AvatarResponseMetadata {
+                etag: response
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                last_modified: response
+                    .headers()
+                    .get("last-modified")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                cache_control: response
+                    .headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+            };
+            if status == 304 {
+                return Ok((status, metadata, Vec::new()));
+            }
             let mut body = Vec::new();
             let mut stream = response;
             loop {
@@ -207,19 +273,37 @@ impl AvatarBytes for ReqwestAvatars {
                     break;
                 };
                 if body.len() + chunk.len() > max_bytes {
-                    // A larger payload than any avatar: treat it as a failure, not a decode target.
                     return Err(());
                 }
                 body.extend_from_slice(&chunk);
             }
+            Ok((status, metadata, body))
+        })
+    }
+}
+
+impl AvatarBytes for ReqwestAvatars {
+    fn load<'a>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        cancel: CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(u16, Vec<u8>), ()>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let (status, _metadata, body) = self
+                .load_detailed(url, max_bytes, None, None, cancel)
+                .await?;
             Ok((status, body))
         })
     }
 }
 
-/// Executes one avatar fetch against an injected [`AvatarBytes`] source.
+/// Executes one avatar fetch against an injected [`AvatarBytes`] source, optionally backed by an [`AvatarDiskCache`].
 pub struct AvatarFetcher {
     bytes: Arc<dyn AvatarBytes>,
+    detailed: Option<Arc<dyn AvatarSource>>,
+    disk_cache: Option<crate::data::avatar_cache::AvatarDiskCache>,
     token: CancellationToken,
     cancel: CancellationTokenSource,
     /// Whether `http://` is allowed (only for the local test base), mirroring the trusted-origin
@@ -232,10 +316,24 @@ impl AvatarFetcher {
         let (token, cancel) = CancellationToken::new();
         Self {
             bytes,
+            detailed: None,
+            disk_cache: None,
             token,
             cancel,
             allow_plain_http,
         }
+    }
+
+    #[allow(dead_code)] // Wire-up in AccountService is pending coordinator assignment
+    pub fn with_cache(mut self, disk_cache: crate::data::avatar_cache::AvatarDiskCache) -> Self {
+        self.disk_cache = Some(disk_cache);
+        self
+    }
+
+    #[allow(dead_code)] // Wire-up in AccountService is pending coordinator assignment
+    pub fn with_source(mut self, source: Arc<dyn AvatarSource>) -> Self {
+        self.detailed = Some(source);
+        self
     }
 
     /// Fetches and decodes `key`'s URL. It returns the decoded image or `None` on any failure; a
@@ -246,18 +344,117 @@ impl AvatarFetcher {
         if !self.is_fetchable(url) {
             return None;
         }
-        let (status, bytes) = self
-            .bytes
-            .load(url, MAX_AVATAR_BYTES, self.token.clone())
-            .await
-            .ok()?;
-        if !(200..300).contains(&status) {
-            return None;
+
+        // 1. If we have a disk cache, attempt to read the cached snapshot off the current thread
+        // using spawn_blocking so we never block an async worker or UI.
+        let cached_snapshot = if let Some(cache) = &self.disk_cache {
+            let cache = cache.clone();
+            let key_clone = key.clone();
+            tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        // 2. Perform network fetch, conditionally if validators exist and detailed source is available.
+        let etag = cached_snapshot
+            .as_ref()
+            .and_then(|s| s.metadata.etag.as_deref());
+        let last_modified = cached_snapshot
+            .as_ref()
+            .and_then(|s| s.metadata.last_modified.as_deref());
+
+        let net_result: Result<(u16, AvatarResponseMetadata, Vec<u8>), ()> =
+            if let Some(detailed) = &self.detailed {
+                detailed
+                    .load_detailed(
+                        url,
+                        MAX_AVATAR_BYTES,
+                        etag,
+                        last_modified,
+                        self.token.clone(),
+                    )
+                    .await
+            } else {
+                self.bytes
+                    .load(url, MAX_AVATAR_BYTES, self.token.clone())
+                    .await
+                    .map(|(status, body)| (status, AvatarResponseMetadata::default(), body))
+            };
+
+        match net_result {
+            Ok((304, meta, _)) => {
+                // 304 Not Modified: must have matching representation in cache
+                if let Some(cached) = cached_snapshot {
+                    if let Some(cache) = &self.disk_cache {
+                        let cache = cache.clone();
+                        let key_clone = key.clone();
+                        let etag = meta.etag.clone();
+                        let lm = meta.last_modified.clone();
+                        let cc = meta.cache_control.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            cache.revalidate_sync(&key_clone, etag, lm, cc)
+                        })
+                        .await;
+                    }
+                    decode_image(cached.bytes)
+                } else {
+                    // Received 304 without existing cache: cannot decode empty body, must treat as missing
+                    None
+                }
+            }
+            Ok((status, meta, bytes)) if (200..300).contains(&status) => {
+                if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
+                    return None;
+                }
+                // Check no-store: if response instructs no-store, invalidate any existing representation and do not store
+                let permits_storage = meta
+                    .cache_control
+                    .as_deref()
+                    .map(|cc| {
+                        !cc.split(',').any(|part| {
+                            part.split('=')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .eq_ignore_ascii_case("no-store")
+                        })
+                    })
+                    .unwrap_or(true);
+
+                if let Some(cache) = &self.disk_cache {
+                    let cache = cache.clone();
+                    let key_clone = key.clone();
+                    if permits_storage {
+                        let bytes_clone = bytes.clone();
+                        let etag = meta.etag.clone();
+                        let lm = meta.last_modified.clone();
+                        let cc = meta.cache_control.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            cache.put_sync(&key_clone, &bytes_clone, etag, lm, cc)
+                        })
+                        .await;
+                    } else {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            cache.invalidate_sync(&key_clone);
+                        })
+                        .await;
+                    }
+                }
+                decode_image(bytes)
+            }
+            _ => {
+                // Network failed or returned error status (e.g. 404, 500, offline).
+                // If we have an existing disk cache hit, we can fall back to the cached snapshot!
+                if let Some(cached) = cached_snapshot {
+                    decode_image(cached.bytes)
+                } else {
+                    None
+                }
+            }
         }
-        if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
-            return None;
-        }
-        decode_image(bytes)
     }
 
     /// `https` always; `http` only when this fetcher was told the base is a local test server.
@@ -394,6 +591,10 @@ impl AvatarFetcher {
         self.cancel.cancel();
     }
 }
+
+#[cfg(test)]
+#[path = "../data/avatar_cache/tests.rs"]
+mod avatar_cache_tests;
 
 #[cfg(test)]
 mod tests {
