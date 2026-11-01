@@ -4,5 +4,7 @@
 pub mod geometry;
 #[path = "../ui/notifications/mod.rs"]
 pub mod notifications;
+#[path = "../ui/relative_time.rs"]
+pub mod relative_time;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;

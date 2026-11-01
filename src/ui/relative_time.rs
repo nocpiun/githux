@@ -5,7 +5,20 @@
 //! not become successful times. Leap-second spellings are left unavailable.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(super) fn relative(value: Option<&str>, now: SystemTime) -> String {
+pub(crate) fn relative(value: Option<&str>, now: SystemTime) -> String {
+    format_relative(value, now, true)
+}
+
+/// Inbox copy uses elapsed days; Home retains its accepted Yesterday wording.
+/// The product binary does not mount the standalone Notifications view yet
+/// (Shell integration is a separate task), so only that developer/example
+/// assembly calls this today.
+#[allow(dead_code)]
+pub(crate) fn relative_days(value: Option<&str>, now: SystemTime) -> String {
+    format_relative(value, now, false)
+}
+
+fn format_relative(value: Option<&str>, now: SystemTime, yesterday: bool) -> String {
     let Some(timestamp) = value.and_then(parse) else {
         return "Time unavailable".to_string();
     };
@@ -21,7 +34,7 @@ pub(super) fn relative(value: Option<&str>, now: SystemTime) -> String {
         0..60 => "Just now".to_string(),
         60..3600 => quantity(seconds / 60, "minute"),
         3600..86400 => quantity(seconds / 3600, "hour"),
-        86400..172800 => "Yesterday".to_string(),
+        86400..172800 if yesterday => "Yesterday".to_string(),
         _ => quantity(seconds / 86400, "day"),
     }
 }
@@ -124,8 +137,8 @@ fn parse(value: &str) -> Option<i128> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::time::Duration;
+    use super::{parse, relative, relative_days};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn instant(value: &str) -> SystemTime {
         let nanos = parse(value).unwrap();
@@ -151,6 +164,22 @@ mod tests {
         ] {
             assert_eq!(relative(date, at + Duration::from_secs(seconds)), expected);
         }
+    }
+
+    #[test]
+    fn inbox_days_share_the_parser_without_changing_home_copy() {
+        let at = instant("2026-11-01T12:00:00Z");
+        for (date, expected) in [
+            ("2026-11-01T12:55:00+01:00", "5 minutes ago"),
+            ("2026-11-01T09:00:00-01:00", "2 hours ago"),
+            ("2026-10-31T12:00:00Z", "1 day ago"),
+            ("2026-10-29T12:00:00Z", "3 days ago"),
+            ("invalid", "Time unavailable"),
+            ("2026-11-01T12:00:01Z", "In the future"),
+        ] {
+            assert_eq!(relative_days(Some(date), at), expected);
+        }
+        assert_eq!(relative(Some("2026-10-31T12:00:00Z"), at), "Yesterday");
     }
 
     #[test]

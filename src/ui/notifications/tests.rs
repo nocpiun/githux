@@ -4,11 +4,19 @@ use crate::data::AccountService;
 use crate::github::client::{GitHubClient, GitHubConfig};
 use gpui::{Modifiers, TestAppContext, size};
 use std::cell::RefCell;
+use std::time::Duration;
 #[path = "../../bin_support/notifications_fixture.rs"]
 mod fixture;
 
-#[gpui::test]
-fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext) {
+const FIXED_NOW_SECS: u64 = 1793534400;
+
+fn setup(
+    cx: &mut TestAppContext,
+) -> (
+    crate::data::notifications::Notifications,
+    Arc<BackgroundExecutor>,
+    Arc<fixture::Fixture>,
+) {
     cx.update(ely_core::init_for_tests);
     let executor = Arc::new(BackgroundExecutor::new(2));
     let fixture = Arc::new(fixture::Fixture::new(fixture::Scene::Mixed));
@@ -28,6 +36,12 @@ fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext
             .await;
         controller
     });
+    (controller, executor, fixture)
+}
+
+#[gpui::test]
+fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext) {
+    let (controller, executor, fixture) = setup(cx);
     let expected = controller.snapshot().items[0].repository.clone();
     let captured = Rc::new(RefCell::new(Vec::new()));
     let sink = captured.clone();
@@ -50,10 +64,12 @@ fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext
         let bounds = cx.debug_bounds("notifications-rows").unwrap();
         let row = cx.debug_bounds("notification-row-0").unwrap();
         let title = cx.debug_bounds("notification-title-0").unwrap();
+        let time = cx.debug_bounds("notification-time-0").unwrap();
         assert!(bounds.size.width <= dimensions.width);
         assert!(bounds.size.height < dimensions.height);
         assert!(row.right() <= bounds.right());
         assert!(title.right() <= row.right());
+        assert!(time.right() <= row.right());
     }
     cx.update(|window, cx| view.update(cx, |view, cx| view.focus.focus(window, cx)));
     cx.simulate_keystrokes("down enter");
@@ -116,4 +132,61 @@ fn empty_failure_and_partial_render_distinctly(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("notifications-partial").is_some());
     assert!(!view.read_with(cx, |view, _| view.snapshot.is_empty()));
+}
+
+#[gpui::test]
+fn row_geometry_read_state_and_relative_time(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = NotificationsView::new(
+            controller.clone(),
+            executor.clone(),
+            Rc::new(|_, _, _| {}),
+            window,
+            cx,
+        );
+        view.set_now(
+            Some(std::time::UNIX_EPOCH + Duration::from_secs(FIXED_NOW_SECS)),
+            cx,
+        );
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    // Icon centre sits on the row's vertical centre, not top-compensated.
+    let row0 = cx.debug_bounds("notification-row-0").unwrap();
+    let icon0 = cx.debug_bounds("notification-icon-0").unwrap();
+    let center = |b: gpui::Bounds<gpui::Pixels>| b.origin.y + b.size.height / 2.0;
+    assert!((center(row0) - center(icon0)).abs() < gpui::px(1.0));
+
+    // Owner/repo line and title share a left origin (the same gutter).
+    let repo = cx.debug_bounds("notification-repository-0").unwrap();
+    let title = cx.debug_bounds("notification-title-0").unwrap();
+    assert!((repo.origin.x - title.origin.x).abs() < gpui::px(1.0));
+
+    // The time sits on the repository metadata line, right of the repo link,
+    // not on the title line.
+    let time0 = cx.debug_bounds("notification-time-0").unwrap();
+    assert!(time0.origin.y < title.origin.y);
+    assert!(repo.right() <= time0.origin.x);
+
+    // Read vs unread differ by background + dot, not by any "Read"/"Unread"
+    // label. Find one unread and one read row deterministically.
+    let snapshot = view.read_with(cx, |view, _| view.snapshot.clone());
+    let unread_idx = snapshot.items.iter().position(|item| item.unread).unwrap();
+    let read_idx = snapshot.items.iter().position(|item| !item.unread).unwrap();
+    assert_ne!(unread_idx, read_idx);
+    let unread_row = cx.debug_bounds("notification-row-0").unwrap();
+    let read_row = cx.debug_bounds("notification-row-1").unwrap();
+    assert_ne!(unread_row, read_row);
+    // The unread dot is a 6px circle on unread rows.
+    let dot = cx.debug_bounds("notification-dot-0").unwrap();
+    assert!(dot.size.width > gpui::px(0.0));
+
+    // A minute/hour/day spread against the fixed clock.
+    let minute = cx.debug_bounds("notification-time-7").unwrap();
+    let hour = cx.debug_bounds("notification-time-5").unwrap();
+    let day = cx.debug_bounds("notification-time-2").unwrap();
+    assert!(!minute.is_empty() && !hour.is_empty() && !day.is_empty());
 }

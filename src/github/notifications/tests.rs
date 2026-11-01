@@ -139,8 +139,12 @@ async fn duplicates_bounded_body_and_exact_conditional_header() {
     transport
         .enqueue(Ok(json_response(
             200,
-            &serde_json::json!([fixture::thread(0), fixture::thread(0), fixture::thread(1)])
-                .to_string(),
+            &serde_json::json!([
+                fixture::thread(0, "2026-11-01T12:00:00Z", true),
+                fixture::thread(0, "2026-11-01T12:00:00Z", true),
+                fixture::thread(1, "2026-11-01T12:00:00Z", true)
+            ])
+            .to_string(),
         )))
         .await;
     assert_eq!(fetch(&client(transport)).await.unwrap().items.len(), 2);

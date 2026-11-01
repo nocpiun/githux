@@ -1,23 +1,29 @@
 //! Standalone inbox view/controller adapter. Official Shell mounting is owned
 //! by the coordinator. No route, browser redirect or notification write action.
+//!
+//! Row layout follows the owner-confirmed GitHub inbox reference: a narrow
+//! left gutter (unread dot + subject icon) centred against a two-line block,
+//! repository metadata above the main title, and a relative time on the right.
+//! Read state is background + dot + weight, never a "Read"/"Unread" label.
 #![allow(dead_code)]
 #[cfg(test)]
 mod tests;
+
 use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind};
 use crate::domain::notification::{NotificationThread, SubjectKind};
 use crate::domain::repository::RepositoryIdentity;
 use crate::network::executor::BackgroundExecutor;
+use crate::ui::relative_time::relative_days as relative;
 use crate::ui::scroll::{self, Bars, Motion};
 use ely_core::{
     buttons::{Button, IconButton},
     motion::Spinner,
-    primitives::{FocusRing, Icon, IconName, Tooltip},
+    primitives::{Icon, IconName, Tooltip},
     theme::{ActiveTheme, ControlSize, IconSize, TextSize},
-    typography::Ellipsis,
 };
 use gpui::{
-    AnyElement, App, Axis, Context, FocusHandle, Focusable, KeyDownEvent, ListAlignment, ListState,
-    Render, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, Axis, Context, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    ListAlignment, ListState, Render, Subscription, Window, div, prelude::*, px,
 };
 use std::{rc::Rc, sync::Arc, time::Instant};
 
@@ -39,10 +45,15 @@ pub struct NotificationsView {
     focus: FocusHandle,
     selected: Option<usize>,
     clock: Instant,
+    now: std::time::SystemTime,
+    fixed_now: bool,
+    active: bool,
+    time_task: Option<gpui::Task<()>>,
     cooldown_until: Option<Instant>,
     cooldown_wake: Option<gpui::Task<()>>,
     on_repository: OnRepository,
     _activation: Subscription,
+    _visibility: Subscription,
 }
 impl NotificationsView {
     pub fn new(
@@ -55,10 +66,17 @@ impl NotificationsView {
         let list = ListState::new(0, ListAlignment::Top, px(160.0));
         let activation = cx.observe_window_activation(window, |view: &mut Self, window, cx| {
             if !window.is_window_active() {
-                scroll::cancel_region(&mut view.bars, &view.motion);
-                cx.notify();
+                view.cancel_activity();
             }
+            cx.notify();
         });
+        let visibility =
+            cx.observe_window_visibility(window, |view: &mut Self, visibility, _, cx| {
+                if !visibility.is_visible() {
+                    view.cancel_activity();
+                }
+                cx.notify();
+            });
         let mut view = Self {
             controller,
             executor,
@@ -69,31 +87,90 @@ impl NotificationsView {
             focus: cx.focus_handle().tab_stop(true),
             selected: None,
             clock: Instant::now(),
+            now: std::time::SystemTime::now(),
+            fixed_now: false,
+            active: true,
+            time_task: None,
             cooldown_until: None,
             cooldown_wake: None,
             on_repository,
             _activation: activation,
+            _visibility: visibility,
         };
         view.sync(cx);
         view.request(RequestKind::First, cx);
         view
     }
 
-    /// Call when the page becomes hidden. Re-entering the retained entity does
-    /// not issue another first load. Account changes require a fresh controller.
-    pub fn cancel_interactions(&mut self, cx: &mut Context<Self>) {
-        scroll::cancel_region(&mut self.bars, &self.motion);
+    /// Inject a fixed wall clock for previews/tests. `None` resumes real time.
+    pub fn set_now(&mut self, now: Option<std::time::SystemTime>, cx: &mut Context<Self>) {
+        self.fixed_now = now.is_some();
+        self.now = now.unwrap_or_else(std::time::SystemTime::now);
+        self.time_task = None;
         cx.notify();
+    }
+
+    /// A retained page's host calls this when switching tabs. No elapsed-time
+    /// timer or scroll animation runs for an inactive page.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.active = active;
+        if !active {
+            self.cancel_activity();
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_interactions(&mut self, cx: &mut Context<Self>) {
+        self.cancel_activity();
+        cx.notify();
+    }
+
+    fn cancel_activity(&mut self) {
+        self.time_task = None;
+        self.cooldown_wake = None;
+        scroll::cancel_region(&mut self.bars, &self.motion);
     }
 
     /// Host calls this when the retained page becomes hidden: stop both the
     /// interaction animation and the request (its result can no longer publish).
     pub fn leave(&mut self, cx: &mut Context<Self>) {
         self.controller.cancel();
-        self.cooldown_wake = None;
-        self.cancel_interactions(cx);
         self.sync(cx);
+        self.cancel_activity();
     }
+
+    /// Keep a single low-frequency clock tick while rows are visible so "Just
+    /// now" advances without any GitHub request. Hidden/released views stop it.
+    fn sync_time_task(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.active || !window.is_window_active() || !window.is_visible() {
+            self.cancel_activity();
+            return;
+        }
+        if self.fixed_now || self.snapshot.items.is_empty() {
+            self.time_task = None;
+            return;
+        }
+        if self.time_task.is_none() {
+            self.now = std::time::SystemTime::now();
+            self.time_task = Some(cx.spawn(async |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(30))
+                        .await;
+                    if this
+                        .update(cx, |view, cx| {
+                            view.now = std::time::SystemTime::now();
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
     fn sync(&mut self, cx: &mut Context<Self>) {
         let previous = std::mem::take(&mut self.snapshot);
         self.snapshot = self.controller.snapshot();
@@ -124,6 +201,7 @@ impl NotificationsView {
         }
         cx.notify();
     }
+
     fn request(&mut self, kind: RequestKind, cx: &mut Context<Self>) {
         let request = match self.controller.begin(kind) {
             Ok(Some(request)) => request,
@@ -164,6 +242,7 @@ impl NotificationsView {
         })
         .detach();
     }
+
     fn navigate(&self, index: usize, window: &mut Window, cx: &mut App) {
         if self.controller.verify()
             && let Some(item) = self.snapshot.items.get(index)
@@ -178,6 +257,7 @@ impl NotificationsView {
             );
         }
     }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus.is_focused(window) {
             return;
@@ -206,7 +286,8 @@ impl NotificationsView {
                 None
             }
             "escape" => {
-                self.cancel_interactions(cx);
+                self.cancel_activity();
+                cx.notify();
                 None
             }
             _ => None,
@@ -219,30 +300,42 @@ impl NotificationsView {
             cx.notify();
         }
     }
+
     fn row(&self, item: &NotificationThread, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors.clone();
         let small = cx.theme().text_size(TextSize::Xs);
-        let icon = match item.subject.kind {
-            SubjectKind::Issue => IconName::CircleDot,
-            SubjectKind::PullRequest => IconName::GitPullRequest,
-            _ => IconName::Bell,
+        let selected = self.selected == Some(index);
+        let (icon, type_label) = match item.subject.kind {
+            SubjectKind::Issue => (IconName::CircleDot, "Issue"),
+            SubjectKind::PullRequest => (IconName::GitPullRequest, "Pull request"),
+            SubjectKind::Commit => (IconName::GitCommitHorizontal, "Commit"),
+            SubjectKind::Release => (IconName::Tag, "Release"),
+            SubjectKind::Discussion => (IconName::MessageSquare, "Discussion"),
+            SubjectKind::Unknown(_) => (IconName::Bell, "Notification"),
         };
         let repository = format!(
             "{}/{}",
             item.repository.locator().owner(),
             item.repository.locator().name()
         );
+        let reason = reason_label(&item.reason);
+        let aria = format!(
+            "{} notification, {}, {repository}, {}, {}",
+            if item.unread { "Unread" } else { "Read" },
+            type_label,
+            item.subject.title,
+            relative(Some(&item.updated_at), self.now)
+        );
         let weak = cx.entity().downgrade();
-        let link = div()
+        let repo_link = div()
             .id(("notification-repository", index))
             .debug_selector(move || format!("notification-repository-{index}"))
             .role(gpui::Role::Link)
             .aria_label(format!("Open repository {repository}"))
             .tab_index(0)
-            .focus_ring(cx)
             .flex_1()
             .min_w_0()
-            .overflow_hidden()
+            .truncate()
             .cursor_pointer()
             .hover(|style| style.underline())
             .tooltip(Tooltip::text(repository.clone()))
@@ -250,92 +343,109 @@ impl NotificationsView {
                 cx.stop_propagation();
                 let _ = weak.update(cx, |view, cx| view.navigate(index, window, cx));
             })
-            .child(Ellipsis::new(repository));
+            .child(repository.clone());
+
+        // Read state is background + dot + title weight. The unread dot keeps
+        // its own gutter so the subject icon stays centred across read states.
+        let base_bg = read_state_background(item.unread, selected, false, &colors);
+        let hover_bg = read_state_background(item.unread, selected, true, &colors);
+        let unread_dot = div()
+            .id(("notification-dot", index))
+            .debug_selector(move || format!("notification-dot-{index}"))
+            .flex_none()
+            .size(px(6.0))
+            .rounded_full()
+            .bg(if item.unread {
+                colors.accent
+            } else {
+                gpui::transparent_black()
+            });
+
+        let subject_icon = div()
+            .id(("notification-icon", index))
+            .debug_selector(move || format!("notification-icon-{index}"))
+            .flex_none()
+            .h(cx.theme().control_height(ControlSize::Sm))
+            .flex()
+            .items_center()
+            .justify_center()
+            .tooltip(Tooltip::text(format!("{type_label} · {reason}")))
+            .aria_label(format!("{type_label}: {reason}"))
+            .child(Icon::new(icon).size(IconSize::Sm).color(colors.fg_muted));
+
+        let title = div()
+            .id(("notification-title", index))
+            .debug_selector(move || format!("notification-title-{index}"))
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .font_weight(if item.unread {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .child(item.subject.title.clone());
+
+        let time = div()
+            .id(("notification-time", index))
+            .debug_selector(move || format!("notification-time-{index}"))
+            .flex_none()
+            .text_size(small)
+            .text_color(colors.fg_subtle)
+            .tooltip(Tooltip::text(item.updated_at.clone()))
+            .aria_label(format!("Updated {}", item.updated_at))
+            .child(relative(Some(&item.updated_at), self.now));
+
         div()
             .id(("notification-row", index))
             .debug_selector(move || format!("notification-row-{index}"))
+            .role(gpui::Role::ListItem)
+            .aria_label(aria)
+            .text_size(cx.theme().text_size(TextSize::Sm))
             .w_full()
             .min_w_0()
             .overflow_hidden()
             .flex()
-            .gap_3()
+            .items_center()
+            .gap_2()
             .px_3()
-            .py_3()
+            .py_2()
             .border_b_1()
             .border_color(colors.border)
-            .bg(if self.selected == Some(index) {
-                colors.surface
-            } else {
-                colors.bg
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .pt_1()
-                    .child(Icon::new(icon).size(IconSize::Sm)),
-            )
+            .bg(base_bg)
+            .hover(move |style| style.bg(hover_bg))
+            .child(unread_dot)
+            .child(subject_icon)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap(px(2.0))
+                    .debug_selector(move || format!("notification-content-{index}"))
                     .child(
                         div()
-                            .w_full()
                             .flex()
                             .items_center()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id(("notification-title", index))
-                                    .debug_selector(move || format!("notification-title-{index}"))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .tooltip(Tooltip::text(item.subject.title.clone()))
-                                    .child(Ellipsis::new(item.subject.title.clone())),
-                            )
-                            .child(div().flex_none().child(if item.unread {
-                                "Unread"
-                            } else {
-                                "Read"
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(("notification-repository-line", index))
                             .w_full()
-                            .flex()
-                            .items_center()
-                            .min_w_0()
-                            .gap_2()
-                            .text_size(small)
-                            .text_color(colors.fg_subtle)
-                            .child(link),
-                    )
-                    .child(
-                        div()
-                            .id(("notification-meta", index))
-                            .w_full()
-                            .text_size(small)
-                            .text_color(colors.fg_subtle)
                             .min_w_0()
                             .overflow_hidden()
-                            .tooltip(Tooltip::text(format!(
-                                "{} · {}",
-                                item.reason, item.updated_at
-                            )))
-                            .child(Ellipsis::new(format!(
-                                "{} · {}",
-                                reason_label(&item.reason),
-                                item.updated_at
-                            ))),
+                            .gap_2()
+                            .text_size(small)
+                            .text_color(colors.fg_subtle)
+                            .child(repo_link)
+                            .child(time),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .gap_2()
+                            .child(title),
                     ),
             )
             .into_any_element()
@@ -348,8 +458,9 @@ impl Focusable for NotificationsView {
 }
 impl Render for NotificationsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Only local animation state is sampled here. Requests originate in
-        // construction or explicit controls; no request is issued by render.
+        self.sync_time_task(window, cx);
+        // Only local animation/clock state is sampled here. Requests originate
+        // in construction or explicit controls; no request is issued by render.
         if !self.controller.verify() && (self.snapshot.loaded || self.snapshot.busy.is_some()) {
             self.controller.cancel();
             self.sync(cx);
@@ -369,11 +480,7 @@ impl Render for NotificationsView {
         let colors = cx.theme().colors.clone();
         let snapshot = &self.snapshot;
         let busy = snapshot.busy.is_some();
-        let summary = if snapshot.loaded {
-            format!("{} loaded", snapshot.items.len())
-        } else {
-            String::new()
-        };
+        let loaded = snapshot.items.len();
         let cooling = self
             .cooldown_until
             .is_some_and(|deadline| deadline > Instant::now());
@@ -407,9 +514,19 @@ impl Render for NotificationsView {
             )
             .child(
                 div()
+                    .id("notifications-loaded")
+                    .debug_selector(|| "notifications-loaded".into())
                     .text_size(cx.theme().text_size(TextSize::Xs))
                     .text_color(colors.fg_subtle)
-                    .child(summary),
+                    .tooltip(Tooltip::text(format!(
+                        "{loaded} loaded in this view; not a remote total"
+                    )))
+                    .aria_label(format!("{loaded} loaded"))
+                    .child(if snapshot.loaded {
+                        format!("{loaded}")
+                    } else {
+                        String::new()
+                    }),
             )
             .child(if busy {
                 div()
@@ -575,6 +692,28 @@ impl Render for NotificationsView {
             })
     }
 }
+fn read_state_background(
+    unread: bool,
+    selected: bool,
+    hovered: bool,
+    colors: &ely_core::theme::Palette,
+) -> gpui::Hsla {
+    let base = if unread {
+        colors.info_subtle
+    } else {
+        colors.bg
+    };
+    // Blend the interaction wash over the read-state fill, so hover/selection
+    // retain the two backgrounds as well as the unread dot and title weight.
+    if selected {
+        base.blend(colors.active.opacity(0.35))
+    } else if hovered {
+        base.blend(colors.hover.opacity(0.35))
+    } else {
+        base
+    }
+}
+
 fn visible_lifetime(cx: &Context<NotificationsView>) -> AnyElement {
     let weak = cx.entity().downgrade();
     let key = format!("notifications-visible-{}", cx.entity_id().as_u64());

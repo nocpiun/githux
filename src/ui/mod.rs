@@ -43,6 +43,7 @@ mod page;
 mod palette;
 pub mod profile;
 pub mod reader;
+pub(crate) mod relative_time;
 pub mod repository;
 pub mod repository_overview;
 pub(crate) mod scroll;

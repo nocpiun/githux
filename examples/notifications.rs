@@ -56,13 +56,20 @@ impl Preview {
     ) -> Self {
         let callback = Self::callback(cx);
         let view = cx.new(|cx| {
-            NotificationsView::new(
+            let mut view = NotificationsView::new(
                 accounts.repo_service().notifications().unwrap(),
                 executor.clone(),
                 callback,
                 window,
                 cx,
-            )
+            );
+            // The synthetic rows use timestamps relative to this fixed clock
+            // (5 min, 2 hours, 3 days, future, invalid, just now, 1 min, 1 hour).
+            view.set_now(
+                Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1793534400)),
+                cx,
+            );
+            view
         });
         Self {
             accounts,

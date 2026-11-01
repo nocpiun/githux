@@ -49,8 +49,11 @@ impl Scene {
         }
     }
 }
+pub const PREVIEW_NOW: u64 = 1_793_534_400;
+
 struct State {
     scene: Scene,
+    now: u64,
     failed: bool,
     requests: Vec<HttpRequest>,
 }
@@ -59,9 +62,13 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new(scene: Scene) -> Self {
+        Self::with_clock(scene, PREVIEW_NOW)
+    }
+    pub fn with_clock(scene: Scene, now: u64) -> Self {
         Self {
             state: Mutex::new(State {
                 scene,
+                now,
                 failed: false,
                 requests: vec![],
             }),
@@ -133,11 +140,15 @@ impl Fixture {
         let rows: Vec<_> = if scene == Scene::Empty {
             vec![]
         } else if long {
-            ((page - 1) * 50..page * 50).map(thread).collect()
+            ((page - 1) * 50..page * 50)
+                .map(|index| timed_thread(index, state.now))
+                .collect()
         } else if page == 1 {
-            (0..8).map(thread).collect()
+            (0..8).map(|index| timed_thread(index, state.now)).collect()
         } else {
-            (7..14).map(thread).collect()
+            (7..14)
+                .map(|index| timed_thread(index, state.now))
+                .collect()
         };
         let mut rows = rows;
         if scene == Scene::Unknown
@@ -196,7 +207,7 @@ impl Transport for Fixture {
         })
     }
 }
-pub fn thread(index: usize) -> Value {
+pub fn thread(index: usize, updated_at: &str, unread: bool) -> Value {
     let reason = [
         "subscribed",
         "mention",
@@ -232,10 +243,44 @@ pub fn thread(index: usize) -> Value {
             ][index % 4]
         )
     };
-    json!({"id":format!("{}", 9000 + index), "unread":true, "reason":reason,
-        "updated_at":"2026-11-01T12:00:00Z", "last_read_at":null,
+    json!({"id":format!("{}", 9000 + index), "unread":unread, "reason":reason,
+        "updated_at":updated_at, "last_read_at":null,
         "subject":{"title":title, "type":subject_type,
             "url":"https://evil.example/opaque-subject", "latest_comment_url":null},
         "repository":{"id":100 + index % 3, "name":repository,
             "owner":{"login":"synthetic-owner"}, "url":"https://evil.example/opaque-repository"}})
+}
+
+/// Clock-relative fixtures share exactly the preview's captured clock.
+fn timed_thread(index: usize, now: u64) -> Value {
+    let age = [300, 7200, 259200, 30, 90, 3600, 0, 60][index % 8];
+    let timestamp = if index % 8 == 3 { now + age } else { now - age };
+    let date = if index % 8 == 4 {
+        "invalid timestamp".into()
+    } else {
+        utc(timestamp)
+    };
+    thread(index, &date, index % 3 != 1)
+}
+
+// Inverse Gregorian civil-date calculation, fixture only; the product parser
+// remains the shared Home implementation. No wall clock or timezone dependency.
+fn utc(seconds: u64) -> String {
+    let days = (seconds / 86400) as i64 + 719468;
+    let era = days.div_euclid(146097);
+    let doe = days - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let clock = seconds % 86400;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        clock / 3600,
+        clock / 60 % 60,
+        clock % 60
+    )
 }

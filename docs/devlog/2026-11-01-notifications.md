@@ -30,6 +30,19 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 原生预览：`cargo run --locked --example notifications` 实际打开标题为 “Githux · Notifications preview” 的窗口，`PrintWindow` 取得混合列表真实渲染帧（合成数据，中英文混排、图标、repository/reason/time）。合成窗口可启动、可渲染、进程响应；用 `SendMessage`/鼠标注入切换场景没有反映在随后捕获的画面中，因此**场景切换、加载更多、滚动、键盘、多 DPI 与真实输入尚未原生验收**。自动化 GPUI 测试不等于 Windows 原生输入证据（L002）。
 
+## 2026-11-01 负责人反馈后返工
+
+负责人否决不原样文案重排的初版，要求参照 GitHub 网页通知列表重做。四条反馈分别处理：
+
+1. **图标与文字上下居中**：subject 图标固定 `control_height(Sm)` 槽位并 `justify_center`，移除旧的 `pt_1` 补偿。几何测试 `row_geometry_read_state_and_relative_time` 断言 `notification-icon-0` 中心与 `notification-row-0` 中心 y 偏差小于 1 logical px。
+2. **读状态用背景而不是文字**：未读 `info_subtle` 背景 + accent 6px 圆点 + `FontWeight::MEDIUM`，已读 `bg` + 无点 + `FontWeight::NORMAL`；移除 Read/Unread 字样与 badge，无障碍名称保留读状态。hover/selected 分别用 `hover`/`active`。
+3. **相对时间**：把 Home 已验收的 `src/ui/home/time.rs` 纯实现抽取为 `src/ui/relative_time.rs`（`pub(crate) fn relative`），Home 的 `mod time` 删除、`rows.rs` 引用改为 `crate::ui::relative_time::relative`，`ui/mod.rs`、`home_modules.rs`、`notifications_modules.rs` 注册同步调整。时间行为与 Home 回归测试原样保留。时间放第一行右侧，绝对时间仅 tooltip；可见时单 30 秒本地时钟刷新，隐藏/释放/失活停止，不请求 GitHub。
+4. **参照 GitHub 网页通知排版**：紧凑两行（顶部弱化 owner/repo 元数据 + 相对时间，下面主标题，标题与仓库同左起点），左侧窄槽放 unread 圆点 + subject 图标。reason 移入图标 tooltip。顶部只显示已加载行数 `N`，不再显示 `N loaded` 字样。
+
+**宽度缺陷**：初版行内用 Ely `Ellipsis`，其隐藏全量测量 div 在 GPUI 虚拟列表 item 的 `MaxContent` 测量下把行撑到整段标题宽度（#57 已记录的现象），导致长标题行宽超出视口。改为 GPUI 原生 `.truncate()` + `min_w_0`/`flex_1` 后，测试 `bounded_narrow_keyboard_and_exact_repository_callback` 断言 960×740 与 360×440 下 title/time/row 均不越出 viewport。原生 PrintWindow 截图（`.agents/task/screens/notifications-rework10.png` 等）确认两种读状态背景、无 Read/Unread 行、类型图标与相对时间呈现。
+
+原生边界不变：合成窗口可启动/渲染，但场景切换、加载更多、真实滚轮、键盘、多 DPI 与 100%/150% 缩放仍未在本机可靠注入验收，交由负责人验收；GPUI 测试与窗口截图不等于原生输入证据（L002）。
+
 ## 验收与集成边界
 
 本任务须创建带 milestone #1 和 pending 的 PR，CI/Codex review 绑定最新 head。UI 需要负责人验收，基层执行者不合并。原生窗口的 mixed/long/narrow/keyboard/paging 与 DPI/手感如受环境阻塞必须明确报告；编译与 GPUI 测试不能替代正式 Shell 或真实 Windows 输入。没有新增跨任务稳定教训；应用 L002/L007/L010/L012，LESSONS 写入权留给当前 Home 执行者。
