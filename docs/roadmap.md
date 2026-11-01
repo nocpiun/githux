@@ -1,6 +1,6 @@
 # 开发路线图
 
-更新：2026-10-29。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 外壳、真实账户/仓库侧栏及多个数据/UI 组件已合并；正式 Home/Profile/统一 Repository 页面接线仍未完成，业务内容离线缓存和最终 Settings 设计也未完成。本文不承诺日期，也不把路线图中的建议变成已批准的产品细节。
+更新：2026-11-01。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 正式 Home/Profile/统一 Repository 页面已接线，业务缓存存储核心已存在；应用离线阅读、最终 Settings 和其他全局页面仍需后续接入与验收。本文不承诺日期，也不把路线图建议变成新产品授权。
 
 功能范围以 [产品约定](product.md#首版范围) 为准；状态边界、数据策略及交付规则分别见 [架构方案](architecture.md)、[缓存策略](cache-strategy.md)、[Agent 工作流](agent-workflow.md)。路线图只维护顺序、依赖和完成标准，不复制另一套产品规则。
 
@@ -16,25 +16,25 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 
 ## 当前证据与下一步
 
-本节只把 **main `730d2292dcd5bb981928341259c971e42ff497b5`**（[PR #38](https://github.com/nocpiun/githux/pull/38)，2026-10-29）及此前已合并 PR 作为“当前已实现”的事实来源；并行任务仅在明确标注时称为已派发/进行中，不读取其他工作树或把未来结果写成 main 事实。
+本节依据 main `f7144b6`（含 Reader 图片/HTML 与 cache-core）及本次 shell-pages 集成的实际源码记录能力；最终合并状态见 [PR #42](https://github.com/nocpiun/githux/pull/42)。其他并行任务不因已派发而算作正式产品接线。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
 | 正式 Rust / GPUI / Ely 外壳 | 单 Cargo package、固定依赖；[`app::run`](../src/app/mod.rs)、[`ui::Shell`](../src/ui/mod.rs) 与 workspace 标签已存在 | 窗口拖动、双击最大化、贴靠、Tall 标题栏等已有各自原生证据，见[外壳记录](devlog/2026-10-22-shell-layout.md)与 [Tall 记录](devlog/2026-10-23-tall-caption.md)。多标签完整交互、中文 IME、多 DPI/跨屏和字体回退仍待整体验收 |
 | 真实账户、仓库侧栏与每账户工作区 | PR #38 已合并；[`app::accounts`](../src/app/accounts/mod.rs)、[`storage::accounts`](../src/storage/accounts.rs) 接入正式 Shell。真实 `/user/repos` 自动读取、独立账户标签、真实圆头像、空 mask 防护和头像有限总超时已实现 | Settings › Accounts 是过渡入口，不是最终 Settings 设计。真实 PAT 登录、Settings/footer 同屏交互、部分原生滚动手感与多 DPI 产品路径仍待验收，见[account-shell 记录](devlog/2026-10-28-account-shell.md) |
-| Home / Feed | [PR #34](https://github.com/nocpiun/githux/pull/34) 的 `src/ui/home/**` 与账户作用域 page-data 已合并；无时间窗口 `involves` / updated 降序、Feed 服务顺序与手动刷新已确认 | **正式路由未接入**：[`ui::page`](../src/ui/page.rs) 仍画 fixture。独立 example 的视觉探针不等于正式 Home、真实数据或原生交互验收；由 shell-pages 接 HomeView + adapter |
-| Profile Overview | [PR #36](https://github.com/nocpiun/githux/pull/36) 的 `src/ui/profile/**`、公开资料/pins/贡献读取及 Profile README helper 已合并 | **正式路由未接入**：当前只画活动账户 identifier stub。shell-pages 需接目标用户、公开同名根 README、最近一年 range、pins/gist/Popular 语义及导航；原生产品路径仍待验收 |
-| 统一 Repository browser + overview + reader | [PR #35](https://github.com/nocpiun/githux/pull/35) 已合并统一页面；原独立 overview PR #37 已关闭、没有另行合入第二套页面。固定版本 tree/blob、Markdown/source reader 与 Releases/Contributors/底边 Languages 已在组件内组合 | **正式路由未接入**：当前 Repository 仍是 identifier stub。shell-pages 需复用 activate/deactivate/rebind 与账户上下文；Star/Fork 只有宿主动作请求，没有真实写操作。example 的原生消息/截图不替代正式应用验收 |
-| 账户持久化与业务缓存 | PR #18、#38 的 rusqlite 账户目录和系统凭据引用真实存在；[`content`](../src/content/mod.rs) 有正文准备 | **没有业务内容磁盘缓存或重启离线内容阅读**。账户 SQLite 不能算作内容缓存；workspace 按已确认范围仅内存、重启 Home，不是待补持久化。私有内容保留政策、容量/TTL/调度参数待决定后按链路实现 |
+| Home / Feed | [`app::pages::home`](../src/app/pages/home.rs) 正式挂载 HomeView；open Issues/PRs、关注账号的三类 Feed、自动续页和描述摘要已接入 | Read more 导航到内部 PR 标签，详情留空；Events 来源仍有 API 范围限制，不能承诺与 GitHub 网页 Feed 完全一致。见 [Home](home-view.md) |
+| Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
+| 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合 | Star/Fork 仅显示计数，正式只读宿主保持按钮禁用；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md) |
+| 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用，以及 [cache-core](cache-core.md) 的持久存储/授权门槛存在 | 正式账户事件与页面尚未消费业务缓存，仍不支持重启离线内容阅读。workspace 仅内存、重启 Home。缓存政策已确认，接线不等同于存储核心 |
 | CI 与交付流程 | PR #1/#2 起已有检查；PR #7 起 Ubuntu code-check，四平台 Debug build 与最终 `CI` 汇总保留；PR #31 增加 PR Check 门槛 | 具体 required checks 和当前 head 结果必须到 GitHub 核验；编译通过不是 Windows 以外原生产品支持，也不是 GUI 验收 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用 | 派发 skill 和完整并行调度未产品化；并行工作不能成为 main 的实现证据 |
 
 ### 下一步依赖（当前排期，不新增产品授权）
 
-1. **shell-pages 正式接线是当前首要工作**：复用已验收的 HomeView、ProfileView、统一 RepositoryPage 和 page-data/account services，替换正式 `ui::page.rs` 的 fixture/stubs，处理账户切换、activate/deactivate/rebind、typed 导航与每会话生命周期。完成标准必须来自正式产品路由，不能由 examples 推断。
+1. **正式页面基础已接线**：后续页面复用既有账户上下文、typed 导航和每会话生命周期；组合验收仍必须来自产品路由，不能由独立 examples 推断。
 2. **Settings 独立设计与验收**：过渡 Accounts 功能可继续服务开发，但最终页面不能直接沿用。先确认全局/仓库分类与首批项目，再实现本地设置持久化；local-only 提案未获批准，不是接线依赖或共享规则。
-3. **持久业务内容缓存与离线**：在私有内容授权失效/账户移除政策及必要缓存参数明确后，按仓库、Home/Profile 等数据类型实现磁盘快照、验证和清理。它与内存 workspace 恢复、账户目录持久化是不同工作。
-4. **README 图片与资源链路**：reader 当前不下载网络/相对图片；需固定版本、安全来源与资源缓存边界，不能把图片提示算作完整 README 阅读。
+3. **持久业务内容缓存与离线**：基于已确认政策与 cache-core，接入账户事件和仓库/Home/Profile 等消费者，验证失效、授权和清理。存储接口本身不提供页面离线体验。
+4. **README 图片与 HTML 已接入**：Reader 图片/Flow 与 HTML 任务已合并并整合到正式 Profile/Repository 页面；保留固定版本、来源和图片请求边界，详见[阅读器](content-reader.md)。
 5. **输入、DPI 与首版整体验收**：在正式接线后的真实 Windows 窗口核验中文 IME、文本选择、键盘/焦点、触控板/滚动、多 DPI/跨屏、长内容和账户切换。各组件已有的局部原生证据保留，但不代替端到端验收。
 6. **保留首版剩余范围**：H1–H4/H7、command palette 搜索范围及最终 Settings 项目仍待逐项决定；Issue/PR 详情等已排除/留空项不借接线恢复。持久缓存、图片、全局入口和综合验收未做完前，不能宣布首版完成。
 
@@ -112,7 +112,7 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 
 **验收：** 两个仓库标签可以独立切换分支和文件；快速切换时旧响应不覆盖新页面；关闭一个标签不误取消其他标签共享的读取；重新启动后离线可读之前缓存的仓库内容，但不恢复旧标签集合，仍先进入 Home；无缓存、旧版本与真实空数据可区分。
 
-**当前状态：** 低层固定快照读取、账户作用域 session、reader 和统一 RepositoryPage（含 overview）已合并，但正式 Shell 仍由 shell-pages 接线；磁盘快照、头像/正文磁盘缓存与重启离线阅读尚未实现。因此不能把 PR #35 的独立 example 称为 R3 整条链路完成。
+**当前状态：** 固定快照读取、账户作用域 session、reader 和统一 RepositoryPage 已接入正式 Shell；业务缓存存储核心已存在但消费者未接线，重启离线阅读仍未交付。完整验证边界见[正式页面接入](shell-page-integration.md)。
 
 **首个内部自用检查点：** 此链路通过后即可试用仓库阅读，收集真实数据、输入与性能问题；它不代表已完成包含 Home、Profile 等内容的整个首版，也不自动缩减其他保留功能。
 
@@ -128,9 +128,9 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 | 全局与仓库 Settings | 经确认的最小设置项目、统一行式风格 | 本地设置重启仍保留；区分本应用偏好与 GitHub 远端设置，不能把本地保存显示成远端成功 |
 | Command palette 数据 | 经确认的搜索类别和结果路由 | 查询变化取消/淘汰旧结果；结果打开正确会话；离线不冒充已完成实时搜索 |
 
-Feed 已选择 Events API，负责人接受其延迟；当前 typed 卡片覆盖、服务顺序、未知类型回退和初始手动刷新已确认，不自动轮询、不过滤，也不承诺复刻网站全部 Feed。Home 无时间窗口、按 updated 降序；Profile 的公开同名根 README、pins/gist 提示、仅无 pin 才 Popular 与最近一年范围已确认。具体边界统一见[产品约定](product.md#home-与-feed-的数据范围)。
+Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确认只保留合并 PR、星标仓库、创建仓库三类活动、保持服务顺序，且每条卡片主语必须是当前账户关注的人（合并贡献取 PR 作者，需读 PR 详情确认），初始手动刷新，不自动轮询，也不承诺复刻网站全部 Feed；Follow 两类事件卡片暂缓。Home 查询为 `involves:` + `is:open`、无时间窗口、按 updated 降序；Profile 的公开同名根 README、pins/gist 提示、仅无 pin 才 Popular 与最近一年范围已确认。具体边界统一见[产品约定](product.md#home-与-feed-的数据范围)。
 
-**当前状态：** PR #34/#35/#36 已合并三个可复用视图，PR #33 等已提供账户作用域数据接口；但正式 Home/Profile/Repository 三个产品路由仍待 shell-pages 统一接线，Settings 仍是过渡 Accounts 页面。表中“保留页面全部使用真实数据入口”的验收尚未因此完成。
+**当前状态：** Home/Profile/Repository 三个产品路由已统一接入真实数据入口；Settings 仍是过渡 Accounts 页面，远程搜索、离线读取与整体验收尚未完成。
 
 **验收：** 保留页面全部使用真实数据入口，不保留假数据冒充已接入；加载、部分失败、权限不足、旧值与离线行为遵循统一约定。远端设置若包含写入，依赖 R5 选定的写操作契约，不绕开权限与失败处理。
 

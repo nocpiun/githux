@@ -184,7 +184,8 @@ jobs:
           staging="dist/${ARTIFACT_NAME}"
           mkdir -p "${staging}"
           cp "target/${TARGET}/debug/${BIN_NAME}" "${staging}/"
-          cp "assets/fonts/noto-sans/OFL.txt" "${staging}/OFL-NotoSans.txt"
+          cp "assets/fonts/githux-ui/OFL-NotoSans.txt" "${staging}/OFL-NotoSans.txt"
+          cp "assets/fonts/githux-ui/OFL-NotoSansSC.txt" "${staging}/OFL-NotoSansSC.txt"
           cp "assets/fonts/google-sans-code/OFL.txt" "${staging}/OFL-GoogleSansCode.txt"
           if [ "${RUNNER_OS}" = "Windows" ]; then
             echo "PACKAGE_PATH=${staging}" >> "$GITHUB_ENV"

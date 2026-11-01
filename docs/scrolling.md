@@ -1,6 +1,6 @@
 # 统一滚动与滚动条
 
-更新：2026-10-28。状态：公共滚动条与公共 wheel motion 已实现。标签条、仓库 viewport 和已合并的 content-reader 使用统一 Bar/Bars；标签条、仓库、每会话页面、palette 使用同一 `Motion<T>` / 输入路径。本轮 content-reader 已接入真实源码双轴与 Markdown ListState 的公共 wheel motion，原生交互验收待负责人完成；account-shell 的账户迁移是独立并行任务，其接线与验收随对应 PR 交付。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。阅读器已改用本地 Markdown 组件及公开的真实 `ListState`，不再受上游 `MarkdownDocument` 私有列表限制。
+更新：2026-10-29。状态：公共滚动条与公共 wheel motion 已实现。标签条、仓库 viewport 和已合并的 content-reader 使用统一 Bar/Bars；标签条、仓库、每会话页面、palette 使用同一 `Motion<T>` / 输入路径。本轮 content-reader 已接入真实源码双轴与 Markdown ListState 的公共 wheel motion，原生交互验收待负责人完成；account-shell 的账户迁移是独立并行任务，其接线与验收随对应 PR 交付。当前基线使用官方 Ely `ely-core`（固定 `30c66fe1d5d23db769a6c834b771d054d7f288cf`）与 GPUI / platform `0.3.10`。阅读器已改用本地 Markdown 组件及公开的真实 `ListState`，不再受上游 `MarkdownDocument` 私有列表限制。
 
 本主题是滚动条外观、几何、拖动、淡入淡出与 `ScrollMotion` 边界的唯一维护位置。视觉基准来自 content-reader 当前实现（负责人 2026-10-26 明确以它为准）：细、两头圆、半透明、出现/消失渐变、无实体轨道。
 
@@ -43,9 +43,35 @@
 | 闲置透明度 | `fg` 0.20 | 无 tracks 背景 |
 | thumb hover | `fg` 0.38 | 仅指针在 thumb 上时加深 |
 | 淡入/淡出 | 140 ms smoothstep | 反向从当前已绘制值继续 |
+| 尾侧可见间隙 | 通常 1.5 logical px；文件树 2.5 px | `Placement::overlay` 的 `inset`；锚点须在真实 pane 内边缘，不能嵌在内容 padding 内；`BAND` 仍为 0 |
 | 命中区 | 由 `Placement::hit` 给出 | 可宽于可见线宽；完全隐藏时不构建元素 |
 
 两轴、所有区域共用同一 `Style::DEFAULT`。区域差异只允许出现在 `Placement` 与区域自身的布局常量里。
+
+`Placement::inset` 描述**可见线到区域尾侧边缘的间隙**；较宽的 `hit` 命中条从该边缘向容器**内部**展开，不再把可见线居中推离边缘。`overlay(1.5, 8.0)` 因此得到 1.5 px 可见间隙和完整 8 px 命中条：命中条覆盖 `right-8..right`（纵向）或 `bottom-8..bottom`（横向），可见线位于 `right-4.5..right-1.5` / `bottom-4.5..bottom-1.5`。`Placement::BAND`（标签条）保持 `inset = 0`、`hit = THICKNESS`，可见线与命中区都贴预留 band 的起点。
+
+### 尾侧间隙审计（2026-10-29）
+
+此前 `overlay(4, 8)` 把 3 px 可见线居中放进 8 px 命中区，实际可见间隙为 `4 + (8-3)/2 = 6.5` px，在侧栏右缘看起来偏远。统一改为可见间隙语义后，以下实际调用点由 `overlay(4.0, 8.0)`（Profile heatmap 为 `overlay(3.0, 8.0)`）改为 `overlay(1.5, 8.0)`：
+
+| 区域 | 文件与 selector |
+| --- | --- |
+| Shell 侧栏仓库组 | `src/ui/mod.rs`，`repo-scrollbar` |
+| Shell Settings 页 | `src/ui/mod.rs`，`settings-scrollbar-y` |
+| Home 双列 | `src/ui/home/mod.rs`，`home-scrollbar-y` / `feed-scrollbar-y` |
+| Profile 页面与 heatmap | `src/ui/profile/render.rs`，`profile-page-scrollbar` / `profile-heatmap-scrollbar` |
+| 仓库浏览文件树 | `src/ui/repository/view.rs`，`repository-tree-scrollbar`；2026-10-30 改为 `overlay(2.5, 8.0)`，见下方真实 pane 边界 |
+| Reader 源码双轴 | `src/ui/reader/source.rs`，`reader-scrollbar-y` / `reader-scrollbar-x` |
+| Reader Markdown | `src/ui/reader/mod.rs`，`reader-markdown-scrollbar` |
+| 账户预览（开发样例） | `src/bin_support/account_example.rs`，`account-preview-scrollbar-y` |
+
+标签条 `Placement::BAND` 及其专属 band 布局未改；`clear_of` 的角落避让按新的命中轨道重算，双轴 corner 仍保留 2 px 间隙。
+
+### 文件树真实 pane 边界（2026-10-30 返工）
+
+前轮文件树测量选错基准：`repository-tree-scroll-viewport` 位于 `.p(7)` 内，所以其“2 物理 px”并不表示到 Files/Reader 分隔线只有 2px；实际 gap 为内容 padding 7 + overlay 1.5 = 8.5 逻辑 px。此前日志/PR 中将其称为 pane 尾侧距离的结论作废，保留为测量错误的历史证据。
+
+文件树现在把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是无 padding 的 pane 内容区，内部列表单独保留四侧 7px padding；`repository-tree-bar-region` 横向覆盖该 pane，纵向仍留上下 7px，以维持 track 与真实滚动 viewport 同高。Bar 使用 `overlay(2.5, 8.0)`，可见线在列表右侧留白内，8px 命中条留在 pane 内；没有负 margin，没有删除选中行四侧留白。测量基准是外层 Files/Reader 边框的内边缘，不是列表 viewport。144 DPI 原生 Shell 帧中边框从 x=773 开始，可见 thumb 覆盖 x=765..768，外缘 x=769，到边框留 4 物理 px（约 2.67 逻辑 px；配置 2.5）。顶部/中间/底部和宽窗均复核；实际证据与限制见本任务日志。Sidebar/Profile 的内容 padding 位于 scroll 内容内，Bar 是外层的直接兄弟，没有文件树这层额外缩进。
 
 ## 状态归属
 
@@ -61,7 +87,7 @@
 let bar = scroll::Bar {
     target: &scroll_handle,                       // impl scroll::ScrollTarget
     id: scroll::BarId { owner, name: "reader-scrollbar-y", axis: Axis::Vertical },
-    placement: scroll::Placement::overlay(4.0, 8.0),
+    placement: scroll::Placement::overlay(1.5, 8.0),
     style: scroll::Style::DEFAULT,
     opacity: bars.opacity(now_ms),
     on_drag: on_thumb_drag,                       // Rc<dyn Fn(Axis, bool, &mut Window, &mut App)>
@@ -77,8 +103,8 @@ let element = bar.render(cx);
 | `ScrollTarget::drag_started` / `drag_ended` | `ScrollHandle` 默认空实现；`ListState` 实现直接转调原生手势钩子 |
 | `ScrollTarget::redraw` | 默认 `window.refresh()` |
 | `Placement::BAND` | 标签条：无 inset、命中区等于线宽，画在预留 band 顶部 |
-| `Placement::overlay(inset, hit)` | 内容区：贴尾侧（纵向在右、横向在下）浮层 |
-| `Placement::clear_of(other, gap)` | 双轴同时显示时在角落让出对方轨道；长度按实际 track 计算，不是整视口 |
+| `Placement::overlay(inset, hit)` | 内容区：`inset` 是可见线到尾侧边缘的间隙，`hit` 的命中条从尾侧边缘向内展开 |
+| `Placement::clear_of(other, gap)` | 双轴同时显示时在角落让出对方命中轨道；只统计一次双方共享的尾侧间隙，长度按实际 track 计算，不是整视口 |
 
 `Thumb::new` 的边界：视口或范围为 0、非有限值、track 过短（移动距离 ≤ 0）时返回 `None`，不绘制、不拦截输入；range 变小或窗口变大时 thumb 位置随 `-offset/reach` 重新 clamp，拖动中 range 变化以“按下时 thumb 比例 + 指针位移”重算，不会跳到端点外。长度计算只用 `viewport`、`reach`、`track` 三个标量，不遍历或测量列表行。
 
@@ -128,7 +154,7 @@ scroll::cancel_region(&mut bars, &motion);
 
 ### 已接入：sidebar-layout 仓库 viewport
 
-`Shell::repo_bars` 独立持有仓库组的显隐与 thumb drag；hover 绑定真实 `repo-scroll-region`，纵向 `BarId` 为 `repo-scrollbar`，使用 `Style::DEFAULT` 与 `Placement::overlay(4, 8)`。条在透明 wheel overlay 之后绘制，不改变列表行高、账号/footer 的位置。固定导航、账号、More 和底部四入口不参与滚动或共享该 `Bars`。
+`Shell::repo_bars` 独立持有仓库组的显隐与 thumb drag；hover 绑定真实 `repo-scroll-region`，纵向 `BarId` 为 `repo-scrollbar`，使用 `Style::DEFAULT` 与 `Placement::overlay(1.5, 8.0)`。条在透明 wheel overlay 之后绘制，不改变列表行高、账号/footer 的位置。固定导航、账号、More 和底部四入口不参与滚动或共享该 `Bars`。
 
 目标是 `scroll::Motion<ScrollHandle>` 的 `ScrollTarget` 适配，所有 viewport/offset/max-offset 与写入均转到原来的真实 `repo_scroll`。`drag_started`、每次 `set_axis_offset`、`drag_ended` 取消旧的 130ms wheel 目标；thumb 拖动期间 wheel 不建立竞争目标，释放后不弹回。内容平滑与 tabs/page/palette 共用同一公共实现，保留 precise Pointer / Touch 直通。
 
@@ -144,8 +170,9 @@ thumb hook、程序 set-offset、选择按下、reset/adopt、正文替换、Esc
 
 ## 验证现状
 
-- 公共模块对真实 GPUI 测试窗口自建的探针覆盖：无溢出时不绘制且不拦截输入、纵向拖动改变真实 `UniformListScrollHandle::base_handle`、真实非均匀 `ListState` 的原生拖动与结束清理、双轴与双区域互不干扰、角落避让、拖动中 range 缩小仍 clamp、取消后清理、平台释放后只结束本区域拖动、`Placement` 与 `Style` 分离。
+- 公共模块对真实 GPUI 测试窗口自建的探针覆盖：无溢出时不绘制且不拦截输入、纵向拖动改变真实 `UniformListScrollHandle::base_handle`、真实非均匀 `ListState` 的原生拖动与结束清理、双轴与双区域互不干扰、角落避让、拖动中 range 缩小仍 clamp、取消后清理、平台释放后只结束本区域拖动、`Placement` 与 `Style` 分离。`visual_gap_is_independent_of_the_inward_hit_area` 另断言可见线到区域尾侧边缘为 1.5 px、命中条为完整 8 px 并贴边，且按在命中条内侧（可见线之外）也能真实拖动对应轴。
 - 标签条既有关键用例（滚轮、`Shift`+wheel、reveal、拖拽排序、边缘自动滚动、关闭/切换、toolbar 固定、hover/拖动淡入淡出、外部释放淡出）全部保留并通过。
 - 历史真实 Windows 窗口自测（2026-10-26 旧依赖 head，144 DPI，1942×1241 物理像素，11 个标签）：闲置 `(84,83,83)`、thumb hover `(120,119,119)` 对 `(44,44,44)` 背景，滑块 4 物理像素高且无实体轨道；一次真实拖动把滑块从 `1010..1871` 移到 `510..1371` 并移动标签条；移出后该行回到背景色。这些是旧 head 的自测证据，不代替迁移后 head 的预览，更不是负责人视觉验收。
+- 2026-10-29：本机原生 Shell 等价预览（合成 80 个仓库行、不读真实账户/PAT）在 144 DPI（150%）下用 DPI-aware 截屏逐列测量侧栏 `repo-scrollbar`：修复前可见线右缘到侧栏尾侧边缘 10 物理像素（约 6.67 逻辑 px），修复后 2 物理像素（约 1.33 逻辑 px，标称 1.5）；两个显示器结果一致。同一原生窗口内真实 thumb 拖动使滑块下移约 120 物理 px，wheel 继续移动，hover 淡入正常。100% 的 1.5 逻辑 px 由测试平台 `visual_gap_is_independent_of_the_inward_hit_area` 直接断言。证据图在 `.agents/output/`（本地忽略），不上传。
 - 迁移后 head（`683b69e`，官方 Ely 固定提交 + GPUI 0.3.10）本机 `fmt` / `check --locked --all-targets` / `clippy -D warnings` / `test --locked`（359 项）/ `build --locked` / `git diff --check` 全部通过；`cargo run --locked` 启动成功且 `PrintWindow` 取到真实渲染帧，但桌面处于锁屏、输入未送达，未取得迁移后 head 的交互像素。
 - 2026-10-28：负责人已分别验收 sidebar-layout 与 content-reader。本文此前的上游列表接口阻塞已由本地 Markdown 组件解除；两者同步后的编译与测试记录在侧栏开发日志。真实 IME、多 DPI、触控板及正式主窗口中的端到端组合仍需综合验收。

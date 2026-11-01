@@ -178,11 +178,11 @@ fn the_shell_starts_on_home_with_a_bounded_repository_list(cx: &mut TestAppConte
     let (view, cx) = shell(cx);
     assert_eq!(route(&view, cx), Route::Home);
     assert!(
-        cx.debug_bounds("page-home").is_some(),
-        "Home draws its columns"
+        cx.debug_bounds("home-view").is_some(),
+        "the real Home/Feed view is mounted"
     );
-    assert!(cx.debug_bounds("home-involved").is_some());
-    assert!(cx.debug_bounds("home-feed").is_some());
+    assert!(cx.debug_bounds("home-panel").is_some());
+    assert!(cx.debug_bounds("feed-panel").is_some());
     assert!(
         view.read_with(cx, |shell, _| shell.repositories().len()) >= 100,
         "the fixture holds at least 100 repositories"
@@ -257,8 +257,8 @@ fn resizing_keeps_the_fixed_rows_and_shrinks_only_the_repository_group(cx: &mut 
 
     // Home's two columns split the island evenly and stay inside it, even with long single-line
     // text in the fixture: nothing may paint past the island's right edge.
-    let involved = bounds("home-involved", cx);
-    let feed = bounds("home-feed", cx);
+    let involved = bounds("home-panel", cx);
+    let feed = bounds("feed-panel", cx);
     assert_eq!(involved.size.width, feed.size.width);
     assert!(feed.right() <= short_island.right() + px(1.0));
     assert!(involved.right() <= feed.left());
@@ -315,7 +315,9 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
 
     click("account-identity", cx);
     assert_eq!(route(&view, cx), Route::Profile);
-    assert!(cx.debug_bounds("page-profile").is_some());
+    // Without a mounted account controller there is no verified online session: the real Profile
+    // host reports that state instead of drawing fixture profile data.
+    assert!(cx.debug_bounds("profile-page-unavailable").is_some());
 
     // The quarter entries keep a persistent selected state for their blank destinations, as the
     // product requires selected-state verification. Go back to Issues first, then prove New's
@@ -329,7 +331,7 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
 
     click("nav-home", cx);
     assert_eq!(route(&view, cx), Route::Home);
-    assert!(cx.debug_bounds("page-home").is_some());
+    assert!(cx.debug_bounds("home-view").is_some());
 }
 
 #[gpui::test]
@@ -338,7 +340,9 @@ fn a_repository_row_opens_its_minimal_identifier(cx: &mut TestAppContext) {
     let expected = view.read_with(cx, |shell, _| shell.repositories()[1].clone());
     click("repo-row-1", cx);
     assert_eq!(route(&view, cx), Route::repository(&expected));
-    assert!(cx.debug_bounds("page-repository").is_some());
+    // The route and tab are real; without an account service the page honestly reports that it
+    // cannot reach the repository rather than drawing a fixture browser.
+    assert!(cx.debug_bounds("page-service-unavailable").is_some());
 }
 
 #[gpui::test]
@@ -395,7 +399,7 @@ fn closing_the_palette_leaves_a_live_focus_target(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_island_draws_real_session_tabs_and_no_placeholder_title(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
-    assert!(cx.debug_bounds("page-home").is_some());
+    assert!(cx.debug_bounds("home-view").is_some());
     // The real strip replaces the removed page-name placeholder: the old selectors stay gone.
     assert!(cx.debug_bounds("tab-strip").is_some());
     assert!(cx.debug_bounds("tab-0").is_some());
@@ -408,7 +412,7 @@ fn the_island_draws_real_session_tabs_and_no_placeholder_title(cx: &mut TestAppC
         shell.navigate(Route::repository(&repo), window, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("page-repository").is_some());
+    assert!(cx.debug_bounds("page-service-unavailable").is_some());
     assert!(cx.debug_bounds("tab-0").is_some(), "Home keeps its tab");
     assert!(
         cx.debug_bounds("tab-1").is_some(),
@@ -1317,7 +1321,13 @@ fn closing_a_tab_releases_its_state_and_focus(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("repository-session").is_some());
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell
+            .repository_state(a)
+            .and_then(|state| state.file.clone())),
+        Some("README.md".to_string()),
+        "the session keeps its browsing selection without an account"
+    );
 
     // Focus the page, then close it with Ctrl+W: focus moves to a live target.
     let a_focus = view.read_with(cx, |shell, _| shell.tab_page_focus(a).unwrap());
@@ -1616,6 +1626,45 @@ fn tabbing_to_an_offscreen_tab_reveals_it(cx: &mut TestAppContext) {
         held,
         "losing focus does not undo the reveal"
     );
+}
+
+/// The rounded-corner mask wraps the island without taking part in layout: the island keeps
+/// exactly the frame the window insets give it, and its page keeps filling the inner box. This
+/// is what lets the language bar stay flush to the island bottom while the corners are erased.
+#[gpui::test]
+fn the_rounded_corner_mask_does_not_move_the_island_or_its_page(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    for (width, height) in [(1280.0, 820.0), (880.0, 560.0)] {
+        cx.simulate_resize(size(px(width), px(height)));
+        cx.run_until_parked();
+        let body = bounds("shell-body", cx);
+        let island = bounds("island", cx);
+        let page = bounds("island-page", cx);
+        let inset = px(super::geometry::ISLAND_INSET);
+        // The wrapper adds no padding and no margin of its own.
+        assert_eq!(
+            body.right() - island.right(),
+            inset,
+            "right inset at {width}"
+        );
+        assert_eq!(
+            body.bottom() - island.bottom(),
+            inset,
+            "bottom inset at {width}"
+        );
+        assert_eq!(
+            island.left(),
+            px(super::geometry::SIDEBAR_WIDTH) + px(super::geometry::ISLAND_GAP)
+        );
+        // The page's own scroll region starts inside the 1px border and fills the island width.
+        assert_eq!(page.left(), island.left() + px(1.0));
+        assert_eq!(page.right(), island.right() - px(1.0));
+        assert_eq!(page.bottom(), island.bottom() - px(1.0));
+        // The mask only erases inside the border: a corner narrower than the island radius, so
+        // the 1px ring is never repainted over.
+        let inner_radius = super::geometry::ISLAND_RADIUS - super::geometry::ISLAND_BORDER_WIDTH;
+        assert!(inner_radius > 0.0 && inner_radius < super::geometry::ISLAND_RADIUS);
+    }
 }
 
 /// The strip's inset matches the island's own gap to the window, and both top and left agree.

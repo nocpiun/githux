@@ -87,13 +87,14 @@ pub enum Edge {
 /// Where a bar paints inside the region it belongs to, kept apart from [`Style`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
-    /// Gap from the region's edges along the track (both ends) and, for [`Edge::End`],
-    /// on the hugging edge as well.
+    /// Visible gap from the region's edges along the track (both ends) and, for
+    /// [`Edge::End`], from the line's outside edge to the region's trailing edge.
     pub inset: f32,
     /// Extra length left at the track's far end for the crossing axis, so two bars
     /// never meet in the same corner.
     pub corner: f32,
-    /// Cross-axis size of the interactive track; the visible line is centered in it.
+    /// Cross-axis size of the interactive track, measured inward from the region edge.
+    /// Overlay lines keep their visual inset independently of this hit width.
     pub hit: f32,
     pub edge: Edge,
 }
@@ -107,11 +108,8 @@ impl Placement {
         edge: Edge::Start,
     };
 
-    /// An overlay on a content region's trailing edge.
-    ///
-    /// This is the placement the sidebar and content-reader consumers wire next; the tab strip
-    /// uses [`Placement::BAND`] today, so only the tests call it this round.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// An overlay on a content region's trailing edge. `inset` is the visible gap;
+    /// the wider hit area extends inward, without pushing the line away from the edge.
     pub fn overlay(inset: f32, hit: f32) -> Self {
         Self {
             inset,
@@ -124,7 +122,9 @@ impl Placement {
     /// Leaves room at the far end for the crossing bar; `other` is that bar's [`Placement`].
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn clear_of(mut self, other: &Self, gap: f32) -> Self {
-        self.corner = other.inset + other.hit + gap;
+        // The other hit track begins at the region edge. Our along-axis inset already
+        // contributes to the clearance, so count it only once.
+        self.corner = (other.hit.max(other.inset + THICKNESS) + gap - self.inset).max(0.0);
         self
     }
 }
@@ -176,7 +176,10 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
             return div().into_any_element();
         };
         let thickness = px(style.thickness);
-        let hit = px(placement.hit);
+        let hit = px(match placement.edge {
+            Edge::Start => placement.hit.max(style.thickness),
+            Edge::End => placement.hit.max(placement.inset + style.thickness),
+        });
         let inset = px(placement.inset);
         let corner = px(placement.corner);
         let (idle, busy) = style.colors(cx);
@@ -235,19 +238,15 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
             (Axis::Horizontal, Edge::Start) => {
                 track_el.left(inset).right(inset + corner).top_0().h(hit)
             }
-            (Axis::Horizontal, Edge::End) => track_el
-                .left(inset)
-                .right(inset + corner)
-                .bottom(inset)
-                .h(hit),
+            (Axis::Horizontal, Edge::End) => {
+                track_el.left(inset).right(inset + corner).bottom_0().h(hit)
+            }
             (Axis::Vertical, Edge::Start) => {
                 track_el.top(inset).bottom(inset + corner).left_0().w(hit)
             }
-            (Axis::Vertical, Edge::End) => track_el
-                .top(inset)
-                .bottom(inset + corner)
-                .right(inset)
-                .w(hit),
+            (Axis::Vertical, Edge::End) => {
+                track_el.top(inset).bottom(inset + corner).right_0().w(hit)
+            }
         };
 
         let group: gpui::SharedString = format!("{name}-thumb").into();
@@ -256,9 +255,12 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
             .rounded_full()
             .bg(idle)
             .group_hover(group.clone(), move |style| style.bg(busy))
-            .map(|line| match axis {
-                Axis::Horizontal => line.w_full().h(thickness),
-                Axis::Vertical => line.h_full().w(thickness),
+            .absolute()
+            .map(|line| match (axis, placement.edge) {
+                (Axis::Horizontal, Edge::Start) => line.w_full().h(thickness).top_0(),
+                (Axis::Horizontal, Edge::End) => line.w_full().h(thickness).bottom(inset),
+                (Axis::Vertical, Edge::Start) => line.h_full().w(thickness).left_0(),
+                (Axis::Vertical, Edge::End) => line.h_full().w(thickness).right(inset),
             });
         let thumb_el = div()
             .id(element_id("thumb"))

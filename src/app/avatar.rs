@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use gpui::{Image, ImageFormat};
 
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+pub use crate::ui::avatar::AvatarKey;
 
 /// Largest avatar payload accepted, in bytes. GitHub avatars are small; a larger body is treated as
 /// a failure instead of being decoded or buffered without bound.
@@ -37,28 +38,9 @@ const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 /// saved accounts, so this is generous while still bounded.
 const CACHE_CAPACITY: usize = 128;
 
-/// The stable identity of one avatar. It is deliberately not a row index or a login string: the
-/// account/owner key stays the same when the list reorders, and a changed URL is a different key so
-/// the old image is never shown for the new identity.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AvatarKey {
-    /// `host` + numeric owner/account id, when known, so one host's id cannot match another's.
-    pub subject: String,
-    /// The exact URL GitHub returned. A different URL is a different key, so a renamed account or a
-    /// refreshed URL cannot keep serving the previous picture.
-    pub url: String,
-}
-
-impl AvatarKey {
-    /// Builds a key from a host, a stable numeric id and the URL. The numeric id is what survives a
-    /// rename; the URL distinguishes a genuinely new picture.
-    pub fn new(host: impl AsRef<str>, id: u64, url: impl Into<String>) -> Self {
-        Self {
-            subject: format!("{}#{id}", host.as_ref()),
-            url: url.into(),
-        }
-    }
-}
+// `AvatarKey` lives in the shared avatar renderer so standalone page assemblies do not need the
+// network-bearing account module just to key a decoded image. It is re-exported above for the
+// existing account/sidebar call sites.
 
 /// What the cache currently knows about one key.
 #[derive(Clone)]
