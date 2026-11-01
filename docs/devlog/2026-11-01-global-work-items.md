@@ -36,7 +36,9 @@
 
 审查 P2 正确指出最初从窗口宽度派生行宽，不能适配窄 pane。修复后行宽取自 `ListState` 自身 viewport（首次布局前仅以前一帧默认值兜底），列表测量不再把窗口宽度写回行。最终复跑的 fmt/check/clippy/test/build 均通过：`45c068b9`、`a9e57af6`、`18afad03`、`644922ab`、`fb1221d7`；聚焦 example suite 为 `16946e3c`（9 项 view）与 `252c57ab`（bounds），全量为 `644922ab`。
 
-**已知 UI 缺陷（未掩盖）：** 修复后 960 宽原生预览中的超长标题仍视觉上越过右侧 content 区域，并在窄窗被窗口边缘裁切；GPUI 测试使用同一列表 viewport 的 title/row 右界断言通过。说明测试平台布局与 `PrintWindow` 原生呈现之间仍有未解释差异；不把该视觉项视为完成。`pending` 保留给负责人验收。最后一次原生复测在修复后源码 `08184f7d` 的预览构建上进行，帧保留在忽略目录；未为同一未解决现象继续无新证据地反复调参。
+**修复与原生复测（后续轮）：** 先用 DPI 感知 + `PrintWindow` 工具重建对应关系，发现旧 `CopyFromScreen` 帧在 150% 显示器上产生缩放错位且混入被遮挡桌面。真实现象是列表 intrinsic width 被 Ely `Ellipsis` 隐藏全文污染，且旧 viewport/整窗宽度兜底在窄窗或放大 resize 后失效。修复为：标题/仓库/更新时间改用 GPUI 原生文本 `truncate()`（隐藏全文不参与测量），并移除固定行宽与窗口宽度兜底，让行由列表真实可用宽度约束。原生 DPI 感知帧（144 DPI、1440×1080 / 645×780 / 1800×1200，与窗口当前 `scale_factor` 一起记录）显示窄窗、放大 resize、宽窗、Load more、键盘末项场景下长文本均正确省略，未再越界。
+
+**新增回归：** `long_text_stays_inside_a_constrained_pane_and_after_resize_and_append` 用真实 460px 受限 pane + 1200/1300 宽窗口，断言列表、行、标题、仓库名、更新时间都落在 pane 内，且 append 后键盘 End 命中末项。聚焦 `work_items` 用例现为 19 passed。
 
 ## 边界与教训应用
 

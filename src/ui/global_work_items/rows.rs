@@ -3,7 +3,6 @@ use crate::{data::RepositoryReadContext, domain::work_item::*};
 use ely_core::{
     primitives::{FocusRing, Icon, IconName, Tooltip},
     theme::{ActiveTheme, IconSize, TextSize},
-    typography::Ellipsis,
 };
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
@@ -13,7 +12,6 @@ pub(super) fn row(
     item: &WorkItem,
     selected: bool,
     context: Option<RepositoryReadContext>,
-    width: gpui::Pixels,
     cx: &mut Context<WorkItemsView>,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
@@ -48,7 +46,8 @@ pub(super) fn row(
                 });
             }
         })
-        .child(Ellipsis::new(label));
+        .truncate()
+        .child(label);
     let icon = match item.kind {
         WorkItemKind::Issue => IconName::CircleDot,
         WorkItemKind::PullRequest => IconName::GitPullRequest,
@@ -60,82 +59,81 @@ pub(super) fn row(
         ItemState::Unknown => colors.warning,
     };
     div()
-        .w(width)
-        .flex_none()
+        .id(format!("work-item-{id}"))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            view.selected = Some(id);
+            view.focus.focus(window, cx);
+            cx.notify();
+        }))
+        .debug_selector(move || format!("work-item-{id}"))
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_2()
+        .py_2()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .min_w_0()
         .overflow_hidden()
+        .when(selected, |row| row.bg(colors.active))
         .child(
             div()
-                .id(format!("work-item-{id}"))
-                .on_click(cx.listener(move |view, _, window, cx| {
-                    view.selected = Some(id);
-                    view.focus.focus(window, cx);
-                    cx.notify();
-                }))
-                .debug_selector(move || format!("work-item-{id}"))
-                .w_full()
-                .h(px(ROW_HEIGHT))
-                .px_2()
-                .py_2()
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .gap_2()
+                .w_full()
                 .min_w_0()
                 .overflow_hidden()
-                .when(selected, |row| row.bg(colors.active))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .flex_none()
-                                .child(Icon::new(icon).size(IconSize::Sm).color(color)),
-                        )
-                        .child(
-                            div()
-                                .id(format!("work-title-{id}"))
-                                .debug_selector(move || format!("work-title-{id}"))
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .tooltip(Tooltip::text(item.title.clone()))
-                                .child(Ellipsis::new(item.title.clone())),
-                        ),
+                        .flex_none()
+                        .child(Icon::new(icon).size(IconSize::Sm).color(color)),
                 )
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
+                        .id(format!("work-title-{id}"))
+                        .debug_selector(move || format!("work-title-{id}"))
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .tooltip(Tooltip::text(item.title.clone()))
+                        .truncate()
+                        .child(item.title.clone()),
+                ),
+        )
+        .child(
+            div()
+                .debug_selector(move || format!("work-metadata-{id}"))
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .text_size(cx.theme().text_size(TextSize::Xs))
+                .text_color(colors.fg_subtle)
+                .child(link)
+                .child(
+                    div()
+                        .debug_selector(move || format!("work-number-{id}"))
+                        .flex_none()
+                        .font_family("Google Sans Code")
+                        .child(format!("#{}", item.number)),
+                )
+                .child(div().flex_none().child(item.state.label()))
+                .child(
+                    div()
+                        .id(format!("work-updated-{id}"))
+                        .debug_selector(move || format!("work-updated-{id}"))
                         .min_w_0()
                         .overflow_hidden()
-                        .text_size(cx.theme().text_size(TextSize::Xs))
-                        .text_color(colors.fg_subtle)
-                        .child(link)
-                        .child(
-                            div()
-                                .flex_none()
-                                .font_family("Google Sans Code")
-                                .child(format!("#{}", item.number)),
-                        )
-                        .child(div().flex_none().child(item.state.label()))
-                        .child(
-                            div()
-                                .id(format!("work-updated-{id}"))
-                                .min_w_0()
-                                .overflow_hidden()
-                                .tooltip(Tooltip::text(item.updated_at.clone()))
-                                .child(Ellipsis::new(format!(
-                                    "Updated {}",
-                                    item.updated_at.replace('T', " ").trim_end_matches('Z')
-                                ))),
-                        ),
+                        .tooltip(Tooltip::text(item.updated_at.clone()))
+                        .truncate()
+                        .child(format!(
+                            "Updated {}",
+                            item.updated_at.replace('T', " ").trim_end_matches('Z')
+                        )),
                 ),
         )
         .into_any_element()

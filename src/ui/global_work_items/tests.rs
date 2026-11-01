@@ -354,3 +354,96 @@ fn bounded_virtual_list_keyboard_end_and_no_render_requests(cx: &mut TestAppCont
         "row {row:?} outside rows {bounds:?}"
     );
 }
+
+struct ConstrainedPane {
+    page: Entity<WorkItemsView>,
+}
+impl gpui::Render for ConstrainedPane {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        div().size_full().flex().flex_col().child(
+            div()
+                .debug_selector(|| "work-constrained-pane".into())
+                .w(px(460.0))
+                .h_full()
+                .flex_none()
+                .overflow_hidden()
+                .child(self.page.clone()),
+        )
+    }
+}
+
+#[gpui::test]
+fn long_text_stays_inside_a_constrained_pane_and_after_resize_and_append(cx: &mut TestAppContext) {
+    let fixture = FixtureRuntime::new(Scene::Mixed);
+    cx.update(ely_core::init_for_tests);
+    let repos = fixture.accounts.repo_service();
+    let executor = fixture.executor.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut controller = Controller::new(repos.work_item_session().unwrap(), WorkItemKind::Issue);
+    let request = controller.begin(RequestMode::Replace).unwrap();
+    let result = runtime.block_on(request.execute(&WorkItemLimits::default()));
+    assert!(controller.finish(&request, result));
+    let accounts = fixture.accounts.clone();
+    let (_pane, cx) = cx.add_window_view(|window, cx| {
+        let page = cx.new(|cx| {
+            WorkItemsView::with_controller(
+                controller,
+                accounts.repo_service(),
+                executor,
+                window,
+                cx,
+            )
+        });
+        ConstrainedPane { page }
+    });
+    cx.simulate_resize(size(px(1200.0), px(700.0)));
+    cx.run_until_parked();
+    let assert_inside = |cx: &mut VisualTestContext, id: &str| {
+        let pane = cx.debug_bounds("work-constrained-pane").unwrap();
+        let list = cx.debug_bounds("work-rows").unwrap();
+        let row = cx
+            .debug_bounds(Box::leak(format!("work-item-{id}").into_boxed_str()))
+            .unwrap();
+        let title = cx
+            .debug_bounds(Box::leak(format!("work-title-{id}").into_boxed_str()))
+            .unwrap();
+        let repository = cx
+            .debug_bounds(Box::leak(format!("work-repo-{id}").into_boxed_str()))
+            .unwrap();
+        let updated = cx
+            .debug_bounds(Box::leak(format!("work-updated-{id}").into_boxed_str()))
+            .unwrap();
+        assert!(
+            list.size.width <= px(460.0),
+            "list {list:?} exceeds pane {pane:?}"
+        );
+        assert!(
+            row.right() <= list.right(),
+            "row {row:?} exceeds list {list:?}"
+        );
+        assert!(
+            title.right() <= row.right(),
+            "title {title:?} exceeds row {row:?}"
+        );
+        assert!(
+            repository.right() <= row.right(),
+            "repo {repository:?} exceeds row {row:?}"
+        );
+        assert!(
+            updated.right() <= row.right(),
+            "updated {updated:?} exceeds row {row:?}"
+        );
+        assert!(pane.size.width <= px(460.0), "pane {pane:?}");
+    };
+    assert_inside(cx, "10000");
+    cx.simulate_resize(size(px(1300.0), px(700.0)));
+    cx.run_until_parked();
+    assert_inside(cx, "10000");
+}

@@ -454,7 +454,7 @@ impl Render for WorkItemsView {
                 .child("No results")
                 .into_any_element()
         } else {
-            self.render_list(opacity, window, cx)
+            self.render_list(opacity, cx)
         };
         let more = self.controller.next.is_some() && current;
         let weak = cx.entity().downgrade();
@@ -508,25 +508,16 @@ impl Render for WorkItemsView {
     }
 }
 impl WorkItemsView {
-    fn render_list(&self, opacity: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        // Measure outside the list's mutable layout borrow. The first frame
-        // falls back to the padded window width; later frames use the actual
-        // list viewport, so the component also fits a narrower pane.
-        let viewport = self.list.viewport_bounds().size.width;
-        let width = if viewport > px(0.0) {
-            viewport
-        } else {
-            window.viewport_size().width - px(32.0)
-        };
+    fn render_list(&self, opacity: f32, cx: &mut Context<Self>) -> AnyElement {
         let list = gpui::list(
             self.list.clone(),
-            cx.processor(move |view: &mut WorkItemsView, index: usize, _, cx| {
+            cx.processor(|view: &mut WorkItemsView, index: usize, _, cx| {
                 if !view.controller.current() {
                     return div().into_any_element();
                 }
                 let item = view.controller.rows[index].clone();
                 let context = Some(view.controller.context().clone());
-                rows::row(&item, view.selected == Some(item.id), context, width, cx)
+                rows::row(&item, view.selected == Some(item.id), context, cx)
             }),
         )
         .size_full();
