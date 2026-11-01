@@ -274,6 +274,10 @@ async fn corrupt_or_oversized_payload_falls_back_and_does_not_cache() {
         .with_cache(disk_cache.clone());
 
     assert!(fetcher.fetch(&broken_key).await.is_none());
+    assert!(
+        disk_cache.read_sync(&broken_key).is_none(),
+        "invalid payload is not written to cache"
+    );
 
     // Oversized URL
     let big_url = "https://avatars.test/big.png";
@@ -287,6 +291,51 @@ async fn corrupt_or_oversized_payload_falls_back_and_does_not_cache() {
         vec![0u8; MAX_AVATAR_BYTES + 10],
     );
     assert!(fetcher.fetch(&big_key).await.is_none());
+    assert!(
+        disk_cache.read_sync(&big_key).is_none(),
+        "oversized payload is not written to cache"
+    );
+}
+
+#[tokio::test]
+async fn no_cache_and_must_revalidate_prohibit_stale_offline_reuse() {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig::at(dir.path().to_path_buf());
+    let store = CacheStore::open(config.clone()).unwrap();
+    let account = AccountKey::new(450, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk_cache = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let source = Arc::new(MockAvatarSource::new());
+    let url_no_cache = "https://avatars.test/no_cache.png";
+    let key_no_cache = AvatarKey::new("github.com", 451, url_no_cache);
+    source.serve(
+        url_no_cache,
+        200,
+        Some("\"nc1\""),
+        None,
+        Some("no-cache"),
+        valid_png(),
+    );
+
+    let fetcher = AvatarFetcher::new(source.clone(), false)
+        .with_source(source.clone())
+        .with_cache(disk_cache.clone());
+
+    // Online fetch stores it
+    assert!(fetcher.fetch(&key_no_cache).await.is_some());
+    assert!(disk_cache.read_sync(&key_no_cache).is_some());
+
+    // Offline fetch with failing network: must NOT return stale avatar because no-cache forbids it!
+    let offline_source = Arc::new(MockAvatarSource::new());
+    let fetcher_offline = AvatarFetcher::new(offline_source.clone(), false)
+        .with_source(offline_source.clone())
+        .with_cache(disk_cache);
+
+    assert!(
+        fetcher_offline.fetch(&key_no_cache).await.is_none(),
+        "no-cache forbids stale offline fallback"
+    );
 }
 
 #[test]

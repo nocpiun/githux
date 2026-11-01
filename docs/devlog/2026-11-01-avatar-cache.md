@@ -48,6 +48,13 @@
 
 ## 验证记录
 
+## Codex Review 修复反馈 (Round 1)
+
+第一轮代码审查提出三项 P2 建议，已全部处理并补充回归测试：
+1. **网络请求前捕获写入票据 (begin_write)**：在发送 HTTP 请求前调用 `begin_write_sync` 捕获 `CacheWrite` 票据，并在写入时使用 `commit_write_sync`。若下载期间发生缓存失效、清理或更新的写入，原有票据自动被判定为 `Stale`，彻底杜绝慢响应覆盖新数据或回填已清理缓存。
+2. **校验图片解码后再写入磁盘**：在 `put` 进磁盘前先执行 `decode_image` 完整图像解码校验；若为损坏/非图片内容，拒绝入库，避免坏数据覆盖有效缓存或存储坏 validator。补充了 `corrupt_or_oversized_payload_falls_back_and_does_not_cache` 对磁盘无写入的断言。
+3. **遵守离线回退的 Cache-Control 限制**：增加 `is_snapshot_reusable_offline` 检查，若缓存标有 `no-cache` 或 `must-revalidate`，离线网络不可用时拒绝回退旧图，安全退回 initials fallback。新增 `no_cache_and_must_revalidate_prohibit_stale_offline_reuse` 测试验证。
+
 所有 Cargo 检查通过 `node scripts/verify.mjs -- cargo ...` 执行：
 - `cargo fmt --all -- --check`：通过。
 - `cargo check --locked --all-targets`：通过。

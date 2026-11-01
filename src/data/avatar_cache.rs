@@ -80,6 +80,38 @@ impl AvatarDiskCache {
         &self.scope
     }
 
+    /// Prepares a write ticket before network download begins.
+    pub fn begin_write_sync<K: AvatarKeyLike>(
+        &self,
+        key: &K,
+    ) -> Result<crate::storage::cache::CacheWrite, crate::storage::cache::CacheError> {
+        let cache_key = avatar_cache_key(key)?;
+        self.store.begin_write(&self.scope, &cache_key)
+    }
+
+    /// Complete write with a previously acquired write ticket.
+    pub fn commit_write_sync(
+        &self,
+        ticket: crate::storage::cache::CacheWrite,
+        bytes: &[u8],
+        etag: Option<String>,
+        last_modified: Option<String>,
+        cache_control: Option<String>,
+    ) -> Result<WriteOutcome, crate::storage::cache::CacheError> {
+        let now = now_ms();
+        let metadata = CacheMetadata {
+            representation_version: AVATAR_REPRESENTATION_VERSION,
+            fetched_at_ms: now,
+            verified_at_ms: now,
+            completeness: CacheCompleteness::Complete,
+            etag,
+            last_modified,
+            cache_control,
+        };
+
+        self.store.put(ticket, bytes, metadata)
+    }
+
     /// Read cached avatar bytes for `key` in a blocking context.
     pub fn read_sync<K: AvatarKeyLike>(&self, key: &K) -> Option<CacheSnapshot> {
         let cache_key = avatar_cache_key(key).ok()?;
@@ -155,9 +187,30 @@ impl AvatarDiskCache {
             let _ = self.store.invalidate(&self.scope, &cache_key);
         }
     }
+    /// Checks whether the cached snapshot is eligible for offline/stale fallback.
+    /// Responses with `Cache-Control: no-cache` or `must-revalidate` cannot be returned
+    /// without revalidation.
+    pub fn is_snapshot_reusable_offline(snapshot: &CacheSnapshot) -> bool {
+        if let Some(cc) = snapshot.metadata.cache_control.as_deref() {
+            for directive in cc.split(',') {
+                let name = directive.split('=').next().unwrap_or("").trim();
+                if name.eq_ignore_ascii_case("no-cache")
+                    || name.eq_ignore_ascii_case("must-revalidate")
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
-/// Sanitizes a URL for caching and diagnostics.
+/// Checks whether the cached snapshot is eligible for offline/stale fallback.
+/// Responses with `Cache-Control: no-cache` or `must-revalidate` cannot be returned
+/// without revalidation.
+pub fn is_snapshot_reusable_offline(snapshot: &CacheSnapshot) -> bool {
+    AvatarDiskCache::is_snapshot_reusable_offline(snapshot)
+}
 ///
 /// Strips query parameters if any query parameter name looks sensitive
 /// (e.g., token, signature, sig, key, auth, credential, expires).

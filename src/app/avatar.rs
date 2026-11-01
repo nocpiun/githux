@@ -345,17 +345,21 @@ impl AvatarFetcher {
             return None;
         }
 
-        // 1. If we have a disk cache, attempt to read the cached snapshot off the current thread
-        // using spawn_blocking so we never block an async worker or UI.
-        let cached_snapshot = if let Some(cache) = &self.disk_cache {
+        // 1. If we have a disk cache:
+        //    a) Read existing cached snapshot
+        //    b) Acquire write ticket BEFORE starting download to preserve stale-writer protections.
+        let (cached_snapshot, write_ticket) = if let Some(cache) = &self.disk_cache {
             let cache = cache.clone();
             let key_clone = key.clone();
-            tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
-                .await
-                .ok()
-                .flatten()
+            tokio::task::spawn_blocking(move || {
+                let snapshot = cache.read_sync(&key_clone);
+                let ticket = cache.begin_write_sync(&key_clone).ok();
+                (snapshot, ticket)
+            })
+            .await
+            .unwrap_or((None, None))
         } else {
-            None
+            (None, None)
         };
 
         // 2. Perform network fetch, conditionally if validators exist and detailed source is available.
@@ -409,6 +413,9 @@ impl AvatarFetcher {
                 if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
                     return None;
                 }
+                // Validate payload first before touching cache!
+                let decoded = decode_image(bytes.clone())?;
+
                 // Check no-store: if response instructs no-store, invalidate any existing representation and do not store
                 let permits_storage = meta
                     .cache_control
@@ -428,14 +435,15 @@ impl AvatarFetcher {
                     let cache = cache.clone();
                     let key_clone = key.clone();
                     if permits_storage {
-                        let bytes_clone = bytes.clone();
-                        let etag = meta.etag.clone();
-                        let lm = meta.last_modified.clone();
-                        let cc = meta.cache_control.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            cache.put_sync(&key_clone, &bytes_clone, etag, lm, cc)
-                        })
-                        .await;
+                        if let Some(ticket) = write_ticket {
+                            let etag = meta.etag.clone();
+                            let lm = meta.last_modified.clone();
+                            let cc = meta.cache_control.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
+                            })
+                            .await;
+                        }
                     } else {
                         let _ = tokio::task::spawn_blocking(move || {
                             cache.invalidate_sync(&key_clone);
@@ -443,13 +451,20 @@ impl AvatarFetcher {
                         .await;
                     }
                 }
-                decode_image(bytes)
+                Some(decoded)
             }
             _ => {
                 // Network failed or returned error status (e.g. 404, 500, offline).
-                // If we have an existing disk cache hit, we can fall back to the cached snapshot!
+                // If we have an existing disk cache hit, we can fall back to the cached snapshot
+                // if permitted by cache_control policies (no-cache / must-revalidate prohibited offline).
                 if let Some(cached) = cached_snapshot {
-                    decode_image(cached.bytes)
+                    if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
+                        &cached,
+                    ) {
+                        decode_image(cached.bytes)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
