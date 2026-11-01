@@ -320,6 +320,7 @@ impl ExternalImageBytes for ReqwestExternalImages {
             let deadline = tokio::time::Instant::now() + limits.timeout;
 
             let mut hops = 0usize;
+            let mut redirect_cache_control: Option<String> = None;
             loop {
                 let mut request = self.client.get(url.clone()).header(
                     "Accept",
@@ -345,7 +346,13 @@ impl ExternalImageBytes for ReqwestExternalImages {
 
                 let status = response.status().as_u16();
                 if status == 304 {
-                    let metadata = extract_metadata(&response);
+                    let mut metadata = extract_metadata(&response);
+                    if let Some(ref r_cc) = redirect_cache_control {
+                        metadata.cache_control = match metadata.cache_control {
+                            Some(cc) => Some(format!("{r_cc}, {cc}")),
+                            None => Some(r_cc.clone()),
+                        };
+                    }
                     return Ok(ExternalImageResponse::NotModified { metadata });
                 }
                 if (300..400).contains(&status) {
@@ -354,6 +361,15 @@ impl ExternalImageBytes for ReqwestExternalImages {
                             ExternalRefusal::TooManyRedirects,
                         ));
                     }
+                    // Accumulate Cache-Control from redirect responses in the chain
+                    let hop_meta = extract_metadata(&response);
+                    if let Some(cc) = hop_meta.cache_control {
+                        redirect_cache_control = match redirect_cache_control {
+                            Some(prev) => Some(format!("{prev}, {cc}")),
+                            None => Some(cc),
+                        };
+                    }
+
                     let location = response
                         .headers()
                         .get(reqwest::header::LOCATION)
@@ -384,7 +400,13 @@ impl ExternalImageBytes for ReqwestExternalImages {
                     });
                 }
 
-                let metadata = extract_metadata(&response);
+                let mut metadata = extract_metadata(&response);
+                if let Some(ref r_cc) = redirect_cache_control {
+                    metadata.cache_control = match metadata.cache_control {
+                        Some(cc) => Some(format!("{r_cc}, {cc}")),
+                        None => Some(r_cc.clone()),
+                    };
+                }
                 let mut response = response;
                 let mut body = Vec::new();
                 loop {

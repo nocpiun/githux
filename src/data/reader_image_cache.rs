@@ -329,22 +329,21 @@ impl ReaderImageCache {
             .cache_control
             .as_ref()
             .or(cached.metadata.cache_control.as_ref());
-        let cache_control = match (cc_base, meta.age_secs) {
-            (Some(cc), Some(age)) => {
+        let cache_control = match cc_base {
+            Some(cc) => {
                 let stripped = cc
                     .split(',')
                     .filter(|p| !p.trim().starts_with("githux-age="))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if stripped.is_empty() {
-                    Some(format!("githux-age={age}"))
-                } else {
-                    Some(format!("{stripped}, githux-age={age}"))
+                match meta.age_secs {
+                    Some(age) if stripped.is_empty() => Some(format!("githux-age={age}")),
+                    Some(age) => Some(format!("{stripped}, githux-age={age}")),
+                    None if stripped.is_empty() => None,
+                    None => Some(stripped),
                 }
             }
-            (Some(cc), None) => Some(cc.clone()),
-            (None, Some(age)) => Some(format!("githux-age={age}")),
-            (None, None) => None,
+            None => meta.age_secs.map(|age| format!("githux-age={age}")),
         };
 
         let updated_metadata = CacheMetadata {
