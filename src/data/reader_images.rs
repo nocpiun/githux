@@ -587,12 +587,26 @@ impl RepositoryImageService {
                     .map_err(|_| ImageFailure::Network)?;
 
             if let Ok(Some(snapshot)) = cached_snapshot {
+                let age_secs = snapshot
+                    .metadata
+                    .cache_control
+                    .as_deref()
+                    .and_then(|cc| {
+                        cc.split(',').find_map(|p| {
+                            let p = p.trim();
+                            p.strip_prefix("githux-age=")
+                                .and_then(|v| v.trim().parse::<u64>().ok())
+                        })
+                    })
+                    .unwrap_or(0);
+
                 let freshness = ExternalFreshness {
                     etag: snapshot.metadata.etag.clone(),
                     last_modified: snapshot.metadata.last_modified.clone(),
                     cache_control: snapshot.metadata.cache_control.clone(),
                     fetched_at_ms: snapshot.metadata.fetched_at_ms,
                     verified_at_ms: snapshot.metadata.verified_at_ms,
+                    age_secs,
                 };
 
                 let now = now_ms();

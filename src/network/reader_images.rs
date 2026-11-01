@@ -426,10 +426,18 @@ fn extract_metadata(response: &reqwest::Response) -> ExternalImageMetadata {
         .get(reqwest::header::LAST_MODIFIED)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let cache_control = headers
-        .get(reqwest::header::CACHE_CONTROL)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let cache_control = {
+        let values: Vec<&str> = headers
+            .get_all(reqwest::header::CACHE_CONTROL)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.join(", "))
+        }
+    };
     let age_secs = headers
         .get(reqwest::header::AGE)
         .and_then(|v| v.to_str().ok())

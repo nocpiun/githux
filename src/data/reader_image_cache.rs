@@ -34,6 +34,7 @@ pub struct ExternalFreshness {
     pub cache_control: Option<String>,
     pub fetched_at_ms: i64,
     pub verified_at_ms: i64,
+    pub age_secs: u64,
 }
 
 impl ExternalFreshness {
@@ -47,10 +48,13 @@ impl ExternalFreshness {
             for part in lower.split(',') {
                 let part = part.trim();
                 if let Some(rest) = part.strip_prefix("max-age=")
-                    && let Ok(secs) = rest.trim().parse::<i64>()
+                    && let Ok(max_age_secs) = rest.trim().parse::<u64>()
                 {
-                    let age_ms = now_ms.saturating_sub(self.verified_at_ms);
-                    return age_ms <= secs.saturating_mul(1000);
+                    let age_since_verified_secs =
+                        now_ms.saturating_sub(self.verified_at_ms).max(0) as u64 / 1000;
+                    let total_current_age_secs =
+                        self.age_secs.saturating_add(age_since_verified_secs);
+                    return total_current_age_secs <= max_age_secs;
                 }
             }
         }
@@ -292,19 +296,23 @@ impl ReaderImageCache {
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
-        // If upstream response had an Age header, offset verified_at_ms into the past
-        // so that freshness lifetime correctly accounts for upstream CDN age.
-        let age_offset_ms = meta.age_secs.unwrap_or(0).saturating_mul(1000) as i64;
-        let verified_at = now.saturating_sub(age_offset_ms);
-        let fetched_at = now.saturating_sub(age_offset_ms);
+        // Pack age_secs into cache_control or separate representation without violating verified_at_ms >= fetched_at_ms invariant.
+        let cache_control = match (meta.cache_control.as_deref(), meta.age_secs) {
+            (Some(cc), Some(age)) if !cc.contains("githux-age=") => {
+                Some(format!("{cc}, githux-age={age}"))
+            }
+            (None, Some(age)) => Some(format!("githux-age={age}")),
+            (cc, _) => cc.map(str::to_string),
+        };
+
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
-            fetched_at_ms: fetched_at,
-            verified_at_ms: verified_at,
+            fetched_at_ms: now,
+            verified_at_ms: now,
             completeness: CacheCompleteness::Complete,
             etag: meta.etag.clone(),
             last_modified: meta.last_modified.clone(),
-            cache_control: meta.cache_control.clone(),
+            cache_control,
         };
         self.store.put(ticket, bytes, metadata)
     }
@@ -317,16 +325,36 @@ impl ReaderImageCache {
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
-        let age_offset_ms = meta.age_secs.unwrap_or(0).saturating_mul(1000) as i64;
-        let verified_at = now.saturating_sub(age_offset_ms);
+        let cc_base = meta
+            .cache_control
+            .as_ref()
+            .or(cached.metadata.cache_control.as_ref());
+        let cache_control = match (cc_base, meta.age_secs) {
+            (Some(cc), Some(age)) => {
+                let stripped = cc
+                    .split(',')
+                    .filter(|p| !p.trim().starts_with("githux-age="))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if stripped.is_empty() {
+                    Some(format!("githux-age={age}"))
+                } else {
+                    Some(format!("{stripped}, githux-age={age}"))
+                }
+            }
+            (Some(cc), None) => Some(cc.clone()),
+            (None, Some(age)) => Some(format!("githux-age={age}")),
+            (None, None) => None,
+        };
+
         let updated_metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
             fetched_at_ms: cached.metadata.fetched_at_ms,
-            verified_at_ms: verified_at,
+            verified_at_ms: now.max(cached.metadata.fetched_at_ms),
             completeness: CacheCompleteness::Complete,
             etag: meta.etag.clone().or(cached.metadata.etag),
             last_modified: meta.last_modified.clone().or(cached.metadata.last_modified),
-            cache_control: meta.cache_control.clone().or(cached.metadata.cache_control),
+            cache_control,
         };
         self.store.put(ticket, &cached.bytes, updated_metadata)
     }
