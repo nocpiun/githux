@@ -51,6 +51,10 @@
    - `ReaderImageCache` 增加 `begin_write_external` 与 `with_ticket` 写入方法；
    - 在 `RepositoryImageService::external_bytes` 及 `repository_bytes` 中，在 `await` 远程响应之前先领取 ticket，入库时传入该 ticket；
    - 保证 `CacheStore` 的并发代次和 `clear()` 失效机制正常运作，阻止并发旧结果覆盖较新快照。
+3. **HTTP 缓存新鲜度优化与 404 代次防护**：
+   - 支持 `must-revalidate` 在未过期（`max-age` 新鲜期内）直接复用缓存，仅对 `no-cache` 或过期条目强制网络验证；
+   - 支持解析 upstream `Age` header，将响应已存在的时间纳入新鲜期计算，防止 CDN 延迟交付导致本地误判为完整满期；
+   - 404 失效（`invalidate_external_image_with_ticket`）改用在请求发起时领取的 write ticket 执行带有 no-store 语义的条件写入，防止慢速/过期的 404 响应误删后续并发请求刚刚缓存的较新图片。
 
 ## 验证结果
 

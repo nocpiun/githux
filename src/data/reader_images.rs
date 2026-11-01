@@ -651,10 +651,11 @@ impl RepositoryImageService {
                     }
                     Err(ExternalImageError::Status(404)) => {
                         let cache_clone = cache.clone();
-                        let url_string = url.to_string();
-                        tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                            let _ = cache_clone.invalidate_external_image(&url_string);
-                        }));
+                        if let Ok(ticket) = ticket_res {
+                            tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                                let _ = cache_clone.invalidate_external_image_with_ticket(ticket);
+                            }));
+                        }
                         return Err(ImageFailure::NotFound);
                     }
                     Err(e) => {

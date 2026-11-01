@@ -41,7 +41,7 @@ impl ExternalFreshness {
     pub fn is_fresh_at(&self, now_ms: i64) -> bool {
         if let Some(ref cc) = self.cache_control {
             let lower = cc.to_ascii_lowercase();
-            if lower.contains("no-cache") || lower.contains("must-revalidate") {
+            if lower.contains("no-cache") {
                 return false;
             }
             for part in lower.split(',') {
@@ -292,10 +292,15 @@ impl ReaderImageCache {
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
+        // If upstream response had an Age header, offset verified_at_ms into the past
+        // so that freshness lifetime correctly accounts for upstream CDN age.
+        let age_offset_ms = meta.age_secs.unwrap_or(0).saturating_mul(1000) as i64;
+        let verified_at = now.saturating_sub(age_offset_ms);
+        let fetched_at = now.saturating_sub(age_offset_ms);
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
-            fetched_at_ms: now,
-            verified_at_ms: now,
+            fetched_at_ms: fetched_at,
+            verified_at_ms: verified_at,
             completeness: CacheCompleteness::Complete,
             etag: meta.etag.clone(),
             last_modified: meta.last_modified.clone(),
@@ -312,10 +317,12 @@ impl ReaderImageCache {
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
+        let age_offset_ms = meta.age_secs.unwrap_or(0).saturating_mul(1000) as i64;
+        let verified_at = now.saturating_sub(age_offset_ms);
         let updated_metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
             fetched_at_ms: cached.metadata.fetched_at_ms,
-            verified_at_ms: now,
+            verified_at_ms: verified_at,
             completeness: CacheCompleteness::Complete,
             etag: meta.etag.clone().or(cached.metadata.etag),
             last_modified: meta.last_modified.clone().or(cached.metadata.last_modified),
@@ -324,10 +331,24 @@ impl ReaderImageCache {
         self.store.put(ticket, &cached.bytes, updated_metadata)
     }
 
-    /// Explicitly invalidates external image representation (e.g. on no-store or 404).
-    pub fn invalidate_external_image(&self, url: &str) -> Result<(), CacheError> {
-        let key = self.external_image_key(url)?;
-        self.store.invalidate(&self.scope, &key)
+    /// Invalidate an external image entry using a pre-acquired write ticket.
+    /// If another writer has updated the entry in the meantime, the invalidation is rejected as stale.
+    pub fn invalidate_external_image_with_ticket(
+        &self,
+        ticket: crate::storage::cache::CacheWrite,
+    ) -> Result<(), CacheError> {
+        let metadata = CacheMetadata {
+            representation_version: READER_IMAGE_REPRESENTATION_VERSION,
+            fetched_at_ms: now_ms(),
+            verified_at_ms: now_ms(),
+            completeness: CacheCompleteness::Complete,
+            etag: None,
+            last_modified: None,
+            cache_control: Some("no-store".into()),
+        };
+        // Putting metadata with no-store using ticket deletes the entry if the ticket is still current!
+        let _ = self.store.put(ticket, &[], metadata)?;
+        Ok(())
     }
 }
 

@@ -78,6 +78,8 @@ pub struct ExternalImageMetadata {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub cache_control: Option<String>,
+    /// Upstream response Age in seconds, if supplied.
+    pub age_secs: Option<u64>,
 }
 
 /// Result of an external image fetch with optional HTTP metadata.
@@ -428,10 +430,15 @@ fn extract_metadata(response: &reqwest::Response) -> ExternalImageMetadata {
         .get(reqwest::header::CACHE_CONTROL)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let age_secs = headers
+        .get(reqwest::header::AGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
     ExternalImageMetadata {
         etag,
         last_modified,
         cache_control,
+        age_secs,
     }
 }
 

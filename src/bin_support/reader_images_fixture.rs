@@ -655,6 +655,7 @@ impl ExternalImageBytes for MemoryExternalImages {
                         etag: Some(etag),
                         last_modified: None,
                         cache_control: Some("public, max-age=60".into()),
+                        age_secs: None,
                     },
                 });
             }
@@ -665,6 +666,7 @@ impl ExternalImageBytes for MemoryExternalImages {
                     etag: Some(etag),
                     last_modified: None,
                     cache_control: Some("public, max-age=60".into()),
+                    age_secs: None,
                 },
             })
         })

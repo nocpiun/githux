@@ -211,6 +211,7 @@ impl ExternalImageBytes for MemoryExternal {
                         etag: Some(etag),
                         last_modified: None,
                         cache_control: Some("public, max-age=60".into()),
+                        age_secs: None,
                     },
                 });
             }
@@ -221,6 +222,7 @@ impl ExternalImageBytes for MemoryExternal {
                     etag: Some(etag),
                     last_modified: None,
                     cache_control: Some("public, max-age=60".into()),
+                    age_secs: None,
                 },
             })
         })
@@ -971,6 +973,7 @@ async fn external_badges_honor_freshness_revalidation_and_no_store() {
         etag: Some("\"etag-1\"".into()),
         last_modified: None,
         cache_control: Some("no-store".into()),
+        age_secs: None,
     };
     cache_helper
         .put_external_image(nostore_url, &bytes, &meta_nostore)
