@@ -9,6 +9,9 @@ use std::sync::Arc;
 fn cache_config(temp: &tempfile::TempDir) -> CacheConfig {
     CacheConfig::at(temp.path().join("cache"))
 }
+fn test_binding(cache: &CacheStore, scope: &crate::storage::cache::CacheScope) -> AccountCache {
+    AccountCache::from_parts_for_test(cache.clone(), scope.clone())
+}
 fn account_summary(service: &AccountService, id: u64) -> AccountSummary {
     service
         .summaries()
@@ -374,9 +377,13 @@ async fn retirement_before_catalog_failure_is_fail_closed_and_recovers_on_reopen
         .execute_batch("DROP TRIGGER fail_remove")
         .unwrap();
     drop(connection);
+    // The partition is already durably retired, so a direct remove retry does
+    // not need to provision or retire another partition before the catalog.
+    service.remove_saved(key(1)).await.unwrap();
+    assert!(service.summaries().is_empty());
     service.close().await.unwrap();
     let service = open_cached(accounts, credentials, mock, executor, cache).await;
-    assert!(service.cache(&account_summary(&service, 1)).is_some());
+    assert!(service.summaries().is_empty());
     service.close().await.unwrap();
 }
 
@@ -455,7 +462,7 @@ async fn legacy_open_and_broken_reconciliation_keep_account_reads_without_cache(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let objects = cache_config(&temp).root.join("objects");
+        let objects = cache_config.root.join("objects");
         let mut permissions = std::fs::metadata(&objects).unwrap().permissions();
         permissions.set_mode(0o500);
         std::fs::set_permissions(&objects, permissions).unwrap();
@@ -483,7 +490,7 @@ async fn legacy_open_and_broken_reconciliation_keep_account_reads_without_cache(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let objects = cache_config(&temp).root.join("objects");
+        let objects = cache_config.root.join("objects");
         let mut permissions = std::fs::metadata(&objects).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&objects, permissions).unwrap();
@@ -684,6 +691,74 @@ async fn late_rejection_waits_for_replacement_and_cannot_poison_the_new_epoch() 
         .await
         .unwrap();
     assert_eq!(value(&binding, &private_key(3)), b"private");
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_rejection_is_replayed_before_recovery_reissues_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = open_cached(accounts, credentials, mock.clone(), executor, cache.clone()).await;
+    user(&mock, 1).await;
+    service.login(Pat::from_str("fake")).await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    put(&binding, &private_key(1), b"private");
+    let context = service.repo_service().session().unwrap().context().clone();
+    let connection =
+        rusqlite::Connection::open(cache_config(&temp).root.join("cache.sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_reject BEFORE UPDATE ON scopes BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(
+        service
+            .repo_service()
+            .credential_rejected(&context)
+            .await
+            .is_err()
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_reject")
+        .unwrap();
+    drop(connection);
+    service.recover().await.unwrap();
+    denied(
+        &service.cache(&account_summary(&service, 1)).unwrap(),
+        &private_key(1),
+    );
+    assert!(!service.recovery_pending().await.unwrap());
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn blocked_orphan_is_retired_before_readd_gets_a_fresh_partition() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let orphan = cache.saved_account(key(1)).unwrap();
+    put(&test_binding(&cache, &orphan), &private_key(1), b"orphan");
+    let connection =
+        rusqlite::Connection::open(cache_config(&temp).root.join("cache.sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_orphan BEFORE UPDATE ON scopes BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = open_cached(accounts, credentials, mock.clone(), executor, cache.clone()).await;
+    assert!(service.recovery_pending().await.unwrap());
+    connection
+        .execute_batch("DROP TRIGGER fail_orphan")
+        .unwrap();
+    drop(connection);
+    user(&mock, 1).await;
+    service.login(Pat::from_str("new_fake")).await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_ne!(binding.scope().partition(), orphan.partition());
+    assert!(matches!(
+        binding.store().read(binding.scope(), &private_key(1)),
+        Ok(CacheRead::Miss(_))
+    ));
+    denied(&test_binding(&cache, &orphan), &private_key(1));
     service.close().await.unwrap();
 }
 

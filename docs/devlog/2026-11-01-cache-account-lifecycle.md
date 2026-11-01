@@ -42,6 +42,12 @@ PR #61 对 head `3fd636fa5db6bcd6d9baf0117a8a960b85ca90cb` 的 [P1 评论](https
 
 新增 `RepoService::begin_revalidation(context, repository)` 与 async `permission_confirmed(context, ticket)`：后者和替换共用提交锁，并在 blocking worker 内复核 registry epoch、cache 绑定与 store ticket。测试先在替换窗口构造旧 proof，用真多线程 runtime 暂停其提交、让替换先完成，再确认旧 proof 为 `Stale` 且 bytes 仍隔离；run `09aac8de-e701-4864-87e6-3a7e5f3aa66a` 通过。现有正常 revalidation 回归改走该服务入口，不把 core ticket 直接确认当作安全组装。最终 lifecycle 10 项通过（`cb5a4a68-9302-484c-99b8-5f6abb408c03`），全量 960 项通过（`8c9aade8-7bb8-4f82-ba59-316328da811c`），clippy（`69b9b170-c43f-44ce-b28f-9ced8f093226`）与 build（`9b1e0610-60a8-4194-bb27-18a3e37c3ffd`）通过。一次全量运行中未修改的 transport bounded 用例返回 Network 而非 ResponseTooLarge（`6629b76e-edd2-4208-a179-6f3c817cc4f2`），其单独重跑通过（`bc21f38e-dc2f-412c-a787-6497988bbb16`），最终全量通过；不把这波动作当作本任务逻辑验证。
 
+## Codex 第三轮、CI 与基线
+
+PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均可直接修复的问题：退休失败的 orphan 在重加前仍须退休；失败的明确拒绝须在 recover 时重放，不能被重新发 scope 覆盖；已持久退休的分区应允许 remove 直接重试。相应测试 `blocked_orphan_is_retired_before_readd_gets_a_fresh_partition`、`failed_rejection_is_replayed_before_recovery_reissues_scope` 与扩展的 `retirement_before_catalog_failure_is_fail_closed_and_recovers_on_reopen` 覆盖实际顺序，最终 lifecycle 12 项通过（run `8dc4b7c5-3297-4dd8-9525-6ff9cc597c92`）。
+
+同一 head 的 Linux CI 在 Unix-only 测试分支发现 `cache_config` 局部变量遮蔽函数（Windows 不编译该分支），已改用已有 config 值。main 前进至 `ee0e9f9a8ca97b87e98b85cad46b6b2a8feedd8c`（reader-image-cache），已合并并保留其独立注册/实现；组合检查通过：全量 test `7a4cf22d-0e12-4cc4-ab05-4de56526fb4b`、all-target check `36844887-9fde-47d8-b7bb-05118c02dd7b`、clippy `ccd3c1db-6bcc-4861-96c6-72bd2fec33d3`、build `931bcdbf-eccc-40fe-a49c-3869369bc985`、fmt check `fbac683c-a0fd-4780-afad-e3706dceae39`。所有反馈均无需裁决，merge_owner 仍为 worker。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。
