@@ -52,6 +52,8 @@ Codex 对 `a53e807` 提出 5 项问题，均可在既定约束内直接修复，
 
 第二轮对 `23b614d` 的 3 项反馈同样直接修复：branches 首个成功验证页标记网络证明；tree 键加入 response budget；缓存 blob 命中按当前 decoded budget 返回 TooLarge。新增 branches 自行重验、预算切换与缓存上限回归，聚焦 `dd50a097-c37b-42c7-8213-bbb41e752b3f` 通过。期间 main 前进至 reader-image-cache `ee0e9f9`，按独立模块归属同步组合。
 
+第三轮对 `c9e97b4` 的 2 项反馈也直接修复：branches 在线读取先在同一认证上下文用 repository details 验证 locator 的数字 ID，再取分支，避免复用 locator 的其它仓库解锁旧 gate；README `NotFoundOrInaccessible` 在线模式不再作为不可变命中冻结，改为重验，离线仍可读该不确定快照。新增相应回归，聚焦 `0069f884-eb1a-4def-b1fe-ba2613edaecd` 通过。
+
 ## 边界
 
 无 GUI/Shell 接线，无真实 PAT/实网写操作或 Star 验收。正式账户事件生产、应用级 CacheStore 组装与离线 UI 由后续任务交付。缓存适配层完成不等于应用离线功能已交付。

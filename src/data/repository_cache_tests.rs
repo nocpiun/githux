@@ -1125,6 +1125,7 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
 
     // Restore proof for storage-directive checks, through the aggregate
     // branches adapter itself rather than a different resource endpoint.
+    fixture.push(200, details());
     fixture.push(
         200,
         json!([{"name":"main","commit":{"sha":A},"protected":false}]),
@@ -1133,7 +1134,7 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         .branches(
             &repository(),
             &Default::default(),
-            RepositoryCacheMode::OnlinePreferred,
+            RepositoryCacheMode::ForceRefresh,
             Default::default(),
         )
         .await
@@ -1348,6 +1349,48 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         small.value.value.body(),
         &BlobBody::TooLarge { size: 5, limit: 1 }
     );
+
+    // An uncertain README result is a reusable offline snapshot, but online
+    // discovery retries instead of freezing a transient/limited 404 outcome.
+    fixture.push(404, json!({}));
+    fixture.push(200, json!({"sha":TREE_A,"truncated":true,"tree":[]}));
+    let uncertain = session
+        .readme(
+            &snap,
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        uncertain.value.value,
+        ReadmeDiscovery::NotFoundOrInaccessible { .. }
+    ));
+    let offline_uncertain = session
+        .readme(
+            &snap,
+            &Default::default(),
+            RepositoryCacheMode::OfflineOnly,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        offline_uncertain.value.value,
+        ReadmeDiscovery::NotFoundOrInaccessible { .. }
+    ));
+    fixture.push(200, readme(BLOB_A));
+    let retried = session
+        .readme(
+            &snap,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(retried.value.value, ReadmeDiscovery::Found(_)));
 }
 
 #[test]

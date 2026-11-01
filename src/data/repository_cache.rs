@@ -235,6 +235,26 @@ impl CachedRepositorySession {
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
+                // A branch response carries no numeric repository id. Prove
+                // the locator in this same authenticated call before allowing
+                // its success to reopen a quarantined repository gate.
+                let (details, _) = github::repository::fetch_repository_with_metadata(
+                    self.session.client(),
+                    &pat,
+                    repository.locator(),
+                    limits,
+                    None,
+                    cancel.clone(),
+                )
+                .await?;
+                let details = details.ok_or_else(|| RepositoryError::InvalidResponse {
+                    message: "unexpected conditional repository response".into(),
+                })?;
+                if details.identity != *repository {
+                    return Err(RepositoryError::InvalidResponse {
+                        message: "repository identity differs from the authorized request".into(),
+                    });
+                }
                 github::branches::fetch_branches_with_metadata(
                     self.session.client(),
                     &pat,
@@ -445,13 +465,16 @@ impl CachedRepositorySession {
             "readme-discovery",
             snapshot.commit().as_str(),
         )?;
-        if mode != RepositoryCacheMode::ForceRefresh {
+        let prior = if mode != RepositoryCacheMode::ForceRefresh {
             let snapshot = snapshot.clone();
-            if let Some(cached) = self
+            let cached = self
                 .prior(&key, cancel.clone(), move |value| {
                     decode_readme(value, &snapshot)
                 })
-                .await?
+                .await?;
+            if let Some(cached) = &cached
+                && (!matches!(cached.value, ReadmeDiscovery::NotFoundOrInaccessible { .. })
+                    || mode == RepositoryCacheMode::OfflineOnly)
             {
                 return self.scoped(CachedRepositoryRead {
                     value: cached.value.clone(),
@@ -461,13 +484,12 @@ impl CachedRepositorySession {
                     ),
                 });
             }
-        }
+            cached
+        } else {
+            None
+        };
         if mode == RepositoryCacheMode::OfflineOnly {
-            let snapshot = snapshot.clone();
-            let cached = self
-                .offline(&key, cancel, move |value| decode_readme(value, &snapshot))
-                .await?;
-            return self.scoped(cached);
+            return Err(RepositoryCacheError::Miss(CacheMiss::NotCached));
         }
         let permit = self
             .before_network(&key, snapshot.repository().id(), cancel.clone())
@@ -490,7 +512,7 @@ impl CachedRepositorySession {
             result,
             key,
             permit,
-            None,
+            prior,
             cancel,
             move |readme| encode_readme(readme, snapshot),
             |_| CacheCompleteness::Complete,
