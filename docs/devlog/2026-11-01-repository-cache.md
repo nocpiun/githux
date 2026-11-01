@@ -38,6 +38,18 @@
 - 可变分支列表按在线验证策略处理；目录/分支读取上限进入表示身份，Partial 原因分类跨重启保留。
 - 候选 reusable lesson：CacheStore 的所有入口（不只 read/put，也包括 begin_write/revalidation）必须放 blocking worker；本次自查已修正，是否纳入共享 LESSONS 由协调者判断。
 
+## PR #62 第一轮审查修复
+
+Codex 对 `a53e807` 提出 5 项问题，均可在既定约束内直接修复，无待裁决事项，merge_owner 保持 worker：
+
+- repository 网络返回的 numeric id 与请求不一致时，在权限确认/写缓存前拒绝，防止改名 locator 解锁其它仓库。
+- transient fallback 发布前重新读取同一缓存键并复核 gate；回归使用真实进入网络请求后 `revoke_repository` 的交错，而非顺序模拟。
+- branches/tree/README 伴随 API 传播 `Cache-Control`，branches 任一页 no-store 使整个聚合不可存储并使旧值失效。
+- OnlinePreferred 对 AccessDenied 不读旧 bytes/validator，继续在线仓库证明；OfflineOnly 仍拒绝。错 id、本地拒绝均不解锁。
+- tree payload 按共享 SHA 复用，commit/path 由请求 SnapshotDirectory 绑定，同 SHA 跨 commit/path 不再互相覆盖成 Corrupt。
+
+聚焦回归现 10/10 通过（`96494280-b820-4983-a15d-4c6aa68518c3`）。最终完整检查结果随新 head 审查记录于 PR。
+
 ## 边界
 
 无 GUI/Shell 接线，无真实 PAT/实网写操作或 Star 验收。正式账户事件生产、应用级 CacheStore 组装与离线 UI 由后续任务交付。缓存适配层完成不等于应用离线功能已交付。

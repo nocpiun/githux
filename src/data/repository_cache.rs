@@ -134,7 +134,7 @@ impl CachedRepositorySession {
         }
         let prior = if mode == RepositoryCacheMode::OnlinePreferred {
             let repository = repository.clone();
-            self.prior(&key, cancel.clone(), move |value| {
+            self.online_prior(&key, cancel.clone(), move |value| {
                 decode_details(value, &repository)
             })
             .await?
@@ -165,6 +165,15 @@ impl CachedRepositorySession {
                 },
             )
             .await;
+        if let Ok(scoped) = &result
+            && let Some(details) = &scoped.value.0
+            && details.identity != *repository
+        {
+            return Err(RepositoryError::InvalidResponse {
+                message: "repository identity differs from the authorized request".into(),
+            }
+            .into());
+        }
         let result = self
             .finish_network(
                 result,
@@ -213,7 +222,7 @@ impl CachedRepositorySession {
         }
         let prior = if mode == RepositoryCacheMode::OnlinePreferred {
             let repository = repository.clone();
-            self.prior(&key, cancel.clone(), move |value| {
+            self.online_prior(&key, cancel.clone(), move |value| {
                 decode_branches(value, &repository)
             })
             .await?
@@ -226,9 +235,15 @@ impl CachedRepositorySession {
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
-                github::fetch_branches(self.session.client(), &pat, repository, limits, cancel)
-                    .await
-                    .map(|value| (Some(value), RepositoryResponseMetadata::default()))
+                github::branches::fetch_branches_with_metadata(
+                    self.session.client(),
+                    &pat,
+                    repository,
+                    limits,
+                    cancel,
+                )
+                .await
+                .map(|(outcome, metadata)| (Some(outcome), metadata))
             })
             .await;
         self.finish_network(
@@ -291,7 +306,7 @@ impl CachedRepositorySession {
         let prior = if !fixed && mode == RepositoryCacheMode::OnlinePreferred {
             let repository = repository.clone();
             let revision = revision.clone();
-            self.prior(&key, cancel.clone(), move |value| {
+            self.online_prior(&key, cancel.clone(), move |value| {
                 decode_snapshot(value, &repository, &revision)
             })
             .await?
@@ -393,9 +408,15 @@ impl CachedRepositorySession {
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
-                github::fetch_directory(self.session.client(), &pat, directory, limits, cancel)
-                    .await
-                    .map(|value| (Some(value), RepositoryResponseMetadata::default()))
+                github::tree::fetch_directory_with_metadata(
+                    self.session.client(),
+                    &pat,
+                    directory,
+                    limits,
+                    cancel,
+                )
+                .await
+                .map(|(tree, metadata)| (Some(tree), metadata))
             })
             .await;
         self.finish_network(
@@ -454,9 +475,15 @@ impl CachedRepositorySession {
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
-                github::discover_readme(self.session.client(), &pat, snapshot, limits, cancel)
-                    .await
-                    .map(|value| (Some(value), RepositoryResponseMetadata::default()))
+                github::readme::discover_readme_with_metadata(
+                    self.session.client(),
+                    &pat,
+                    snapshot,
+                    limits,
+                    cancel,
+                )
+                .await
+                .map(|(readme, metadata)| (Some(readme), metadata))
             })
             .await;
         self.finish_network(
@@ -509,7 +536,7 @@ impl CachedRepositorySession {
         }
         let prior = if mode == RepositoryCacheMode::OnlinePreferred {
             let identity = identity.clone();
-            self.prior(&key, cancel.clone(), move |value| {
+            self.online_prior(&key, cancel.clone(), move |value| {
                 decode_blob(value, &identity)
             })
             .await?
@@ -628,6 +655,23 @@ impl CachedRepositorySession {
             Ok(())
         } else {
             Err(GitHubError::StaleContext.into())
+        }
+    }
+
+    async fn online_prior<T>(
+        &self,
+        key: &CacheKey,
+        cancel: CancellationToken,
+        decode: impl Fn(&CacheSnapshot) -> Result<T, RepositoryCacheError> + Send + 'static,
+    ) -> Result<Option<Arc<Prior<T>>>, RepositoryCacheError>
+    where
+        T: Send + Sync + Clone + 'static,
+    {
+        match self.prior(key, cancel, decode).await {
+            // A quarantined old value cannot supply bytes or validators, but
+            // the current online session may establish fresh repository proof.
+            Err(RepositoryCacheError::AccessDenied) => Ok(None),
+            result => result,
         }
     }
 
@@ -797,14 +841,13 @@ impl CachedRepositorySession {
             Ok(scoped) => scoped,
             Err(error) if offline_fallback(&error) => {
                 if let Some(prior) = prior {
-                    self.check()?;
-                    return self.scoped(CachedRepositoryRead {
-                        value: prior.value.clone(),
-                        provenance: provenance(
-                            prior.payload.metadata.clone(),
-                            RepositoryCacheOrigin::Snapshot,
-                        ),
-                    });
+                    // The earlier lease has ended. Reload and snapshot again so
+                    // revocation/PAT isolation during the request wins over the
+                    // copied fallback bytes.
+                    let current = self
+                        .offline(&_key, cancel, move |_| Ok(prior.value.clone()))
+                        .await?;
+                    return self.scoped(current);
                 }
                 return Err(error.into());
             }
@@ -1343,11 +1386,9 @@ fn decode_tree(
     directory: &SnapshotDirectory,
 ) -> Result<DirectoryTree, RepositoryCacheError> {
     let raw: TreeDto = decode_envelope(value, directory.repository().id())?;
-    if raw.commit != directory.commit().as_str()
-        || raw.tree != directory.tree().as_str()
-        || raw.path.as_deref() != directory.path().map(RepositoryPath::as_str)
-        || raw.complete != matches!(value.metadata.completeness, CacheCompleteness::Complete)
-    {
+    // A tree SHA identifies the same immutable payload across commits/paths;
+    // navigation context comes from the requested SnapshotDirectory.
+    if raw.complete != matches!(value.metadata.completeness, CacheCompleteness::Complete) {
         return Err(RepositoryCacheError::Miss(CacheMiss::Corrupt));
     }
     let mut paths = std::collections::HashSet::new();

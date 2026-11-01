@@ -59,6 +59,8 @@ fn blob(sha: &str, text: &str) -> serde_json::Value {
 struct Fixture {
     responses: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
     requests: Mutex<Vec<HttpRequest>>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 impl Fixture {
     fn push(&self, status: u16, body: serde_json::Value) {
@@ -82,6 +84,18 @@ impl Fixture {
     fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+    fn pause_next(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = tokio::sync::oneshot::channel();
+        *self.entered.lock().unwrap() = Some(entered);
+        *self.release.lock().unwrap() = Some(release);
+        (entered_rx, release_tx)
+    }
 }
 impl Transport for Fixture {
     fn execute<'a>(
@@ -91,6 +105,13 @@ impl Transport for Fixture {
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
             self.requests.lock().unwrap().push(request);
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                release.await.expect("release response");
+            }
             self.responses
                 .lock()
                 .unwrap()
@@ -976,6 +997,267 @@ async fn damaged_dto_is_a_corrupt_miss_not_an_empty_success() {
             .unwrap_err(),
         RepositoryCacheError::Miss(CacheMiss::Corrupt)
     );
+}
+
+#[tokio::test]
+async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_context() {
+    let accounts = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let svc = service(&accounts, fixture.clone()).await;
+    login(&svc, &fixture, 1).await;
+    let store = cache(&storage);
+    let session = cached(&svc, store.clone(), 1);
+    let scope = store.saved_account(key(1)).unwrap();
+
+    // A reused locator resolving to another numeric repository is not proof
+    // for the requested repository and cannot overwrite its cache.
+    fixture.push(200, commit(A, TREE_A, "A"));
+    let snap = session
+        .revision(
+            &repository(),
+            RevisionSpec::Commit(ObjectSha::new(A).unwrap()),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value
+        .value;
+    store
+        .access_event(&scope, AccessEvent::PatReplaced)
+        .unwrap();
+    fixture.push(200, json!({"id":99,"name":"repo","owner":{"id":7,"login":"octo"},"private":true,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":0,"html_url":"https://github.com/octo/repo"}));
+    assert!(matches!(
+        session
+            .repository(
+                &repository(),
+                &Default::default(),
+                RepositoryCacheMode::ForceRefresh,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::Online(RepositoryError::InvalidResponse { .. })
+    ));
+    assert_eq!(
+        session
+            .revision(
+                &repository(),
+                RevisionSpec::Commit(ObjectSha::new(A).unwrap()),
+                &Default::default(),
+                RepositoryCacheMode::OfflineOnly,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::AccessDenied
+    );
+
+    // OnlinePreferred does not let quarantine prevent fresh proof; success
+    // reopens only this repository and persists the validated observation.
+    fixture.push(200, details());
+    session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .revision(
+                &repository(),
+                RevisionSpec::Commit(ObjectSha::new(A).unwrap()),
+                &Default::default(),
+                RepositoryCacheMode::OfflineOnly,
+                Default::default()
+            )
+            .await
+            .unwrap()
+            .value
+            .value,
+        snap
+    );
+
+    // Revocation after the initial cache read, while the network request is
+    // actually in flight, must beat the transient fallback.
+    fixture.push(200, details());
+    session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (entered, release) = fixture.pause_next();
+    fixture.fail(TransportError::Network {
+        message: "offline".into(),
+    });
+    let pending = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .repository(
+                    &repository(),
+                    &Default::default(),
+                    RepositoryCacheMode::OnlinePreferred,
+                    Default::default(),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    store.revoke_repository(&scope, Some(42)).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        pending.await.unwrap().unwrap_err(),
+        RepositoryCacheError::AccessDenied
+    );
+
+    // Restore proof for storage-directive checks.
+    fixture.push(200, details());
+    session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    fixture.push(200, tree(TREE_A));
+    session
+        .directory(
+            &SnapshotDirectory::root(&snap),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    fixture.headers(200, tree(TREE_A), &[("cache-control", "no-store")]);
+    session
+        .directory(
+            &SnapshotDirectory::root(&snap),
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .directory(
+                &SnapshotDirectory::root(&snap),
+                &Default::default(),
+                RepositoryCacheMode::OfflineOnly,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::Miss(CacheMiss::NotCached)
+    );
+
+    fixture.push(200, readme(BLOB_A));
+    session
+        .readme(
+            &snap,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    fixture.headers(
+        200,
+        readme(BLOB_A),
+        &[("cache-control", "private, no-store")],
+    );
+    session
+        .readme(
+            &snap,
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .readme(
+                &snap,
+                &Default::default(),
+                RepositoryCacheMode::OfflineOnly,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::Miss(CacheMiss::NotCached)
+    );
+
+    // One immutable tree payload is valid at another commit and path. Only
+    // the second context is fetched; both contexts can then read offline.
+    let other_commit = RepoSnapshot {
+        repository: repository(),
+        requested: RevisionSpec::Commit(ObjectSha::new(B).unwrap()),
+        commit: ObjectSha::new(B).unwrap(),
+        root_tree: ObjectSha::new(TREE_A).unwrap(),
+        message: "B".into(),
+        author: None,
+        committer: None,
+    };
+    fixture.push(200, tree(TREE_A));
+    let other = session
+        .directory(
+            &SnapshotDirectory::root(&other_commit),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value
+        .value;
+    assert_eq!(other.directory.commit().as_str(), B);
+    let original = session
+        .directory(
+            &SnapshotDirectory::root(&snap),
+            &Default::default(),
+            RepositoryCacheMode::OfflineOnly,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value
+        .value;
+    assert_eq!(original.directory.commit().as_str(), A);
+    let path = SnapshotDirectory {
+        repository: repository(),
+        commit: ObjectSha::new(B).unwrap(),
+        tree: ObjectSha::new(TREE_A).unwrap(),
+        path: Some(RepositoryPath::new("alias").unwrap()),
+    };
+    let aliased = session
+        .directory(
+            &path,
+            &Default::default(),
+            RepositoryCacheMode::OfflineOnly,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value
+        .value;
+    assert_eq!(aliased.directory.path().unwrap().as_str(), "alias");
 }
 
 #[test]
