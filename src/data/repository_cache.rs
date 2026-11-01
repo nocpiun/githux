@@ -532,7 +532,9 @@ impl CachedRepositorySession {
             let identity = identity.clone();
             let limits = *limits;
             let cached = self
-                .offline(&key, cancel, move |value| decode_blob(value, &identity, &limits))
+                .offline(&key, cancel, move |value| {
+                    decode_blob(value, &identity, &limits)
+                })
                 .await?;
             return self.scoped(cached);
         }

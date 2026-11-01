@@ -1125,7 +1125,10 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
 
     // Restore proof for storage-directive checks, through the aggregate
     // branches adapter itself rather than a different resource endpoint.
-    fixture.push(200, json!([{"name":"main","commit":{"sha":A},"protected":false}]));
+    fixture.push(
+        200,
+        json!([{"name":"main","commit":{"sha":A},"protected":false}]),
+    );
     session
         .branches(
             &repository(),
@@ -1272,22 +1275,79 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
 
     // Response budgets are representation identity: a tiny budget caches a
     // ResponseLimit partial, while a larger budget gets its own online read.
-    let tight = RepositoryLimits { response_bytes: 1, ..Default::default() };
+    let tight = RepositoryLimits {
+        response_bytes: 1,
+        ..Default::default()
+    };
     fixture.push(200, tree(TREE_A));
-    let limited = session.directory(&SnapshotDirectory::root(&snap), &tight, RepositoryCacheMode::ForceRefresh, Default::default()).await.unwrap();
-    assert!(matches!(limited.value.value.completeness, Completeness::Partial { .. }));
+    let limited = session
+        .directory(
+            &SnapshotDirectory::root(&snap),
+            &tight,
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        limited.value.value.completeness,
+        Completeness::Partial { .. }
+    ));
     fixture.push(200, tree(TREE_A));
-    let larger = session.directory(&SnapshotDirectory::root(&snap), &Default::default(), RepositoryCacheMode::ForceRefresh, Default::default()).await.unwrap();
+    let larger = session
+        .directory(
+            &SnapshotDirectory::root(&snap),
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
     assert_eq!(larger.value.value.completeness, Completeness::Complete);
 
     // Cached raw bytes still obey the caller's current decoded budget.
     fixture.push(200, readme(BLOB_A));
-    let ReadmeDiscovery::Found(descriptor) = session.readme(&snap, &Default::default(), RepositoryCacheMode::OnlinePreferred, Default::default()).await.unwrap().value.value else { panic!() };
+    let ReadmeDiscovery::Found(descriptor) = session
+        .readme(
+            &snap,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value
+        .value
+    else {
+        panic!()
+    };
     let identity = BlobIdentity::from_readme(&descriptor);
     fixture.push(200, blob(BLOB_A, "hello"));
-    session.blob(&identity, &Default::default(), RepositoryCacheMode::OnlinePreferred, Default::default()).await.unwrap();
-    let small = session.blob(&identity, &BlobLimits { decoded_bytes: 1, response_bytes: 1024 }, RepositoryCacheMode::OfflineOnly, Default::default()).await.unwrap();
-    assert_eq!(small.value.value.body(), &BlobBody::TooLarge { size: 5, limit: 1 });
+    session
+        .blob(
+            &identity,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let small = session
+        .blob(
+            &identity,
+            &BlobLimits {
+                decoded_bytes: 1,
+                response_bytes: 1024,
+            },
+            RepositoryCacheMode::OfflineOnly,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        small.value.value.body(),
+        &BlobBody::TooLarge { size: 5, limit: 1 }
+    );
 }
 
 #[test]
