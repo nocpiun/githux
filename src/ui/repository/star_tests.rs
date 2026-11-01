@@ -182,6 +182,33 @@ fn switching_branch_does_not_cancel_star_and_old_repository_cannot_publish(
 }
 
 #[gpui::test]
+fn summary_retry_restores_count_with_get_only_and_keeps_warning_until_success(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, page, cx) = ready(cx, Scene::StarSummaryFailure);
+    click_star(&page, cx);
+    settle(&page, cx, |page| {
+        matches!(page.star.phase, StarPhase::Failed { .. })
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.starred_state()),
+        Some(StarredState::Starred)
+    );
+    assert_eq!(
+        page.read_with(cx, |page, _| page.details().unwrap().stars),
+        128,
+        "the last authoritative count is not presented as refreshed"
+    );
+    let writes = fixture.transport.star_method_count(HttpMethod::Put);
+    page.update(cx, |page, cx| page.retry_star(cx));
+    settle(&page, cx, |page| {
+        matches!(page.star.phase, StarPhase::Ready) && page.details().unwrap().stars == 129
+    });
+    assert_eq!(fixture.transport.star_method_count(HttpMethod::Put), writes);
+    assert!(fixture.transport.star_method_count(HttpMethod::Get) >= 2);
+}
+
+#[gpui::test]
 fn an_older_repository_summary_cannot_roll_back_a_write_or_its_count(cx: &mut TestAppContext) {
     let (_fixture, page, cx) = ready(cx, Scene::StarUnstarred);
     let old = page.read_with(cx, |page, _| page.details().cloned().unwrap());

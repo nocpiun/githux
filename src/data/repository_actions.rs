@@ -62,6 +62,26 @@ impl RepositoryActionService {
             .await
     }
 
+    /// Retry observation after a failed summary refresh. This performs only
+    /// GETs; it cannot replay a prior write and keeps summary failure visible.
+    pub async fn refresh_starred(
+        &self,
+        repository: &RepositoryIdentity,
+        limits: &RepositoryLimits,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<StarActionOutcome>, RepositoryActionError> {
+        let observation = self.starred(repository, cancel.clone()).await?.value;
+        let summary = self.summary_for_action(repository, limits, cancel).await?;
+        Ok(Scoped {
+            context: self.context().clone(),
+            value: StarActionOutcome {
+                observation,
+                summary,
+                confirmation: StarConfirmation::Observed,
+            },
+        })
+    }
+
     /// Apply one explicit desired state. A 204 is the only direct write success.
     /// Timeout/connection loss is reconciled with GET, and PUT/DELETE is never
     /// automatically replayed. The count is then re-read from the repository

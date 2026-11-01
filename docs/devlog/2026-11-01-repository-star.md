@@ -50,3 +50,9 @@
 完整测试初轮发现新增 localhost 重定向测试未收敛及 adapter 测试对 mock 记录的错误假设，均修复后重跑；不以旧成功结果替代最终 `07df4645`。
 
 未执行任何真实 GitHub 写操作；最终视觉、tooltip 与 Windows 原生按钮验收由负责人进行，PR 保持 `pending`。
+
+## PR #63 第一轮审查修复
+
+Codex 在 `02b8e4d` 指出：写成功但 summary 失败后，Retry 只读 starred 就清除 warning，会留下看似恢复的旧 count。意见成立，无需裁决。新增 `RepositoryActionService::refresh_starred`，初始读取与 Retry 都执行 starred GET + authoritative summary GET；不再复用只读状态成功来掩盖 summary 失败。新增 `StarSummaryFailure` 场景与整页回归，确认 warning 保留到 count 恢复、重试没有第二个 PUT。
+
+修复后验证：`a484d8cf` 专项通过；`dde477b8` 完整 test 通过；`2c2af8d0` clippy 通过；`ad5e8180` build 通过。Clippy 中间发现重构后的未使用 import，已删除并重跑成功。

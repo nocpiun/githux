@@ -67,9 +67,7 @@ use crate::domain::repository::{
     RepositoryError, RepositoryIdentity, RepositoryLocator, RevisionSpec, SnapshotDirectory,
     TreeEntryKind,
 };
-use crate::domain::repository_actions::{
-    RepositoryActionError, StarActionOutcome, StarObservation, StarredState,
-};
+use crate::domain::repository_actions::{RepositoryActionError, StarActionOutcome, StarredState};
 use crate::github::RepositoryLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::executor::BackgroundExecutor;
@@ -218,6 +216,12 @@ struct StarWork {
     request: u64,
 }
 
+#[derive(Clone, Copy)]
+enum StarSubmission {
+    Observe,
+    Write(StarredState),
+}
+
 struct StarReply {
     binding: crate::ui::repository_overview::OverviewBinding,
     context: RepositoryReadContext,
@@ -226,7 +230,6 @@ struct StarReply {
 }
 
 enum StarReplyBody {
-    Observed(Result<StarObservation, RepositoryActionError>),
     Changed(Box<Result<StarActionOutcome, RepositoryActionError>>),
 }
 
@@ -1805,7 +1808,7 @@ impl RepositoryPage {
             return;
         };
         self.star.phase = StarPhase::Loading;
-        self.submit_star(binding, service, None);
+        self.submit_star(binding, service, StarSubmission::Observe);
         cx.notify();
     }
 
@@ -1838,7 +1841,7 @@ impl RepositoryPage {
         let desired = observed.toggled();
         self.star_write_generation = self.star_write_generation.wrapping_add(1);
         self.star.phase = StarPhase::Writing { desired };
-        self.submit_star(binding, service, Some(desired));
+        self.submit_star(binding, service, StarSubmission::Write(desired));
         cx.notify();
     }
 
@@ -1846,7 +1849,7 @@ impl RepositoryPage {
         &mut self,
         binding: crate::ui::repository_overview::OverviewBinding,
         service: RepositoryActionService,
-        desired: Option<StarredState>,
+        submission: StarSubmission,
     ) {
         self.star_request = self.star_request.wrapping_add(1);
         let request = self.star_request;
@@ -1865,21 +1868,17 @@ impl RepositoryPage {
         });
         self.star_request = request;
         let spawned = self.services.executor.handle().spawn(async move {
-            let body = if let Some(desired) = desired {
-                StarReplyBody::Changed(Box::new(
+            let result = match submission {
+                StarSubmission::Observe => {
+                    service.refresh_starred(&repository, &limits, cancel).await
+                }
+                StarSubmission::Write(desired) => {
                     service
                         .set_starred(&repository, desired, &limits, cancel)
                         .await
-                        .map(|scoped| scoped.value),
-                ))
-            } else {
-                StarReplyBody::Observed(
-                    service
-                        .starred(&repository, cancel)
-                        .await
-                        .map(|scoped| scoped.value),
-                )
+                }
             };
+            let body = StarReplyBody::Changed(Box::new(result.map(|scoped| scoped.value)));
             if *alive.borrow() {
                 inbox.lock().expect("star inbox").push_back(StarReply {
                     binding,
@@ -1931,10 +1930,6 @@ impl RepositoryPage {
             }
             self.star_work = None;
             match reply.body {
-                StarReplyBody::Observed(Ok(observation)) => {
-                    self.star.observed = Some(observation.state);
-                    self.star.phase = StarPhase::Ready;
-                }
                 StarReplyBody::Changed(result) if result.is_ok() => {
                     let outcome = result.expect("checked Ok");
                     self.star.observed = Some(outcome.observation.state);
@@ -1951,9 +1946,6 @@ impl RepositoryPage {
                             };
                         }
                     }
-                }
-                StarReplyBody::Observed(Err(error)) => {
-                    self.apply_star_error(error);
                 }
                 StarReplyBody::Changed(result) => {
                     self.apply_star_error(result.expect_err("Ok handled above"));

@@ -79,11 +79,14 @@ pub enum Scene {
     StarTimeoutNotApplied,
     /// Writes and reconciliation both time out, leaving an explicit unknown outcome.
     StarTimeoutUnknown,
+    /// A write succeeds but its first summary refresh fails once; Retry uses
+    /// two GETs to restore the authoritative count without replaying the write.
+    StarSummaryFailure,
 }
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 30] = [
+    pub const ALL: [Scene; 31] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
@@ -114,6 +117,7 @@ impl Scene {
         Scene::StarTimeoutApplied,
         Scene::StarTimeoutNotApplied,
         Scene::StarTimeoutUnknown,
+        Scene::StarSummaryFailure,
     ];
 
     pub fn label(self) -> &'static str {
@@ -135,6 +139,7 @@ impl Scene {
             Scene::StarTimeoutApplied => "Star · timeout applied",
             Scene::StarTimeoutNotApplied => "Star · timeout not applied",
             Scene::StarTimeoutUnknown => "Star · outcome unknown",
+            Scene::StarSummaryFailure => "Star · summary retry",
             Scene::Normal => "Normal",
             Scene::EmptyRepository => "Empty repository",
             Scene::ReadmeUncertain => "README uncertain",
@@ -198,6 +203,9 @@ impl Scene {
             }
             Scene::StarTimeoutUnknown => {
                 "The write and reconciliation time out. The warning preserves the last observed state and retries with GET only."
+            }
+            Scene::StarSummaryFailure => {
+                "The write succeeds but its first count refresh fails. Retry re-reads status and summary with GET only; the warning remains until the count recovers."
             }
             Scene::Normal => {
                 "Two branches, README, docs, src and a nested directory. Everything is browsable and repeatable."
@@ -383,6 +391,7 @@ enum ArmedFailure {
     Root,
     Directory,
     File,
+    StarSummary,
 }
 
 /// A deterministic, request-addressed repository.
@@ -554,6 +563,12 @@ impl FixtureTransport {
 
         match rest {
             // GET /repos/{owner}/{name}
+            "" if scene == Scene::StarSummaryFailure
+                && *self.star_writes.lock().unwrap() > 0
+                && self.take_armed(ArmedFailure::StarSummary) =>
+            {
+                Ok(json_response(503, "{}"))
+            }
             "" => Ok(json_response(200, &self.details_body(scene).to_string())),
             "/branches" => Ok(self.branches(scene, url)),
             "/releases" | "/releases/latest" | "/contributors" | "/languages" => {
@@ -979,6 +994,7 @@ fn armed_for(scene: Scene) -> Option<ArmedFailure> {
         Scene::OverviewError => Some(ArmedFailure::Languages),
         Scene::ReleasesFailure => Some(ArmedFailure::Releases),
         Scene::FileFailure => Some(ArmedFailure::File),
+        Scene::StarSummaryFailure => Some(ArmedFailure::StarSummary),
         _ => None,
     }
 }
