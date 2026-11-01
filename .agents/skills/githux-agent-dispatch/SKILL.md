@@ -12,6 +12,7 @@ description: Create isolated Githux task worktrees and start, inspect or resume 
 1. 检查协调仓库分支、worktree 和已有改动；明确任务范围、验收、相关文档及交付模式。首次试跑人数由主 Agent 管理，脚本不设置全局上限。
 2. 在忽略的 `.agents/dispatch.local.json` 配置执行工具；凭据只由执行工具既有配置管理。可用 `--config` 指定另一份本地 JSON，不改用户全局配置。
 3. 写 UTF-8 任务规格文件，至少包含 `# Goal`、`# Scope`、`# Acceptance`、`# Relevant docs`（也接受目标、范围、验收、相关文档）。写清依赖、共享接口、不做内容和检查。只传必要任务上下文，不复制私人记忆。
+   规格应简短聚焦：目标、硬性产品约束、真实反例、所有权/依赖、验收证据和完成条件。链接共享规则而非复制。外部 API 假设需当前一手文档和代表性真实响应形状，测试保持确定性/离线。
 4. 普通实现任务使用 `--delivery pr`，让原执行者完成 PR 闭环；实验、诊断或明确本地验收才用 `local-only`。`create` 显式指定已提交 base、新分支、task ID、规格文件、`local-only` 或 `pr`。首版配套任务显式加 `--first-release true`；其他任务不继承 milestone。create 不启动执行工具。
 5. 核对输出的 worktree、branch、base SHA 和 `.agents/task/TASK.md`，再 `start`。负责人在可见 CMD 中直接阅读、输入和接管配置的 CLI；脚本用继承的终端运行交互会话，没有 print/RPC 模式。本机真实启动、键盘接管、正常退出和同一会话恢复已验证，证据与边界见 reference。
 

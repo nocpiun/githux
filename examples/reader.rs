@@ -52,6 +52,11 @@ const FIXTURES: &[Fixture] = &[
         kind: || DocumentKind::Markdown,
     },
     Fixture {
+        label: "HTML",
+        body: fixtures::html,
+        kind: || DocumentKind::Markdown,
+    },
+    Fixture {
         label: "Inline wrap",
         body: fixtures::inline_code_long,
         kind: || DocumentKind::Markdown,
@@ -99,7 +104,11 @@ struct Preview {
 }
 
 impl Preview {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `initial` selects the fixture shown at startup; the native preview
+    /// passes it as the first command-line argument for scripted captures.
+    fn new(window: &mut Window, cx: &mut Context<Self>, initial: usize) -> Self {
+        let active = initial.min(FIXTURES.len().saturating_sub(1));
+        let fixture = &FIXTURES[active];
         let context = ResourceContext::new(
             fixtures::OWNER,
             fixtures::NAME,
@@ -108,13 +117,8 @@ impl Preview {
         );
         let this = cx.entity().downgrade();
         let reader = cx.new(|cx| {
-            let mut reader = ReaderView::new(
-                fixtures::markdown(),
-                DocumentKind::Markdown,
-                context,
-                window,
-                cx,
-            );
+            let mut reader =
+                ReaderView::new((fixture.body)(), (fixture.kind)(), context, window, cx);
             reader.on_action(Rc::new(move |action, _window, cx| {
                 let Some(this) = this.upgrade() else {
                     return;
@@ -129,7 +133,7 @@ impl Preview {
         });
         Self {
             reader,
-            active: 0,
+            active,
             action: None,
         }
     }
@@ -236,8 +240,14 @@ fn main() {
                 window_min_size: Some(size(px(720.0), px(480.0))),
                 ..Default::default()
             };
-            cx.open_window(options, |window, cx| cx.new(|cx| Preview::new(window, cx)))
-                .expect("the reader preview window failed to open");
+            let initial = std::env::args()
+                .nth(1)
+                .and_then(|argument| argument.parse::<usize>().ok())
+                .unwrap_or(0);
+            cx.open_window(options, |window, cx| {
+                cx.new(|cx| Preview::new(window, cx, initial))
+            })
+            .expect("the reader preview window failed to open");
             cx.activate(true);
         });
 }

@@ -41,7 +41,7 @@ view.update(cx, |view, _| {
 
 `..` 向仓库根攀升并在根处停止（与浏览器一致）；查询串按静态文件地址丢弃；`%XX` 严格解码，坏转义整体拒绝。图片地址复用同一边界转成 `ImageTarget`：相对/根路径固定到当前 commit，`https:` 进独立无凭据通路，`http:` 与 `file:`/`data:`/其他 scheme、UNC/反斜杠、空地址一律拒绝；图片不会绕过链接的危险 scheme 边界发起本地/SMB 读取。完整图片契约见 [README 图片](reader-images.md)。
 
-`raw HTML` 由 Ely 的 GFM 标签过滤器处理：`script`/`style`/`iframe` 等按文本显示而不执行，`<a href>`/`<img src>` 转为文本与普通链接，因此也不存在走 HTML 执行脚本的路径。
+原始 HTML 不再按文本显示：注释被丢弃，常见容器、行内、链接、图片与表格标签映射为与 Markdown 相同的块和样式，`<img>`/`<a>` 继续走既有图片与链接安全边界。支持子集、实体解码与明确未支持项见 [HTML 子集](#html-子集2026-10-29)。
 
 ## 只读源码
 
@@ -83,8 +83,20 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
 - fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
 - 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding、边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
-- 图片按注入的 provider 显示（未注入时保留 alt/未载入占位），HTML 惰性显示，链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。
+- 图片按注入的 provider 显示（未注入时保留 alt/未载入占位），HTML 规范化后走同一 `Block`/`Inline`（其中 `<img>` 同样交给图片板），链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。
 - Source gutter 仍为原 0.75rem 加 6px。
+
+## HTML 子集（2026-10-29）
+
+README 中常见的原始 HTML 由本地 `src/ui/reader/markdown/html.rs` 规范化后交给同一套 `Block`/`Inline` 渲染，不再作为惰性文本显示。规则按 WHATWG HTML 的语法/分词章节实现，不引入 HTML 解析依赖；解析只产生节点树，URL 从不在这里解析。
+
+- 注释（`<!-- ... -->`，含跨行、行内）与 `<!doctype>`、处理指令一律丢弃，不进入可见正文、文档模型或复制文本。
+- 容器与结构：`div`/`section`/`article`/`p`/`center`/`details`/`summary`/`figure` 等展开为段落；`h1`–`h6` 成为标题并进入导航索引；`ul`/`ol`/`li` 成为真实列表；`blockquote`、`hr`、`br` 分别成为引用、分隔线、换行。
+- 行内语义：`strong`/`b`、`em`/`i`、`del`/`s`、`code`/`kbd`/`samp`、`a href`、`img src` 映射为与 Markdown 相同的样式、链接和图片块。`<img>` 只产生 `Block::Image`，URL 仍由 `links::resolve` 与图片管线判定。
+- 表格：`table`/`thead`/`tbody`/`tr`/`th`/`td` 转成 `Block::Table`；首行全为 `th` 时作为表头，否则第一行提升为表头；`align` 属性或 `style="text-align:..."` 决定列对齐；单元格内的块级内容按行内文本展平。补齐空单元格前检查总预算（含表头最多 65,536 格），超宽×超长的表格回退为按行文本，避免二次内存膨胀。
+- 代码：`pre`/`code` 成为围栏代码块（`class="language-x"` 取语言）；Markdown 行内代码与围栏代码中的 HTML 原样保留，因为它们是 `Code`/`CodeBlock` 事件而非 HTML 事件。
+- 安全：`script`/`style`/`template`/`iframe`/`object`/`embed`/`head`/`title`/`textarea` 等整段丢弃（含开闭标签之间作为独立事件到达的正文，也含空行把块级 HTML 截断后继续出现的 Markdown 内容；丢弃元素前后的可见内容仍保留，列表/引用开闭正常平衡），事件处理属性只被忽略，绝不回写原始 HTML；实体按常见命名引用与数值引用解码，未知或畸形实体保留字面文本，`&nbsp;` 等 Unicode 空白不会被折叠成普通空格。
+- 明确不支持：`align` 等布局属性的视觉居中/对齐（内容保留、布局忽略）；`colspan`/`rowspan`；SVG/MathML 与 CSS 布局；`<details>` 的折叠交互（默认全部展开）；未闭合标签按容错规则丢弃或展开。元素树嵌套深度上限 256 层，更深的标签被展平（文本保留、额外标签丢弃），以避免小体积输入触发递归栈溢出。复杂嵌套或表格跨度会退化为内容保留的近似排版。
 
 ## 滚动条（共享核心）
 
@@ -102,8 +114,9 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 
 - **真实 Windows 窗口**：鼠标拖选、`Ctrl+C`、Shift+滚轮横向滚动、中文 IME 组合态在源码视图中的行为、emoji 与中文字形回退、多 DPI。测试平台不经过 Windows 原生输入分发，不能替代。
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
+- **图片**：仓库模式不允许本地文件/data 图片，图片 URL 由既有图片管线（`links::resolve` → `ImageTarget` → 宿主 provider）判定；HTML 的 `img`/`a` 与 Markdown 共用同一安全边界，不新增读取路径。
+- **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 的 CSS 布局、`colspan`/`rowspan`、脚注样式、绝对 URL 重写）。无法支持的语法按内容保留的近似排版显示，不在本模块另造。
 - **表格单元格内图片**：仍只显示 alt 文本（AST 在 cell 中没有块列表可挂图片）；行内图片被提取为段落后的图片块，不是文字行内原位置。SVG 等未支持格式明确 Unsupported。细节与支持边界见 [README 图片](reader-images.md#支持边界明确未覆盖)。
-- **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 表格布局、脚注样式、绝对 URL 重写）。无法支持的语法按 Ely 的现有行为显示或按文本显示，不在本模块另造。
 - **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有；README 图片能力也只在独立预览中验收，正式 Shell 的 provider 接线契约见 [README 图片](reader-images.md#后续正式接线契约)。本轮的预览与 fixture 只用于验收，不冒充真实数据。
 
 

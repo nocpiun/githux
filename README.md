@@ -30,17 +30,27 @@ island 顶部是应用级标签条：点击侧栏仓库/Profile、底部入口�
 
 ## 构建检查
 
+所有 Cargo 检查/构建/测试均通过共享 runner 执行，保留真实 exit code 与完整 stdout/stderr：
+
 ```sh
-cargo fmt --all -- --check
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
-cargo build --locked
-cargo test --locked
+node scripts/verify.mjs -- cargo fmt --all -- --check
+node scripts/verify.mjs -- cargo check --locked --all-targets
+node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings
+node scripts/verify.mjs -- cargo build --locked
+node scripts/verify.mjs -- cargo test --locked
 git diff --check
 
 # Windows 运行时准备与 Cargo runner 的离线回归测试（Windows）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/windows-runtime.test.ps1
 ```
+
+Runner 用法：`node scripts/verify.mjs [options] -- <executable> [args...]`。参数以数组形式在 `--` 后传递，不做 shell 插值。每次运行在 `.agents/task/runs/<run_id>.json` 写入原子记录（run_id、命令/参数、source identity、时序、exit code、log 路径、结果），并输出简洁摘要。Windows 下 runner 持有共享 mutex `Local\Githux-Cargo-20261029`，禁止并发重编译；非 Windows 平台自动跳过该锁。
+
+常用选项：
+- `--timeout <ms>`：超时后终止子进程并标记 `timed_out`，不视为成功。
+- `--no-lock`：跳过共享构建锁（仅用于无并发风险的轻量命令）。
+- `--json`：输出完整 run record JSON。
+- `--task-dir <dir>`：指定 `.agents/task/runs/` 的父目录。
 
 [CI 配置](.github/workflows/ci.yml) 按改动范围运行：应用或构建配置改动触发 Ubuntu Rust 检查（fmt、check、clippy、test）及四平台 Debug 构建；纯文档跳过两者，Agent 脚本变更单独运行 Node 测试。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建，并上传 `githux-<Rust target>-debug` artifact，包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。
 

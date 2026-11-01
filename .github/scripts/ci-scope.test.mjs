@@ -24,6 +24,8 @@ test('tooling-only changes run script checks; workflow/policy changes exercise a
   assert.deepEqual(classifyChanges(['src/main.rs', '.agents/skills/example/fixtures/data.json']), { app: true, scripts: true });
   for (const path of ['.github/workflows/ci.yml', '.github/scripts/ci-scope.mjs'])
     assert.deepEqual(classifyChanges([path]), { app: true, scripts: true });
+  for (const path of ['scripts/verify.mjs', 'scripts/verify.test.mjs'])
+    assert.deepEqual(classifyChanges([path]), { app: false, scripts: true });
 });
 
 function results(app = false, scripts = false) {
