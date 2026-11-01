@@ -50,6 +50,11 @@ pub enum RouteKey {
     Notifications,
     Issues,
     PullRequests,
+    PullRequest {
+        namespace: String,
+        name: String,
+        number: u64,
+    },
     Repository {
         namespace: String,
         name: String,
@@ -78,6 +83,12 @@ pub enum Route {
     Issues,
     /// Cross-repository personal pull requests. Content is not designed yet.
     PullRequests,
+    /// One pull request in Githux. The detail surface is a separate task.
+    PullRequest {
+        namespace: String,
+        name: String,
+        number: u64,
+    },
     /// A repository identified by its namespace and name; its reader is a later task.
     Repository { namespace: String, name: String },
 }
@@ -130,6 +141,15 @@ impl Route {
             Self::Notifications => RouteKey::Notifications,
             Self::Issues => RouteKey::Issues,
             Self::PullRequests => RouteKey::PullRequests,
+            Self::PullRequest {
+                namespace,
+                name,
+                number,
+            } => RouteKey::PullRequest {
+                namespace: namespace.to_ascii_lowercase(),
+                name: name.to_ascii_lowercase(),
+                number: *number,
+            },
             Self::Repository { namespace, name } => RouteKey::Repository {
                 namespace: namespace.to_ascii_lowercase(),
                 name: name.to_ascii_lowercase(),
@@ -148,6 +168,11 @@ impl Route {
             Self::Notifications => "Notifications".to_string(),
             Self::Issues => "Issues".to_string(),
             Self::PullRequests => "Pull requests".to_string(),
+            Self::PullRequest {
+                namespace,
+                name,
+                number,
+            } => format!("{namespace}/{name} #{number}"),
             Self::Repository { namespace, name } => format!("{namespace}/{name}"),
         }
     }
@@ -592,6 +617,38 @@ mod tests {
             );
             assert_eq!(workspace.sessions().len(), 2);
             assert_eq!(workspace.route(), &repo("Githux-Dev", "GitHux"));
+        });
+    }
+
+    #[gpui::test]
+    fn pull_request_sessions_reuse_case_aliases_and_keep_resource_identity(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut workspace = Workspace::new(cx);
+            let route = |owner: &str, repo: &str, number| Route::PullRequest {
+                namespace: owner.into(),
+                name: repo.into(),
+                number,
+            };
+            let opened = match workspace.open(route("Owner", "Repo", 41), cx) {
+                OpenResult::Opened(id) => id,
+                other => panic!("expected a new PR session, got {other:?}"),
+            };
+            assert_eq!(
+                workspace.open(route("owner", "repo", 41), cx),
+                OpenResult::Activated(opened)
+            );
+            assert_eq!(workspace.route().title(), "Owner/Repo #41");
+            assert!(matches!(
+                workspace.open(route("owner", "repo", 42), cx),
+                OpenResult::Opened(_)
+            ));
+            assert!(matches!(
+                workspace.open(route("owner", "other", 41), cx),
+                OpenResult::Opened(_)
+            ));
+            assert_eq!(workspace.sessions().len(), 4);
         });
     }
 

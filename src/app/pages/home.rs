@@ -292,12 +292,16 @@ impl HomePage {
                     cx,
                 );
             }
-            // Issue/PR detail is deliberately not routed in this release.
-            HomeAction::OpenExternalUrl(url) => {
-                if url.starts_with("https://github.com/") {
-                    (self.navigation)(PageNavigation::External(url), window, cx);
-                }
-            }
+            HomeAction::OpenPullRequest { repository, number } => (self.navigation)(
+                PageNavigation::Open(Route::PullRequest {
+                    namespace: repository.owner,
+                    name: repository.name,
+                    number,
+                }),
+                window,
+                cx,
+            ),
+            // Other Issue/PR entry points are outside this navigation correction.
             HomeAction::ActivateWorkItem(_)
             | HomeAction::ActivateFeed(_)
             | HomeAction::Refresh(_)

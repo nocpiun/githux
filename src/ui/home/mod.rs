@@ -122,9 +122,11 @@ pub enum HomeAction {
     /// source page. Carries the binding/generation the view observed, so the host
     /// can reject a stale request after an account switch or refresh.
     LoadMoreFeed(RefreshRequest),
-    /// Open a safe, canonical external URL in the system browser (specifically
-    /// authorized for pull request "Read more" links; not a general redirect).
-    OpenExternalUrl(String),
+    /// Open the addressed pull request in the current account's Githux workspace.
+    OpenPullRequest {
+        repository: RepositoryIdentity,
+        number: u64,
+    },
 }
 
 pub type OnAction = Rc<dyn Fn(HomeAction, &mut Window, &mut App)>;

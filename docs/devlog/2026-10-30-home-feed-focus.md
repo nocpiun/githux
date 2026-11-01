@@ -1,7 +1,7 @@
 # Home 仅 open、Feed 三类活动（主语必须被关注）
 
 - 2026-10-30，任务 `home-feed-focus`，执行者：基层实现 Agent（第四轮由主 Agent 接管，第五轮经负责人 2026-11-01 授权由原实现者继续）。文件覆盖五轮：首轮信息筛选、第二轮真实数据更正、第三轮触底分页、第四轮加载延迟与历史边界、第五轮星标仓库描述与 PR 正文摘要。
-- 目标与状态：实现负责人 2026-11-01 授权的星标仓库描述与 PR 正文摘要及外链交互，等待 PR 审查；PR 目标分支为 `feature/shell-pages`，保持 `pending`，不自行合并。
+- 目标与状态：实现星标仓库描述与 PR 正文摘要；2026-11-01 由主 Agent 纠正 Read more 为 Githux 内部导航；PR 目标分支为 `feature/shell-pages`，保持 `pending`，不自行合并。
 
 ## 背景与决定
 
@@ -149,7 +149,7 @@ powershell -File .agents/task/capture.ps1 -Scenario 3 -Out .agents/task/home-rew
   - PR 作者解析端点 `GET /repos/{owner}/{repo}/pulls/{number}` 扩展反序列化 `body` 字段；`ResolvedPullRequest` 与 `FeedPayload::PullRequest` 均保留该字段，一次请求同时获取作者与正文，无额外网络调用。
   - **纯文本提取与清洗**（`domain::home::extract_body_preview`）：基于 `pulldown_cmark` 事件流提取正文，剥除 Markdown 格式标记（`#`、`**`、`*`、`` ` ``、`[...](...)` 等）、HTML 标签与 HTML 注释（如 `<!-- ... -->`）；空白或纯标记/纯注释的 body 静默不占位。
   - **截断规则**：上限设为 200 字符；不超过 200 字符时完整展示纯文本，不附省略号，不渲染“Read more”控件；超过 200 字符时在末尾 40 字符内的词边界截断并附 `…`，附带“Read more”跳转控件。
-  - **外链跳转**：用户明确要求点击直接打开对应 PR 网页。当前应用未实现内建 PR 详情页（`ActivateFeed` 被 host 忽略）；根据专属授权，通过 `HomeAction::OpenExternalUrl` 经 Shell 既有外部链接通道在系统浏览器中打开规范的 `https://github.com/{owner}/{repo}/pull/{number}`（URL 经严格坐标验证，拒绝非法 scheme）。
+  - **上一轮的导航误解（已纠正）**：主 Agent 派发时把“跳转到 PR 页面”错误解释为浏览器网页，worker 据此实现 `OpenExternalUrl`。用户没有授予这个外跳例外；负责人随后明确要求打开 Githux 内部 PR 页面。下面的修正取代原有外链行为。
   - **无就地展开**：点击“Read more”绝不展开卡片，卡片无行内展开状态；支持键盘 Tab 聚焦与 Enter/Space 激活；`on_click` 显式 `stop_propagation()`，不触发卡片选中或次级激活。
 - **原生预览证据**：
   - `examples/home.rs` 构造代表性星标仓库描述（Towards a More Autonomous Agent System）与超长 PR body（含注释、Markdown 标记），抓取完整 1792×1256 原生帧 `.agents/task/home-desc-preview.png`：星标仓库显示三行折行描述，PR 卡片显示纯净摘要与 Read more 控件，短描述卡片无 Read more，建库卡片无多余空行。
@@ -157,7 +157,16 @@ powershell -File .agents/task/capture.ps1 -Scenario 3 -Out .agents/task/home-rew
 ### 验证
 
 - 针对新场景编写的定向回归全部通过：
-  - UI：`starred_cards_render_repository_description_under_name_and_missing_is_quiet`（两卡共享同一描述，未描述仓库静默不破坏卡片）、`pr_body_previews_short_and_long_with_read_more_navigation`（短正文无按钮，长正文附外链且阻止冒泡、不改变卡片选中）、`read_more_link_can_be_keyboard_activated`（Tab + Enter 键盘激活）。
+  - UI：`starred_cards_render_repository_description_under_name_and_missing_is_quiet`（两卡共享同一描述，未描述仓库静默不破坏卡片）、`pr_body_previews_short_and_long_with_read_more_navigation`（短正文无按钮，长正文附外链且阻止冒泡、不改变卡片选中）、`read_more_link_can_be_keyboard_activated`（该轮实际使用鼠标模拟，不能证明键盘激活；本轮已替换为焦点切换 + Enter）。
   - Markdown：`empty_or_blank_markdown_yields_none`、`short_markdown_extracts_clean_plain_text_without_truncation`、`html_tags_and_headers_are_stripped`、`long_markdown_truncates_at_word_boundary_with_ellipsis`、`unicode_and_cjk_are_counted_safely`、`canonical_pr_url_validates_and_constructs`。
   - 数据层：`repository_descriptions_deduplicates_requests_and_handles_failures`（同一仓库两张卡只读一次，404 返回 None 且不影响调用）、`feed_preserves_pr_body_and_extracts_clean_preview`（PR 详情正文清洗为 BodyPreview 且首屏发布不阻塞）。
   - Shell 端到端：`the_shell_mounts_real_home_and_reads_its_two_columns` 在真实 Shell 宿主下完整验证：星标仓库异步丰富展示描述、合并 PR 展示正文摘要。
+
+## 2026-11-01：主 Agent 修正 Read more 的导航目标
+
+- 已核验旧 Pi 执行者停止并保留进程身份/遗留锁证据；主 Agent 作为唯一写入者接管原 `fix/home-feed-focus` / PR #51。
+- Read more 发出 `OpenPullRequest { repository, number }`，HomePage 通过既有延迟 `PageNavigation::Open` 进入当前账户的 Githux workspace；删除此入口的外部 URL 构造器与 `OpenExternalUrl` 动作。
+- 新增资源路由 `Route::PullRequest`，标签显示仓库与 PR 编号并使用 PR 图标；同一目标重复打开复用标签，大小写别名归一，不同仓库/编号保持独立。短摘要没有 Read more，无有效仓库/正编号时不显示该导航控件。
+- 本轮先完成导航纠正，PR 详情正文页面仍为后续任务；内部路由当前沿用尚未设计页面的空内容，不以浏览器页面替代。卡片仍不原地展开，其他尚未实现的 Issue/PR 入口不在本轮接线。
+- 新增真实 Shell 宿主点击回归 `feed_read_more_opens_and_reuses_the_internal_pr_tab`；修正原来的伪键盘测试，真实切换焦点并发送 Enter。另验证 PR 路由大小写归一/编号隔离及缺失目标不生成导航。
+- 4 项 Read more 定向测试、主程序 875 项测试、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check` 、`cargo build --locked --bin githux` 与 `git diff --check` 均通过；编译目标检查覆盖所有 example。GPUI 测试平台不等于 Windows 原生输入验收。

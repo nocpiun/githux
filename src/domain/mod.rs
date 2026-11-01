@@ -39,8 +39,8 @@ pub use home::{
     Following, FollowingPartialReason, FollowingReadiness, HomeError, HomeItem, HomeItemKind,
     HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
     PullRequestDetail, PullRequestDetailOutcome, ResolvedPullRequest, UpdatedWindow, build_feed,
-    build_feed_activities, build_feed_page, canonical_pr_url, extract_body_preview,
-    extract_body_preview_with_limit, is_retained_activity, local_activity, merge_candidate,
+    build_feed_activities, build_feed_page, extract_body_preview, extract_body_preview_with_limit,
+    is_retained_activity, local_activity, merge_candidate,
 };
 #[allow(unused_imports)]
 pub use profile::{

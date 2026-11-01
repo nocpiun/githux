@@ -1123,6 +1123,5 @@ mod feed_policy_tests;
 
 pub mod markdown;
 pub use markdown::{
-    BodyPreview, DEFAULT_BODY_EXCERPT_CHARS, canonical_pr_url, extract_body_preview,
-    extract_body_preview_with_limit,
+    BodyPreview, DEFAULT_BODY_EXCERPT_CHARS, extract_body_preview, extract_body_preview_with_limit,
 };

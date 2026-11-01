@@ -546,7 +546,11 @@ impl Shell {
                     id, &route, services, intent, navigation, avatars, window, cx,
                 )
             }),
-            Route::Settings | Route::Notifications | Route::Issues | Route::PullRequests => None,
+            Route::Settings
+            | Route::Notifications
+            | Route::Issues
+            | Route::PullRequests
+            | Route::PullRequest { .. } => None,
         };
         if let Some(page) = page {
             self.pages.insert(id, page);

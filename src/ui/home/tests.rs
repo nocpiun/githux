@@ -1780,13 +1780,20 @@ fn pr_body_previews_short_and_long_with_read_more_navigation(cx: &mut TestAppCon
     assert!(cx.debug_bounds("feed-pr-body-2").is_none());
     assert!(cx.debug_bounds("feed-pr-read-more-2").is_none());
 
-    // Clicking "Read more" on Card 1 emits HomeAction::OpenExternalUrl with the canonical PR URL.
+    // Read more carries the repository identity and PR number, never a browser URL.
     click("feed-pr-read-more-1", cx);
     let captured = actions.borrow().clone();
     assert_eq!(captured.len(), 1);
     assert_eq!(
         captured[0],
-        HomeAction::OpenExternalUrl("https://github.com/owner/repo/pull/41".into())
+        HomeAction::OpenPullRequest {
+            repository: RepositoryIdentity {
+                id: Some(701),
+                owner: "owner".into(),
+                name: "repo".into()
+            },
+            number: 41,
+        }
     );
 
     // Card selection did not change to Card 1 because click propagation was stopped.
@@ -1815,15 +1822,51 @@ fn read_more_link_can_be_keyboard_activated(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    // The "Read more" link has tab_index(0) and can be focused and activated with Enter.
-    let target = bounds("feed-pr-read-more-0", cx).center();
-    cx.simulate_click(target, Modifiers::none());
-    cx.run_until_parked();
-
+    // Exercise native Tab stops and Enter, not a mouse click disguised as a keyboard test.
+    // Clear other controls' actions between attempts; the target activation must emit exactly one.
+    for _ in 0..20 {
+        actions.borrow_mut().clear();
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+        if actions
+            .borrow()
+            .iter()
+            .any(|action| matches!(action, HomeAction::OpenPullRequest { .. }))
+        {
+            break;
+        }
+    }
     let captured = actions.borrow().clone();
     assert_eq!(captured.len(), 1);
     assert_eq!(
         captured[0],
-        HomeAction::OpenExternalUrl("https://github.com/owner/repo/pull/40".into())
+        HomeAction::OpenPullRequest {
+            repository: RepositoryIdentity {
+                id: Some(700),
+                owner: "owner".into(),
+                name: "repo".into()
+            },
+            number: 40,
+        }
     );
+}
+
+#[test]
+fn read_more_requires_a_repository_and_positive_pr_number() {
+    let mut event = merged_activity(0, author(901, "author")).event;
+    assert!(super::rows::feed_pull_request_action(&event, None).is_none());
+    assert!(super::rows::feed_pull_request_action(&event, Some(0)).is_none());
+    for name in ["owner", "owner/", "/repo", "owner/repo/extra", "owner/.."] {
+        event.repository.name = name.into();
+        assert!(super::rows::feed_pull_request_action(&event, Some(1)).is_none());
+    }
+    event.repository.name = "owner/.github".into();
+    assert!(matches!(
+        super::rows::feed_pull_request_action(&event, Some(1)),
+        Some(HomeAction::OpenPullRequest { number: 1, .. })
+    ));
 }

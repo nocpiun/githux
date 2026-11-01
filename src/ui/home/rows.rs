@@ -38,7 +38,7 @@ fn link(name: String, label: String, action: HomeAction, cx: &mut Context<HomeVi
         .into_any_element()
 }
 
-fn read_more_link(name: String, url: String, cx: &mut Context<HomeView>) -> AnyElement {
+fn read_more_link(name: String, action: HomeAction, cx: &mut Context<HomeView>) -> AnyElement {
     let weak = cx.entity().downgrade();
     let debug = name.clone();
     let colors = cx.theme().colors.clone();
@@ -46,7 +46,7 @@ fn read_more_link(name: String, url: String, cx: &mut Context<HomeView>) -> AnyE
         .id(name)
         .debug_selector(move || debug.clone())
         .role(gpui::Role::Link)
-        .aria_label("Read more on GitHub")
+        .aria_label("Open pull request in Githux")
         .tab_index(0)
         .flex_none()
         .cursor_pointer()
@@ -58,7 +58,7 @@ fn read_more_link(name: String, url: String, cx: &mut Context<HomeView>) -> AnyE
         })
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            let action = HomeAction::OpenExternalUrl(url.clone());
+            let action = action.clone();
             let _ = weak.update(cx, |view, cx| view.emit(action, window, cx));
         })
         .child("Read more")
@@ -254,6 +254,23 @@ pub(super) fn feed_repository(event: &FeedEvent) -> RepositoryIdentity {
     }
 }
 
+pub(super) fn feed_pull_request_action(
+    event: &FeedEvent,
+    number: Option<u64>,
+) -> Option<HomeAction> {
+    let number = number.filter(|number| *number > 0)?;
+    let repository = feed_repository(event);
+    if repository.owner.trim().is_empty() || repository.name.trim().is_empty() {
+        return None;
+    }
+    crate::domain::repository::RepositoryLocator::new(
+        repository.owner.clone(),
+        repository.name.clone(),
+    )
+    .ok()?;
+    Some(HomeAction::OpenPullRequest { repository, number })
+}
+
 /// Renders one already-validated Feed activity.
 ///
 /// The host applies the product policy before publishing: only retained activity
@@ -407,7 +424,7 @@ pub(super) fn feed_row(
         if let Some(preview) = &target.body_preview
             && !preview.excerpt.trim().is_empty()
         {
-            let pr_url = canonical_pr_url(&event.repository.name, target.number);
+            let navigation = feed_pull_request_action(event, target.number);
             let body_div = div()
                 .id(format!("feed-pr-body-{index}"))
                 .debug_selector(move || format!("feed-pr-body-{index}"))
@@ -417,8 +434,9 @@ pub(super) fn feed_row(
                 .child(preview.excerpt.clone());
 
             if preview.is_truncated {
-                if let Some(url) = pr_url {
-                    let read_more = read_more_link(format!("feed-pr-read-more-{index}"), url, cx);
+                if let Some(action) = navigation {
+                    let read_more =
+                        read_more_link(format!("feed-pr-read-more-{index}"), action, cx);
                     inset = inset.child(
                         div()
                             .flex()

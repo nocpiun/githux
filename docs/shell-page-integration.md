@@ -74,7 +74,7 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 `Route::Profile` 仍是本人；新增 `Route::UserProfile { host, login }` 承载他人页面，key 使用 host + 小写 login。相同 alias 复用同一会话，服务器返回后只更新该资源的 canonical 展示名。
 
-Issue/PR 详情、通知、搜索和所有写操作未扩展。未设计路由继续按产品约定留空。
+2026-11-01：Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签，保留仓库/编号，不走浏览器外链；其他 Issue/PR 入口未扩展。PR 详情内容、通知、搜索和所有写操作未扩展；未设计页面仍按产品约定留空。
 
 ## 滚动
 

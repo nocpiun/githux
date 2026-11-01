@@ -47,6 +47,7 @@ fn graphql_ok(data: serde_json::Value) -> HttpResponse {
 #[derive(Default)]
 struct PageTransport {
     reads: Mutex<Vec<String>>,
+    long_pr_body: bool,
 }
 
 impl PageTransport {
@@ -164,7 +165,11 @@ impl Transport for PageTransport {
                         "title": "Synthetic merged pull request",
                         "html_url": "https://github.com/alice/demo/pull/5",
                         "user": {"id": 8, "login": "carol", "avatar_url": null},
-                        "body": "Fixes critical issue with bounded memory allocation."
+                        "body": if self.long_pr_body {
+                            "A detailed pull request description that exceeds the Feed preview limit. ".repeat(8)
+                        } else {
+                            "Fixes critical issue with bounded memory allocation.".into()
+                        }
                     }),
                 ));
             }
@@ -1004,4 +1009,64 @@ fn feed_end_of_scroll_appends_the_next_page_through_the_real_shell_host(cx: &mut
         after,
         "true exhaustion must not issue another read"
     );
+}
+
+#[gpui::test]
+fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport {
+        long_pr_body: true,
+        ..Default::default()
+    });
+    let (shell, controller, cx) = open_shell(cx, transport);
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(1100.0)));
+    login(&controller, cx);
+    wait_until(&controller, cx, |accounts| {
+        matches!(&accounts.snapshot().repositories.preview,
+        crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2)
+    });
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.home_mount_for_test(window, cx)
+    });
+    let mut first_tab = None;
+    for _ in 0..2 {
+        for _ in 0..400 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            shell.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+            if cx.debug_bounds("feed-pr-read-more-1").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let target = cx
+            .debug_bounds("feed-pr-read-more-1")
+            .expect("long PR preview has Read more");
+        cx.simulate_click(target.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.route()),
+            Route::PullRequest {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 5,
+            }
+        );
+        let active = shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.workspace().sessions().len(),
+                2,
+                "Home plus one PR tab"
+            );
+            shell.workspace().active_id()
+        });
+        if let Some(first) = first_tab {
+            assert_eq!(active, first);
+        } else {
+            first_tab = Some(active);
+        }
+        cx.update_window_entity(&shell, |shell, window, cx| {
+            shell.navigate(Route::Home, window, cx)
+        });
+        cx.run_until_parked();
+    }
 }

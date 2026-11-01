@@ -170,34 +170,6 @@ fn strip_html_tags_and_comments(s: &str) -> String {
     out
 }
 
-/// Rebuild and validate the canonical PR web URL: `https://github.com/{owner}/{repo}/pull/{number}`.
-///
-/// Rejects non-alphanumeric or hostile characters, path traversal segments (`..`),
-/// and empty parameters to guarantee safe external browser navigation.
-pub fn canonical_pr_url(repo_full_name: &str, number: Option<u64>) -> Option<String> {
-    let number = number?;
-    if number == 0 {
-        return None;
-    }
-    let (owner, repo) = repo_full_name.split_once('/')?;
-    let owner = owner.trim();
-    let repo = repo.trim();
-    if owner.is_empty() || repo.is_empty() {
-        return None;
-    }
-    let valid_segment = |s: &str| {
-        !s.is_empty()
-            && !s.starts_with('.')
-            && !s.ends_with('.')
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    };
-    if !valid_segment(owner) || !valid_segment(repo) {
-        return None;
-    }
-    Some(format!("https://github.com/{owner}/{repo}/pull/{number}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,26 +222,5 @@ mod tests {
         assert!(preview.is_truncated);
         assert!(preview.excerpt.ends_with('…'));
         assert_eq!(preview.excerpt.chars().count(), 21); // 20 chars + 1 ellipsis
-    }
-
-    #[test]
-    fn canonical_pr_url_validates_and_constructs() {
-        assert_eq!(
-            canonical_pr_url("subsurface/libdc", Some(144)),
-            Some("https://github.com/subsurface/libdc/pull/144".to_string())
-        );
-        assert_eq!(
-            canonical_pr_url("YunLeFun/apps.yunle.fun", Some(77)),
-            Some("https://github.com/YunLeFun/apps.yunle.fun/pull/77".to_string())
-        );
-        // Invalid cases
-        assert_eq!(canonical_pr_url("subsurface/libdc", None), None);
-        assert_eq!(canonical_pr_url("subsurface/libdc", Some(0)), None);
-        assert_eq!(canonical_pr_url("", Some(1)), None);
-        assert_eq!(canonical_pr_url("owner", Some(1)), None);
-        assert_eq!(canonical_pr_url("owner/repo/pull", Some(1)), None);
-        assert_eq!(canonical_pr_url("evil.com\\x/repo", Some(1)), None);
-        assert_eq!(canonical_pr_url("owner/..", Some(1)), None);
-        assert_eq!(canonical_pr_url("owner/repo?param=1", Some(1)), None);
     }
 }
