@@ -7,7 +7,7 @@
 - 已实现：`src/ui/home/**` 的双列呈现、独立状态、绑定/generation 隔离、虚拟化列表、共享滚动条与 wheel motion、键盘选择、typed 动作回调。
 - 独立预览：`examples/home.rs` 通过 `src/bin_support/home_modules.rs` 的薄 `#[path]` 装配复用真实组件，提供合成 Mixed / Loading-error / Partial / Filtered-out / Empty-unavailable / Large 场景；可选首个参数按标签或 0-based 索引选择初始场景（仅预览用）。Mixed 与 Filtered-out 都通过真实 `build_feed`；前者混合合法活动与被过滤来源，后者仅含技术噪声和未被关注的主语，验证正常最小空态。
 - 测试：`tests/home.rs` 在 GPUI 测试平台执行真实组件，测试代码位于 `src/ui/home/tests.rs`。
-- 未实现：正式 Shell 挂载、账户作用域请求、host 适配器、Issue/PR 详情、URL 打开、轮询、筛选、缓存 TTL。示例场景与 fixtures 不是产品路由或运行时开关。
+- 正式集成：`app::pages::HomePage` 提供账户作用域请求、异步结果发布、分页与内部导航，见[正式页面接入](shell-page-integration.md)。Issue/PR 详情、自动轮询、用户自定义筛选与磁盘离线读取未实现。示例 fixtures 不是产品路由或运行时开关。
 
 ## 已确认默认值（负责人 2026-10-28，2026-10-30 补充筛选）
 

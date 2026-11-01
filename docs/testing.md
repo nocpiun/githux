@@ -11,7 +11,7 @@ Githux 为单 Rust package（edition 2024）。在早期开发阶段，为支持
 1. **主二进制库/应用（`src/main.rs`）**：
    - 包含了完整的应用产品模块树：`app`、`auth`、`content`、`data`、`diagnostics`、`domain`、`github`、`network`、`platform`、`storage`、`ui`、`workspace`。
    - 在 `cfg(test)` 下装配 `bin_support/test_repository_modules.rs`（开发 fixture），使 `ui::repository` 的全套单元测试与集成测试均在主 binary 单元测试套件中编译和执行。
-   - 主二进制目标共运行 799 个测试用例，覆盖全部通用领域、网络、存储、认证、UI 基础逻辑与 Shell Composition。
+   - 主二进制目标覆盖通用领域、网络、存储、认证、UI 基础逻辑与 Shell Composition；用例数量以当前 `cargo test --bin githux` 输出为准（下述 799 是去重任务当时的数量）。
 
 2. **领域与专用组件集成测试（`tests/*.rs`）**：
    - `tests/home.rs`：测试 Home / Feed 模块装配。

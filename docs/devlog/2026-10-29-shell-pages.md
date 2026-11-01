@@ -47,3 +47,18 @@
 - IME、多 DPI/跨屏、触控板、真实窗口聚焦与拖拽手感未由本轮自动化证明。
 - Settings 仍为过渡实现，必须独立设计；本轮合并不代表 Settings 最终验收。
 - Issue/PR 详情、通知、搜索与写操作未实现；Star/Fork 没有成功回调，不宣称写能力。
+
+## 2026-11-01：最终整合
+
+负责人已验收 Home Feed 并授权 shell-pages 收尾后合并。协调者在原执行者停止写入、工作区干净的前提下接手集成：
+
+- PR #51 squash 合入 shell-pages，包含三类关注动态、open Home 条目、自动续页、仓库简介与 PR 描述，以及 Read more 的内部 PR 路由。详情内容继续按产品约定留空。
+- 保留已验收的 #44/#46/#48/#49 布局与字体、#50 README polish、#53 测试拓扑；同步 main `f7144b6`，组合 Reader HTML、验证 runner 和缓存核心，无文本冲突。缓存核心仍未接正式离线读取。
+- 核对历史审查时确认 compact status 和 overview retry 的 debug selector 在每次错误重绘中使用 `Box::leak`，本轮修为元素闭包持有字符串。保持既有 selector、tooltip、单次重试及键盘行为，不改变产品外观。
+- README、文档索引、架构与组件状态说明更新为实际正式接线，移除旧 fixture/stub 与 README Flow 未完成的描述。Settings 仍是过渡入口。
+
+本轮应用 LESSONS L009 的最新基线核验、L012 的页面组合边界、L013 的 Reader Flow 消费契约及 L016 的内部导航约定；没有新增不同类别的可复用教训，不机械新增 LESSONS 条目。
+
+通过共享 runner 执行 fmt、all-target Clippy、完整 cargo test（2,930 项，其中主程序 950 项）和 Windows debug build，均 exit 0；git diff --check 通过。已有回归覆盖实际 Shell 内部 PR 标签复用、Feed 续页与刷新、Profile Flow 文末与后续区块、错误重试标识/单次触发、仓库列头与圆角裁切。
+
+先前的组合测试在发现上述泄漏后主动取消，不计为通过；修复后重新完成最终验证。原生视觉沿用负责人已完成的验收；本轮未新增真实 PAT/IME/多 DPI/触控板证据。

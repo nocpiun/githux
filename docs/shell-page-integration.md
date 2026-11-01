@@ -1,6 +1,6 @@
 # 正式 Shell 的 Home / Profile / Repository 页面接入
 
-更新：2026-10-29。状态：实现完成，等待负责人真实验收。本文记录正式 Shell 中页面 host 的挂载、生命周期、导航和验证边界；Home/Feed、Profile Overview、Repository 页面组件本身分别见 [home-view](home-view.md)、[profile-view](profile-view.md)、[repository-browser](repository-browser.md)，账户服务仍见 [账户预览](account-ui-preview.md) 与 [账户目录](account-persistence.md)。
+更新：2026-11-01。状态：正式页面接线与已验收子任务已整合，最终检查与合并记录见 [PR #42](https://github.com/nocpiun/githux/pull/42)。本文记录正式 Shell 中页面 host 的挂载、生命周期、导航和验证边界；组件契约分别见 [Home](home-view.md)、[Profile](profile-view.md)、[Repository](repository-browser.md)，账户服务见[账户接入](account-ui-preview.md)与[账户目录](account-persistence.md)。
 
 ## 这是正式入口，不是预览
 
@@ -48,8 +48,8 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 ## Home 与 Feed
 
-- Home 固定 `involves:<当前认证 login>`、无时间窗口、`updated` 降序。
-- Feed 使用服务端顺序，只发布合并 PR、星标仓库、创建仓库三类活动，且主语必须是当前账户关注的人（合并贡献取 PR 作者）；host 负责读取 `/user/following` 与有界 PR 作者详情（`FEED_AUTHOR_LOOKUP_LIMIT = 30`）。Push、issue、未知类型等不生成卡片或 fallback 占位；不自动轮询。Poll-Interval 只控制刷新按钮何时重新可用，到期不会自行发起读取。
+- Home 固定 `involves:<当前认证 login> is:open`、无时间窗口、`updated` 降序，DTO 还会防御性过滤 closed/merged 项。
+- Feed 只保留关注账号的三类动态：合并 PR（作者为主语）、星标仓库与创建仓库；未支持类型直接省略。详情与分页边界见 [Home 查询服务](home-query-service.md)。滚动到末尾自动读取更早页，首屏不足时继续补页；未知或失败不当作历史已耗尽。刷新仍为手动，Poll-Interval 到期不自行轮询。
 - 页面组件发出的 action 在组件更新栈结束后才交给 host；Shell 的统一导航 sink 同样延后执行，覆盖 Home/Profile 链接及 Repository contributor，避免 refresh/navigation 重入正在更新的同一实体。
 - 两栏独立加载、错误、Partial、空态和刷新；一栏失败不擦另一栏。
 - 刷新按钮由 host 提供可用性。Feed 收到 `X-Poll-Interval` 后在该窗口内禁用刷新，不另建计时轮询。
@@ -58,7 +58,7 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 ## Profile
 
 - 范围沿用已确认首版：基本资料、同名公开仓库根 `README.md`、repository pins（有 gist 时提示）、无任何 pin 时 Popular、host 生成的最近滚动一年贡献区间。
-- README 的 `Missing`/`Unavailable`/`NotEligible` 是中性“未提供/无法确认”，不是读取错误；真实网络/权限/解析失败才显示对应错误。
+- README 是可选 section；`Missing`/`Unavailable`/`NotEligible` 直接省略，不显示空框或错误句。可用正文继承 Profile 背景、使用 Reader Flow 自然高度和内部 padding；真实操作错误继续走紧凑状态。
 - 每个 section 独立失败，不擦除其他成功结果。
 - 头像通过 `app::avatar` 加载并由组件接收已解码图片；失败/加载中保持首字母与固定尺寸。
 
@@ -88,7 +88,7 @@ Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`
 - Profile section loading 使用 spinner；section error 使用 warning+tooltip，具体原因保留可读文本。
 - Profile Pinned 卡片的描述和 language/star/fork 行按卡片内容起点对齐；文字层级与卡片布局不变。
 - 本人 Profile 打开时，侧栏账户行不再显示仓库/导航行的选中线；头像、current 身份与账户交互不变。
-- Profile README 已移除自身固定 280px 高度；当时 Reader 的共享自然高度/Flow API 尚未合入，因此正文区塌缩，该项保持未完成而非假装完成。
+- 历史缺陷：只移除 Profile README 的 280px 固定高度时，Reader 尚无自然高度 API，导致正文塌缩；随后已通过下述 Flow 接线修复，见 LESSONS L013。
 - 2026-10-30：`reader-images`（PR #45，main `9522eee`）合入 Flow 后，Profile 在构造 README 时设置 `MarkdownLayout::Flow` 并注册 `on_layout_changed`。正文按真实高度完整展开、只由 Profile 外层滚动，文末 inset 保留。Pinned 简介同时改为自然换行、最多三行，卡片随内容长高。
 
 ## 验证与限制
@@ -102,4 +102,4 @@ Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`
 - 关闭一个仓库标签不关闭或清空另一个；
 - 重新验证推进授权 epoch 后旧页面 host 被丢弃。
 
-真实 Windows 窗口对正式 `target/debug/githux.exe` 已核对启动、Home/Feed 真实数据、侧栏仓库 README/树/分支、Profile 头像/README/pins 与滚动；截图只保留在被忽略目录。未由本任务完成：负责人输入真实 PAT 的完整验收、Profile README 的共享 Reader Flow、原生鼠标/键盘/IME、多 DPI/跨屏与触控板，以及 Settings 的最终设计。Settings 仍是过渡页，不能以本轮状态视为最终验收。
+此前真实 Windows 窗口已核对正式 binary 的 Home/Feed 数据、仓库 README/树/分支、Profile 与滚动；负责人已验收关联 UI 修复、Reader HTML、Profile README polish 和 Home Feed，并授权本任务收尾后合并。最终组合验证见 [收尾记录](devlog/2026-10-29-shell-pages.md#2026-11-01最终整合)。本次整合不补称此前未测的完整登录/切账户、IME、多 DPI/跨屏或触控板均已验收；Settings 仍是过渡页，必须单独设计交付。

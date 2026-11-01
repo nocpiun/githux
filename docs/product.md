@@ -110,7 +110,7 @@ account-shell 在正式 Shell 中加入的 **Settings › Accounts** 只承担�
 
 ### Profile 的已确认读取与回退
 
-个人 README 来自目标用户公开的同名仓库（canonical owner/name 均为该用户 login）的**根目录普通 `README.md`**，按固定 commit/blob 读取；不把 `.github/` 或 `docs/` 下的 README 当作 Profile README。仓库 pins 保持服务顺序；观察到 gist pin 时只提示，不增加 gist 功能。**只有无 pin 且服务明确给出 Popular 回退时才展示 Popular**；gist-only、截断或不确定结果不擅自转 Popular。贡献图由正式 host 提供**最近滚动一年**的范围。当前这些是已合并 page-data 与 Profile 组件的已接受契约，正式 Shell 尚未调用；详见 [账户页面数据服务](page-data-service.md) 和 [Profile 展示组件](profile-view.md)。
+个人 README 来自目标用户公开的同名仓库（canonical owner/name 均为该用户 login）的**根目录普通 `README.md`**，按固定 commit/blob 读取；不把 `.github/` 或 `docs/` 下的 README 当作 Profile README。仓库 pins 保持服务顺序；观察到 gist pin 时只提示，不增加 gist 功能。**只有无 pin 且服务明确给出 Popular 回退时才展示 Popular**；gist-only、截断或不确定结果不擅自转 Popular。贡献图由正式 host 提供**最近滚动一年**的范围。这些契约已由正式 Shell 的 Profile host 接入；详见 [账户页面数据服务](page-data-service.md) 和 [Profile 展示组件](profile-view.md)。
 
 负责人 2026-10-30 另确认 Profile README 的呈现边界：**可选 README 缺失/不可用时，Profile 不渲染该 section，也不显示错误句**；README 可用时正文与 Profile 背景自然融合，保留文档自然完整高度与内部 padding；只有真实操作错误才保留内部诊断含义，并以紧凑、可操作的呈现给出。这是已确认意图；实现与真实窗口验证状态以 Profile 任务自身记录为准，不因写在本节而视为已验证。
 
@@ -126,7 +126,7 @@ UI 拉丁字形为 **Noto Sans**，简体中文为应用自带 **Noto Sans SC**�
 
 - 侧边栏仓库排序/局部筛选，command palette 搜索范围，Notifications/全局 Issues/PRs/New 的具体内容；H1–H4/H7 的最小功能与动作清单。
 - 最终全局/仓库 Settings 的分类、布局、首批项目及仓库设置范围；现有 Accounts 分区不预决这些选择。
-- 顶部摘要的窄窗口呈现、无 README 的最终呈现细节、Feed 后续自动刷新/过滤（若提出）；Home 无时间窗口、Feed 服务顺序与手动刷新、Profile 的 README/pins/Popular/最近一年规则已经确认，不再列为待定。
+- 顶部摘要的窄窗口呈现、Feed 后续自动刷新/过滤（若提出）；Home 无时间窗口、Feed 服务顺序与手动刷新、Profile 的 README/pins/Popular/最近一年规则已经确认，不再列为待定。
 - H6 其余进阶交互本轮不设计实现，基础边界不能借机恢复它们。标签数量不设上限、溢出用水平滚动承载、每账户独立标签切回恢复（仅内存）已经确认；启动仍进入 Home，不恢复上次活动页或重启前标签。
 - 最小窗口、面板宽度与响应布局、产品语言、本人/他人操作。
 - PAT 创建引导的最小权限清单、私有内容授权失效后的展示/保留规则、账户移除后的私有内容保留/删除策略；若 H7 选定需要编辑内容的操作，再明确相应草稿规则。

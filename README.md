@@ -1,6 +1,6 @@
 # Githux
 
-基于 Rust、GPUI 与 Ely 的 GitHub 桌面客户端，Windows 优先，后续覆盖 macOS 和 Linux。当前正式工程实现 R1 的外壳布局：Windows 自定义标题栏、固定侧边栏与有界仓库列表、Ely island、Home 双列假数据、本地导航搜索浮层、应用级基础标签（打开/复用/切换/关闭），以及随 binary 注册的字体。PAT 登录、凭据保存与可取消的 GitHub 读取等服务层已实现（PR #14），但尚未接入 UI；仓库阅读器、Profile Overview、设置选项等业务页面仍未实现。
+基于 Rust、GPUI 与 Ely 的 GitHub 桌面客户端，Windows 优先。正式 Shell 已接入 Classic PAT 登录、多账户与真实仓库侧栏，以及 Home/Feed、Profile Overview 和统一仓库阅读页面；保留自定义标题栏、island、本地导航搜索与每账户独立的内存标签。UI 使用 Noto Sans / Noto Sans SC，代码使用 Google Sans Code。页面生命周期与验证边界见 [正式页面接入](docs/shell-page-integration.md)。
 
 首版功能取舍见 [产品约定](docs/product.md#首版范围)，后续开发顺序与验收讨论见 [开发路线图](docs/roadmap.md)。首版不做 macOS/Linux 产品适配或安装更新系统；已有跨平台 Debug CI 保留。
 
@@ -22,11 +22,11 @@ cargo run --locked
 
 Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
 
-启动进入 Home：左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果只有本地导航命令（各页面与当前假数据仓库）：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Notifications、Issues、PRs、New；New 尚未确定创建范围，因此保持禁用。
+启动进入 Home：左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果为本地导航命令与当前账户已读取的仓库：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间真实仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Notifications、Issues、PRs、New；New 暂时禁用。
 
 island 顶部是应用级标签条：点击侧栏仓库/Profile、底部入口或 palette 结果会打开或激活对应标签（同一资源复用、不重复），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换；关闭活动标签切到左邻，关闭最后一个标签后新建 Home。Home、Settings 与全局占位页按路由单例，仓库按 `owner/repo` 单例（大小写不敏感）。每个标签保留自己的页面滚动位置、焦点与仓库会话选择。标签数量不设上限：放不下时标签条自行横向滚动（滚轮 / `Shift`+滚轮 / 原生水平滚动 / 鼠标悬停时淡入的细滚动条），只影响标签条本身；新建、切换或 Tab 聚焦会把目标标签滚入视野。标签可以横向拖拽排序（按标签身份移动，不重建会话），鼠标中键在标签任意位置关闭该标签（不先激活），关闭按钮只在 hover 或活动标签上出现。标签条最右侧有一个固定的工具栏，本轮只放一个未接逻辑的禁用刷新入口。标签文本可省略，悬停显示完整名称。
 
-页面内容：Home 用少量固定假数据展示左栏 Home（最近参与）与右栏 Feed（关注动态）的密度；Repository 与 Profile 只显示最小资源标识以核验路由；Settings 与 Issue/PR 等未设计页面内容区按约定留空，不添加“未实现”卡片。关闭最后窗口退出应用。仓库阅读器与页面的真实数据接入、账户切换时的标签处理仍属于后续任务（账户/PAT 服务层已实现，UI 未接入）。字体、中文回退、输入法、多 DPI 与窗口按钮的真实窗口验收状态见 [外壳布局开发日志](docs/devlog/2026-10-22-shell-layout.md)，应用级标签的实现与边界见 [标签开发日志](docs/devlog/2026-10-23-workspace-tabs.md)；macOS/Linux 仍保留系统标题栏，未做产品适配。
+页面内容：Home 显示当前账户参与的 open Issues/PRs；Feed 只显示关注账号的合并 PR、星标仓库与创建仓库，滚动到底部继续读取 API 可用的历史页。仓库卡片显示简介，PR 显示描述摘要，Read more 打开 Githux 内部 PR 标签（详情内容按当前约定留空）。Repository 挂载真实分支、文件树和 Markdown/源码阅读器；Profile 展示公开资料、自然高度 README、Pinned/Popular 与贡献图。缺失的可选 README 不占位。Settings 仍是过渡账户入口；通知、全局 Issues/PRs 等未接入的页面内容继续留空。切账户恢复该账户进程内标签，重启从 Home 开始。关闭最后窗口退出应用。IME、多 DPI/跨屏与触控板仍需专项验收，macOS/Linux 保留编译 CI，尚未做产品适配。
 
 ## 构建检查
 

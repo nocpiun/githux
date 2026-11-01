@@ -50,7 +50,7 @@ pub fn failed(
     label: impl Into<String>,
     reason: impl Into<String>,
     on_retry: Option<impl Fn(&mut gpui::Window, &mut App) + 'static>,
-    selector: Option<&'static str>,
+    selector: Option<&str>,
     cx: &App,
 ) -> AnyElement {
     let label = label.into();
@@ -58,11 +58,12 @@ pub fn failed(
     let aria = format!("{label}: {reason}");
     let retry = on_retry.map(std::rc::Rc::new);
     let colors = &cx.theme().colors;
-    let fallback = format!("compact-failed-{label}");
-    let selector = selector.unwrap_or_else(|| Box::leak(fallback.into_boxed_str()));
+    let selector = selector
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("compact-failed-{label}"));
     let base = div()
         .id(id.into())
-        .debug_selector(move || selector.to_string())
+        .debug_selector(move || selector.clone())
         .role(if retry.is_some() {
             gpui::Role::Button
         } else {

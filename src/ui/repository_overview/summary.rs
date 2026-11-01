@@ -92,8 +92,6 @@ impl RepositoryOverview {
         let binding = self.binding.clone();
         let label = format!("Retry {}", section.title());
         let reason = message.to_string();
-        let section_label = section.title().to_string();
-        let _ = section_label;
         let this = cx.entity().downgrade();
         let id = format!("overview-retry-{}", section.id());
         crate::ui::compact_status::failed(
@@ -112,7 +110,7 @@ impl RepositoryOverview {
                     );
                 });
             }),
-            Some(Box::leak(id.into_boxed_str())),
+            Some(&id),
             cx,
         )
     }

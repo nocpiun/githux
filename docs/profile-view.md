@@ -1,6 +1,6 @@
 # Profile Overview 展示组件
 
-更新：2026-10-30。**负责人已确认当前其余视觉无问题，主 Agent 补齐 Overview tab 居中修正；PR 尚未合并。** 已实现可复用的只读 Profile Overview，位于 [`src/ui/profile/`](../src/ui/profile/)。独立开发预览为 `examples/profile.rs`，测试装配为 `tests/profile.rs` 与 `src/bin_support/profile_modules.rs`。**尚未接入 Shell、路由、workspace、账户服务或真实页面数据；预览中的合成数据不表示生产集成完成。**
+更新：2026-11-01。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略及 Pinned 简介三行已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
 
 ## 已实现的展示范围
 
