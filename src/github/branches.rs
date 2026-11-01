@@ -100,6 +100,7 @@ pub async fn fetch_branches_with_metadata(
         };
         successful_pages += 1;
         let page_metadata = response_metadata(&response);
+        metadata.network_observed = true;
         // Aggregate pages have no single validator. Any no-store contributor
         // invalidates the whole aggregate; retain other directives as observed.
         if page_metadata.cache_control.as_deref().is_some_and(|value| {

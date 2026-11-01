@@ -512,9 +512,10 @@ impl CachedRepositorySession {
         )?;
         if mode != RepositoryCacheMode::ForceRefresh {
             let identity = identity.clone();
+            let limits = *limits;
             if let Some(cached) = self
                 .prior(&key, cancel.clone(), move |value| {
-                    decode_blob(value, &identity)
+                    decode_blob(value, &identity, &limits)
                 })
                 .await?
             {
@@ -529,15 +530,17 @@ impl CachedRepositorySession {
         }
         if mode == RepositoryCacheMode::OfflineOnly {
             let identity = identity.clone();
+            let limits = *limits;
             let cached = self
-                .offline(&key, cancel, move |value| decode_blob(value, &identity))
+                .offline(&key, cancel, move |value| decode_blob(value, &identity, &limits))
                 .await?;
             return self.scoped(cached);
         }
         let prior = if mode == RepositoryCacheMode::OnlinePreferred {
             let identity = identity.clone();
+            let limits = *limits;
             self.online_prior(&key, cancel.clone(), move |value| {
-                decode_blob(value, &identity)
+                decode_blob(value, &identity, &limits)
             })
             .await?
         } else {
@@ -1524,11 +1527,21 @@ fn encode_blob(value: &BlobRead) -> Result<Vec<u8>, RepositoryCacheError> {
 fn decode_blob(
     value: &CacheSnapshot,
     identity: &BlobIdentity,
+    limits: &BlobLimits,
 ) -> Result<BlobRead, RepositoryCacheError> {
     if let Some(size) = identity.size()
         && size != value.bytes.len() as u64
     {
         return Err(RepositoryCacheError::Miss(CacheMiss::Corrupt));
+    }
+    if value.bytes.len() > limits.decoded_bytes {
+        return Ok(BlobRead {
+            identity: identity.clone(),
+            body: BlobBody::TooLarge {
+                size: value.bytes.len() as u64,
+                limit: limits.decoded_bytes,
+            },
+        });
     }
     // This is an ordinary byte payload, not a serialized internal handle. The
     // fixed cache key binds the blob SHA; identity binds commit/path here too.

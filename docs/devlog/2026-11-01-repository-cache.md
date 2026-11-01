@@ -50,6 +50,8 @@ Codex 对 `a53e807` 提出 5 项问题，均可在既定约束内直接修复，
 
 聚焦回归现 10/10 通过（`96494280-b820-4983-a15d-4c6aa68518c3`）。最终完整检查结果随新 head 审查记录于 PR。
 
+第二轮对 `23b614d` 的 3 项反馈同样直接修复：branches 首个成功验证页标记网络证明；tree 键加入 response budget；缓存 blob 命中按当前 decoded budget 返回 TooLarge。新增 branches 自行重验、预算切换与缓存上限回归，聚焦 `dd50a097-c37b-42c7-8213-bbb41e752b3f` 通过。期间 main 前进至 reader-image-cache `ee0e9f9`，按独立模块归属同步组合。
+
 ## 边界
 
 无 GUI/Shell 接线，无真实 PAT/实网写操作或 Star 验收。正式账户事件生产、应用级 CacheStore 组装与离线 UI 由后续任务交付。缓存适配层完成不等于应用离线功能已交付。
