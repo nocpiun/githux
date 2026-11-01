@@ -24,6 +24,8 @@ pub(crate) struct SettingsBinding {
     pub mode: Option<FormMode>,
     pub input: Entity<TextInput>,
     pub help: bool,
+    /// Controller outcome applied for the current submitted token operation. Cleared on failure so
+    /// unrelated later operations cannot be mistaken for this submission's commit.
     pub submitted: bool,
     pub field_error: Option<&'static str>,
     /// Whether this mounted page has seen an account action. It suppresses the controller's
@@ -231,6 +233,21 @@ impl SettingsBinding {
             if let Some(origin) = &self.origin {
                 window.focus(origin, cx);
             }
+            cx.notify();
+            return;
+        }
+        // The submission failed without an authoritative epoch change. Forget its pending
+        // completion so a later unrelated operation (a row Revalidate advancing an epoch, for
+        // example) is never mistaken for a successful save of this PAT. The form stays open with
+        // its input for correction.
+        if !controller.busy()
+            && controller
+                .snapshot()
+                .status
+                .as_ref()
+                .is_some_and(|status| status.tone == crate::ui::accounts::StatusTone::Error)
+        {
+            self.submitted = false;
             cx.notify();
         }
     }

@@ -37,6 +37,10 @@ Codex 首轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#di
 
 修复：`settle` 只以提交前记录的账户身份与权威目录中的 epoch 差确认提交，不再依赖最新状态或 busy。`Scenario::ReposFail` 让 `/user` 成功、`/user/repos` 返回 503；新增 `committed_form_closes_even_when_the_follow_up_repository_read_fails` 验证表单关闭、提交不被误报为保存失败、仓库失败留在独立状态。聚焦测试现为 8 passed，clippy 通过。
 
+## 第二轮审查修复
+
+第二轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#discussion_r4434744048)）指出：提交失败后表单保持打开，但其行的 Revalidate 可用；无关重验证推进 epoch 会被上一轮实现误当成 PAT 已提交。修复为：提交失败且控制器不再 busy 时清除本绑定的待完成状态，之后 epoch 变化不再能关闭表单；现行表单保留，已提交的秘密仍按既有规则立即清空，失败后新输入不受影响。新增 `a_failed_submission_is_not_completed_by_a_later_unrelated_revalidation`，并再次覆盖第一轮“自动读取失败不能让已提交表单重开”的场景。聚焦测试 9 passed。
+
 ## 交付与剩余边界
 
 待完成最终 required checks 与 PR。UI PR 添加 `pending`，负责人原生验收通过前不合并。真实 PAT、Windows IME 消息顺序、多 DPI、正式 Shell 组合和非 Windows 产品验收不能由该离线预览推断。

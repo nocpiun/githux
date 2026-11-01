@@ -153,6 +153,40 @@ fn committed_form_closes_even_when_the_follow_up_repository_read_fails(cx: &mut 
 }
 
 #[gpui::test]
+fn a_failed_submission_is_not_completed_by_a_later_unrelated_revalidation(cx: &mut TestAppContext) {
+    let fixture = Fixture::open(Scenario::Normal);
+    let (_, binding, cx) = mount(cx, &fixture);
+    wait_idle(&binding, cx);
+    open(&binding, FormMode::Replace(key(2)), cx);
+    put(&binding, "preview-alex", cx);
+    cx.simulate_keystrokes("enter");
+    wait_idle(&binding, cx);
+    assert_eq!(
+        binding.read_with(cx, |this, _| this.mode.clone()),
+        Some(FormMode::Replace(key(2)))
+    );
+    assert!(
+        !binding.read_with(cx, |this, _| this.submitted),
+        "a failed submission must stop waiting for its own commit"
+    );
+    // The secret is cleared immediately after submission and never restored. A replacement text
+    // entered after the failure still must not make the unrelated epoch change count as a commit.
+    assert!(binding.read_with(cx, |this, cx| this.input.read(cx).text().is_empty()));
+    put(&binding, "replacement-in-progress", cx);
+    let controller = binding.read_with(cx, |this, _| this.controller.clone());
+    controller.update(cx, |this, cx| this.revalidate(key(2), cx));
+    wait_idle(&binding, cx);
+    assert_eq!(
+        binding.read_with(cx, |this, _| this.mode.clone()),
+        Some(FormMode::Replace(key(2)))
+    );
+    assert_eq!(
+        binding.read_with(cx, |this, cx| this.input.read(cx).text().to_owned()),
+        "replacement-in-progress"
+    );
+}
+
+#[gpui::test]
 fn double_submit_and_cancellation_use_existing_controller(cx: &mut TestAppContext) {
     let fixture = Fixture::open(Scenario::Slow);
     let (_, binding, cx) = mount(cx, &fixture);
