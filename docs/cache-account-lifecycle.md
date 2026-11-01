@@ -19,7 +19,7 @@ let accounts = AccountService::open_with_cache(
 - 返回的 `AccountCache` 提供同一个 `CacheStore` clone 与已保存账户的 `CacheScope`，也可 `into_parts()`。消费者仍须校验 `scope.account() == session.context().auth().account`，保留现有 session、context、资源代次、取消与 lease 复核。
 - 消费者不得自行创建分区、打开另一 DB、绕过现有服务或把旧句柄当成持续许可。`None` 表示无可用私有缓存，不是空内容。
 
-替换后消费者先用该 scope 对具体仓库取得 `begin_revalidation(scope, Some(repo_id))`，使用**当前 session 固定的新凭据**成功读取该仓库后，再检查 context 并调用 `permission_confirmed`。`GET /user` 和 `revalidate()` 不会解锁仓库。账户级私有聚合使用 `repository=None` 的独立证明，不随任一仓库证明解锁。
+替换后消费者先通过 `RepoService::begin_revalidation(session.context(), Some(repo_id))` 取得 ticket，使用**当前 session 固定的新凭据**成功读取该仓库后，再检查 context 并 `await RepoService::permission_confirmed(session.context(), ticket)`。完成证明与账户替换共用提交锁，写门禁前再次核对 context，旧 session 在替换提交窗口内也不能解锁新 cache epoch。不得绕过该服务入口直接发布 core proof。`GET /user` 和 `revalidate()` 不会解锁仓库。账户级私有聚合使用 `repository=None` 的独立证明，不随任一仓库证明解锁。
 
 ## 跨 DB 顺序与崩溃窗口
 

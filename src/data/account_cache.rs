@@ -5,7 +5,7 @@
 use super::*;
 use crate::domain::AccountKey;
 use crate::storage::accounts::AccountDatabaseConfig;
-use crate::storage::cache::{AccessEvent, CacheError, CacheScope, CacheStore};
+use crate::storage::cache::{AccessEvent, CacheError, CacheScope, CacheStore, Revalidation};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -105,7 +105,13 @@ impl AccountCaches {
             // and still require this event; None here is NOT cache-disabled.
             None => self
                 .store
-                .saved_account(account.clone())
+                .live_scopes()
+                .and_then(|scopes| {
+                    scopes
+                        .into_iter()
+                        .find(|scope| scope.account() == account)
+                        .ok_or(CacheError::AccessDenied)
+                })
                 .and_then(|scope| self.store.access_event(&scope, event)),
         };
         if result.is_err() {
@@ -125,7 +131,13 @@ impl AccountCaches {
             // partition and retire it before allowing a remove retry to commit.
             None => self
                 .store
-                .saved_account(account.clone())
+                .live_scopes()
+                .and_then(|scopes| {
+                    scopes
+                        .into_iter()
+                        .find(|scope| scope.account() == account)
+                        .ok_or(CacheError::AccessDenied)
+                })
                 .and_then(|scope| self.store.retire(&scope)),
         };
         // Never leave an enabled in-memory route after a remove attempt, even
@@ -181,6 +193,73 @@ impl AccountService {
             .expect("account cache lock")
             .as_ref()
             .and_then(|cache| cache.current(&account.identity.key))
+    }
+}
+
+impl RepoService {
+    /// Begin the cache ticket for a repository-specific proof. The actual
+    /// network read still belongs to the consumer's existing session; finish
+    /// with `permission_confirmed`, which serializes against account commits.
+    pub fn begin_revalidation(
+        &self,
+        context: &RepositoryReadContext,
+        repository: Option<u64>,
+    ) -> Result<Revalidation, CacheError> {
+        let binding = self.cache(context).ok_or(CacheError::AccessDenied)?;
+        binding
+            .store()
+            .begin_revalidation(binding.scope(), repository)
+    }
+
+    /// Publish repository proof only while its session and cache partition are
+    /// still current. In particular, an old PAT cannot prove the cache epoch
+    /// allocated by a concurrent replacement before that replacement commits.
+    pub async fn permission_confirmed(
+        &self,
+        context: &RepositoryReadContext,
+        proof: Revalidation,
+    ) -> Result<(), CacheError> {
+        if !self.is_current(context) {
+            return Err(CacheError::Stale);
+        }
+        let gate = self.credential_commit.clone();
+        let registry = self.registry.clone();
+        let cache = self.cache.clone();
+        let closed = self.closed.clone();
+        let expected = context.clone();
+        let proof_scope = proof.scope().clone();
+        #[cfg(test)]
+        let probe = self.rejection_probe.lock().expect("rejection probe").take();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe.entered.send(()).unwrap();
+                probe.resume.recv().unwrap();
+            }
+            let _gate = gate.lock().expect("account commit lock");
+            if closed.load(std::sync::atomic::Ordering::Acquire)
+                || registry
+                    .lock()
+                    .expect("registry lock")
+                    .active_context()
+                    .as_ref()
+                    != Some(expected.auth())
+            {
+                return Err(CacheError::Stale);
+            }
+            let binding = cache
+                .lock()
+                .expect("account cache lock")
+                .as_ref()
+                .and_then(|cache| cache.current(&expected.auth().account))
+                .ok_or(CacheError::AccessDenied)?;
+            if binding.scope() != &proof_scope {
+                return Err(CacheError::Stale);
+            }
+            binding.store().permission_confirmed(proof)
+        })
+        .await
+        .map_err(|_| CacheError::Stale)?
     }
 }
 

@@ -119,6 +119,11 @@ pub struct Revalidation {
     revision: String,
     instance: String,
 }
+impl Revalidation {
+    pub fn scope(&self) -> &CacheScope {
+        &self.scope
+    }
+}
 /// Captured before a network read; newer writers and access events invalidate it.
 pub struct CacheWrite {
     scope: CacheScope,
@@ -257,6 +262,8 @@ impl CacheStore {
         };
         keys::object_name(&partition)?;
         tx.commit()?;
+        // saved_account is a lookup/provision operation, not reconciliation of
+        // an uncertain gate outcome. It never advances the local generation.
         let generation = state.suspended.get(&partition).copied().unwrap_or(0);
         Ok(CacheScope {
             account,

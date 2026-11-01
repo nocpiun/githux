@@ -136,6 +136,7 @@ async fn saved_restart_replacement_revalidation_remove_and_readd_use_real_catalo
         value(&restored, &private_key(10)),
         b"account one repository ten"
     );
+    service.set_active(key(1)).await.unwrap();
     user(&mock, 1).await;
     service
         .replace(key(1), Pat::from_str("replacement_fake"))
@@ -160,11 +161,24 @@ async fn saved_restart_replacement_revalidation_remove_and_readd_use_real_catalo
         b"account two repository ten"
     );
     // Repository proof opens exactly one repository, never the account aggregate.
-    let proof = restored
-        .store()
-        .begin_revalidation(restored.scope(), Some(10))
+    // Re-acquire the binding through the new session. The persistent partition
+    // is intentionally retained across PAT replacement; its cache epoch/gates
+    // remain quarantined, and proof publication must pass the service context.
+    let replacement_session = service.repo_service().session().unwrap();
+    let current = service
+        .repo_service()
+        .cache(replacement_session.context())
         .unwrap();
-    restored.store().permission_confirmed(proof).unwrap();
+    denied(&current, &private_key(10));
+    let proof = service
+        .repo_service()
+        .begin_revalidation(replacement_session.context(), Some(10))
+        .unwrap();
+    service
+        .repo_service()
+        .permission_confirmed(replacement_session.context(), proof)
+        .await
+        .unwrap();
     assert_eq!(
         value(&restored, &private_key(10)),
         b"account one repository ten"
@@ -204,6 +218,52 @@ async fn saved_restart_replacement_revalidation_remove_and_readd_use_real_catalo
         Ok(CacheRead::Miss(_))
     ));
     denied(&restored, &private_key(10));
+    service.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn old_session_proof_cannot_reopen_repository_during_replacement_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(4));
+    let service =
+        Arc::new(open_cached(accounts, credentials, mock.clone(), executor, cache.clone()).await);
+    user(&mock, 1).await;
+    service.login(Pat::from_str("old_fake")).await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    put(&binding, &private_key(6), b"private");
+    // Quarantine before the old proof begins, while the old registry epoch is
+    // still published. This is the exact replacement commit window.
+    cache
+        .access_event(
+            binding.scope(),
+            crate::storage::cache::AccessEvent::PatReplaced,
+        )
+        .unwrap();
+    let session = service.repo_service().session().unwrap();
+    let context = session.context().clone();
+    let proof = service
+        .repo_service()
+        .begin_revalidation(&context, Some(6))
+        .unwrap();
+    let repos = service.repo_service();
+    let (entered, release) = repos.pause_rejection();
+    let confirmed = tokio::spawn(async move { repos.permission_confirmed(&context, proof).await });
+    entered.await.unwrap();
+    user(&mock, 1).await;
+    service
+        .replace(key(1), Pat::from_str("new_fake"))
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    assert_eq!(confirmed.await.unwrap(), Err(CacheError::Stale));
+    denied(
+        &service.cache(&account_summary(&service, 1)).unwrap(),
+        &private_key(6),
+    );
     service.close().await.unwrap();
 }
 
@@ -247,14 +307,15 @@ async fn rejected_credentials_stay_closed_across_restart_and_late_rejection_is_s
     // A late rejection did not turn the replacement's active quarantine into a
     // rejected scope; the same repository proof is still required and sufficient.
     let binding = service.cache(&account_summary(&service, 1)).unwrap();
-    binding
-        .store()
-        .permission_confirmed(
-            binding
-                .store()
-                .begin_revalidation(binding.scope(), Some(7))
-                .unwrap(),
-        )
+    let session = service.repo_service().session().unwrap();
+    let proof = service
+        .repo_service()
+        .begin_revalidation(session.context(), Some(7))
+        .unwrap();
+    service
+        .repo_service()
+        .permission_confirmed(session.context(), proof)
+        .await
         .unwrap();
     assert_eq!(value(&binding, &private_key(7)), b"private");
     service.close().await.unwrap();
@@ -505,14 +566,15 @@ async fn cache_gate_failure_aborts_replacement_and_preserves_old_credential() {
         .unwrap();
     let replaced = service.cache(&account_summary(&service, 1)).unwrap();
     denied(&replaced, &private_key(1));
-    replaced
-        .store()
-        .permission_confirmed(
-            replaced
-                .store()
-                .begin_revalidation(replaced.scope(), Some(1))
-                .unwrap(),
-        )
+    let session = service.repo_service().session().unwrap();
+    let proof = service
+        .repo_service()
+        .begin_revalidation(session.context(), Some(1))
+        .unwrap();
+    service
+        .repo_service()
+        .permission_confirmed(session.context(), proof)
+        .await
         .unwrap();
     assert_eq!(value(&replaced, &private_key(1)), b"old private");
     service.close().await.unwrap();
@@ -564,14 +626,15 @@ async fn replacement_quarantine_survives_catalog_failure_and_restart() {
     let service = open_cached(accounts, credentials, mock, executor, cache).await;
     let binding = service.cache(&account_summary(&service, 1)).unwrap();
     denied(&binding, &private_key(4));
-    binding
-        .store()
-        .permission_confirmed(
-            binding
-                .store()
-                .begin_revalidation(binding.scope(), Some(4))
-                .unwrap(),
-        )
+    let session = service.repo_service().session().unwrap();
+    let proof = service
+        .repo_service()
+        .begin_revalidation(session.context(), Some(4))
+        .unwrap();
+    service
+        .repo_service()
+        .permission_confirmed(session.context(), proof)
+        .await
         .unwrap();
     assert_eq!(value(&binding, &private_key(4)), b"private");
     service.close().await.unwrap();
@@ -610,14 +673,15 @@ async fn late_rejection_waits_for_replacement_and_cannot_poison_the_new_epoch() 
     let current = service.active_context().unwrap();
     assert!(current.epoch > old_epoch);
     let binding = service.cache(&account_summary(&service, 1)).unwrap();
-    binding
-        .store()
-        .permission_confirmed(
-            binding
-                .store()
-                .begin_revalidation(binding.scope(), Some(3))
-                .unwrap(),
-        )
+    let session = service.repo_service().session().unwrap();
+    let proof = service
+        .repo_service()
+        .begin_revalidation(session.context(), Some(3))
+        .unwrap();
+    service
+        .repo_service()
+        .permission_confirmed(session.context(), proof)
+        .await
         .unwrap();
     assert_eq!(value(&binding, &private_key(3)), b"private");
     service.close().await.unwrap();

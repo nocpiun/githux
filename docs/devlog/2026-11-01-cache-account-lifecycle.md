@@ -36,6 +36,12 @@ PR #61 对 head `4b3832463b93132237237e7fadfb0d3873adc94f` 的 [P1 评论](https
 
 修复为 cache-enabled 服务在 map 缺 scope 时也按持久账户身份取得分区，并强制应用 `PatReplaced`；同类移除重试也强制 `retire`。回归扩展 `cache_gate_failure_aborts_replacement_and_preserves_old_credential`：故障解除后不调用 `recover()` 直接重试，旧 bytes 仍隔离，需逐仓库证明才恢复。聚焦测试通过：run `92fa3988-1732-4c69-b661-c18a0ef403d2`。一次等待共享 mutex 超过宿主 15 分钟工具时限，未执行测试，随后以同一参数取得上述记录。第二轮全量验证通过：`cargo test --locked`（`6ac7c4d0-ffd5-42e3-8a5d-c381c5fac356`）、`cargo clippy --locked --all-targets -- -D warnings`（`b29fada8-f369-4d1a-a552-8dae810f44a7`）、`cargo build --locked`（`f2412e4f-bdbd-4ea1-b35f-9a7b8c8e4f61`）；格式化后通过最终 fmt/diff 核验。
 
+## Codex 第二轮反馈与修复
+
+PR #61 对 head `3fd636fa5db6bcd6d9baf0117a8a960b85ca90cb` 的 [P1 评论](https://github.com/nocpiun/githux/pull/61#discussion_r4436443355) 指出替换已 quarantine、尚未提交 registry 时旧 session 可以完成 repository proof。问题成立，无需产品裁决。
+
+新增 `RepoService::begin_revalidation(context, repository)` 与 async `permission_confirmed(context, ticket)`：后者和替换共用提交锁，并在 blocking worker 内复核 registry epoch、cache 绑定与 store ticket。测试先在替换窗口构造旧 proof，用真多线程 runtime 暂停其提交、让替换先完成，再确认旧 proof 为 `Stale` 且 bytes 仍隔离；run `09aac8de-e701-4864-87e6-3a7e5f3aa66a` 通过。现有正常 revalidation 回归改走该服务入口，不把 core ticket 直接确认当作安全组装。最终 lifecycle 10 项通过（`cb5a4a68-9302-484c-99b8-5f6abb408c03`），全量 960 项通过（`8c9aade8-7bb8-4f82-ba59-316328da811c`），clippy（`69b9b170-c43f-44ce-b28f-9ced8f093226`）与 build（`9b1e0610-60a8-4194-bb27-18a3e37c3ffd`）通过。一次全量运行中未修改的 transport bounded 用例返回 Network 而非 ResponseTooLarge（`6629b76e-edd2-4208-a179-6f3c817cc4f2`），其单独重跑通过（`bc21f38e-dc2f-412c-a787-6497988bbb16`），最终全量通过；不把这波动作当作本任务逻辑验证。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。
