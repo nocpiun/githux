@@ -41,6 +41,8 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 **宽度缺陷**：初版行内用 Ely `Ellipsis`，其隐藏全量测量 div 在 GPUI 虚拟列表 item 的 `MaxContent` 测量下把行撑到整段标题宽度（#57 已记录的现象），导致长标题行宽超出视口。改为 GPUI 原生 `.truncate()` + `min_w_0`/`flex_1` 后，测试 `bounded_narrow_keyboard_and_exact_repository_callback` 断言 960×740 与 360×440 下 title/time/row 均不越出 viewport。原生 PrintWindow 截图（`.agents/task/screens/notifications-rework10.png` 等）确认两种读状态背景、无 Read/Unread 行、类型图标与相对时间呈现。
 
+**审查反馈（Codex P2）**：窗口在 polling cooldown 期间失活时，`cancel_activity()` 会丢掉 cooldown 唤醒任务，重新激活后无人重建，空 inbox 又不会启动时钟任务，Refresh 可能一直禁用。修复为幂等的 `sync_cooldown_wake`：每次活跃 render 按剩余时间补建一次性唤醒，`sync` 也复用同一入口。回归 `cooldown_wake_is_rearmed_after_deactivation` 覆盖“有唤醒 → 失活丢弃 → 复活补建 → 固定时钟不建时间任务”；按 L008 反向验证，移除补建后该测试稳定失败。
+
 原生边界不变：合成窗口可启动/渲染，但场景切换、加载更多、真实滚轮、键盘、多 DPI 与 100%/150% 缩放仍未在本机可靠注入验收，交由负责人验收；GPUI 测试与窗口截图不等于原生输入证据（L002）。
 
 ## 验收与集成边界

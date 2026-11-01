@@ -190,3 +190,33 @@ fn row_geometry_read_state_and_relative_time(cx: &mut TestAppContext) {
     let day = cx.debug_bounds("notification-time-2").unwrap();
     assert!(!minute.is_empty() && !hour.is_empty() && !day.is_empty());
 }
+
+#[gpui::test]
+fn cooldown_wake_is_rearmed_after_deactivation(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx)
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    // A server cooldown is in force; the wake-up task exists.
+    assert!(view.read_with(cx, |view, _| view.cooldown_wake.is_some()));
+    // Deactivation cancels activity, which also drops that one-shot task.
+    view.update(cx, |view, cx| view.set_active(false, cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.cooldown_wake.is_none()));
+    // Reactivation must re-arm the remaining cooldown even for an empty inbox,
+    // otherwise Refresh would stay disabled with nothing to wake it.
+    view.update(cx, |view, cx| view.set_active(true, cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.cooldown_wake.is_some()));
+    // A fixed clock starts no elapsed-time task.
+    view.update(cx, |view, cx| {
+        view.set_now(
+            Some(std::time::UNIX_EPOCH + Duration::from_secs(FIXED_NOW_SECS)),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+}

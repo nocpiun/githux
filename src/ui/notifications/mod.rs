@@ -140,12 +140,14 @@ impl NotificationsView {
     }
 
     /// Keep a single low-frequency clock tick while rows are visible so "Just
-    /// now" advances without any GitHub request. Hidden/released views stop it.
+    /// now" advances without any GitHub request. Hidden/released views stop it,
+    /// and the remaining poll cooldown wake-up is re-armed on reactivation.
     fn sync_time_task(&mut self, window: &Window, cx: &mut Context<Self>) {
         if !self.active || !window.is_window_active() || !window.is_visible() {
             self.cancel_activity();
             return;
         }
+        self.sync_cooldown_wake(cx);
         if self.fixed_now || self.snapshot.items.is_empty() {
             self.time_task = None;
             return;
@@ -171,6 +173,26 @@ impl NotificationsView {
         }
     }
 
+    /// Cancelling interaction animation also drops the cooldown wake-up. Arming
+    /// is therefore idempotent and runs on every active render, so a window that
+    /// was deactivated mid-cooldown can still re-enable Refresh when it expires.
+    fn sync_cooldown_wake(&mut self, cx: &mut Context<Self>) {
+        if self.cooldown_wake.is_some() {
+            return;
+        }
+        let Some(deadline) = self.cooldown_until else {
+            return;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        self.cooldown_wake = Some(cx.spawn(async move |weak, cx| {
+            cx.background_executor().timer(remaining).await;
+            let _ = weak.update(cx, |_, cx| cx.notify());
+        }));
+    }
+
     fn sync(&mut self, cx: &mut Context<Self>) {
         let previous = std::mem::take(&mut self.snapshot);
         self.snapshot = self.controller.snapshot();
@@ -188,17 +210,7 @@ impl NotificationsView {
             self.snapshot.cooldown_seconds,
         ));
         self.cooldown_wake = None;
-        if self.snapshot.cooldown_seconds > 0 {
-            let timer = cx
-                .background_executor()
-                .timer(std::time::Duration::from_secs(
-                    self.snapshot.cooldown_seconds,
-                ));
-            self.cooldown_wake = Some(cx.spawn(async move |weak, cx| {
-                timer.await;
-                let _ = weak.update(cx, |_, cx| cx.notify());
-            }));
-        }
+        self.sync_cooldown_wake(cx);
         cx.notify();
     }
 
