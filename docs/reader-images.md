@@ -1,14 +1,15 @@
 # README 图片加载与显示
 
-更新：2026-10-29（`reader-images` 任务）。为现有可复用 [阅读器](content-reader.md) 增加有界的 README 图片能力：固定 commit 的仓库相对图片、公开 HTTPS 图片、失败/拒绝占位，以及可取消的异步生命周期。**正式 Shell 尚未接入**：本切片通过独立预览 `examples/reader_images.rs` 验收，主界面的接线点见下文「后续正式接线契约」。
+更新：2026-11-01（`reader-image-cache` 任务）。为现有可复用 [阅读器](content-reader.md) 增加持久缓存适配支持：固定 commit 的仓库相对图片持久缓存并可离线读取、外部动态徽章与资产遵循 HTTP Freshness 与条件重验证（304）、`no-store` 失效旧值且不落盘、缺失图片诚实降级且绝不阻塞正文排版。**正式 Shell 离线接线仍留待统一组装**：本任务交付独立的数据层与网络层缓存能力，主界面的接线点见下文「持久缓存适配与后续正式接线契约」。
 
 ## 分层与文件
 
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
 | 图片契约与预算 | [`src/content/images/`](../src/content/images/mod.rs) | `ImageLimits`、`ImageTarget`、`ImageKey`、`ImageScope`、`ImageProvider`、`ImageSink`、格式嗅探与有界解码。无 I/O，无 GPUI |
-| 无凭据外部读取 | [`src/network/reader_images.rs`](../src/network/reader_images.rs) | `ExternalImageBytes` 与生产实现 `ReqwestExternalImages`：仅 HTTPS、手动逐跳验证重定向、总超时、流式字节上限 |
-| 固定 commit 的仓库图片 | [`src/data/reader_images.rs`](../src/data/reader_images.rs) | `RepositoryImageService`：复用已捕获的 `RepositorySession` 的 revision/directory/blob 能力，自己持有 executor 与外部字节源，不持有 PAT |
+| 无凭据外部读取与条件请求 | [`src/network/reader_images.rs`](../src/network/reader_images.rs) | `ExternalImageBytes`、`ValidationHeaders`、`ExternalImageResponse` 与生产实现 `ReqwestExternalImages`：仅 HTTPS、手动逐跳验证重定向、总超时、流式字节上限、If-None-Match/If-Modified-Since 条件头与 304 处理 |
+| 图片持久缓存存储适配 | [`src/data/reader_image_cache.rs`](../src/data/reader_image_cache.rs) | `ReaderImageCache` 与 `ExternalFreshness`：基于 `CacheStore`、`CacheScope` 与 `CacheKey` 的持久适配，固定 blob SHA 命名空间与外部 URL 独立键管理、`max-age` 新鲜度判断、304 时间戳更新与 `no-store` 失效 |
+| 固定 commit 的仓库图片与缓存编排 | [`src/data/reader_images.rs`](../src/data/reader_images.rs) | `RepositoryImageService`：复用已捕获的 `RepositorySession` 的 revision/directory/blob 能力，支持可选注入 `(CacheStore, CacheScope, is_private)`，优先从持久缓存读取，网络回包异步入库，不持有 PAT |
 | 阅读器图片状态 | [`src/ui/reader/images.rs`](../src/ui/reader/images.rs) | 每个 reader 每个文档代次的 `ImageBoard`：请求排队、在途预算、完成应用、淘汰、拒绝与占位绘制 |
 | Markdown 块接入 | [`src/ui/reader/markdown/document.rs`](../src/ui/reader/markdown/document.rs) | `Block::Image` 的解析目标解析、状态查询，以及图片尺寸确定后的块重测 |
 | 预览与测试装配 | [`src/bin_support/reader_images_modules.rs`](../src/bin_support/reader_images_modules.rs)、[`src/bin_support/reader_images_fixture.rs`](../src/bin_support/reader_images_fixture.rs)、[`src/bin_support/reader_images_view_tests.rs`](../src/bin_support/reader_images_view_tests.rs)、`examples/reader_images.rs`、`tests/reader_images.rs` | 真实流水线的确定性预览和验收测试，非产品二进制的一部分 |
@@ -133,17 +134,29 @@ GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按
 - 尚未接入正式 Shell：`src/ui/repository/mod.rs`、profile、Home 仍使用旧 Reader API，无 provider 时行为与以前一致（显示诚实占位）。
 - 真实 Windows 窗口的原生验收（DPI、动画、IME、真实输入分发）以预览观察和后续负责人验收为准，测试平台不能替代。
 
-## 后续正式接线契约
+## 持久缓存适配与后续正式接线契约
 
-最小调用点（以 `RepositoryPage` 为例）：
+图片服务提供旧 constructor 与支持持久缓存的新 constructor：
+```rust
+// 旧无持久缓存 constructor（保持完全向后兼容）
+RepositoryImageService::new(session, repository, executor, external, limits);
 
-1. 页面已有 `RepositorySession` 与 `RepositoryIdentity`（`apply_content` 分支，reader 构造处）。
-2. 用 `RepositoryImageService::new(session.clone(), repository.clone(), executor.clone(), Arc::new(ReqwestExternalImages::new()?), ImageLimits::default())` 建 provider；`ReqwestExternalImages::new()` 的错误按页面现有错误模型处理（不静默当无图片）。
-3. `reader.set_image_provider(Some(provider as Arc<dyn ImageProvider>), cx)`；`set_markdown_layout` 等旧调用保持原顺序。
-4. 页面切换分支/文件/账户、deactivate/rebind/close 时，沿用现有「丢弃 reader 实体」的行为即可，图片代次随 reader 结束；如保留实体则调用 `reader.show(...)` 或 `reader.set_image_provider(None, cx)`，不要复用旧 provider 跨授权。
-5. 不需要为图片新增 PAT、存储、路由、缓存键或账户 API。
+// 支持可选注入 CacheStore 与 CacheScope 的新 constructor
+RepositoryImageService::with_cache(
+    session,
+    repository,
+    executor,
+    external,
+    limits,
+    cache_opt, // Option<(CacheStore, CacheScope, bool)>
+);
+```
 
-预览 `examples/reader_images.rs` 里的 `Pipeline::open` / `open_document` 与 `open_reader` 就是上述流程的真实实现（`src/bin_support/reader_images_fixture.rs`），预览和测试共用同一装配。
+1. **账户验证隔离**：注入的 `CacheScope` 会与 `session.context().auth().account` 进行一致性校验，不匹配则拒绝挂载持久缓存；私有属性 `is_private` 由调用方明确提供，不凭 SHA 穿透鉴权。
+2. **仓库图片对象缓存**：固定 commit 的图片按 `BlobIdentity` 解析得到的 blob SHA 存入固定对象缓存命名空间 `reader-image-bytes-v1`。重启 store 后离线读取直接命中；新分支新图使用独立对象 SHA，互不干扰。
+3. **外部图片与徽章重验证**：外部图片按 URL 建立可变条目。包含 `Cache-Control: max-age=...` 的资产在新鲜期内本地命中，过期或 `no-cache` 时携带 `If-None-Match` / `If-Modified-Since` 发送条件请求；服务端返回 304 时原子更新验证时间并复用原字节；返回 `no-store` 时立即删除旧缓存并阻止落盘。
+4. **缺失降级与错误处理**：缺失图片直接以 `ImageFailure::NotFound` 返回占位，其余图片和正文文档正常解码并渲染；`CredentialRejected` / `AccessDenied` 时安全降级。
+5. **正式 Shell 接线**：后续由协调者安排正式 Shell 离线接线任务，统一在 `RepositoryPage` 创建 `RepositoryImageService` 时将账户管理层获取的 `CacheStore` 与当前激活账户的 `CacheScope` 注入。
 
 ## 运行与验证
 
