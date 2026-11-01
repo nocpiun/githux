@@ -129,6 +129,7 @@ impl SettingsView {
         let (fg, hover, muted) = (theme.colors.fg, theme.colors.hover, theme.colors.fg_muted);
         let mut items = div()
             .id("settings-category-list")
+            .debug_selector(|| "settings-category-list".into())
             .flex()
             .when(!narrow, |row| row.flex_col())
             .gap_1()

@@ -1,6 +1,6 @@
 //! Tests are compiled in the existing Cargo example target (no duplicate whole-app test target).
 pub(super) use super::accounts::authorization;
-pub(super) use super::{SettingsBinding, SettingsView, binding::FormMode};
+pub(super) use super::{Category, SettingsBinding, SettingsView, binding::FormMode};
 use crate::domain::{account::AuthorizationState, error::GitHubError};
 pub(super) use crate::{
     app::accounts::Accounts,
@@ -8,7 +8,8 @@ pub(super) use crate::{
     settings_fixture::{Fixture, Scenario},
 };
 pub(super) use gpui::{
-    AppContext, Entity, Focusable, TestAppContext, VisualContext, VisualTestContext, px, size,
+    AppContext, Entity, Focusable, Modifiers, TestAppContext, VisualContext, VisualTestContext, px,
+    size,
 };
 
 pub(super) fn key(id: u64) -> AccountKey {

@@ -27,6 +27,17 @@ mod settings;
 mod settings_example;
 #[path = "../src/bin_support/settings_fixture.rs"]
 mod settings_fixture;
+// The product `ui` tree now contains repository modules whose own test suites reference
+// `crate::repository_modules::fixture`. Alias the single real fixture instead of compiling a second
+// copy of the repository module tree, which would duplicate its types.
+#[cfg(test)]
+#[path = "../src/bin_support/repository_fixture.rs"]
+#[allow(dead_code)]
+pub mod repository_fixture;
+#[cfg(test)]
+mod repository_modules {
+    pub use crate::repository_fixture as fixture;
+}
 #[path = "../src/storage/mod.rs"]
 mod storage;
 #[path = "../src/ui/mod.rs"]

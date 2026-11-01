@@ -4,7 +4,9 @@
 
 ## 已确认范围
 
-公开分类只有 Accounts：添加、选择当前账户、重新验证、替换 PAT。无移除、登出、外观/网络/缓存偏好、Keyboard/About 或仓库设置入口。宽态是 168px 分类列、32px 间隔和最大 720px 内容列；组件实际可用宽度低于 760px 时改为单行 icon + label Tabs。分类条独立横向滚动，页面内容仅纵向滚动。预览额外分类明确标为 Fixture，不属于产品配置。
+公开分类只有 Accounts：添加、选择当前账户、重新验证、替换 PAT。无移除、登出、外观/网络/缓存偏好、Keyboard/About 或仓库设置入口。
+
+宽态分类行沿用正式 Shell 侧栏密度：Ely `ControlSize::Md` 行高（而非固定像素）、8px 图文 gap、`Radius::Md` 圆角、`fg_muted`/`hover`/`fg` 主题层级；当前分类左侧画与主侧栏同参数的 2px 短 indicator（宽 2、高度按 2/3 行高 clamp 20–24、右侧圆角 4、左直角，`fg_muted`，在 8px lane 内、不占点击目标、只有当前项有）。窄态继续用横向 Tabs 下划线，不复制该 indicator。宽态是 168px 分类列、32px 间隔和最大 720px 内容列；组件实际可用宽度低于 760px 时改为单行 icon + label Tabs。分类条独立横向滚动，页面内容仅纵向滚动。预览额外分类明确标为 Fixture，不属于产品配置。
 
 PAT 表单默认收起。Add account 和账户行 Replace PAT 在列表下方打开表单，替换绑定被点击身份，允许目标为非当前账户。当前账户用 Current 标记，不生成 Switch 控件。账户状态来自服务权威目录，Verified、PendingVerification、MissingCredential、CredentialUnavailable、过期/拒绝与连接失败保持区别。
 

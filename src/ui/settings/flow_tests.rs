@@ -292,4 +292,48 @@ fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mu
     assert!(view.read_with(cx, |view, _| view.tabs.offset().x < px(0.0)));
     let last = cx.debug_bounds("settings-category-5").expect("last tab");
     assert!(last.right() <= tabs.right() + px(1.0));
+    assert!(
+        cx.debug_bounds("settings-category-indicator").is_none(),
+        "the narrow layout must not paint the wide rail indicator"
+    );
+}
+
+#[gpui::test]
+fn wide_categories_are_compact_with_one_indicator_and_follow_selection(cx: &mut TestAppContext) {
+    let fixture = Fixture::open(Scenario::Normal);
+    let (view, binding, cx) = mount(cx, &fixture);
+    wait_idle(&binding, cx);
+    view.update(cx, |view, cx| {
+        view.fixtures = 5;
+        cx.notify();
+    });
+    draw(cx);
+    draw(cx);
+    let row = cx.debug_bounds("settings-category-0").expect("wide row");
+    assert!(
+        row.size.height < px(38.0),
+        "wide rows use the shell's Md height, not the old 38px tabs"
+    );
+    let list = cx
+        .debug_bounds("settings-category-list")
+        .expect("category list");
+    let marker = cx
+        .debug_bounds("settings-category-indicator")
+        .expect("current marker");
+    assert_eq!(marker.left(), list.left());
+    assert!(marker.top() >= row.top() && marker.bottom() <= row.bottom());
+    let first = cx
+        .debug_bounds("settings-category-1")
+        .expect("fixture category");
+    cx.simulate_click(first.center(), Modifiers::none());
+    draw(cx);
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| matches!(view.category, Category::Fixture(1))));
+    let moved = cx
+        .debug_bounds("settings-category-indicator")
+        .expect("marker moved");
+    let second = cx
+        .debug_bounds("settings-category-1")
+        .expect("selected row");
+    assert!(moved.top() >= second.top() && moved.bottom() <= second.bottom());
 }

@@ -45,6 +45,18 @@ Codex 首轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#di
 
 第三轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#discussion_r4434773534)）指出 `activity` 门控把启动错误/警告也隐藏了。修复为只抑制尚未操作时的 `StatusTone::Info`，Error/Warning/Success 照常显示；新增 `a_startup_repository_failure_is_visible_before_any_user_action` 直接以 `Scenario::ReposFail` 验证自动读取失败在无用户操作时可见。同时为状态行补 debug selector。10 项聚焦测试、clippy 与全量测试通过。
 
+## 侧栏风格返工（2026-11-01 后续）
+
+负责人反馈：宽态分类侧栏应参考正式 Shell 侧栏（行高更小、带 indicator 等）。本次把 `settings/layout.rs` 的宽态分类列改为：
+
+- 行高使用 Ely `ControlSize::Md`（`control_height` × 窗口 rem），不再写死 38px；icon 与文字在行内垂直居中，图文 gap 8px，行内左右 8px。
+- 未选文字用 `fg_muted`，选中/悬浮用 `hover` 背景与 `fg` 文字，选中字重 MEDIUM，圆角 `Radius::Md`，键盘 focus 用 `fg_muted` 边框；不再是大号 active 卡片。
+- 当前分类左侧画与主侧栏同参数的 2px 短 indicator：宽 `SIDEBAR_INDICATOR_WIDTH`、高按 `SIDEBAR_INDICATOR_HEIGHT_RATIO` clamp 到 20–24、右侧圆角 4、左直角，颜色 `fg_muted`，相对行垂直居中，位于 8px lane 内且不占点击目标。indicator 只按 `selected` 绘制一个。
+- 窄屏分支完全保留此前批准的横向 Tabs（下划线选中、icon+label、只 tabstrip 横向滚动），不复制宽态 indicator，不改成 Select；宽窄切换只改变导航呈现，当前分类/焦点/表单状态不重置。
+- `examples/settings.rs` 在 test 下声明 `repository_modules` 装配，适配 main 9c40594 后 `ui/mod.rs` 纳入 repository 模块测试的路径。
+
+新增聚焦用例 `wide_categories_are_compact_with_one_indicator_and_follow_selection` 验证宽行高 < 38、indicator 与列表左对齐且处于当前行内、点击后 marker 跟随；窄态用例补“无 indicator”。原账号动作/表单回归不变。原生截图与最终验证在本轮完成后补齐。
+
 ## 交付与剩余边界
 
 待完成最终 required checks 与 PR。UI PR 添加 `pending`，负责人原生验收通过前不合并。真实 PAT、Windows IME 消息顺序、多 DPI、正式 Shell 组合和非 Windows 产品验收不能由该离线预览推断。
