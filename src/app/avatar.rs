@@ -254,9 +254,12 @@ impl AvatarSource for ReqwestAvatars {
                     .map(|s| s.to_string()),
                 cache_control: response
                     .headers()
-                    .get("cache-control")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string()),
+                    .get_all("cache-control")
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .collect::<Vec<&str>>()
+                    .join(", ")
+                    .into(),
             };
             if status == 304 {
                 return Ok((status, metadata, Vec::new()));
@@ -395,6 +398,20 @@ impl AvatarFetcher {
             Ok((304, meta, _)) => {
                 // 304 Not Modified: must have matching representation in cache
                 if let Some(cached) = cached_snapshot {
+                    // Recheck scope access authorization on a blocking worker before returning cached bytes
+                    let authorized = if let Some(cache) = &self.disk_cache {
+                        let cache = cache.clone();
+                        let key_clone = key.clone();
+                        tokio::task::spawn_blocking(move || cache.read_sync(&key_clone).is_some())
+                            .await
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    if !authorized {
+                        return None;
+                    }
+
                     if let Some(cache) = &self.disk_cache
                         && let Some(ticket) = write_ticket
                     {
@@ -479,6 +496,20 @@ impl AvatarFetcher {
                 // If we have an existing disk cache hit, we can fall back to the cached snapshot
                 // if permitted by cache_control policies (no-cache / must-revalidate prohibited offline).
                 if let Some(cached) = cached_snapshot {
+                    // Recheck scope access authorization on a blocking worker before offline fallback
+                    let authorized = if let Some(cache) = &self.disk_cache {
+                        let cache = cache.clone();
+                        let key_clone = key.clone();
+                        tokio::task::spawn_blocking(move || cache.read_sync(&key_clone).is_some())
+                            .await
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    if !authorized {
+                        return None;
+                    }
+
                     if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
                         &cached,
                     ) {
