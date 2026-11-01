@@ -21,7 +21,7 @@ let settings = cx.new(|cx| SettingsView::new(binding, window, cx));
 - `SettingsView` 持有页面与分类条的真实 ScrollHandle、公共 Motion/Bars、分类焦点；按实际布局宽度响应，不从窗口宽度猜侧栏状态。生产 `fixtures = 0`，`Category::Accounts` 是唯一产品分类。
 - Binding 只持有表单模式、目标、帮助显隐、输入实体与返回焦点。输入为 Ely masked TextInput + PasswordInput，视图展示数据不含 PAT。
 - 提交把输入直接移交现有控制器 `submit`，立即重建输入实体以释放秘密与撤销历史。控制器负责验证、提交、in-flight、取消 generation、旧响应与权威对账，详见[现有账户契约](account-ui-preview.md)。关闭表单不宣称在途提交已回滚。
-- 成功收起根据权威账户目录的身份/授权代次变化判定，保留控制器的失败与部分成功消息。完成/取消返回 Add account 或原行 Replace PAT；Enter/Esc 先检查 IME marked range，组合输入不被当作提交/取消。
+- 成功收起根据权威账户目录的身份/授权代次变化判定，不依赖控制器最新状态；成功提交后的自动仓库读取失败属于独立消息，不会让已提交的表单保持打开或误报 PAT 未保存。控制器自身的失败与部分成功消息保留。完成/取消返回 Add account 或原行 Replace PAT；Enter/Esc 先检查 IME marked range，组合输入不被当作提交/取消。
 - 头像直接复用 `ui::avatar` 的圆形绘制与空 mask 防护。主题、字号、字体和公共滚动条均沿用当前 Ely/应用 token；不引入新的主题或 scrollbar 算法。
 
 未来 Shell 宿主由协调者注册本模块，传入同一 app 级控制器并保留实体生命周期。宿主隐藏/释放时调用 `SettingsView::cancel_interactions` 清理滚动交互；本任务不负责 Shell 会话集成。Rust 可见性沿用仓库内部组件的 `pub(crate)`，不是另发公共 crate API。
@@ -41,7 +41,7 @@ git diff --check
 
 只为原生检查运行 preview：`GITHUX_SETTINGS_PREVIEW_FORM=replace`（或 `add`）会让独立预览在 fixture 自动读取完成后直接打开对应表单；不设置时从正常收起状态启动。该变量只由 `examples/settings.rs` 读取，不进入产品 binary。
 
-预览窗口保留 200px 展开侧栏空间，最小 880px；侧栏块只表示空间预算，不模拟正式 Shell 接线。顶部选择 Normal、Expired、Missing credential、Restored、Network failure、Slow / cancel，每次重新建立隔离场景。Fixture categories 开关在实际 Accounts-only 配置与五个布局 fixture 分类之间切换。
+预览窗口保留 200px 展开侧栏空间，最小 880px；侧栏块只表示空间预算，不模拟正式 Shell 接线。顶部选择 Normal、Expired、Missing credential、Restored、Network failure、Repository read failure、Slow / cancel，每次重新建立隔离场景。Fixture categories 开关在实际 Accounts-only 配置与五个布局 fixture 分类之间切换。
 
 [`settings_fixture.rs`](../src/bin_support/settings_fixture.rs) 是预览和测试共用的可重复传输。按请求路径与合成输入应答，不使用一次性响应队列：`preview-alex`、`preview-sam`、`preview-jordan` 分别对应虚构身份；其他输入返回 401，错身份替换由真实 AccountService 拒绝。`/user/repos` 明确返回 fixture 空集合，未建模请求返回开发错误 599。
 

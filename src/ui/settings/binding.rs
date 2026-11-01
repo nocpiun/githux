@@ -7,7 +7,6 @@ use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, Subscriptio
 use crate::{
     app::accounts::Accounts,
     domain::{AccountKey, AuthEpoch},
-    ui::accounts::StatusTone,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,30 +205,26 @@ impl SettingsBinding {
             return;
         }
         let controller = self.controller.read(cx);
-        if controller.busy() {
-            return;
-        }
-        let operation_completed =
-            controller.snapshot().status.as_ref().is_some_and(|status| {
-                matches!(status.tone, StatusTone::Success | StatusTone::Warning)
-            });
-        let committed = operation_completed
-            && match &self.mode {
-                Some(FormMode::Replace(target)) => {
-                    controller.snapshot().accounts.iter().any(|summary| {
-                        &summary.identity.key == target
-                            && !self
-                                .before_submit
-                                .contains(&(target.clone(), summary.epoch))
-                    })
-                }
-                Some(FormMode::Add) => controller.snapshot().accounts.iter().any(|summary| {
-                    !self
-                        .before_submit
-                        .contains(&(summary.identity.key.clone(), summary.epoch))
-                }),
-                None => false,
-            };
+        // A confirmed commit is proven by the authoritative directory advancing the submitted
+        // identity's epoch. Do not gate this on the latest status: a successful account mutation
+        // starts an automatic repository read whose later failure must stay a separate message,
+        // not keep the committed form open or imply the PAT was not saved.
+        let committed = match &self.mode {
+            Some(FormMode::Replace(target)) => {
+                controller.snapshot().accounts.iter().any(|summary| {
+                    &summary.identity.key == target
+                        && !self
+                            .before_submit
+                            .contains(&(target.clone(), summary.epoch))
+                })
+            }
+            Some(FormMode::Add) => controller.snapshot().accounts.iter().any(|summary| {
+                !self
+                    .before_submit
+                    .contains(&(summary.identity.key.clone(), summary.epoch))
+            }),
+            None => false,
+        };
         if committed {
             self.mode = None;
             self.submitted = false;

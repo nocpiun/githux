@@ -123,6 +123,36 @@ fn add_switch_and_revalidate_publish_authoritative_service_state(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn committed_form_closes_even_when_the_follow_up_repository_read_fails(cx: &mut TestAppContext) {
+    let fixture = Fixture::open(Scenario::ReposFail);
+    let (_, binding, cx) = mount(cx, &fixture);
+    wait_idle(&binding, cx);
+    open(&binding, FormMode::Replace(key(2)), cx);
+    put(&binding, "preview-sam", cx);
+    cx.simulate_keystrokes("enter");
+    wait_idle(&binding, cx);
+    assert!(
+        cx.debug_bounds("settings-pat-form").is_none(),
+        "a committed replacement closes its form even if the follow-up read fails"
+    );
+    let (status, repositories) = binding.read_with(cx, |this, cx| {
+        let controller = this.controller.read(cx);
+        (
+            controller.snapshot().status.clone(),
+            controller.snapshot().repositories.clone(),
+        )
+    });
+    assert!(
+        status.is_none_or(|status| !status.text.contains("was not saved")),
+        "repository failure must not be reported as a credential save failure"
+    );
+    assert!(matches!(
+        repositories.preview,
+        crate::ui::accounts::RepositoryPreview::Failed(_)
+    ));
+}
+
+#[gpui::test]
 fn double_submit_and_cancellation_use_existing_controller(cx: &mut TestAppContext) {
     let fixture = Fixture::open(Scenario::Slow);
     let (_, binding, cx) = mount(cx, &fixture);

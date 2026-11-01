@@ -27,15 +27,17 @@ pub enum Scenario {
     Missing,
     Pending,
     Network,
+    ReposFail,
     Slow,
 }
 impl Scenario {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Normal,
         Self::Expired,
         Self::Missing,
         Self::Pending,
         Self::Network,
+        Self::ReposFail,
         Self::Slow,
     ];
     pub fn label(self) -> &'static str {
@@ -45,6 +47,7 @@ impl Scenario {
             Self::Missing => "Missing credential",
             Self::Pending => "Restored",
             Self::Network => "Network failure",
+            Self::ReposFail => "Repository read failure",
             Self::Slow => "Slow / cancel",
         }
     }
@@ -80,6 +83,9 @@ impl Transport for SettingsTransport {
                 message: "fixture URL invalid".into(),
             })?;
             if path.path() == "/user/repos" {
+                if self.scenario == Scenario::ReposFail {
+                    return Ok(response(503, "{}".into()));
+                }
                 return Ok(response(200, "[]".into()));
             }
             if path.path() != "/user" {

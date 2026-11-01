@@ -31,6 +31,12 @@ Add/Replace 默认收起；非当前账户替换固定点击目标，identity mi
 
 测试写在组件旁，使用 example 既有 target 的过滤测试，不新增 `tests/settings.rs` 复制整应用测试目标。静态设计 PNG/HTML 和 GPUI 测试平台均不算原生证明。
 
+## 审查修复
+
+Codex 首轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#discussion_r4434714882)）指出了真实契约缺陷：当前账户成功提交后，控制器会立即自动读取仓库；若该读取失败，其错误状态覆盖提交状态，而旧 `settle` 以“控制器不 busy 且最新状态为成功”判定完成，会使已提交的表单保持打开，并把后续读取失败呈现为 PAT 保存失败。
+
+修复：`settle` 只以提交前记录的账户身份与权威目录中的 epoch 差确认提交，不再依赖最新状态或 busy。`Scenario::ReposFail` 让 `/user` 成功、`/user/repos` 返回 503；新增 `committed_form_closes_even_when_the_follow_up_repository_read_fails` 验证表单关闭、提交不被误报为保存失败、仓库失败留在独立状态。聚焦测试现为 8 passed，clippy 通过。
+
 ## 交付与剩余边界
 
 待完成最终 required checks 与 PR。UI PR 添加 `pending`，负责人原生验收通过前不合并。真实 PAT、Windows IME 消息顺序、多 DPI、正式 Shell 组合和非 Windows 产品验收不能由该离线预览推断。
