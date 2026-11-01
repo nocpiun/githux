@@ -1,0 +1,278 @@
+use super::*;
+use crate::auth::{memory::InMemoryCredentialStore, token::Pat};
+use crate::data::AccountService;
+use crate::github::client::{GitHubClient, GitHubConfig};
+use crate::network::executor::BackgroundExecutor;
+#[path = "../../bin_support/notifications_fixture.rs"]
+mod fixture;
+use fixture::{Fixture, Scene};
+
+async fn setup(scene: Scene) -> (AccountService, Notifications, Arc<Fixture>) {
+    let fixture = Arc::new(Fixture::new(scene));
+    let accounts = AccountService::new(
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), fixture.clone())),
+        Arc::new(BackgroundExecutor::new(2)),
+    );
+    accounts.login(Pat::from_str("synthetic")).await.unwrap();
+    let inbox = accounts.repo_service().notifications().unwrap();
+    (accounts, inbox, fixture)
+}
+async fn run(inbox: &Notifications, kind: RequestKind) {
+    let request = inbox
+        .begin_at(kind, Instant::now() + Duration::from_secs(120))
+        .unwrap()
+        .unwrap();
+    inbox.execute(request).await;
+}
+#[tokio::test]
+async fn first_once_append_dedup_server_order_and_retry() {
+    let (_accounts, inbox, fixture) = setup(Scene::AppendFailure).await;
+    run(&inbox, RequestKind::First).await;
+    assert!(inbox.begin(RequestKind::First).unwrap().is_none());
+    run(&inbox, RequestKind::More).await;
+    let failed = inbox.snapshot();
+    assert_eq!(failed.items.len(), 8);
+    assert!(failed.error.is_some() && failed.has_more && !failed.is_empty());
+    run(&inbox, RequestKind::More).await;
+    let snapshot = inbox.snapshot();
+    assert_eq!(
+        snapshot
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        (9000..9014).map(|id| id.to_string()).collect::<Vec<_>>()
+    );
+    assert!(snapshot.error.is_none() && !snapshot.has_more);
+    assert_eq!(fixture.requests().len(), 4);
+}
+#[tokio::test]
+async fn empty_and_first_failure_are_distinct_and_entry_does_not_retry() {
+    let (_accounts, empty, _) = setup(Scene::Empty).await;
+    run(&empty, RequestKind::First).await;
+    assert!(empty.snapshot().is_empty());
+    let (_accounts, failed, _) = setup(Scene::FirstFailure).await;
+    run(&failed, RequestKind::First).await;
+    assert!(!failed.snapshot().is_empty());
+    assert!(failed.snapshot().error.is_some());
+    assert!(failed.begin(RequestKind::First).unwrap().is_none());
+    run(&failed, RequestKind::Refresh).await;
+    assert_eq!(failed.snapshot().items.len(), 8);
+}
+#[tokio::test]
+async fn poll_cooldown_and_inflight_reject_duplicate_requests() {
+    let (_accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    let first = inbox.begin(RequestKind::First).unwrap().unwrap();
+    assert!(matches!(
+        inbox.begin(RequestKind::Refresh),
+        Err(NotificationError::Busy)
+    ));
+    inbox.execute(first).await;
+    assert!(matches!(
+        inbox.begin(RequestKind::Refresh),
+        Err(NotificationError::Cooldown { .. })
+    ));
+    assert_eq!(fixture.requests().len(), 2);
+    assert!(inbox.begin(RequestKind::More).unwrap().is_some());
+    inbox.cancel();
+}
+#[tokio::test]
+async fn refresh_supersedes_append_success_and_error() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    for failure in [false, true] {
+        let old = inbox
+            .begin_at(RequestKind::More, Instant::now() + Duration::from_secs(120))
+            .unwrap()
+            .unwrap();
+        let new = inbox
+            .begin_at(
+                RequestKind::Refresh,
+                Instant::now() + Duration::from_secs(120),
+            )
+            .unwrap()
+            .unwrap();
+        let result = if failure {
+            Err(PageFailure {
+                error: GitHubError::Unauthorized.into(),
+                metadata: NotificationMetadata {
+                    poll_interval_seconds: Some(999),
+                    ..Default::default()
+                },
+            })
+        } else {
+            Ok(NotificationPage {
+                items: vec![],
+                next: None,
+                partial: vec![],
+                metadata: NotificationMetadata::default(),
+                not_modified: false,
+            })
+        };
+        inbox.finish(&old, result, Instant::now());
+        assert_eq!(inbox.snapshot().busy, Some(RequestKind::Refresh));
+        assert_eq!(inbox.snapshot().items.len(), 8);
+        assert!(inbox.snapshot().error.is_none());
+        inbox.execute(new).await;
+    }
+}
+#[tokio::test]
+async fn stale_account_success_error_and_replacement_cannot_publish() {
+    let (accounts, inbox, fixture) = setup(Scene::Delayed).await;
+    let first = inbox.begin(RequestKind::First).unwrap().unwrap();
+    // The actual adapter is awaiting its delayed response when PAT replacement
+    // advances the existing session's epoch.
+    let read = inbox.execute(first);
+    let replace = async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        accounts
+            .login(Pat::from_str("replacement-synthetic"))
+            .await
+            .unwrap();
+    };
+    tokio::join!(read, replace);
+    assert!(!inbox.verify());
+    assert!(!inbox.snapshot().loaded);
+    assert!(inbox.snapshot().items.is_empty());
+    fixture.set_scene(Scene::FirstFailure);
+    assert!(matches!(
+        inbox.begin(RequestKind::Refresh),
+        Err(NotificationError::GitHub(GitHubError::StaleContext))
+    ));
+}
+#[tokio::test]
+async fn account_aba_remove_readd_close_and_service_identity_reject_old_results() {
+    for mode in ["aba", "remove", "close", "service"] {
+        let (accounts, inbox, _) = setup(Scene::Mixed).await;
+        let old_context = inbox.context().clone();
+        let request = inbox.begin(RequestKind::First).unwrap().unwrap();
+        match mode {
+            "aba" => {
+                accounts
+                    .login(Pat::from_str("synthetic-second"))
+                    .await
+                    .unwrap();
+                accounts
+                    .repo_service()
+                    .set_active(crate::domain::AccountKey::new(
+                        42,
+                        crate::domain::HostId::github(),
+                    ))
+                    .unwrap();
+            }
+            "remove" => {
+                accounts
+                    .remove_saved(crate::domain::AccountKey::new(
+                        42,
+                        crate::domain::HostId::github(),
+                    ))
+                    .await
+                    .unwrap();
+                accounts.login(Pat::from_str("synthetic")).await.unwrap();
+            }
+            "close" => {
+                accounts.close().await.unwrap();
+            }
+            _ => {
+                let (other, _, _) = setup(Scene::Mixed).await;
+                assert!(!other.repo_service().is_current(&old_context));
+                continue;
+            }
+        }
+        for error in [false, true] {
+            let result = if error {
+                Err(PageFailure {
+                    error: GitHubError::Unauthorized.into(),
+                    metadata: NotificationMetadata::default(),
+                })
+            } else {
+                Ok(NotificationPage {
+                    items: vec![],
+                    next: None,
+                    partial: vec![],
+                    metadata: NotificationMetadata::default(),
+                    not_modified: false,
+                })
+            };
+            inbox.finish(&request, result, Instant::now());
+            assert!(!inbox.snapshot().loaded);
+            assert!(inbox.snapshot().error.is_none());
+        }
+    }
+}
+#[tokio::test]
+async fn partial_never_has_validator_and_item_bound_is_explicit() {
+    let (_accounts, mut inbox, _) = setup(Scene::SsoPartial).await;
+    run(&inbox, RequestKind::First).await;
+    assert!(inbox.state.lock().unwrap().validator.is_none());
+    assert!(!inbox.snapshot().partial.is_empty());
+    let (_accounts, bounded, _) = setup(Scene::Mixed).await;
+    inbox = bounded;
+    inbox.limits.max_items = 9;
+    run(&inbox, RequestKind::First).await;
+    run(&inbox, RequestKind::More).await;
+    let snapshot = inbox.snapshot();
+    assert_eq!(snapshot.items.len(), 9);
+    assert_eq!(snapshot.partial, vec![NotificationPartial::ItemLimit]);
+    assert!(!snapshot.has_more);
+}
+#[tokio::test]
+async fn not_modified_keeps_appended_rows_and_continuation() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    run(&inbox, RequestKind::More).await;
+    let request = inbox
+        .begin_at(
+            RequestKind::Refresh,
+            Instant::now() + Duration::from_secs(120),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(request.validator.is_some());
+    inbox.finish(
+        &request,
+        Ok(NotificationPage {
+            items: vec![],
+            next: None,
+            partial: vec![],
+            metadata: NotificationMetadata::default(),
+            not_modified: true,
+        }),
+        Instant::now(),
+    );
+    assert_eq!(inbox.snapshot().items.len(), 14);
+}
+#[tokio::test]
+async fn rate_failure_headers_gate_append_and_refresh_and_keep_rows() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let request = inbox.begin(RequestKind::More).unwrap().unwrap();
+    inbox.finish(
+        &request,
+        Err(PageFailure {
+            error: GitHubError::RateLimited {
+                retry: crate::domain::error::RetryAfter {
+                    kind: crate::domain::error::RateLimitKind::Secondary,
+                    seconds: Some(90),
+                },
+            }
+            .into(),
+            metadata: NotificationMetadata {
+                rate_limit: NotificationRateLimit {
+                    retry_after: Some(90),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        }),
+        Instant::now(),
+    );
+    assert_eq!(inbox.snapshot().items.len(), 8);
+    for kind in [RequestKind::Refresh, RequestKind::More] {
+        assert!(matches!(
+            inbox.begin(kind),
+            Err(NotificationError::Cooldown { .. })
+        ));
+    }
+}

@@ -31,6 +31,7 @@ mod account_concurrency_tests;
 #[cfg(test)]
 mod account_tests;
 mod accounts;
+pub mod notifications;
 #[cfg(test)]
 mod page_read_tests;
 mod page_reads;

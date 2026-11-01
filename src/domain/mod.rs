@@ -18,6 +18,7 @@ pub mod account;
 pub mod blob;
 pub mod error;
 pub mod home;
+pub mod notification;
 pub mod profile;
 pub mod repo;
 pub mod repository;
