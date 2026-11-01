@@ -57,7 +57,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。R1 首份外壳交付只提供本地导航命令（各页与当前仓库列表），不调用 GitHub，也不据此确定未来全局搜索范围。
 - 侧栏以外的页面主区域采用 island，与窗口边缘留微小距离，内外圆角协调。不是所有子面板都变成浮动卡片；精确间距、圆角和最大化行为待真实窗口确认。
 - island 顶部为应用级会话标签（tab strip），可同时保留多个仓库、Issue/PR、个人主页等；它和页面内的横向内容 Tabs 是两层不同导航，不共用状态。页面内容内的大标题保留，不再显示重复页面名称的占位标题条，也不保留其高度。Profile 首版只实现 Overview。
-- 基础标签规则（负责人 2026-10-23 确认）：点击侧边栏仓库、底部入口或通过 command palette 选择页面时，统一执行“打开或激活”——同一资源已打开则切换到该标签，否则新建。Home、Settings 及当前全局占位页（Notifications、Issues、Pull requests）按路由单例，仓库按 `owner/repo` 单例；GitHub 名称大小写不敏感，同一资源的别名不生成重复会话。不支持同资源重复标签。启动仍只有 Home，不恢复上次会话。
+- 基础标签规则（负责人 2026-10-23 确认）：点击侧边栏仓库、底部入口或通过 command palette 选择页面时，统一执行“打开或激活”——同一资源已打开则切换到该标签，否则新建。Home、Settings 及当前全局占位页（Notifications、Issues、Pull requests）按路由单例，仓库按 `owner/repo` 单例；单条 PR 的 Read more 导航按 `owner/repo` 与 PR 编号单例（详情内容仍依下表留空）。GitHub 名称大小写不敏感，同一资源的别名不生成重复会话。不支持同资源重复标签。启动仍只有 Home，不恢复上次会话。
 - 账户与标签（负责人 2026-10-28 确认）：每个账户拥有自己的打开标签集合，切换回某账户即恢复该账户自己的标签、顺序与活动标签；全局式标签（如 Settings）同样属于当前活动账户的 workspace。账户身份是 host + 稳定账户 ID，不是登录文本或 PAT，因此账户 A 与 B 拥有同一仓库或相同本地标签编号时，标签与异步身份都不会互相串。这是进程内内存状态：重启仍从 Home 开始，不扩展 workspace 持久化。
 - 关闭非活动标签不切换当前标签；关闭活动标签切换到左邻标签，没有左邻则右邻；关闭最后一个标签后新建 Home 标签。
 - 标签可鼠标打开/切换/关闭，键盘可到达（Tab 焦点与 Enter/Space），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换标签；这些组合键不与输入法候选确认（Enter/Esc/方向键）或文本输入争用。
@@ -98,13 +98,21 @@ account-shell 在正式 Shell 中加入的 **Settings › Accounts** 只承担�
 
 ### Home 与 Feed 的数据范围
 
-左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。负责人 2026-10-28 确认：查询固定为 `involves:当前已认证登录`，**不添加时间窗口**，按 `updated` 降序；不额外扩大到仅被请求评审等关系。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
+左栏通过 GitHub API 获取参与关系和条目更新，不以本地打开历史替代。负责人 2026-10-28 确认查询固定为 `involves:当前已认证登录`，**不添加时间窗口**，按 `updated` 降序；2026-10-30 追加确认**实际搜索查询必须包含 `is:open`**，Home 最终可见条目只能是 open 的 Issue/PR。不额外扩大到仅被请求评审等关系。标题不改为“最近打开”或“参与的讨论”，也不把“有更新”自动定义成“未读”。
 
-右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。已确认 Feed 保留服务返回顺序，展示现有 typed event 覆盖，未知类型简洁回退；不过滤，初始只提供手动刷新，不自动轮询，刷新遵守服务端限制。展示名称为 Feed，不要求每张卡片标注“API 事件流”。组件契约见 [Home / Feed 页面视图](home-view.md)，来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
+右栏采用 Events API 的 `GET /users/{username}/received_events` 展示因关注用户、订阅仓库而收到的事件。负责人接受该来源的延迟；接口最多提供最近 30 天内的 300 条事件，可能延迟 30 秒至 6 小时，不承诺与 github.com 首页逐条一致。负责人 2026-10-30 确认 Feed **只保留明确允许的活动**，去掉 Push 等技术噪声；当前实现三类：合并的 PR（标题为“<user> contributed to <owner>/<repo>”）、星标仓库（`WatchEvent action=started`）与创建仓库（`CreateEvent ref_type=repository`）。Push、issue、评论、Release、Fork、成员、公开仓库、分支/标签创建删除、未知类型与非合并 PR 都不得生成卡片或占位回退。
+
+**每条卡片的主语必须是当前账户关注的人**（负责人 2026-10-30 补充，适用于全部三类）。合并贡献的主语是**真实的 PR 作者**，不是点了 merge 的维护者 actor；当前线上 `action=merged` 的事件 payload 不携带作者，因此需要读该 PR 的详情确认作者与合并状态，作者无法可靠确定时宁可不显示。星标/建库主语是事件 actor。`received_events` 本身混合了“关注的人”与“watch 的仓库”，所以必须显式读取当前账户的关注关系再过滤。关注关系或作者解析不完整时不能显示成“完整空 Feed”，也不能把失败当作“没关注任何人”。筛选后为空是正常最小空态，不是 API 错误。
+
+**Follow 两类事件暂缓**：当前官方 Events API 事件类型列表没有 FollowEvent，followers/following 端点只返回关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types) 与 [followers](https://docs.github.com/en/rest/users/followers)）。负责人回答“先实现三类，关注两类暂缓”：本轮不实现 follow 卡片、不伪造时间戳、不抓取私有网页端点，也没有占位卡；“Followed someone / Followed me”保留为待可靠来源的后续需求。**暂缓的只是这两类事件卡片**；读取关注关系用于上面的主语过滤已经实现，不属于暂缓项。详见 [Home 视图](home-view.md) 与 [Home 查询服务](home-query-service.md)。
+
+组件契约见 [Home / Feed 页面视图](home-view.md)，来源边界见 [Events 文档](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)。
 
 ### Profile 的已确认读取与回退
 
 个人 README 来自目标用户公开的同名仓库（canonical owner/name 均为该用户 login）的**根目录普通 `README.md`**，按固定 commit/blob 读取；不把 `.github/` 或 `docs/` 下的 README 当作 Profile README。仓库 pins 保持服务顺序；观察到 gist pin 时只提示，不增加 gist 功能。**只有无 pin 且服务明确给出 Popular 回退时才展示 Popular**；gist-only、截断或不确定结果不擅自转 Popular。贡献图由正式 host 提供**最近滚动一年**的范围。当前这些是已合并 page-data 与 Profile 组件的已接受契约，正式 Shell 尚未调用；详见 [账户页面数据服务](page-data-service.md) 和 [Profile 展示组件](profile-view.md)。
+
+负责人 2026-10-30 另确认 Profile README 的呈现边界：**可选 README 缺失/不可用时，Profile 不渲染该 section，也不显示错误句**；README 可用时正文与 Profile 背景自然融合，保留文档自然完整高度与内部 padding；只有真实操作错误才保留内部诊断含义，并以紧凑、可操作的呈现给出。这是已确认意图；实现与真实窗口验证状态以 Profile 任务自身记录为准，不因写在本节而视为已验证。
 
 ## 视觉、字体与原生体验
 

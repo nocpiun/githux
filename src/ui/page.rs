@@ -16,7 +16,9 @@ pub(super) struct PageData {
 pub(super) fn page(session: &Session, data: PageData, cx: &App) -> AnyElement {
     match session.route() {
         Route::Settings => data.settings.unwrap_or_else(blank),
-        Route::Notifications | Route::Issues | Route::PullRequests => blank(),
+        Route::Notifications | Route::Issues | Route::PullRequests | Route::PullRequest { .. } => {
+            blank()
+        }
         Route::Home | Route::Profile | Route::UserProfile { .. } => unavailable(
             "This page needs an active account and verified online access. No saved page content is available.",
             cx,

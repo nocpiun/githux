@@ -15,7 +15,8 @@
 - **原因**：审查等待脚本的模拟用例可以验证 SHA、分页和超时逻辑，却不能确认真实 Bot 如何表达“无问题”，也不能证明合并流程已经跑通。
 - **证据**：2026-10-21 的 [等待脚本测试](.agents/skills/githux-pr-review/scripts/wait-review.test.mjs) 已有 17 项离线用例；真实 PR 验证尚未执行。属于本次搭建中确认的验证边界，不是线上事故记录。
 - **补充证据**：Hello 的真实 Windows 窗口收到“鼠标可用、Tab/Enter/Space 无反应”的反馈，但原实现与显式焦点候选修复都能通过 GPUI 测试平台的导航/激活测试。测试没有经过 Windows 原生输入分发，不能将其当作缺陷已复现或已修复的证据，见 [键盘修复记录](docs/devlog/2026-10-21-bootstrap-gpui-ely.md#键盘反馈与本地候选修复)。
-- **范围**：PR 流程、UI 测试与其他外部集成。后续真实验证通过后补充证据，不改写之前的验证事实。
+- **补充证据（外部 API 形状）**：不能凭记忆或旧版文档断言第三方 API 的字段/取值，也不要把自己写出的假设当成测试基准。2026-10-30 的 `home-feed-focus` 首轮把 `PullRequestEvent.action` 说成“没有 `merged`”，并据此写了“`action=merged` 必须被拒绝”的回归；官方事件类型文档与公开响应都包含 `action=merged`，且该 payload 的 `pull_request` 只有 `url/id/number/head/base`，没有作者。合成 fixture 恰好按错误假设构造，所以测试全绿而真实 Feed 一条真实合并都取不到。修复办法是先按官方文档核对并抓取一份无凭据公开响应形状（记录 API 版本与观测字段），再据此写 fixture 与回归，并把“离线回归”与“真实公开数据核对”分开报告。见 [开发日志](docs/devlog/2026-10-30-home-feed-focus.md#数据源更正)。
+- **范围**：PR 流程、UI 测试、外部 API 适配与其他外部集成。后续真实验证通过后补充证据，不改写之前的验证事实。
 
 ## L003：按键归属要在按键绑定之前决定
 
@@ -99,4 +100,19 @@
 - **规则**："有就显示、没有就算了"的可选区块，其确认缺失/不可见应作为正常缺省：不渲染错误文案、不显示 Retry、不保留占位或空行间距，必要时整段省略。诊断语义（缺失 vs 不确定 vs 真实失败）留在内部状态，可见呈现只与影响相称：加载用动画，真实可操作失败才用一个小 warning 图标加 tooltip/无障碍名称，并且只在确实存在重试回调时提供重试。不要写服务实现解释给用户。
 - **原因**：负责人连续反馈 Profile README 把正常缺省渲染成故障：先是 "This section was not found or is not visible." 文本面板，再是 "Unavailable · Retry" 式大错误块。这类呈现既误导用户、占用可省略的空间，又把"缺失"和"网络/认证/限流失败"混成同一种可见状态，掩盖真正可操作的失败。根因不是文案，而是把可选缺省错误地当成必须显式呈现的错误。
 - **证据**：2026-10-30 `profile-readme-polish` 把 README 的 `SectionState::Unavailable` 改为整段省略（`src/ui/profile/render.rs` 的 `render_readme` 返回 `None`），真实 `SectionState::Error` 改用 `compact_status::failed` 单个 warning 图标；同名仓库 404 在 `src/app/pages/profile.rs` 归入缺省。回归 `confirmed_readme_absence_omits_the_whole_optional_section`、`actionable_readme_failure_keeps_a_compact_mark_not_absence`、`ready_to_absent_to_another_account_never_reuses_the_old_reader`。见 [开发日志](docs/devlog/2026-10-30-profile-readme-polish.md)。
+- **补充证据（卡片可选元数据）**：2026-11-01 `home-feed-focus` 星标仓库描述作为卡片内的可选附加内容，缺失、404 或为空时直接静默，不画空边距、不渲染占位或 Unavailable 错误段落，保留正常卡片内容；空白 PR 正文同样静默。测试 `starred_cards_render_repository_description_under_name_and_missing_is_quiet`。见 [Feed 开发日志](docs/devlog/2026-10-30-home-feed-focus.md)。
 - **范围**：外部数据驱动的可选区块（个人 README、附加资料、可选摘要）。本条目不授权把真实失败静默成成功缺省，也不要求所有 section 都省略；判断依据是该内容对页面是否必需，以及失败是否可操作。
+
+## L015：虚拟列表的未知高度不能当成内容耗尽
+
+- **规则**：依据虚拟列表位置触发翻页时，要区分尚未测量与真实短列表；使用已测量行边界或逻辑索引，并在布局完成后核验。不能仅凭 scrollbar 最大偏移为零/很小就认定已到尾部。首屏少量内容与过滤空页也须有自动续读路径，不能依赖用户再次滚动或无关定时器。
+- **原因**：GPUI 列表首次布局及变宽会清除未测量行的高度提示。Feed 的“剩余滚动距离”此时只包含已测量部分，可能把长列表当短列表、提前耗尽源页；相反，在布局前只检查一次可能让短首屏等待下一次通知才续读。
+- **证据**：2026-10-31 `feed_prefetches_before_the_end_but_does_not_drain_a_tall_initial_page` 在用最大偏移判断的实现上失败；修正为尾部行位置/逻辑锚点与布局后检查。详情见 [Feed 开发日志](docs/devlog/2026-10-30-home-feed-focus.md)。
+- **范围**：虚拟化列表的自动翻页、预加载与首屏填充；测试应同时覆盖长列表、少量可见内容、全过滤空页和真实末页。
+
+## L016：缺少内部页面不能自行改写导航目的地
+
+- **规则**：派发与实现必须保留负责人指定的导航语义；“跳转到 PR 页面”不能因为详情页尚未实现就擅自变成浏览器外跳。缺失能力应明确记录和协调范围，不能在任务文档中倒写成用户授权。
+- **原因**：Feed Read more 的外跳来自主 Agent 的派发误解，worker 据此完成了一个技术上可用但目的地错误的入口；原测试只断言外链动作，未验证用户实际到达的 Githux 页面。
+- **证据**：2026-11-01 负责人纠正后，改用仓库/编号内部路由，`feed_read_more_opens_and_reuses_the_internal_pr_tab` 从实际控件点击验证 Shell 路由及复用行为，见 [修正记录](docs/devlog/2026-10-30-home-feed-focus.md#2026-11-01主-agent-修正-read-more-的导航目标)。原“键盘激活”测试实际调用鼠标模拟，本轮改用焦点切换与 Enter；验证报告必须描述真正运行的输入路径，遵循 L002。
+- **范围**：导航接线、任务派发、缺失页面的范围协调与交互验收。

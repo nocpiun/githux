@@ -546,7 +546,11 @@ impl Shell {
                     id, &route, services, intent, navigation, avatars, window, cx,
                 )
             }),
-            Route::Settings | Route::Notifications | Route::Issues | Route::PullRequests => None,
+            Route::Settings
+            | Route::Notifications
+            | Route::Issues
+            | Route::PullRequests
+            | Route::PullRequest { .. } => None,
         };
         if let Some(page) = page {
             self.pages.insert(id, page);
@@ -795,6 +799,17 @@ impl Shell {
         let id = self.workspace.active_id();
         if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
             page.update(cx, |page, cx| page.refresh_for_test(column, window, cx));
+        }
+    }
+
+    /// Drives the Feed end-of-scroll append exactly like a real user scrolling to
+    /// the bottom: the HomeView emits one LoadMoreFeed and the HomePage host
+    /// fetches the next source page through the real data service.
+    #[cfg(test)]
+    pub fn load_more_home_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
+            page.update(cx, |page, cx| page.load_more_for_test(window, cx));
         }
     }
 

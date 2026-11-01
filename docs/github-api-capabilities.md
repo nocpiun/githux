@@ -154,7 +154,7 @@ Classic PAT 的 scope 和组织授权仍限制实际能力。读取私有仓库�
 要点与局限：
 
 - **没有与 github.com 首页 “Recent activity” 完全等价、且语义被文档保证的接口。** 网站该区只展示**最近两周、最多 4 条**更新，上榜条件是：本人打开、有人评论、被重新打开、被请求评审、被指派、被 commit 引用、本人评论过。REST 的 `filter` 参数没有“我评审过/我评论过/被 commit 引用”这些单选项，`involves:` 覆盖 author/assignee/mentions/commenter，但不等价于“我的评审”与“commit 引用”，也没有“最多 4 条”的同款裁剪规则。
-- 左栏标题已确定为 Home，内容为最近参与且有更新的 Issues/PRs；时间窗口与额外参与关系仍须在实现任务中明确。候选实现为：`involves:@me` 搜索（可解释、可叠加 `updated:` 与 `sort=updated`），或 `filter=all&sort=updated`（覆盖订阅/可见但语义更宽）。两者都不能声称复刻网站首页。
+- 左栏标题已确定为 Home，内容为最近参与且有更新的 **open** Issues/PRs；负责人 2026-10-30 确认查询固定为 `involves:<login> is:open`，无时间窗口，按 `updated` 降序。`involves:` 可解释、可叠加 `updated:` 与 `sort=updated`；不能声称复刻网站首页。closed/merged/未知状态在适配器与视图两侧都不作为 open 行发布。
 - 排序不是“更新时间稳定流”：`sort=updated` 会让条目在刷新时移动，跨页拼接会重复或漏项；应保存查询、排序与页信息并按 ID 去重。
 - 空结果、权限不足与“确实没有更新”必须区分：搜索对无权限的 `repo:`/`org:` 会返回 422 或静默省略，而列表型端点会直接返回更少的条目。
 
@@ -164,9 +164,18 @@ Classic PAT 的 scope 和组织授权仍限制实际能力。读取私有仓库�
 | --- | --- | --- | --- | --- |
 | Feed 目录 | `GET /feeds` | 细粒度：无需权限；classic：`repo`/`notifications` 影响私有可见性 | 返回各种 Feed 的 URL（timeline、user、current_user_public 等） | 文档说明私有 Feed 只在 Basic Auth 且使用旧的不可撤销 token 时返回；实测任何认证方式都只返回 `current_user_public_url`，没有 `current_user_url` |
 | 事件流 | `GET /users/{u}/received_events`、`/users/{u}/events` | 细粒度：无需权限（文档提到查看私有事件可选 “Events” 用户权限） | 事件数组 | **延迟 30 秒–6 小时**；最多 300 条、只含 30 天内事件；带 `X-Poll-Interval` 与 ETag，支持 304 |
+| 事件类型 | 同一事件数组的 `type` / `payload` | 同上 | `PushEvent`、`PullRequestEvent`、`WatchEvent`、`CreateEvent` 等 | `PullRequestEvent.action` 官方取值包含 `merged`（另有 `opened`、`closed`、`reopened`、`assigned`、`unassigned`、`labeled`、`unlabeled`）。线上 `action=merged` 的 `payload.pull_request` 是**瘦对象**（`url`/`id`/`number`/`head`/`base`），既无 `user` 也无 `merged` 标记，所以作者必须另读 PR 详情。官方事件类型列表没有 `FollowEvent` |
+| 关注关系 | `GET /user/following` | 必须认证 | 用户对象数组 + `Link` 分页 | 官方 next 链接写作 `/user/{id}/following`；只取页码后按 `/user/following` 重建请求。部分/失败响应不能当作“未关注” |
+| PR 详情（仅作者解析） | `GET /repos/{owner}/{repo}/pulls/{number}` | 细粒度：需能读该仓库 | 单个 PR 对象 | 提供 `user`、`merged`、`merged_at`、`title`、`html_url`，是合并贡献作者与合并确认的权威来源 |
 | GraphQL Feed | 无公开等价 | — | — | schema 中没有 feed/notification 查询字段 |
 
 结论：关注 Feed 属于**受限**能力。可行路径是 Events API 的 `received_events`（“关注的人 + 订阅仓库产生的事件”），它与网站首页的 Following feed 不是同一数据源：网站还包含 star、follow、建库、Release 等条目，API 事件流不保证覆盖同一集合，也不保证同样的顺序与新鲜度。首版已接受此事件流及延迟，右栏标题为 Feed；不承诺与网站逐条一致，也不要求每张卡片显示技术性来源标签。
+
+**Feed 允许的活动（负责人 2026-10-30，第二轮补充）**：只保留合并的 PR、星标仓库（`WatchEvent action=started`）、创建仓库（`CreateEvent ref_type=repository`），且**每条卡片的主语必须是当前账户关注的人**。合并贡献的主语是 PR 作者（`action=merged` 的瘦 payload 无作者，须读 PR 详情），不是点 merge 的 actor；星标/建库主语是事件 actor。Push、issue、评论、Release、Fork、成员、公开仓库、分支/标签创建删除、未知类型与非合并 PR 均不生成卡片或占位卡；筛选后为空是正常空态，但关注关系读取失败或作者未解析不能报成“完整空 Feed”。
+
+`received_events` 合并“关注的人”与“watch 的仓库”的事件，本身**不是**只含关注用户的 Feed，因此关注关系必须显式读取 `/user/following` 后过滤。
+
+**Follow 两类暂缓**：官方事件类型列表没有 `FollowEvent`，followers/following 端点只返回当前关系、没有事件时间戳（2026-10-30 核对 [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types)、[followers](https://docs.github.com/en/rest/users/followers)）。负责人回答“先实现三类，关注两类暂缓”；不伪造时间戳、不抓取私有网页端点/Cookie、不加监控后端。“Followed someone / Followed me”保留为待可靠来源的后续需求。
 
 ### Profile：资料、README、Pinned/Popular、热力图
 
@@ -314,7 +323,7 @@ Classic PAT 的 scope 和组织授权仍限制实际能力。读取私有仓库�
 仍需在相关任务前细化：
 
 - PAT 创建引导的最小权限清单；Notifications/全局 Issues/PRs/New 和 H7 写操作的具体内容与动作，不由本次认证选择自动扩张。
-- Home 的时间窗口、额外参与关系和筛选；`involves:` + 更新时间排序是候选，不代表“未读”或与网站首页等价。Feed 卡片的事件类型和过滤仍待实现规格确认。
+- Home 是否设时间窗口、是否额外包含“仅被请求评审”等关系；已确认的 `involves:` + `is:open` + 更新时间排序不代表“未读”或与网站首页等价。Feed 的三类活动、关注关系约束与过滤已确认，自动刷新间隔仍待定；Follow 两类**事件卡片**待可靠来源（读取关注关系本身已实现）。
 - 账户切换时标签处理、凭据失效和移除账户后的私有内容策略。
 - 已明确延后的 Profile 边界：gist-only 的 Pinned→Popular 仓库回退；2020-07 前同名仓库个人 README 的遗留分享规则。执行者交接将这两项合并为第 4 项，待对应任务开始时再定。
 
