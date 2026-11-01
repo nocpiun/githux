@@ -16,6 +16,7 @@
 
 pub mod account;
 pub mod blob;
+pub mod cache;
 pub mod error;
 pub mod home;
 pub mod profile;
