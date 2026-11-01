@@ -262,7 +262,8 @@ impl AccountService {
                 None => Ok(()),
             };
             let directory = registry.lock().expect("registry lock").directory();
-            result.and_then(|()| super::account_cache::recover(&cache, &directory))
+            let cache_result = super::account_cache::recover(&cache, &directory);
+            result.and(cache_result)
         })
         .await
         .map_err(|_| AccountError::Storage(StorageError::Closed))?

@@ -36,7 +36,7 @@ pub(super) struct AccountCaches {
     store: CacheStore,
     scopes: HashMap<AccountKey, CacheScope>,
     recovery_pending: bool,
-    /// Accounts whose orphan partition must be durably retired before re-add.
+    /// Accounts whose old live partition must be durably retired before re-add.
     blocked: HashSet<AccountKey>,
     /// A classified rejection whose durable outcome was uncertain. Replaying it
     /// is a prerequisite for recovery; replacing the credential supersedes it.
@@ -72,16 +72,21 @@ impl AccountCaches {
         };
         let mut orphans = HashSet::new();
         for scope in live {
-            if !directory
+            let account = scope.account().clone();
+            let unsaved = !directory
                 .accounts
                 .iter()
-                .any(|saved| saved.identity.key == *scope.account())
-            {
-                let account = scope.account().clone();
+                .any(|saved| saved.identity.key == account);
+            // A blocked account may have been re-added while its SQL fault was
+            // still present. Its old partition is still an orphan for recovery:
+            // retire it before issuing any binding for the newly saved account.
+            if unsaved || self.blocked.contains(&account) {
                 if self.store.retire(&scope).is_err() {
                     self.recovery_pending = true;
                     self.blocked.insert(account.clone());
                     orphans.insert(account);
+                } else {
+                    self.blocked.remove(&account);
                 }
             }
         }
@@ -103,9 +108,6 @@ impl AccountCaches {
                 Err(_) => self.recovery_pending = true,
             }
         }
-        // Keep an orphan blocked until durable retirement actually succeeds.
-        // Removing it just because the account is absent would let a later
-        // re-add adopt the still-live partition after a transient SQL fault.
         self.rejected.retain(|account| {
             directory
                 .accounts
@@ -160,31 +162,38 @@ impl AccountCaches {
     }
 
     fn retire(&mut self, account: &AccountKey) -> Result<(), CacheError> {
-        if self.blocked.contains(account) {
-            let scope = self
-                .store
-                .live_scopes()?
-                .into_iter()
-                .find(|scope| scope.account() == account)
-                .ok_or(CacheError::AccessDenied)?;
-            self.store.retire(&scope)?;
-            self.blocked.remove(account);
-            self.scopes.remove(account);
-            return Ok(());
-        }
-        let result = match self.scopes.get(account) {
-            Some(scope) => self.store.retire(scope),
-            // Withdrawn handles are not disabled caching. Resolve the persisted
-            // partition and retire it before allowing a remove retry to commit.
-            // An already-retired partition satisfies removal's prerequisite;
-            // do not provision a fresh partition merely to retry the catalog.
-            None => Ok(()),
+        let blocked = self.blocked.contains(account);
+        let result = if blocked {
+            // A previous failed/local-suspended scope cannot prove retirement.
+            // Re-read the current durable generation and retry the live row.
+            self.store.live_scopes().and_then(|scopes| {
+                match scopes.into_iter().find(|scope| scope.account() == account) {
+                    Some(scope) => self.store.retire(&scope),
+                    None => Ok(()),
+                }
+            })
+        } else {
+            match self.scopes.get(account) {
+                Some(scope) => self.store.retire(scope),
+                // Empty map state is not evidence of durable retirement. Retire a
+                // still-live persisted partition; only no live partition (already
+                // retired) satisfies the prerequisite without another UPDATE.
+                None => self.store.live_scopes().and_then(|scopes| {
+                    match scopes.into_iter().find(|scope| scope.account() == account) {
+                        Some(scope) => self.store.retire(&scope),
+                        None => Ok(()),
+                    }
+                }),
+            }
         };
         // Never leave an enabled in-memory route after a remove attempt, even
         // when the durable retirement outcome is unknown.
         self.scopes.remove(account);
         if result.is_err() {
             self.recovery_pending = true;
+            self.blocked.insert(account.clone());
+        } else if blocked {
+            self.blocked.remove(account);
         }
         result
     }
@@ -408,9 +417,7 @@ pub(super) fn retire(cache: &Shared, account: &AccountKey) -> Result<(), CacheEr
 
 pub(super) fn provision(cache: &Shared, account: &AccountKey) {
     let mut cache = cache.lock().expect("account cache lock");
-    if let Some(cache) = cache.as_mut()
-        && !cache.scopes.contains_key(account)
-    {
+    if let Some(cache) = cache.as_mut() {
         if cache.blocked.contains(account) {
             // A failed orphan retirement must complete before re-add. Retiring
             // first makes saved_account allocate a fresh UUID partition instead
@@ -418,6 +425,9 @@ pub(super) fn provision(cache: &Shared, account: &AccountKey) {
             if cache.retire(account).is_err() {
                 return;
             }
+        }
+        if cache.scopes.contains_key(account) {
+            return;
         }
         match cache.store.saved_account(account.clone()) {
             Ok(scope) => {

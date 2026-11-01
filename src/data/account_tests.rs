@@ -93,9 +93,9 @@ async fn restart_restores_directory_explicit_selection_and_removal_without_secre
 }
 
 #[derive(Default)]
-struct FaultStore {
+pub(super) struct FaultStore {
     inner: crate::auth::memory::InMemoryCredentialStore,
-    fail_delete: AtomicBool,
+    pub(super) fail_delete: AtomicBool,
     fail_save_after_write: AtomicBool,
     lock_after_save: Mutex<Option<std::path::PathBuf>>,
     held: Mutex<Option<rusqlite::Connection>>,
