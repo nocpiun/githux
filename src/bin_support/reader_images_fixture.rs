@@ -24,7 +24,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::network::cancel::CancellationToken;
-use crate::network::reader_images::{ExternalImageBytes, ExternalImageError, ExternalImageLimits};
+use crate::network::reader_images::{
+    ExternalImageBytes, ExternalImageError, ExternalImageLimits, ExternalImageMetadata,
+    ExternalImageResponse, ValidationHeaders,
+};
 use crate::network::transport::{
     HttpRequest, HttpResponse, Transport, TransportError, json_response,
 };
@@ -623,12 +626,14 @@ impl Default for MemoryExternalImages {
 }
 
 impl ExternalImageBytes for MemoryExternalImages {
-    fn load<'a>(
+    fn load_with_metadata<'a>(
         &'a self,
         url: &'a str,
         _limits: &'a ExternalImageLimits,
+        validation: ValidationHeaders<'a>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExternalImageError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ExternalImageResponse, ExternalImageError>> + Send + 'a>>
+    {
         Box::pin(async move {
             self.reads.lock().unwrap().push(url.to_string());
             if url == SLOW_URL {
@@ -637,10 +642,33 @@ impl ExternalImageBytes for MemoryExternalImages {
             if cancel.is_cancelled() {
                 return Err(ExternalImageError::Cancelled);
             }
-            self.bodies
+            let bytes = self
+                .bodies
                 .get(url)
                 .cloned()
-                .ok_or(ExternalImageError::Status(404))
+                .ok_or(ExternalImageError::Status(404))?;
+
+            let etag = format!("\"etag-{}\"", bytes.len());
+            if validation.if_none_match == Some(etag.as_str()) {
+                return Ok(ExternalImageResponse::NotModified {
+                    metadata: ExternalImageMetadata {
+                        etag: Some(etag),
+                        last_modified: None,
+                        cache_control: Some("public, max-age=60".into()),
+                        age_secs: None,
+                    },
+                });
+            }
+
+            Ok(ExternalImageResponse::Fetched {
+                bytes,
+                metadata: ExternalImageMetadata {
+                    etag: Some(etag),
+                    last_modified: None,
+                    cache_control: Some("public, max-age=60".into()),
+                    age_secs: None,
+                },
+            })
         })
     }
 }
