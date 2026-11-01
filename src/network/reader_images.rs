@@ -72,6 +72,33 @@ pub enum ExternalImageError {
     Cancelled,
 }
 
+/// Response metadata for conditional cache revalidation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExternalImageMetadata {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub cache_control: Option<String>,
+}
+
+/// Result of an external image fetch with optional HTTP metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalImageResponse {
+    /// Newly fetched body with metadata.
+    Fetched {
+        bytes: Vec<u8>,
+        metadata: ExternalImageMetadata,
+    },
+    /// The remote server answered 304 Not Modified.
+    NotModified { metadata: ExternalImageMetadata },
+}
+
+/// Conditional validation headers sent to recheck external freshness.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ValidationHeaders<'a> {
+    pub if_none_match: Option<&'a str>,
+    pub if_modified_since: Option<&'a str>,
+}
+
 /// Fetches raw bytes for one external picture address.
 ///
 /// Implementations must never attach a credential. The future is `Send` so it
@@ -82,7 +109,25 @@ pub trait ExternalImageBytes: Send + Sync + 'static {
         url: &'a str,
         limits: &'a ExternalImageLimits,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExternalImageError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExternalImageError>> + Send + 'a>> {
+        Box::pin(async move {
+            match self
+                .load_with_metadata(url, limits, ValidationHeaders::default(), cancel)
+                .await?
+            {
+                ExternalImageResponse::Fetched { bytes, .. } => Ok(bytes),
+                ExternalImageResponse::NotModified { .. } => Err(ExternalImageError::Status(304)),
+            }
+        })
+    }
+
+    fn load_with_metadata<'a>(
+        &'a self,
+        url: &'a str,
+        limits: &'a ExternalImageLimits,
+        validation: ValidationHeaders<'a>,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<ExternalImageResponse, ExternalImageError>> + Send + 'a>>;
 }
 
 /// The production fetcher: its own `reqwest` client with redirects disabled and
@@ -255,12 +300,14 @@ impl reqwest::dns::Resolve for GuardResolver {
 }
 
 impl ExternalImageBytes for ReqwestExternalImages {
-    fn load<'a>(
+    fn load_with_metadata<'a>(
         &'a self,
         url: &'a str,
         limits: &'a ExternalImageLimits,
+        validation: ValidationHeaders<'a>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExternalImageError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ExternalImageResponse, ExternalImageError>> + Send + 'a>>
+    {
         Box::pin(async move {
             if cancel.is_cancelled() {
                 return Err(ExternalImageError::Cancelled);
@@ -272,10 +319,18 @@ impl ExternalImageBytes for ReqwestExternalImages {
 
             let mut hops = 0usize;
             loop {
-                let request = self.client.get(url.clone()).header(
+                let mut request = self.client.get(url.clone()).header(
                     "Accept",
                     "image/png,image/jpeg,image/webp,image/gif,*/*;q=0.8",
                 );
+                if hops == 0 {
+                    if let Some(inm) = validation.if_none_match {
+                        request = request.header("If-None-Match", inm);
+                    }
+                    if let Some(ims) = validation.if_modified_since {
+                        request = request.header("If-Modified-Since", ims);
+                    }
+                }
                 let response = tokio::select! {
                     biased;
                     _ = cancel.clone().cancelled() => return Err(ExternalImageError::Cancelled),
@@ -287,6 +342,10 @@ impl ExternalImageBytes for ReqwestExternalImages {
                 };
 
                 let status = response.status().as_u16();
+                if status == 304 {
+                    let metadata = extract_metadata(&response);
+                    return Ok(ExternalImageResponse::NotModified { metadata });
+                }
                 if (300..400).contains(&status) {
                     if hops >= limits.max_redirects {
                         return Err(ExternalImageError::Refused(
@@ -323,6 +382,7 @@ impl ExternalImageBytes for ReqwestExternalImages {
                     });
                 }
 
+                let metadata = extract_metadata(&response);
                 let mut response = response;
                 let mut body = Vec::new();
                 loop {
@@ -345,9 +405,33 @@ impl ExternalImageBytes for ReqwestExternalImages {
                     }
                     body.extend_from_slice(&chunk);
                 }
-                return Ok(body);
+                return Ok(ExternalImageResponse::Fetched {
+                    bytes: body,
+                    metadata,
+                });
             }
         })
+    }
+}
+
+fn extract_metadata(response: &reqwest::Response) -> ExternalImageMetadata {
+    let headers = response.headers();
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let cache_control = headers
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    ExternalImageMetadata {
+        etag,
+        last_modified,
+        cache_control,
     }
 }
 

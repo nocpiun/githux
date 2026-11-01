@@ -25,6 +25,7 @@ use crate::content::images::{
     ImageRequest, ImageScope, ImageSink, ImageTarget, decode_image,
 };
 use crate::data::RepositorySession;
+use crate::data::reader_image_cache::{ExternalFreshness, ReaderImageCache, now_ms};
 use crate::domain::blob::{BlobBody, BlobIdentity, BlobLimits};
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
@@ -35,8 +36,10 @@ use crate::github::RepositoryLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::executor::BackgroundExecutor;
 use crate::network::reader_images::{
-    ExternalImageBytes, ExternalImageError, ExternalImageLimits, ExternalRefusal,
+    ExternalImageBytes, ExternalImageError, ExternalImageLimits, ExternalImageResponse,
+    ExternalRefusal, ValidationHeaders,
 };
+use crate::storage::cache::{CacheScope, CacheStore};
 
 /// Cache bounds for one service instance. They are per-instance and are never
 /// shared between readers or accounts.
@@ -64,6 +67,7 @@ struct Inner {
     repository_limits: RepositoryLimits,
     blob_limits: BlobLimits,
     permits: Arc<tokio::sync::Semaphore>,
+    persistent_cache: Option<ReaderImageCache>,
     /// Scope -> (token, source). One source per reader document generation, so
     /// cancelling one document stops only its own loads.
     work: Mutex<HashMap<ImageScope, (CancellationToken, CancellationTokenSource)>>,
@@ -155,6 +159,21 @@ impl RepositoryImageService {
         external: Arc<dyn ExternalImageBytes>,
         limits: ImageLimits,
     ) -> Self {
+        Self::with_cache(session, repository, executor, external, limits, None)
+    }
+
+    /// Builds the service with an optional persistent cache store and scope.
+    ///
+    /// The injected cache scope must match the session's authenticated account,
+    /// and the caller explicitly passes the repository visibility.
+    pub fn with_cache(
+        session: RepositorySession,
+        repository: RepositoryIdentity,
+        executor: Arc<BackgroundExecutor>,
+        external: Arc<dyn ExternalImageBytes>,
+        limits: ImageLimits,
+        cache: Option<(CacheStore, CacheScope, bool)>,
+    ) -> Self {
         let max_concurrent = limits.max_concurrent.max(1);
         let blob_limits = BlobLimits {
             decoded_bytes: limits.max_response_bytes,
@@ -165,6 +184,18 @@ impl RepositoryImageService {
             timeout: limits.total_timeout,
             max_redirects: limits.max_redirects,
         };
+        let persistent_cache = cache.and_then(|(store, scope, is_private)| {
+            // Verify that scope account matches session context account
+            if scope.account() != &session.context().auth().account {
+                return None;
+            }
+            Some(ReaderImageCache::new(
+                store,
+                scope,
+                Some(repository.id),
+                is_private,
+            ))
+        });
         Self {
             inner: Arc::new(Inner {
                 session,
@@ -176,6 +207,7 @@ impl RepositoryImageService {
                 repository_limits: RepositoryLimits::default(),
                 blob_limits,
                 permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
+                persistent_cache,
                 work: Mutex::new(HashMap::new()),
                 cache: Mutex::new(ResolutionCache::default()),
                 #[cfg(test)]
@@ -302,6 +334,35 @@ impl RepositoryImageService {
             return Err(ImageFailure::StaleContext);
         }
         let identity = self.resolve_blob(&snapshot, path, cancel.clone()).await?;
+
+        // Check persistent cache for blob bytes first
+        if let Some(ref cache) = self.inner.persistent_cache {
+            let cache_clone = cache.clone();
+            let blob_sha = identity.blob().clone();
+            let cached_opt =
+                tokio::task::spawn_blocking(move || cache_clone.read_repository_blob(&blob_sha))
+                    .await
+                    .map_err(|_| ImageFailure::Network)?;
+
+            match cached_opt {
+                Ok(Some(bytes)) => {
+                    if !self.inner.session.verify() {
+                        return Err(ImageFailure::StaleContext);
+                    }
+                    if bytes.len() > self.inner.blob_limits.decoded_bytes {
+                        return Err(ImageFailure::TooLarge {
+                            limit: self.inner.blob_limits.decoded_bytes,
+                        });
+                    }
+                    return Ok(bytes);
+                }
+                Err(crate::storage::cache::CacheError::AccessDenied) => {
+                    return Err(ImageFailure::StaleContext);
+                }
+                _ => {}
+            }
+        }
+
         let read = self
             .inner
             .session
@@ -313,7 +374,18 @@ impl RepositoryImageService {
         }
         let (_, body) = read.value.into_parts();
         match body {
-            BlobBody::Bytes(bytes) => Ok(bytes),
+            BlobBody::Bytes(bytes) => {
+                // Persist to cache in background
+                if let Some(ref cache) = self.inner.persistent_cache {
+                    let cache_clone = cache.clone();
+                    let blob_sha = identity.blob().clone();
+                    let bytes_clone = bytes.clone();
+                    tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                        let _ = cache_clone.put_repository_blob(&blob_sha, &bytes_clone);
+                    }));
+                }
+                Ok(bytes)
+            }
             BlobBody::TooLarge { limit, .. } => Err(ImageFailure::TooLarge { limit }),
         }
     }
@@ -435,11 +507,104 @@ impl RepositoryImageService {
         cancel: CancellationToken,
     ) -> Result<Vec<u8>, ImageFailure> {
         let limits = self.inner.external_limits.clone();
-        self.inner
+
+        if let Some(ref cache) = self.inner.persistent_cache {
+            let cache_clone = cache.clone();
+            let url_string = url.to_string();
+            let cached_snapshot =
+                tokio::task::spawn_blocking(move || cache_clone.read_external_image(&url_string))
+                    .await
+                    .map_err(|_| ImageFailure::Network)?;
+
+            if let Ok(Some(snapshot)) = cached_snapshot {
+                let freshness = ExternalFreshness {
+                    etag: snapshot.metadata.etag.clone(),
+                    last_modified: snapshot.metadata.last_modified.clone(),
+                    cache_control: snapshot.metadata.cache_control.clone(),
+                    fetched_at_ms: snapshot.metadata.fetched_at_ms,
+                    verified_at_ms: snapshot.metadata.verified_at_ms,
+                };
+
+                let now = now_ms();
+                if freshness.is_fresh_at(now) {
+                    return Ok(snapshot.bytes);
+                }
+
+                // Stale or needs revalidation: send conditional request
+                let validation = ValidationHeaders {
+                    if_none_match: freshness.etag.as_deref(),
+                    if_modified_since: freshness.last_modified.as_deref(),
+                };
+
+                let response = self
+                    .inner
+                    .external
+                    .load_with_metadata(url, &limits, validation, cancel.clone())
+                    .await;
+
+                match response {
+                    Ok(ExternalImageResponse::NotModified { metadata }) => {
+                        let cache_clone = cache.clone();
+                        let url_string = url.to_string();
+                        let snap = snapshot.clone();
+                        tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                            let _ =
+                                cache_clone.revalidate_external_image(&url_string, snap, &metadata);
+                        }));
+                        return Ok(snapshot.bytes);
+                    }
+                    Ok(ExternalImageResponse::Fetched { bytes, metadata }) => {
+                        let cache_clone = cache.clone();
+                        let url_string = url.to_string();
+                        let bytes_clone = bytes.clone();
+                        let meta = metadata.clone();
+                        tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                            let _ =
+                                cache_clone.put_external_image(&url_string, &bytes_clone, &meta);
+                        }));
+                        return Ok(bytes);
+                    }
+                    Err(ExternalImageError::Status(404)) => {
+                        let cache_clone = cache.clone();
+                        let url_string = url.to_string();
+                        tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                            let _ = cache_clone.invalidate_external_image(&url_string);
+                        }));
+                        return Err(ImageFailure::NotFound);
+                    }
+                    Err(e) => {
+                        return Err(map_external_error(e));
+                    }
+                }
+            }
+        }
+
+        // Cache miss or no cache configured: normal load_with_metadata
+        let response = self
+            .inner
             .external
-            .load(url, &limits, cancel)
+            .load_with_metadata(url, &limits, ValidationHeaders::default(), cancel)
             .await
-            .map_err(map_external_error)
+            .map_err(map_external_error)?;
+
+        match response {
+            ExternalImageResponse::Fetched { bytes, metadata } => {
+                if let Some(ref cache) = self.inner.persistent_cache {
+                    let cache_clone = cache.clone();
+                    let url_string = url.to_string();
+                    let bytes_clone = bytes.clone();
+                    tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                        let _ =
+                            cache_clone.put_external_image(&url_string, &bytes_clone, &metadata);
+                    }));
+                }
+                Ok(bytes)
+            }
+            ExternalImageResponse::NotModified { .. } => {
+                // 304 without prior cached snapshot is an invalid condition
+                Err(ImageFailure::Network)
+            }
+        }
     }
 }
 

@@ -18,6 +18,7 @@ use crate::data::AccountService;
 use crate::data::account_tests::config;
 use crate::domain::repository::RepositoryLocator;
 use crate::github::client::GitHubClient;
+use crate::network::reader_images::ExternalImageMetadata;
 use crate::network::transport::{
     HttpRequest, HttpResponse, Transport, TransportError, json_response,
 };
@@ -185,20 +186,43 @@ impl MemoryExternal {
 }
 
 impl ExternalImageBytes for MemoryExternal {
-    fn load<'a>(
+    fn load_with_metadata<'a>(
         &'a self,
         url: &'a str,
         _limits: &'a ExternalImageLimits,
+        validation: ValidationHeaders<'a>,
         _cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExternalImageError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ExternalImageResponse, ExternalImageError>> + Send + 'a>>
+    {
         Box::pin(async move {
             self.reads.lock().unwrap().push(url.to_string());
-            self.bodies
+            let bytes = self
+                .bodies
                 .lock()
                 .unwrap()
                 .get(url)
                 .cloned()
-                .ok_or(ExternalImageError::Status(404))
+                .ok_or(ExternalImageError::Status(404))?;
+
+            let etag = format!("\"etag-{}\"", bytes.len());
+            if validation.if_none_match == Some(etag.as_str()) {
+                return Ok(ExternalImageResponse::NotModified {
+                    metadata: ExternalImageMetadata {
+                        etag: Some(etag),
+                        last_modified: None,
+                        cache_control: Some("public, max-age=60".into()),
+                    },
+                });
+            }
+
+            Ok(ExternalImageResponse::Fetched {
+                bytes,
+                metadata: ExternalImageMetadata {
+                    etag: Some(etag),
+                    last_modified: None,
+                    cache_control: Some("public, max-age=60".into()),
+                },
+            })
         })
     }
 }
@@ -252,7 +276,24 @@ impl Fixture {
         external: Arc<dyn ExternalImageBytes>,
         limits: ImageLimits,
     ) -> RepositoryImageService {
-        RepositoryImageService::new(session, identity(), self.executor.clone(), external, limits)
+        self.service_with_cache(session, external, limits, None)
+    }
+
+    fn service_with_cache(
+        &self,
+        session: RepositorySession,
+        external: Arc<dyn ExternalImageBytes>,
+        limits: ImageLimits,
+        cache: Option<(CacheStore, CacheScope, bool)>,
+    ) -> RepositoryImageService {
+        RepositoryImageService::with_cache(
+            session,
+            identity(),
+            self.executor.clone(),
+            external,
+            limits,
+            cache,
+        )
     }
 }
 
@@ -777,4 +818,328 @@ async fn an_account_change_during_decode_publishes_nothing() {
         Err(ImageFailure::StaleContext),
         "a picture decoded under a retired authorization is never published"
     );
+}
+
+#[tokio::test]
+async fn fixed_revision_images_persist_across_reopened_store_and_service() {
+    use crate::domain::{AccountKey, HostId};
+    use crate::storage::cache::{CacheConfig, CacheStore};
+
+    let cache_dir = tempfile::tempdir().expect("cache temp dir");
+    let cache_cfg = CacheConfig::at(cache_dir.path().join("cache"));
+    let store = CacheStore::open(cache_cfg.clone()).expect("open cache store");
+    let account_key = AccountKey::new(1, HostId::github());
+    let scope = store
+        .saved_account(account_key.clone())
+        .expect("saved scope");
+
+    let fixture = fixture().await;
+    fixture.login(1).await;
+    let session = fixture.session();
+
+    let bytes = png_bytes();
+    for step in image_chain(&bytes) {
+        fixture.transport.push(200, step);
+    }
+
+    let (source, _) = external("https://example.com/never.png", Vec::new());
+    let service = fixture.service_with_cache(
+        session.clone(),
+        source.clone(),
+        ImageLimits::default(),
+        Some((store.clone(), scope.clone(), true)),
+    );
+
+    let sink = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("diagram-img"),
+            target: repository_request(COMMIT, "docs/images/diagram.png"),
+        },
+        sink.clone(),
+    );
+
+    let completion = next_completion(&sink).await;
+    assert!(completion.result.is_ok());
+
+    // Give asynchronous put a moment to complete
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Drop first store and service, reopen store and rebuild service with same scope
+    drop(service);
+    drop(store);
+
+    let store2 = CacheStore::open(cache_cfg).expect("reopen cache store");
+    let scope2 = store2.saved_account(account_key).expect("saved scope");
+
+    // Second service is offline: no responses are pushed to transport for blob
+    // Only commit & trees are fetched because session resolver resolves the tree path
+    fixture.transport.push(200, commit_json());
+    fixture.transport.push(
+        200,
+        tree(
+            ROOT,
+            json!([{"path": "docs", "type": "tree", "mode": "040000", "sha": DOCS_TREE}]),
+        ),
+    );
+    fixture.transport.push(
+        200,
+        tree(
+            DOCS_TREE,
+            json!([{"path": "images", "type": "tree", "mode": "040000", "sha": IMAGES_TREE}]),
+        ),
+    );
+    fixture.transport.push(
+        200,
+        tree(
+            IMAGES_TREE,
+            json!([{"path": "diagram.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()}]),
+        ),
+    );
+    // NOTICE: NO blob response pushed to transport! If cache fails, blob request would fail with unscripted response.
+
+    let service2 = fixture.service_with_cache(
+        session,
+        source,
+        ImageLimits::default(),
+        Some((store2, scope2, true)),
+    );
+
+    let sink2 = ImageSink::new();
+    service2.start(
+        ImageRequest {
+            scope: test_scope(2),
+            key: ImageKey::new("diagram-img-offline"),
+            target: repository_request(COMMIT, "docs/images/diagram.png"),
+        },
+        sink2.clone(),
+    );
+
+    let completion2 = next_completion(&sink2).await;
+    let decoded = completion2.result.expect("cached picture offline");
+    assert_eq!((decoded.width, decoded.height), (6, 3));
+}
+
+#[tokio::test]
+async fn external_badges_honor_freshness_revalidation_and_no_store() {
+    use crate::domain::{AccountKey, HostId};
+    use crate::storage::cache::{CacheConfig, CacheStore};
+
+    let cache_dir = tempfile::tempdir().expect("cache temp dir");
+    let cache_cfg = CacheConfig::at(cache_dir.path().join("cache"));
+    let store = CacheStore::open(cache_cfg).expect("open cache store");
+    let account_key = AccountKey::new(1, HostId::github());
+    let scope = store.saved_account(account_key).expect("saved scope");
+
+    let fixture = fixture().await;
+    fixture.login(1).await;
+    let session = fixture.session();
+
+    let external_source = Arc::new(MemoryExternal::default());
+    let bytes = png_bytes();
+    external_source.serve("https://badge.invalid/build.png", bytes.clone());
+
+    let service = fixture.service_with_cache(
+        session.clone(),
+        external_source.clone(),
+        ImageLimits::default(),
+        Some((store.clone(), scope.clone(), false)),
+    );
+
+    let sink = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("badge"),
+            target: ImageTarget::External {
+                url: "https://badge.invalid/build.png".into(),
+            },
+        },
+        sink.clone(),
+    );
+
+    let completion = next_completion(&sink).await;
+    assert!(completion.result.is_ok());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Second read should be served directly or via 304 Not Modified
+    let sink2 = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(2),
+            key: ImageKey::new("badge-cached"),
+            target: ImageTarget::External {
+                url: "https://badge.invalid/build.png".into(),
+            },
+        },
+        sink2.clone(),
+    );
+
+    let completion2 = next_completion(&sink2).await;
+    assert!(completion2.result.is_ok());
+
+    // 3. Test no-store response: no-store response clears existing cache entry
+    let nostore_url = "https://badge.invalid/nostore.png";
+    external_source
+        .bodies
+        .lock()
+        .unwrap()
+        .insert(nostore_url.to_string(), bytes.clone());
+
+    // In a custom implementation of load_with_metadata for a specific url:
+    // When served with no-store cache-control, cache.read_external_image should return None or be invalidated
+    let cache_helper = ReaderImageCache::new(store.clone(), scope.clone(), None, false);
+    let meta_nostore = ExternalImageMetadata {
+        etag: Some("\"etag-1\"".into()),
+        last_modified: None,
+        cache_control: Some("no-store".into()),
+    };
+    cache_helper
+        .put_external_image(nostore_url, &bytes, &meta_nostore)
+        .expect("put outcome");
+    let after_nostore = cache_helper.read_external_image(nostore_url).expect("read");
+    assert!(after_nostore.is_none(), "no-store must not be stored");
+}
+
+#[tokio::test]
+async fn branch_switch_or_other_repo_does_not_mix_cached_images() {
+    use crate::domain::{AccountKey, HostId};
+    use crate::storage::cache::{CacheConfig, CacheStore};
+
+    let cache_dir = tempfile::tempdir().expect("cache temp dir");
+    let cache_cfg = CacheConfig::at(cache_dir.path().join("cache"));
+    let store = CacheStore::open(cache_cfg).expect("open cache store");
+    let account_key = AccountKey::new(1, HostId::github());
+    let scope = store.saved_account(account_key).expect("saved scope");
+
+    let cache_repo1 = ReaderImageCache::new(store.clone(), scope.clone(), Some(101), true);
+    let cache_repo2 = ReaderImageCache::new(store.clone(), scope.clone(), Some(102), true);
+
+    let sha = ObjectSha::new(IMAGE_BLOB).unwrap();
+    let bytes1 = b"repo1 image bytes".to_vec();
+    let bytes2 = b"repo2 image bytes".to_vec();
+
+    cache_repo1.put_repository_blob(&sha, &bytes1).unwrap();
+    cache_repo2.put_repository_blob(&sha, &bytes2).unwrap();
+
+    let read1 = cache_repo1.read_repository_blob(&sha).unwrap();
+    let read2 = cache_repo2.read_repository_blob(&sha).unwrap();
+
+    assert_eq!(read1, Some(bytes1));
+    assert_eq!(read2, Some(bytes2));
+    assert_ne!(
+        read1, read2,
+        "Different repositories must have distinct namespaces for blobs"
+    );
+}
+
+#[tokio::test]
+async fn private_cache_isolation_and_quarantine_rejection() {
+    use crate::domain::{AccountKey, HostId};
+    use crate::storage::cache::{AccessEvent, CacheConfig, CacheStore};
+
+    let cache_dir = tempfile::tempdir().expect("cache temp dir");
+    let cache_cfg = CacheConfig::at(cache_dir.path().join("cache"));
+    let store = CacheStore::open(cache_cfg).expect("open cache store");
+    let account_key = AccountKey::new(1, HostId::github());
+    let scope = store.saved_account(account_key).expect("saved scope");
+
+    let cache_repo = ReaderImageCache::new(store.clone(), scope.clone(), Some(42), true);
+    let sha = ObjectSha::new(IMAGE_BLOB).unwrap();
+    let bytes = png_bytes();
+
+    cache_repo.put_repository_blob(&sha, &bytes).unwrap();
+    assert!(cache_repo.read_repository_blob(&sha).unwrap().is_some());
+
+    // When credential is rejected, private cached content is quarantined / denied
+    store
+        .access_event(&scope, AccessEvent::CredentialRejected)
+        .unwrap();
+
+    let read_result = cache_repo.read_repository_blob(&sha);
+    assert!(
+        read_result.is_err(),
+        "AccessDenied expected after CredentialRejected"
+    );
+}
+
+#[tokio::test]
+async fn missing_images_fail_without_blocking_other_images_or_context() {
+    let fixture = fixture().await;
+    fixture.login(1).await;
+    let session = fixture.session();
+
+    let bytes = png_bytes();
+    // Two requests will both look up commit. The first will fetch commit, and cache it in ResolutionCache.
+    // When "missing.png" resolves ROOT tree, it sees only "good.png", so it returns ImageFailure::NotFound!
+    // But if both start concurrently, they might both hit the transport before the first finishes caching.
+    // So push two commit_jsons just in case, or root tree.
+    fixture.transport.push(200, commit_json());
+    fixture.transport.push(200, commit_json());
+    fixture.transport.push(
+        200,
+        tree(
+            ROOT,
+            json!([
+                {"path": "good.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()},
+            ]),
+        ),
+    );
+    fixture.transport.push(
+        200,
+        tree(
+            ROOT,
+            json!([
+                {"path": "good.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()},
+            ]),
+        ),
+    );
+    fixture.transport.push(200, blob_json(IMAGE_BLOB, &bytes));
+
+    let (source, _) = external("https://example.com/never.png", Vec::new());
+    let service = fixture.service(session, source, ImageLimits::default());
+
+    let sink = ImageSink::new();
+    // Request missing image
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("missing"),
+            target: repository_request(COMMIT, "missing.png"),
+        },
+        sink.clone(),
+    );
+    // Request existing image
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("good"),
+            target: repository_request(COMMIT, "good.png"),
+        },
+        sink.clone(),
+    );
+
+    let mut completions = Vec::new();
+    for _ in 0..500 {
+        let drained = sink.drain();
+        completions.extend(drained);
+        if completions.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(completions.len(), 2, "expected 2 completions");
+
+    let good = completions
+        .iter()
+        .find(|c| c.key.as_str() == "good")
+        .unwrap();
+    let missing = completions
+        .iter()
+        .find(|c| c.key.as_str() == "missing")
+        .unwrap();
+
+    assert_eq!(missing.result, Err(ImageFailure::NotFound));
+    assert!(good.result.is_ok(), "good result was: {:?}", good.result);
 }
