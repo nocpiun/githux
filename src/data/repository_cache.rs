@@ -71,6 +71,8 @@ pub struct CachedRepositorySession {
     session: RepositorySession,
     cache: CacheStore,
     scope: CacheScope,
+    #[cfg(test)]
+    preparation: Arc<std::sync::Mutex<Option<super::repository::PreparationProbe>>>,
 }
 
 impl std::fmt::Debug for CachedRepositorySession {
@@ -96,6 +98,8 @@ impl CachedRepositorySession {
             session,
             cache,
             scope,
+            #[cfg(test)]
+            preparation: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -109,6 +113,22 @@ impl CachedRepositorySession {
 
     pub fn inner(&self) -> &RepositorySession {
         &self.session
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_preparation(
+        &self,
+        fail: bool,
+    ) -> (
+        tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *self.preparation.lock().unwrap() = Some(super::repository::PreparationProbe::new(
+            entered, resume, fail,
+        ));
+        (ready, release)
     }
 
     pub async fn repository(
@@ -167,7 +187,7 @@ impl CachedRepositorySession {
             .await;
         if let Ok(scoped) = &result
             && let Some(details) = &scoped.value.0
-            && details.identity != *repository
+            && details.identity.id() != repository.id()
         {
             return Err(RepositoryError::InvalidResponse {
                 message: "repository identity differs from the authorized request".into(),
@@ -250,7 +270,7 @@ impl CachedRepositorySession {
                 let details = details.ok_or_else(|| RepositoryError::InvalidResponse {
                     message: "unexpected conditional repository response".into(),
                 })?;
-                if details.identity != *repository {
+                if details.identity.id() != repository.id() {
                     return Err(RepositoryError::InvalidResponse {
                         message: "repository identity differs from the authorized request".into(),
                     });
@@ -339,6 +359,7 @@ impl CachedRepositorySession {
         let permit = self
             .before_network(&key, repository.id(), cancel.clone())
             .await?;
+        let needs_identity_proof = permit.ticket.is_none();
         let network_revision = revision.clone();
         let result = self
             .session
@@ -346,6 +367,26 @@ impl CachedRepositorySession {
                 cancel.clone(),
                 validator,
                 async move |pat, validator, cancel| {
+                    if needs_identity_proof {
+                        let (details, _) = github::repository::fetch_repository_with_metadata(
+                            self.session.client(),
+                            &pat,
+                            repository.locator(),
+                            limits,
+                            None,
+                            cancel.clone(),
+                        )
+                        .await?;
+                        let details = details.ok_or_else(|| RepositoryError::InvalidResponse {
+                            message: "unexpected conditional repository response".into(),
+                        })?;
+                        if details.identity.id() != repository.id() {
+                            return Err(RepositoryError::InvalidResponse {
+                                message: "repository identity differs from the authorized request"
+                                    .into(),
+                            });
+                        }
+                    }
                     github::revision::resolve_revision_with_metadata(
                         self.session.client(),
                         &pat,
@@ -394,7 +435,10 @@ impl CachedRepositorySession {
             true,
             ObjectKind::Tree,
             directory.tree().as_str(),
-            &format!("tree-v1;entry-limit={}", limits.tree_entries),
+            &format!(
+                "tree-v1;entry-limit={};response-limit={}",
+                limits.tree_entries, limits.response_bytes,
+            ),
             VERSION,
         )
         .map_err(|_| RepositoryError::InvalidInput { field: "cache key" })?;
@@ -645,11 +689,19 @@ impl CachedRepositorySession {
         let service = self.session.service().clone();
         let context = self.session.context().clone();
         let budget = limits.decoded_bytes;
-        let prepared =
-            tokio::task::spawn_blocking(move || prepare_content(blob.value.value, budget));
+        #[cfg(test)]
+        let probe = self.preparation.lock().unwrap().take();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let content = prepare_content(blob.value.value, budget);
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe.finish();
+            }
+            content
+        });
         let prepared = tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(GitHubError::Cancelled.into()),
+            _ = cancel.clone().cancelled() => Err(GitHubError::Cancelled.into()),
             prepared = prepared => prepared.map_err(|_| RepositoryError::GitHub(
                 GitHubError::CredentialStore { message: "content preparation worker closed".into() },
             )),
@@ -657,6 +709,10 @@ impl CachedRepositorySession {
         if !service.is_current(&context) {
             return Err(GitHubError::StaleContext.into());
         }
+        // Preparation is another await boundary: an explicit revocation during
+        // it must win even though the session context is unchanged.
+        self.ensure_cache_access(identity.repository().id(), cancel)
+            .await?;
         Ok(Scoped {
             context,
             value: CachedRepositoryRead {
@@ -664,6 +720,31 @@ impl CachedRepositorySession {
                 provenance: blob.value.provenance,
             },
         })
+    }
+
+    async fn ensure_cache_access(
+        &self,
+        repository: u64,
+        cancel: CancellationToken,
+    ) -> Result<(), RepositoryCacheError> {
+        let key = mutable_key(repository, "authorization-probe", "gate-v1")?;
+        let cache = self.cache.clone();
+        let scope = self.scope.clone();
+        let worker = tokio::task::spawn_blocking(move || match cache.read(&scope, &key) {
+            Err(crate::storage::cache::CacheError::AccessDenied) => {
+                Err(RepositoryCacheError::AccessDenied)
+            }
+            Err(error) => Err(cache_error(error)),
+            // A hit/miss both mean the current gate allowed this repository.
+            Ok(_) => Ok(()),
+        });
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(GitHubError::Cancelled.into()),
+            result = worker => result.map_err(|_| RepositoryCacheError::Storage)?,
+        };
+        self.check()?;
+        result
     }
 
     fn scoped<T>(
@@ -689,7 +770,7 @@ impl CachedRepositorySession {
         &self,
         key: &CacheKey,
         cancel: CancellationToken,
-        decode: impl Fn(&CacheSnapshot) -> Result<T, RepositoryCacheError> + Send + 'static,
+        decode: impl Fn(&CacheSnapshot) -> Result<T, RepositoryCacheError> + Send + Sync + 'static,
     ) -> Result<Option<Arc<Prior<T>>>, RepositoryCacheError>
     where
         T: Send + Sync + Clone + 'static,
@@ -706,13 +787,22 @@ impl CachedRepositorySession {
         &self,
         key: &CacheKey,
         cancel: CancellationToken,
-        decode: impl Fn(&CacheSnapshot) -> Result<T, RepositoryCacheError> + Send + 'static,
+        decode: impl Fn(&CacheSnapshot) -> Result<T, RepositoryCacheError> + Send + Sync + 'static,
     ) -> Result<Option<Arc<Prior<T>>>, RepositoryCacheError>
     where
         T: Send + Sync + Clone + 'static,
     {
-        match self.load(key, cancel, decode).await? {
-            CachedValue::Hit(payload, value) => Ok(Some(Arc::new(Prior { payload, value }))),
+        let decode = Arc::new(decode);
+        let load_decode = decode.clone();
+        match self
+            .load(key, cancel, move |snapshot| load_decode(snapshot))
+            .await?
+        {
+            CachedValue::Hit(payload, value) => Ok(Some(Arc::new(Prior {
+                payload,
+                value,
+                decode,
+            }))),
             CachedValue::Miss(_) => Ok(None),
         }
     }
@@ -871,8 +961,9 @@ impl CachedRepositorySession {
                     // The earlier lease has ended. Reload and snapshot again so
                     // revocation/PAT isolation during the request wins over the
                     // copied fallback bytes.
+                    let decode = prior.decode.clone();
                     let current = self
-                        .offline(&_key, cancel, move |_| Ok(prior.value.clone()))
+                        .offline(&_key, cancel, move |snapshot| decode(snapshot))
                         .await?;
                     return self.scoped(current);
                 }
@@ -951,9 +1042,11 @@ impl CachedRepositorySession {
     }
 }
 
+type SnapshotDecoder<T> = dyn Fn(&CacheSnapshot) -> Result<T, RepositoryCacheError> + Send + Sync;
 struct Prior<T> {
     payload: CacheSnapshot,
     value: T,
+    decode: Arc<SnapshotDecoder<T>>,
 }
 enum CachedValue<T> {
     Hit(CacheSnapshot, T),

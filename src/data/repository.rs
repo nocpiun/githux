@@ -177,7 +177,7 @@ impl RepoService {
 /// Per-session test instrumentation, absent from production. Pauses after
 /// classification and reports that worker's thread, without global state.
 #[cfg(test)]
-pub(super) struct PreparationProbe {
+pub(in crate::data) struct PreparationProbe {
     entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
     resume: std::sync::mpsc::Receiver<()>,
     fail: bool,
@@ -185,7 +185,19 @@ pub(super) struct PreparationProbe {
 
 #[cfg(test)]
 impl PreparationProbe {
-    fn finish(self) {
+    pub(in crate::data) fn new(
+        entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
+        resume: std::sync::mpsc::Receiver<()>,
+        fail: bool,
+    ) -> Self {
+        Self {
+            entered,
+            resume,
+            fail,
+        }
+    }
+
+    pub(in crate::data) fn finish(self) {
         self.entered.send(std::thread::current().id()).unwrap();
         self.resume
             .recv_timeout(std::time::Duration::from_secs(5))

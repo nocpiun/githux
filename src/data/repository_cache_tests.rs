@@ -913,7 +913,9 @@ async fn authorization_gate_requires_real_repository_success_not_fixed_sha_or_lo
         RepositoryCacheError::AccessDenied
     );
     // The fixed commit's successful repository request is the proof that
-    // unlocks the same repository after PAT replacement.
+    // unlocks the same repository after PAT replacement. Because the gate is
+    // quarantined, the adapter first proves the locator's numeric identity.
+    fixture.push(200, details());
     fixture.push(200, commit(A, TREE_A, "A"));
     session
         .revision(
@@ -1350,15 +1352,131 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         &BlobBody::TooLarge { size: 5, limit: 1 }
     );
 
-    // An uncertain README result is a reusable offline snapshot, but online
-    // discovery retries instead of freezing a transient/limited 404 outcome.
+    // A rename/transfer keeps the numeric ID: authorization compares IDs and
+    // accepts the server's updated canonical locator.
+    fixture.push(200, json!({"id":42,"name":"renamed","owner":{"id":7,"login":"newowner"},"private":true,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":0,"html_url":"https://github.com/newowner/renamed"}));
+    let renamed = session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.value.value.identity.id(), 42);
+    assert_eq!(renamed.value.value.identity.locator().name(), "renamed");
+
+    // Revision reads must reject a reused locator that resolves to another ID
+    // before their success can reopen the requested repository's gate.
+    store
+        .access_event(&scope, AccessEvent::PatReplaced)
+        .unwrap();
+    fixture.push(200, json!({"id":99,"name":"repo","owner":{"id":7,"login":"octo"},"private":true,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":0,"html_url":"https://github.com/octo/repo"}));
+    assert!(matches!(
+        session
+            .revision(
+                &repository(),
+                RevisionSpec::Ref(DynamicRef::new("main").unwrap()),
+                &Default::default(),
+                RepositoryCacheMode::OnlinePreferred,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::Online(RepositoryError::InvalidResponse { .. })
+    ));
+    assert_eq!(
+        session
+            .revision(
+                &repository(),
+                RevisionSpec::Commit(ObjectSha::new(A).unwrap()),
+                &Default::default(),
+                RepositoryCacheMode::OfflineOnly,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::AccessDenied
+    );
+
+    // Restore proof, then revocation during content preparation must win.
+    fixture.push(200, details());
+    session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    fixture.push(200, blob(BLOB_A, "hello"));
+    session
+        .blob(
+            &identity,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (entered, release) = session.pause_preparation(false);
+    let content = tokio::spawn({
+        let session = session.clone();
+        let identity = identity.clone();
+        async move {
+            session
+                .content(
+                    &identity,
+                    &Default::default(),
+                    RepositoryCacheMode::OfflineOnly,
+                    Default::default(),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    store.revoke_repository(&scope, Some(42)).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        content.await.unwrap().unwrap_err(),
+        RepositoryCacheError::AccessDenied
+    );
+}
+
+#[tokio::test]
+async fn uncertain_readme_is_offline_visible_but_online_revalidated() {
+    let accounts = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let svc = service(&accounts, fixture.clone()).await;
+    login(&svc, &fixture, 1).await;
+    let store = cache(&storage);
+    let session = cached(&svc, store, 1);
+    fixture.push(200, commit(A, TREE_A, "A"));
+    let snap = session
+        .revision(
+            &repository(),
+            RevisionSpec::Commit(ObjectSha::new(A).unwrap()),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value
+        .value;
     fixture.push(404, json!({}));
     fixture.push(200, json!({"sha":TREE_A,"truncated":true,"tree":[]}));
     let uncertain = session
         .readme(
             &snap,
             &Default::default(),
-            RepositoryCacheMode::ForceRefresh,
+            RepositoryCacheMode::OnlinePreferred,
             Default::default(),
         )
         .await
@@ -1367,7 +1485,7 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         uncertain.value.value,
         ReadmeDiscovery::NotFoundOrInaccessible { .. }
     ));
-    let offline_uncertain = session
+    let offline = session
         .readme(
             &snap,
             &Default::default(),
@@ -1377,9 +1495,13 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         .await
         .unwrap();
     assert!(matches!(
-        offline_uncertain.value.value,
+        offline.value.value,
         ReadmeDiscovery::NotFoundOrInaccessible { .. }
     ));
+    assert_eq!(
+        offline.value.provenance.origin,
+        RepositoryCacheOrigin::Snapshot
+    );
     fixture.push(200, readme(BLOB_A));
     let retried = session
         .readme(
@@ -1391,6 +1513,83 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         .await
         .unwrap();
     assert!(matches!(retried.value.value, ReadmeDiscovery::Found(_)));
+}
+
+#[tokio::test]
+async fn transient_fallback_decodes_the_latest_cached_observation_with_its_own_provenance() {
+    let accounts = tempfile::tempdir().unwrap();
+    let other_accounts = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let first_fixture = Arc::new(Fixture::default());
+    let first_svc = service(&accounts, first_fixture.clone()).await;
+    login(&first_svc, &first_fixture, 1).await;
+    let store = cache(&storage);
+    let session = cached(&first_svc, store.clone(), 1);
+    first_fixture.push(200, commit(A, TREE_A, "A"));
+    let a = session
+        .revision(
+            &repository(),
+            RevisionSpec::Ref(DynamicRef::new("main").unwrap()),
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(a.value.value.commit().as_str(), A);
+
+    let second_fixture = Arc::new(Fixture::default());
+    let second_svc = service(&other_accounts, second_fixture.clone()).await;
+    login(&second_svc, &second_fixture, 1).await;
+    let second = CachedRepositorySession::new(
+        second_svc.repo_service().session().unwrap(),
+        store.clone(),
+        store.saved_account(key(1)).unwrap(),
+    )
+    .unwrap();
+
+    let (entered, release) = first_fixture.pause_next();
+    first_fixture.fail(TransportError::Network {
+        message: "offline".into(),
+    });
+    let pending = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .revision(
+                    &repository(),
+                    RevisionSpec::Ref(DynamicRef::new("main").unwrap()),
+                    &Default::default(),
+                    RepositoryCacheMode::OnlinePreferred,
+                    Default::default(),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    second_fixture.push(200, commit(B, TREE_B, "B"));
+    let b = second
+        .revision(
+            &repository(),
+            RevisionSpec::Ref(DynamicRef::new("main").unwrap()),
+            &Default::default(),
+            RepositoryCacheMode::ForceRefresh,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.value.value.commit().as_str(), B);
+    release.send(()).unwrap();
+    let fallback = pending.await.unwrap().unwrap();
+    assert_eq!(fallback.value.value.commit().as_str(), B);
+    assert_eq!(fallback.value.value.message(), "B");
+    assert_eq!(
+        fallback.value.provenance.origin,
+        RepositoryCacheOrigin::Snapshot
+    );
 }
 
 #[test]
