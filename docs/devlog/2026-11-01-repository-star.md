@@ -56,3 +56,9 @@
 Codex 在 `02b8e4d` 指出：写成功但 summary 失败后，Retry 只读 starred 就清除 warning，会留下看似恢复的旧 count。意见成立，无需裁决。新增 `RepositoryActionService::refresh_starred`，初始读取与 Retry 都执行 starred GET + authoritative summary GET；不再复用只读状态成功来掩盖 summary 失败。新增 `StarSummaryFailure` 场景与整页回归，确认 warning 保留到 count 恢复、重试没有第二个 PUT。
 
 修复后验证：`a484d8cf` 专项通过；`dde477b8` 完整 test 通过；`2c2af8d0` clippy 通过；`ad5e8180` build 通过。Clippy 中间发现重构后的未使用 import，已删除并重跑成功。
+
+## PR #63 第二轮审查修复
+
+Codex 在 `ee3e54f` 指出 `drain_star` 接受结果后没有 `cx.notify()`，独立完成的写可能不触发重绘，而 tests 的显式 refresh 掩盖了问题。意见成立，无需裁决。`drain_star` 现携带页面 Context，在至少一个经完整门禁接受的 reply 后通知；过期回复不通知。新增不主动 refresh/draw 的 observer 回归，证明接受结果会使页面失效。
+
+验证：`6e9e2f08` 通知专项通过；`6e6db7ff` 完整 test 通过；`981d0b31` clippy 通过；`0ced48bc` build 通过。`70c29500` 全套中既有 bounded-read 用例出现一次 `error sending request`，该用例由 `0a01ae05` 单独通过且随后全套通过；未改测试掩盖波动。

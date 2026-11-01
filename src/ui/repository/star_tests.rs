@@ -241,6 +241,53 @@ fn an_older_repository_summary_cannot_roll_back_a_write_or_its_count(cx: &mut Te
 }
 
 #[gpui::test]
+fn an_accepted_star_reply_notifies_render_without_a_forced_refresh(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = ready(cx, Scene::StarUnstarred);
+    click_star(&page, cx);
+    wait_star(&page, cx, StarredState::Starred);
+    let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let sink = observed.clone();
+    cx.update(|_, cx| {
+        cx.observe(&page, move |_, _| sink.set(true)).detach();
+    });
+    page.update_in(cx, |page, window, cx| {
+        let message = super::super::StarReply {
+            binding: page.star_binding().unwrap(),
+            context: page.context.clone().unwrap(),
+            request: page.star_request,
+            body: super::super::StarReplyBody::Changed(Box::new(Ok(
+                crate::domain::repository_actions::StarActionOutcome {
+                    observation: crate::domain::repository_actions::StarObservation {
+                        repository: page.details().unwrap().identity.clone(),
+                        state: StarredState::Starred,
+                    },
+                    summary: Ok(page.details().cloned().unwrap()),
+                    confirmation: crate::domain::repository_actions::StarConfirmation::Observed,
+                },
+            ))),
+        };
+        // Reconstruct the same accepted-work identity, then drain without any
+        // explicit window.refresh() or draw call in this regression.
+        page.star_work = Some(super::super::StarWork {
+            service: super::super::RepositoryActionService::new(
+                page.session.as_ref().unwrap(),
+                &page.services.accounts,
+            )
+            .unwrap(),
+            work: super::super::Work::new(),
+            binding: message.binding.clone(),
+            request: message.request,
+        });
+        page.star_inbox.lock().unwrap().push_back(message);
+        page.drain(window, cx);
+    });
+    assert!(
+        observed.get(),
+        "an accepted Star reply must invalidate the page"
+    );
+}
+
+#[gpui::test]
 fn normal_preview_fixture_supports_repeated_star_and_unstar(cx: &mut TestAppContext) {
     let (fixture, page, cx) = normal(cx);
     settle(&page, cx, |page| page.starred_state().is_some());

@@ -1294,7 +1294,7 @@ impl RepositoryPage {
             self.apply(message, window, cx);
         }
         self.drain_overview(cx);
-        self.drain_star();
+        self.drain_star(cx);
     }
 
     /// Detects an account/authorization change even when no message is pending,
@@ -1910,7 +1910,8 @@ impl RepositoryPage {
             && self.star_binding().as_ref() == Some(binding)
     }
 
-    fn drain_star(&mut self) {
+    fn drain_star(&mut self, cx: &mut Context<Self>) {
+        let mut accepted = false;
         let replies: Vec<StarReply> = self
             .star_inbox
             .lock()
@@ -1929,6 +1930,7 @@ impl RepositoryPage {
                 continue;
             }
             self.star_work = None;
+            accepted = true;
             match reply.body {
                 StarReplyBody::Changed(result) if result.is_ok() => {
                     let outcome = result.expect("checked Ok");
@@ -1951,6 +1953,9 @@ impl RepositoryPage {
                     self.apply_star_error(result.expect_err("Ok handled above"));
                 }
             }
+        }
+        if accepted {
+            cx.notify();
         }
     }
 
