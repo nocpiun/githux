@@ -53,6 +53,8 @@ struct PullRequestResponse {
     html_url: Option<String>,
     #[serde(default)]
     user: Option<UserResponse>,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +145,7 @@ pub async fn fetch_pull_request_detail(
                     .filter(|title| !title.trim().is_empty())
                     .map(|title| title.trim().to_string()),
                 html_url: raw.html_url.filter(|url| !url.trim().is_empty()),
+                body: raw.body.filter(|b| !b.trim().is_empty()),
             })
         }
         _ => PullRequestDetailOutcome::Unattributable,

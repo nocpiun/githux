@@ -341,6 +341,8 @@ pub enum FeedPayload {
         merged: Option<bool>,
         /// `pull_request.user`, when the payload supplies it.
         author: Option<FeedAuthor>,
+        /// `pull_request.body`, when the payload supplies it.
+        body: Option<String>,
     },
     Issues {
         action: String,
@@ -431,6 +433,8 @@ pub struct FeedActivity {
     pub pull_request: Option<FeedActivityTarget>,
     /// The received event this activity was derived from (source order, real id).
     pub event: FeedEvent,
+    /// Enriched repository description for starred repositories.
+    pub repository_description: Option<String>,
 }
 
 /// The pull request an activity refers to, when the event payload has one.
@@ -439,6 +443,8 @@ pub struct FeedActivityTarget {
     pub number: Option<u64>,
     pub title: Option<String>,
     pub html_url: Option<String>,
+    /// Compact plain-text preview of the pull request body.
+    pub body_preview: Option<BodyPreview>,
 }
 
 /// A merged pull request that still needs its author resolved.
@@ -456,6 +462,8 @@ pub struct FeedMergeCandidate {
     pub pull_request: FeedActivityTarget,
     /// The payload's embedded pull-request author, when the source supplied one.
     pub embedded_author: Option<FeedAuthor>,
+    /// The payload's embedded pull-request body, when the source supplied one.
+    pub embedded_body: Option<String>,
 }
 
 impl FeedMergeCandidate {
@@ -490,6 +498,7 @@ pub fn merge_candidate(event: &FeedEvent) -> Option<FeedMergeCandidate> {
             html_url,
             merged,
             author,
+            body,
             ..
         },
     ) = (&event.event_type, &event.payload)
@@ -523,8 +532,10 @@ pub fn merge_candidate(event: &FeedEvent) -> Option<FeedMergeCandidate> {
                 .filter(|title| !title.is_empty())
                 .map(str::to_string),
             html_url: html_url.clone(),
+            body_preview: body.as_deref().and_then(extract_body_preview),
         },
         embedded_author: author.clone(),
+        embedded_body: body.clone(),
     })
 }
 
@@ -660,6 +671,7 @@ pub struct ResolvedPullRequest {
     pub merged: bool,
     pub title: Option<String>,
     pub html_url: Option<String>,
+    pub body: Option<String>,
 }
 
 /// One pull-request detail read.
@@ -887,6 +899,7 @@ pub fn build_feed_activities(
                     merged: true,
                     title: candidate.pull_request.title.clone(),
                     html_url: candidate.pull_request.html_url.clone(),
+                    body: candidate.embedded_body.clone(),
                 })
                 .or_else(|| authors.get(&candidate.key()).cloned().flatten());
             let Some(resolved) = resolved else {
@@ -906,6 +919,11 @@ pub fn build_feed_activities(
             if !following.follows_subject(&subject) {
                 continue;
             }
+            let body_preview = resolved
+                .body
+                .as_deref()
+                .or(candidate.embedded_body.as_deref())
+                .and_then(extract_body_preview);
             activities.push(FeedActivity {
                 kind: FeedActivityKind::PullRequestMerged,
                 subject,
@@ -913,8 +931,10 @@ pub fn build_feed_activities(
                     number: candidate.pull_request.number,
                     title: resolved.title.or(candidate.pull_request.title),
                     html_url: resolved.html_url.or(candidate.pull_request.html_url),
+                    body_preview,
                 }),
                 event: event.clone(),
+                repository_description: None,
             });
             continue;
         }
@@ -929,6 +949,7 @@ pub fn build_feed_activities(
             subject,
             pull_request: None,
             event: event.clone(),
+            repository_description: None,
         });
     }
     activities
@@ -1099,3 +1120,9 @@ pub struct FeedSourcePage {
 
 #[cfg(test)]
 mod feed_policy_tests;
+
+pub mod markdown;
+pub use markdown::{
+    BodyPreview, DEFAULT_BODY_EXCERPT_CHARS, canonical_pr_url, extract_body_preview,
+    extract_body_preview_with_limit,
+};

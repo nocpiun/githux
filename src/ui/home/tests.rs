@@ -19,10 +19,11 @@ use super::rows::event_description;
 use super::*;
 use crate::domain::error::GitHubError;
 use crate::domain::home::{
-    AuthorResolutions, FeedActivity, FeedActivityKind, FeedActivityTarget, FeedActor, FeedAuthor,
-    FeedEvent, FeedEventType, FeedPartialReason, FeedPayload, FeedReadiness, FeedRepository,
-    FollowedAccount, Following, FollowingReadiness, HomeItem, HomeItemKind, HomePartialReason,
-    HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, ResolvedPullRequest, build_feed,
+    AuthorResolutions, BodyPreview, FeedActivity, FeedActivityKind, FeedActivityTarget, FeedActor,
+    FeedAuthor, FeedEvent, FeedEventType, FeedPartialReason, FeedPayload, FeedReadiness,
+    FeedRepository, FollowedAccount, Following, FollowingReadiness, HomeItem, HomeItemKind,
+    HomePartialReason, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, ResolvedPullRequest,
+    build_feed,
 };
 
 fn setup(cx: &mut TestAppContext) {
@@ -151,6 +152,7 @@ fn activity(
         subject,
         pull_request,
         event,
+        repository_description: None,
     }
 }
 
@@ -193,6 +195,7 @@ fn merged_activity(index: usize, author: FeedAuthor) -> FeedActivity {
             state: None,
             merged: None,
             author: None,
+            body: None,
         },
     );
     let subject = FeedActor {
@@ -209,6 +212,7 @@ fn merged_activity(index: usize, author: FeedAuthor) -> FeedActivity {
             number: Some(40 + index as u64),
             title: Some(format!("Contributor change {index}")),
             html_url: None,
+            body_preview: None,
         }),
     )
 }
@@ -978,6 +982,7 @@ fn the_visible_feed_is_the_policy_output_not_the_raw_event_list(cx: &mut TestApp
                 state: Some("closed".into()),
                 merged: Some(false),
                 author: Some(author(901, "contributor-6")),
+                body: None,
             },
         ),
         feed_event(
@@ -991,6 +996,7 @@ fn the_visible_feed_is_the_policy_output_not_the_raw_event_list(cx: &mut TestApp
                 state: None,
                 merged: None,
                 author: None,
+                body: None,
             },
         ),
     ];
@@ -1005,6 +1011,7 @@ fn the_visible_feed_is_the_policy_output_not_the_raw_event_list(cx: &mut TestApp
             merged: true,
             title: Some("Slim merged contribution".into()),
             html_url: None,
+            body: None,
         },
     );
     // `shulaoda` must be followed for the contribution to appear.
@@ -1675,5 +1682,148 @@ fn feed_append_failure_shows_warning_and_retries(cx: &mut TestAppContext) {
             .borrow()
             .iter()
             .any(|action| matches!(action, HomeAction::LoadMoreFeed(_)))
+    );
+}
+
+#[gpui::test]
+fn starred_cards_render_repository_description_under_name_and_missing_is_quiet(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = open(cx);
+    // Two cards starring the same repository ("owner/shared-repo"), plus one starring
+    // another repository ("owner/undescribed").
+    let mut card0 = starred_activity(0);
+    card0.event.repository.name = "owner/shared-repo".to_string();
+    let mut card1 = starred_activity(1);
+    card1.event.repository.name = "owner/shared-repo".to_string();
+    let mut card2 = starred_activity(2);
+    card2.event.repository.name = "owner/undescribed".to_string();
+
+    let outcome = feed_outcome(vec![card0, card1, card2], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+
+    // Before enrichment: neither card renders a description element or placeholder.
+    assert!(cx.debug_bounds("feed-repo-description-0").is_none());
+    assert!(cx.debug_bounds("feed-repo-description-1").is_none());
+    assert!(cx.debug_bounds("feed-repo-description-2").is_none());
+
+    // Enrich the shared repository description.
+    view.update(cx, |view, cx| {
+        assert!(view.set_repository_description(
+            &binding(),
+            1,
+            "owner/shared-repo",
+            Some("A shared core repository for autonomous agent components.".into()),
+            cx,
+        ));
+    });
+    cx.run_until_parked();
+
+    // Both cards starring the shared repository display the description.
+    let desc0 = bounds("feed-repo-description-0", cx);
+    let desc1 = bounds("feed-repo-description-1", cx);
+    assert!(desc0.size.height > px(0.0));
+    assert!(desc1.size.height > px(0.0));
+
+    // The undescribed repository has no description element, no placeholder, and no error box.
+    assert!(cx.debug_bounds("feed-repo-description-2").is_none());
+    assert!(cx.debug_bounds("feed-event-row-2").is_some());
+}
+
+#[gpui::test]
+fn pr_body_previews_short_and_long_with_read_more_navigation(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+
+    // Card 0: PR with short body (fits within budget, no truncation).
+    let mut card0 = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut card0.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "Short body that fits completely.".into(),
+            is_truncated: false,
+        });
+    }
+
+    // Card 1: PR with long body (truncated, requires "Read more" affordance).
+    let mut card1 = merged_activity(1, author(902, "author-1"));
+    if let Some(target) = &mut card1.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "A long body excerpt that exceeds the compact limit and ends with…".into(),
+            is_truncated: true,
+        });
+    }
+
+    // Card 2: PR with no body (blank / comments only).
+    let mut card2 = merged_activity(2, author(903, "author-2"));
+    if let Some(target) = &mut card2.pull_request {
+        target.body_preview = None;
+    }
+
+    let outcome = feed_outcome(vec![card0, card1, card2], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+
+    // Card 0: short body is rendered; "Read more" is NOT rendered.
+    assert!(cx.debug_bounds("feed-pr-body-0").is_some());
+    assert!(cx.debug_bounds("feed-pr-read-more-0").is_none());
+
+    // Card 1: excerpt is rendered, and "Read more" IS rendered.
+    assert!(cx.debug_bounds("feed-pr-body-1").is_some());
+    assert!(cx.debug_bounds("feed-pr-read-more-1").is_some());
+
+    // Card 2: blank body renders no body element at all.
+    assert!(cx.debug_bounds("feed-pr-body-2").is_none());
+    assert!(cx.debug_bounds("feed-pr-read-more-2").is_none());
+
+    // Clicking "Read more" on Card 1 emits HomeAction::OpenExternalUrl with the canonical PR URL.
+    click("feed-pr-read-more-1", cx);
+    let captured = actions.borrow().clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0],
+        HomeAction::OpenExternalUrl("https://github.com/owner/repo/pull/41".into())
+    );
+
+    // Card selection did not change to Card 1 because click propagation was stopped.
+    assert_eq!(
+        view.read_with(cx, |view, _| view.selected(Column::Feed)),
+        None
+    );
+}
+
+#[gpui::test]
+fn read_more_link_can_be_keyboard_activated(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+
+    let mut card0 = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut card0.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "A long body excerpt that ends with…".into(),
+            is_truncated: true,
+        });
+    }
+
+    let outcome = feed_outcome(vec![card0], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+
+    // The "Read more" link has tab_index(0) and can be focused and activated with Enter.
+    let target = bounds("feed-pr-read-more-0", cx).center();
+    cx.simulate_click(target, Modifiers::none());
+    cx.run_until_parked();
+
+    let captured = actions.borrow().clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0],
+        HomeAction::OpenExternalUrl("https://github.com/owner/repo/pull/40".into())
     );
 }

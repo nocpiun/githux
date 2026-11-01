@@ -70,6 +70,14 @@ struct AppendReply {
     result: Result<(FeedOutcome, std::collections::HashSet<String>), HomeError>,
 }
 
+/// Asynchronous repository description enrichment for starred repositories.
+struct EnrichReply {
+    generation: u64,
+    selection: u64,
+    context: RepositoryReadContext,
+    descriptions: std::collections::HashMap<String, Option<String>>,
+}
+
 pub struct HomePage {
     tab: TabId,
     services: Option<AccountServices>,
@@ -81,6 +89,7 @@ pub struct HomePage {
     work: [Option<Work>; 2],
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     append_inbox: Arc<Mutex<VecDeque<AppendReply>>>,
+    enrich_inbox: Arc<Mutex<VecDeque<EnrichReply>>>,
     alive: Arc<watch::Sender<bool>>,
     receiver: Option<gpui::Task<()>>,
     feed_ready: Option<Instant>,
@@ -93,6 +102,9 @@ pub struct HomePage {
     /// Monotonic append epoch; bumped before every replacement Feed read so an
     /// in-flight append from before a refresh is rejected and cancelled.
     feed_append_epoch: u64,
+    /// Known repository descriptions, keyed by lowercase "owner/name".
+    feed_repo_descriptions: std::collections::HashMap<String, Option<String>>,
+    feed_enrich_work: Option<Work>,
     view: Entity<HomeView>,
     navigation: NavigationSink,
     _changed: Subscription,
@@ -151,6 +163,7 @@ impl HomePage {
             work: [None, None],
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             append_inbox: Arc::new(Mutex::new(VecDeque::new())),
+            enrich_inbox: Arc::new(Mutex::new(VecDeque::new())),
             alive: Arc::new(alive),
             receiver: None,
             feed_ready: None,
@@ -159,6 +172,8 @@ impl HomePage {
             feed_seen_ids: std::collections::HashSet::new(),
             feed_append: None,
             feed_append_epoch: 0,
+            feed_repo_descriptions: std::collections::HashMap::new(),
+            feed_enrich_work: None,
             view,
             navigation,
             _changed,
@@ -191,6 +206,7 @@ impl HomePage {
         self.feed_ready = None;
         self.feed_next_page = None;
         self.feed_seen_ids.clear();
+        self.feed_repo_descriptions.clear();
         let binding = self.binding.clone();
         let generation = self.generation;
         self.view.update(cx, |view, cx| {
@@ -277,6 +293,11 @@ impl HomePage {
                 );
             }
             // Issue/PR detail is deliberately not routed in this release.
+            HomeAction::OpenExternalUrl(url) => {
+                if url.starts_with("https://github.com/") {
+                    (self.navigation)(PageNavigation::External(url), window, cx);
+                }
+            }
             HomeAction::ActivateWorkItem(_)
             | HomeAction::ActivateFeed(_)
             | HomeAction::Refresh(_)
@@ -455,6 +476,15 @@ impl HomePage {
         for append in appends {
             self.apply_append(append, cx);
         }
+        let enriches: Vec<_> = self
+            .enrich_inbox
+            .lock()
+            .expect("home enrich inbox")
+            .drain(..)
+            .collect();
+        for enrich in enriches {
+            self.apply_enrichment(enrich, cx);
+        }
     }
 
     fn apply_append(&mut self, append: AppendReply, cx: &mut Context<Self>) {
@@ -506,6 +536,7 @@ impl HomePage {
                         view.apply_feed_page(&binding, generation, merged, cx);
                     }
                 });
+                self.enrich_starred_repositories(&page.activities, cx);
             }
             Err(_error) => {
                 let page = self.feed_next_page.map(|cursor| cursor.page).unwrap_or(1);
@@ -525,6 +556,10 @@ impl HomePage {
         let binding = self.binding.clone();
         let generation = self.generation;
         let column = reply.column;
+        let feed_activities = match &reply.result {
+            ColumnResult::Feed(Ok(outcome)) => Some(outcome.activities.clone()),
+            _ => None,
+        };
         self.view.update(cx, |view, cx| match reply.result {
             ColumnResult::Home(Ok(outcome)) => {
                 view.apply_home(&binding, generation, outcome, cx);
@@ -555,6 +590,9 @@ impl HomePage {
                 view.apply_error(column, &binding, generation, error, cx);
             }
         });
+        if let Some(activities) = feed_activities {
+            self.enrich_starred_repositories(&activities, cx);
+        }
         let reason = match column {
             Column::Feed => self.feed_ready.and_then(|ready| {
                 ready.checked_duration_since(Instant::now()).map(|remaining| {
@@ -692,13 +730,18 @@ impl HomePage {
         if let Some(append) = self.feed_append.take() {
             append.source.cancel();
         }
+        if let Some(enrich) = self.feed_enrich_work.take() {
+            enrich.source.cancel();
+        }
         self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         self.inbox.lock().expect("home inbox").clear();
         self.append_inbox.lock().expect("home append inbox").clear();
+        self.enrich_inbox.lock().expect("home enrich inbox").clear();
         self.feed_cooldown_task = None;
         self.feed_ready = None;
         self.feed_next_page = None;
         self.feed_seen_ids.clear();
+        self.feed_repo_descriptions.clear();
         self.session = None;
     }
 
@@ -798,6 +841,128 @@ impl HomePage {
         let binding = self.binding.clone();
         self.view.update(cx, |view, cx| {
             view.feed_append_failed(&binding, generation, page, cx);
+        });
+        cx.notify();
+    }
+
+    /// Asynchronously enriches repository descriptions for starred repository cards.
+    /// Deduplicates repository requests and uses account-scoped caching for the
+    /// current feed lifecycle.
+    fn enrich_starred_repositories(
+        &mut self,
+        activities: &[crate::domain::home::FeedActivity],
+        cx: &mut Context<Self>,
+    ) {
+        let binding = self.binding.clone();
+        let generation = self.generation;
+
+        // Collect distinct repositories that do not yet have a cached entry.
+        let mut needed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for activity in activities {
+            if activity.kind == crate::domain::home::FeedActivityKind::RepositoryStarred {
+                let (owner, repo) = activity
+                    .event
+                    .repository
+                    .name
+                    .split_once('/')
+                    .map_or(("", activity.event.repository.name.as_str()), |(o, r)| {
+                        (o, r)
+                    });
+                let key = format!("{owner}/{repo}").to_ascii_lowercase();
+                if !owner.is_empty()
+                    && !repo.is_empty()
+                    && !self.feed_repo_descriptions.contains_key(&key)
+                    && seen.insert(key)
+                {
+                    needed.push((owner.to_string(), repo.to_string()));
+                }
+            }
+        }
+
+        // Send any descriptions that are already known immediately.
+        let known: std::collections::HashMap<String, String> = self
+            .feed_repo_descriptions
+            .iter()
+            .filter_map(|(k, v)| v.as_ref().map(|desc| (k.clone(), desc.clone())))
+            .collect();
+        if !known.is_empty() {
+            self.view.update(cx, |view, cx| {
+                view.set_repository_descriptions(&binding, generation, known, cx);
+            });
+        }
+
+        if needed.is_empty() {
+            return;
+        }
+
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        let context = session.context().clone();
+        if !services.repositories().is_current(&context) {
+            return;
+        }
+
+        let work = Work::new();
+        let cancel = work.token.clone();
+        self.feed_enrich_work = Some(work);
+
+        let enrich_inbox = self.enrich_inbox.clone();
+        let alive = self.alive.clone();
+        let selection = self.selection;
+        let reply_context = context.clone();
+
+        let _ = services.executor().handle().spawn(async move {
+            let result = session.repository_descriptions(needed, 20, cancel).await;
+            if *alive.borrow()
+                && let Ok(scoped) = result
+            {
+                enrich_inbox
+                    .lock()
+                    .expect("enrich inbox")
+                    .push_back(EnrichReply {
+                        generation,
+                        selection,
+                        context: reply_context,
+                        descriptions: scoped.value,
+                    });
+            }
+        });
+    }
+
+    fn apply_enrichment(&mut self, reply: EnrichReply, cx: &mut Context<Self>) {
+        if reply.generation != self.generation
+            || reply.selection != self.selection
+            || !self
+                .services
+                .as_ref()
+                .is_some_and(|services| services.repositories().is_current(&reply.context))
+            || !self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.context() == &reply.context)
+        {
+            return;
+        }
+        self.feed_enrich_work = None;
+        let binding = self.binding.clone();
+        let generation = self.generation;
+
+        for (k, v) in reply.descriptions {
+            self.feed_repo_descriptions.insert(k, v);
+        }
+
+        let known: std::collections::HashMap<String, String> = self
+            .feed_repo_descriptions
+            .iter()
+            .filter_map(|(k, v)| v.as_ref().map(|desc| (k.clone(), desc.clone())))
+            .collect();
+        self.view.update(cx, |view, cx| {
+            view.set_repository_descriptions(&binding, generation, known, cx);
         });
         cx.notify();
     }

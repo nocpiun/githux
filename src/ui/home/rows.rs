@@ -38,6 +38,33 @@ fn link(name: String, label: String, action: HomeAction, cx: &mut Context<HomeVi
         .into_any_element()
 }
 
+fn read_more_link(name: String, url: String, cx: &mut Context<HomeView>) -> AnyElement {
+    let weak = cx.entity().downgrade();
+    let debug = name.clone();
+    let colors = cx.theme().colors.clone();
+    div()
+        .id(name)
+        .debug_selector(move || debug.clone())
+        .role(gpui::Role::Link)
+        .aria_label("Read more on GitHub")
+        .tab_index(0)
+        .flex_none()
+        .cursor_pointer()
+        .focus_ring(cx)
+        .text_color(colors.accent)
+        .hover(|style| style.underline())
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            let action = HomeAction::OpenExternalUrl(url.clone());
+            let _ = weak.update(cx, |view, cx| view.emit(action, window, cx));
+        })
+        .child("Read more")
+        .into_any_element()
+}
+
 fn repository_links(
     repo: RepositoryIdentity,
     prefix: &str,
@@ -239,6 +266,7 @@ pub(super) fn feed_row(
     selected: bool,
     now: SystemTime,
     real_avatar: Option<AnyElement>,
+    repo_description: Option<&str>,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
     let event = &activity.event;
@@ -321,7 +349,7 @@ pub(super) fn feed_row(
         .rounded(radius)
         .bg(colors.sunken);
     // Exactly one of the two cards owns the repository element.
-    let (sentence, inset) = if merged {
+    let (sentence, mut inset) = if merged {
         (sentence.child(div().min_w_0().child(repo)), inset)
     } else {
         (
@@ -339,6 +367,20 @@ pub(super) fn feed_row(
             ),
         )
     };
+    if activity.kind == FeedActivityKind::RepositoryStarred
+        && let Some(desc) = repo_description.filter(|d| !d.trim().is_empty())
+    {
+        inset = inset.child(
+            div()
+                .id(format!("feed-repo-description-{index}"))
+                .debug_selector(move || format!("feed-repo-description-{index}"))
+                .min_w_0()
+                .text_size(tiny)
+                .text_color(colors.fg_subtle)
+                .line_clamp(3)
+                .child(desc.trim().to_string()),
+        );
+    }
     let mut inset = inset;
     if let Some(target) = &activity.pull_request {
         let mut label = target
@@ -362,6 +404,37 @@ pub(super) fn feed_row(
                 )
                 .child(title(Column::Feed, index, label, cx)),
         );
+        if let Some(preview) = &target.body_preview
+            && !preview.excerpt.trim().is_empty()
+        {
+            let pr_url = canonical_pr_url(&event.repository.name, target.number);
+            let body_div = div()
+                .id(format!("feed-pr-body-{index}"))
+                .debug_selector(move || format!("feed-pr-body-{index}"))
+                .min_w_0()
+                .text_size(tiny)
+                .text_color(colors.fg_subtle)
+                .child(preview.excerpt.clone());
+
+            if preview.is_truncated {
+                if let Some(url) = pr_url {
+                    let read_more = read_more_link(format!("feed-pr-read-more-{index}"), url, cx);
+                    inset = inset.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .min_w_0()
+                            .child(body_div)
+                            .child(read_more),
+                    );
+                } else {
+                    inset = inset.child(body_div);
+                }
+            } else {
+                inset = inset.child(body_div);
+            }
+        }
     }
     div()
         .debug_selector(move || format!("feed-event-row-{index}"))

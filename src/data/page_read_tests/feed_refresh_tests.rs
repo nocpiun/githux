@@ -441,3 +441,126 @@ async fn refresh_reseeds_the_dedup_set_so_older_pages_can_be_reappended() {
     assert!(refreshed.activities.len() == 1);
     assert_eq!(refreshed.next_page, None);
 }
+
+/// Two starred cards for the same repository must only issue one repository detail
+/// lookup (deduplication), and an optional lookup failure (e.g. 404) must return None
+/// rather than failing the caller.
+#[tokio::test]
+async fn repository_descriptions_deduplicates_requests_and_handles_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    // acme/demo succeeds with a description; acme/missing fails with 404.
+    let demo_repo = json!({
+        "id": 10, "name": "demo", "full_name": "acme/demo",
+        "owner": {"id": 1, "login": "acme", "avatar_url": null},
+        "visibility": "public", "private": false, "default_branch": "main",
+        "fork": false, "archived": false, "stargazers_count": 42,
+        "forks_count": 2, "open_issues_count": 0, "size": 100,
+        "html_url": "https://github.com/acme/demo",
+        "description": "Towards a More Autonomous Agent System"
+    });
+    transport.push(200, demo_repo);
+    transport.push(404, json!({"message": "Not Found"}));
+
+    // Pass duplicates for acme/demo plus acme/missing.
+    let repos = vec![
+        ("acme".to_string(), "demo".to_string()),
+        ("acme".to_string(), "demo".to_string()),
+        ("acme".to_string(), "missing".to_string()),
+    ];
+    let descriptions = session
+        .repository_descriptions(repos, 20, Default::default())
+        .await
+        .expect("repository descriptions")
+        .value;
+
+    assert_eq!(descriptions.len(), 2);
+    assert_eq!(
+        descriptions.get("acme/demo"),
+        Some(&Some("Towards a More Autonomous Agent System".to_string()))
+    );
+    assert_eq!(descriptions.get("acme/missing"), Some(&None));
+
+    let requests = transport.requests.lock().unwrap();
+    // 1 login + 2 detail requests (acme/demo requested only once, despite appearing twice!).
+    assert_eq!(
+        requests.len(),
+        3,
+        "detail requests must be deduplicated: {:?}",
+        requests.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(requests[1].url.ends_with("/repos/acme/demo"));
+    assert!(requests[2].url.ends_with("/repos/acme/missing"));
+}
+
+/// Merged PR detail response body is parsed and extracted into a compact plain-text
+/// BodyPreview on the activity target.
+#[tokio::test]
+async fn feed_preserves_pr_body_and_extracts_clean_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    // Merged PR event in received_events.
+    let merged_event = json!({
+        "id": "evt-merged",
+        "type": "PullRequestEvent",
+        "actor": {"id": 10, "login": "merger"},
+        "repo": {"id": 99, "name": "acme/widgets"},
+        "payload": {
+            "action": "merged",
+            "number": 77,
+            "pull_request": {
+                "url": "https://api.github.com/repos/acme/widgets/pulls/77",
+                "id": 777, "number": 77,
+                "head": {"ref": "x", "sha": "a"}, "base": {"ref": "main", "sha": "b"}
+            }
+        },
+        "created_at": "2026-10-30T12:00:41Z"
+    });
+    transport.push(200, json!([merged_event]));
+    transport.push(200, json!([{"id": 31, "login": "contributor"}]));
+    // PR detail response with a Markdown body containing HTML comments and styling.
+    transport.push(
+        200,
+        json!({
+            "id": 777,
+            "number": 77,
+            "state": "closed",
+            "merged": true,
+            "title": "Fix memory leak in parser",
+            "html_url": "https://github.com/acme/widgets/pull/77",
+            "user": {"id": 31, "login": "contributor"},
+            "body": "<!-- hidden comment -->\n## Changes\nThis fixes **critical** memory leak in `tokenizer`.\n\nTested with all fixtures."
+        }),
+    );
+
+    let feed = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .expect("feed")
+        .value;
+    assert_eq!(feed.activities.len(), 1);
+    let target = feed.activities[0].pull_request.as_ref().unwrap();
+    assert_eq!(target.number, Some(77));
+    assert_eq!(target.title.as_deref(), Some("Fix memory leak in parser"));
+    let preview = target.body_preview.as_ref().expect("body preview");
+    assert_eq!(
+        preview.excerpt,
+        "Changes This fixes critical memory leak in tokenizer. Tested with all fixtures."
+    );
+    assert!(!preview.is_truncated);
+
+    // Initial feed publication was independent of repository descriptions: no /repos/* request was made.
+    let requests = transport.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.url.contains("/repos/acme/widgets") || r.url.contains("/pulls/77"))
+    );
+}

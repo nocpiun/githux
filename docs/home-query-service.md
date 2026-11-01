@@ -60,17 +60,18 @@ GET /search/issues
 
 `Link: rel="next"` 只用于确认“还有下一页”并取页码：目标必须同源、路径为本搜索端点、`page` 必须严格大于当前页；请求 URL 由**本层用调用者自己的查询身份重建**，因此恶意或过期的链接不能替换搜索表达式，也不能造成循环。
 
-## 3. Feed：事件流、关注关系与贡献作者
+## 3. Feed：事件流、关注关系、贡献作者与仓库详情
 
-Feed 由三段有界读取组成，**策略只在 `domain::home::build_feed` 里应用一次**：
+Feed 由四段有界读取组成，**策略只在 `domain::home::build_feed` 里应用一次**：
 
 | 读取 | 入口 | 端点 |
 | --- | --- | --- |
 | 1. 源事件 | `github::home::fetch_received_events`（首页）/ `fetch_received_events_page`（逐页） | `GET /users/<login>/received_events` |
 | 2. 关注关系 | `github::home::fetch_following` | `GET /user/following` |
 | 3. 贡献作者 | `github::home::fetch_pull_request_detail` | `GET /repos/{owner}/{repo}/pulls/{number}` |
+| 4. 仓库描述 | `data::PageReadSession::repository_descriptions` | `GET /repos/{owner}/{repo}` |
 
-账户作用域的编排与预算在 `data::PageReadSession::feed`；它先读源事件，再读关注关系，然后为**尚无作者的合并 PR**做去重后的详情读取，最后调用 `build_feed`。
+账户作用域的编排与预算在 `data::PageReadSession::feed`；它先读源事件，再读关注关系，然后为**尚无作者的合并 PR**做去重后的详情读取，最后调用 `build_feed` 并立即发布首屏。**仓库描述为可选异步丰富**：不阻塞 Feed 首屏发布，由 host 在后台去重读取并异步写入卡片，失败不影响基础卡片呈现。
 
 ### 3.1 源事件（`received_events`）
 
@@ -102,6 +103,7 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 - 官方 `PullRequestEvent.action` **包含 `merged`**（[GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types)）。线上 `action=merged` 的 `payload.pull_request` 是瘦对象，只有 `url`、`id`、`number`、`head`、`base`，**没有 `merged` 标记也没有 `user`**（2026-10-30 公开响应核对，见下）。
 - 因此合并证据为 `action == "merged"`，或旧形状的 `action == "closed"` 且 `pull_request.merged == true`；`closed` 单独不算合并。
 - 作者必须来自 `GET /repos/{owner}/{repo}/pulls/{number}` 的 `user` 字段。事件里若内嵌了 `user`（另一种来源），可直接使用，不必再读详情。
+- 详情响应同时包含 `body` 字段（Markdown 格式）：经 `domain::home::extract_body_preview` 提取纯文本摘要（剥除 Markdown 标记、HTML 注释与标签，按 200 字符上限在词边界截断并附省略号，超长附带“Read more”动作跳转 github.com 对应 PR 页面，卡片不就地展开）。
 - **绝不把点了 merge 的 actor 当作者**。作者缺失、详情读取失败或详情未确认 `merged: true` 时，该贡献不显示，并计入 `FeedPartialReason::AuthorUnresolved`。
 - 安全：仓库 owner/name 与编号取自解析后的事件，URL 由本层用受信 base 重建（`.`/`..`、路径分隔符、`?`、`#`、`@` 一律拒绝）；**从不请求 payload 里的 `url`**，因此不可能把凭据发往任意主机（见 [L007](../LESSONS.md#l007安全判定与真正的连接方必须用同一个-url-解析器)）。编号不匹配请求值时视为不可用证据。
 
@@ -142,6 +144,7 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 | `FollowingLimits::per_page` / `response_bytes` | 100 / 4 MiB | 端点上限与接收期限制 |
 | `PullRequestDetailLimits::response_bytes` | 1 MiB | 单条 PR 详情的接收期限制 |
 | 单次刷新作者详情读取数 | 30 | `FEED_AUTHOR_LOOKUP_LIMIT`，按 PR 去重 |
+| 单次刷新仓库描述读取数 | 20 | 异步丰富，按仓库坐标去重，并发 2 |
 
 `per_page=0`、超过端点上限、`max_pages=0`、条目预算为 0 会在发请求前返回 `HomeError::InvalidInput`，不消耗网络。
 
@@ -200,6 +203,10 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 | 从不请求 payload URL | `the_payload_url_is_never_used_for_the_request` |
 | 端到端真实形状 → 可见模型 | `real_adapter_shapes_produce_only_followed_contribution_star_and_create_cards`（断言请求数 = login + events + following + 1 详情） |
 | 重复合并事件只读一次详情 | `duplicate_merged_events_share_one_author_lookup` |
+| **仓库描述读取去重与失败容忍** | `repository_descriptions_deduplicates_requests_and_handles_failures`（同一仓库两张卡只读一次，404 返回 None 不影响卡片） |
+| **PR 正文提取与紧凑预览** | `feed_preserves_pr_body_and_extracts_clean_preview`（提取纯文本，剥除 HTML 注释/标记） |
+| **星标卡片展示描述与空描述静默** | `starred_cards_render_repository_description_under_name_and_missing_is_quiet`（两卡共享同一描述，未描述仓库静默） |
+| **PR 摘要截断与 Read more 交互** | `pr_body_previews_short_and_long_with_read_more_navigation`、`read_more_link_can_be_keyboard_activated`（短正文无按钮，长正文附外链且阻止冒泡、不展开卡片） |
 | 304 / `X-Poll-Interval` / `If-None-Match` | `not_modified_returns_etag_and_poll_interval`、`conditional_request_sends_if_none_match`、`localhost_304_round_trip_returns_not_modified` |
 | 取消、输入校验 | `cancellation_is_a_hard_error`（各适配器）、`invalid_logins_are_rejected`、`invalid_dates_are_rejected`、`invalid_limits_are_rejected_without_network` |
 
@@ -214,5 +221,6 @@ If-None-Match: "<etag>"        # 仅第一页，且调用者显式提供时
 - [Events](https://docs.github.com/en/rest/activity/events#list-events-received-by-the-authenticated-user)（`GET /users/{username}/received_events`、300 条/30 天、`ETag`、`X-Poll-Interval`、`304`）
 - [GitHub event types](https://docs.github.com/en/rest/using-the-rest-api/github-event-types)（payload schema；`PullRequestEvent.action` 明确列出 `opened`、`closed`、`merged`、`reopened`、`assigned`、`unassigned`、`labeled`、`unlabeled`）
 - [List the people the authenticated user follows](https://docs.github.com/en/rest/users/followers#list-the-people-the-authenticated-user-follows)（`GET /user/following`，需要认证）
-- [Get a pull request](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)（`user`、`merged`、`merged_at`、`title`、`html_url`）
+- [Get a pull request](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)（`user`、`merged`、`merged_at`、`title`、`html_url`、`body`）
+- [Get a repository](https://docs.github.com/en/rest/repos/repos#get-a-repository)（`description`）
 - 字段与状态码同时对照 `github/rest-api-description` 的 `api.github.com.2022-11-28` 描述。

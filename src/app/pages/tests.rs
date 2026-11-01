@@ -163,7 +163,8 @@ impl Transport for PageTransport {
                         "id": 555, "number": 5, "state": "closed", "merged": true,
                         "title": "Synthetic merged pull request",
                         "html_url": "https://github.com/alice/demo/pull/5",
-                        "user": {"id": 8, "login": "carol", "avatar_url": null}
+                        "user": {"id": 8, "login": "carol", "avatar_url": null},
+                        "body": "Fixes critical issue with bounded memory allocation."
                     }),
                 ));
             }
@@ -270,7 +271,9 @@ impl Transport for PageTransport {
                     serde_json::json!({
                         "id": 10, "name": "demo", "full_name": "alice/demo",
                         "owner": {"id": 1, "login": "alice", "avatar_url": null},
-                        "visibility": "public", "default_branch": "main",
+                        "visibility": "public", "private": false, "default_branch": "main",
+                        "fork": false, "archived": false, "stargazers_count": 0,
+                        "forks_count": 0, "open_issues_count": 0, "size": 1,
                         "description": "Synthetic repository", "html_url": "https://github.com/alice/demo"
                     }),
                 ));
@@ -627,8 +630,26 @@ fn the_shell_mounts_real_home_and_reads_its_two_columns(cx: &mut TestAppContext)
         "the merged contribution is visible"
     );
     assert!(
+        cx.debug_bounds("feed-pr-body-1").is_some(),
+        "the merged contribution renders its extracted body preview"
+    );
+    assert!(
         cx.debug_bounds("feed-event-row-2").is_none(),
         "the push event and the unfollowed star must not have rows"
+    );
+    // Drain enrichment for the starred repository description.
+    for _ in 0..100 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+        if cx.debug_bounds("feed-repo-description-0").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        cx.debug_bounds("feed-repo-description-0").is_some(),
+        "the starred repository displays its enriched description"
     );
 }
 

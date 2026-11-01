@@ -122,6 +122,9 @@ pub enum HomeAction {
     /// source page. Carries the binding/generation the view observed, so the host
     /// can reject a stale request after an account switch or refresh.
     LoadMoreFeed(RefreshRequest),
+    /// Open a safe, canonical external URL in the system browser (specifically
+    /// authorized for pull request "Read more" links; not a general redirect).
+    OpenExternalUrl(String),
 }
 
 pub type OnAction = Rc<dyn Fn(HomeAction, &mut Window, &mut App)>;
@@ -342,6 +345,8 @@ pub struct HomeView {
     /// End-of-scroll append state for the Feed column. `None` means not loading
     /// and no pending failure; a failure is retryable and preserves the cursor.
     feed_append: FeedAppendState,
+    /// Enriched repository descriptions, keyed by lowercase "owner/name".
+    repo_descriptions: std::collections::HashMap<String, String>,
     on_action: Option<OnAction>,
     avatar_renderer: Option<AvatarRenderer>,
     last_action: Option<HomeAction>,
@@ -383,6 +388,7 @@ impl HomeView {
             home_view: PanelView::new(cx),
             feed_view: PanelView::new(cx),
             feed_append: FeedAppendState::Idle,
+            repo_descriptions: std::collections::HashMap::new(),
             on_action: None,
             avatar_renderer: None,
             last_action: None,
@@ -481,6 +487,7 @@ impl HomeView {
         self.home_view.reset(window, cx);
         self.feed_view.reset(window, cx);
         self.feed_append = FeedAppendState::Idle;
+        self.repo_descriptions.clear();
         self.last_action = None;
         cx.notify();
     }
@@ -517,6 +524,51 @@ impl HomeView {
 
     pub fn feed_append_state(&self) -> &FeedAppendState {
         &self.feed_append
+    }
+
+    /// Enriches multiple repository descriptions at once, guarded by the active
+    /// request binding and generation.
+    pub fn set_repository_descriptions(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        descriptions: std::collections::HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        for (key, desc) in descriptions {
+            let key = key.trim().to_ascii_lowercase();
+            if !desc.trim().is_empty() {
+                self.repo_descriptions.insert(key, desc);
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Enriches or clears a single repository description, guarded by the active
+    /// request binding and generation.
+    pub fn set_repository_description(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        repo: &str,
+        description: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        let key = repo.trim().to_ascii_lowercase();
+        if let Some(desc) = description.filter(|d| !d.trim().is_empty()) {
+            self.repo_descriptions.insert(key, desc);
+        } else {
+            self.repo_descriptions.remove(&key);
+        }
+        cx.notify();
+        true
     }
 
     pub fn on_action(&mut self, handler: OnAction) {
@@ -1354,6 +1406,12 @@ impl PanelRows for FeedOutcome {
         cx: &mut Context<HomeView>,
     ) -> AnyElement {
         let activity = view.feed.state.data().unwrap().activities[index].clone();
+        // Repository description comes from the activity or the host-enriched map.
+        let repo_key = activity.event.repository.name.trim().to_ascii_lowercase();
+        let repo_desc = activity
+            .repository_description
+            .as_deref()
+            .or_else(|| view.repo_descriptions.get(&repo_key).map(String::as_str));
         // The avatar belongs to the credited subject, which for a merged pull
         // request is the author, not the merging actor.
         feed_row(
@@ -1364,6 +1422,7 @@ impl PanelRows for FeedOutcome {
             view.avatar_renderer
                 .as_ref()
                 .and_then(|render| render(&activity.subject, index, cx)),
+            repo_desc,
             cx,
         )
     }

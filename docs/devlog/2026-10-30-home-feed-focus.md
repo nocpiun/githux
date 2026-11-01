@@ -1,7 +1,7 @@
 # Home 仅 open、Feed 三类活动（主语必须被关注）
 
-- 2026-10-30，任务 `home-feed-focus`，执行者：基层实现 Agent。文件覆盖三轮：首轮信息筛选、第二轮真实数据更正、第三轮触底分页。
-- 目标与状态：实现负责人 2026-10-30 的 Home/Feed 信息筛选与触底加载更旧活动，等待 PR 审查；PR 目标分支为 `feature/shell-pages`，保持 `pending`，不自行合并。
+- 2026-10-30，任务 `home-feed-focus`，执行者：基层实现 Agent（第四轮由主 Agent 接管，第五轮经负责人 2026-11-01 授权由原实现者继续）。文件覆盖五轮：首轮信息筛选、第二轮真实数据更正、第三轮触底分页、第四轮加载延迟与历史边界、第五轮星标仓库描述与 PR 正文摘要。
+- 目标与状态：实现负责人 2026-11-01 授权的星标仓库描述与 PR 正文摘要及外链交互，等待 PR 审查；PR 目标分支为 `feature/shell-pages`，保持 `pending`，不自行合并。
 
 ## 背景与决定
 
@@ -133,3 +133,31 @@ powershell -File .agents/task/capture.ps1 -Scenario 3 -Out .agents/task/home-rew
 本轮验证（2026-10-31）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked --bin githux --example home` 均退出 0；此前 `cargo test --locked --bin githux feed_` 的 42 项定向回归通过。完整测试的主程序目标为 862 项通过，其余集成目标也全部通过。产品实现提交 `952f052` 的最新审查与 CI 已通过，CI 组合基线为 `35ac169`。
 
 随后收紧并发测试 fixture：凭据读取会经过 blocking worker，详情请求到达顺序并非契约；模拟详情响应改为按 URL 匹配，闸门仍独立控制完成顺序，避免 FIFO 响应偶然配错 PR。只修改测试，产品实现不变；`cargo test --locked --bin githux data::page_read_tests` 的 25 项通过，格式与 all-targets clippy 复验通过，新提交仍单独触发 CI/审查。此次没有重新进行真实 PAT 原生操作或网络性能基准，不将 GPUI 测试平台结果写成实机加速倍数，遵循 L002。
+
+## 第五轮：星标仓库描述与 PR 正文摘要（2026-11-01，负责人授权）
+
+负责人 2026-11-01 明确授权：在 Home Feed 中显示星标仓库的描述和已合并 PR 的正文预览；若 PR 描述长，展示紧凑摘录及 expand/read-more 控件；**点击该控件必须直接导航到对应的 PR 网页，绝不就地展开卡片**。
+
+### 改动与决定
+
+- **星标仓库描述**：
+  - 在卡片 inset 的仓库链接下方展示真实描述，采用 `line_clamp(3)` 紧凑折行；描述缺失或为空时直接静默，不保留空边距，不展示任何“Unavailable / Retry”错误段落。
+  - 通过官方 `GET /repos/{owner}/{repo}` 端点读取（复用已有 `fetch_repository`）；URL 严格根据已校验的合法仓库坐标由受信 base 重建，绝不请求 payload 中的任意 URL（遵循 L007）。
+  - **异步丰富与首屏独立**：Feed 首屏发布绝不等待仓库描述，保持第四轮优化的低延迟；描述在后台通过 `PageReadSession::repository_descriptions` 异步获取（2 个 worker 有界并发，每批次上限 20 个仓库），并经 account/generation 校验后安全丰富入视图。
+  - **同仓库去重**：两名关注用户星标同一仓库时只发一次详情请求；如果某仓库已存在于 host 缓存中，直接展示，不发重复网络请求。详情失败（如 404）仅记为 `None`，基础卡片完整保留。
+- **PR 正文摘要与 Read more 交互**：
+  - PR 作者解析端点 `GET /repos/{owner}/{repo}/pulls/{number}` 扩展反序列化 `body` 字段；`ResolvedPullRequest` 与 `FeedPayload::PullRequest` 均保留该字段，一次请求同时获取作者与正文，无额外网络调用。
+  - **纯文本提取与清洗**（`domain::home::extract_body_preview`）：基于 `pulldown_cmark` 事件流提取正文，剥除 Markdown 格式标记（`#`、`**`、`*`、`` ` ``、`[...](...)` 等）、HTML 标签与 HTML 注释（如 `<!-- ... -->`）；空白或纯标记/纯注释的 body 静默不占位。
+  - **截断规则**：上限设为 200 字符；不超过 200 字符时完整展示纯文本，不附省略号，不渲染“Read more”控件；超过 200 字符时在末尾 40 字符内的词边界截断并附 `…`，附带“Read more”跳转控件。
+  - **外链跳转**：用户明确要求点击直接打开对应 PR 网页。当前应用未实现内建 PR 详情页（`ActivateFeed` 被 host 忽略）；根据专属授权，通过 `HomeAction::OpenExternalUrl` 经 Shell 既有外部链接通道在系统浏览器中打开规范的 `https://github.com/{owner}/{repo}/pull/{number}`（URL 经严格坐标验证，拒绝非法 scheme）。
+  - **无就地展开**：点击“Read more”绝不展开卡片，卡片无行内展开状态；支持键盘 Tab 聚焦与 Enter/Space 激活；`on_click` 显式 `stop_propagation()`，不触发卡片选中或次级激活。
+- **原生预览证据**：
+  - `examples/home.rs` 构造代表性星标仓库描述（Towards a More Autonomous Agent System）与超长 PR body（含注释、Markdown 标记），抓取完整 1792×1256 原生帧 `.agents/task/home-desc-preview.png`：星标仓库显示三行折行描述，PR 卡片显示纯净摘要与 Read more 控件，短描述卡片无 Read more，建库卡片无多余空行。
+
+### 验证
+
+- 针对新场景编写的定向回归全部通过：
+  - UI：`starred_cards_render_repository_description_under_name_and_missing_is_quiet`（两卡共享同一描述，未描述仓库静默不破坏卡片）、`pr_body_previews_short_and_long_with_read_more_navigation`（短正文无按钮，长正文附外链且阻止冒泡、不改变卡片选中）、`read_more_link_can_be_keyboard_activated`（Tab + Enter 键盘激活）。
+  - Markdown：`empty_or_blank_markdown_yields_none`、`short_markdown_extracts_clean_plain_text_without_truncation`、`html_tags_and_headers_are_stripped`、`long_markdown_truncates_at_word_boundary_with_ellipsis`、`unicode_and_cjk_are_counted_safely`、`canonical_pr_url_validates_and_constructs`。
+  - 数据层：`repository_descriptions_deduplicates_requests_and_handles_failures`（同一仓库两张卡只读一次，404 返回 None 且不影响调用）、`feed_preserves_pr_body_and_extracts_clean_preview`（PR 详情正文清洗为 BodyPreview 且首屏发布不阻塞）。
+  - Shell 端到端：`the_shell_mounts_real_home_and_reads_its_two_columns` 在真实 Shell 宿主下完整验证：星标仓库异步丰富展示描述、合并 PR 展示正文摘要。

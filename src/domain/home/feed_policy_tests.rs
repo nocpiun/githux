@@ -52,6 +52,7 @@ fn live_merged(id: &str, number: u64, merger: FeedActor) -> FeedEvent {
             state: None,
             merged: None,
             author: None,
+            body: None,
         },
         merger,
     )
@@ -70,6 +71,7 @@ fn classic_merged(id: &str, author: FeedAuthor, merger: FeedActor) -> FeedEvent 
             state: Some("closed".into()),
             merged: Some(true),
             author: Some(author),
+            body: None,
         },
         merger,
     )
@@ -122,6 +124,7 @@ fn resolved(login: &str, id: u64) -> ResolvedPullRequest {
         merged: true,
         title: Some("Resolved title".into()),
         html_url: Some("https://github.com/subsurface/libdc/pull/144".into()),
+        body: None,
     }
 }
 
@@ -251,6 +254,7 @@ fn a_detail_response_that_does_not_confirm_the_merge_is_not_merge_evidence() {
             merged: false,
             title: None,
             html_url: None,
+            body: None,
         },
     );
     let outcome = build_feed(
@@ -291,6 +295,7 @@ fn closed_events_never_qualify_without_merge_evidence() {
                     login: "shulaoda".into(),
                     avatar_url: None,
                 }),
+                body: None,
             },
             actor(10, "maintainer"),
         )
@@ -329,6 +334,7 @@ fn opened_and_reopened_pull_requests_are_never_contributions() {
                 state: Some("open".into()),
                 merged: None,
                 author: None,
+                body: None,
             },
             actor(10, "someone"),
         );
@@ -575,6 +581,7 @@ fn feed_page_appends_without_duplicating_overlapping_events() {
             merged: true,
             title: None,
             html_url: None,
+            body: None,
         },
     );
 

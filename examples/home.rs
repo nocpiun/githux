@@ -157,6 +157,15 @@ impl Preview {
                 self.home.update(cx, |home, cx| {
                     home.apply_home(&self.binding, self.generation, search, cx);
                     home.apply_feed(&self.binding, self.generation, feed, cx);
+                    if SCENARIOS[self.scenario].label == "Mixed" {
+                        home.set_repository_description(
+                            &self.binding,
+                            self.generation,
+                            "synthetic-owner/repository",
+                            Some("Towards a More Autonomous Agent System".into()),
+                            cx,
+                        );
+                    }
                 });
             }
         }
@@ -193,6 +202,13 @@ impl Preview {
             outcome.activities.extend(second.activities.clone());
             outcome.next_page = None;
             home.apply_feed_page(&self.binding, self.generation, outcome, cx);
+            home.set_repository_description(
+                &self.binding,
+                self.generation,
+                "synthetic-owner/older-repo",
+                Some("An older foundational repository providing core utilities".into()),
+                cx,
+            );
         });
     }
 
@@ -431,6 +447,7 @@ fn merged_event(index: usize, merger: &str, repository: &str, number: u64) -> Fe
         state: None,
         merged: None,
         author: None,
+        body: None,
     };
     event
 }
@@ -495,6 +512,7 @@ fn excluded_events() -> Vec<FeedEvent> {
         state: Some("open".into()),
         merged: None,
         author: None,
+        body: None,
     };
     noise.push(opened);
 
@@ -508,6 +526,7 @@ fn excluded_events() -> Vec<FeedEvent> {
         state: Some("closed".into()),
         merged: Some(false),
         author: None,
+        body: None,
     };
     noise.push(closed_unmerged);
 
@@ -568,6 +587,13 @@ fn preview_authors() -> AuthorResolutions {
             merged: true,
             title: Some("Synthetic merged pull request".into()),
             html_url: None,
+            body: Some(
+                "This pull request refactors the parser to extract plain-text excerpts \
+                 from Markdown bodies without raw syntax like **bold**, *italic*, \
+                 and HTML comments. It provides a compact preview for long descriptions \
+                 with an expand affordance that navigates directly to the pull request page on GitHub."
+                    .into(),
+            ),
         },
     );
     authors.insert(
@@ -581,6 +607,7 @@ fn preview_authors() -> AuthorResolutions {
             merged: true,
             title: Some("Unfollowed author's contribution".into()),
             html_url: None,
+            body: None,
         },
     );
     authors
@@ -600,6 +627,7 @@ fn preview_authors_older() -> AuthorResolutions {
             merged: true,
             title: Some("Older synthetic merged pull request".into()),
             html_url: None,
+            body: Some("A short description that fits completely.".into()),
         },
     );
     authors

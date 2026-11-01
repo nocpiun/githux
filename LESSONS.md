@@ -100,6 +100,7 @@
 - **规则**："有就显示、没有就算了"的可选区块，其确认缺失/不可见应作为正常缺省：不渲染错误文案、不显示 Retry、不保留占位或空行间距，必要时整段省略。诊断语义（缺失 vs 不确定 vs 真实失败）留在内部状态，可见呈现只与影响相称：加载用动画，真实可操作失败才用一个小 warning 图标加 tooltip/无障碍名称，并且只在确实存在重试回调时提供重试。不要写服务实现解释给用户。
 - **原因**：负责人连续反馈 Profile README 把正常缺省渲染成故障：先是 "This section was not found or is not visible." 文本面板，再是 "Unavailable · Retry" 式大错误块。这类呈现既误导用户、占用可省略的空间，又把"缺失"和"网络/认证/限流失败"混成同一种可见状态，掩盖真正可操作的失败。根因不是文案，而是把可选缺省错误地当成必须显式呈现的错误。
 - **证据**：2026-10-30 `profile-readme-polish` 把 README 的 `SectionState::Unavailable` 改为整段省略（`src/ui/profile/render.rs` 的 `render_readme` 返回 `None`），真实 `SectionState::Error` 改用 `compact_status::failed` 单个 warning 图标；同名仓库 404 在 `src/app/pages/profile.rs` 归入缺省。回归 `confirmed_readme_absence_omits_the_whole_optional_section`、`actionable_readme_failure_keeps_a_compact_mark_not_absence`、`ready_to_absent_to_another_account_never_reuses_the_old_reader`。见 [开发日志](docs/devlog/2026-10-30-profile-readme-polish.md)。
+- **补充证据（卡片可选元数据）**：2026-11-01 `home-feed-focus` 星标仓库描述作为卡片内的可选附加内容，缺失、404 或为空时直接静默，不画空边距、不渲染占位或 Unavailable 错误段落，保留正常卡片内容；空白 PR 正文同样静默。测试 `starred_cards_render_repository_description_under_name_and_missing_is_quiet`。见 [Feed 开发日志](docs/devlog/2026-10-30-home-feed-focus.md)。
 - **范围**：外部数据驱动的可选区块（个人 README、附加资料、可选摘要）。本条目不授权把真实失败静默成成功缺省，也不要求所有 section 都省略；判断依据是该内容对页面是否必需，以及失败是否可操作。
 
 ## L015：虚拟列表的未知高度不能当成内容耗尽

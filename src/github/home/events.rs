@@ -496,6 +496,7 @@ fn convert_payload(type_name: &str, payload: &Value) -> (FeedEventType, FeedPayl
                 // maintainer's merge click is never credited as authorship and
                 // no extra pull-request request is needed.
                 author: author_at(payload, &["pull_request", "user"]),
+                body: string_at(payload, &["pull_request", "body"]),
             },
         ),
         "IssuesEvent" => (

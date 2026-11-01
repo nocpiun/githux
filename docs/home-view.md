@@ -33,6 +33,8 @@ pub fn set_loading(&mut self, column, binding, generation, ...) -> bool;
 pub fn apply_home(&mut self, binding, generation, HomeSearchOutcome, ...) -> bool;
 pub fn apply_feed(&mut self, binding, generation, FeedOutcome, ...) -> bool;
 pub fn apply_feed_page(&mut self, binding, generation, FeedOutcome, ...) -> bool; // 触底追加，不重置滚动/选择
+pub fn set_repository_descriptions(&mut self, binding, generation, HashMap<String, String>, ...) -> bool;
+pub fn set_repository_description(&mut self, binding, generation, repo, Option<String>, ...) -> bool;
 pub fn feed_append_loading(&mut self, binding, generation, ...) -> bool;
 pub fn feed_append_failed(&mut self, binding, generation, page, ...) -> bool;
 pub fn apply_error(&mut self, column, binding, generation, HomeError, ...) -> bool;
@@ -56,6 +58,7 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 | --- | --- |
 | `Refresh(RefreshRequest)` | `column`、触发时观察到的 binding 与 generation |
 | `LoadMoreFeed(RefreshRequest)` | Feed 触底时请求下一页更旧的活动；携带 binding/generation，host 重新核验后按 cursor 追加 |
+| `OpenExternalUrl(String)` | 专门用于 PR 正文“Read more”跳转至 github.com 的对应 PR 页面；不用于应用内未实现功能的常规外链 |
 | `Repository(RepositoryIdentity)` | `id`（Feed 有，Home 搜索模型无）、owner、name |
 | `Profile(ProfileIdentity)` | `Option<u64>` id 与 canonical 登录名；actor 保留真实 id，owner-only 为 None |
 | `ActivateWorkItem(WorkItemIdentity)` | Home 条目的全局 id、number、Issue/PR kind、仓库 |
@@ -68,7 +71,11 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。
 - 单栏最多同时呈现 loading、empty、error、unavailable 或 Ready 中的一种；Partial 仍保留已取条目并显示原因提示。
 - Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。owner/name 分段导航，更新时间为相对时间，标题和长名称有界截断。
-- Feed 是紧凑的活动卡片：avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 只放目标仓库与（合并 PR 时的）PR 标题/#号。没有 branch/ref/SHA/commit 数等 prose，也不为被过滤事件补造正文。
+- Feed 是紧凑的活动卡片：avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
+  - **星标仓库**：在仓库链接下方展示仓库真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
+  - **合并 PR**：展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮。
+  - **Read more 交互**：点击或键盘 Enter/Space 激活直接通过既有外部链接通道跳转到 GitHub 对应的 PR 页面（`https://github.com/{owner}/{repo}/pull/{number}`），**绝不在卡片内就地展开全文**，也不展开卡片；阻止事件冒泡，不触发卡片选中或次级激活。
+  - 没有 branch/ref/SHA/commit 数等技术噪声 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
 - 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。
 - 双列模式使用约 32 logical px 的间距、等宽列；窗口较窄（小于 760 logical px）时上下堆叠，纵向间距保持约 16px。顶部/左右留白不变，底部约 8px；生命周期 canvas 以绝对定位零尺寸参与 render，不再作为 flex child 留出额外 gap。
@@ -123,7 +130,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本机 Windows 使用序列化 Cargo helper，独立 target/：fmt、locked all-target check、clippy -D warnings、完整测试、产品与 home example 构建、diff check。最终结果与 PR head 见 PR34 交付评论，不以旧 head 结果代替当前 head。
 
-Home 装配当前 84 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。2026-10-30 新增：closed/merged/未知/缺失 Home 状态永不成为行、选择索引或激活目标；只保留三类 Feed 活动且不产生占位卡；合并 PR 归因 PR 作者而非 merge actor；全噪声 Feed 仍是正常空态且 readiness 保持 Complete；仅含 closed 的刷新不会让旧 open 行残留。第二轮新增：视图直接渲染 `build_feed` 的真实策略输出（关注主语过滤 + 瘦 `action=merged` 事件 + 作者解析），断言被过滤事件没有行与占位、合并卡片链接到作者；关注关系不完整时显示 Partial 提示而不是空 Feed。第三轮新增：触底单次 `LoadMoreFeed`、在途去重、`splice` 追加保留滚动锚点与选择、追加失败告警+点击重试、真正耗尽停止。
+Home 装配当前 95 项（含共享 scroll/domain 用例）。新增/更新覆盖 count/order 行消失、同槽 spinner 生命周期、canonical login 与 owner-only id、独立链接单次动作、键盘子链接、标题/icon 几何对齐、真实可变高度卡片与末项可达、30 秒任务失活/隐藏/释放清理、相对时间边界/offset/无效/未来；保留旧 binding/generation 拒绝、Partial/empty/error、1,000/300 虚拟化和滚轮一次/跨栏隔离。2026-10-30 新增：closed/merged/未知/缺失 Home 状态永不成为行、选择索引或激活目标；只保留三类 Feed 活动且不产生占位卡；合并 PR 归因 PR 作者而非 merge actor；全噪声 Feed 仍是正常空态且 readiness 保持 Complete；仅含 closed 的刷新不会让旧 open 行残留。第二轮新增：视图直接渲染 `build_feed` 的真实策略输出（关注主语过滤 + 瘦 `action=merged` 事件 + 作者解析），断言被过滤事件没有行与占位、合并卡片链接到作者；关注关系不完整时显示 Partial 提示而不是空 Feed。第三轮新增：触底单次 `LoadMoreFeed`、在途去重、`splice` 追加保留滚动锚点与选择、追加失败告警+点击重试、真正耗尽停止。2026-11-01 新增：星标仓库描述展示与空描述静默（多卡共享同一结果）、PR 正文 Markdown 纯文本截断提取、超长正文“Read more”外链跳转且不触发展开卡片。
 
 本轮实际查看 Windows 原生 PrintWindow 帧：144 DPI，宽布局 2130×1425 物理像素与窄布局 990×1000；计数/列框/分割线/右侧导航按钮消失，Home icon 对齐标题，Feed 卡片 header/inset 详情及相对时间正常。通过本任务 HWND 的消息切换 Mixed/Loading-error/Large，并取得 owner-only 与 repo-only hover underline 帧。未拿源码推断或测试平台代替视觉核验。
 

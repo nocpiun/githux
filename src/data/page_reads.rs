@@ -195,6 +195,93 @@ impl PageReadSession {
             .await
     }
 
+    /// Read descriptions for a list of repositories, deduplicated and with bounded
+    /// concurrency. If a lookup fails, `None` is stored so the card still displays
+    /// without a description.
+    pub async fn repository_descriptions(
+        &self,
+        repositories: Vec<(String, String)>,
+        max_lookups: usize,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<std::collections::HashMap<String, Option<String>>>, HomeError> {
+        let mut results = std::collections::HashMap::new();
+        let mut pending = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (owner, repo) in repositories {
+            let key = format!("{owner}/{repo}").to_ascii_lowercase();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if pending.len() < max_lookups {
+                pending.push((key, owner, repo));
+            } else {
+                results.insert(key, None);
+            }
+        }
+
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let worker = || async {
+            let mut resolved = Vec::new();
+            while let Some((key, owner, repo)) =
+                pending.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            {
+                let desc = match self
+                    .repository_description(owner, repo, cancel.clone())
+                    .await
+                {
+                    Ok(scoped) => scoped.value,
+                    Err(error) if matches!(error, HomeError::GitHub(GitHubError::Cancelled)) => {
+                        return Err(error);
+                    }
+                    Err(_) => None,
+                };
+                resolved.push((key.clone(), desc));
+            }
+            Ok::<_, HomeError>(resolved)
+        };
+        let (a, b) = tokio::try_join!(biased; worker(), worker())?;
+        for (key, desc) in a.into_iter().chain(b) {
+            results.insert(key, desc);
+        }
+        if !self.verify() {
+            return Err(GitHubError::StaleContext.into());
+        }
+        Ok(Scoped {
+            context: self.context().clone(),
+            value: results,
+        })
+    }
+
+    /// Read a single repository's description using the existing validated repository reader.
+    pub async fn repository_description(
+        &self,
+        owner: &str,
+        repo: &str,
+        cancel: CancellationToken,
+    ) -> Result<Scoped<Option<String>>, HomeError> {
+        let locator = RepositoryLocator::new(owner, repo).map_err(|_| HomeError::InvalidInput {
+            field: "repository coordinates",
+        })?;
+        let limits = RepositoryLimits {
+            response_bytes: 1024 * 1024,
+            ..Default::default()
+        };
+        let details = self
+            .repository
+            .repository(locator, &limits, cancel)
+            .await
+            .map_err(|error| match error {
+                RepositoryError::GitHub(e) => HomeError::GitHub(e),
+                _ => HomeError::InvalidResponse {
+                    message: "repository detail failed".into(),
+                },
+            })?;
+        Ok(Scoped {
+            context: details.context,
+            value: details.value.description,
+        })
+    }
+
     /// One source page of received events from a validated cursor.
     ///
     /// Unlike [`Self::feed_events`], this does not re-read the whole timeline: it
