@@ -157,6 +157,8 @@ pub(super) fn content(binding: Entity<SettingsBinding>, cx: &mut App) -> AnyElem
         )
         .child(
             div()
+                .w_full()
+                .min_w_0()
                 .text_color(cx.theme().colors.fg_muted)
                 .child("Choose the account used for GitHub reads, or add another identity."),
         );
@@ -268,6 +270,8 @@ pub(super) fn content(binding: Entity<SettingsBinding>, cx: &mut App) -> AnyElem
                 )
                 .child(
                     div()
+                        .w_full()
+                        .min_w_0()
                         .text_size(px(12.0))
                         .text_color(if warning {
                             cx.theme().colors.warning

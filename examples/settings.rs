@@ -71,10 +71,12 @@ fn main() {
                 ))),
                 _ => None,
             };
-            match initial {
-                Some(mode) => settings_example::open_window_with(cx, Some(mode)),
-                None => settings_example::open_window(cx),
-            }
+            let initial_category = std::env::var("GITHUX_SETTINGS_PREVIEW_CATEGORY")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0)
+                .min(5);
+            settings_example::open_window_with(cx, initial, initial_category);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

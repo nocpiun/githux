@@ -28,10 +28,16 @@ pub struct SettingsPreview {
     /// Opens a contextual form after the fixture mounts, so a native capture can inspect it
     /// without relying on synthetic window input. Production hosts leave this `None`.
     pub form: Option<FormMode>,
+    initial_category: usize,
     _receiver: Task<()>,
 }
 impl SettingsPreview {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, initial: Option<FormMode>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        initial: Option<FormMode>,
+        initial_category: usize,
+    ) -> Self {
         let mut this = Self {
             view: None,
             fixture: None,
@@ -40,6 +46,7 @@ impl SettingsPreview {
             scenario: Scenario::Normal,
             fixtures: true,
             form: initial,
+            initial_category,
             _receiver: cx.spawn_in(window, async |this, cx| {
                 loop {
                     cx.background_executor()
@@ -64,7 +71,12 @@ impl SettingsPreview {
                                     cx.new(|cx| SettingsBinding::new(controller, window, cx));
                                 let view = cx.new(|cx| SettingsView::new(binding, window, cx));
                                 view.update(cx, |view, _| {
-                                    view.fixtures = if this.fixtures { 5 } else { 0 }
+                                    view.fixtures = if this.fixtures { 5 } else { 0 };
+                                    view.category = if this.initial_category == 0 {
+                                        crate::settings::Category::Accounts
+                                    } else {
+                                        crate::settings::Category::Fixture(this.initial_category)
+                                    };
                                 });
                                 this.view = Some(view);
                                 this.fixture = Some(fixture);
@@ -157,11 +169,11 @@ impl Render for SettingsPreview {
 }
 
 pub fn open_window(cx: &mut App) {
-    open_window_with(cx, None);
+    open_window_with(cx, None, 0);
 }
 
-/// Also used by the native probe host to land directly in a contextual form.
-pub fn open_window_with(cx: &mut App, initial: Option<FormMode>) {
+/// Also used by the native probe host to land directly in a contextual form or a fixture category.
+pub fn open_window_with(cx: &mut App, initial: Option<FormMode>, initial_category: usize) {
     let bounds = gpui::Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
     cx.open_window(
         gpui::WindowOptions {
@@ -173,7 +185,9 @@ pub fn open_window_with(cx: &mut App, initial: Option<FormMode>) {
             }),
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| SettingsPreview::new(window, cx, initial.clone())),
+        |window, cx| {
+            cx.new(|cx| SettingsPreview::new(window, cx, initial.clone(), initial_category))
+        },
     )
     .expect("settings preview window");
 }
