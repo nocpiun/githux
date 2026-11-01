@@ -24,6 +24,9 @@
 //! low-level GitHub modules, so account-context checks stay with future data
 //! wiring and the UI is not falsely reported as protected.
 
+pub(crate) mod cache;
+#[cfg(test)]
+mod cache_tests;
 pub mod events;
 pub mod following;
 pub mod pull_request;

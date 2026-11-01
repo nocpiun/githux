@@ -1,5 +1,6 @@
 //! End-to-end through AccountService: synthetic credentials, mock transport.
 mod feed_refresh_tests;
+mod page_cache_race_tests;
 use super::account_tests::{config, key};
 use super::*;
 use crate::auth::memory::InMemoryCredentialStore;

@@ -37,6 +37,7 @@ pub struct PageReadSession {
     repository: RepositorySession,
     client: std::sync::Arc<crate::github::client::GitHubClient>,
     login: Login,
+    credential_commit: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for PageReadSession {
@@ -58,6 +59,7 @@ impl RepoService {
             repository,
             client: self.client.clone(),
             login,
+            credential_commit: self.credential_commit.clone(),
         })
     }
 }
@@ -84,6 +86,37 @@ impl PageReadSession {
                     .await
             })
             .await
+    }
+
+    /// Replace only this adapter's client. Authorization still flows through the
+    /// original RepositorySession (including credential, permit and epoch checks).
+    pub(super) fn with_page_client(
+        &self,
+        client: std::sync::Arc<crate::github::client::GitHubClient>,
+    ) -> Self {
+        Self {
+            repository: self.repository.clone(),
+            client,
+            login: self.login.clone(),
+            credential_commit: self.credential_commit.clone(),
+        }
+    }
+
+    /// Called only from the cache blocking worker. Serialize the final context
+    /// check and cache effect with existing account replacement/selection commits.
+    pub(super) fn cache_access<T>(&self, work: impl FnOnce() -> T) -> Result<T, GitHubError> {
+        let _gate = self
+            .credential_commit
+            .lock()
+            .map_err(|_| GitHubError::StaleContext)?;
+        if !self.verify() {
+            return Err(GitHubError::StaleContext);
+        }
+        Ok(work())
+    }
+
+    pub(super) fn page_client(&self) -> &std::sync::Arc<crate::github::client::GitHubClient> {
+        &self.client
     }
 
     pub fn context(&self) -> &RepositoryReadContext {
@@ -268,7 +301,9 @@ impl PageReadSession {
         };
         let details = self
             .repository
-            .repository(locator, &limits, cancel)
+            .read(cancel, async |pat, cancel| {
+                github::fetch_repository(&self.client, &pat, &locator, &limits, cancel).await
+            })
             .await
             .map_err(|error| match error {
                 RepositoryError::GitHub(e) => HomeError::GitHub(e),
@@ -645,7 +680,10 @@ impl PageReadSession {
         let locator = RepositoryLocator::new(&profile.login, &profile.login)?;
         let details = self
             .repository
-            .repository(locator, repository_limits, cancel.clone())
+            .read(cancel.clone(), async |pat, cancel| {
+                github::fetch_repository(&self.client, &pat, &locator, repository_limits, cancel)
+                    .await
+            })
             .await?;
         let identity = details.value.identity.clone();
         let canonical_same_name = details
@@ -678,12 +716,17 @@ impl PageReadSession {
         };
         let snapshot = self
             .repository
-            .revision(
-                &identity,
-                RevisionSpec::Ref(default_branch),
-                repository_limits,
-                cancel.clone(),
-            )
+            .read(cancel.clone(), async |pat, cancel| {
+                github::resolve_revision(
+                    &self.client,
+                    &pat,
+                    &identity,
+                    RevisionSpec::Ref(default_branch),
+                    repository_limits,
+                    cancel,
+                )
+                .await
+            })
             .await?;
         let identity = snapshot.value.repository().clone();
         let commit = snapshot.value.commit().clone();
@@ -691,11 +734,16 @@ impl PageReadSession {
         // root. Profile README eligibility requires the root README.md itself.
         let root = self
             .repository
-            .directory(
-                &SnapshotDirectory::root(&snapshot.value),
-                repository_limits,
-                cancel.clone(),
-            )
+            .read(cancel.clone(), async |pat, cancel| {
+                github::fetch_directory(
+                    &self.client,
+                    &pat,
+                    &SnapshotDirectory::root(&snapshot.value),
+                    repository_limits,
+                    cancel,
+                )
+                .await
+            })
             .await?;
         let readme_index = root.value.entries.iter().position(|entry| {
             entry.path.as_str().eq_ignore_ascii_case("README.md")
@@ -705,13 +753,29 @@ impl PageReadSession {
                 )
         });
         if let Some(index) = readme_index {
+            let blob_identity = BlobIdentity::from_file(&root.value, index)?;
+            let budget = blob_limits.decoded_bytes;
             let content = self
                 .repository
-                .content(
-                    &BlobIdentity::from_file(&root.value, index)?,
-                    blob_limits,
-                    cancel,
-                )
+                .read(cancel, async |pat, cancel| {
+                    let blob = github::blob::fetch_blob(
+                        &self.client,
+                        &pat,
+                        &blob_identity,
+                        blob_limits,
+                        cancel,
+                    )
+                    .await?;
+                    tokio::task::spawn_blocking(move || {
+                        crate::content::prepare_content(blob, budget)
+                    })
+                    .await
+                    .map_err(|_| {
+                        RepositoryError::GitHub(GitHubError::CredentialStore {
+                            message: "content preparation worker closed".into(),
+                        })
+                    })
+                })
                 .await?;
             self.readme_outcome(ProfileReadme::Prepared {
                 repository: identity,
