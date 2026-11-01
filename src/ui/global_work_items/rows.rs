@@ -3,15 +3,17 @@ use crate::{data::RepositoryReadContext, domain::work_item::*};
 use ely_core::{
     primitives::{FocusRing, Icon, IconName, Tooltip},
     theme::{ActiveTheme, IconSize, TextSize},
+    typography::Ellipsis,
 };
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 pub(super) const ROW_HEIGHT: f32 = 72.0;
+
 pub(super) fn row(
     item: &WorkItem,
     selected: bool,
     context: Option<RepositoryReadContext>,
-    width: f32,
+    width: gpui::Pixels,
     cx: &mut Context<WorkItemsView>,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
@@ -26,10 +28,10 @@ pub(super) fn row(
         .aria_label(label.clone())
         .tab_index(0)
         .focus_ring(cx)
-        .cursor_pointer()
         .min_w_0()
+        .flex_1()
         .overflow_hidden()
-        .whitespace_nowrap()
+        .cursor_pointer()
         .hover(|style| style.underline())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -46,7 +48,7 @@ pub(super) fn row(
                 });
             }
         })
-        .child(label);
+        .child(Ellipsis::new(label));
     let icon = match item.kind {
         WorkItemKind::Issue => IconName::CircleDot,
         WorkItemKind::PullRequest => IconName::GitPullRequest,
@@ -57,12 +59,8 @@ pub(super) fn row(
         ItemState::Merged => colors.accent,
         ItemState::Unknown => colors.warning,
     };
-    // The list measures items as MaxContent on first layout. Give the item a
-    // definite width and keep all text on GPUI's own truncating single line.
     div()
-        .id(format!("work-shell-{id}"))
-        .debug_selector(move || format!("work-shell-{id}"))
-        .w(px(width))
+        .w(width)
         .flex_none()
         .overflow_hidden()
         .child(
@@ -102,13 +100,11 @@ pub(super) fn row(
                                 .id(format!("work-title-{id}"))
                                 .debug_selector(move || format!("work-title-{id}"))
                                 .min_w_0()
-                                .max_w_full()
                                 .flex_1()
                                 .overflow_hidden()
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .tooltip(Tooltip::text(item.title.clone()))
-                                .truncate()
-                                .child(item.title.clone()),
+                                .child(Ellipsis::new(item.title.clone())),
                         ),
                 )
                 .child(
@@ -119,34 +115,26 @@ pub(super) fn row(
                         .w_full()
                         .min_w_0()
                         .overflow_hidden()
-                        .whitespace_nowrap()
                         .text_size(cx.theme().text_size(TextSize::Xs))
                         .text_color(colors.fg_subtle)
                         .child(link)
                         .child(
                             div()
                                 .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .font_family("Google Sans Code")
-                                        .child(format!("#{}", item.number)),
-                                )
-                                .child(div().child(item.state.label())),
+                                .font_family("Google Sans Code")
+                                .child(format!("#{}", item.number)),
                         )
+                        .child(div().flex_none().child(item.state.label()))
                         .child(
                             div()
                                 .id(format!("work-updated-{id}"))
                                 .min_w_0()
                                 .overflow_hidden()
                                 .tooltip(Tooltip::text(item.updated_at.clone()))
-                                .truncate()
-                                .child(format!(
+                                .child(Ellipsis::new(format!(
                                     "Updated {}",
                                     item.updated_at.replace('T', " ").trim_end_matches('Z')
-                                )),
+                                ))),
                         ),
                 ),
         )

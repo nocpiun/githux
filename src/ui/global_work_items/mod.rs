@@ -509,7 +509,15 @@ impl Render for WorkItemsView {
 }
 impl WorkItemsView {
     fn render_list(&self, opacity: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let width = f32::from(window.viewport_size().width) - 32.0;
+        // Measure outside the list's mutable layout borrow. The first frame
+        // falls back to the padded window width; later frames use the actual
+        // list viewport, so the component also fits a narrower pane.
+        let viewport = self.list.viewport_bounds().size.width;
+        let width = if viewport > px(0.0) {
+            viewport
+        } else {
+            window.viewport_size().width - px(32.0)
+        };
         let list = gpui::list(
             self.list.clone(),
             cx.processor(move |view: &mut WorkItemsView, index: usize, _, cx| {
