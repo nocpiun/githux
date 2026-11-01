@@ -168,11 +168,6 @@ impl Render for SettingsPreview {
     }
 }
 
-pub fn open_window(cx: &mut App) {
-    open_window_with(cx, None, 0);
-}
-
-/// Also used by the native probe host to land directly in a contextual form or a fixture category.
 pub fn open_window_with(cx: &mut App, initial: Option<FormMode>, initial_category: usize) {
     let bounds = gpui::Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
     cx.open_window(
