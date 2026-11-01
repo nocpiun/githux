@@ -41,6 +41,10 @@ Codex 首轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#di
 
 第二轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#discussion_r4434744048)）指出：提交失败后表单保持打开，但其行的 Revalidate 可用；无关重验证推进 epoch 会被上一轮实现误当成 PAT 已提交。修复为：提交失败且控制器不再 busy 时清除本绑定的待完成状态，之后 epoch 变化不再能关闭表单；现行表单保留，已提交的秘密仍按既有规则立即清空，失败后新输入不受影响。新增 `a_failed_submission_is_not_completed_by_a_later_unrelated_revalidation`，并再次覆盖第一轮“自动读取失败不能让已提交表单重开”的场景。聚焦测试 9 passed。
 
+## 第三轮审查修复
+
+第三轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#discussion_r4434773534)）指出 `activity` 门控把启动错误/警告也隐藏了。修复为只抑制尚未操作时的 `StatusTone::Info`，Error/Warning/Success 照常显示；新增 `a_startup_repository_failure_is_visible_before_any_user_action` 直接以 `Scenario::ReposFail` 验证自动读取失败在无用户操作时可见。同时为状态行补 debug selector。10 项聚焦测试、clippy 与全量测试通过。
+
 ## 交付与剩余边界
 
 待完成最终 required checks 与 PR。UI PR 添加 `pending`，负责人原生验收通过前不合并。真实 PAT、Windows IME 消息顺序、多 DPI、正式 Shell 组合和非 Windows 产品验收不能由该离线预览推断。

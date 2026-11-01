@@ -280,23 +280,30 @@ pub(super) fn content(binding: Entity<SettingsBinding>, cx: &mut App) -> AnyElem
     }
     content = content.child(list);
     // The one operation message lives next to the form when one is open, otherwise below the list.
+    // Suppress only the controller's informational startup line until this page has done something.
+    // Errors and warnings are real state (an automatic read may already have failed) and must never
+    // be hidden merely because the user has not acted yet.
     let status = |cx: &App| {
-        if !binding.read(cx).activity {
-            return None;
-        }
-        snapshot.status.as_ref().map(|status| {
+        let activity = binding.read(cx).activity;
+        snapshot.status.as_ref().and_then(|status| {
+            if !activity && status.tone == StatusTone::Info {
+                return None;
+            }
             let color = match status.tone {
                 StatusTone::Error => cx.theme().colors.danger,
                 StatusTone::Warning => cx.theme().colors.warning,
                 StatusTone::Success => cx.theme().colors.success,
                 StatusTone::Info => cx.theme().colors.fg_muted,
             };
-            div()
-                .id("settings-status")
-                .role(gpui::Role::Status)
-                .text_size(px(12.0))
-                .text_color(color)
-                .child(status.text.clone())
+            Some(
+                div()
+                    .id("settings-status")
+                    .debug_selector(|| "settings-status".into())
+                    .role(gpui::Role::Status)
+                    .text_size(px(12.0))
+                    .text_color(color)
+                    .child(status.text.clone()),
+            )
         })
     };
     // One operation message only. The list shows it when no form is open; an open form shows it

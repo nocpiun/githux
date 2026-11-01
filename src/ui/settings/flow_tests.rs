@@ -123,6 +123,22 @@ fn add_switch_and_revalidate_publish_authoritative_service_state(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn a_startup_repository_failure_is_visible_before_any_user_action(cx: &mut TestAppContext) {
+    let fixture = Fixture::open(Scenario::ReposFail);
+    let (_, binding, cx) = mount(cx, &fixture);
+    wait_idle(&binding, cx);
+    assert!(!binding.read_with(cx, |this, _| this.activity));
+    assert!(
+        cx.debug_bounds("settings-status").is_some(),
+        "an automatic read failure is an error, not suppressible startup progress"
+    );
+    let status = binding.read_with(cx, |this, cx| {
+        this.controller.read(cx).snapshot().status.clone()
+    });
+    assert!(status.is_some_and(|status| status.tone == crate::ui::accounts::StatusTone::Error));
+}
+
+#[gpui::test]
 fn committed_form_closes_even_when_the_follow_up_repository_read_fails(cx: &mut TestAppContext) {
     let fixture = Fixture::open(Scenario::ReposFail);
     let (_, binding, cx) = mount(cx, &fixture);
