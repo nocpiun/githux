@@ -72,7 +72,7 @@ pub(super) fn feed_summary(outcome: &FeedOutcome) -> Summary {
                 .collect::<Vec<_>>()
                 .join(" ");
             format!(
-                "Partial result · {details} Received Events is limited to at most 30 days / 300 events and may be delayed."
+                "Partial result · {details} This page only shows activities by accounts you follow, from Received Events, which covers at most 30 days / 300 events and may be delayed."
             )
         }
     };
@@ -84,7 +84,7 @@ pub(super) fn feed_summary(outcome: &FeedOutcome) -> Summary {
 fn feed_partial(reason: &FeedPartialReason) -> String {
     match reason {
         FeedPartialReason::PageFailed { .. } => {
-            "A later page failed; earlier events remain available.".to_string()
+            "A later page failed; earlier retained activities remain available.".to_string()
         }
         FeedPartialReason::PageLimit => "The local page budget stopped the read.".to_string(),
         FeedPartialReason::EntryLimit => "The local event budget truncated the read.".to_string(),
@@ -92,7 +92,8 @@ fn feed_partial(reason: &FeedPartialReason) -> String {
             "A later response exceeded its size budget.".to_string()
         }
         FeedPartialReason::ParseFailed { .. } => {
-            "A later page could not be parsed; earlier events remain available.".to_string()
+            "A later page could not be parsed; earlier retained activities remain available."
+                .to_string()
         }
         FeedPartialReason::UntrustedPagination => {
             "An untrusted pagination link was rejected.".to_string()
@@ -104,6 +105,14 @@ fn feed_partial(reason: &FeedPartialReason) -> String {
         FeedPartialReason::SsoPartial { organizations } => format!(
             "Some organizations require SSO authorization: {}.",
             safe_list(organizations)
+        ),
+        FeedPartialReason::FollowingIncomplete { details } => format!(
+            "Your followed accounts could not all be read ({}), so activities from accounts that may be followed were withheld.",
+            safe_list(details)
+        ),
+        FeedPartialReason::AuthorUnresolved { count } => format!(
+            "The author of {} merged pull request(s) could not be confirmed, so those contributions were withheld.",
+            count
         ),
     }
 }

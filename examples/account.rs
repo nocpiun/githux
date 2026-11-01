@@ -4,10 +4,9 @@
 //! product account controller, the product account presentation and the shared scrollbar; the
 //! product binary never declares this preview's modules or opens its account database.
 //!
-//! Every module below is declared at this file's top level with `#[path]`, exactly like
-//! `tests/account.rs`, so `rustfmt` and the Rust module resolver agree on every platform. An inline
-//! `mod { #[path] … }` block would make `#[path]` resolve against a virtual directory that does not
-//! exist on Linux.
+//! Every module below is declared at this file's top level with `#[path]`, so `rustfmt` and the
+//! Rust module resolver agree on every platform. An inline `mod { #[path] … }` block would make
+//! `#[path]` resolve against a virtual directory that does not exist on Linux.
 
 // Keep the preview console-free on Windows, like the product. Tests keep their console output in a
 // separate integration target.

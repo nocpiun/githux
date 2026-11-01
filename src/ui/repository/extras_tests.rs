@@ -124,6 +124,60 @@ fn scoped_retry_keeps_source_and_sibling_groups(cx: &mut TestAppContext) {
     assert_eq!(fixture.transport.count("/releases/latest"), 1);
 }
 #[gpui::test]
+fn releases_warning_mark_retries_only_that_group_and_disappears(cx: &mut TestAppContext) {
+    let (fixture, page, cx) = ready(cx, Scene::ReleasesFailure);
+    let overview = page.read_with(cx, |p, _| p.overview().unwrap().clone());
+    assert!(
+        overview.read_with(cx, |v, _| v.releases().error().is_none()),
+        "the release list itself is still usable"
+    );
+    // Both independent reads started; the fixture failed only the latest request. Whether the
+    // retry mark is shown depends on the latest reply arriving after the list reply, so drive the
+    // UI queue until that specific reply has landed.
+    for _ in 0..200 {
+        page.update_in(cx, |p, w, cx| p.drain(w, cx));
+        frames(cx);
+        if cx.debug_bounds("overview-retry-releases").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+    let mark = cx
+        .debug_bounds("overview-retry-releases")
+        .expect("latest failure shows one compact warning mark");
+    let release_reads = fixture.transport.count("/releases?");
+    let latest_reads = fixture.transport.count("/releases/latest");
+    let contributor_reads = fixture.transport.count("/contributors?");
+    cx.simulate_click(mark.center(), Modifiers::none());
+    for _ in 0..300 {
+        page.update_in(cx, |p, w, cx| p.drain(w, cx));
+        frames(cx);
+        if overview.read_with(cx, |v, _| {
+            v.latest_release()
+                .is_some_and(|state| state.value().is_some())
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+    assert!(
+        cx.debug_bounds("overview-retry-releases").is_none(),
+        "recovery removes the warning mark"
+    );
+    assert!(cx.debug_bounds("overview-release-version").is_some());
+    assert_eq!(fixture.transport.count("/releases?"), release_reads + 1);
+    assert_eq!(
+        fixture.transport.count("/releases/latest"),
+        latest_reads + 1
+    );
+    assert_eq!(
+        fixture.transport.count("/contributors?"),
+        contributor_reads,
+        "the scoped retry does not touch Contributors"
+    );
+}
+
+#[gpui::test]
 fn typed_actions_emit_once_and_old_binding_is_inert(cx: &mut TestAppContext) {
     let (_fixture, page, cx) = ready(cx, Scene::Normal);
     let received = Arc::new(Mutex::new(Vec::new()));
@@ -283,6 +337,7 @@ fn counts_are_independent_and_actions_are_host_entries(cx: &mut TestAppContext) 
     let received = Arc::new(Mutex::new(Vec::new()));
     let sink = received.clone();
     page.update(cx, |p, cx| {
+        p.enable_mutations(true);
         p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
         cx.notify();
     });
@@ -405,6 +460,7 @@ fn action_count_pills_are_inside_one_action_and_expire_with_binding(cx: &mut Tes
     let calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     page.update(cx, |p, cx| {
+        p.enable_mutations(true);
         p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
         cx.notify();
     });

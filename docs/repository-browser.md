@@ -20,6 +20,16 @@
 
 切出 Code 不再绘制树与正文，但保留 Code 导航意图（分支/选中路径/展开目录）；切回时若当前授权仍有效则恢复，失效则先重新验证，绝不恢复旧授权。
 
+## 正式 Shell 接入（2026-10-29）
+
+`app::pages::repository_page` 已把 `RepositoryPage` 挂到正式 workspace 的仓库路由：同一账户 `AccountService`/`BackgroundExecutor`、真实会话、既有 overview/Code/README/分支/底条均保留。普通标签切换调用新增 `suspend`，只结束滚动/阅读器手势并保留已验证内容；关闭只释放该页 host；账户或授权变化保留分支/路径/展开的导航意图，丢弃内容/固定提交/上下文后由新会话重读。Star/Fork 没有写回调，不宣称成功；contributor/release typed action 由 host 复核后进入统一导航。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
+
+## 紧凑状态呈现（2026-10-29 第二轮反馈）
+
+文件树目录行的 loading 改用 Ely spinner（tooltip 给出目录名）；目录失败与 root/branch 失败合并为一个黄色 warning 标记，tooltip 保留原因，可重试时同一标记的鼠标/Enter/Space 只发起该资源的一次重试，恢复后标记消失。树截断/不完整和 capped 改用 warning 图标 + tooltip，不再让长句占满行。真空目录 `empty`、README 缺失/不确定、错误详情面板和 Partial 仍保留文字，因为这些是数据/操作语义而非可折叠的紧凑失败。
+
+Releases/Contributors 的紧凑条也使用同一 warning/loading 呈现；latest 的确认空值是中性圆点，不是 warning。开发 fixture 新增 ReleasesFailure（只失败一次，可重试恢复），与既有一轮失败场景一致，只存在于 example/test 装配。
+
 ## 构造与生命周期（正式接入契约）
 
 主机只注入已存在的能力：`Arc<AccountService>`、`Arc<BackgroundExecutor>` 与一个 `RepositoryLocator`。构造后页面默认**未激活**：
@@ -133,3 +143,12 @@ Releases版本前为Ely Tag图标，链接后为Success Outline `Latest`。仅�
 Repository Markdown启用`MarkdownLayout::Repository`，根不保留固定上下空带，正文首尾0.75rem量级inset属于真实块测量内容，随文档滚动且计入wheel/thumb最大reach；左右各比原间距增加4px。源码/非文本状态和其他宿主默认不变。实现与GPUI padding/reach差异的原因见[reader布局契约](content-reader.md#repository-专用正文留白配置2026-10-28)。底部语言条不盖住内容inset；没有第二滚动容器或假AST条目。
 
 统一场景新增README paragraph/list/code/table end，全部走现有真实服务fixture管线，供实际wheel/thumb到底检查。自动测试分别验证每种正文末块的内容bounds到viewport底边仍有留白，不以块自身边框或末条目存在冒充。
+
+
+## 底部语言条与 island 圆角裁切（2026-10-29）
+
+Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：4px 高、按真实比例分块、不合并 Other、hover tooltip 由 GPUI 原生拟合。**但 GPUI 0.3.10 的 `ContentMask` 只有矩形边界**，"rounded + overflow_hidden" 只把圆角画在元素自己的背景与边框 quad 上，不裁子元素。所以只有色条有真实数据并贴到底边时，它会在 island 底部两个圆角处以方形越过弧线。
+
+修复位于 [`ui::island`](../src/ui/island.rs) 的 `RoundedClip`：它只包一个子元素、直接复用该子元素的 layout（不加 padding/尺寸/新布局盒），在子元素之后按 island 的**外**半径擦除四个 `radius × radius` 角方块中弧外的部分（用窗口背景色），再用同一半径重画 island 的 1px 边框。`Shell::island` 通过 `rounded_island(frame, outside, border)` 使用它。色条的比例、颜色、底部位置、hover/百分比 tooltip，以及文件树、README reader、滚动区域和 tab strip 的几何均未改动。
+
+边界说明：这是绘制层补偿，不是真正的几何裁切——若将来升级到支持非矩形 mask 的 GPUI，应换成真实 mask 并删除角擦除。开发预览 `cargo run --example repository` 另有一个**仅预览**的 `Corner clip: on/off` 开关，用于在同一真实窗口对比修复前后；产品始终开启。原生对照与像素边界见 [开发日志](devlog/2026-10-29-repository-language-clip.md)。

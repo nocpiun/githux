@@ -578,9 +578,9 @@ impl SourceView {
                 axis,
             },
             placement: match axis {
-                gpui::Axis::Vertical => crate::ui::scroll::Placement::overlay(4.0, 8.0)
-                    .clear_of(&crate::ui::scroll::Placement::overlay(4.0, 8.0), 0.0),
-                gpui::Axis::Horizontal => crate::ui::scroll::Placement::overlay(4.0, 8.0),
+                gpui::Axis::Vertical => crate::ui::scroll::Placement::overlay(1.5, 8.0)
+                    .clear_of(&crate::ui::scroll::Placement::overlay(1.5, 8.0), 0.0),
+                gpui::Axis::Horizontal => crate::ui::scroll::Placement::overlay(1.5, 8.0),
             },
             style: crate::ui::scroll::Style::DEFAULT,
             opacity,

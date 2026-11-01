@@ -33,10 +33,15 @@ pub use account::{AccountIdentity, AccountKey, AccountSummary, AuthEpoch, HostId
 pub use error::GitHubError;
 #[allow(unused_imports)]
 pub use home::{
-    DateBound, FeedActor, FeedEvent, FeedEventType, FeedFetch, FeedOutcome, FeedPartialReason,
-    FeedPayload, FeedReadiness, FeedRepository, HomeError, HomeItem, HomeItemKind,
+    AuthorResolutions, BodyPreview, DEFAULT_BODY_EXCERPT_CHARS, DateBound, FeedActivity,
+    FeedActivityKind, FeedActivityTarget, FeedActor, FeedAuthor, FeedEvent, FeedEventType,
+    FeedEventsRead, FeedFetch, FeedMergeCandidate, FeedOutcome, FeedPage, FeedPartialReason,
+    FeedPayload, FeedReadiness, FeedRepository, FeedSourceCursor, FeedSourcePage, FollowedAccount,
+    Following, FollowingPartialReason, FollowingReadiness, HomeError, HomeItem, HomeItemKind,
     HomePartialReason, HomeQuery, HomeReadiness, HomeRepositoryRef, HomeSearchOutcome, Login,
-    UpdatedWindow,
+    PullRequestDetail, PullRequestDetailOutcome, ResolvedPullRequest, UpdatedWindow, build_feed,
+    build_feed_activities, build_feed_page, extract_body_preview, extract_body_preview_with_limit,
+    is_retained_activity, local_activity, merge_candidate,
 };
 #[allow(unused_imports)]
 pub use profile::{

@@ -1,6 +1,6 @@
 # 第三方资产与依赖许可清单
 
-更新：2026-10-29。任务 `dependency-licenses`，基线 `730d2292dcd5bb981928341259c971e42ff497b5`。
+字体章节更新：2026-10-30（ui-fonts）；其余章节为 2026-10-29 任务 `dependency-licenses`，基线 `730d2292dcd5bb981928341259c971e42ff497b5`。
 
 本文记录当前首版**实际分发**的字体、图标、复制的 Markdown 代码、Rust 依赖与 Windows App SDK 运行时的来源、固定版本、哈希、许可证文本与实际分发形态，并区分已验证与未覆盖。它是后续打包的依据，不是法律结论，也不代表整个应用已通过发布验收。
 
@@ -11,7 +11,7 @@
 - 只核对本基线真正进入分发的对象：`Cargo.lock` 解析图、`assets/` 中的字体与 manifest、`src/platform/fonts.rs` 与 `ely-core` 的 `include_bytes!`、复制的 `src/ui/reader/markdown/` 源码、Windows App SDK 运行时。不扫描上游全部文件，也不把整库搬进仓库。
 - 依赖清单来自 `cargo metadata --locked --offline --format-version 1`（Rust 1.98.1）。其 `license` 字段是 **SPDX 声明**，用于筛选与分类；**SPDX 字符串不等于已逐项核验全量许可合规**。
 - 固定版本的许可文本从本机已获取的 cargo registry 源码与 Ely git checkout 按精确版本/修订读取；本机缺失的固定版本从官方精确 tag/revision 查证。
-- 未升级依赖、未改 `Cargo.lock`、未改缓存源码、未改项目许可证、未复制或替换字体/图标二进制。
+- 原清单不修改依赖或图标；2026-10-30 字体资源替换与衍生字面生成单独记录在第 1 节，未改 Cargo.lock。
 
 ### 复现命令
 
@@ -23,16 +23,13 @@ cargo metadata --locked --offline --format-version 1
 
 ## 1. 字体
 
-`src/platform/fonts.rs` 用 `include_bytes!` 把两个文件编译进 binary，启动时注册为 GPUI 字体：
+`src/platform/fonts.rs` 嵌入四个应用私有 UI 字面（Githux UI）与原 Google Sans Code。UI 衍生字面保留 Noto Sans v2.015 的全部 2,965 字符映射，补入 Noto Sans SC 2.004-H2 的 30,361 映射；400/500/600/700 均使用源字体对应权重，主字族改名以避免与上游/系统字体混淆。官方固定来源、每个文件体积/哈希与可复现生成过程统一维护于 [字体清单](../assets/fonts/README.md)，生成脚本为 [build-ui-fonts.py](../scripts/build-ui-fonts.py)。
 
-| 字体 | 固定版本 | 仓库文件（`include_bytes!` 路径） | 文件 SHA-256 | 大小 | 许可证 | 相邻许可文件 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Noto Sans Regular | [NotoSans-v2.015](https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSans-v2.015)（release commitish `c4a321e123e4d4ff315f57f4e0adf294fe3a95be`，2024-11-20） | `assets/fonts/noto-sans/NotoSans-Regular.ttf` | `478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823` | 621572 B | SIL OFL 1.1 | `assets/fonts/noto-sans/OFL.txt`（SHA-256 `303aa29b5fe1a05733ddfa4c68971e417df7fa05c4ea5ebc3bb897a261595700`） |
-| Google Sans Code | [v7.001](https://github.com/googlefonts/googlesans-code/releases/tag/v7.001)（2026-06-09） | `assets/fonts/google-sans-code/GoogleSansCode.ttf`（上游 `GoogleSansCode[MONO,wght].ttf`） | `74642762fae66d5883077794a763e1086394b8cb72f2623e456e06359dc5c64b` | 268264 B | SIL OFL 1.1 | `assets/fonts/google-sans-code/OFL.txt`（SHA-256 `550bdaa8fa49333ab3b9a6b6cb6f60d3c6c082b4bb2f99da2f28f8991e168387`） |
-
-- 官方 release tag 已用 GitHub API 核验存在；下载地址与归档 SHA-256 记录在 [`assets/fonts/README.md`](../assets/fonts/README.md)。**归档 SHA-256 本轮未重新下载核验**（Noto 归档约 117 MB）；两个**实际打包的 ttf 文件哈希本轮已重新计算并与清单一致**。
-- 相邻 `OFL.txt` 只保留在仓库，**没有**编译进 binary。因此当前开发构建里没有随字体携带的 OFL 文本；打包时必须单独随附（见第 8 节）。
-- 实际用法：Noto Sans 是 UI 字体（`src/app/mod.rs` 设为主题 `font_family`），Google Sans Code 是代码字体（主题 `mono_family`，用于 Source 查看器、Markdown 围栏代码与行内代码）。旧 `assets/fonts/README.md` 里“Hello heading/button / counter”的描述属于已删除的 Hello 原型，已更正；同处“Ely additionally bundles its own upstream assets and fonts”也已改为第 3 节的事实。
+- 四份 UI 字面共 43,707,220 B（41.68 MiB），替换旧 Latin-only 的 1,866,600 B。仅包含这两个 Noto 来源，没有引入其他语言字体集。
+- Noto Sans 与 Noto Sans SC 均为 SIL OFL 1.1；随包携带 `assets/fonts/githux-ui/OFL-NotoSans.txt`、`OFL-NotoSansSC.txt`。SC 来源原声明含 Reserved Font Name `Source`，衍生字体使用 `Githux UI` 名称。两份来源的版权和许可文本保留，未改写。
+- Google Sans Code v7.001 原文件 268,264 B，SHA-256 `74642762fae66d5883077794a763e1086394b8cb72f2623e456e06359dc5c64b`；字体与许可均未改。
+- CI artifact 打包步骤同时携带两份 UI 来源 OFL 及 Google Sans Code OFL。许可文本不嵌入 binary，单独分发时仍必须随附。
+- Windows GPUI 0.3.10 的显式 fallback 查询只使用系统字体集合。合成字面让中文直接命中应用内注册字体，不依赖系统安装；逐映射轮廓/advance 比对和原生 shaping 证据见[字体开发日志](devlog/2026-10-29-ui-fonts.md)。
 
 ### 上游 Ely 附带的字体（非本仓库文件）
 
@@ -174,7 +171,7 @@ grep -c '^\[\[package\]\]' Cargo.lock
 
 当前没有任何安装包/发布产物。未来打包/分发时，至少需要随附：
 
-1. 两个字体的 `OFL.txt`：`assets/fonts/noto-sans/OFL.txt`、`assets/fonts/google-sans-code/OFL.txt`（**未编译进 binary**）。
+1. UI 两份来源 OFL（`assets/fonts/githux-ui/OFL-NotoSans.txt`、`OFL-NotoSansSC.txt`）及 `assets/fonts/google-sans-code/OFL.txt`。
 2. IBM Plex Sans 的 OFL：`assets/licenses/ibm-plex-sans-ofl.txt`（binary 内也有一份 asset，但打包仍应显式随附）。
 3. Ely MIT：`assets/licenses/ely-mit.txt`（覆盖 `ely-core`/`ely-settings`/`ely-canvas` 与提取的 Markdown 派生代码）。
 4. Lucide 图标 ISC + Feather MIT：`assets/licenses/lucide-icons-isc.txt`。
@@ -187,16 +184,16 @@ grep -c '^\[\[package\]\]' Cargo.lock
 
 **本轮已验证：**
 
-- 两个打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；两份 `OFL.txt` 各自与其字体匹配（仅版权行与 FAQ 链接不同）。
+- 五份打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；三个来源的 OFL 与其字体匹配。Noto 归档的 SHA-256 本轮已按官方 release 重新下载核验为 `0c34df07…`。
 - Noto v2.015 与 Google Sans Code v7.001 的官方 release tag 存在（GitHub API 核验）。
-- `include_bytes!` 路径与 `assets/fonts/README.md` 的 include 描述一致；仓库内只有 `src/platform/fonts.rs` 两处 `include_bytes!`。
+- `include_bytes!` 路径与 `assets/fonts/README.md` 的 include 描述一致；仓库内`src/platform/fonts.rs` 五处 `include_bytes!`。
 - Ely 修订 `30c66fe1` 的 MIT 文本、`gpui-pre 0.3.10` 的 Apache-2.0 文本、Lucide 的 ISC+Feather MIT、IBM Plex OFL、pulldown-cmark MIT 均已按原文复制到 `assets/licenses/` 并计算 SHA-256。
 - `cargo metadata --locked --offline` 成功，得到 748 个 package 的版本与 SPDX 声明。
 - Windows App SDK 的固定包哈希与“脚本已复制 license.txt”在 [`scripts/windows-runtime-lib.ps1`](../scripts/windows-runtime-lib.ps1) 与测试中已有覆盖。
 
 **本轮未覆盖：**
 
-- 未重新下载核验字体归档 zip 的 SHA-256（Noto 归档约 117 MB）。
+- 字体归档已重新下载并核对 SHA-256；仍不核验归档内未打包的其他字面。
 - 未反汇编最终 binary，图标实际链接集合、`ely-canvas` 是否被链接均未以二进制证据固定。
 - 未逐项读取 748 个 package 的许可证原文；传递依赖只有 SPDX 声明分类。
 - 未把 build-only / dev-only / 非目标平台 crate 从“分发集合”中剔除。

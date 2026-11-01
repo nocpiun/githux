@@ -6,8 +6,9 @@
 //! boundary of the scroll group and never the fixed parts. Rows expose accessible names and full
 //! identifiers; long names are cut inside the column instead of widening it.
 
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, AvatarSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
@@ -307,7 +308,7 @@ pub(super) fn nav_row(
                 )
             }
         })
-        .tooltip(Tooltip::text(label));
+        .tooltip(ui_tooltip(label));
     marked(row.into_any_element(), active, height, cx)
 }
 
@@ -433,7 +434,7 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
                     .child(Ellipsis::new(full_name.clone())),
             )
         })
-        .tooltip(Tooltip::text(full_name))
+        .tooltip(ui_tooltip(full_name))
         .into_any_element();
     marked(row, active, height, cx)
 }
@@ -483,7 +484,7 @@ pub(super) fn account_row(
             .focus(move |style| style.border_color(focus))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(move |_, window, cx| run(window, cx))
-            .tooltip(Tooltip::text(sign_in_label))
+            .tooltip(ui_tooltip(sign_in_label))
             .child(
                 div()
                     .debug_selector(|| "sidebar-account-avatar".to_string())
@@ -570,7 +571,7 @@ pub(super) fn account_row(
         .focus(move |style| style.border_color(focus))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
-        .tooltip(Tooltip::text(if collapsed {
+        .tooltip(ui_tooltip(if collapsed {
             collapsed_label.clone()
         } else {
             identity_label.clone()
@@ -631,7 +632,7 @@ pub(super) fn account_row(
             // Placeholder for a future GitHub status editor: no navigation, no write.
             cx.stop_propagation();
         })
-        .tooltip(Tooltip::text(account.status_label))
+        .tooltip(ui_tooltip(account.status_label))
         .child(
             div()
                 .text_size(theme.text_size(TextSize::Sm))
@@ -773,7 +774,7 @@ pub(super) fn quarter_button(
                 .on_click(move |_, window, cx| run(window, cx))
         })
         .child(Icon::new(icon).size(IconSize::Sm).color(muted))
-        .tooltip(Tooltip::text(label))
+        .tooltip(ui_tooltip(label))
         .into_any_element()
 }
 
@@ -999,7 +1000,7 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
                                 .color(colors.fg_muted),
                         ),
                 )
-                .tooltip(Tooltip::text("More")),
+                .tooltip(ui_tooltip("More")),
         )
         .text_color(colors.fg_muted);
 

@@ -1,16 +1,19 @@
 //! `GET /search/issues` for a fixed `involves:` query.
 //!
-//! Query shape (parameterized, never a product default):
+//! Query shape (the confirmed Home rule, 2026-10-30):
 //!
 //! ```text
-//! q=involves:<login> [updated:>=<from>] [updated:<=<to>]
+//! q=involves:<login> is:open [updated:>=<from>] [updated:<=<to>]
 //! sort=updated&order=desc&per_page=<n>&page=<n>
 //! ```
 //!
 //! The login is validated by [`Login`], so it cannot inject extra qualifiers;
-//! the `updated` window is only emitted when the caller supplied one. The
-//! adapter deliberately does **not** add review-requested relations, a default
-//! time window, unread state, or browse history.
+//! the `updated` window is only emitted when the caller supplied one. `is:open`
+//! is always present, so closed and merged entries are not even requested — the
+//! filter is part of the query rather than a post-fetch hiding step over an
+//! unrestricted limited page. The adapter deliberately does **not** add
+//! review-requested relations, a default time window, unread state, or browse
+//! history.
 
 use crate::auth::token::Pat;
 use crate::domain::error::GitHubError;
@@ -66,7 +69,10 @@ struct SearchItem {
     number: u64,
     title: String,
     html_url: String,
-    state: String,
+    /// Missing/unknown states must be rejected rather than assumed open, so this
+    /// deserializes as optional and is normalized in [`convert_item`].
+    #[serde(default)]
+    state: Option<String>,
     updated_at: String,
     repository_url: String,
     /// Present (as an object) only for pull requests.
@@ -199,7 +205,10 @@ pub async fn search_involving(
                 break;
             }
             let item = match convert_item(raw) {
-                Ok(item) => item,
+                Ok(Some(item)) => item,
+                // A non-open state is filtered, not an error: it must not count
+                // as a parsed entry, a selection index or a completeness signal.
+                Ok(None) => continue,
                 Err(error) => {
                     // A malformed first page with nothing collected is a hard
                     // error. Once any item exists (later page, or an earlier
@@ -273,7 +282,9 @@ fn validate_limits(limits: &HomeSearchLimits) -> Result<(), HomeError> {
 }
 
 fn build_query(query: &HomeQuery) -> String {
-    let mut q = format!("involves:{}", query.login.as_str());
+    // `is:open` is the owner-confirmed Home filter. It precedes the optional
+    // window so the shape is stable and inspectable.
+    let mut q = format!("involves:{} is:open", query.login.as_str());
     if let Some(window) = &query.updated {
         if let Some(from) = window.from() {
             q.push_str(" updated:>=");
@@ -308,22 +319,34 @@ fn search_url(client: &GitHubClient, q: &str, per_page: u32, page: u32) -> Resul
     Ok(url)
 }
 
-fn convert_item(raw: SearchItem) -> Result<HomeItem, HomeError> {
+fn convert_item(raw: SearchItem) -> Result<Option<HomeItem>, HomeError> {
+    // Defense in depth: the query already asks for `is:open`, but a cached, mocked
+    // or otherwise non-conforming response must never put a closed/merged/unknown
+    // entry on screen. Search only reports `open`/`closed` for issues and open
+    // pull requests, so anything not exactly `open` is dropped here.
+    let Some(state) = raw
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|state| state.eq_ignore_ascii_case("open"))
+    else {
+        return Ok(None);
+    };
     let kind = if raw.pull_request.is_some() {
         HomeItemKind::PullRequest
     } else {
         HomeItemKind::Issue
     };
-    Ok(HomeItem {
+    Ok(Some(HomeItem {
         id: raw.id,
         kind,
         number: raw.number,
         title: raw.title,
         html_url: raw.html_url,
-        state: raw.state,
+        state: state.to_string(),
         updated_at: raw.updated_at,
         repository: parse_repository_url(&raw.repository_url)?,
-    })
+    }))
 }
 
 /// Extract `{owner}/{name}` from `…/repos/{owner}/{name}`. Parsing is done with
