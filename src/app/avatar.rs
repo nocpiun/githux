@@ -346,14 +346,15 @@ impl AvatarFetcher {
         }
 
         // 1. If we have a disk cache:
-        //    a) Read existing cached snapshot
-        //    b) Acquire write ticket BEFORE starting download to preserve stale-writer protections.
+        //    a) Acquire write ticket BEFORE reading snapshot and starting download
+        //       to preserve stale-writer protections.
+        //    b) Read existing cached snapshot under the same operation.
         let (cached_snapshot, write_ticket) = if let Some(cache) = &self.disk_cache {
             let cache = cache.clone();
             let key_clone = key.clone();
             tokio::task::spawn_blocking(move || {
-                let snapshot = cache.read_sync(&key_clone);
                 let ticket = cache.begin_write_sync(&key_clone).ok();
+                let snapshot = cache.read_sync(&key_clone);
                 (snapshot, ticket)
             })
             .await
@@ -447,10 +448,22 @@ impl AvatarFetcher {
                             .await;
                         }
                     } else {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            cache.invalidate_sync(&key_clone);
-                        })
-                        .await;
+                        // no-store: commit through the same pre-request ticket so that
+                        // newer writers/invalidations win instead of being unconditionally deleted.
+                        if let Some(ticket) = write_ticket {
+                            let etag = meta.etag.clone();
+                            let lm = meta.last_modified.clone();
+                            let cc = meta.cache_control.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
+                            })
+                            .await;
+                        } else {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                cache.invalidate_sync(&key_clone);
+                            })
+                            .await;
+                        }
                     }
                 }
                 Some(decoded)
