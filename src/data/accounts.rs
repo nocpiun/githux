@@ -137,7 +137,8 @@ impl AccountService {
             // New accounts (including remove/re-add) receive a fresh partition.
             // Rejected/replaced accounts retain their isolated partition until
             // repository-specific permission proof arrives from the consumer.
-            super::account_cache::provision(&cache, &summary.identity.key);
+            let directory = registry.lock().expect("registry lock").directory();
+            super::account_cache::provision(&cache, &summary.identity.key, &directory);
             if let Some(db) = db.as_ref()
                 && cleanup(db, store.as_ref()).is_err()
             {

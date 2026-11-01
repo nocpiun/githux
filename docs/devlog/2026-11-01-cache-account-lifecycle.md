@@ -54,6 +54,10 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 
 回归新增 re-add 后 recover、退休失败→remove 重试→凭据删除失败→重加的组合。最终 lifecycle 14 项通过（`d96f1076-911f-4978-ab42-acbc595a7258`）；未确认的 orphan retirement 保持 blocked，正常已退休分区不阻碍 remove/re-add。全量 test `a1c3543b-6998-4da6-9214-a225e1eb3271`、clippy `34f0abcb-38a7-4116-813f-ad08c17d676e`、build `1b767fde-afab-4b81-810a-8f8251e3832a`、fmt check `814a092f-b113-482b-867e-3912a7bee161` 通过。反馈均可直接修复，无裁决。
 
+## Codex 第五轮枚举屏障
+
+对 `241fe7e3ce92ba9895c6c7604d66e042e233923f` 的 P1 指出 `live_scopes()` 失败没有留下任何保护。现以对账完成标志封闭 provision，失败时记录待复核账户；锁解除后必须完成对账/退休，才可发绑定。真实 SQLite EXCLUSIVE 锁回归 `failed_scope_enumeration_blocks_provisioning_until_reconciliation_succeeds` 覆盖登录保留账户但无缓存、恢复后新 partition；lifecycle 15 项通过（`a9920816-9f50-4e87-b443-4a182bc1984b`）。全量 test `6b976f03-08ce-4a98-b2ab-99ad24803275`、clippy `d35d43c0-d3de-4a20-b198-8fc9b6a9e719`、build `f85069f9-0e92-4b05-ba2d-1e76038a3295` 通过。同一未修改 transport 用例在 `44b74b51-56ee-42b6-8bd7-bd0feff13db3` 再次时序失败，单独 `68a5371c-1d62-4925-ba40-22d63f98e411` 及最终全量通过。无需裁决。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。

@@ -33,7 +33,7 @@ let accounts = AccountService::open_with_cache(
 
 门禁 SQL 失败时账户替换不继续。由于结果可能未知，本地会撤回 scope map，并推进 `CacheStore` 的进程内 suspension generation；已经 clone 的旧 store/scope、旧 writer 和 lease 也立即拒绝。只有之后按持久目录和门禁重新对账才会发新 scope；suspension 不是授权证明，不持久化、不绕过 C1–C5。map 中没有 scope 不等于禁用缓存：故障后直接重试替换/移除也必须先按持久账户身份恢复该分区并应用 quarantine/retire，不能绕过门禁；已经持久退休的分区直接满足移除前提，不重开新分区。退休在本地封禁旧 clone 后才执行持久校验，因此重复移除或退休 SQL 失败也不会留下已启用的内存路由。
 
-退休失败的 orphan 会保持阻断，重加前必须成功持久退休并取得新 UUID partition，不能因 SQL 故障已解除而直接采用旧分区。明确拒绝若持久化失败，恢复时先重放该事件，成功后才可能发绑定；新的已验证 PAT 通过 `PatReplaced` 明确取代该待恢复事件，不会顺带解除仓库门禁。
+退休失败的 orphan 会保持阻断，重加前必须成功持久退休并取得新 UUID partition，不能因 SQL 故障已解除而直接采用旧分区。scope 枚举失败也是对账未完成的封闭屏障，不是空账本；登录可保留账户功能但不发绑定，登记该账户供恢复重审。明确拒绝若持久化失败，恢复时先重放该事件，成功后才可能发绑定；新的已验证 PAT 通过 `PatReplaced` 明确取代该待恢复事件，不会顺带解除仓库门禁。
 
 物理对象删除失败不回滚逻辑退休，其他账户不受影响，`recovery_pending()` 保持可观察。释放文件/修复目录后调用 `recover()`；成功后重试回收并清除 pending。账户功能不因缓存清理失败而被删除或伪装成清理成功。
 

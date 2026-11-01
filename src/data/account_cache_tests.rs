@@ -847,6 +847,36 @@ async fn failed_retire_remove_retry_and_credential_cleanup_cannot_reuse_live_par
     service.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn failed_scope_enumeration_blocks_provisioning_until_reconciliation_succeeds() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let orphan = cache.saved_account(key(1)).unwrap();
+    put(&test_binding(&cache, &orphan), &private_key(1), b"orphan");
+    let locked =
+        rusqlite::Connection::open(cache_config(&temp).root.join("cache.sqlite3")).unwrap();
+    locked.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = open_cached(accounts, credentials, mock.clone(), executor, cache.clone()).await;
+    assert!(service.recovery_pending().await.unwrap());
+    user(&mock, 1).await;
+    service.login(Pat::from_str("new_fake")).await.unwrap();
+    assert!(service.cache(&account_summary(&service, 1)).is_none());
+    drop(locked);
+    service.recover().await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_ne!(binding.scope().partition(), orphan.partition());
+    assert!(matches!(
+        binding.store().read(binding.scope(), &private_key(1)),
+        Ok(CacheRead::Miss(_))
+    ));
+    denied(&test_binding(&cache, &orphan), &private_key(1));
+    service.close().await.unwrap();
+}
+
 #[test]
 fn scope_enumeration_is_read_only_and_validates_persisted_account_ids() {
     let temp = tempfile::tempdir().unwrap();

@@ -36,6 +36,9 @@ pub(super) struct AccountCaches {
     store: CacheStore,
     scopes: HashMap<AccountKey, CacheScope>,
     recovery_pending: bool,
+    /// No scope may be provisioned until a complete durable enumeration has
+    /// succeeded. An empty result is not equivalent to an unavailable result.
+    reconciled: bool,
     /// Accounts whose old live partition must be durably retired before re-add.
     blocked: HashSet<AccountKey>,
     /// A classified rejection whose durable outcome was uncertain. Replaying it
@@ -50,6 +53,7 @@ impl AccountCaches {
             store,
             scopes: HashMap::new(),
             recovery_pending: false,
+            reconciled: false,
             blocked: HashSet::new(),
             rejected: HashSet::new(),
         };
@@ -63,6 +67,7 @@ impl AccountCaches {
     fn reconcile(&mut self, directory: &crate::storage::accounts::Directory) {
         self.scopes.clear();
         self.recovery_pending = false;
+        self.reconciled = false;
         let live = match self.store.live_scopes() {
             Ok(scopes) => scopes,
             Err(_) => {
@@ -77,9 +82,9 @@ impl AccountCaches {
                 .accounts
                 .iter()
                 .any(|saved| saved.identity.key == account);
-            // A blocked account may have been re-added while its SQL fault was
-            // still present. Its old partition is still an orphan for recovery:
-            // retire it before issuing any binding for the newly saved account.
+            // Retirement follows the durable directory, not the in-memory
+            // binding map. A saved account's replacement must quarantine rather
+            // than rotate its partition; an absent account's scope is an orphan.
             if unsaved || self.blocked.contains(&account) {
                 if self.store.retire(&scope).is_err() {
                     self.recovery_pending = true;
@@ -114,9 +119,13 @@ impl AccountCaches {
                 .iter()
                 .any(|saved| saved.identity.key == *account)
         });
+        // Do not erase a just-observed failed orphan retirement. Only a
+        // successful durable operation above may clear this protection.
+        self.blocked.extend(orphans);
         if self.store.recover().is_err() {
             self.recovery_pending = true;
         }
+        self.reconciled = true;
     }
 
     fn current(&self, account: &AccountKey) -> Option<AccountCache> {
@@ -415,9 +424,20 @@ pub(super) fn retire(cache: &Shared, account: &AccountKey) -> Result<(), CacheEr
     }
 }
 
-pub(super) fn provision(cache: &Shared, account: &AccountKey) {
+pub(super) fn provision(
+    cache: &Shared,
+    account: &AccountKey,
+    directory: &crate::storage::accounts::Directory,
+) {
     let mut cache = cache.lock().expect("account cache lock");
     if let Some(cache) = cache.as_mut() {
+        if !cache.reconciled {
+            // Enumeration failure is a closed barrier, not an empty ledger.
+            // Remember this just-committed account for a later recovery pass;
+            // an unsuccessful enumeration must not provision its old partition.
+            cache.blocked.insert(account.clone());
+            cache.reconcile(directory);
+        }
         if cache.blocked.contains(account) {
             // A failed orphan retirement must complete before re-add. Retiring
             // first makes saved_account allocate a fresh UUID partition instead
