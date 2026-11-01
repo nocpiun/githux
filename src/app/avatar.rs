@@ -392,14 +392,16 @@ impl AvatarFetcher {
             Ok((304, meta, _)) => {
                 // 304 Not Modified: must have matching representation in cache
                 if let Some(cached) = cached_snapshot {
-                    if let Some(cache) = &self.disk_cache {
+                    if let Some(cache) = &self.disk_cache
+                        && let Some(ticket) = write_ticket
+                    {
                         let cache = cache.clone();
-                        let key_clone = key.clone();
+                        let original = cached.clone();
                         let etag = meta.etag.clone();
                         let lm = meta.last_modified.clone();
                         let cc = meta.cache_control.clone();
                         let _ = tokio::task::spawn_blocking(move || {
-                            cache.revalidate_sync(&key_clone, etag, lm, cc)
+                            cache.commit_revalidation_sync(ticket, original, etag, lm, cc)
                         })
                         .await;
                     }

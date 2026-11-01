@@ -147,38 +147,28 @@ impl AvatarDiskCache {
         self.store.put(ticket, bytes, metadata)
     }
 
-    /// Update verification timestamp on 304 Not Modified.
-    /// If there is no existing valid cached representation matching validator, returns Ok(WriteOutcome::NotStored).
-    pub fn revalidate_sync<K: AvatarKeyLike>(
+    /// Update verification timestamp on 304 Not Modified using the pre-request write ticket
+    /// and the original cached snapshot that the request was based upon.
+    pub fn commit_revalidation_sync(
         &self,
-        key: &K,
+        ticket: crate::storage::cache::CacheWrite,
+        original_snapshot: CacheSnapshot,
         new_etag: Option<String>,
         new_last_modified: Option<String>,
         new_cache_control: Option<String>,
     ) -> Result<WriteOutcome, crate::storage::cache::CacheError> {
-        let cache_key = avatar_cache_key(key)?;
-        let existing = match self.store.read(&self.scope, &cache_key).ok() {
-            Some(CacheRead::Hit(lease)) => lease.snapshot().ok().flatten(),
-            _ => None,
-        };
-
-        let Some(existing) = existing else {
-            return Ok(WriteOutcome::NotStored);
-        };
-
-        let ticket = self.store.begin_write(&self.scope, &cache_key)?;
         let now = now_ms();
         let metadata = CacheMetadata {
             representation_version: AVATAR_REPRESENTATION_VERSION,
-            fetched_at_ms: existing.metadata.fetched_at_ms,
+            fetched_at_ms: original_snapshot.metadata.fetched_at_ms,
             verified_at_ms: now,
             completeness: CacheCompleteness::Complete,
-            etag: new_etag.or(existing.metadata.etag),
-            last_modified: new_last_modified.or(existing.metadata.last_modified),
-            cache_control: new_cache_control.or(existing.metadata.cache_control),
+            etag: new_etag.or(original_snapshot.metadata.etag),
+            last_modified: new_last_modified.or(original_snapshot.metadata.last_modified),
+            cache_control: new_cache_control.or(original_snapshot.metadata.cache_control),
         };
 
-        self.store.put(ticket, &existing.bytes, metadata)
+        self.store.put(ticket, &original_snapshot.bytes, metadata)
     }
 
     /// Explicitly remove/invalidate an avatar entry (e.g. on no-store).
