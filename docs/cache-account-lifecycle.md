@@ -31,7 +31,7 @@ let accounts = AccountService::open_with_cache(
 4. **移除**：先持久 `retire`，再提交目录删除与凭据 cleanup journal。退休成功立即拒绝读、写和旧 lease；目录提交失败可留下“账户仍保存但缓存仍退休”的保守状态，之后重试移除或重启对账。目录已删除而进程在退休前崩溃的反向窗口由启动对账覆盖。
 5. **启动/恢复**：先枚举 live scopes，退休所有不在持久账户目录中的分区，再为保存账户发绑定，最后回收退休 entries/slots 和孤儿对象。目录不存在账户时不能 provision。`recover()` 重试凭据 cleanup、目录对账与物理回收，不自动无限重试。
 
-门禁 SQL 失败时账户替换不继续。由于结果可能未知，本地会撤回 scope map，并推进 `CacheStore` 的进程内 suspension generation；已经 clone 的旧 store/scope、旧 writer 和 lease 也立即拒绝。只有之后按持久目录和门禁重新对账才会发新 scope；suspension 不是授权证明，不持久化、不绕过 C1–C5。退休在本地封禁旧 clone 后才执行持久校验，因此重复移除或退休 SQL 失败也不会留下已启用的内存路由。
+门禁 SQL 失败时账户替换不继续。由于结果可能未知，本地会撤回 scope map，并推进 `CacheStore` 的进程内 suspension generation；已经 clone 的旧 store/scope、旧 writer 和 lease 也立即拒绝。只有之后按持久目录和门禁重新对账才会发新 scope；suspension 不是授权证明，不持久化、不绕过 C1–C5。map 中没有 scope 不等于禁用缓存：故障后直接重试替换/移除也必须先按持久账户身份恢复该分区并应用 quarantine/retire，不能绕过门禁。退休在本地封禁旧 clone 后才执行持久校验，因此重复移除或退休 SQL 失败也不会留下已启用的内存路由。
 
 物理对象删除失败不回滚逻辑退休，其他账户不受影响，`recovery_pending()` 保持可观察。释放文件/修复目录后调用 `recover()`；成功后重试回收并清除 pending。账户功能不因缓存清理失败而被删除或伪装成清理成功。
 

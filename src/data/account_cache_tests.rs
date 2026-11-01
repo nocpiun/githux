@@ -496,14 +496,25 @@ async fn cache_gate_failure_aborts_replacement_and_preserves_old_credential() {
     );
     connection.execute_batch("DROP TRIGGER fail_gate").unwrap();
     drop(connection);
-    service.recover().await.unwrap();
-    assert_eq!(
-        value(
-            &service.cache(&account_summary(&service, 1)).unwrap(),
-            &private_key(1)
-        ),
-        b"old private"
-    );
+    // Retry WITHOUT recover: the withdrawn map entry must not be mistaken for
+    // a cache-disabled account. It still has to quarantine the existing scope.
+    user(&mock, 1).await;
+    service
+        .replace(key(1), Pat::from_str("new_fake"))
+        .await
+        .unwrap();
+    let replaced = service.cache(&account_summary(&service, 1)).unwrap();
+    denied(&replaced, &private_key(1));
+    replaced
+        .store()
+        .permission_confirmed(
+            replaced
+                .store()
+                .begin_revalidation(replaced.scope(), Some(1))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(value(&replaced, &private_key(1)), b"old private");
     service.close().await.unwrap();
 }
 

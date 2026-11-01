@@ -100,8 +100,13 @@ impl AccountCaches {
     fn event(&mut self, account: &AccountKey, event: AccessEvent) -> Result<(), CacheError> {
         let result = match self.scopes.get(account) {
             Some(scope) => self.store.access_event(scope, event),
-            // Cache-disabled account operations retain their network behavior.
-            None => Ok(()),
+            // A cache-enabled saved account may have had its handle withdrawn
+            // after an uncertain gate outcome. Reconcile its durable partition
+            // and still require this event; None here is NOT cache-disabled.
+            None => self
+                .store
+                .saved_account(account.clone())
+                .and_then(|scope| self.store.access_event(&scope, event)),
         };
         if result.is_err() {
             if let Some(scope) = self.scopes.get(account) {
@@ -116,7 +121,12 @@ impl AccountCaches {
     fn retire(&mut self, account: &AccountKey) -> Result<(), CacheError> {
         let result = match self.scopes.get(account) {
             Some(scope) => self.store.retire(scope),
-            None => Ok(()),
+            // Withdrawn handles are not disabled caching. Resolve the persisted
+            // partition and retire it before allowing a remove retry to commit.
+            None => self
+                .store
+                .saved_account(account.clone())
+                .and_then(|scope| self.store.retire(&scope)),
         };
         // Never leave an enabled in-memory route after a remove attempt, even
         // when the durable retirement outcome is unknown.

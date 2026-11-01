@@ -30,6 +30,12 @@
 
 跨 DB 安全操作失败时，撤销内存里的 map entry 不足以封禁此前 clone 出去的 `{store, scope}`；需要在共享 store 内设置只能拒绝、不能授权的本地代次屏障，并用旧 lease/writer 验证。该教训是否加入共享 LESSONS 由协调者决定。
 
+## Codex 第一轮反馈与修复
+
+PR #61 对 head `4b3832463b93132237237e7fadfb0d3873adc94f` 的 [P1 评论](https://github.com/nocpiun/githux/pull/61#discussion_r4436200521) 指出：门禁失败撤回 scope 后，直接重试替换会把 `None` 当成禁用缓存，可能未经隔离提交新 PAT。该问题成立，无需产品裁决，合并权限保持 worker。
+
+修复为 cache-enabled 服务在 map 缺 scope 时也按持久账户身份取得分区，并强制应用 `PatReplaced`；同类移除重试也强制 `retire`。回归扩展 `cache_gate_failure_aborts_replacement_and_preserves_old_credential`：故障解除后不调用 `recover()` 直接重试，旧 bytes 仍隔离，需逐仓库证明才恢复。聚焦测试通过：run `92fa3988-1732-4c69-b661-c18a0ef403d2`。一次等待共享 mutex 超过宿主 15 分钟工具时限，未执行测试，随后以同一参数取得上述记录。第二轮全量验证通过：`cargo test --locked`（`6ac7c4d0-ffd5-42e3-8a5d-c381c5fac356`）、`cargo clippy --locked --all-targets -- -D warnings`（`b29fada8-f369-4d1a-a552-8dae810f44a7`）、`cargo build --locked`（`f2412e4f-bdbd-4ea1-b35f-9a7b8c8e4f61`）；格式化后通过最终 fmt/diff 核验。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。
