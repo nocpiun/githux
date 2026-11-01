@@ -34,6 +34,7 @@ mod accounts;
 #[cfg(test)]
 mod page_read_tests;
 mod page_reads;
+pub mod reader_image_cache;
 pub mod reader_images;
 pub mod repository;
 pub mod repository_cache;
