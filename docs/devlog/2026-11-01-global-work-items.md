@@ -45,3 +45,13 @@
 按 L002 将公开 API 形状核验、mock/GPUI 和原生交互证据分开记录。按 L007 复用 reqwest URL 同源判定；按 L010 预览与行为测试共用可重复 fixture，未建模请求为 599 开发错误；按 L012 在一个联合 example 验收 API→controller→视图。没有新教训需要直接修改共享 LESSONS。
 
 UI 要求负责人原生验收，交付 PR 保持 pending，不自动合并。真实 PAT、私有授权/SSO、正式 Shell 挂载以及真人输入手感不由 mock 测试推导。
+
+## 相对时间返工（负责人反馈“时间要调整，同上”）
+
+主行时间由 `Updated <ISO>` 改为相对年龄，Issues 与 Pull Requests 共用同一行实现；精确 RFC3339 值仅保留 tooltip 与 `aria_label`。为避免第二套 parser，本模块用 `#[path = "../home/time.rs"] mod time;` 直接编译 Home 现有纯函数源文件，不编辑 `src/ui/home/time.rs`、`shots`、Home 引用或通知 worktree。这是过渡 consumer 接点：Notifications 正在抽取共享 helper，待其进入已提交基线后由协调者把引用统一到公共模块，本任务不读取其未提交文件、不阻塞等待。
+
+视图新增可注入 wall clock（`set_now`）与低频 30 秒刷新任务；固定 clock 不建任务，窗口失活/隐藏、`set_active(false)`、视图释放都会停止。没有新增 GitHub 刷新、轮询或写操作；请求、过滤、分页、导航和旧响应防护未改。
+
+fixture 时间改为相对预览固定时钟 2026-11-02T12:00:00Z 的确定性分布（Just now 边界、分钟、小时、Yesterday、多天、+09:00 offset），预览使用同一固定时钟，因此原生窗口能看到真实相对文本且可重复。测试断言 Issues/PR 两种列表的真实行标签包含分钟/小时/天/Yesterday，主文本不含 ISO 或 `Updated`，tooltip 保留精确值，invalid/future/offset 由共享 formatter 处理（未镜像重写 parser 测试）；并验证失活、隐藏、固定 clock 与释放后的计时停止。
+
+验证：聚焦 `cargo test --locked --example global_work_items work_items` 为 24 passed / 0 failed（run `0b413c96-1280-41fa-a544-3ff3654dc90f`）。原生 DPI 感知宽/窄帧与最终必需检查记录见本轮 PR 评论与交付状态。

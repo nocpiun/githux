@@ -4,8 +4,13 @@
 pub mod controller;
 mod presentation;
 mod rows;
+// Transitional consumer of Home's pure formatter: the same source file, no
+// second parser. Notifications is extracting a shared helper; this path will
+// be replaced by that committed module when it lands.
 #[cfg(test)]
 mod tests;
+#[path = "../home/time.rs"]
+mod time;
 
 use crate::ui::scroll::{self, Bars, Motion};
 use crate::{
@@ -23,7 +28,11 @@ use gpui::{
     AnyElement, App, Context, FocusHandle, Focusable, KeyDownEvent, ListAlignment, ListState,
     Render, Subscription, Task, Window, div, prelude::*, px,
 };
-use std::{rc::Rc, sync::Arc, time::Instant};
+use std::{
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
 
 /// The host checks its workspace/tab incarnation when consuming navigation.
 /// Account ownership is captured at the time the repository link is rendered.
@@ -49,8 +58,12 @@ pub struct WorkItemsView {
     pending_reveal: Option<usize>,
     clock: Instant,
     active: bool,
+    now: SystemTime,
+    fixed_now: bool,
+    time_task: Option<Task<()>>,
     on_repository: Option<OnRepository>,
     _activation: Subscription,
+    _visibility: Subscription,
 }
 impl WorkItemsView {
     pub fn new(
@@ -64,6 +77,12 @@ impl WorkItemsView {
         let list = ListState::new(0, ListAlignment::Top, px(rows::ROW_HEIGHT));
         let activation = cx.observe_window_activation(window, |view, _, cx| {
             scroll::cancel_region(&mut view.bars, &view.motion);
+            cx.notify();
+        });
+        let visibility = cx.observe_window_visibility(window, |view, visibility, _, cx| {
+            if !visibility.is_visible() {
+                view.cancel_activity();
+            }
             cx.notify();
         });
         let mut view = Self {
@@ -81,8 +100,12 @@ impl WorkItemsView {
             pending_reveal: None,
             clock: Instant::now(),
             active: true,
+            now: SystemTime::now(),
+            fixed_now: false,
+            time_task: None,
             on_repository: None,
             _activation: activation,
+            _visibility: visibility,
         };
         view.request(RequestMode::Replace, cx);
         Ok(view)
@@ -103,6 +126,12 @@ impl WorkItemsView {
             scroll::cancel_region(&mut view.bars, &view.motion);
             cx.notify();
         });
+        let visibility = cx.observe_window_visibility(window, |view, visibility, _, cx| {
+            if !visibility.is_visible() {
+                view.cancel_activity();
+            }
+            cx.notify();
+        });
         Self {
             controller,
             repos,
@@ -118,8 +147,12 @@ impl WorkItemsView {
             pending_reveal: None,
             clock: Instant::now(),
             active: true,
+            now: SystemTime::now(),
+            fixed_now: false,
+            time_task: None,
             on_repository: None,
             _activation: activation,
+            _visibility: visibility,
         }
     }
     pub fn on_repository(&mut self, callback: OnRepository) {
@@ -130,14 +163,62 @@ impl WorkItemsView {
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
         if !active {
-            self.controller.cancel();
-            self.receiver = None;
-            scroll::cancel_region(&mut self.bars, &self.motion);
+            self.shutdown_activity();
         } else if !self.controller.loaded {
             self.request(RequestMode::Replace, cx);
         }
         cx.notify();
     }
+    fn shutdown_activity(&mut self) {
+        self.controller.cancel();
+        self.receiver = None;
+        self.time_task = None;
+        scroll::cancel_region(&mut self.bars, &self.motion);
+    }
+
+    fn cancel_activity(&mut self) {
+        self.time_task = None;
+        scroll::cancel_region(&mut self.bars, &self.motion);
+    }
+
+    /// Inject a fixed wall clock for previews/tests. `None` resumes real time.
+    pub fn set_now(&mut self, now: Option<SystemTime>, cx: &mut Context<Self>) {
+        self.fixed_now = now.is_some();
+        self.now = now.unwrap_or_else(SystemTime::now);
+        self.time_task = None;
+        cx.notify();
+    }
+
+    fn sync_time_task(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.active || !window.is_window_active() || !window.is_visible() {
+            self.cancel_activity();
+            return;
+        }
+        if self.fixed_now || self.controller.rows.is_empty() {
+            self.time_task = None;
+            return;
+        }
+        if self.time_task.is_none() {
+            self.now = SystemTime::now();
+            self.time_task = Some(cx.spawn(async |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_secs(30))
+                        .await;
+                    if this
+                        .update(cx, |view, cx| {
+                            view.now = SystemTime::now();
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
     /// Use on account/auth changes, including A -> B -> A. No old rows survive.
     pub fn rebind(&mut self, cx: &mut Context<Self>) -> Result<(), WorkItemError> {
         let session = self.repos.work_item_session();
@@ -350,6 +431,7 @@ impl Focusable for WorkItemsView {
 }
 impl Render for WorkItemsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_time_task(window, cx);
         let current = self.controller.current();
         if !current {
             scroll::cancel_region(&mut self.bars, &self.motion);
@@ -517,7 +599,7 @@ impl WorkItemsView {
                 }
                 let item = view.controller.rows[index].clone();
                 let context = Some(view.controller.context().clone());
-                rows::row(&item, view.selected == Some(item.id), context, cx)
+                rows::row(&item, view.selected == Some(item.id), context, view.now, cx)
             }),
         )
         .size_full();

@@ -8,10 +8,21 @@ use gpui::{AnyElement, Context, div, prelude::*, px};
 
 pub(super) const ROW_HEIGHT: f32 = 72.0;
 
+/// Main-row text: relative age only, never a redundant "Updated" prefix.
+pub(super) fn time_label(value: &str, now: std::time::SystemTime) -> String {
+    super::time::relative(Some(value), now)
+}
+
+/// Exact RFC3339 value for the tooltip and accessible name only.
+pub(super) fn exact_time(value: &str) -> String {
+    value.to_string()
+}
+
 pub(super) fn row(
     item: &WorkItem,
     selected: bool,
     context: Option<RepositoryReadContext>,
+    now: std::time::SystemTime,
     cx: &mut Context<WorkItemsView>,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
@@ -129,11 +140,9 @@ pub(super) fn row(
                         .min_w_0()
                         .overflow_hidden()
                         .tooltip(Tooltip::text(item.updated_at.clone()))
+                        .aria_label(format!("Updated {}", item.updated_at))
                         .truncate()
-                        .child(format!(
-                            "Updated {}",
-                            item.updated_at.replace('T', " ").trim_end_matches('Z')
-                        )),
+                        .child(super::time::relative(Some(&item.updated_at), now)),
                 ),
         )
         .into_any_element()

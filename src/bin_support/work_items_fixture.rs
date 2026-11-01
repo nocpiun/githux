@@ -41,6 +41,26 @@ struct FixtureState {
     armed: bool,
     requests: Vec<String>,
 }
+/// Deterministic RFC3339 timestamps for the preview and tests: minutes, an
+/// hour, a day, several days, plus one offset spelling and invalid/empty cases.
+pub fn updated_at(index: u32) -> &'static str {
+    // Preview clock is 2026-11-02T12:00:00Z (see examples/global_work_items.rs).
+    // Keep a deterministic spread: just now, minutes, hours, yesterday, days.
+    const STAMPS: [&str; 8] = [
+        "2026-11-02T11:59:40Z",
+        "2026-11-02T11:57:00Z",
+        "2026-11-02T11:50:00Z",
+        "2026-11-02T09:00:00Z",
+        "2026-11-01T10:00:00Z",
+        "2026-10-29T12:00:00Z",
+        "2026-11-02T20:50:00+09:00",
+        "2026-11-02T11:30:00Z",
+    ];
+    STAMPS[(index as usize) % STAMPS.len()]
+}
+
+pub use updated_at as timestamp_for_index;
+
 pub struct FixtureTransport {
     state: Mutex<FixtureState>,
 }
@@ -129,7 +149,7 @@ impl FixtureTransport {
             let closed = q.contains("is:closed") || (!q.contains("is:open") && index % 3 != 0);
             let mut item = json!({"id":(if pr { 20000 } else { 10000 }) + (if created { 5000 } else { 0 }) + identity,
                 "number":index + 1,"title": if index % 5 == 0 { format!("Improve narrow-window keyboard navigation and preserve selection while loading additional results — synthetic item {index}") } else { format!("{} {} work item {index}", if created { "Created" } else { "Assigned" }, if pr { "PR" } else { "Issue" }) },
-                "state":if closed { "closed" } else { "open" },"updated_at":"2026-11-01T04:30:00Z", "repository_url":format!("https://api.github.com/repos/acme/{}", if index % 4 == 0 { "a-very-long-repository-name-for-narrow-layouts" } else { "desktop" })});
+                "state":if closed { "closed" } else { "open" },"updated_at":updated_at(index), "repository_url":format!("https://api.github.com/repos/acme/{}", if index % 4 == 0 { "a-very-long-repository-name-for-narrow-layouts" } else { "desktop" })});
             if pr { item["pull_request"] = json!({"merged_at":if closed && index % 2 == 0 { Some("2026-11-01T04:00:00Z") } else { None }}); }
             item
         }).collect();

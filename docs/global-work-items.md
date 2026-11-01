@@ -46,9 +46,11 @@ page.update(cx, |view, _| view.on_repository(callback));
 
 `RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
 
+时间显示：主行只显示相对年龄（`Just now`、`3 minutes ago`、`2 hours ago`、`Yesterday`、`4 days ago`），不再显示 `Updated` 前缀或 ISO 日期；精确 RFC3339 值只保留在 tooltip 与无障碍说明。解析与格式化复用 `src/ui/home/time.rs` 的同一纯函数（本模块以 `#[path]` 引用该源文件，不复制 parser），因此 offset、小数秒、无效和未来值得到与 Home 一致的诚实结果。页面可见且有行时，本地 wall clock 每 30 秒更新一次以刷新相对文本；窗口失活、隐藏、切离前台或视图释放时停止计时，不产生 GitHub 刷新或后台轮询。这是过渡消费者接点，Notifications 的共享 helper 落地后由协调者统一为单一公共模块。
+
 标题和行没有详情动作、浏览器跳转或替代仓库跳转，也不建立空详情路由。列表 Up/Down/Home/End 改变选择并 reveal；仓库名是独立 Tab/Enter 键盘入口，刷新、筛选和 Load more 使用 Ely 控件。每个视图使用有界 GPUI ListState、共享 Bars/Motion 和 FocusHandle，按可见行渲染；追加不重置滚动，失活/窗口 activation 变化清理 motion/drag。
 
-**当前原生限制：** 超长单行标题在真实 Windows 窗口仍可能越过右侧 content 区域并在窄窗边缘被裁切；GPUI 测试中的行右界断言通过，尚不能把该视觉项视为完成。交付 PR 因此保持 `pending`，等待负责人原生验收后再判断是否需继续修正。
+**已修复：** 早先原生长标题越界问题已定位为 Ely `Ellipsis` 隐藏全文污染 `ListState` intrinsic width 加旧 viewport 兜底，现改为 GPUI 原生 `truncate()` 且行由列表实际可用宽度约束；DPI 感知原生帧与 460px 受限 pane 回归均通过。交付 PR 仍保持 `pending`，等待负责人本轮相对时间改动的原生验收。
 
 ## 开发预览与验证边界
 

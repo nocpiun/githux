@@ -71,6 +71,11 @@ impl Preview {
                 });
             }))
         });
+        // A stable wall clock keeps the preview's relative labels meaningful
+        // and reproducible instead of racing the real time while the window
+        // is open. The page itself owns the low-frequency refresh timer.
+        let preview_now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_620_800);
+        page.update(cx, |page, cx| page.set_now(Some(preview_now), cx));
         Self {
             page,
             transport: runtime.transport.clone(),

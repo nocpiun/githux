@@ -447,3 +447,170 @@ fn long_text_stays_inside_a_constrained_pane_and_after_resize_and_append(cx: &mu
     cx.run_until_parked();
     assert_inside(cx, "10000");
 }
+
+fn fixed_clock() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_620_800)
+}
+
+#[gpui::test]
+fn rows_render_relative_time_and_keep_the_exact_value_for_the_tooltip(cx: &mut TestAppContext) {
+    let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    view.update(cx, |view, cx| view.set_now(Some(fixed_clock()), cx));
+    cx.simulate_resize(size(px(900.0), px(650.0)));
+    cx.run_until_parked();
+
+    let rows = view.read_with(cx, |view, _| view.controller.rows.clone());
+    let labels = rows
+        .iter()
+        .map(|item| {
+            (
+                item.updated_at.as_str(),
+                rows::time_label(&item.updated_at, fixed_clock()),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Varied fixture stamps exercise minutes, hours, Yesterday and days; the
+    // offset spelling is normalised by the shared formatter, not string-sliced.
+    assert!(
+        labels
+            .iter()
+            .any(|(_, label)| label.ends_with("minutes ago")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|(_, label)| label.ends_with("hours ago")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|(_, label)| label == "Yesterday"),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|(_, label)| label.ends_with("days ago")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|(stamp, _)| stamp.ends_with("+09:00")),
+        "{labels:?}"
+    );
+    // The visible main text is never an ISO date and never keeps "Updated".
+    assert!(
+        labels.iter().all(|(_, label)| !label.contains("2026-")
+            && !label.contains('T')
+            && !label.starts_with("Updated")),
+        "{labels:?}"
+    );
+    // Exact time is preserved only for tooltip/accessibility.
+    for (stamp, _) in &labels {
+        assert_eq!(rows::exact_time(stamp), *stamp);
+    }
+    // Invalid and future values never masquerade as a successful age.
+    assert_eq!(
+        rows::time_label("not-a-time", fixed_clock()),
+        "Time unavailable"
+    );
+    assert_eq!(
+        rows::time_label("2026-11-03T00:00:00Z", fixed_clock()),
+        "In the future"
+    );
+    assert_eq!(
+        rows::time_label("2026-11-02T20:50:00+09:00", fixed_clock()),
+        "10 minutes ago"
+    );
+    assert!(cx.debug_bounds("work-updated-10000").is_some());
+}
+
+#[gpui::test]
+fn elapsed_clock_stops_for_inactive_hidden_and_released_views(cx: &mut TestAppContext) {
+    let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.set_now(None, cx);
+            view.sync_time_task(window, cx);
+            assert!(view.time_task.is_some());
+            view.set_active(false, cx);
+            assert!(view.time_task.is_none());
+            view.set_active(true, cx);
+            view.sync_time_task(window, cx);
+            assert!(view.time_task.is_some());
+        })
+    });
+    cx.deactivate_window();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+    // A fixed clock never starts a background timer.
+    view.update(cx, |view, cx| view.set_now(Some(fixed_clock()), cx));
+    cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+    let weak = view.downgrade();
+    cx.replace_root_view(|_, _| gpui::EmptyView);
+    drop(view);
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_none(), "the timer holds only a weak view");
+}
+
+#[gpui::test]
+fn pull_request_rows_also_render_relative_time_from_the_same_row(cx: &mut TestAppContext) {
+    let fixture = FixtureRuntime::new(Scene::Mixed);
+    cx.update(ely_core::init_for_tests);
+    let repos = fixture.accounts.repo_service();
+    let executor = fixture.executor.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut controller = Controller::new(
+        repos.work_item_session().unwrap(),
+        WorkItemKind::PullRequest,
+    );
+    let request = controller.begin(RequestMode::Replace).unwrap();
+    let result = runtime.block_on(request.execute(&WorkItemLimits::default()));
+    assert!(controller.finish(&request, result));
+    assert!(
+        controller
+            .rows
+            .iter()
+            .all(|item| item.kind == WorkItemKind::PullRequest)
+    );
+    let accounts = fixture.accounts.clone();
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        WorkItemsView::with_controller(controller, accounts.repo_service(), executor, window, cx)
+    });
+    view.update(cx, |view, cx| view.set_now(Some(fixed_clock()), cx));
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+    let rows = view.read_with(cx, |view, _| view.controller.rows.clone());
+    assert_eq!(rows[0].kind, WorkItemKind::PullRequest);
+    let labels = rows
+        .iter()
+        .map(|item| rows::time_label(&item.updated_at, fixed_clock()))
+        .collect::<Vec<_>>();
+    assert!(
+        labels.iter().any(|label| label.ends_with("minutes ago")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label.ends_with("hours ago")),
+        "{labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .all(|label| !label.contains("2026-") && !label.starts_with("Updated"))
+    );
+    let id = rows[0].id;
+    assert!(
+        cx.debug_bounds(Box::leak(format!("work-item-{id}").into_boxed_str()))
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds(Box::leak(format!("work-updated-{id}").into_boxed_str()))
+            .is_some()
+    );
+}
