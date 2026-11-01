@@ -777,14 +777,19 @@ async fn recovery_retires_blocked_partition_after_readd_before_issuing_binding()
     let executor = Arc::new(BackgroundExecutor::new(2));
     let service = open_cached(accounts, credentials, mock.clone(), executor, cache.clone()).await;
     user(&mock, 1).await;
-    // Login is allowed to preserve account functionality while its cache is
-    // withheld. Recovery must not mistake the now-saved account for a safe one.
-    service.login(Pat::from_str("new_fake")).await.unwrap();
+    // Do not commit a new account whose old partition still cannot be retired.
+    // This is what makes a later restart safe without an in-memory marker.
+    assert!(matches!(
+        service.login(Pat::from_str("new_fake")).await,
+        Err(LoginError::CredentialSave(_))
+    ));
+    assert!(service.summaries().is_empty());
     connection
         .execute_batch("DROP TRIGGER fail_orphan")
         .unwrap();
     drop(connection);
-    service.recover().await.unwrap();
+    user(&mock, 1).await;
+    service.login(Pat::from_str("new_fake")).await.unwrap();
     let binding = service.cache(&account_summary(&service, 1)).unwrap();
     assert_ne!(binding.scope().partition(), orphan.partition());
     assert!(matches!(
@@ -863,10 +868,14 @@ async fn failed_scope_enumeration_blocks_provisioning_until_reconciliation_succe
     let service = open_cached(accounts, credentials, mock.clone(), executor, cache.clone()).await;
     assert!(service.recovery_pending().await.unwrap());
     user(&mock, 1).await;
-    service.login(Pat::from_str("new_fake")).await.unwrap();
-    assert!(service.cache(&account_summary(&service, 1)).is_none());
+    assert!(matches!(
+        service.login(Pat::from_str("new_fake")).await,
+        Err(LoginError::CredentialSave(_))
+    ));
+    assert!(service.summaries().is_empty());
     drop(locked);
-    service.recover().await.unwrap();
+    user(&mock, 1).await;
+    service.login(Pat::from_str("new_fake")).await.unwrap();
     let binding = service.cache(&account_summary(&service, 1)).unwrap();
     assert_ne!(binding.scope().partition(), orphan.partition());
     assert!(matches!(

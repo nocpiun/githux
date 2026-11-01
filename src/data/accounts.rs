@@ -103,6 +103,19 @@ impl AccountService {
                     })
                 })?;
             }
+            // Prepare cache safety before committing a newly saved account.
+            // Otherwise a restart could forget a failed orphan retirement and
+            // treat the newly committed account as owner of the old partition.
+            if old.is_none() {
+                let directory = registry.lock().expect("registry lock").directory();
+                super::account_cache::prepare_new(&cache, &identity.key, &directory).map_err(
+                    |_| {
+                        LoginError::CredentialSave(CredentialError::Platform {
+                            message: "private cache authorization update failed".into(),
+                        })
+                    },
+                )?;
+            }
             let mut db = database.lock().expect("database lock");
             let credential = if db.is_some() {
                 CredentialRef::versioned(

@@ -58,6 +58,10 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 
 对 `241fe7e3ce92ba9895c6c7604d66e042e233923f` 的 P1 指出 `live_scopes()` 失败没有留下任何保护。现以对账完成标志封闭 provision，失败时记录待复核账户；锁解除后必须完成对账/退休，才可发绑定。真实 SQLite EXCLUSIVE 锁回归 `failed_scope_enumeration_blocks_provisioning_until_reconciliation_succeeds` 覆盖登录保留账户但无缓存、恢复后新 partition；lifecycle 15 项通过（`a9920816-9f50-4e87-b443-4a182bc1984b`）。全量 test `6b976f03-08ce-4a98-b2ab-99ad24803275`、clippy `d35d43c0-d3de-4a20-b198-8fc9b6a9e719`、build `f85069f9-0e92-4b05-ba2d-1e76038a3295` 通过。同一未修改 transport 用例在 `44b74b51-56ee-42b6-8bd7-bd0feff13db3` 再次时序失败，单独 `68a5371c-1d62-4925-ba40-22d63f98e411` 及最终全量通过。无需裁决。
 
+## Codex 第六轮保存前屏障
+
+对 `08a9a67c1ea4b1cf6a27a9e3f02eb52ef6572fea` 的 P1 指出进程内 blocked 在“先登录后退休”下跨重启丢失。改为 `prepare_new` 在账户目录/新凭据提交前完成对账与必要退休；故障时不保存新账户，而不是提交后仅撤回绑定。既有账户目录保持可用，故障解除后重试登录并分配新分区。lifecycle 15 项通过（`4b6d605e-e723-4aad-b3a7-3a4b18c97463`）；全量 test `5f14b1f7-975d-4055-a6f5-19d667a3836c`、clippy `4437846e-ea33-4c08-b113-9e7f74459e75`、build `00d6fa94-ead3-4569-9008-2228aa89ef9d`、fmt check `b1dc5987-6502-47a7-bc09-ff6987f0cd1b` 通过。无需新增账户 DB schema，也无需裁决。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。

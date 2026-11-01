@@ -25,7 +25,7 @@ let accounts = AccountService::open_with_cache(
 
 账户目录与缓存 DB 不共享事务。所有生命周期提交沿用 `credential_commit` 串行化，采用以下持久顺序：
 
-1. **保存**：目录/凭据按既有独立 revision 协议提交后，provision 已保存账户的 scope。remove/re-add 通过退休记录获得新 UUID partition；新保存不会重置已有 quarantine。
+1. **保存**：先对账并完成新身份可能存在的旧分区退休，再按既有独立 revision 协议提交目录/凭据并 provision scope。对账或退休未确认时不保存该新身份，避免重启后把旧分区误认给新账户。remove/re-add 通过退休记录获得新 UUID partition；新保存不会重置已有 quarantine。
 2. **替换 PAT**：先核对账户 incarnation，再持久 `PatReplaced`，之后才能保存新槽并提交目录。旧私有内容先进入逐仓库隔离。若随后凭据/目录步骤失败，旧凭据和旧目录继续权威，但缓存保持隔离，不能因回滚重新放开。
 3. **明确凭据拒绝**：`RepoService::credential_rejected(context)` 只接收已分类的明确拒绝，blocking 前后都复核原 context，并在提交锁内再次复核；迟到 401 返回 `StaleContext`，不能污染替换后的凭据或 remove/re-add 账户。网络、超时、5xx、限流、模糊 403/404 不调用它。
 4. **移除**：先持久 `retire`，再提交目录删除与凭据 cleanup journal。退休成功立即拒绝读、写和旧 lease；目录提交失败可留下“账户仍保存但缓存仍退休”的保守状态，之后重试移除或重启对账。目录已删除而进程在退休前崩溃的反向窗口由启动对账覆盖。
@@ -33,7 +33,7 @@ let accounts = AccountService::open_with_cache(
 
 门禁 SQL 失败时账户替换不继续。由于结果可能未知，本地会撤回 scope map，并推进 `CacheStore` 的进程内 suspension generation；已经 clone 的旧 store/scope、旧 writer 和 lease 也立即拒绝。只有之后按持久目录和门禁重新对账才会发新 scope；suspension 不是授权证明，不持久化、不绕过 C1–C5。map 中没有 scope 不等于禁用缓存：故障后直接重试替换/移除也必须先按持久账户身份恢复该分区并应用 quarantine/retire，不能绕过门禁；已经持久退休的分区直接满足移除前提，不重开新分区。退休在本地封禁旧 clone 后才执行持久校验，因此重复移除或退休 SQL 失败也不会留下已启用的内存路由。
 
-退休失败的 orphan 会保持阻断，重加前必须成功持久退休并取得新 UUID partition，不能因 SQL 故障已解除而直接采用旧分区。scope 枚举失败也是对账未完成的封闭屏障，不是空账本；登录可保留账户功能但不发绑定，登记该账户供恢复重审。明确拒绝若持久化失败，恢复时先重放该事件，成功后才可能发绑定；新的已验证 PAT 通过 `PatReplaced` 明确取代该待恢复事件，不会顺带解除仓库门禁。
+退休失败的 orphan 会保持阻断，重加前必须成功持久退休并取得新 UUID partition，不能因 SQL 故障已解除而直接采用旧分区。scope 枚举失败也是对账未完成的封闭屏障，不是空账本；新登录在准备阶段被拒绝而不提交目录，已有账户继续可用，恢复后重试。明确拒绝若持久化失败，恢复时先重放该事件，成功后才可能发绑定；新的已验证 PAT 通过 `PatReplaced` 明确取代该待恢复事件，不会顺带解除仓库门禁。
 
 物理对象删除失败不回滚逻辑退休，其他账户不受影响，`recovery_pending()` 保持可观察。释放文件/修复目录后调用 `recover()`；成功后重试回收并清除 pending。账户功能不因缓存清理失败而被删除或伪装成清理成功。
 

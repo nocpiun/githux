@@ -424,6 +424,35 @@ pub(super) fn retire(cache: &Shared, account: &AccountKey) -> Result<(), CacheEr
     }
 }
 
+pub(super) fn prepare_new(
+    cache: &Shared,
+    account: &AccountKey,
+    directory: &crate::storage::accounts::Directory,
+) -> Result<(), CacheError> {
+    let mut cache = cache.lock().expect("account cache lock");
+    let Some(cache) = cache.as_mut() else {
+        return Ok(());
+    };
+    if !cache.reconciled {
+        cache.reconcile(directory);
+    }
+    if !cache.reconciled {
+        cache.blocked.insert(account.clone());
+        return Err(CacheError::AccessDenied);
+    }
+    if cache.blocked.contains(account)
+        || cache
+            .store
+            .live_scopes()?
+            .iter()
+            .any(|scope| scope.account() == account)
+    {
+        cache.blocked.insert(account.clone());
+        cache.retire(account)?;
+    }
+    Ok(())
+}
+
 pub(super) fn provision(
     cache: &Shared,
     account: &AccountKey,
