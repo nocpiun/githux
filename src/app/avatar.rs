@@ -371,6 +371,8 @@ impl AvatarFetcher {
             .as_ref()
             .and_then(|s| s.metadata.last_modified.as_deref());
 
+        let has_metadata = self.detailed.is_some() || self.disk_cache.is_none();
+
         let net_result: Result<(u16, AvatarResponseMetadata, Vec<u8>), ()> =
             if let Some(detailed) = &self.detailed {
                 detailed
@@ -435,34 +437,38 @@ impl AvatarFetcher {
                     .unwrap_or(true);
 
                 if let Some(cache) = &self.disk_cache {
-                    let cache = cache.clone();
-                    let key_clone = key.clone();
-                    if permits_storage {
-                        if let Some(ticket) = write_ticket {
-                            let etag = meta.etag.clone();
-                            let lm = meta.last_modified.clone();
-                            let cc = meta.cache_control.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
-                            })
-                            .await;
-                        }
-                    } else {
-                        // no-store: commit through the same pre-request ticket so that
-                        // newer writers/invalidations win instead of being unconditionally deleted.
-                        if let Some(ticket) = write_ticket {
-                            let etag = meta.etag.clone();
-                            let lm = meta.last_modified.clone();
-                            let cc = meta.cache_control.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
-                            })
-                            .await;
+                    // If metadata is not available (only basic AvatarBytes trait injected),
+                    // skip disk caching entirely to avoid violating HTTP cache semantics.
+                    if has_metadata {
+                        let cache = cache.clone();
+                        let key_clone = key.clone();
+                        if permits_storage {
+                            if let Some(ticket) = write_ticket {
+                                let etag = meta.etag.clone();
+                                let lm = meta.last_modified.clone();
+                                let cc = meta.cache_control.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
+                                })
+                                .await;
+                            }
                         } else {
-                            let _ = tokio::task::spawn_blocking(move || {
-                                cache.invalidate_sync(&key_clone);
-                            })
-                            .await;
+                            // no-store: commit through the same pre-request ticket so that
+                            // newer writers/invalidations win instead of being unconditionally deleted.
+                            if let Some(ticket) = write_ticket {
+                                let etag = meta.etag.clone();
+                                let lm = meta.last_modified.clone();
+                                let cc = meta.cache_control.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
+                                })
+                                .await;
+                            } else {
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    cache.invalidate_sync(&key_clone);
+                                })
+                                .await;
+                            }
                         }
                     }
                 }
