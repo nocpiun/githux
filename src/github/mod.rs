@@ -32,6 +32,7 @@ pub mod repository;
 pub mod repository_counts;
 pub mod repository_extras;
 pub mod revision;
+pub mod starring;
 pub mod tree;
 pub mod user;
 

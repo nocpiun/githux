@@ -37,6 +37,9 @@ mod page_reads;
 pub mod reader_images;
 pub mod repository;
 #[cfg(test)]
+mod repository_action_tests;
+pub mod repository_actions;
+#[cfg(test)]
 mod repository_content_tests;
 #[cfg(test)]
 mod repository_tests;

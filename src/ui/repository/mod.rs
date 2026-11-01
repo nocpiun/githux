@@ -59,12 +59,16 @@ use gpui::{
 use tokio::sync::watch;
 
 use crate::content::PreparedContent;
+use crate::data::repository_actions::RepositoryActionService;
 use crate::data::{AccountService, RepositoryReadContext, RepositorySession, Scoped};
 use crate::domain::blob::{BlobIdentity, BlobLimits};
 use crate::domain::repository::{
     BranchesOutcome, DirectoryTree, DynamicRef, ObjectSha, RepoSnapshot, RepositoryDetails,
     RepositoryError, RepositoryIdentity, RepositoryLocator, RevisionSpec, SnapshotDirectory,
     TreeEntryKind,
+};
+use crate::domain::repository_actions::{
+    RepositoryActionError, StarActionOutcome, StarObservation, StarredState,
 };
 use crate::github::RepositoryLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
@@ -186,6 +190,46 @@ impl ReaderStatus {
     }
 }
 
+/// The current account's observed starred state and its independent UI phase.
+#[derive(Clone, Debug, Default)]
+pub struct StarState {
+    observed: Option<StarredState>,
+    phase: StarPhase,
+}
+
+#[derive(Clone, Debug, Default)]
+enum StarPhase {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Writing {
+        desired: StarredState,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+struct StarWork {
+    service: RepositoryActionService,
+    work: Work,
+    binding: crate::ui::repository_overview::OverviewBinding,
+    request: u64,
+}
+
+struct StarReply {
+    binding: crate::ui::repository_overview::OverviewBinding,
+    context: RepositoryReadContext,
+    request: u64,
+    body: StarReplyBody,
+}
+
+enum StarReplyBody {
+    Observed(Result<StarObservation, RepositoryActionError>),
+    Changed(Box<Result<StarActionOutcome, RepositoryActionError>>),
+}
+
 /// One fixed-commit browsing snapshot plus its lazily loaded tree.
 struct BranchState {
     name: String,
@@ -227,7 +271,10 @@ struct Message {
 }
 
 enum Body {
-    Repository(Result<RepositoryDetails, RepositoryError>),
+    Repository {
+        result: Result<RepositoryDetails, RepositoryError>,
+        star_write_generation: u64,
+    },
     Branches(Result<BranchesOutcome, RepositoryError>),
     Revision {
         branch: String,
@@ -329,10 +376,17 @@ pub struct RepositoryPage {
     tree_focus: FocusHandle,
     star_focus: FocusHandle,
     fork_focus: FocusHandle,
-    /// Whether Star/Fork actions are accepted by the host. The first release has no remote write
-    /// operations, so a host that only handles navigation leaves this false and the buttons stay
-    /// honestly disabled instead of claiming to perform a mutation.
+    /// Only Star is implemented. Fork deliberately has a separate, false
+    /// capability so enabling Star can never accidentally enable Fork.
     mutations_enabled: bool,
+    fork_mutations_enabled: bool,
+    star: StarState,
+    star_work: Option<StarWork>,
+    star_request: u64,
+    /// Monotonic user-write intent. A repository summary captured before this
+    /// changes cannot replace the post-write authoritative summary.
+    star_write_generation: u64,
+    star_inbox: Arc<Mutex<VecDeque<StarReply>>>,
     clock: std::time::Instant,
     #[cfg(test)]
     pinned_clock: Option<u64>,
@@ -395,7 +449,13 @@ impl RepositoryPage {
             tree_focus: cx.focus_handle().tab_stop(true),
             star_focus: cx.focus_handle().tab_stop(true),
             fork_focus: cx.focus_handle().tab_stop(true),
-            mutations_enabled: false,
+            mutations_enabled: true,
+            fork_mutations_enabled: false,
+            star: StarState::default(),
+            star_work: None,
+            star_request: 0,
+            star_write_generation: 0,
+            star_inbox: Arc::new(Mutex::new(VecDeque::new())),
             clock: std::time::Instant::now(),
             #[cfg(test)]
             pinned_clock: None,
@@ -423,13 +483,29 @@ impl RepositoryPage {
         self.on_action = Some(handler);
     }
 
-    /// Explicitly declares that the host implements Star/Fork remote write operations.
+    /// Controls only the real Star capability, used by focused component tests.
+    /// Fork remains disabled and has its own independent capability bit.
     pub fn enable_mutations(&mut self, enabled: bool) {
         self.mutations_enabled = enabled;
     }
 
     pub fn mutations_enabled(&self) -> bool {
         self.mutations_enabled
+    }
+
+    pub fn fork_mutations_enabled(&self) -> bool {
+        self.fork_mutations_enabled
+    }
+
+    pub fn starred_state(&self) -> Option<StarredState> {
+        self.star.observed
+    }
+
+    pub fn star_is_busy(&self) -> bool {
+        matches!(
+            self.star.phase,
+            StarPhase::Loading | StarPhase::Writing { .. }
+        )
     }
 
     /// Whether a browsing generation is running.
@@ -442,6 +518,7 @@ impl RepositoryPage {
     /// A new session is always created; a saved branch or file is restored
     /// against that new authorization and re-resolved to a fixed commit.
     pub fn activate(&mut self, cx: &mut Context<Self>) {
+        self.stop_star();
         self.extras.stop();
         self.branches_loading = false;
         self.cancel_reader_interactions(cx);
@@ -479,7 +556,10 @@ impl RepositoryPage {
         self.active = true;
         self.error = None;
         self.work = Some(Work::new());
-        self.spawn_job(Job::Repository(self.locator.clone()));
+        self.spawn_job(Job::Repository {
+            locator: self.locator.clone(),
+            star_write_generation: self.star_write_generation,
+        });
         cx.notify();
     }
 
@@ -488,6 +568,7 @@ impl RepositoryPage {
     /// Nothing that finishes later can replace the page's content, because the
     /// generation has already moved on.
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.stop_star();
         self.extras.stop();
         self.cancel_reader_interactions(cx);
         self.stop_work();
@@ -512,6 +593,7 @@ impl RepositoryPage {
     /// Replaces the injected capabilities and re-reads the saved navigation
     /// under a new session.
     pub fn rebind(&mut self, services: RepositoryPageServices, cx: &mut Context<Self>) {
+        self.stop_star();
         self.cancel_reader_interactions(cx);
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
@@ -1161,6 +1243,15 @@ impl RepositoryPage {
         self.tree_bars.cancel(&self.tree_motion);
     }
 
+    fn stop_star(&mut self) {
+        if let Some(star) = self.star_work.take() {
+            star.work.source.cancel();
+        }
+        self.star_request = self.star_request.wrapping_add(1);
+        self.star_inbox.lock().expect("star inbox").clear();
+        self.star = StarState::default();
+    }
+
     fn now_ms(&self) -> u64 {
         #[cfg(test)]
         if let Some(ms) = self.pinned_clock {
@@ -1200,6 +1291,7 @@ impl RepositoryPage {
             self.apply(message, window, cx);
         }
         self.drain_overview(cx);
+        self.drain_star();
     }
 
     /// Detects an account/authorization change even when no message is pending,
@@ -1211,6 +1303,7 @@ impl RepositoryPage {
         if self.session.as_ref().is_some_and(RepositorySession::verify) {
             return;
         }
+        self.stop_star();
         self.cancel_reader_interactions(cx);
         self.extras.stop();
         self.authorization_lost = true;
@@ -1254,7 +1347,10 @@ impl RepositoryPage {
             return;
         }
         match message.body {
-            Body::Repository(result) => self.apply_repository(result, window, cx),
+            Body::Repository {
+                result,
+                star_write_generation,
+            } => self.apply_repository(result, star_write_generation, window, cx),
             Body::Branches(result) => self.apply_branches(result, cx),
             Body::Revision {
                 branch,
@@ -1284,15 +1380,25 @@ impl RepositoryPage {
     fn apply_repository(
         &mut self,
         result: Result<RepositoryDetails, RepositoryError>,
+        star_write_generation: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if star_write_generation != self.star_write_generation && self.details.is_some() {
+            return;
+        }
         match result {
             Ok(details) => {
+                // An older summary response cannot roll back a newer Star
+                // observation or its authoritative count refresh.
+                let star_request = self.star_request;
                 self.spawn_job(Job::Branches(details.identity.clone()));
                 let identity = details.identity.clone();
                 self.details = Some(details);
                 self.start_overview(identity, window, cx);
+                if star_request == self.star_request {
+                    self.start_star_read(cx);
+                }
             }
             Err(error) => {
                 self.error = Some(PageError::from_repository(&error));
@@ -1656,13 +1762,220 @@ impl RepositoryPage {
         if self.repository_binding().as_ref() != Some(&binding) {
             return;
         }
-        let action = if star {
-            PageAction::StarRequested { binding }
-        } else {
-            PageAction::ForkRequested { binding }
-        };
-        self.emit(action, window, cx);
+        if star {
+            self.press_star(cx);
+            return;
+        }
+        if self.fork_mutations_enabled {
+            self.emit(PageAction::ForkRequested { binding }, window, cx);
+        }
     }
+
+    fn star_binding(&self) -> Option<crate::ui::repository_overview::OverviewBinding> {
+        let repository = self.details.as_ref()?.identity.clone();
+        let account = self.context.as_ref()?.auth().account.clone();
+        let binding = crate::ui::repository_overview::OverviewBinding::new(
+            account,
+            repository,
+            self.generation,
+        );
+        (self.active && self.session.as_ref().is_some_and(RepositorySession::verify))
+            .then_some(binding)
+    }
+
+    fn star_service(&mut self) -> Option<RepositoryActionService> {
+        let session = self.session.clone()?;
+        let service = RepositoryActionService::new(&session, &self.services.accounts).ok()?;
+        if Some(service.context()) == self.context.as_ref() && service.verify() {
+            Some(service)
+        } else {
+            None
+        }
+    }
+
+    fn start_star_read(&mut self, cx: &mut Context<Self>) {
+        if self.star_work.is_some() || !self.mutations_enabled {
+            return;
+        }
+        let Some(binding) = self.star_binding() else {
+            return;
+        };
+        let Some(service) = self.star_service() else {
+            self.check_authorization(cx);
+            return;
+        };
+        self.star.phase = StarPhase::Loading;
+        self.submit_star(binding, service, None);
+        cx.notify();
+    }
+
+    /// Reconcile again after an unknown transport result. This starts a new
+    /// GET only; it never reconstructs or replays the uncertain PUT/DELETE.
+    pub fn retry_star(&mut self, cx: &mut Context<Self>) {
+        if self.star_work.is_some() {
+            return;
+        }
+        self.star_request = self.star_request.wrapping_add(1);
+        self.start_star_read(cx);
+    }
+
+    fn press_star(&mut self, cx: &mut Context<Self>) {
+        if !self.mutations_enabled || self.star_work.is_some() {
+            return;
+        }
+        let Some(observed) = self.star.observed else {
+            // No optimistic toggle before the first status response exists.
+            self.start_star_read(cx);
+            return;
+        };
+        let Some(binding) = self.star_binding() else {
+            return;
+        };
+        let Some(service) = self.star_service() else {
+            self.check_authorization(cx);
+            return;
+        };
+        let desired = observed.toggled();
+        self.star_write_generation = self.star_write_generation.wrapping_add(1);
+        self.star.phase = StarPhase::Writing { desired };
+        self.submit_star(binding, service, Some(desired));
+        cx.notify();
+    }
+
+    fn submit_star(
+        &mut self,
+        binding: crate::ui::repository_overview::OverviewBinding,
+        service: RepositoryActionService,
+        desired: Option<StarredState>,
+    ) {
+        self.star_request = self.star_request.wrapping_add(1);
+        let request = self.star_request;
+        let work = Work::new();
+        let cancel = work.token();
+        let context = service.context().clone();
+        let inbox = self.star_inbox.clone();
+        let alive = self.alive.clone();
+        let repository = binding.repository.clone();
+        let limits = self.services.limits.repository.clone();
+        self.star_work = Some(StarWork {
+            service: service.clone(),
+            work,
+            binding: binding.clone(),
+            request,
+        });
+        self.star_request = request;
+        let spawned = self.services.executor.handle().spawn(async move {
+            let body = if let Some(desired) = desired {
+                StarReplyBody::Changed(Box::new(
+                    service
+                        .set_starred(&repository, desired, &limits, cancel)
+                        .await
+                        .map(|scoped| scoped.value),
+                ))
+            } else {
+                StarReplyBody::Observed(
+                    service
+                        .starred(&repository, cancel)
+                        .await
+                        .map(|scoped| scoped.value),
+                )
+            };
+            if *alive.borrow() {
+                inbox.lock().expect("star inbox").push_back(StarReply {
+                    binding,
+                    context,
+                    request,
+                    body,
+                });
+            }
+        });
+        if spawned.is_err() {
+            self.star_work = None;
+            self.star.phase = StarPhase::Failed {
+                message: "Background services are closing; the Star action was not submitted."
+                    .into(),
+            };
+        }
+    }
+
+    fn star_accepts(
+        &self,
+        binding: &crate::ui::repository_overview::OverviewBinding,
+        request: u64,
+    ) -> bool {
+        self.active
+            && self.star_request == request
+            && self.star_work.as_ref().is_some_and(|work| {
+                work.request == request && work.binding == *binding && work.service.verify()
+            })
+            && self.star_binding().as_ref() == Some(binding)
+    }
+
+    fn drain_star(&mut self) {
+        let replies: Vec<StarReply> = self
+            .star_inbox
+            .lock()
+            .expect("star inbox")
+            .drain(..)
+            .collect();
+        for reply in replies {
+            if !self.star_accepts(&reply.binding, reply.request)
+                || self.context.as_ref() != Some(&reply.context)
+                || !self
+                    .services
+                    .accounts
+                    .repo_service()
+                    .is_current(&reply.context)
+            {
+                continue;
+            }
+            self.star_work = None;
+            match reply.body {
+                StarReplyBody::Observed(Ok(observation)) => {
+                    self.star.observed = Some(observation.state);
+                    self.star.phase = StarPhase::Ready;
+                }
+                StarReplyBody::Changed(result) if result.is_ok() => {
+                    let outcome = result.expect("checked Ok");
+                    self.star.observed = Some(outcome.observation.state);
+                    match outcome.summary {
+                        Ok(details) => {
+                            self.details = Some(details);
+                            self.star.phase = StarPhase::Ready;
+                        }
+                        Err(error) => {
+                            self.star.phase = StarPhase::Failed {
+                                message: format!(
+                                    "The starred state was observed, but the repository summary could not be refreshed: {error}"
+                                ),
+                            };
+                        }
+                    }
+                }
+                StarReplyBody::Observed(Err(error)) => {
+                    self.apply_star_error(error);
+                }
+                StarReplyBody::Changed(result) => {
+                    self.apply_star_error(result.expect_err("Ok handled above"));
+                }
+            }
+        }
+    }
+
+    fn apply_star_error(&mut self, error: RepositoryActionError) {
+        if matches!(
+            error,
+            RepositoryActionError::GitHub(crate::domain::GitHubError::StaleContext)
+        ) {
+            return;
+        }
+        // Keep the last actual server observation; never flip it
+        // optimistically or replace it with a desired local state.
+        self.star.phase = StarPhase::Failed {
+            message: error.to_string(),
+        };
+    }
+
     fn emit(&mut self, action: PageAction, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handler) = self.on_action.clone() {
             handler(action, window, cx);
@@ -1883,7 +2196,10 @@ impl Focusable for RepositoryPage {
 }
 
 enum Job {
-    Repository(RepositoryLocator),
+    Repository {
+        locator: RepositoryLocator,
+        star_write_generation: u64,
+    },
     Branches(RepositoryIdentity),
     Revision {
         branch: String,
@@ -1922,12 +2238,16 @@ async fn run_job(
     cancel: CancellationToken,
 ) -> Body {
     match job {
-        Job::Repository(locator) => Body::Repository(
-            session
+        Job::Repository {
+            locator,
+            star_write_generation,
+        } => Body::Repository {
+            result: session
                 .repository(locator, &limits.repository, cancel)
                 .await
                 .map(|Scoped { value, .. }| value),
-        ),
+            star_write_generation,
+        },
         Job::Branches(identity) => Body::Branches(
             session
                 .branches(&identity, &limits.repository, cancel)
@@ -2028,7 +2348,10 @@ impl Render for RepositoryPage {
 impl Drop for RepositoryPage {
     fn drop(&mut self) {
         // Stop late workers from enqueuing, then cancel in-flight work. The
-        // executor keeps its own existing shutdown contract.
+        // executor keeps its own existing shutdown contract. Cancelling here
+        // cannot undo a write already accepted by the server; its result is
+        // discarded with this closed page rather than replayed on reopening.
+        self.stop_star();
         self.alive.send_replace(false);
         if let Some(work) = self.work.take() {
             work.source.cancel();
@@ -2097,6 +2420,14 @@ mod test_support {
         /// The in-flight result count, for tests that assert no extra reads.
         pub(crate) fn queued_results(&self) -> usize {
             self.inbox.lock().expect("repository page inbox").len()
+        }
+
+        pub(crate) fn queued_star_results(&self) -> usize {
+            self.star_inbox.lock().expect("star inbox").len()
+        }
+
+        pub(crate) fn drain_for_shell_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.drain(window, cx);
         }
 
         /// The authorization context of the current session, for rebind checks.
