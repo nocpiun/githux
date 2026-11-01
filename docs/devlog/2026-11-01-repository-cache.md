@@ -56,6 +56,8 @@ Codex 对 `a53e807` 提出 5 项问题，均可在既定约束内直接修复，
 
 第四轮对 `962a74c` 的 4 项反馈直接修复：授权比较只按数字 repository ID，接受改名/转移后的 canonical locator；branches/revision 仅在 gate 隔离时先验证数字 ID；transient fallback 重新解码当前缓存 payload，使值与 fetched/verified 来源一致；content 准备完成后重查 cache gate，防止准备期间撤权仍发布。新增确定性的准备阶段撤权与并发刷新 fallback 回归，聚焦 `b17cef45-89a0-46b0-8455-9ed7b5582a7a` 12/12 通过。
 
+第五轮对 `c6b169d` 的唯一 P1 修复：directory/blob/readme 在 cache gate 隔离时也先证明 locator 的数字仓库 ID，再允许响应重开 gate；正常已授权读取不加额外请求，本地 oversized 仍不确认权限。聚焦 `e6988c46-0eab-4228-a425-757ce21f3989` 12/12 通过。
+
 ## 边界
 
 无 GUI/Shell 接线，无真实 PAT/实网写操作或 Star 验收。正式账户事件生产、应用级 CacheStore 组装与离线 UI 由后续任务交付。缓存适配层完成不等于应用离线功能已交付。

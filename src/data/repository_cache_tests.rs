@@ -870,7 +870,9 @@ async fn authorization_gate_requires_real_repository_success_not_fixed_sha_or_lo
             .unwrap_err(),
         RepositoryCacheError::AccessDenied
     );
-    // A known oversized blob is rejected locally and cannot confirm permission.
+    // A known oversized blob is rejected locally and cannot confirm permission;
+    // the quarantined path still performs its numeric locator preflight first.
+    fixture.push(200, details());
     let tree = DirectoryTree {
         directory: SnapshotDirectory::root(&snap),
         entries: vec![TreeEntry {

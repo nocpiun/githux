@@ -252,28 +252,19 @@ impl CachedRepositorySession {
         let permit = self
             .before_network(&key, repository.id(), cancel.clone())
             .await?;
+        let needs_identity_proof = permit.ticket.is_none();
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
-                // A branch response carries no numeric repository id. Prove
-                // the locator in this same authenticated call before allowing
-                // its success to reopen a quarantined repository gate.
-                let (details, _) = github::repository::fetch_repository_with_metadata(
-                    self.session.client(),
-                    &pat,
-                    repository.locator(),
-                    limits,
-                    None,
-                    cancel.clone(),
-                )
-                .await?;
-                let details = details.ok_or_else(|| RepositoryError::InvalidResponse {
-                    message: "unexpected conditional repository response".into(),
-                })?;
-                if details.identity.id() != repository.id() {
-                    return Err(RepositoryError::InvalidResponse {
-                        message: "repository identity differs from the authorized request".into(),
-                    });
+                if needs_identity_proof {
+                    prove_locator_identity(
+                        self.session.client(),
+                        &pat,
+                        repository,
+                        limits,
+                        cancel.clone(),
+                    )
+                    .await?;
                 }
                 github::branches::fetch_branches_with_metadata(
                     self.session.client(),
@@ -368,24 +359,14 @@ impl CachedRepositorySession {
                 validator,
                 async move |pat, validator, cancel| {
                     if needs_identity_proof {
-                        let (details, _) = github::repository::fetch_repository_with_metadata(
+                        prove_locator_identity(
                             self.session.client(),
                             &pat,
-                            repository.locator(),
+                            repository,
                             limits,
-                            None,
                             cancel.clone(),
                         )
                         .await?;
-                        let details = details.ok_or_else(|| RepositoryError::InvalidResponse {
-                            message: "unexpected conditional repository response".into(),
-                        })?;
-                        if details.identity.id() != repository.id() {
-                            return Err(RepositoryError::InvalidResponse {
-                                message: "repository identity differs from the authorized request"
-                                    .into(),
-                            });
-                        }
                     }
                     github::revision::resolve_revision_with_metadata(
                         self.session.client(),
@@ -469,9 +450,20 @@ impl CachedRepositorySession {
         let permit = self
             .before_network(&key, directory.repository().id(), cancel.clone())
             .await?;
+        let needs_identity_proof = permit.ticket.is_none();
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
+                if needs_identity_proof {
+                    prove_locator_identity(
+                        self.session.client(),
+                        &pat,
+                        directory.repository(),
+                        limits,
+                        cancel.clone(),
+                    )
+                    .await?;
+                }
                 github::tree::fetch_directory_with_metadata(
                     self.session.client(),
                     &pat,
@@ -538,9 +530,20 @@ impl CachedRepositorySession {
         let permit = self
             .before_network(&key, snapshot.repository().id(), cancel.clone())
             .await?;
+        let needs_identity_proof = permit.ticket.is_none();
         let result = self
             .session
             .read_with_metadata(cancel.clone(), None, async move |pat, _, cancel| {
+                if needs_identity_proof {
+                    prove_locator_identity(
+                        self.session.client(),
+                        &pat,
+                        snapshot.repository(),
+                        limits,
+                        cancel.clone(),
+                    )
+                    .await?;
+                }
                 github::readme::discover_readme_with_metadata(
                     self.session.client(),
                     &pat,
@@ -620,12 +623,23 @@ impl CachedRepositorySession {
         let mut permit = self
             .before_network(&key, identity.repository().id(), cancel.clone())
             .await?;
+        let needs_identity_proof = permit.ticket.is_none();
         let result = self
             .session
             .read_with_metadata(
                 cancel.clone(),
                 validator,
                 async move |pat, validator, cancel| {
+                    if needs_identity_proof {
+                        prove_locator_identity(
+                            self.session.client(),
+                            &pat,
+                            identity.repository(),
+                            &RepositoryLimits::default(),
+                            cancel.clone(),
+                        )
+                        .await?;
+                    }
                     github::blob::fetch_blob_with_metadata(
                         self.session.client(),
                         &pat,
@@ -1146,6 +1160,36 @@ fn validators_match(prior: &CacheMetadata, response: &RepositoryResponseMetadata
     (prior.etag.is_some() || prior.last_modified.is_some())
         && prior.etag == response.etag
         && prior.last_modified == response.last_modified
+}
+
+/// A repository-object response carries no numeric repository id. When the
+/// cache gate is quarantined, this same authenticated preflight proves the
+/// locator before that response may reopen the numeric repository gate.
+async fn prove_locator_identity(
+    client: &crate::github::GitHubClient,
+    pat: &crate::auth::token::Pat,
+    repository: &RepositoryIdentity,
+    limits: &RepositoryLimits,
+    cancel: CancellationToken,
+) -> Result<(), RepositoryError> {
+    let (details, _) = github::repository::fetch_repository_with_metadata(
+        client,
+        pat,
+        repository.locator(),
+        limits,
+        None,
+        cancel,
+    )
+    .await?;
+    let details = details.ok_or_else(|| RepositoryError::InvalidResponse {
+        message: "unexpected conditional repository response".into(),
+    })?;
+    if details.identity.id() != repository.id() {
+        return Err(RepositoryError::InvalidResponse {
+            message: "repository identity differs from the authorized request".into(),
+        });
+    }
+    Ok(())
 }
 
 fn mutable_key(
