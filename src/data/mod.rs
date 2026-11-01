@@ -36,6 +36,9 @@ mod page_read_tests;
 mod page_reads;
 pub mod reader_images;
 pub mod repository;
+pub mod repository_cache;
+#[cfg(test)]
+mod repository_cache_tests;
 #[cfg(test)]
 mod repository_content_tests;
 #[cfg(test)]
@@ -49,6 +52,11 @@ pub use accounts::AccountError;
 pub use page_reads::{PageReadSession, ProfileReadme, ProfileReadmeIneligible};
 #[allow(unused_imports)]
 pub use repository::{RepositoryReadContext, RepositorySession, Scoped};
+#[allow(unused_imports)]
+pub use repository_cache::{
+    CachedRepositoryRead, CachedRepositorySession, RepositoryCacheError, RepositoryCacheMode,
+    RepositoryCacheOrigin, RepositoryCacheProvenance,
+};
 use std::sync::Arc;
 
 /// Account and credential lifecycle service.

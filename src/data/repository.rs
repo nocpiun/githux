@@ -7,9 +7,10 @@ use crate::domain::blob::{BlobIdentity, BlobLimits, BlobRead};
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
     BranchesOutcome, DirectoryTree, ReadmeDiscovery, RepoSnapshot, RepositoryDetails,
-    RepositoryError, RepositoryIdentity, RepositoryLocator, RevisionSpec, SnapshotDirectory,
+    RepositoryError, RepositoryIdentity, RepositoryLocator, RepositoryResponseMetadata,
+    RevisionSpec, SnapshotDirectory,
 };
-use crate::github::{self, RepositoryLimits};
+use crate::github::{self, GitHubClient, RepositoryLimits};
 use crate::network::cancel::CancellationToken;
 use std::sync::{Arc, Mutex, Weak, atomic::Ordering};
 
@@ -256,6 +257,32 @@ impl RepositorySession {
             context: self.context.clone(),
             value,
         })
+    }
+
+    /// Companion response-metadata path used by the explicit cache adapter.
+    /// It does not alter the behavior of the original network-only methods.
+    pub(in crate::data) async fn read_with_metadata<T, F, Fut>(
+        &self,
+        cancel: CancellationToken,
+        validator: Option<RepositoryResponseMetadata>,
+        read: F,
+    ) -> Result<Scoped<(Option<T>, RepositoryResponseMetadata)>, RepositoryError>
+    where
+        F: FnOnce(Pat, Option<RepositoryResponseMetadata>, CancellationToken) -> Fut,
+        Fut: Future<Output = Result<(Option<T>, RepositoryResponseMetadata), RepositoryError>>,
+    {
+        self.read(cancel, async move |pat, cancel| {
+            read(pat, validator, cancel).await
+        })
+        .await
+    }
+
+    pub(in crate::data) fn client(&self) -> &Arc<GitHubClient> {
+        &self.service.client
+    }
+
+    pub(in crate::data) fn service(&self) -> &RepoService {
+        &self.service
     }
 
     pub async fn repository(

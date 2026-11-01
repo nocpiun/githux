@@ -7,6 +7,7 @@ use crate::domain::error::GitHubError;
 use crate::domain::repo::{RepoOwner, RepoVisibility};
 use crate::domain::repository::{
     DynamicRef, RepositoryDetails, RepositoryError, RepositoryIdentity, RepositoryLocator,
+    RepositoryResponseMetadata,
 };
 use crate::github::client::GitHubClient;
 use crate::github::error::{classify_status, classify_transport};
@@ -75,12 +76,27 @@ pub(crate) fn endpoint(
     Ok(url)
 }
 
-pub(crate) async fn get(
+/// Response headers for the exact request representation, including an empty
+/// metadata value for a real response without HTTP validators.
+pub(crate) fn response_metadata(response: &HttpResponse) -> RepositoryResponseMetadata {
+    RepositoryResponseMetadata {
+        etag: response.header("etag").map(str::to_owned),
+        last_modified: response.header("last-modified").map(str::to_owned),
+        cache_control: response.header("cache-control").map(str::to_owned),
+        network_observed: true,
+    }
+}
+
+/// Minimal companion API for cached callers. A 304 is deliberately returned to
+/// the consumer, which must match a cached representation and validator or
+/// retry unconditionally. Existing uncached callers remain unaware of it.
+pub(crate) async fn get_with_metadata(
     client: &GitHubClient,
     token: &Pat,
     url: &Url,
+    conditional: Option<&RepositoryResponseMetadata>,
     cancel: CancellationToken,
-) -> Result<HttpResponse, RepositoryError> {
+) -> Result<(HttpResponse, RepositoryResponseMetadata), RepositoryError> {
     if cancel.is_cancelled() {
         return Err(GitHubError::Cancelled.into());
     }
@@ -89,15 +105,36 @@ pub(crate) async fn get(
             field: "API origin",
         });
     }
+    let mut request = client.build_get(url.as_str(), token);
+    if let Some(metadata) = conditional {
+        if let Some(etag) = &metadata.etag {
+            request = request.with_header("If-None-Match", etag);
+        }
+        if let Some(last_modified) = &metadata.last_modified {
+            request = request.with_header("If-Modified-Since", last_modified);
+        }
+    }
     let response = client
         .transport()
-        .execute(client.build_get(url.as_str(), token), cancel.clone())
+        .execute(request, cancel.clone())
         .await
         .map_err(classify_transport)?;
     if cancel.is_cancelled() {
         return Err(GitHubError::Cancelled.into());
     }
-    Ok(response)
+    let metadata = response_metadata(&response);
+    Ok((response, metadata))
+}
+
+pub(crate) async fn get(
+    client: &GitHubClient,
+    token: &Pat,
+    url: &Url,
+    cancel: CancellationToken,
+) -> Result<HttpResponse, RepositoryError> {
+    get_with_metadata(client, token, url, None, cancel)
+        .await
+        .map(|(response, _)| response)
 }
 
 pub(crate) fn check_status(response: &HttpResponse) -> Result<(), RepositoryError> {
@@ -178,8 +215,24 @@ pub async fn fetch_repository(
     limits: &RepositoryLimits,
     cancel: CancellationToken,
 ) -> Result<RepositoryDetails, RepositoryError> {
+    fetch_repository_with_metadata(client, token, locator, limits, None, cancel)
+        .await
+        .map(|(details, _)| details.expect("unconditional read cannot be 304"))
+}
+
+pub async fn fetch_repository_with_metadata(
+    client: &GitHubClient,
+    token: &Pat,
+    locator: &RepositoryLocator,
+    limits: &RepositoryLimits,
+    conditional: Option<&RepositoryResponseMetadata>,
+    cancel: CancellationToken,
+) -> Result<(Option<RepositoryDetails>, RepositoryResponseMetadata), RepositoryError> {
     let url = endpoint(client, locator, &[])?;
-    let response = get(client, token, &url, cancel).await?;
+    let (response, metadata) = get_with_metadata(client, token, &url, conditional, cancel).await?;
+    if response.status == 304 {
+        return Ok((None, metadata));
+    }
     check_single(&response)?;
     let raw: RepositoryResponse = decode(&response, limits)?;
     let visibility = match raw.visibility.as_deref() {
@@ -190,30 +243,33 @@ pub async fn fetch_repository(
         None => RepoVisibility::Public,
         Some(_) => return Err(invalid_response("unknown repository visibility")),
     };
-    Ok(RepositoryDetails {
-        identity: RepositoryIdentity {
-            id: raw.id,
-            locator: RepositoryLocator::new(&raw.owner.login, raw.name)?,
-        },
-        owner: RepoOwner {
-            id: raw.owner.id,
-            login: raw.owner.login,
-            avatar_url: raw.owner.avatar_url,
-        },
-        description: raw.description,
-        visibility,
-        default_branch: raw.default_branch.map(DynamicRef::new).transpose()?,
-        fork: raw.fork,
-        archived: raw.archived,
-        stars: raw.stargazers_count,
-        forks: raw.forks_count,
-        open_issues_and_prs: raw.open_issues_count,
-        subscribers: raw.subscribers_count,
-        size_kb: raw.size,
-        html_url: raw.html_url,
-        clone_url: raw.clone_url,
-        pushed_at: raw.pushed_at,
-    })
+    Ok((
+        Some(RepositoryDetails {
+            identity: RepositoryIdentity {
+                id: raw.id,
+                locator: RepositoryLocator::new(&raw.owner.login, raw.name)?,
+            },
+            owner: RepoOwner {
+                id: raw.owner.id,
+                login: raw.owner.login,
+                avatar_url: raw.owner.avatar_url,
+            },
+            description: raw.description,
+            visibility,
+            default_branch: raw.default_branch.map(DynamicRef::new).transpose()?,
+            fork: raw.fork,
+            archived: raw.archived,
+            stars: raw.stargazers_count,
+            forks: raw.forks_count,
+            open_issues_and_prs: raw.open_issues_count,
+            subscribers: raw.subscribers_count,
+            size_kb: raw.size,
+            html_url: raw.html_url,
+            clone_url: raw.clone_url,
+            pushed_at: raw.pushed_at,
+        }),
+        metadata,
+    ))
 }
 
 #[cfg(test)]
