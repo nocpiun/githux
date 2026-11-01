@@ -329,11 +329,69 @@ impl RepositoryImageService {
             return Err(ImageFailure::StaleContext);
         }
         let commit = ObjectSha::new(commit).map_err(|_| ImageFailure::NotFound)?;
+
+        // Try offline resolution and blob retrieval first
+        if let Some(ref cache) = self.inner.persistent_cache {
+            let cache_clone = cache.clone();
+            let commit_clone = commit.clone();
+            let path_clone = path.to_string();
+            let resolved_sha_res = tokio::task::spawn_blocking(move || {
+                cache_clone.read_resolved_blob(&commit_clone, &path_clone)
+            })
+            .await
+            .map_err(|_| ImageFailure::Network)?;
+
+            match resolved_sha_res {
+                Ok(Some(blob_sha)) => {
+                    let cache_clone = cache.clone();
+                    let sha_for_read = blob_sha.clone();
+                    let cached_bytes_res = tokio::task::spawn_blocking(move || {
+                        cache_clone.read_repository_blob(&sha_for_read)
+                    })
+                    .await
+                    .map_err(|_| ImageFailure::Network)?;
+
+                    match cached_bytes_res {
+                        Ok(Some(bytes)) => {
+                            if !self.inner.session.verify() {
+                                return Err(ImageFailure::StaleContext);
+                            }
+                            if bytes.len() > self.inner.blob_limits.decoded_bytes {
+                                return Err(ImageFailure::TooLarge {
+                                    limit: self.inner.blob_limits.decoded_bytes,
+                                });
+                            }
+                            return Ok(bytes);
+                        }
+                        Err(crate::storage::cache::CacheError::AccessDenied) => {
+                            return Err(ImageFailure::StaleContext);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(crate::storage::cache::CacheError::AccessDenied) => {
+                    return Err(ImageFailure::StaleContext);
+                }
+                _ => {}
+            }
+        }
+
         let snapshot = self.snapshot(&commit, cancel.clone()).await?;
         if snapshot.commit() != &commit {
             return Err(ImageFailure::StaleContext);
         }
         let identity = self.resolve_blob(&snapshot, path, cancel.clone()).await?;
+
+        // Cache resolution mapping in background
+        if let Some(ref cache) = self.inner.persistent_cache {
+            let cache_clone = cache.clone();
+            let commit_clone = commit.clone();
+            let path_clone = path.to_string();
+            let blob_sha = identity.blob().clone();
+            tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                let _ = cache_clone.put_resolved_blob(&commit_clone, &path_clone, &blob_sha);
+            }));
+        }
 
         // Check persistent cache for blob bytes first
         if let Some(ref cache) = self.inner.persistent_cache {
@@ -363,6 +421,17 @@ impl RepositoryImageService {
             }
         }
 
+        let blob_ticket_opt = if let Some(ref cache) = self.inner.persistent_cache {
+            let cache_clone = cache.clone();
+            let blob_sha = identity.blob().clone();
+            tokio::task::spawn_blocking(move || cache_clone.begin_write_repository_blob(&blob_sha))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+        } else {
+            None
+        };
+
         let read = self
             .inner
             .session
@@ -375,13 +444,14 @@ impl RepositoryImageService {
         let (_, body) = read.value.into_parts();
         match body {
             BlobBody::Bytes(bytes) => {
-                // Persist to cache in background
-                if let Some(ref cache) = self.inner.persistent_cache {
+                // Persist to cache in background using pre-acquired ticket
+                if let Some(ref cache) = self.inner.persistent_cache
+                    && let Some(ticket) = blob_ticket_opt
+                {
                     let cache_clone = cache.clone();
-                    let blob_sha = identity.blob().clone();
                     let bytes_clone = bytes.clone();
                     tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                        let _ = cache_clone.put_repository_blob(&blob_sha, &bytes_clone);
+                        let _ = cache_clone.put_repository_blob_with_ticket(ticket, &bytes_clone);
                     }));
                 }
                 Ok(bytes)
@@ -530,7 +600,17 @@ impl RepositoryImageService {
                     return Ok(snapshot.bytes);
                 }
 
-                // Stale or needs revalidation: send conditional request
+                // Stale or needs revalidation: capture write ticket BEFORE network await
+                let ticket_res = {
+                    let cache_clone = cache.clone();
+                    let url_string = url.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        cache_clone.begin_write_external(&url_string)
+                    })
+                    .await
+                    .map_err(|_| ImageFailure::Network)?
+                };
+
                 let validation = ValidationHeaders {
                     if_none_match: freshness.etag.as_deref(),
                     if_modified_since: freshness.last_modified.as_deref(),
@@ -545,23 +625,28 @@ impl RepositoryImageService {
                 match response {
                     Ok(ExternalImageResponse::NotModified { metadata }) => {
                         let cache_clone = cache.clone();
-                        let url_string = url.to_string();
                         let snap = snapshot.clone();
-                        tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                            let _ =
-                                cache_clone.revalidate_external_image(&url_string, snap, &metadata);
-                        }));
+                        if let Ok(ticket) = ticket_res {
+                            tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                                let _ = cache_clone
+                                    .revalidate_external_image_with_ticket(ticket, snap, &metadata);
+                            }));
+                        }
                         return Ok(snapshot.bytes);
                     }
                     Ok(ExternalImageResponse::Fetched { bytes, metadata }) => {
                         let cache_clone = cache.clone();
-                        let url_string = url.to_string();
                         let bytes_clone = bytes.clone();
                         let meta = metadata.clone();
-                        tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                            let _ =
-                                cache_clone.put_external_image(&url_string, &bytes_clone, &meta);
-                        }));
+                        if let Ok(ticket) = ticket_res {
+                            tokio::task::spawn(tokio::task::spawn_blocking(move || {
+                                let _ = cache_clone.put_external_image_with_ticket(
+                                    ticket,
+                                    &bytes_clone,
+                                    &meta,
+                                );
+                            }));
+                        }
                         return Ok(bytes);
                     }
                     Err(ExternalImageError::Status(404)) => {
@@ -579,7 +664,18 @@ impl RepositoryImageService {
             }
         }
 
-        // Cache miss or no cache configured: normal load_with_metadata
+        // Cache miss or no cache configured: capture write ticket before network load
+        let ticket_opt = if let Some(ref cache) = self.inner.persistent_cache {
+            let cache_clone = cache.clone();
+            let url_string = url.to_string();
+            tokio::task::spawn_blocking(move || cache_clone.begin_write_external(&url_string))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+        } else {
+            None
+        };
+
         let response = self
             .inner
             .external
@@ -589,13 +685,17 @@ impl RepositoryImageService {
 
         match response {
             ExternalImageResponse::Fetched { bytes, metadata } => {
-                if let Some(ref cache) = self.inner.persistent_cache {
+                if let Some(ref cache) = self.inner.persistent_cache
+                    && let Some(ticket) = ticket_opt
+                {
                     let cache_clone = cache.clone();
-                    let url_string = url.to_string();
                     let bytes_clone = bytes.clone();
                     tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                        let _ =
-                            cache_clone.put_external_image(&url_string, &bytes_clone, &metadata);
+                        let _ = cache_clone.put_external_image_with_ticket(
+                            ticket,
+                            &bytes_clone,
+                            &metadata,
+                        );
                     }));
                 }
                 Ok(bytes)

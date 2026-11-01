@@ -40,10 +40,22 @@
 - **L010（fixture 支持反复操作）**：更新 `MemoryExternalImages` 保证同一 URL 多次请求、条件请求及反复切换场景稳定应答。
 - **L014（可选内容缺失不是错误卡片）**：缺图或 404 返回 `ImageFailure::NotFound`，由阅读器渲染为诚实图注或占位，不阻塞正文排版，不产生全屏错误。
 
+## 审查修复轮次
+
+针对 Codex 审查提出的两项反馈完成修复：
+1. **持久化固定 commit/path 至 blob 的解析映射**：
+   - 增加 `ReaderImageCache::read_resolved_blob` 和 `put_resolved_blob`，使用 `reader-image-resolution` mutable key 保存 commit/path 到 blob SHA 的映射关系；
+   - 在 `repository_bytes` 中离线先查询该解析关系，命中后直接读取已缓存 blob 字节，使完全断网/重启服务后无需重新请求 GitHub 树/提交即可展示固定图片；
+   - 更新测试 `fixed_revision_images_persist_across_reopened_store_and_service` 为第二轮完全零网络响应断言。
+2. **在网络请求发起前领取写票据（Write Ticket）**：
+   - `ReaderImageCache` 增加 `begin_write_external` 与 `with_ticket` 写入方法；
+   - 在 `RepositoryImageService::external_bytes` 及 `repository_bytes` 中，在 `await` 远程响应之前先领取 ticket，入库时传入该 ticket；
+   - 保证 `CacheStore` 的并发代次和 `clear()` 失效机制正常运作，阻止并发旧结果覆盖较新快照。
+
 ## 验证结果
 
 所有 Cargo 验证均严格通过 `node scripts/verify.mjs -- cargo ...` 运行：
-- `cargo test --locked --test reader_images`：624 项测试全部通过（耗时 28.6s）。
+- `cargo test --locked --test reader_images`：624 项测试全部通过。
 - `cargo test --locked --bin githux network::reader_images::tests`：全部通过。
 - `cargo test --locked --bin githux data::reader_images::tests`：全部通过。
 - `cargo check --locked --all-targets`：通过。

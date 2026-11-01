@@ -98,7 +98,67 @@ impl ReaderImageCache {
         self.repo_private
     }
 
-    /// Creates a fixed CacheKey for an immutable repository blob.
+    /// Attempts to read cached resolved blob SHA for a (commit, path).
+    pub fn read_resolved_blob(
+        &self,
+        commit: &ObjectSha,
+        path: &str,
+    ) -> Result<Option<ObjectSha>, CacheError> {
+        let repo_id = self.repo_numeric_id.ok_or(CacheError::InvalidInput)?;
+        let request = format!("commit={};path={}", commit.as_str(), path);
+        let key = CacheKey::mutable(
+            Some(repo_id),
+            self.repo_private,
+            "reader-image-resolution",
+            &request,
+            READER_IMAGE_REPRESENTATION,
+            READER_IMAGE_REPRESENTATION_VERSION,
+        )?;
+        match self.store.read(&self.scope, &key)? {
+            CacheRead::Hit(lease) => {
+                if let Some(snapshot) = lease.snapshot()?
+                    && let Ok(sha_str) = std::str::from_utf8(&snapshot.bytes)
+                    && let Ok(sha) = ObjectSha::new(sha_str)
+                {
+                    return Ok(Some(sha));
+                }
+                Ok(None)
+            }
+            CacheRead::Miss(_) => Ok(None),
+        }
+    }
+
+    /// Persists resolved blob SHA for a (commit, path).
+    pub fn put_resolved_blob(
+        &self,
+        commit: &ObjectSha,
+        path: &str,
+        blob_sha: &ObjectSha,
+    ) -> Result<WriteOutcome, CacheError> {
+        let repo_id = self.repo_numeric_id.ok_or(CacheError::InvalidInput)?;
+        let request = format!("commit={};path={}", commit.as_str(), path);
+        let key = CacheKey::mutable(
+            Some(repo_id),
+            self.repo_private,
+            "reader-image-resolution",
+            &request,
+            READER_IMAGE_REPRESENTATION,
+            READER_IMAGE_REPRESENTATION_VERSION,
+        )?;
+        let ticket = self.store.begin_write(&self.scope, &key)?;
+        let now = now_ms();
+        let metadata = CacheMetadata {
+            representation_version: READER_IMAGE_REPRESENTATION_VERSION,
+            fetched_at_ms: now,
+            verified_at_ms: now,
+            completeness: CacheCompleteness::Complete,
+            etag: None,
+            last_modified: None,
+            cache_control: None,
+        };
+        self.store
+            .put(ticket, blob_sha.as_str().as_bytes(), metadata)
+    }
     pub fn repository_blob_key(&self, blob_sha: &ObjectSha) -> Result<CacheKey, CacheError> {
         let repo_id = self.repo_numeric_id.ok_or(CacheError::InvalidInput)?;
         CacheKey::fixed(
@@ -142,14 +202,21 @@ impl ReaderImageCache {
         }
     }
 
-    /// Persists repository blob bytes.
-    pub fn put_repository_blob(
+    /// Begins a write ticket for repository blob bytes before making a network request.
+    pub fn begin_write_repository_blob(
         &self,
         blob_sha: &ObjectSha,
+    ) -> Result<crate::storage::cache::CacheWrite, CacheError> {
+        let key = self.repository_blob_key(blob_sha)?;
+        self.store.begin_write(&self.scope, &key)
+    }
+
+    /// Persists repository blob bytes using a pre-acquired write ticket.
+    pub fn put_repository_blob_with_ticket(
+        &self,
+        ticket: crate::storage::cache::CacheWrite,
         bytes: &[u8],
     ) -> Result<WriteOutcome, CacheError> {
-        let key = self.repository_blob_key(blob_sha)?;
-        let ticket = self.store.begin_write(&self.scope, &key)?;
         let now_ms = now_ms();
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
@@ -185,8 +252,45 @@ impl ReaderImageCache {
         bytes: &[u8],
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
+        let ticket = self.begin_write_external(url)?;
+        self.put_external_image_with_ticket(ticket, bytes, meta)
+    }
+
+    pub fn put_repository_blob(
+        &self,
+        blob_sha: &ObjectSha,
+        bytes: &[u8],
+    ) -> Result<WriteOutcome, CacheError> {
+        let ticket = self.begin_write_repository_blob(blob_sha)?;
+        self.put_repository_blob_with_ticket(ticket, bytes)
+    }
+
+    pub fn revalidate_external_image(
+        &self,
+        url: &str,
+        cached: CacheSnapshot,
+        meta: &ExternalImageMetadata,
+    ) -> Result<WriteOutcome, CacheError> {
+        let ticket = self.begin_write_external(url)?;
+        self.revalidate_external_image_with_ticket(ticket, cached, meta)
+    }
+
+    /// Begins a write ticket for an external image URL before making a network request.
+    pub fn begin_write_external(
+        &self,
+        url: &str,
+    ) -> Result<crate::storage::cache::CacheWrite, CacheError> {
         let key = self.external_image_key(url)?;
-        let ticket = self.store.begin_write(&self.scope, &key)?;
+        self.store.begin_write(&self.scope, &key)
+    }
+
+    /// Stores newly fetched external image bytes with metadata using a pre-acquired write ticket.
+    pub fn put_external_image_with_ticket(
+        &self,
+        ticket: crate::storage::cache::CacheWrite,
+        bytes: &[u8],
+        meta: &ExternalImageMetadata,
+    ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
@@ -200,15 +304,13 @@ impl ReaderImageCache {
         self.store.put(ticket, bytes, metadata)
     }
 
-    /// Updates verification timestamp on a 304 Not Modified response.
-    pub fn revalidate_external_image(
+    /// Updates verification timestamp on a 304 Not Modified response using a pre-acquired write ticket.
+    pub fn revalidate_external_image_with_ticket(
         &self,
-        url: &str,
+        ticket: crate::storage::cache::CacheWrite,
         cached: CacheSnapshot,
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
-        let key = self.external_image_key(url)?;
-        let ticket = self.store.begin_write(&self.scope, &key)?;
         let now = now_ms();
         let updated_metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,

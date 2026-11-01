@@ -873,31 +873,8 @@ async fn fixed_revision_images_persist_across_reopened_store_and_service() {
     let store2 = CacheStore::open(cache_cfg).expect("reopen cache store");
     let scope2 = store2.saved_account(account_key).expect("saved scope");
 
-    // Second service is offline: no responses are pushed to transport for blob
-    // Only commit & trees are fetched because session resolver resolves the tree path
-    fixture.transport.push(200, commit_json());
-    fixture.transport.push(
-        200,
-        tree(
-            ROOT,
-            json!([{"path": "docs", "type": "tree", "mode": "040000", "sha": DOCS_TREE}]),
-        ),
-    );
-    fixture.transport.push(
-        200,
-        tree(
-            DOCS_TREE,
-            json!([{"path": "images", "type": "tree", "mode": "040000", "sha": IMAGES_TREE}]),
-        ),
-    );
-    fixture.transport.push(
-        200,
-        tree(
-            IMAGES_TREE,
-            json!([{"path": "diagram.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()}]),
-        ),
-    );
-    // NOTICE: NO blob response pushed to transport! If cache fails, blob request would fail with unscripted response.
+    // Second service is completely offline: ZERO responses are pushed to transport!
+    // Both commit/path resolution and blob bytes are read entirely from persistent cache.
 
     let service2 = fixture.service_with_cache(
         session,
