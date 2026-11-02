@@ -53,12 +53,24 @@ Codex 首轮 finding（[discussion](https://github.com/nocpiun/githux/pull/56#di
 - 未选文字用 `fg_muted`，选中/悬浮用 `hover` 背景与 `fg` 文字，选中字重 MEDIUM，圆角 `Radius::Md`，键盘 focus 用 `fg_muted` 边框；不再是大号 active 卡片。
 - 当前分类左侧画与主侧栏同参数的 2px 短 indicator：宽 `SIDEBAR_INDICATOR_WIDTH`、高按 `SIDEBAR_INDICATOR_HEIGHT_RATIO` clamp 到 20–24、右侧圆角 4、左直角，颜色 `fg_muted`，相对行垂直居中，位于 8px lane 内且不占点击目标。indicator 只按 `selected` 绘制一个。
 - 窄屏分支完全保留此前批准的横向 Tabs（下划线选中、icon+label、只 tabstrip 横向滚动），不复制宽态 indicator，不改成 Select；宽窄切换只改变导航呈现，当前分类/焦点/表单状态不重置。
-- `examples/settings.rs` 在 test 下声明 `repository_modules` 装配，适配 main 9c40594 后 `ui/mod.rs` 纳入 repository 模块测试的路径。
+- `examples/settings.rs` 在 test 下用单个 `repository_fixture` 别名提供 `crate::repository_modules::fixture`，避免为适配 main 9c40594 的 `ui/mod.rs` repository 测试而复制整棵 repository 模块树。
 
 新增聚焦用例 `wide_categories_are_compact_with_one_indicator_and_follow_selection` 验证宽行高 < 38、indicator 与列表左对齐且处于当前行内、点击后 marker 跟随；窄态用例补“无 indicator”。原账号动作/表单回归不变。原生截图与最终验证在本轮完成后补齐。
 
+## 窄态 Tabs 对齐仓库页（2026-11-01 后续）
+
+负责人反馈：窄屏 Settings 分类 Tabs 必须与仓库页 Code/Issues/Pull requests 等内容 Tabs（`src/ui/repository/view.rs::tab_strip`）样式对齐。本轮只改 `settings/layout.rs` 窄态 navigation 与受影响测试/文档：
+
+- 字号/图标改为 `TextSize::Sm` / `IconSize::Xs`；icon-label `gap_1p5`、单项 `px_2`/`py_2`、项间 `gap_2`；未选 `NORMAL` + `fg_muted`，选中 `MEDIUM` + `fg`，hover 文字 `fg`。
+- 去掉旧 `h(38)`/`px_3`/固定 14px/SEMIBOLD 的大号样式；选中下划线改为 tab 内绝对定位 2px `colors.accent`，整条底部加 1px `colors.border` 基线。
+- keyboard focus 改用背景 `hover`，不引入会改变尺寸的边框；选中、hover、focus 三者职责分开。
+- 横向滚动容器就是 tab 行本身（不是包一层 wrapper），因此 `scroll_to_item`、End 选中末项 reveal、滚轮/滚动条继续有效；滚动条画在下方 `TAB_SCROLLBAR_BAND` 预留带，不遮住下划线。
+- 宽态紧凑侧栏 + indicator 未改；窄态仍不画 indicator，宽窄切换保留当前分类/焦点/表单状态。
+
+验证：聚焦 `narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last` 改为 12 个 fixture 分类、648px 内容宽度，验证横向溢出、End 选中末项后 offset 为负、末项进入视口、选中下划线高 2px、窄态无 indicator；宽态用例与原账户/表单回归继续通过（11 passed）。原生对照（同一 DPI/rem）：仓库页 `reference-repository-tabs.png` 的 Code 选中样式与本任务 `rework-narrow-tabs.png` 的 Settings 窄态 Tabs 并排检查了字号/图标、muted/active、下划线与底部 1px 分隔线；`rework-wide-regression.png` 复核宽态 indicator 未回退。原生 hover/focus 像素与本轮视觉验收仍待负责人确认。
+
 ## 交付与剩余边界
 
-待完成最终 required checks 与 PR。UI PR 添加 `pending`，负责人原生验收通过前不合并。真实 PAT、Windows IME 消息顺序、多 DPI、正式 Shell 组合和非 Windows 产品验收不能由该离线预览推断。
+本轮已提交并推送；PR 最新 head 的审查/CI 结果以 PR 记录为准。`pending` 保留以重新请求负责人验收，`blocked` 不碰，执行者不自合并。真实 PAT、Windows IME 消息顺序、多 DPI、正式 Shell 组合和非 Windows 产品验收不能由该离线预览推断。
 
 LESSONS 本任务基线仅 L001–L012；任务提及的 L014 未在该基线存在，按任务明确的紧凑可操作错误要求实现。未直接修改共享 LESSONS；若验证发现可复用问题，在本日志保留证据交协调者整合。

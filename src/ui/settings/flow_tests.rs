@@ -264,7 +264,7 @@ fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mu
     let (view, binding, cx) = mount(cx, &fixture);
     wait_idle(&binding, cx);
     view.update(cx, |view, cx| {
-        view.fixtures = 5;
+        view.fixtures = 12;
         cx.notify();
     });
     // 880px window minus 200px expanded sidebar + host margins.
@@ -290,8 +290,12 @@ fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mu
     draw(cx);
     draw(cx);
     assert!(view.read_with(cx, |view, _| view.tabs.offset().x < px(0.0)));
-    let last = cx.debug_bounds("settings-category-5").expect("last tab");
+    let last = cx.debug_bounds("settings-category-12").expect("last tab");
     assert!(last.right() <= tabs.right() + px(1.0));
+    let underline = cx
+        .debug_bounds("settings-category-active-underline")
+        .expect("active underline");
+    assert_eq!(underline.size.height, px(2.0));
     assert!(
         cx.debug_bounds("settings-category-indicator").is_none(),
         "the narrow layout must not paint the wide rail indicator"

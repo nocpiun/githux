@@ -8,6 +8,8 @@
 
 宽态分类行沿用正式 Shell 侧栏密度：Ely `ControlSize::Md` 行高（而非固定像素）、8px 图文 gap、`Radius::Md` 圆角、`fg_muted`/`hover`/`fg` 主题层级；当前分类左侧画与主侧栏同参数的 2px 短 indicator（宽 2、高度按 2/3 行高 clamp 20–24、右侧圆角 4、左直角，`fg_muted`，在 8px lane 内、不占点击目标、只有当前项有）。窄态继续用横向 Tabs 下划线，不复制该 indicator。宽态是 168px 分类列、32px 间隔和最大 720px 内容列；组件实际可用宽度低于 760px 时改为单行 icon + label Tabs。分类条独立横向滚动，页面内容仅纵向滚动。预览额外分类明确标为 Fixture，不属于产品配置。
 
+窄态分类 Tabs 与仓库页内容 Tabs 使用同一组主题参数，而不是另造视觉：`TextSize::Sm`、`IconSize::Xs`、icon-label `gap_1p5`、单项 `px_2`/`py_2`、项间 `gap_2`；未选 `FontWeight::NORMAL` + `fg_muted`，选中 `MEDIUM` + `fg`，hover 文字 `fg`；选中底部 2px `accent` 下划线与整条 1px `border` 基线。键盘 focus 用背景色表达，不增加边框尺寸；横向滚动容器就是 tab 行本身，使 `scroll_to_item`、选中末项 reveal 与滚轮/滚动条继续有效，滚动条画在下方预留带而不是压住下划线。
+
 PAT 表单默认收起。Add account 和账户行 Replace PAT 在列表下方打开表单，替换绑定被点击身份，允许目标为非当前账户。当前账户用 Current 标记，不生成 Switch 控件。账户状态来自服务权威目录，Verified、PendingVerification、MissingCredential、CredentialUnavailable、过期/拒绝与连接失败保持区别。
 
 ## 宿主接口与状态归属

@@ -13,7 +13,7 @@ use gpui::{
 use super::{SettingsBinding, accounts};
 use crate::ui::geometry::{
     SIDEBAR_INDICATOR_HEIGHT_RATIO, SIDEBAR_INDICATOR_MAX_HEIGHT, SIDEBAR_INDICATOR_MIN_HEIGHT,
-    SIDEBAR_INDICATOR_RADIUS, SIDEBAR_INDICATOR_WIDTH, SIDEBAR_PADDING,
+    SIDEBAR_INDICATOR_RADIUS, SIDEBAR_INDICATOR_WIDTH, SIDEBAR_PADDING, TAB_SCROLLBAR_BAND,
 };
 use crate::ui::scroll::{self, Bar, BarId, Bars, Motion, Placement, Style};
 
@@ -118,6 +118,9 @@ impl SettingsView {
             self.tab_focus.push(focus);
         }
         let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let small = theme.text_size(TextSize::Sm);
+        let radius_md = theme.radius(Radius::Md);
         let row_height = f32::from(
             theme
                 .control_height(ControlSize::Md)
@@ -126,13 +129,20 @@ impl SettingsView {
         let indicator_height = (row_height * SIDEBAR_INDICATOR_HEIGHT_RATIO)
             .clamp(SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_MAX_HEIGHT);
         let indicator_inset = ((row_height - indicator_height) / 2.0).max(0.0);
-        let (fg, hover, muted) = (theme.colors.fg, theme.colors.hover, theme.colors.fg_muted);
+        let (fg, hover, muted) = (colors.fg, colors.hover, colors.fg_muted);
+        let (active_fg, muted_fg, hover_bg, accent, border) = (
+            colors.fg,
+            colors.fg_muted,
+            colors.hover,
+            colors.accent,
+            colors.border,
+        );
         let mut items = div()
             .id("settings-category-list")
             .debug_selector(|| "settings-category-list".into())
             .flex()
-            .when(!narrow, |row| row.flex_col())
-            .gap_1()
+            .when(!narrow, |row| row.flex_col().gap_1())
+            .when(narrow, |row| row.gap_2())
             .min_w_0();
         for index in 0..=self.fixtures {
             let selected = match self.category {
@@ -157,26 +167,42 @@ impl SettingsView {
                     .aria_label(label.clone())
                     .aria_selected(selected)
                     .track_focus(&self.tab_focus[index])
+                    .relative()
                     .cursor_pointer()
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(7.0))
-                    .h(px(38.0))
-                    .px_3()
+                    .gap_1p5()
+                    .px_2()
+                    .py_2()
                     .whitespace_nowrap()
-                    .text_color(theme.colors.fg)
-                    .text_size(px(14.0))
-                    .when(selected, |item| item.font_weight(FontWeight::SEMIBOLD))
-                    .border_b_2()
-                    .border_color(if selected {
-                        theme.colors.fg
+                    .text_size(small)
+                    .font_weight(if selected {
+                        FontWeight::MEDIUM
                     } else {
-                        gpui::transparent_black()
+                        FontWeight::NORMAL
                     })
-                    .focus_visible(|item| item.border_1().border_color(theme.colors.focus))
-                    .child(Icon::new(icon).size(IconSize::Sm))
+                    .text_color(if selected { active_fg } else { muted_fg })
+                    .hover(move |style| style.text_color(active_fg))
+                    .focus_visible(move |style| style.bg(hover_bg))
+                    .child(Icon::new(icon).size(IconSize::Xs).color(if selected {
+                        active_fg
+                    } else {
+                        muted_fg
+                    }))
                     .child(label)
+                    .when(selected, |tab| {
+                        tab.child(
+                            div()
+                                .debug_selector(|| "settings-category-active-underline".to_string())
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(2.0))
+                                .bg(accent),
+                        )
+                    })
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
                     )
@@ -224,10 +250,10 @@ impl SettingsView {
                             .min_w_0()
                             .px(px(8.0))
                             .overflow_hidden()
-                            .rounded(theme.radius(Radius::Md))
+                            .rounded(radius_md)
                             .border_1()
                             .border_color(gpui::transparent_black())
-                            .text_size(theme.text_size(TextSize::Sm))
+                            .text_size(small)
                             .text_color(if selected { fg } else { muted })
                             .when(selected, |row| {
                                 row.bg(hover).font_weight(FontWeight::MEDIUM)
@@ -321,8 +347,9 @@ impl SettingsView {
             .relative()
             .w_full()
             .min_w_0()
-            .h(px(44.0))
             .flex_none()
+            .flex()
+            .flex_col()
             .on_hover(cx.listener(|this, hovered, _, cx| {
                 this.tab_bars.hover(
                     *hovered,
@@ -332,12 +359,17 @@ impl SettingsView {
                 cx.notify();
             }))
             .child(
+                // Keep the tabs themselves as the direct scroll children so `scroll_to_item`
+                // addresses a tab, not a single wrapper. The 1px divider belongs to the strip.
                 items
                     .w_full()
-                    .h_full()
+                    .min_w_0()
                     .overflow_x_scroll()
-                    .track_scroll(&self.tabs),
+                    .track_scroll(&self.tabs)
+                    .border_b_1()
+                    .border_color(border),
             )
+            .child(div().w_full().h(px(TAB_SCROLLBAR_BAND)).flex_none())
             .child(scroll::wheel_overlay(
                 "settings-tabs-wheel",
                 Axis::Horizontal,
