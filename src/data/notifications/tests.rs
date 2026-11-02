@@ -276,3 +276,215 @@ async fn rate_failure_headers_gate_append_and_refresh_and_keep_rows() {
         ));
     }
 }
+
+async fn run_action(inbox: &Notifications, thread_id: &str, action: ThreadAction) {
+    let request = inbox
+        .begin_thread_action(thread_id, action)
+        .unwrap()
+        .unwrap();
+    inbox.execute_thread_action(request).await;
+}
+
+#[tokio::test]
+async fn done_uses_delete_and_only_204_removes_the_row() {
+    let (_accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Done).await;
+    let snapshot = inbox.snapshot();
+    assert!(snapshot.items.iter().all(|item| item.id != "9000"));
+    assert!(!snapshot.thread_states.contains_key("9000"));
+    let writes: Vec<_> = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .collect();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(
+        writes[0].method,
+        crate::network::transport::HttpMethod::Delete
+    );
+    assert!(writes[0].url.ends_with("/notifications/threads/9000"));
+    assert!(writes[0].body.is_none());
+}
+
+#[tokio::test]
+async fn done_failure_keeps_the_row_with_a_retryable_state() {
+    let (_accounts, inbox, _) = setup(Scene::DoneFailure).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Done).await;
+    let snapshot = inbox.snapshot();
+    assert!(snapshot.items.iter().any(|item| item.id == "9000"));
+    match snapshot.thread_states.get("9000") {
+        Some(ThreadActionState::Failed { action, .. }) => assert_eq!(*action, ThreadAction::Done),
+        other => panic!("expected a retryable Done failure, got {other:?}"),
+    }
+    // A retry after the scripted failure succeeds and removes the row.
+    run_action(&inbox, "9000", ThreadAction::Done).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+}
+
+#[tokio::test]
+async fn unsubscribe_ignores_then_dones_and_completes() {
+    let (_accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9001", ThreadAction::Unsubscribe).await;
+    let snapshot = inbox.snapshot();
+    assert!(snapshot.items.iter().all(|item| item.id != "9001"));
+    let writes: Vec<_> = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .collect();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0].method, crate::network::transport::HttpMethod::Put);
+    assert!(
+        writes[0]
+            .url
+            .ends_with("/notifications/threads/9001/subscription")
+    );
+    assert!(
+        writes[0]
+            .body
+            .as_deref()
+            .is_some_and(|body| body.contains("\"ignored\":true"))
+    );
+    assert!(
+        writes[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json")
+    );
+    assert_eq!(
+        writes[1].method,
+        crate::network::transport::HttpMethod::Delete
+    );
+    assert!(writes[1].url.ends_with("/notifications/threads/9001"));
+}
+
+#[tokio::test]
+async fn unsubscribe_first_step_failure_touches_no_done_and_keeps_the_row() {
+    let (_accounts, inbox, fixture) = setup(Scene::UnsubscribeStepOneFailure).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Unsubscribe).await;
+    assert!(inbox.snapshot().items.iter().any(|item| item.id == "9000"));
+    assert!(matches!(
+        inbox.snapshot().thread_states.get("9000"),
+        Some(ThreadActionState::Failed {
+            action: ThreadAction::Unsubscribe,
+            ..
+        })
+    ));
+    let writes: Vec<_> = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .collect();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].method, crate::network::transport::HttpMethod::Put);
+}
+
+#[tokio::test]
+async fn unsubscribe_keeps_the_ignored_fact_when_the_followup_done_fails() {
+    let (_accounts, inbox, fixture) = setup(Scene::UnsubscribeStepTwoFailure).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Unsubscribe).await;
+    let snapshot = inbox.snapshot();
+    // The row stays because Done did not confirm removal, but the subscription
+    // is recorded as already ignored so the retry only issues Done.
+    assert!(snapshot.items.iter().any(|item| item.id == "9000"));
+    assert!(matches!(
+        snapshot.thread_states.get("9000"),
+        Some(ThreadActionState::UnsubscribedPendingDone { .. })
+    ));
+    run_action(&inbox, "9000", ThreadAction::Done).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+    let writes: Vec<_> = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .collect();
+    assert_eq!(writes.len(), 3, "PUT, failed DELETE, retried DELETE");
+    assert_eq!(
+        writes[1].method,
+        crate::network::transport::HttpMethod::Delete
+    );
+    assert_eq!(
+        writes[2].method,
+        crate::network::transport::HttpMethod::Delete
+    );
+}
+
+#[tokio::test]
+async fn duplicate_action_clicks_send_one_request_per_thread() {
+    let (_accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let first = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap();
+    assert!(first.is_some());
+    assert!(matches!(
+        inbox.begin_thread_action("9000", ThreadAction::Done),
+        Err(NotificationError::Busy)
+    ));
+    assert!(matches!(
+        inbox.begin_thread_action("9000", ThreadAction::Unsubscribe),
+        Err(NotificationError::Busy)
+    ));
+    // Another thread is unaffected by the first thread's in-flight action.
+    assert!(
+        inbox
+            .begin_thread_action("9001", ThreadAction::Done)
+            .unwrap()
+            .is_some()
+    );
+    inbox.execute_thread_action(first.unwrap()).await;
+    let writes = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .count();
+    assert_eq!(writes, 1);
+}
+
+#[tokio::test]
+async fn stale_account_reply_and_late_list_response_cannot_revive_a_done_row() {
+    let (accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    // An old Done reply is in flight while the account changes.
+    let old = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    accounts
+        .login(Pat::from_str("synthetic-second"))
+        .await
+        .unwrap();
+    // The late reply is applied after the account change: the controller must
+    // drop it, so the thread is neither removed nor tombstoned (the new account
+    // may legitimately own the same numeric thread id).
+    inbox.execute_thread_action(old).await;
+    assert!(!inbox.verify());
+    let stale = inbox.snapshot();
+    assert!(stale.items.is_empty(), "a stale snapshot publishes nothing");
+    assert_eq!(
+        fixture
+            .requests()
+            .iter()
+            .filter(|request| { request.method != crate::network::transport::HttpMethod::Get })
+            .count(),
+        0,
+        "a stale action must not send under the new account"
+    );
+}
+
+#[tokio::test]
+async fn a_done_row_is_not_resurrected_by_a_late_refresh_page() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Done).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+    // Refresh returns the same server page; the confirmed Done must not come back.
+    run(&inbox, RequestKind::Refresh).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+    assert_eq!(inbox.snapshot().items.len(), 7);
+}

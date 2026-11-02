@@ -103,13 +103,18 @@ impl Preview {
         self.scene = scene;
         let callback = Self::callback(cx);
         self.view = cx.new(|cx| {
-            NotificationsView::new(
+            let mut view = NotificationsView::new(
                 self.accounts.repo_service().notifications().unwrap(),
                 self.executor.clone(),
                 callback,
                 window,
                 cx,
-            )
+            );
+            view.set_now(
+                Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1793534400)),
+                cx,
+            );
+            view
         });
         self.action = format!("Offline fixture · {}", scene.label());
         cx.notify();
@@ -128,44 +133,19 @@ impl Render for Preview {
             .flex_col()
             .bg(colors.bg)
             .text_color(colors.fg)
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_2()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .children(Scene::ALL[..4].iter().map(|scene| {
-                                let scene = *scene;
-                                let weak = cx.entity().downgrade();
-                                Button::new(format!("scene-{scene:?}"), scene.label()).on_click(
-                                    move |_, window, cx| {
-                                        let _ = weak
-                                            .update(cx, |view, cx| view.select(scene, window, cx));
-                                    },
-                                )
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .children(Scene::ALL[4..].iter().map(|scene| {
-                                let scene = *scene;
-                                let weak = cx.entity().downgrade();
-                                Button::new(format!("scene-{scene:?}"), scene.label()).on_click(
-                                    move |_, window, cx| {
-                                        let _ = weak
-                                            .update(cx, |view, cx| view.select(scene, window, cx));
-                                    },
-                                )
-                            })),
-                    ),
-            )
+            .child(div().flex_none().flex().flex_col().gap_2().p_2().children(
+                Scene::ALL.chunks(4).map(|chunk| {
+                    div().flex().gap_2().children(chunk.iter().map(|scene| {
+                        let scene = *scene;
+                        let weak = cx.entity().downgrade();
+                        Button::new(format!("scene-{scene:?}"), scene.label()).on_click(
+                            move |_, window, cx| {
+                                let _ = weak.update(cx, |view, cx| view.select(scene, window, cx));
+                            },
+                        )
+                    }))
+                }),
+            ))
             .child(
                 div()
                     .flex_1()

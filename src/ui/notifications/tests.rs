@@ -220,3 +220,76 @@ fn cooldown_wake_is_rearmed_after_deactivation(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
 }
+
+#[gpui::test]
+fn three_actions_stay_inside_the_row_and_do_not_navigate(cx: &mut TestAppContext) {
+    let (controller, executor, fixture) = setup(cx);
+    let captured = Rc::new(RefCell::new(0usize));
+    let sink = captured.clone();
+    let on_repository: OnRepository = Rc::new(move |_, _, _| *sink.borrow_mut() += 1);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        NotificationsView::new(
+            controller.clone(),
+            executor.clone(),
+            on_repository,
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, _| window.activate_window());
+    for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(620.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let row = cx.debug_bounds("notification-row-0").unwrap();
+        let actions = cx.debug_bounds("notification-actions-0").unwrap();
+        let title = cx.debug_bounds("notification-title-0").unwrap();
+        let done = cx.debug_bounds("notification-action-done-0").unwrap();
+        let unsub = cx
+            .debug_bounds("notification-action-unsubscribe-0")
+            .unwrap();
+        let save = cx.debug_bounds("notification-action-save-0").unwrap();
+        assert!(actions.right() <= row.right());
+        assert!(
+            title.right() <= actions.left(),
+            "title must shrink before the actions"
+        );
+        assert!(done.left() < unsub.left() && unsub.left() < save.left());
+        assert!(save.right() <= row.right());
+    }
+    let before = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .count();
+    // The unavailable Save button must never send a request or fake a local save.
+    let save = cx
+        .debug_bounds("notification-action-save-0")
+        .unwrap()
+        .center();
+    cx.simulate_click(save, Modifiers::none());
+    cx.run_until_parked();
+    let after = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+        .count();
+    assert_eq!(before, after, "Save for later stays a no-op");
+    // Done removes exactly one row and never triggers repository navigation.
+    let done = cx
+        .debug_bounds("notification-action-done-0")
+        .unwrap()
+        .center();
+    cx.simulate_click(done, Modifiers::none());
+    // The write runs on the shared Tokio executor; drain both that task and the
+    // GPUI oneshot callback before asserting.
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if view.read_with(cx, |view, _| view.snapshot.items.len()) == 13 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // setup() loads both pages (14 rows); Done removes exactly this one.
+    assert_eq!(view.read_with(cx, |view, _| view.snapshot.items.len()), 13);
+    assert_eq!(*captured.borrow(), 0);
+}

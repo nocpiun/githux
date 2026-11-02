@@ -7,7 +7,7 @@ use crate::github::notifications::{
     self, NotificationCursor, NotificationLimits, NotificationPage, PageFailure,
 };
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,9 @@ pub struct InboxSnapshot {
     pub error: Option<NotificationError>,
     pub failed_request: Option<RequestKind>,
     pub cooldown_seconds: u64,
+    /// Rate-limit backoff that also blocks thread actions (poll cooldown does not).
+    pub action_cooldown_seconds: u64,
+    pub thread_states: HashMap<String, ThreadActionState>,
 }
 impl InboxSnapshot {
     pub fn is_empty(&self) -> bool {
@@ -48,6 +51,8 @@ struct State {
     request_after: Option<Instant>,
     cancel: CancellationToken,
     cancel_source: CancellationTokenSource,
+    tombstones: HashSet<String>,
+    action_generations: HashMap<String, u64>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -61,8 +66,17 @@ impl Default for State {
             request_after: None,
             cancel,
             cancel_source,
+            tombstones: HashSet::new(),
+            action_generations: HashMap::new(),
         }
     }
+}
+
+pub struct ThreadActionRequest {
+    pub thread_id: String,
+    pub action: ThreadAction,
+    generation: u64,
+    cancel: CancellationToken,
 }
 
 pub struct InboxRequest {
@@ -105,6 +119,7 @@ impl Notifications {
         let state = self.state.lock().expect("inbox state");
         let mut snapshot = state.snapshot.clone();
         snapshot.cooldown_seconds = remaining(state.refresh_after.max(state.request_after));
+        snapshot.action_cooldown_seconds = remaining(state.request_after);
         snapshot
     }
 
@@ -282,6 +297,9 @@ impl Notifications {
                     .collect();
                 let mut truncated = false;
                 for item in page.items {
+                    if state.tombstones.contains(&item.id) {
+                        continue;
+                    }
                     if ids.insert(item.id.clone()) {
                         if state.snapshot.items.len() >= self.limits.max_items {
                             truncated = true;
@@ -308,6 +326,187 @@ impl Notifications {
                 if !state.snapshot.partial.is_empty() {
                     state.validator = None;
                 }
+            }
+        }
+    }
+
+    /// Start an action on an individual thread (Done or Unsubscribe).
+    /// Guarded against concurrent actions on the same thread, account staleness
+    /// and rate limit cooldown.
+    pub fn begin_thread_action(
+        &self,
+        thread_id: &str,
+        action: ThreadAction,
+    ) -> Result<Option<ThreadActionRequest>, NotificationError> {
+        self.begin_thread_action_at(thread_id, action, Instant::now())
+    }
+
+    fn begin_thread_action_at(
+        &self,
+        thread_id: &str,
+        action: ThreadAction,
+        now: Instant,
+    ) -> Result<Option<ThreadActionRequest>, NotificationError> {
+        if !self.verify() {
+            return Err(GitHubError::StaleContext.into());
+        }
+        let mut state = self.state.lock().expect("inbox state");
+        if state.tombstones.contains(thread_id) {
+            return Ok(None);
+        }
+        if let Some(ThreadActionState::Busy(_)) = state.snapshot.thread_states.get(thread_id) {
+            return Err(NotificationError::Busy);
+        }
+        if let Some(deadline) = state.request_after
+            && deadline > now
+        {
+            return Err(NotificationError::Cooldown {
+                seconds: seconds(deadline.duration_since(now)),
+            });
+        }
+        let generation = state
+            .action_generations
+            .entry(thread_id.to_string())
+            .or_insert(0);
+        *generation += 1;
+        let action_generation = *generation;
+        state
+            .snapshot
+            .thread_states
+            .insert(thread_id.to_string(), ThreadActionState::Busy(action));
+        Ok(Some(ThreadActionRequest {
+            thread_id: thread_id.to_string(),
+            action,
+            generation: action_generation,
+            cancel: state.cancel.clone(),
+        }))
+    }
+
+    /// Execute the thread action in background and apply result.
+    pub async fn execute_thread_action(&self, request: ThreadActionRequest) {
+        let thread_id = request.thread_id.clone();
+        let action = request.action;
+        let client = self.client.clone();
+        let result = match action {
+            ThreadAction::Done => {
+                let tid = thread_id.clone();
+                let res = self
+                    .session
+                    .read(request.cancel.clone(), async move |pat, cancel| {
+                        Ok::<_, GitHubError>(
+                            notifications::mark_done(&client, &pat, &tid, cancel).await,
+                        )
+                    })
+                    .await;
+                match res {
+                    Ok(scoped) => match scoped.value {
+                        Ok(meta) => Ok(notifications::UnsubscribeOutcome::Completed(meta)),
+                        Err(fail) => Err(fail),
+                    },
+                    Err(err) => Err(PageFailure {
+                        error: err.into(),
+                        metadata: NotificationMetadata::default(),
+                    }),
+                }
+            }
+            ThreadAction::Unsubscribe => {
+                let tid = thread_id.clone();
+                let res = self
+                    .session
+                    .read(request.cancel.clone(), async move |pat, cancel| {
+                        Ok::<_, GitHubError>(
+                            notifications::unsubscribe_thread(&client, &pat, &tid, cancel).await,
+                        )
+                    })
+                    .await;
+                match res {
+                    Ok(scoped) => scoped.value,
+                    Err(err) => Err(PageFailure {
+                        error: err.into(),
+                        metadata: NotificationMetadata::default(),
+                    }),
+                }
+            }
+        };
+        self.finish_thread_action(&request, result, Instant::now());
+    }
+
+    fn finish_thread_action(
+        &self,
+        request: &ThreadActionRequest,
+        result: Result<notifications::UnsubscribeOutcome, PageFailure>,
+        now: Instant,
+    ) {
+        if !self.verify() {
+            return;
+        }
+        let mut state = self.state.lock().expect("inbox state");
+        if state.action_generations.get(&request.thread_id) != Some(&request.generation) {
+            return;
+        }
+        let metadata = match &result {
+            Ok(notifications::UnsubscribeOutcome::Completed(meta)) => meta,
+            Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed { metadata, .. }) => metadata,
+            Err(failure) => &failure.metadata,
+        };
+        let poll = metadata.poll_interval_seconds.unwrap_or(60).max(1);
+        state.refresh_after = now.checked_add(Duration::from_secs(poll));
+        let rate = &metadata.rate_limit;
+        let reset = if rate.remaining == Some(0) {
+            rate.reset.map(|reset| {
+                reset.saturating_sub(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                )
+            })
+        } else {
+            None
+        };
+        let rate_failure = matches!(
+            &result,
+            Err(PageFailure {
+                error: NotificationError::GitHub(GitHubError::RateLimited { .. }),
+                ..
+            })
+        );
+        let retry = rate
+            .retry_after
+            .map(u64::from)
+            .into_iter()
+            .chain(reset)
+            .max()
+            .or(if rate_failure { Some(60) } else { None });
+        if let Some(retry) = retry {
+            state.request_after = now.checked_add(Duration::from_secs(retry.max(1)));
+        }
+
+        match result {
+            Ok(notifications::UnsubscribeOutcome::Completed(_)) => {
+                // Done succeeded: remove from items, add to tombstones, remove thread state
+                state.tombstones.insert(request.thread_id.clone());
+                state
+                    .snapshot
+                    .items
+                    .retain(|item| item.id != request.thread_id);
+                state.snapshot.thread_states.remove(&request.thread_id);
+            }
+            Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed { done_error, .. }) => {
+                // Subscription was ignored, but Done failed.
+                state.snapshot.thread_states.insert(
+                    request.thread_id.clone(),
+                    ThreadActionState::UnsubscribedPendingDone { error: done_error },
+                );
+            }
+            Err(failure) => {
+                state.snapshot.thread_states.insert(
+                    request.thread_id.clone(),
+                    ThreadActionState::Failed {
+                        action: request.action,
+                        error: failure.error,
+                    },
+                );
             }
         }
     }

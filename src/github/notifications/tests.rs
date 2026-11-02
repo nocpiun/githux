@@ -207,3 +207,190 @@ async fn reusable_fixture_failure_recovers_and_unknown_request_is_599() {
         assert!(!scene.label().is_empty());
     }
 }
+
+#[tokio::test]
+async fn done_is_a_delete_and_requires_204() {
+    use crate::network::transport::{HttpMethod, HttpResponse};
+    for (status, ok) in [
+        (204, true),
+        (200, false),
+        (403, false),
+        (404, false),
+        (503, false),
+    ] {
+        let transport = Arc::new(MockTransport::new());
+        transport
+            .enqueue(Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body: String::new(),
+            }))
+            .await;
+        let result = mark_done(
+            &client(transport.clone()),
+            &Pat::from_str("synthetic"),
+            "9000",
+            CancellationToken::default(),
+        )
+        .await;
+        assert_eq!(result.is_ok(), ok, "status {status}");
+        let requests = transport.recorded_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, HttpMethod::Delete);
+        assert!(requests[0].url.ends_with("/notifications/threads/9000"));
+        assert!(!requests[0].url.contains("/subscription"));
+        assert!(requests[0].body.is_none());
+        assert!(
+            requests[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v.contains("synthetic"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsubscribe_puts_ignored_json_then_done() {
+    use crate::network::transport::{HttpMethod, json_response};
+    let transport = Arc::new(MockTransport::new());
+    transport
+        .enqueue(Ok(json_response(200, r#"{"ignored":true}"#)))
+        .await;
+    transport
+        .enqueue(Ok(crate::network::transport::HttpResponse {
+            status: 204,
+            headers: vec![],
+            body: String::new(),
+        }))
+        .await;
+    let outcome = unsubscribe_thread(
+        &client(transport.clone()),
+        &Pat::from_str("synthetic"),
+        "9000",
+        CancellationToken::default(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, UnsubscribeOutcome::Completed(_)));
+    let requests = transport.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, HttpMethod::Put);
+    assert!(
+        requests[0]
+            .url
+            .ends_with("/notifications/threads/9000/subscription")
+    );
+    assert_eq!(requests[0].body.as_deref(), Some(r#"{"ignored":true}"#));
+    assert!(
+        requests[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json")
+    );
+    assert_eq!(requests[1].method, HttpMethod::Delete);
+    assert!(requests[1].url.ends_with("/notifications/threads/9000"));
+}
+
+#[tokio::test]
+async fn unsubscribe_rejects_a_subscription_that_is_not_ignored() {
+    use crate::network::transport::json_response;
+    let transport = Arc::new(MockTransport::new());
+    transport
+        .enqueue(Ok(json_response(200, r#"{"ignored":false}"#)))
+        .await;
+    let result = unsubscribe_thread(
+        &client(transport.clone()),
+        &Pat::from_str("synthetic"),
+        "9000",
+        CancellationToken::default(),
+    )
+    .await;
+    assert!(result.is_err());
+    // No follow-up DELETE is sent when the ignore was not confirmed.
+    assert_eq!(transport.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn unsubscribe_keeps_the_confirmed_ignore_when_done_fails() {
+    use crate::network::transport::json_response;
+    let transport = Arc::new(MockTransport::new());
+    transport
+        .enqueue(Ok(json_response(200, r#"{"ignored":true}"#)))
+        .await;
+    transport.enqueue(Ok(json_response(503, "{}"))).await;
+    let outcome = unsubscribe_thread(
+        &client(transport.clone()),
+        &Pat::from_str("synthetic"),
+        "9000",
+        CancellationToken::default(),
+    )
+    .await
+    .unwrap();
+    match outcome {
+        UnsubscribeOutcome::IgnoredDoneFailed { .. } => {}
+        other => panic!("expected IgnoredDoneFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn thread_writes_are_not_swallowed_on_forbidden_or_timeout() {
+    use crate::network::transport::{MockFailure, json_response};
+    let transport = Arc::new(MockTransport::new());
+    transport
+        .enqueue(Ok(json_response(403, r#"{"message":"forbidden"}"#)))
+        .await;
+    let forbidden = mark_done(
+        &client(transport.clone()),
+        &Pat::from_str("synthetic"),
+        "9000",
+        CancellationToken::default(),
+    )
+    .await;
+    assert!(matches!(
+        forbidden,
+        Err(PageFailure {
+            error: NotificationError::GitHub(GitHubError::Forbidden),
+            ..
+        })
+    ));
+    transport.enqueue(Err(MockFailure::Timeout)).await;
+    let timeout = mark_done(
+        &client(transport),
+        &Pat::from_str("synthetic"),
+        "9000",
+        CancellationToken::default(),
+    )
+    .await;
+    assert!(matches!(
+        timeout,
+        Err(PageFailure {
+            error: NotificationError::GitHub(GitHubError::Timeout { .. }),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn a_thread_id_cannot_escape_the_fixed_endpoint() {
+    use crate::network::transport::HttpMethod;
+    let transport = Arc::new(MockTransport::new());
+    for hostile in ["../user", "9000/../../user", "9000?all=true", ""] {
+        let result = mark_done(
+            &client(transport.clone()),
+            &Pat::from_str("synthetic"),
+            hostile,
+            CancellationToken::default(),
+        )
+        .await;
+        assert!(result.is_err(), "{hostile}");
+    }
+    assert_eq!(
+        transport
+            .recorded_requests()
+            .await
+            .iter()
+            .filter(|r| r.method != HttpMethod::Get)
+            .count(),
+        0
+    );
+}

@@ -1,12 +1,14 @@
 # Notifications 只读收件箱
 
-本任务交付独立的数据适配、账户控制器、列表和原生 example，正式 Shell 的 Notifications 路由由后续唯一集成者挂载。尚未接入 Shell，不把预览视为正式应用功能已上线。实现不依赖全局 Issues/PR 或 cache-core。
+本任务交付独立的数据适配、账户控制器、列表、三项条目动作和原生 example，正式 Shell 的 Notifications 路由与动作接线由后续唯一集成者挂载。尚未接入 Shell，不把预览视为正式应用功能已上线。实现不依赖全局 Issues/PR 或 cache-core。
+
+条目动作是 GitHub 收件箱语义：**Done（完成）**、**Unsubscribe（取消订阅）**、**Save for later（稍后处理）**。Done 不是 mark read；三者都不代表订阅/取消订阅之外的写能力扩张。
 
 ## 已确认范围
 
-默认 `GET /notifications?all=false&participating=false&per_page=50&page=1`，不加 `since/before`，包含 watched 与 participating 来源的未读通知。第一次进入只加载一次，之后仅显式刷新和加载更多；不后台轮询，不读取/已读/Done/全部已读/Watch/Ignore/订阅，不实现磁盘业务缓存。
+默认 `GET /notifications?all=false&participating=false&per_page=50&page=1`，不加 `since/before`，包含 watched 与 participating 来源的未读通知。第一次进入只加载一次，之后仅显式刷新和加载更多；不后台轮询，不实现磁盘业务缓存。首版只提供单条 Done、单条 Unsubscribe 与禁用的 Save for later：不做 mark read、全部已读、Done-all、按仓库通知页或其它 Watch/Ignore/订阅管理动作。
 
-行展示真实字符串 thread ID 对应的标题、仓库、reason、更新时间、unread。thread ID 不作为 Issue/PR ID。列表保持服务端顺序，跨页按 ID 去重；标题和未知类型不猜详情地址，不跳浏览器。仓库名独立输出 typed `RepositoryNavigation`（真实 repository ID、owner/name、`RepositoryReadContext`），供宿主核验当前账户及 tab/incarnation 后打开应用内 Repository。
+行展示真实字符串 thread ID 对应的标题、仓库、reason、更新时间、unread，以及右下角常显的 Done、Unsubscribe、Save for later 三个紧凑图标按钮（Check、EyeOff、Bookmark）。时间在上、按钮在下，不依赖 hover 才可发现；窄屏时右列固定宽度、标题真实收缩，按钮不挤出条目或覆盖文本。thread ID 不作为 Issue/PR ID。列表保持服务端顺序，跨页按 ID 去重；标题和未知类型不猜详情地址，不跳浏览器。仓库名独立输出 typed `RepositoryNavigation`（真实 repository ID、owner/name、`RepositoryReadContext`），供宿主核验当前账户及 tab/incarnation 后打开应用内 Repository。
 
 ## 行排版与读状态（2026-11-01 负责人反馈后）
 
@@ -23,6 +25,18 @@
 ## 数据和控制器
 
 - `src/domain/notification.rs` 定义 thread、subject、partial 和错误。未知 subject 类型保留为 `Unknown`；未知 reason 安全显示 Other notification。subject/comment/repository URL 不发起读取、不变成导航地址。
+### 条目动作（账户作用域）
+
+- `mark_done`：`DELETE /notifications/threads/{id}`，只有 **204 No Content** 才确认完成；200/403/404/超时都不当作成功，绝不使用 `PATCH` read 冒充完成。线程 ID 只允许 `[A-Za-z0-9_-]`，不能借分隔符跳出固定端点。
+- `unsubscribe_thread`：第一步 `PUT /notifications/threads/{id}/subscription`，JSON `{"ignored":true}` 与 `Content-Type: application/json`，必须 200 且响应 `ignored=true` 才算忽略成功；随后调用 `mark_done`，因为 GitHub 收件箱的 Unsubscribe 会从 inbox 移除通知。**只用 `DELETE subscription` 对 watched repo 无效，禁止使用**。
+- 若第一步成功而第二步 Done 失败：保留「已确认取消订阅」的事实，状态为 `UnsubscribedPendingDone`，只提供重试剩余 Done 的入口，不回滚、不谎称全成功、不本地删行冒充完成。
+- 写请求按 thread 串行：进行中该条两个动作禁用并以 spinner 表示，其他行不受影响；重复点击不产生第二个请求。失败保留条目，显示 warning 图标 + tooltip 与真实重试入口。
+- 账户切换、移除、换 PAT 或旧响应到达时，动作成功/失败都按 `RepositorySession` 的 context 与动作 generation 丢弃；已确认 Done 的 thread ID 记入 tombstone，之后到达的旧列表页或刷新不会把它复活。
+- 写请求结果不明（超时/断连）不自动重放，也不把 401/403/404 当成功；`X-Poll-Interval` 与限流冷却沿用读取路径的语义，写失败同样进入冷却。
+- **Save for later**：当前公开 REST 列表与公开 GraphQL 均无 save/read-saved 接口。按已确认 G2「暂不支持先放着，不做 GitHub 跳转」保留按钮但禁用，tooltip `Save for later (unavailable)`；不伪造成功、不本地收藏、不读 cookie、不使用未公开接口、点击零网络请求。若未来出现正式支持，先带一手证据报告协调者再改边界。
+
+这些写操作建立在 `src/github/client.rs` 与 `src/network/transport.rs` 的通用 PUT/DELETE 基础上；该基础从 `feature/repository-star` 的固定提交 `a707021db4bef6945b27653a75988de8820f81ab`（相对 base `9c405942654237b95cceb10c0f8543ee1a6f06a5`）按协调者授权精确引入，保持与 Star 任务一致的形态以便后续归并；没有复制 Star 的其他文件，也没有另造 mutation 框架。
+
 - `src/github/notifications/mod.rs` 每次只读一页，复用固定请求头、标准 `reqwest::Url` origin 判断、共享错误分类及接收时 body 限制。continuation 为不可构造的 cursor；仅接受同源、相同 notifications path、固定 all/participating/per_page 和恰好下一页的 Link。跨域、不同端口、userinfo、循环、额外查询参数均停止并标 Partial。
 - 默认每页 50、最多 20 页/1,000 个已加载 thread、单响应 2 MiB。达到限制标 Partial，不声称全局未读总数。UI 的 `N loaded` 仅表示当前加载的去重行数。
 - `RepoService::notifications()` 捕获一个 `RepositorySession`，`Notifications` 通过其 `read` 复用凭据 blocking load、共享 semaphore、取消和 auth epoch/selection/service-instance 检查。没有第二套 PAT 管理或 endpoint 私有 semaphore。
@@ -39,7 +53,9 @@ Arrow/Home/End/PageUp/PageDown 移动选择并 reveal；列表焦点下 Enter �
 
 ## 官方接口证据
 
-2026-11-01 重新只读抓取 [GitHub Notifications REST 官方文档](https://docs.github.com/en/rest/activity/notifications?apiVersion=2022-11-28) 的 [机器可读正文](https://docs.github.com/api/article/body?pathname=/en/rest/activity/notifications&apiVersion=2022-11-28)。文档确认 Classic PAT、`notifications` 或 `repo` scope、fine-grained token 不支持该端点；默认 all=false/participating=false、按更新时间排序、per_page 最大 50、Last-Modified 与 X-Poll-Interval。响应为 Thread 数组，id 为字符串，repository 为 Minimal Repository，subject 含 title/type/url/latest_comment_url，last_read_at 可 null。此端点需要认证且可能包含私人通知，因此本任务只核验官方公开 schema，再用确定性 fixture；没有读取任何实际私人通知，也没有远端业务写入。
+2026-11-01 重新只读抓取 [GitHub Notifications REST 官方文档](https://docs.github.com/en/rest/activity/notifications?apiVersion=2022-11-28) 的 [机器可读正文](https://docs.github.com/api/article/body?pathname=/en/rest/activity/notifications&apiVersion=2022-11-28)。文档确认 Classic PAT、`notifications` 或 `repo` scope、fine-grained token 不支持该端点；默认 all=false/participating=false、按更新时间排序、per_page 最大 50、Last-Modified 与 X-Poll-Interval。响应为 Thread 数组，id 为字符串，repository 为 Minimal Repository，subject 含 title/type/url/latest_comment_url，last_read_at 可 null。2026-11-02 再次只读核验 [Mark a thread as done](https://docs.github.com/en/rest/activity/notifications#mark-a-thread-as-done)、[Set a thread subscription](https://docs.github.com/en/rest/activity/notifications#set-a-thread-subscription)、[Delete a thread subscription](https://docs.github.com/en/rest/activity/notifications#delete-a-thread-subscription) 与 [Managing notifications from your inbox](https://docs.github.com/en/subscriptions-and-notifications/how-tos/viewing-and-triaging-notifications/managing-notifications-from-your-inbox)：Done 是 `DELETE`（204），与 read/PATCH 不同；订阅更新是 `PUT .../subscription`，`ignored=true` 才是忽略；收件箱的 Unsubscribe 会一并移除通知，因此实现为「先 ignored、后 Done」两步；对 watched repo 只删订阅不会生效。Save for later 在这两份公开 API 中都没有对应条目接口。
+
+此端点需要认证且可能包含私人通知，因此本任务只核验官方公开 schema，再用确定性 fixture；没有读取任何实际私人通知，也没有对真实账户执行写操作。
 
 ## 预览与验证边界
 

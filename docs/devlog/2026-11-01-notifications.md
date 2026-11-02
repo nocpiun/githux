@@ -45,6 +45,21 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 原生边界不变：合成窗口可启动/渲染，但场景切换、加载更多、真实滚轮、键盘、多 DPI 与 100%/150% 缩放仍未在本机可靠注入验收，交由负责人验收；GPUI 测试与窗口截图不等于原生输入证据（L002）。
 
+## 2026-11-02 条目动作（Done / Unsubscribe / Save for later）
+
+负责人要求每条通知右下角常显三个图标按钮，并确认语义为 GitHub 收件箱的 Done、Unsubscribe、Save for later（Done 不是 mark read）。实现：
+
+- 右列固定宽度：时间在上，Check / EyeOff / Bookmark 三个紧凑 Ely `IconButton` 在下。Done 与 Unsubscribe 接到本组件现有账户作用域 controller；Save 无公开 API，禁用并带 `Save for later (unavailable)` tooltip，点击零请求。Ely 固定图标集没有 `BellOff`，语义最接近的是 `EyeOff`（对应 `ignored`），tooltip/无障碍名称仍为 Unsubscribe，已在交付说明中报告该替代。
+- `mark_done` 用 `DELETE /notifications/threads/{id}`，仅 204 成功；`unsubscribe_thread` 先 `PUT .../subscription`（`{"ignored":true}`，200 且 `ignored=true`）再 `mark_done`，第二步失败保留 `UnsubscribedPendingDone` 并只重试 Done。只用 DELETE subscription 对 watched repo 无效，因此没有采用。
+- controller 为每条 thread 维护 busy/failed 状态与动作 generation；重复点击同条返回 `Busy`，其他行不受影响。已确认 Done 的 thread ID 进入 tombstone，之后到达的旧列表/刷新不会复活；账户切换/换 PAT 后旧动作结果被 context 检查丢弃。
+- 失败保留条目，只显示 warning 图标 + tooltip 与真实重试入口；超时/403/404 不吞行也不当成功，写失败同样进入 rate/poll 冷却。
+
+公共基础：按协调者授权，从 `feature/repository-star` 固定提交 `a707021db4bef6945b27653a75988de8820f81ab`（相对 base `9c40594`）精确引入 `src/github/client.rs` 与 `src/network/transport.rs` 的 PUT/DELETE 支持并单独提交，未复制 Star 其他文件、未合并整条分支、未另造 mutation 框架。
+
+验证：mock/localhost 覆盖 Done method/path/204、非 204 拒绝、Unsubscribe JSON + 两步、ignored=false 拒绝、第二步失败保留并重试、403/超时不吞、重复点击、跨账户旧回复、旧刷新不复活、thread ID 不能逃出固定端点；UI 测试覆盖三按钮位置/窄屏收缩、Save 点击零写请求、Done 点击后仅移除该行且不触发 Repository 导航。原生 144 DPI 截图 `.agents/task/screens/actions-wide.png` 与 `actions-narrow3.png` 确认时间在上、按钮在下、长标题真实省略与读状态背景；负责人已确认无需再截图。
+
+未测边界：真实账户写操作、真实 tooltip 悬停/焦点到达、150% 缩放切换与触摸板仍未原生验证，交负责人验收。
+
 ## 验收与集成边界
 
-本任务须创建带 milestone #1 和 pending 的 PR，CI/Codex review 绑定最新 head。UI 需要负责人验收，基层执行者不合并。原生窗口的 mixed/long/narrow/keyboard/paging 与 DPI/手感如受环境阻塞必须明确报告；编译与 GPUI 测试不能替代正式 Shell 或真实 Windows 输入。没有新增跨任务稳定教训；应用 L002/L007/L010/L012，LESSONS 写入权留给当前 Home 执行者。
+本任务须创建带 milestone #1 和 pending 的 PR，CI/Codex review 绑定最新 head。UI 需要负责人验收，基层执行者不合并。原生窗口的 mixed/long/narrow/keyboard/paging 与 DPI/手感如受环境阻塞必须明确报告；编译与 GPUI 测试不能替代正式 Shell 或真实 Windows 输入。本轮应用 L002/L007/L010/L012/L017，并把两步写操作的中间事实规则沉淀为 L018。

@@ -24,9 +24,12 @@ pub enum Scene {
     Unknown,
     Delayed,
     Long,
+    DoneFailure,
+    UnsubscribeStepOneFailure,
+    UnsubscribeStepTwoFailure,
 }
 impl Scene {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::Mixed,
         Self::Empty,
         Self::AppendFailure,
@@ -35,6 +38,9 @@ impl Scene {
         Self::Unknown,
         Self::Delayed,
         Self::Long,
+        Self::DoneFailure,
+        Self::UnsubscribeStepOneFailure,
+        Self::UnsubscribeStepTwoFailure,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -46,6 +52,9 @@ impl Scene {
             Self::Unknown => "Unknown",
             Self::Delayed => "Delayed",
             Self::Long => "Long list",
+            Self::DoneFailure => "Done failure",
+            Self::UnsubscribeStepOneFailure => "Unsub step 1 fail",
+            Self::UnsubscribeStepTwoFailure => "Unsub step 2 fail",
         }
     }
 }
@@ -94,6 +103,71 @@ impl Fixture {
         let Ok(url) = reqwest::Url::parse(&request.url) else {
             return (invalid(), false);
         };
+        let segment = url.path().trim_start_matches('/').trim_end_matches('/');
+        if request.method == HttpMethod::Delete && segment.starts_with("notifications/threads/") {
+            let thread = segment
+                .trim_start_matches("notifications/threads/")
+                .to_string();
+            if thread.is_empty() {
+                return (invalid(), false);
+            }
+            let scene = state.scene;
+            let should_fail = match scene {
+                Scene::DoneFailure => !state.failed,
+                Scene::UnsubscribeStepTwoFailure => !state.failed,
+                _ => false,
+            };
+            if should_fail {
+                state.failed = true;
+                return (
+                    HttpResponse {
+                        status: 503,
+                        headers: vec![("x-poll-interval".into(), "1".into())],
+                        body: "{}".into(),
+                    },
+                    false,
+                );
+            }
+            // 204 No Content is the only confirmation of Done.
+            return (
+                HttpResponse {
+                    status: 204,
+                    headers: vec![("x-poll-interval".into(), "1".into())],
+                    body: String::new(),
+                },
+                false,
+            );
+        }
+        if request.method == HttpMethod::Put && segment.ends_with("/subscription") {
+            let scene = state.scene;
+            let should_fail = match scene {
+                Scene::UnsubscribeStepOneFailure => !state.failed,
+                _ => false,
+            };
+            if should_fail {
+                state.failed = true;
+                return (
+                    HttpResponse {
+                        status: 503,
+                        headers: vec![("x-poll-interval".into(), "1".into())],
+                        body: "{}".into(),
+                    },
+                    false,
+                );
+            }
+            let body = request.body.clone().unwrap_or_default();
+            let ignored = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("ignored").and_then(Value::as_bool))
+                .unwrap_or(false);
+            if !ignored {
+                return (
+                    json_response(422, r#"{"message":"ignored must be true"}"#),
+                    false,
+                );
+            }
+            return (json_response(200, r#"{"ignored":true}"#), false);
+        }
         if request.method != HttpMethod::Get {
             return (invalid(), false);
         }

@@ -277,5 +277,153 @@ impl ThreadDto {
     }
 }
 
+pub async fn mark_done(
+    client: &GitHubClient,
+    pat: &Pat,
+    thread_id: &str,
+    cancel: CancellationToken,
+) -> Result<NotificationMetadata, PageFailure> {
+    if !valid_thread_id(thread_id) {
+        return Err(NotificationError::InvalidResponse("invalid thread id").into());
+    }
+    let path = format!("notifications/threads/{thread_id}");
+    let request = client.build_delete(&path, pat);
+    let response = client
+        .transport()
+        .execute_bounded(request, cancel, 16 * 1024)
+        .await
+        .map_err(|err| {
+            PageFailure::from(NotificationError::from(error::classify_transport(err)))
+        })?;
+    let metadata = NotificationMetadata {
+        last_modified: response.header("last-modified").map(str::to_owned),
+        poll_interval_seconds: response
+            .header("x-poll-interval")
+            .and_then(|s| s.parse().ok()),
+        rate_limit: {
+            let rate = response.rate_limit();
+            NotificationRateLimit {
+                limit: rate.limit,
+                remaining: rate.remaining,
+                reset: rate.reset,
+                retry_after: rate.retry_after,
+            }
+        },
+    };
+    if let Some(err) = error::classify_status(&response) {
+        return Err(PageFailure {
+            error: err.into(),
+            metadata,
+        });
+    }
+    // GitHub API states: 204 No Content confirms thread was marked as Done.
+    if response.status != 204 {
+        return Err(PageFailure {
+            error: NotificationError::InvalidResponse("expected HTTP 204 for Done"),
+            metadata,
+        });
+    }
+    Ok(metadata)
+}
+
+/// Opaque thread ids stay inside one fixed path segment: no separators, query
+/// or fragment characters can retarget the request.
+fn valid_thread_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnsubscribeOutcome {
+    Completed(NotificationMetadata),
+    /// The subscription was ignored on the server, but the subsequent Done call failed.
+    IgnoredDoneFailed {
+        done_error: NotificationError,
+        metadata: NotificationMetadata,
+    },
+}
+
+#[derive(Deserialize)]
+struct SubscriptionDto {
+    #[serde(default)]
+    ignored: bool,
+}
+
+pub async fn unsubscribe_thread(
+    client: &GitHubClient,
+    pat: &Pat,
+    thread_id: &str,
+    cancel: CancellationToken,
+) -> Result<UnsubscribeOutcome, PageFailure> {
+    if !valid_thread_id(thread_id) {
+        return Err(NotificationError::InvalidResponse("invalid thread id").into());
+    }
+    // Step 1: PUT /notifications/threads/{id}/subscription with {"ignored": true}
+    let path = format!("notifications/threads/{thread_id}/subscription");
+    let mut request = client.build_put(&path, pat);
+    request.body = Some(r#"{"ignored":true}"#.to_string());
+    request = request.with_header("Content-Type", "application/json");
+
+    let response = client
+        .transport()
+        .execute_bounded(request, cancel.clone(), 32 * 1024)
+        .await
+        .map_err(|err| {
+            PageFailure::from(NotificationError::from(error::classify_transport(err)))
+        })?;
+    let metadata = NotificationMetadata {
+        last_modified: response.header("last-modified").map(str::to_owned),
+        poll_interval_seconds: response
+            .header("x-poll-interval")
+            .and_then(|s| s.parse().ok()),
+        rate_limit: {
+            let rate = response.rate_limit();
+            NotificationRateLimit {
+                limit: rate.limit,
+                remaining: rate.remaining,
+                reset: rate.reset,
+                retry_after: rate.retry_after,
+            }
+        },
+    };
+    if let Some(err) = error::classify_status(&response) {
+        return Err(PageFailure {
+            error: err.into(),
+            metadata,
+        });
+    }
+    if response.status != 200 {
+        return Err(PageFailure {
+            error: NotificationError::InvalidResponse(
+                "expected HTTP 200 for thread subscription update",
+            ),
+            metadata,
+        });
+    }
+    let sub: SubscriptionDto = serde_json::from_str(&response.body).map_err(|_| PageFailure {
+        error: NotificationError::InvalidResponse("invalid subscription JSON"),
+        metadata: metadata.clone(),
+    })?;
+    if !sub.ignored {
+        return Err(PageFailure {
+            error: NotificationError::InvalidResponse("subscription was not marked as ignored"),
+            metadata,
+        });
+    }
+
+    // Step 2: In GitHub's inbox UI, Unsubscribe removes the thread from the inbox.
+    // Call Done (DELETE) to complete the action.
+    match mark_done(client, pat, thread_id, cancel).await {
+        Ok(done_meta) => Ok(UnsubscribeOutcome::Completed(done_meta)),
+        Err(failure) => Ok(UnsubscribeOutcome::IgnoredDoneFailed {
+            done_error: failure.error,
+            metadata: failure.metadata,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests;

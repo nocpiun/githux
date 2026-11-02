@@ -9,8 +9,10 @@
 #[cfg(test)]
 mod tests;
 
-use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind};
-use crate::domain::notification::{NotificationThread, SubjectKind};
+use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind, ThreadActionRequest};
+use crate::domain::notification::{
+    NotificationThread, SubjectKind, ThreadAction, ThreadActionState,
+};
 use crate::domain::repository::RepositoryIdentity;
 use crate::network::executor::BackgroundExecutor;
 use crate::ui::relative_time::relative_days as relative;
@@ -255,6 +257,40 @@ impl NotificationsView {
         .detach();
     }
 
+    fn run_thread_action(
+        &mut self,
+        thread_id: String,
+        action: ThreadAction,
+        cx: &mut Context<Self>,
+    ) {
+        let request = match self.controller.begin_thread_action(&thread_id, action) {
+            Ok(Some(request)) => request,
+            Ok(None) | Err(_) => {
+                // Busy, cooldown, stale context or an already-Done thread: no
+                // duplicate request and no optimistic local change.
+                self.sync(cx);
+                return;
+            }
+        };
+        self.sync(cx);
+        let controller = self.controller.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let spawned = self.executor.handle().spawn(async move {
+            controller.execute_thread_action(request).await;
+            let _ = tx.send(());
+        });
+        if spawned.is_err() {
+            self.sync(cx);
+            return;
+        }
+        cx.spawn(async move |weak, cx| {
+            if rx.await.is_ok() {
+                let _ = weak.update(cx, |view, cx| view.sync(cx));
+            }
+        })
+        .detach();
+    }
+
     fn navigate(&self, index: usize, window: &mut Window, cx: &mut App) {
         if self.controller.verify()
             && let Some(item) = self.snapshot.items.get(index)
@@ -408,6 +444,17 @@ impl NotificationsView {
             .aria_label(format!("Updated {}", item.updated_at))
             .child(relative(Some(&item.updated_at), self.now));
 
+        let actions = self.actions(item, index, cx);
+        let right = div()
+            .flex_none()
+            .w(px(112.0))
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap_1()
+            .child(time)
+            .child(actions);
+
         div()
             .id(("notification-row", index))
             .debug_selector(move || format!("notification-row-{index}"))
@@ -446,8 +493,7 @@ impl NotificationsView {
                             .gap_2()
                             .text_size(small)
                             .text_color(colors.fg_subtle)
-                            .child(repo_link)
-                            .child(time),
+                            .child(repo_link),
                     )
                     .child(
                         div()
@@ -460,7 +506,123 @@ impl NotificationsView {
                             .child(title),
                     ),
             )
+            .child(right)
             .into_any_element()
+    }
+
+    /// Three always-visible compact actions: Done, Unsubscribe, Save for later.
+    /// Save has no public API and stays disabled; a successful action never
+    /// mutates the row locally here – the controller publishes the new snapshot.
+    fn actions(
+        &self,
+        item: &NotificationThread,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.snapshot.thread_states.get(&item.id).cloned();
+        let blocked = self.snapshot.action_cooldown_seconds > 0
+            || matches!(state, Some(ThreadActionState::Busy(_)));
+        let busy_action = match state {
+            Some(ThreadActionState::Busy(action)) => Some(action),
+            _ => None,
+        };
+        let warning = match &state {
+            Some(ThreadActionState::Failed { action, error }) => {
+                Some((*action, format!("{error} {}", error.recovery())))
+            }
+            Some(ThreadActionState::UnsubscribedPendingDone { error }) => Some((
+                ThreadAction::Done,
+                format!(
+                    "Unsubscribed; finish removing from the inbox. {error} {}",
+                    error.recovery()
+                ),
+            )),
+            _ => None,
+        };
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .debug_selector(move || format!("notification-actions-{index}"));
+        if let Some((action, tooltip)) = warning {
+            let thread_id = item.id.clone();
+            let weak = cx.entity().downgrade();
+            row = row.child(
+                IconButton::new(
+                    ("notification-action-warning", index),
+                    IconName::TriangleAlert,
+                )
+                .size(ControlSize::Sm)
+                .tooltip(tooltip)
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let thread_id = thread_id.clone();
+                    let _ =
+                        weak.update(cx, |view, cx| view.run_thread_action(thread_id, action, cx));
+                }),
+            );
+        }
+        for action in [ThreadAction::Done, ThreadAction::Unsubscribe] {
+            let (id, icon, label, enabled) = match action {
+                ThreadAction::Done => (
+                    format!("notification-action-done-{index}"),
+                    IconName::Check,
+                    "Done",
+                    !blocked,
+                ),
+                ThreadAction::Unsubscribe => (
+                    format!("notification-action-unsubscribe-{index}"),
+                    IconName::EyeOff,
+                    "Unsubscribe",
+                    !blocked,
+                ),
+            };
+            let debug = id.clone();
+            let thread_id = item.id.clone();
+            let weak = cx.entity().downgrade();
+            let cell: AnyElement = if busy_action == Some(action) {
+                div()
+                    .id(id)
+                    .debug_selector(move || debug.clone())
+                    .role(gpui::Role::ProgressIndicator)
+                    .aria_label(format!("{label} in progress"))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(cx.theme().control_height(ControlSize::Sm))
+                    .child(Spinner::new(("notification-action-spinner", index)).size(IconSize::Xs))
+                    .into_any_element()
+            } else {
+                div()
+                    .debug_selector(move || debug.clone())
+                    .child(
+                        IconButton::new(id, icon)
+                            .size(ControlSize::Sm)
+                            .disabled(!enabled)
+                            .tooltip(label)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let thread_id = thread_id.clone();
+                                let _ = weak.update(cx, |view, cx| {
+                                    view.run_thread_action(thread_id, action, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            };
+            row = row.child(cell);
+        }
+        row = row.child(
+            div()
+                .debug_selector(move || format!("notification-action-save-{index}"))
+                .child(
+                    IconButton::new(("notification-action-save", index), IconName::Bookmark)
+                        .size(ControlSize::Sm)
+                        .disabled(true)
+                        .tooltip("Save for later (unavailable)"),
+                ),
+        );
+        row.into_any_element()
     }
 }
 impl Focusable for NotificationsView {

@@ -70,6 +70,25 @@ pub struct NotificationMetadata {
     pub rate_limit: NotificationRateLimit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadAction {
+    Done,
+    Unsubscribe,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ThreadActionState {
+    Busy(ThreadAction),
+    Failed {
+        action: ThreadAction,
+        error: NotificationError,
+    },
+    /// Subscription was successfully ignored, but the follow-up Done step failed.
+    UnsubscribedPendingDone {
+        error: NotificationError,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum NotificationError {
     #[error(transparent)]
