@@ -293,3 +293,31 @@ fn three_actions_stay_inside_the_row_and_do_not_navigate(cx: &mut TestAppContext
     assert_eq!(view.read_with(cx, |view, _| view.snapshot.items.len()), 13);
     assert_eq!(*captured.borrow(), 0);
 }
+
+#[gpui::test]
+fn action_buttons_unlock_when_the_server_cooldown_expires(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx)
+    });
+    cx.run_until_parked();
+    // No cooldown: actions are available.
+    assert!(view.read_with(cx, |view, _| {
+        view.action_available("9000", ThreadAction::Done)
+    }));
+    // A rate-limit deadline in the near future disables them...
+    view.update(cx, |view, cx| {
+        view.action_cooldown_until = Some(Instant::now() + Duration::from_millis(120));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |view, _| {
+        view.action_available("9000", ThreadAction::Done)
+    }));
+    // ...and once it elapses the same recomputation re-enables them without a
+    // request, matching the wake-up repaint.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(view.read_with(cx, |view, _| {
+        view.action_available("9000", ThreadAction::Done)
+    }));
+}

@@ -27,9 +27,10 @@ pub enum Scene {
     DoneFailure,
     UnsubscribeStepOneFailure,
     UnsubscribeStepTwoFailure,
+    DoneAlwaysFails,
 }
 impl Scene {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Mixed,
         Self::Empty,
         Self::AppendFailure,
@@ -41,6 +42,7 @@ impl Scene {
         Self::DoneFailure,
         Self::UnsubscribeStepOneFailure,
         Self::UnsubscribeStepTwoFailure,
+        Self::DoneAlwaysFails,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -55,6 +57,7 @@ impl Scene {
             Self::DoneFailure => "Done failure",
             Self::UnsubscribeStepOneFailure => "Unsub step 1 fail",
             Self::UnsubscribeStepTwoFailure => "Unsub step 2 fail",
+            Self::DoneAlwaysFails => "Done always fails",
         }
     }
 }
@@ -115,6 +118,7 @@ impl Fixture {
             let should_fail = match scene {
                 Scene::DoneFailure => !state.failed,
                 Scene::UnsubscribeStepTwoFailure => !state.failed,
+                Scene::DoneAlwaysFails => true,
                 _ => false,
             };
             if should_fail {

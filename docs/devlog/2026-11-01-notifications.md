@@ -58,6 +58,14 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 验证：mock/localhost 覆盖 Done method/path/204、非 204 拒绝、Unsubscribe JSON + 两步、ignored=false 拒绝、第二步失败保留并重试、403/超时不吞、重复点击、跨账户旧回复、旧刷新不复活、thread ID 不能逃出固定端点；UI 测试覆盖三按钮位置/窄屏收缩、Save 点击零写请求、Done 点击后仅移除该行且不触发 Repository 导航。原生 144 DPI 截图 `.agents/task/screens/actions-wide.png` 与 `actions-narrow3.png` 确认时间在上、按钮在下、长标题真实省略与读状态背景；负责人已确认无需再截图。
 
+**本轮 Codex 反馈（3 条 P2，均已修复并反向验证）**：
+
+1. 列表请求与条目动作曾共享取消令牌，Refresh/Load more 会中止进行中的写；`cancel()` 后动作还会复用已取消令牌。改为独立 `action_cancel` 生命周期，只在显式 cancel/leave/teardown 时轮换；回归 `list_requests_never_cancel_an_in_flight_thread_action`、`actions_work_after_the_view_was_cancelled_and_reentered`。
+2. 动作冷却只读 `snapshot.action_cooldown_seconds`，截止后不会自行解锁。改为视图保存 `action_cooldown_until` 截止时间并实时比较，冷却唤醒按 poll/action 较早截止重绘；回归 `action_buttons_unlock_when_the_server_cooldown_expires`。
+3. 已确认 ignored 后再重试 Done 失败会被覆盖成普通 `Failed(Done)`，UI 会重新提供 Unsubscribe。改为独立 `unsubscribed` 集合保留已确认事实，重试失败仍是 `UnsubscribedPendingDone` 且不再提供 Unsubscribe；回归 `confirmed_unsubscribe_survives_a_failed_done_retry`。
+
+三条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
+
 未测边界：真实账户写操作、真实 tooltip 悬停/焦点到达、150% 缩放切换与触摸板仍未原生验证，交负责人验收。
 
 ## 验收与集成边界

@@ -488,3 +488,73 @@ async fn a_done_row_is_not_resurrected_by_a_late_refresh_page() {
     assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
     assert_eq!(inbox.snapshot().items.len(), 7);
 }
+
+#[tokio::test]
+async fn list_requests_never_cancel_an_in_flight_thread_action() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let action = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    // Starting a refresh supersedes the page-one list token, but the action
+    // holds a separate lifecycle and must stay live.
+    // A refresh is in poll cooldown here; More still supersedes the list token.
+    let _more = inbox
+        .begin_at(RequestKind::More, Instant::now() + Duration::from_secs(120))
+        .unwrap();
+    assert!(!action.cancel.is_cancelled());
+    inbox.execute_thread_action(action).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+}
+
+#[tokio::test]
+async fn actions_work_after_the_view_was_cancelled_and_reentered() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    // Leaving/hiding a retained view cancels in-flight work and rotates tokens.
+    inbox.cancel();
+    let action = inbox
+        .begin_thread_action("9001", ThreadAction::Done)
+        .unwrap()
+        .expect("a fresh action token is issued after cancel");
+    assert!(!action.cancel.is_cancelled());
+    inbox.execute_thread_action(action).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9001"));
+}
+
+#[tokio::test]
+async fn confirmed_unsubscribe_survives_a_failed_done_retry() {
+    let (_accounts, inbox, _) = setup(Scene::DoneAlwaysFails).await;
+    run(&inbox, RequestKind::First).await;
+    // Confirm the ignore, then fail Done twice.
+    let ignored = inbox
+        .begin_thread_action("9000", ThreadAction::Unsubscribe)
+        .unwrap()
+        .unwrap();
+    // The fixture's unsubscribe path uses the always-failing Done.
+    inbox.execute_thread_action(ignored).await;
+    assert!(matches!(
+        inbox.snapshot().thread_states.get("9000"),
+        Some(ThreadActionState::UnsubscribedPendingDone { .. })
+    ));
+    let retry = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    inbox.execute_thread_action(retry).await;
+    assert!(
+        matches!(
+            inbox.snapshot().thread_states.get("9000"),
+            Some(ThreadActionState::UnsubscribedPendingDone { .. })
+        ),
+        "the confirmed ignore must not degrade to an ordinary Done failure"
+    );
+    // Unsubscribe is not offered again; the ignore is already confirmed.
+    assert!(
+        inbox
+            .begin_thread_action("9000", ThreadAction::Unsubscribe)
+            .unwrap()
+            .is_none()
+    );
+}

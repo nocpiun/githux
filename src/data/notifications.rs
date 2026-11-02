@@ -51,12 +51,19 @@ struct State {
     request_after: Option<Instant>,
     cancel: CancellationToken,
     cancel_source: CancellationTokenSource,
+    /// Thread actions must not be aborted by a list read superseding the
+    /// page-one representation; only explicit cancel/leave/teardown stops them.
+    action_cancel: CancellationToken,
+    action_cancel_source: CancellationTokenSource,
     tombstones: HashSet<String>,
     action_generations: HashMap<String, u64>,
+    /// Threads whose ignored=true subscription was confirmed by the server.
+    unsubscribed: HashSet<String>,
 }
 impl Default for State {
     fn default() -> Self {
         let (cancel, cancel_source) = CancellationToken::new();
+        let (action_cancel, action_cancel_source) = CancellationToken::new();
         Self {
             snapshot: InboxSnapshot::default(),
             generation: 0,
@@ -66,8 +73,11 @@ impl Default for State {
             request_after: None,
             cancel,
             cancel_source,
+            action_cancel,
+            action_cancel_source,
             tombstones: HashSet::new(),
             action_generations: HashMap::new(),
+            unsubscribed: HashSet::new(),
         }
     }
 }
@@ -357,6 +367,10 @@ impl Notifications {
         if let Some(ThreadActionState::Busy(_)) = state.snapshot.thread_states.get(thread_id) {
             return Err(NotificationError::Busy);
         }
+        if action == ThreadAction::Unsubscribe && state.unsubscribed.contains(thread_id) {
+            // The ignore is already confirmed; only the remaining Done step may run.
+            return Ok(None);
+        }
         if let Some(deadline) = state.request_after
             && deadline > now
         {
@@ -378,7 +392,7 @@ impl Notifications {
             thread_id: thread_id.to_string(),
             action,
             generation: action_generation,
-            cancel: state.cancel.clone(),
+            cancel: state.action_cancel.clone(),
         }))
     }
 
@@ -486,6 +500,7 @@ impl Notifications {
             Ok(notifications::UnsubscribeOutcome::Completed(_)) => {
                 // Done succeeded: remove from items, add to tombstones, remove thread state
                 state.tombstones.insert(request.thread_id.clone());
+                state.unsubscribed.remove(&request.thread_id);
                 state
                     .snapshot
                     .items
@@ -493,20 +508,31 @@ impl Notifications {
                 state.snapshot.thread_states.remove(&request.thread_id);
             }
             Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed { done_error, .. }) => {
-                // Subscription was ignored, but Done failed.
+                // Subscription was ignored, but Done failed: keep that fact.
+                state.unsubscribed.insert(request.thread_id.clone());
                 state.snapshot.thread_states.insert(
                     request.thread_id.clone(),
                     ThreadActionState::UnsubscribedPendingDone { error: done_error },
                 );
             }
             Err(failure) => {
-                state.snapshot.thread_states.insert(
-                    request.thread_id.clone(),
+                // A confirmed ignore must survive a failed Done retry; the row
+                // keeps saying "unsubscribed, finish Done" instead of offering
+                // the already-completed Unsubscribe again.
+                let state_value = if state.unsubscribed.contains(&request.thread_id) {
+                    ThreadActionState::UnsubscribedPendingDone {
+                        error: failure.error,
+                    }
+                } else {
                     ThreadActionState::Failed {
                         action: request.action,
                         error: failure.error,
-                    },
-                );
+                    }
+                };
+                state
+                    .snapshot
+                    .thread_states
+                    .insert(request.thread_id.clone(), state_value);
             }
         }
     }
@@ -514,8 +540,14 @@ impl Notifications {
     pub fn cancel(&self) {
         let mut state = self.state.lock().expect("inbox state");
         state.cancel_source.cancel();
+        state.action_cancel_source.cancel();
+        (state.cancel, state.cancel_source) = CancellationToken::new();
+        (state.action_cancel, state.action_cancel_source) = CancellationToken::new();
         state.generation += 1;
+        // Dropping the per-thread generations makes any late reply stale.
+        state.action_generations.clear();
         state.snapshot.busy = None;
+        state.snapshot.thread_states.clear();
     }
 }
 fn seconds(duration: Duration) -> u64 {

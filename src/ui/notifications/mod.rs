@@ -52,6 +52,7 @@ pub struct NotificationsView {
     active: bool,
     time_task: Option<gpui::Task<()>>,
     cooldown_until: Option<Instant>,
+    action_cooldown_until: Option<Instant>,
     cooldown_wake: Option<gpui::Task<()>>,
     on_repository: OnRepository,
     _activation: Subscription,
@@ -94,6 +95,7 @@ impl NotificationsView {
             active: true,
             time_task: None,
             cooldown_until: None,
+            action_cooldown_until: None,
             cooldown_wake: None,
             on_repository,
             _activation: activation,
@@ -182,13 +184,21 @@ impl NotificationsView {
         if self.cooldown_wake.is_some() {
             return;
         }
-        let Some(deadline) = self.cooldown_until else {
+        // Wake at the earliest of the poll and action cooldowns so an expired
+        // rate-limit deadline re-enables the per-item buttons without a request.
+        let now = Instant::now();
+        let future = |deadline: Option<Instant>| deadline.filter(|deadline| *deadline > now);
+        let deadline = match (
+            future(self.cooldown_until),
+            future(self.action_cooldown_until),
+        ) {
+            (Some(poll), Some(action)) => Some(poll.min(action)),
+            (poll, action) => poll.or(action),
+        };
+        let Some(deadline) = deadline else {
             return;
         };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return;
-        }
+        let remaining = deadline.saturating_duration_since(now);
         self.cooldown_wake = Some(cx.spawn(async move |weak, cx| {
             cx.background_executor().timer(remaining).await;
             let _ = weak.update(cx, |_, cx| cx.notify());
@@ -210,6 +220,9 @@ impl NotificationsView {
         self.selected = self.selected.filter(|index| *index < len);
         self.cooldown_until = Instant::now().checked_add(std::time::Duration::from_secs(
             self.snapshot.cooldown_seconds,
+        ));
+        self.action_cooldown_until = Instant::now().checked_add(std::time::Duration::from_secs(
+            self.snapshot.action_cooldown_seconds,
         ));
         self.cooldown_wake = None;
         self.sync_cooldown_wake(cx);
@@ -510,6 +523,22 @@ impl NotificationsView {
             .into_any_element()
     }
 
+    /// Whether a per-item control is currently usable. Cooldowns are derived
+    /// from live deadlines, so an elapsed server cooldown unlocks the buttons
+    /// as soon as its wake-up repaints, without any further network request.
+    fn action_available(&self, thread_id: &str, action: ThreadAction) -> bool {
+        let state = self.snapshot.thread_states.get(thread_id);
+        let busy = matches!(state, Some(ThreadActionState::Busy(_)));
+        let cooling = self
+            .action_cooldown_until
+            .is_some_and(|deadline| deadline > Instant::now());
+        let unsubscribed = matches!(
+            state,
+            Some(ThreadActionState::UnsubscribedPendingDone { .. })
+        );
+        !busy && !cooling && !(action == ThreadAction::Unsubscribe && unsubscribed)
+    }
+
     /// Three always-visible compact actions: Done, Unsubscribe, Save for later.
     /// Save has no public API and stays disabled; a successful action never
     /// mutates the row locally here – the controller publishes the new snapshot.
@@ -520,8 +549,14 @@ impl NotificationsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let state = self.snapshot.thread_states.get(&item.id).cloned();
-        let blocked = self.snapshot.action_cooldown_seconds > 0
-            || matches!(state, Some(ThreadActionState::Busy(_)));
+        let action_cooling = self
+            .action_cooldown_until
+            .is_some_and(|deadline| deadline > Instant::now());
+        let unsubscribed_pending = matches!(
+            state,
+            Some(ThreadActionState::UnsubscribedPendingDone { .. })
+        );
+        let blocked = action_cooling || matches!(state, Some(ThreadActionState::Busy(_)));
         let busy_action = match state {
             Some(ThreadActionState::Busy(action)) => Some(action),
             _ => None,
@@ -574,7 +609,8 @@ impl NotificationsView {
                     format!("notification-action-unsubscribe-{index}"),
                     IconName::EyeOff,
                     "Unsubscribe",
-                    !blocked,
+                    // The ignore is already confirmed; only Done may be retried.
+                    !blocked && !unsubscribed_pending,
                 ),
             };
             let debug = id.clone();
