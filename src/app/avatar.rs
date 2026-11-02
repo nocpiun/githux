@@ -252,14 +252,7 @@ impl AvatarSource for ReqwestAvatars {
                     .get("last-modified")
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string()),
-                cache_control: response
-                    .headers()
-                    .get_all("cache-control")
-                    .iter()
-                    .filter_map(|v| v.to_str().ok())
-                    .collect::<Vec<&str>>()
-                    .join(", ")
-                    .into(),
+                cache_control: collect_cache_control(response.headers()),
             };
             if status == 304 {
                 return Ok((status, metadata, Vec::new()));
@@ -566,6 +559,22 @@ fn to_image_crate_format(format: ImageFormat) -> image::ImageFormat {
         ImageFormat::Gif => image::ImageFormat::Gif,
         // `detect_format` only ever returns the four above.
         _ => unreachable!("only avatar formats reach the decoder"),
+    }
+}
+
+/// Joins every `Cache-Control` field value into one directive list. A response
+/// with no such header returns `None` (not an empty string), so a 304 without
+/// the header does not erase the policy stored with the original representation.
+fn collect_cache_control(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let directives: Vec<&str> = headers
+        .get_all("cache-control")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    if directives.is_empty() {
+        None
+    } else {
+        Some(directives.join(", "))
     }
 }
 
@@ -954,5 +963,24 @@ mod tests {
         assert_eq!(detect_format(b"GIF89a...."), Some(ImageFormat::Gif));
         assert_eq!(detect_format(b"<svg></svg>"), None);
         assert_eq!(detect_format(b""), None);
+    }
+
+    #[test]
+    fn cache_control_is_absent_only_when_no_field_is_present() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        // No field at all: absence must stay `None`, so a 304 without the header
+        // does not erase the policy stored with the original representation.
+        assert_eq!(collect_cache_control(&HeaderMap::new()), None);
+
+        // Repeated fields are merged into one directive list, so a later
+        // `no-store`/`no-cache` is not lost behind an earlier `max-age`.
+        let mut headers = HeaderMap::new();
+        headers.append("cache-control", HeaderValue::from_static("max-age=3600"));
+        headers.append("cache-control", HeaderValue::from_static("no-store"));
+        assert_eq!(
+            collect_cache_control(&headers).as_deref(),
+            Some("max-age=3600, no-store")
+        );
     }
 }

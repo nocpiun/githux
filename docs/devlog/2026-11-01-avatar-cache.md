@@ -48,17 +48,41 @@
 
 ## 验证记录
 
-## Codex Review 修复反馈 (Round 1)
+## Codex Review 修复反馈
+
+### Round 1
 
 第一轮代码审查提出三项 P2 建议，已全部处理并补充回归测试：
 1. **网络请求前捕获写入票据 (begin_write)**：在发送 HTTP 请求前调用 `begin_write_sync` 捕获 `CacheWrite` 票据，并在写入时使用 `commit_write_sync`。若下载期间发生缓存失效、清理或更新的写入，原有票据自动被判定为 `Stale`，彻底杜绝慢响应覆盖新数据或回填已清理缓存。
 2. **校验图片解码后再写入磁盘**：在 `put` 进磁盘前先执行 `decode_image` 完整图像解码校验；若为损坏/非图片内容，拒绝入库，避免坏数据覆盖有效缓存或存储坏 validator。补充了 `corrupt_or_oversized_payload_falls_back_and_does_not_cache` 对磁盘无写入的断言。
 3. **遵守离线回退的 Cache-Control 限制**：增加 `is_snapshot_reusable_offline` 检查，若缓存标有 `no-cache` 或 `must-revalidate`，离线网络不可用时拒绝回退旧图，安全退回 initials fallback。新增 `no_cache_and_must_revalidate_prohibit_stale_offline_reuse` 测试验证。
 
+### Round 2
+
+1. **304 只续期条件请求所依据的表示**：移除 `revalidate_sync`（它会重新读取当前条目，把更新写入者的 body 与旧 ETag 拼在一起），改为 `commit_revalidation_sync(ticket, original_snapshot, …)`，复用请求前的 ticket 和请求时读取的快照；若期间有更新写入或失效，`CacheStore::put` 以 `Stale` 拒绝发布。
+
+### Round 3
+
+1. **先取 ticket 再读快照**：`begin_write_sync` 与 `read_sync` 同一 blocking 任务内按此顺序执行，使 clear/invalidate 落在两者之间时旧快照无法再借新 ticket 复活。
+2. **no-store 也走带 ticket 的提交**：删掉无 ticket 的 `invalidate_sync` 分支，改由 `commit_write_sync` 交给 `CacheStore::put` 在票据校验后处理 no-store 删除，避免旧响应删掉新写入者已发布的条目和 slot。
+
+### Round 4
+
+1. **启用磁盘缓存时必须有响应元数据**：无 `AvatarSource` 时不再持久化任何东西（`has_metadata` 为假即跳过全部磁盘写入），避免 `ReqwestAvatars::load` 丢弃的响应头导致 no-store/no-cache 被忽略。
+
+### Round 5
+
+1. **回退前重核授权**：304 分支与离线回退分支在返回缓存字节前，都在 blocking worker 上重新 `read_sync`（`CacheLease::snapshot` 的授权复查），账户退休/凭据拒绝后不再把旧图片排进 inbox。
+2. **合并所有 Cache-Control 字段**：抽出 `collect_cache_control` 用 `get_all` 拼接全部字段值，后续 `no-store`/`no-cache` 不会因先出现的 `max-age` 而丢失。
+
+### Round 6
+
+1. **缺失 Cache-Control 必须是 `None`**：`collect_cache_control` 在没有任何字段时返回 `None`，否则 304 会用空字符串覆盖原 `no-cache` 策略。新增 `cache_control_is_absent_only_when_no_field_is_present`（直接覆盖生产 header 提取路径）与 `a_304_without_cache_control_preserves_the_stored_policy`（存储策略跨 304 保持）。
+
 所有 Cargo 检查通过 `node scripts/verify.mjs -- cargo ...` 执行：
 - `cargo fmt --all -- --check`：通过。
 - `cargo check --locked --all-targets`：通过。
 - `cargo clippy --locked --all-targets -- -D warnings`：通过（zero warnings）。
-- `cargo test --locked`：全量测试套件通过（44 passed）。
+- `cargo test --locked`：全量测试套件通过。
 - `cargo build --locked`：通过。
 - `git diff --check`：无空白或格式异常。

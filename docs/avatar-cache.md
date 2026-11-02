@@ -38,11 +38,14 @@ flowchart TD
 
 ### 2. HTTP 缓存新鲜度与条件请求
 - **AvatarSource trait**：支持发送 `If-None-Match`（ETag）和 `If-Modified-Since`（Last-Modified）。
-- **304 Not Modified**：仅当本地已存在有效快照时，更新 `verified_at_ms` 和相关元数据头，复用本地缓存字节并解码；如果无本地表示，不捏造空字节。
-- **200 OK**：通过 `MAX_AVATAR_BYTES`（2 MiB）上限和格式校验后，写入 SQLite/文件对象，并保存 `ETag`、`Last-Modified`、`Cache-Control`。
-- **Cache-Control: no-store**：响应包含 `no-store` 指令时，不写磁盘，并主动调用 `invalidate_sync` 彻底删除该键已有的旧缓存。
+- **写入票据先于网络**：`begin_write_sync` 先于读取快照与下载执行，返回响应用同一票据 `commit_write_sync` / `commit_revalidation_sync` 发布。期间发生 clear、invalidate 或更新写入时，`CacheStore::put` 以 `Stale` 拒绝，旧响应不会回填或覆盖新值。
+- **304 Not Modified**：仅用请求前快照 + 同一票据续期 `verified_at_ms`；无本地表示时不捏造空字节。
+- **200 OK**：先做 `MAX_AVATAR_BYTES`（2 MiB）上限与完整解码校验，再写 SQLite/文件对象并保存 `ETag`、`Last-Modified`、`Cache-Control`。
+- **Cache-Control**：多个 `Cache-Control` 字段由 `collect_cache_control` 合并；缺失时返回 `None`，所以无头的 304 不会抹掉原 `no-cache` 策略。`no-store` 经同一票据交给 `CacheStore::put`，由其在票据校验后删除旧表示。
+- **离线回退限制**：`is_snapshot_reusable_offline` 阻止 `no-cache` / `must-revalidate` 表示在未验证时被回退；回退与 304 分支都在 blocking worker 上重新 `read_sync` 复核 scope 授权，账户退休或凭据被拒后不再投递旧图片。
+- **元数据必需**：启用磁盘缓存却只注入无元数据的 `AvatarBytes` 时，不执行任何磁盘读写；需 `AvatarSource` 才能遵守响应头语义。
 
 ### 3. 解码校验与安全防线
 - 磁盘缓存读取的字节必须经过 `image::load_from_memory_with_format` 完整解码校验，才包装为 GPUI `Image`。损坏、截断或伪造签名的文件无法通过校验，安全回退到 initials fallback，绝不在 UI 产生破图。
-- 所有磁盘 I/O（`store.read`, `store.put`, `store.revalidate`, `store.invalidate`）严格在 Tokio 的 `spawn_blocking` 中执行，绝不在 UI 线程或事件循环主任务执行。
+- 所有磁盘 I/O（`store.read`, `store.put`, `store.invalidate`, 票据与快照读取）严格在 Tokio 的 `spawn_blocking` 中执行，绝不在 UI 线程或事件循环主任务执行。
 - 未注入 `AvatarDiskCache` 或未登录时，保持原本纯内存缓存与无磁盘行为，完全兼容既有调用点。

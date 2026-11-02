@@ -338,6 +338,49 @@ async fn no_cache_and_must_revalidate_prohibit_stale_offline_reuse() {
     );
 }
 
+#[tokio::test]
+async fn a_304_without_cache_control_preserves_the_stored_policy() {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig::at(dir.path().to_path_buf());
+    let store = CacheStore::open(config).unwrap();
+    let account = AccountKey::new(460, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk_cache = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let source = Arc::new(MockAvatarSource::new());
+    let url = "https://avatars.test/revalidated.png";
+    let key = AvatarKey::new("github.com", 461, url);
+    source.serve(
+        url,
+        200,
+        Some("\"r1\""),
+        None,
+        Some("no-cache"),
+        valid_png(),
+    );
+
+    let fetcher = AvatarFetcher::new(source.clone(), false)
+        .with_source(source.clone())
+        .with_cache(disk_cache.clone());
+
+    // Online fetch stores the representation with its no-cache policy.
+    assert!(fetcher.fetch(&key).await.is_some());
+
+    // A 304 that omits Cache-Control must not erase the stored no-cache policy.
+    source.serve(url, 304, Some("\"r1\""), None, None, vec![]);
+    assert!(fetcher.fetch(&key).await.is_some());
+
+    // Offline fallback is still forbidden because no-cache was preserved across revalidation.
+    let offline_source = Arc::new(MockAvatarSource::new());
+    let offline = AvatarFetcher::new(offline_source.clone(), false)
+        .with_source(offline_source.clone())
+        .with_cache(disk_cache);
+    assert!(
+        offline.fetch(&key).await.is_none(),
+        "a header-less 304 preserves the stored no-cache policy"
+    );
+}
+
 #[test]
 fn sensitive_url_query_parameters_are_sanitized() {
     let raw =
