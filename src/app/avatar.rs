@@ -397,27 +397,32 @@ impl AvatarFetcher {
                 // newer writer or an invalidation makes it stale instead of mixing
                 // generations.
                 let cached = cached_snapshot?;
-                if let Some(cache) = &self.disk_cache {
-                    // Whether this 304 actually revalidated the representation that is
-                    // still current. When a newer writer superseded it, the ticket commit
-                    // is rejected as stale and the unvalidated current entry must only be
-                    // returned if its own reuse policy permits it.
-                    let mut revalidated = false;
-                    if has_metadata && let Some(ticket) = write_ticket {
-                        let cache = cache.clone();
-                        let original = cached.clone();
-                        let etag = meta.etag.clone();
-                        let lm = meta.last_modified.clone();
-                        let cc = meta.cache_control.clone();
-                        let outcome = tokio::task::spawn_blocking(move || {
-                            cache.commit_revalidation_sync(ticket, original, etag, lm, cc)
-                        })
-                        .await;
-                        revalidated =
-                            matches!(outcome, Ok(Ok(crate::storage::cache::WriteOutcome::Stored)));
-                    }
-                    // Re-read on a blocking worker: this both rechecks scope
-                    // authorization and reflects the *current* entry.
+                let Some(cache) = &self.disk_cache else {
+                    return decode_image(cached.bytes);
+                };
+                let mut committed = false;
+                if has_metadata && let Some(ticket) = write_ticket {
+                    let cache = cache.clone();
+                    let original = cached.clone();
+                    let etag = meta.etag.clone();
+                    let lm = meta.last_modified.clone();
+                    let cc = meta.cache_control.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        cache.commit_revalidation_sync(ticket, original, etag, lm, cc)
+                    })
+                    .await;
+                    committed =
+                        matches!(outcome, Ok(Ok(crate::storage::cache::WriteOutcome::Stored)));
+                }
+                if committed {
+                    // The stored entry is exactly the pre-request snapshot this 304
+                    // validated; the ticket commit would have failed had the scope been
+                    // retired or the entry superseded in the meantime.
+                    decode_image(cached.bytes)
+                } else {
+                    // Either the commit was superseded/invalidated, or no metadata-capable
+                    // source produced a verifiable revalidation. Re-read the *current*
+                    // entry (rechecking authorization) and honour its own reuse policy.
                     let cache = cache.clone();
                     let key_clone = key.clone();
                     let current = tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
@@ -425,18 +430,14 @@ impl AvatarFetcher {
                         .ok()
                         .flatten();
                     current.and_then(|snapshot| {
-                        if revalidated
-                            || crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
-                                &snapshot,
-                            )
-                        {
+                        if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
+                            &snapshot,
+                        ) {
                             decode_image(snapshot.bytes)
                         } else {
                             None
                         }
                     })
-                } else {
-                    decode_image(cached.bytes)
                 }
             }
             Ok((status, meta, bytes)) if (200..300).contains(&status) => {

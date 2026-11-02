@@ -96,6 +96,10 @@
 
 main 推进至 `c44f34d`（合并 #58/#62/#63，与本任务并行）。本分支已 `rebase` 到该基线上，冲突零，重跑 `cargo check/clippy/fmt/test` 全绿（1007 passed 主二进制）。
 
+### Round 10
+
+1. **成功续期绑定被提交的表示**：304 分支不再在提交成功后再做一次独立 `read_sync`（那会在提交与读取之间给更新写入者留窗）。`committed == Stored` 时直接解码提交用的请求前快照（票据已证明 scope 有效、无更新写入者）；未提交时重读当前条目并按 `is_snapshot_reusable_offline` 判定。
+
 所有 Cargo 检查通过 `node scripts/verify.mjs -- cargo ...` 执行：
 - `cargo fmt --all -- --check`：通过。
 - `cargo check --locked --all-targets`：通过。
