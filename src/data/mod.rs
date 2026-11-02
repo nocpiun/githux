@@ -37,12 +37,12 @@ mod page_reads;
 pub mod reader_image_cache;
 pub mod reader_images;
 pub mod repository;
-pub mod repository_cache;
-#[cfg(test)]
-mod repository_cache_tests;
 #[cfg(test)]
 mod repository_action_tests;
 pub mod repository_actions;
+pub mod repository_cache;
+#[cfg(test)]
+mod repository_cache_tests;
 #[cfg(test)]
 mod repository_content_tests;
 #[cfg(test)]

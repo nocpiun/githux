@@ -64,6 +64,8 @@ CI run `41345858631` 的 code-check 失败来自合并后的 `reader_images` 既
 
 第七轮对 `0f05596` 的 2 项 P2 修复：隔离态无 ticket 的成功响应若为 `no-store`，只执行有序失效、不补写 ticket，避免旧值残留同时不恢复写入竞争；304 省略的 ETag/Last-Modified/Cache-Control 从原表示合并，保留 `no-cache`。新增两者回归，聚焦 `18c6193c-6c16-416a-8fbb-12494b04d81e` 14/14 通过。全量测试曾因并行 `page_read_tests` 既有 flaky 失败，隔离与重跑均通过；记录为验证事实。
 
+第八轮对 `cc726f7` 的 P2：有 pre-network ticket 的 no-store 走 `put()` 的 ticket/写序校验失效；只有隔离态无 ticket 才直接 invalidation。聚焦 14/14 通过，并与最新 main（含 Star #63）完成全量 fmt/check/clippy/test/build 组合验证。
+
 ## 边界
 
 无 GUI/Shell 接线，无真实 PAT/实网写操作或 Star 验收。正式账户事件生产、应用级 CacheStore 组装与离线 UI 由后续任务交付。缓存适配层完成不等于应用离线功能已交付。
