@@ -203,7 +203,12 @@ fn repository_actions(
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
     let binding = page.repository_binding();
-    let enabled = page.on_action.is_some() && page.mutations_enabled() && binding.is_some();
+    let star_busy = page.star_is_busy();
+    let star_label = page.starred_state().map_or("Star", |state| state.label());
+    let star_failure = match &page.star.phase {
+        super::StarPhase::Failed { message } => Some(message.clone()),
+        _ => None,
+    };
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let height = theme.control_height(ControlSize::Md);
@@ -211,11 +216,17 @@ fn repository_actions(
     let radius = theme.radius(Radius::Md);
     let text_size = theme.text_size(TextSize::Sm);
     let buttons = [
-        (true, "Star", IconName::Star),
+        (true, star_label, IconName::Star),
         (false, "Fork", IconName::GitBranch),
     ]
     .into_iter()
     .map(|(star, label, icon)| {
+        let enabled = binding.is_some()
+            && if star {
+                page.mutations_enabled() && page.starred_state().is_some() && !star_busy
+            } else {
+                page.on_action.is_some() && page.fork_mutations_enabled()
+            };
         let owner = cx.weak_entity();
         let key_owner = owner.clone();
         let click_binding = binding.clone();
@@ -306,10 +317,26 @@ fn repository_actions(
                     });
                 }
             })
-            .child(Icon::new(icon).size(IconSize::Sm).color(if enabled {
-                colors.fg_muted
-            } else {
-                colors.fg_disabled
+            .children((star && star_busy).then(|| {
+                crate::ui::compact_status::loading(
+                    "repository-star-loading",
+                    "Updating Star status…",
+                    cx,
+                )
+            }))
+            .children((!star || !star_busy).then(|| {
+                Icon::new(icon)
+                    .size(IconSize::Sm)
+                    .color(if enabled {
+                        if star && page.starred_state().is_some_and(|state| state.is_starred()) {
+                            colors.warning
+                        } else {
+                            colors.fg_muted
+                        }
+                    } else {
+                        colors.fg_disabled
+                    })
+                    .into_any_element()
             }))
             .child(label)
             .children(count.map(|count| {
@@ -332,6 +359,19 @@ fn repository_actions(
         .gap_2()
         .items_center()
         .children(buttons)
+        .children(star_failure.map(|message| {
+            let owner = cx.weak_entity();
+            crate::ui::compact_status::failed(
+                "repository-star-retry",
+                "Star action failed",
+                message,
+                Some(move |_: &mut Window, cx: &mut App| {
+                    let _ = owner.update(cx, |page, cx| page.retry_star(cx));
+                }),
+                Some("repository-star-retry"),
+                cx,
+            )
+        }))
         .into_any_element()
 }
 

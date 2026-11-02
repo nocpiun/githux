@@ -47,6 +47,7 @@ fn graphql_ok(data: serde_json::Value) -> HttpResponse {
 #[derive(Default)]
 struct PageTransport {
     reads: Mutex<Vec<String>>,
+    starred: Mutex<bool>,
     long_pr_body: bool,
 }
 
@@ -92,6 +93,27 @@ impl Transport for PageTransport {
             self.reads.lock().unwrap().push(request.url.clone());
 
             let url = request.url.as_str();
+            if url.ends_with("/user/starred/alice/demo") {
+                return match request.method {
+                    crate::network::transport::HttpMethod::Get => Ok(json(
+                        if *self.starred.lock().unwrap() {
+                            204
+                        } else {
+                            404
+                        },
+                        serde_json::json!({}),
+                    )),
+                    crate::network::transport::HttpMethod::Put => {
+                        *self.starred.lock().unwrap() = true;
+                        Ok(json(204, serde_json::json!({})))
+                    }
+                    crate::network::transport::HttpMethod::Delete => {
+                        *self.starred.lock().unwrap() = false;
+                        Ok(json(204, serde_json::json!({})))
+                    }
+                    _ => Ok(json(599, serde_json::json!({}))),
+                };
+            }
             let body = request.body.clone().unwrap_or_default();
             let lower = url.to_ascii_lowercase();
             if url.ends_with("/user") {
@@ -270,14 +292,15 @@ impl Transport for PageTransport {
                     }),
                 ));
             }
-            if url.contains("/repos/alice/demo") && url.ends_with("/demo") {
+            if url == "https://api.github.com/repos/alice/demo" {
                 return Ok(json(
                     200,
                     serde_json::json!({
                         "id": 10, "name": "demo", "full_name": "alice/demo",
                         "owner": {"id": 1, "login": "alice", "avatar_url": null},
                         "visibility": "public", "private": false, "default_branch": "main",
-                        "fork": false, "archived": false, "stargazers_count": 0,
+                        "fork": false, "archived": false,
+                        "stargazers_count": if *self.starred.lock().unwrap() { 1 } else { 0 },
                         "forks_count": 0, "open_issues_count": 0, "size": 1,
                         "description": "Synthetic repository", "html_url": "https://github.com/alice/demo"
                     }),
@@ -421,7 +444,7 @@ fn repository_contributor_navigation_is_deferred_and_opens_a_profile(cx: &mut Te
 }
 
 #[gpui::test]
-fn repository_star_and_fork_remain_disabled_in_production(cx: &mut TestAppContext) {
+fn production_shell_composes_real_star_and_keeps_fork_disabled(cx: &mut TestAppContext) {
     let transport = Arc::new(PageTransport::default());
     let (view, controller, cx) = open_shell(cx, transport.clone());
     login(&controller, cx);
@@ -435,13 +458,65 @@ fn repository_star_and_fork_remain_disabled_in_production(cx: &mut TestAppContex
         shell.navigate(Route::repository(&rows[0]), window, cx);
     });
     cx.run_until_parked();
-    // In production Shell the buttons must stay disabled because no remote write is implemented.
     assert_eq!(
         view.read_with(cx, |shell, cx| shell
             .active_repository_mutations_enabled(cx)),
-        Some(false),
-        "Star and Fork must remain disabled when only navigation is handled"
+        Some(true),
+        "the formal Shell injects the real Star service"
     );
+    for _ in 0..400 {
+        pump(&controller, cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        if transport.seen("/user/starred/alice/demo") > 0
+            && view.read_with(cx, |shell, cx| {
+                shell.active_repository_star_ready_for_test(cx) == Some(true)
+            })
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The request reaching transport is earlier than the page's light result
+    // drain. Let the initial status publish before pressing the actual button.
+    for _ in 0..20 {
+        pump(&controller, cx);
+        cx.update_window_entity(&view, |shell, window, cx| {
+            shell.drain_repository_star_for_test(window, cx)
+        });
+        cx.update(|window, _| window.refresh());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let star = cx
+        .debug_bounds("repository-star")
+        .expect("formal Star button");
+    cx.simulate_click(star.center(), gpui::Modifiers::none());
+    for _ in 0..400 {
+        pump(&controller, cx);
+        cx.update_window_entity(&view, |shell, window, cx| {
+            shell.drain_repository_star_for_test(window, cx)
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        if transport.seen("/user/starred/alice/demo") >= 2
+            && transport.seen("/repos/alice/demo") >= 2
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        *transport.starred.lock().unwrap(),
+        "PUT reached the local server"
+    );
+    assert!(
+        transport.seen("/repos/alice/demo") >= 2,
+        "the formal page refreshed its authoritative summary"
+    );
+    let fork = cx.debug_bounds("repository-fork").expect("Fork button");
+    cx.simulate_click(fork.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(transport.seen("/forks"), 0, "Fork remains disabled");
 }
 
 #[gpui::test]

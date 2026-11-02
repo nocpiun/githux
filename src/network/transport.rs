@@ -7,12 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
-/// HTTP method. Reads are `GET`; `POST` exists solely for read-only GraphQL
-/// queries (the transport has no mutation entry point and never replays one).
+/// HTTP methods used by the deliberately narrow API surface. `POST` is only
+/// for read-only GraphQL queries; `PUT`/`DELETE` are only constructed by the
+/// repository Starring adapter. No method is automatically replayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
     Post,
+    Put,
+    Delete,
 }
 
 /// A prepared outbound request. Headers are owned strings; the GitHub layer is
@@ -84,6 +87,26 @@ impl HttpRequest {
             url: url.into(),
             headers: Vec::new(),
             body: Some(body.into()),
+        }
+    }
+
+    /// An empty-body PUT, used only for the fixed Starring endpoint.
+    pub fn put(url: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Put,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// An empty-body DELETE, used only for the fixed Starring endpoint.
+    pub fn delete(url: impl Into<String>) -> Self {
+        Self {
+            method: HttpMethod::Delete,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
         }
     }
 
@@ -252,6 +275,8 @@ impl ReqwestTransport {
                 let method = match request.method {
                     HttpMethod::Get => reqwest::Method::GET,
                     HttpMethod::Post => reqwest::Method::POST,
+                    HttpMethod::Put => reqwest::Method::PUT,
+                    HttpMethod::Delete => reqwest::Method::DELETE,
                 };
                 let mut builder = self.client.request(method, &url).timeout(self.timeout);
                 for (name, value) in &request.headers {
@@ -292,14 +317,12 @@ impl ReqwestTransport {
                 }
 
                 if (300..400).contains(&status) {
-                    // Conservative GraphQL rule: never follow a redirect for a
-                    // POST. A 301/302/303 would silently turn the method into
-                    // GET and drop the query body, while 307/308 would re-send
-                    // the body — neither is safe to automate for a query whose
-                    // variables may carry user data. Surface the 3xx so the
-                    // GraphQL layer rejects it as an error. GET keeps the
-                    // existing same-origin follow behaviour.
-                    if request.method == HttpMethod::Post {
+                    // Conservative non-GET rule: never follow a redirect for a
+                    // GraphQL query or a Star/Unstar write. A 301/302/303 could
+                    // silently turn the method into GET, while 307/308 would
+                    // re-send the original operation. Surface the 3xx so the
+                    // caller rejects it; GET keeps same-origin follow behaviour.
+                    if request.method != HttpMethod::Get {
                         return Ok(HttpResponse {
                             status,
                             headers,
@@ -806,6 +829,37 @@ mod tests {
         let recorded = server.recorded();
         assert_eq!(recorded.len(), 1, "the redirect must not be followed");
         assert!(recorded[0].request_line.starts_with("POST /graphql"));
+    }
+
+    /// Star/Unstar writes reach localhost with their exact method and no body;
+    /// neither same-origin nor cross-origin redirects are followed.
+    #[tokio::test]
+    async fn starring_write_methods_and_redirect_policy() {
+        for (request, expected) in [
+            (HttpRequest::put("unused"), "PUT"),
+            (HttpRequest::delete("unused"), "DELETE"),
+        ] {
+            let server = LocalHttpServer::start(vec![
+                ScriptedResponse::json(307, "redirect must not be followed")
+                    .with_header("Location", "/user/starred/octo/ledger"),
+            ]);
+            let mut request = request;
+            request.url = format!("{}user/starred/octo/ledger", server.base_url());
+            request = request.with_header("Authorization", "Bearer ghp_star_secret");
+            let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("client");
+            let response = transport
+                .execute_bounded(request, CancellationToken::default(), 16 * 1024)
+                .await
+                .expect("write response");
+            assert_eq!(response.status, 307, "a write redirect is never followed");
+            assert_eq!(server.recorded().len(), 1);
+            assert!(
+                server.recorded()[0]
+                    .request_line
+                    .starts_with(&format!("{expected} /user/starred/octo/ledger"))
+            );
+            assert!(server.recorded()[0].body.is_empty());
+        }
     }
 
     /// A cross-origin POST redirect target is never contacted, so neither the
