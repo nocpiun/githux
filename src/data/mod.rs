@@ -26,6 +26,9 @@ use crate::domain::repo::ReposOutcome;
 use crate::github::client::GitHubClient;
 use crate::github::repos::fetch_user_repos;
 use crate::github::user::{AuthenticatedUser, fetch_authenticated_user};
+mod account_cache;
+#[cfg(test)]
+mod account_cache_tests;
 #[cfg(test)]
 mod account_concurrency_tests;
 #[cfg(test)]
@@ -54,6 +57,8 @@ use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::storage::accounts::StorageError;
 #[allow(unused_imports)]
+pub use account_cache::AccountCache;
+#[allow(unused_imports)]
 pub use accounts::AccountError;
 #[allow(unused_imports)]
 pub use page_reads::{PageReadSession, ProfileReadme, ProfileReadmeIneligible};
@@ -81,6 +86,7 @@ pub struct AccountService {
     database: accounts::Database,
     closed: Arc<std::sync::atomic::AtomicBool>,
     persistent: bool,
+    cache: account_cache::Shared,
 }
 
 /// Repository read service scoped to the active account.
@@ -93,6 +99,10 @@ pub struct RepoService {
     persistent: bool,
     credential_commit: Arc<std::sync::Mutex<()>>,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    cache: account_cache::Shared,
+    database: accounts::Database,
+    #[cfg(test)]
+    rejection_probe: Arc<std::sync::Mutex<Option<account_cache::RejectionProbe>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +156,7 @@ impl AccountService {
             database: Arc::new(std::sync::Mutex::new(None)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistent: false,
+            cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -163,6 +174,10 @@ impl AccountService {
             persistent: self.persistent,
             credential_commit: self.credential_commit.clone(),
             closed: self.closed.clone(),
+            cache: self.cache.clone(),
+            database: self.database.clone(),
+            #[cfg(test)]
+            rejection_probe: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -913,6 +928,7 @@ mod tests {
             database: Arc::new(std::sync::Mutex::new(None)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistent: false,
+            cache: Arc::new(std::sync::Mutex::new(None)),
         };
 
         svc.login(Pat::from_str("ghp_old")).await.expect("login");
@@ -1139,6 +1155,7 @@ mod tests {
             database: Arc::new(std::sync::Mutex::new(None)),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistent: false,
+            cache: Arc::new(std::sync::Mutex::new(None)),
         };
 
         svc.login(Pat::from_str("ghp_a1")).await.expect("login A");
