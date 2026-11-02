@@ -249,6 +249,47 @@ async fn avatar_no_store_invalidates_old_cache_and_is_not_persisted() {
 }
 
 #[tokio::test]
+async fn no_store_with_an_unusable_body_still_invalidates_the_stored_avatar() {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig::at(dir.path().to_path_buf());
+    let store = CacheStore::open(config).unwrap();
+    let account = AccountKey::new(350, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk_cache = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let source = Arc::new(MockAvatarSource::new());
+    let url = "https://avatars.test/no_store_broken.png";
+    let key = AvatarKey::new("github.com", 351, url);
+
+    // A usable avatar is stored first.
+    source.serve(url, 200, Some("\"b1\""), None, None, valid_png());
+    let fetcher = AvatarFetcher::new(source.clone(), false)
+        .with_source(source.clone())
+        .with_cache(disk_cache.clone());
+    assert!(fetcher.fetch(&key).await.is_some());
+    assert!(disk_cache.read_sync(&key).is_some());
+
+    // The same key then answers `no-store` with bytes that are not an image:
+    // the old representation must still be dropped, and nothing is published.
+    source.serve(
+        url,
+        200,
+        None,
+        None,
+        Some("no-store"),
+        b"not a png image".to_vec(),
+    );
+    assert!(
+        fetcher.fetch(&key).await.is_none(),
+        "an unusable body is never rendered"
+    );
+    assert!(
+        disk_cache.read_sync(&key).is_none(),
+        "no-store invalidates the stored representation even when the body is unusable"
+    );
+}
+
+#[tokio::test]
 async fn corrupt_or_oversized_payload_falls_back_and_does_not_cache() {
     let dir = tempdir().unwrap();
     let config = CacheConfig::at(dir.path().to_path_buf());

@@ -425,13 +425,9 @@ impl AvatarFetcher {
                 }
             }
             Ok((status, meta, bytes)) if (200..300).contains(&status) => {
-                if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
-                    return None;
-                }
-                // Validate payload first before touching cache!
-                let decoded = decode_image(bytes.clone())?;
-
-                // Check no-store: if response instructs no-store, invalidate any existing representation and do not store
+                // Storage policy is decided by the response headers alone, so a
+                // `no-store` response invalidates any previously usable
+                // representation even when its body turns out to be unusable.
                 let permits_storage = meta
                     .cache_control
                     .as_deref()
@@ -446,13 +442,22 @@ impl AvatarFetcher {
                     })
                     .unwrap_or(true);
 
+                // The payload is validated before anything is stored, so a
+                // corrupt body never replaces a usable cached avatar.
+                let decoded = if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
+                    None
+                } else {
+                    decode_image(bytes.clone())
+                };
+                let usable = decoded.is_some();
+
                 if let Some(cache) = &self.disk_cache {
-                    // If metadata is not available (only basic AvatarBytes trait injected),
-                    // skip disk caching entirely to avoid violating HTTP cache semantics.
+                    // Without response metadata (only the basic `AvatarBytes`
+                    // trait injected) disk semantics cannot be honoured.
                     if has_metadata {
                         let cache = cache.clone();
                         let key_clone = key.clone();
-                        if permits_storage {
+                        if permits_storage && usable {
                             if let Some(ticket) = write_ticket {
                                 let etag = meta.etag.clone();
                                 let lm = meta.last_modified.clone();
@@ -462,15 +467,16 @@ impl AvatarFetcher {
                                 })
                                 .await;
                             }
-                        } else {
+                        } else if !permits_storage {
                             // no-store: commit through the same pre-request ticket so that
                             // newer writers/invalidations win instead of being unconditionally deleted.
                             if let Some(ticket) = write_ticket {
                                 let etag = meta.etag.clone();
                                 let lm = meta.last_modified.clone();
                                 let cc = meta.cache_control.clone();
+                                let body = bytes.clone();
                                 let _ = tokio::task::spawn_blocking(move || {
-                                    cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
+                                    cache.commit_write_sync(ticket, &body, etag, lm, cc)
                                 })
                                 .await;
                             } else {
@@ -482,7 +488,8 @@ impl AvatarFetcher {
                         }
                     }
                 }
-                Some(decoded)
+
+                decoded
             }
             _ => {
                 // Network failed or returned error status (e.g. 404, 500, offline).

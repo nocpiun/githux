@@ -79,6 +79,10 @@
 
 1. **缺失 Cache-Control 必须是 `None`**：`collect_cache_control` 在没有任何字段时返回 `None`，否则 304 会用空字符串覆盖原 `no-cache` 策略。新增 `cache_control_is_absent_only_when_no_field_is_present`（直接覆盖生产 header 提取路径）与 `a_304_without_cache_control_preserves_the_stored_policy`（存储策略跨 304 保持）。
 
+### Round 7
+
+1. **no-store 与图片校验解耦**：存储策略只由响应头决定。`no-store` 响应即使在 body 为空/损坏时也用同一票据提交，让 `CacheStore::put` 删除旧表示；损坏 body 仍然不入库也不渲染，返回 initials。新增 `no_store_with_an_unusable_body_still_invalidates_the_stored_avatar`。
+
 所有 Cargo 检查通过 `node scripts/verify.mjs -- cargo ...` 执行：
 - `cargo fmt --all -- --check`：通过。
 - `cargo check --locked --all-targets`：通过。
