@@ -48,6 +48,7 @@ mod repository_cache_tests;
 mod repository_content_tests;
 #[cfg(test)]
 mod repository_tests;
+pub mod work_items;
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::storage::accounts::StorageError;
