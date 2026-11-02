@@ -681,3 +681,38 @@ async fn newer_activity_reenters_the_inbox_after_a_done() {
     assert!(revived.is_some(), "newer activity must re-enter the inbox");
     assert_ne!(revived.unwrap().updated_at, old_version);
 }
+
+#[tokio::test]
+async fn a_late_done_does_not_remove_a_newer_version_already_loaded() {
+    let (_accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let old_version = inbox
+        .snapshot()
+        .items
+        .iter()
+        .find(|item| item.id == "9000")
+        .unwrap()
+        .updated_at
+        .clone();
+    // Done for version A is in flight.
+    let done = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    // A concurrent refresh loads newer activity (version B) for the same id.
+    fixture.set_clock(fixture::PREVIEW_NOW + 3600);
+    run(&inbox, RequestKind::Refresh).await;
+    assert!(
+        inbox
+            .snapshot()
+            .items
+            .iter()
+            .any(|item| item.id == "9000" && item.updated_at != old_version)
+    );
+    // The late Done completion for A must not remove B.
+    inbox.execute_thread_action(done).await;
+    assert!(
+        inbox.snapshot().items.iter().any(|item| item.id == "9000"),
+        "newer activity must survive an older Done completion"
+    );
+}

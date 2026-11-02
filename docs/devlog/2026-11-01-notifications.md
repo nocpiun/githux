@@ -70,7 +70,9 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 6. tombstone 只按 thread ID 永久隐藏，会阻断同一 thread 之后合法的新通知。改为记录 Done 时观察到的 `updated_at`，只抑制该版本；同一 ID 的新版本重新进入 inbox。回归 `newer_activity_reenters_the_inbox_after_a_done`。
 
-以上六条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
+7. Done 完成时按 ID 移除行，会误删并发刷新已载入的同一 ID 新版本 B。改为只移除 Done 捕获的版本 A，较新版本保留；回归 `a_late_done_does_not_remove_a_newer_version_already_loaded`。
+
+以上七条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
 
 **与最新 main 组合**：合并 `origin/main` 时 `src/data/mod.rs` 只有新增模块声明的文本冲突，保留双方声明即可。发现 Newer main 的 `global_work_items` 通过 `#[path = "../home/time.rs"]` 复用 Home 时间实现，而我已把实现移到 `src/ui/relative_time.rs`；为不破坏该消费者，把 `src/ui/home/time.rs` 恢复为仅转发的 shim，并在其独立装配 `work_items_modules.rs` 注册共享模块，仍只有一份解析器。第一次完整 `cargo test` 出现两个与本任务无关的 main 侧偶发失败（`repository_descriptions_deduplicates...`、`reader_images::fixed_revision_images...` 的 `InUse`），单独重跑均通过，随后完整重跑全部通过；记录为既有测试的顺序/资源偶发，不归因本任务，也不掩盖。
 

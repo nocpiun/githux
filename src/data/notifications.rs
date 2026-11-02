@@ -513,10 +513,13 @@ impl Notifications {
                         .insert(request.thread_id.clone(), request.version.clone());
                 }
                 state.unsubscribed.remove(&request.thread_id);
-                state
-                    .snapshot
-                    .items
-                    .retain(|item| item.id != request.thread_id);
+                // Remove only the version the user completed. A concurrent
+                // refresh may already hold newer unread activity (version B)
+                // for the same thread id; that row must stay visible.
+                state.snapshot.items.retain(|item| {
+                    item.id != request.thread_id
+                        || (!request.version.is_empty() && item.updated_at != request.version)
+                });
                 state.snapshot.thread_states.remove(&request.thread_id);
             }
             Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed { done_error, .. }) => {
