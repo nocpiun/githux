@@ -9,7 +9,7 @@
 - C1：账户仍保存、没有已知授权失败时，断网冷启动允许按最后已知授权读私有缓存。返回 bytes + fetched/verified 时间、DTO 版本、完整性和验证器；消费者标明历史快照、离线和上次同步，不能据此声称当前权限或最新版本。
 - C2：`retire` 持久退休分区后立即拒绝所有读写。`recover` 可稍后删除退休内容并清理文件，open 自动尝试恢复。重加同 host + 数字账户 ID 获得新 UUID partition；其他账户不受影响。
 - C3：`PatReplaced` 推进持久授权 epoch，隔离所有旧私有 scope。新凭据逐仓库确认访问权后才能 `permission_confirmed`，`GET /user` 不构成仓库权限证明。账户级私有聚合数据使用 `repository=None` 的独立门槛，必须独立确认其数据范围，不能随某个仓库重验一起恢复。
-- C4：`CredentialRejected` 持久拒绝私有读取，重启或 `saved_account` 不解除；接受替换凭据后仍逐仓库重验。Offline/Timeout/ServerFailure/RateLimited/AmbiguousDenial 不改变最后已知许可。明确仓库撤权使用 `revoke_repository` 清理该仓库全部条目并拒绝私有读取；模糊 403/404 不足以调用它。
+- C4：`CredentialRejected` 持久拒绝私有读取，重启或 `saved_account` 不解除；接受替换凭据后仍逐仓库重验。Offline/Timeout/ServerFailure/RateLimited/AmbiguousDenial 不改变最后已知许可。明确仓库撤权使用 `revoke_repository` 清理该仓库全部条目并拒绝私有读取；模糊 403/404 不足以调用它。撤销某具体仓库 R 时，同事务还使该账户 `repository=None` 的旧聚合快照（Complete/Partial）全部失效并推进聚合门禁 revision：既有聚合 lease、在途写 ticket 和旧重验 proof 均不能回填或重新打开旧数据，重启不复活；聚合门禁的 `allowed/epoch` 保持不变，因此在原本允许且未受 PAT 替换/凭据拒绝隔离的 scope 下，撤权后由当前凭据完成的新在线聚合读取仍可建立新快照。其他账户、同账户其他仓库及其在途写入不受影响。
 - C5：普通可淘汰缓存，没有 pin/永久保留或离线下载保证。读取 lease 仅阻止容量淘汰，`snapshot()` 每次检查授权；退休、撤权、clear 可以立即使 lease 失效。已复制到调用方的字节无法由 storage 撤回，消费者必须继续复核现有 Account/RepositoryReadContext 与页面代次并清掉旧画面。
 
 这些是产品决定；下述容量与 schema 是可调整的工程选择。
@@ -22,7 +22,7 @@
 
 数据库 schema v1，DTO 的 `representation_version` 独立。v0 只接管空库，拒绝未知非空库、高版本、quick_check 失败；保留原文件，**不自动重建授权账本**。损坏账本不能按“可丢弃缓存”删除重建后隐式恢复私有访问。若未来用户手动删除整个缓存目录，正式集成必须从账户事件/恢复策略重建安全门槛；本任务不提供该产品操作。
 
-`scopes` 保存 active/rejected/retired、持久随机 epoch 与 restricted；`gates` 保存每仓库许可、epoch 与撤权 revision；`slots` 保存最近写 ticket 代次；`entries` 原子保存 payload/对象引用、完整元数据、字节数和 CRC-64/ECMA-182。CRC 用于检测意外损坏，不防本机攻击者篡改，既不授权也不作内容寻址去重。
+`scopes` 保存 active/rejected/retired、持久随机 epoch 与 restricted；`gates` 保存每仓库许可、epoch 与撤权 revision；`slots` 保存最近写 ticket 代次；`entries` 原子保存 payload/对象引用、完整元数据、字节数和 CRC-64/ECMA-182。CRC 用于检测意外损坏，不防本机攻击者篡改，既不授权也不作内容寻址去重。`repository=None` 是现有账户聚合门禁：具体仓库撤权时保守地使该门槛下所有旧聚合快照失效并推进其 revision，这是已确认取舍，允许损失部分本与撤销仓库无关的普通缓存，但不额外请求仓库数字 ID、不新增授权注册表、也不永久封禁新聚合在线读取。
 
 大内容：create_new 临时文件 → write/sync_all → rename UUID 对象 → SQLite 事务发布。Unix 同步目录；Windows 掉电后的目录项持久性不额外保证，丢失对象返回 Corrupt miss。元数据发布失败回滚旧表示，残留孤儿下次 put/open/recover 删除。SQLite 使用 rollback journal、FULL synchronous；无半条表示，数据库引用丢失对象只作为 miss，不当空内容。
 
@@ -78,7 +78,7 @@ let proof = cache.begin_revalidation(&scope, Some(repo_id))?;
 // 使用当前凭据对该仓库作权限核验，并复核现有服务 context。
 cache.permission_confirmed(proof)?;
 cache.access_event(&scope, AccessEvent::CredentialRejected)?;
-cache.revoke_repository(&scope, Some(repo_id))?; // 需要明确撤权证据
+cache.revoke_repository(&scope, Some(repo_id))?; // 明确撤权证据；同时使该账户聚合失效
 cache.retire(&scope)?; // 账户移除先提交逻辑拒绝；随后处理 recover
 cache.recover()?;
 ```
