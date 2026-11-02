@@ -58,6 +58,7 @@ impl AccountService {
             database: Arc::new(Mutex::new(Some(db))),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistent: true,
+            cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -72,6 +73,7 @@ impl AccountService {
         let database = self.database.clone();
         let store = self.store.clone();
         let closed = self.closed.clone();
+        let cache = self.cache.clone();
         tokio::task::spawn_blocking(move || {
             let _gate = gate.lock().expect("account commit lock");
             if closed.load(std::sync::atomic::Ordering::Acquire) {
@@ -87,6 +89,34 @@ impl AccountService {
                     return Err(LoginError::GitHub(GitHubError::StaleContext));
                 }
             }
+            // Isolate old private bytes before any replacement catalog commit,
+            // but only after rejecting a stale remove/re-add incarnation.
+            if old.is_some() {
+                super::account_cache::quarantine(
+                    &cache,
+                    &identity.key,
+                    crate::storage::cache::AccessEvent::PatReplaced,
+                )
+                .map_err(|_| {
+                    LoginError::CredentialSave(CredentialError::Platform {
+                        message: "private cache authorization update failed".into(),
+                    })
+                })?;
+            }
+            // Prepare cache safety before committing a newly saved account.
+            // Otherwise a restart could forget a failed orphan retirement and
+            // treat the newly committed account as owner of the old partition.
+            if old.is_none() {
+                let directory = registry.lock().expect("registry lock").directory();
+                super::account_cache::prepare_new(&cache, &identity.key, &directory).map_err(
+                    |_| {
+                        LoginError::CredentialSave(CredentialError::Platform {
+                            message: "private cache authorization update failed".into(),
+                        })
+                    },
+                )?;
+            }
+            let cache_enabled = cache.lock().expect("account cache lock").is_some();
             let mut db = database.lock().expect("database lock");
             let credential = if db.is_some() {
                 CredentialRef::versioned(
@@ -110,7 +140,12 @@ impl AccountService {
             }
             let summary = next.upsert_verified(identity, credential.clone());
             if let Some(db) = db.as_mut()
-                && let Err(error) = db.commit(&next.directory(), Some(&credential), old.as_ref())
+                && let Err(error) = db.commit_with_cache_recovery(
+                    &next.directory(),
+                    Some(&credential),
+                    old.as_ref(),
+                    cache_enabled,
+                )
             {
                 // Old credential/registry stay authoritative. New slot is
                 // still journalled even if rollback cleanup itself fails.
@@ -118,6 +153,12 @@ impl AccountService {
                 return Err(LoginError::Storage(error));
             }
             *registry.lock().expect("registry lock") = next;
+            super::account_cache::published(&cache, &summary.identity.key);
+            // New accounts (including remove/re-add) receive a fresh partition.
+            // Rejected/replaced accounts retain their isolated partition until
+            // repository-specific permission proof arrives from the consumer.
+            let directory = registry.lock().expect("registry lock").directory();
+            super::account_cache::provision(&cache, &summary.identity.key, &directory);
             if let Some(db) = db.as_ref()
                 && cleanup(db, store.as_ref()).is_err()
             {
@@ -151,35 +192,59 @@ impl AccountService {
         let database = self.database.clone();
         let store = self.store.clone();
         let closed = self.closed.clone();
+        let cache = self.cache.clone();
         tokio::task::spawn_blocking(move || {
             let _gate = gate.lock().expect("account commit lock");
             if closed.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(AccountError::Storage(StorageError::Closed));
             }
             let mut next = registry.lock().expect("registry lock").clone();
-            let retired = if let Some(key) = removed {
+            let retired = if let Some(ref key) = removed {
                 let r = next
                     .credential_ref(key.clone())
                     .ok_or(AccountError::NotFound)?;
-                next.remove(key).map_err(|_| AccountError::NotFound)?;
+                next.remove(key.clone())
+                    .map_err(|_| AccountError::NotFound)?;
                 Some(r)
             } else {
                 next.set_active(active.expect("selection"))
                     .map_err(|_| AccountError::NotFound)?;
                 None
             };
+            if let Some(account) = removed.as_ref() {
+                // Durable logical denial precedes the independent catalog commit.
+                // Physical object deletion is deliberately later and retryable.
+                super::account_cache::retire(&cache, account)
+                    .map_err(|_| AccountError::CleanupPending)?;
+            }
             let mut db = database.lock().expect("database lock");
-            if let Some(db) = db.as_mut() {
-                db.commit(&next.directory(), None, retired.as_ref())
-                    .map_err(AccountError::Storage)?;
+            if let Some(db) = db.as_mut()
+                && let Err(error) = db.commit(&next.directory(), None, retired.as_ref())
+            {
+                if removed.is_some() {
+                    super::account_cache::mark_recovery(&cache);
+                }
+                return Err(AccountError::Storage(error));
             }
             *registry.lock().expect("registry lock") = next;
-            if let Some(db) = db.as_ref() {
+            if let Some(account) = removed.as_ref() {
+                // The removal transaction superseded the durable recovery row;
+                // discard its in-memory counterpart only after that commit.
+                super::account_cache::published(&cache, account);
+            }
+            let result = if let Some(db) = db.as_ref() {
                 cleanup(db, store.as_ref())
             } else if let Some(r) = retired {
                 store.delete(&r).map_err(AccountError::Credential)
             } else {
                 Ok(())
+            };
+            if removed.is_some() {
+                let directory = registry.lock().expect("registry lock").directory();
+                let cache_result = super::account_cache::recover(&cache, &directory);
+                result.and(cache_result)
+            } else {
+                result
             }
         })
         .await
@@ -190,13 +255,16 @@ impl AccountService {
     pub async fn recovery_pending(&self) -> Result<bool, StorageError> {
         let database = self.database.clone();
         let closed = self.closed.clone();
+        let cache = self.cache.clone();
         tokio::task::spawn_blocking(move || {
             if closed.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(StorageError::Closed);
             }
             match database.lock().expect("database lock").as_ref() {
-                Some(db) => Ok(!db.pending()?.is_empty()),
-                None => Ok(false),
+                Some(db) => {
+                    Ok(!db.pending()?.is_empty() || super::account_cache::recovery_pending(&cache))
+                }
+                None => Ok(super::account_cache::recovery_pending(&cache)),
             }
         })
         .await
@@ -209,15 +277,21 @@ impl AccountService {
         let database = self.database.clone();
         let store = self.store.clone();
         let closed = self.closed.clone();
+        let cache = self.cache.clone();
+        let registry = self.registry.clone();
         tokio::task::spawn_blocking(move || {
             let _gate = gate.lock().expect("account commit lock");
             if closed.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(AccountError::Storage(StorageError::Closed));
             }
-            match database.lock().expect("database lock").as_ref() {
+            let result = match database.lock().expect("database lock").as_ref() {
                 Some(db) => cleanup(db, store.as_ref()),
                 None => Ok(()),
-            }
+            };
+            let directory = registry.lock().expect("registry lock").directory();
+            let cache_result =
+                super::account_cache::recover_with_catalog(&cache, &directory, &database);
+            result.and(cache_result)
         })
         .await
         .map_err(|_| AccountError::Storage(StorageError::Closed))?
@@ -293,12 +367,14 @@ impl AccountService {
         let gate = self.credential_commit.clone();
         let registry = self.registry.clone();
         let closed = self.closed.clone();
+        let cache = self.cache.clone();
+        let database = self.database.clone();
         tokio::task::spawn_blocking(move || {
             let _gate = gate.lock().expect("account commit lock");
             if closed.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(LoginError::Storage(StorageError::Closed));
             }
-            let mut reg = registry.lock().expect("registry lock");
+            let reg = registry.lock().expect("registry lock");
             if reg.active_context() != selection
                 || reg.credential_ref(account.clone()).as_ref() != Some(&credential)
                 || !reg
@@ -308,8 +384,17 @@ impl AccountService {
             {
                 return Err(LoginError::GitHub(GitHubError::StaleContext));
             }
-            // This operation changes runtime evidence only; display refresh is
-            // persisted on the next explicit login/replacement.
+            drop(reg);
+            // Only a classified Unauthorized is revocation evidence; outages,
+            // limits and ambiguous errors leave the last-known gate intact.
+            if matches!(result, Err(LoginError::GitHub(GitHubError::Unauthorized))) {
+                super::account_cache::reject(&cache, &database, &account).map_err(|_| {
+                    LoginError::CredentialSave(CredentialError::Platform {
+                        message: "private cache authorization update failed".into(),
+                    })
+                })?;
+            }
+            let mut reg = registry.lock().expect("registry lock");
             reg.revalidated(&account, state);
             result?;
             Ok(reg

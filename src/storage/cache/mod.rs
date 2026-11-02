@@ -26,7 +26,7 @@ use std::{
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, CacheError>;
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CacheError {
     #[error("invalid cache input or configuration")]
     InvalidInput,
@@ -95,6 +95,9 @@ impl CacheConfig {
 struct State {
     db: Connection,
     pins: HashMap<String, usize>,
+    /// Process-local fail-closed barrier for an uncertain durable gate outcome.
+    /// Freshly reconciled scopes capture the new generation; old clones cannot.
+    suspended: HashMap<String, u64>,
 }
 struct Inner {
     state: Mutex<State>,
@@ -115,6 +118,11 @@ pub struct Revalidation {
     epoch: String,
     revision: String,
     instance: String,
+}
+impl Revalidation {
+    pub fn scope(&self) -> &CacheScope {
+        &self.scope
+    }
 }
 /// Captured before a network read; newer writers and access events invalidate it.
 pub struct CacheWrite {
@@ -169,6 +177,7 @@ impl Drop for CacheLease {
 impl CacheLease {
     pub fn snapshot(&self) -> Result<Option<CacheSnapshot>> {
         let state = self.store.lock()?;
+        check_local_access(&state, &self.scope)?;
         check_access(&state.db, &self.scope, &self.key)?;
         self.store
             .load(&state.db, &self.id, &self.key)
@@ -208,6 +217,7 @@ impl CacheStore {
                 state: Mutex::new(State {
                     db,
                     pins: HashMap::new(),
+                    suspended: HashMap::new(),
                 }),
                 config,
                 instance: nonce(),
@@ -252,12 +262,66 @@ impl CacheStore {
         };
         keys::object_name(&partition)?;
         tx.commit()?;
-        Ok(CacheScope { account, partition })
+        // saved_account is a lookup/provision operation, not reconciliation of
+        // an uncertain gate outcome. It never advances the local generation.
+        let generation = state.suspended.get(&partition).copied().unwrap_or(0);
+        Ok(CacheScope {
+            account,
+            partition,
+            generation,
+        })
+    }
+    /// Read-only enumeration for account-catalog reconciliation. The account
+    /// service retires scopes absent from its durable catalog before exposing
+    /// any saved-account binding; consumers must not create their own scopes.
+    pub(crate) fn live_scopes(&self) -> Result<Vec<CacheScope>> {
+        let state = self.lock()?;
+        let mut statement = state.db.prepare(
+            "SELECT partition,host,account FROM scopes WHERE state!='retired' ORDER BY partition",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut scopes = Vec::new();
+        for row in rows {
+            let (partition, host, id) = row;
+            keys::object_name(&partition)?;
+            let parsed = id.parse::<u64>().map_err(|_| CacheError::Corrupt)?;
+            if parsed.to_string() != id {
+                return Err(CacheError::Corrupt);
+            }
+            let generation = state.suspended.get(&partition).copied().unwrap_or(0);
+            scopes.push(CacheScope {
+                account: AccountKey::new(parsed, crate::domain::HostId::new(host)),
+                partition,
+                generation,
+            });
+        }
+        Ok(scopes)
+    }
+    /// Last-resort local barrier when a durable gate mutation reports failure.
+    /// It never grants access; only reconciliation may issue a fresh scope.
+    pub(crate) fn suspend(&self, scope: &CacheScope) -> Result<()> {
+        let mut state = self.lock()?;
+        let generation = state.suspended.entry(scope.partition.clone()).or_default();
+        *generation = generation.saturating_add(1);
+        Ok(())
     }
     /// Durable logical retirement first. recover() can finish physical deletion
     /// later, including after a crash. Re-adding allocates another partition.
     pub fn retire(&self, scope: &CacheScope) -> Result<()> {
-        let state = self.lock()?;
+        let mut state = self.lock()?;
+        // Invalidate old clones even if validation or this SQL commit fails.
+        // Reconciliation mints a fresh local generation only after checking the
+        // durable row; retirement never turns a local barrier into permission.
+        let generation = state.suspended.entry(scope.partition.clone()).or_default();
+        *generation = generation.saturating_add(1);
         validate_scope(&state.db, scope)?;
         state.db.execute(
             "UPDATE scopes SET state='retired',epoch=?1 WHERE partition=?2",
@@ -267,6 +331,7 @@ impl CacheStore {
     }
     pub fn access_event(&self, scope: &CacheScope, event: AccessEvent) -> Result<()> {
         let state = self.lock()?;
+        check_local_access(&state, scope)?;
         validate_scope(&state.db, scope)?;
         match event {
             AccessEvent::PatReplaced | AccessEvent::CredentialRejected => {
@@ -290,6 +355,7 @@ impl CacheStore {
         repository: Option<u64>,
     ) -> Result<Revalidation> {
         let mut state = self.lock()?;
+        check_local_access(&state, scope)?;
         let tx = state.db.transaction()?;
         let (status, epoch, _) = validate_scope(&tx, scope)?;
         if status != "active" {
@@ -312,6 +378,7 @@ impl CacheStore {
         if ticket.instance != self.inner.instance {
             return Err(CacheError::Stale);
         }
+        check_local_access(&state, &ticket.scope)?;
         let (status, epoch, _) = validate_scope(&state.db, &ticket.scope)?;
         if status != "active"
             || epoch != ticket.epoch
@@ -328,6 +395,7 @@ impl CacheStore {
     /// Explicit evidence of repository revocation, never a raw ambiguous 403/404.
     pub fn revoke_repository(&self, scope: &CacheScope, repository: Option<u64>) -> Result<()> {
         let mut state = self.lock()?;
+        check_local_access(&state, scope)?;
         let tx = state.db.transaction()?;
         let (_, epoch, _) = validate_scope(&tx, scope)?;
         let repository = repository_key(repository);
@@ -340,11 +408,32 @@ impl CacheStore {
             "DELETE FROM entries WHERE partition=?1 AND repository=?2",
             params![scope.partition, repository],
         )?;
+        // Revoking one concrete repository also invalidates this account's
+        // aggregate (repository=None) snapshots in the same durable transaction.
+        // Existing leases, in-flight write tickets and earlier revalidation
+        // proofs are all bound to the aggregate gate revision and therefore stop
+        // reading/repopulating/reopening old bytes. The aggregate's allowed and
+        // epoch columns are deliberately untouched: a fresh online read may
+        // still publish under the pre-existing authorization (or stay
+        // quarantined if a PAT replacement/rejection is still in effect).
+        if repository != "account" {
+            let account = repository_key(None);
+            ensure_gate(&tx, scope, &account, &epoch)?;
+            tx.execute(
+                "UPDATE gates SET revision=?1 WHERE partition=?2 AND repository=?3",
+                params![nonce(), scope.partition, account],
+            )?;
+            tx.execute(
+                "DELETE FROM entries WHERE partition=?1 AND repository=?2",
+                params![scope.partition, account],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
     pub fn begin_write(&self, scope: &CacheScope, key: &CacheKey) -> Result<CacheWrite> {
         let mut state = self.lock()?;
+        check_local_access(&state, scope)?;
         let tx = state.db.transaction()?;
         let (_, epoch, _) = validate_scope(&tx, scope)?;
         ensure_gate(&tx, scope, &key.repository_key(), &epoch)?;
@@ -379,8 +468,9 @@ impl CacheStore {
             return Err(CacheError::InvalidInput);
         }
         let mut state = self.lock()?;
+        check_local_access(&state, &ticket.scope)?;
         objects::collect(&self.inner.config.root, &state.db)?;
-        let State { db, pins } = &mut *state;
+        let State { db, pins, .. } = &mut *state;
         let tx = db.transaction()?;
         if ticket.instance != self.inner.instance
             || validate_scope(&tx, &ticket.scope)?.1 != ticket.epoch
@@ -438,6 +528,7 @@ impl CacheStore {
     }
     pub fn read(&self, scope: &CacheScope, key: &CacheKey) -> Result<CacheRead> {
         let mut state = self.lock()?;
+        check_local_access(&state, scope)?;
         check_access(&state.db, scope, key)?;
         let id: Option<String> = state
             .db
@@ -519,6 +610,7 @@ impl CacheStore {
     /// Older network writers cannot repopulate it; the authorization gate remains.
     pub fn invalidate(&self, scope: &CacheScope, key: &CacheKey) -> Result<()> {
         let mut state = self.lock()?;
+        check_local_access(&state, scope)?;
         let tx = state.db.transaction()?;
         validate_scope(&tx, scope)?;
         tx.execute(
@@ -553,7 +645,7 @@ impl CacheStore {
     /// orphan removal. Never follows object-directory symlinks or recursive paths.
     pub fn recover(&self) -> Result<()> {
         let mut state = self.lock()?;
-        let State { db, pins } = &mut *state;
+        let State { db, pins, .. } = &mut *state;
         let tx = db.transaction()?;
         tx.execute("DELETE FROM entries WHERE partition IN (SELECT partition FROM scopes WHERE state='retired')", [])?;
         tx.execute("DELETE FROM slots WHERE partition IN (SELECT partition FROM scopes WHERE state='retired')", [])?;
@@ -592,6 +684,12 @@ fn metadata_valid(value: &CacheMetadata) -> Result<()> {
     }
     Ok(())
 }
+fn check_local_access(state: &State, scope: &CacheScope) -> Result<()> {
+    if state.suspended.get(&scope.partition).copied().unwrap_or(0) != scope.generation {
+        return Err(CacheError::AccessDenied);
+    }
+    Ok(())
+}
 fn validate_scope(db: &Connection, scope: &CacheScope) -> Result<(String, String, bool)> {
     let row = db.query_row("SELECT state,epoch,restricted FROM scopes WHERE partition=?1 AND host=?2 AND account=?3",
         params![scope.partition, scope.account.host.as_str(), scope.account.id.to_string()],
@@ -614,11 +712,11 @@ fn gate(db: &Connection, scope: &CacheScope, repository: &str) -> Result<(String
     )?)
 }
 fn check_access(db: &Connection, scope: &CacheScope, key: &CacheKey) -> Result<()> {
-    let (state, epoch, restricted) = validate_scope(db, scope)?;
+    let (status, epoch, restricted) = validate_scope(db, scope)?;
     if !key.private {
         return Ok(());
     }
-    if state != "active" {
+    if status != "active" {
         return Err(CacheError::AccessDenied);
     }
     let permission = db
