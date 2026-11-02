@@ -306,23 +306,27 @@ impl CachedRepositorySession {
                 (fixed_key(repository.id(), ObjectKind::Commit, sha)?, true)
             }
         };
-        if fixed && mode != RepositoryCacheMode::ForceRefresh {
+        let loaded = if mode != RepositoryCacheMode::ForceRefresh {
             let repository = repository.clone();
             let revision = revision.clone();
-            if let Some(cached) = self
-                .prior(&key, cancel.clone(), move |value| {
-                    decode_snapshot(value, &repository, &revision)
-                })
-                .await?
-            {
-                return self.scoped(CachedRepositoryRead {
-                    value: cached.value.clone(),
-                    provenance: provenance(
-                        cached.payload.metadata.clone(),
-                        RepositoryCacheOrigin::Snapshot,
-                    ),
-                });
-            }
+            self.online_prior(&key, cancel.clone(), move |value| {
+                decode_snapshot(value, &repository, &revision)
+            })
+            .await?
+        } else {
+            None
+        };
+        if fixed
+            && let Some(cached) = &loaded
+            && !requires_revalidation(&cached.payload.metadata)
+        {
+            return self.scoped(CachedRepositoryRead {
+                value: cached.value.clone(),
+                provenance: provenance(
+                    cached.payload.metadata.clone(),
+                    RepositoryCacheOrigin::Snapshot,
+                ),
+            });
         }
         if mode == RepositoryCacheMode::OfflineOnly {
             let repository = repository.clone();
@@ -334,13 +338,10 @@ impl CachedRepositorySession {
                 .await?;
             return self.scoped(cached);
         }
-        let prior = if !fixed && mode == RepositoryCacheMode::OnlinePreferred {
-            let repository = repository.clone();
-            let revision = revision.clone();
-            self.online_prior(&key, cancel.clone(), move |value| {
-                decode_snapshot(value, &repository, &revision)
-            })
-            .await?
+        // A no-cache fixed object keeps its loaded representation as the
+        // conditional/fallback prior; ordinary fixed hits returned above.
+        let prior = if mode == RepositoryCacheMode::OnlinePreferred {
+            loaded
         } else {
             None
         };
@@ -423,22 +424,25 @@ impl CachedRepositorySession {
             VERSION,
         )
         .map_err(|_| RepositoryError::InvalidInput { field: "cache key" })?;
-        if mode != RepositoryCacheMode::ForceRefresh {
+        let loaded = if mode == RepositoryCacheMode::OnlinePreferred {
             let directory = directory.clone();
-            if let Some(cached) = self
-                .prior(&key, cancel.clone(), move |value| {
-                    decode_tree(value, &directory)
-                })
-                .await?
-            {
-                return self.scoped(CachedRepositoryRead {
-                    value: cached.value.clone(),
-                    provenance: provenance(
-                        cached.payload.metadata.clone(),
-                        RepositoryCacheOrigin::Snapshot,
-                    ),
-                });
-            }
+            self.online_prior(&key, cancel.clone(), move |value| {
+                decode_tree(value, &directory)
+            })
+            .await?
+        } else {
+            None
+        };
+        if let Some(cached) = &loaded
+            && !requires_revalidation(&cached.payload.metadata)
+        {
+            return self.scoped(CachedRepositoryRead {
+                value: cached.value.clone(),
+                provenance: provenance(
+                    cached.payload.metadata.clone(),
+                    RepositoryCacheOrigin::Snapshot,
+                ),
+            });
         }
         if mode == RepositoryCacheMode::OfflineOnly {
             let directory = directory.clone();
@@ -479,7 +483,7 @@ impl CachedRepositorySession {
             result,
             key,
             permit,
-            None,
+            loaded,
             cancel,
             move |tree| encode_tree(tree, directory),
             completeness_tree,
@@ -503,14 +507,21 @@ impl CachedRepositorySession {
         )?;
         let prior = if mode != RepositoryCacheMode::ForceRefresh {
             let snapshot = snapshot.clone();
-            let cached = self
-                .prior(&key, cancel.clone(), move |value| {
+            let cached = if mode == RepositoryCacheMode::OfflineOnly {
+                self.prior(&key, cancel.clone(), move |value| {
                     decode_readme(value, &snapshot)
                 })
-                .await?;
+                .await?
+            } else {
+                self.online_prior(&key, cancel.clone(), move |value| {
+                    decode_readme(value, &snapshot)
+                })
+                .await?
+            };
             if let Some(cached) = &cached
-                && (!matches!(cached.value, ReadmeDiscovery::NotFoundOrInaccessible { .. })
-                    || mode == RepositoryCacheMode::OfflineOnly)
+                && (mode == RepositoryCacheMode::OfflineOnly
+                    || (!requires_revalidation(&cached.payload.metadata)
+                        && !matches!(cached.value, ReadmeDiscovery::NotFoundOrInaccessible { .. })))
             {
                 return self.scoped(CachedRepositoryRead {
                     value: cached.value.clone(),
@@ -579,24 +590,6 @@ impl CachedRepositorySession {
             ObjectKind::Blob,
             identity.blob(),
         )?;
-        if mode != RepositoryCacheMode::ForceRefresh {
-            let identity = identity.clone();
-            let limits = *limits;
-            if let Some(cached) = self
-                .prior(&key, cancel.clone(), move |value| {
-                    decode_blob(value, &identity, &limits)
-                })
-                .await?
-            {
-                return self.scoped(CachedRepositoryRead {
-                    value: cached.value.clone(),
-                    provenance: provenance(
-                        cached.payload.metadata.clone(),
-                        RepositoryCacheOrigin::Snapshot,
-                    ),
-                });
-            }
-        }
         if mode == RepositoryCacheMode::OfflineOnly {
             let identity = identity.clone();
             let limits = *limits;
@@ -617,6 +610,17 @@ impl CachedRepositorySession {
         } else {
             None
         };
+        if let Some(cached) = &prior
+            && !requires_revalidation(&cached.payload.metadata)
+        {
+            return self.scoped(CachedRepositoryRead {
+                value: cached.value.clone(),
+                provenance: provenance(
+                    cached.payload.metadata.clone(),
+                    RepositoryCacheOrigin::Snapshot,
+                ),
+            });
+        }
         let validator = prior
             .as_ref()
             .and_then(|value| validators(&value.payload.metadata));
@@ -928,29 +932,21 @@ impl CachedRepositorySession {
             return Ok(());
         }
         let proof = permit.proof.take();
-        let needs_ticket = permit.ticket.is_none();
         let cache = self.cache.clone();
-        let scope = self.scope.clone();
-        let key = permit.key.clone();
-        let ticket = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             if let Some(proof) = proof {
                 cache.permission_confirmed(proof).map_err(cache_error)?;
             }
-            if needs_ticket {
-                cache
-                    .begin_write(&scope, &key)
-                    .map(Some)
-                    .map_err(cache_error)
-            } else {
-                Ok(None)
-            }
+            Ok::<(), RepositoryCacheError>(())
         })
         .await
         .map_err(|_| RepositoryCacheError::Storage)??;
         self.check()?;
-        if permit.ticket.is_none() {
-            permit.ticket = ticket;
-        }
+        // Deliberately no post-network begin_write: a quarantined request has
+        // no pre-request ordering ticket, so it proves access and returns the
+        // network value without publishing. The next authorized read obtains
+        // an ordinary pre-request ticket, so an older response can never
+        // overwrite a newer observation after PAT replacement.
         Ok(())
     }
 
@@ -1156,6 +1152,19 @@ fn validators(metadata: &CacheMetadata) -> Option<RepositoryResponseMetadata> {
         network_observed: true,
     })
 }
+fn requires_revalidation(metadata: &CacheMetadata) -> bool {
+    metadata.cache_control.as_deref().is_some_and(|value| {
+        value.split(',').any(|directive| {
+            directive
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("no-cache")
+        })
+    })
+}
+
 fn validators_match(prior: &CacheMetadata, response: &RepositoryResponseMetadata) -> bool {
     (prior.etag.is_some() || prior.last_modified.is_some())
         && prior.etag == response.etag

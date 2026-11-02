@@ -29,6 +29,17 @@ const BLOB_B: &str = "5555555555555555555555555555555555555555";
 fn locator() -> RepositoryLocator {
     RepositoryLocator::new("octo", "repo").unwrap()
 }
+fn snapshot() -> RepoSnapshot {
+    RepoSnapshot {
+        repository: repository(),
+        requested: RevisionSpec::Commit(ObjectSha::new(A).unwrap()),
+        commit: ObjectSha::new(A).unwrap(),
+        root_tree: ObjectSha::new(TREE_A).unwrap(),
+        message: "fixture".into(),
+        author: None,
+        committer: None,
+    }
+}
 fn repository() -> RepositoryIdentity {
     RepositoryIdentity {
         id: 42,
@@ -1143,6 +1154,21 @@ async fn review_boundaries_keep_identity_gate_storage_directives_and_tree_contex
         )
         .await
         .unwrap();
+    // The quarantined request proved access but published nothing. The next
+    // authorized request carries an ordinary pre-request ticket.
+    fixture.push(
+        200,
+        json!([{"name":"main","commit":{"sha":A},"protected":false}]),
+    );
+    session
+        .branches(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
     let offline_branches = session
         .branches(
             &repository(),
@@ -1591,6 +1617,72 @@ async fn transient_fallback_decodes_the_latest_cached_observation_with_its_own_p
     assert_eq!(
         fallback.value.provenance.origin,
         RepositoryCacheOrigin::Snapshot
+    );
+}
+
+#[tokio::test]
+async fn no_cache_fixed_blob_revalidates_online_but_remains_offline_readable() {
+    let accounts = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let svc = service(&accounts, fixture.clone()).await;
+    login(&svc, &fixture, 1).await;
+    let store = cache(&storage);
+    let session = cached(&svc, store, 1);
+    let tree = DirectoryTree {
+        directory: SnapshotDirectory::root(&snapshot()),
+        entries: vec![TreeEntry {
+            path: RepositoryPath::new("a.txt").unwrap(),
+            kind: TreeEntryKind::File { executable: false },
+            sha: ObjectSha::new(BLOB_A).unwrap(),
+            size: Some(5),
+        }],
+        truncated: Some(false),
+        completeness: Completeness::Complete,
+    };
+    let identity = BlobIdentity::from_file(&tree, 0).unwrap();
+    fixture.headers(
+        200,
+        blob(BLOB_A, "hello"),
+        &[("cache-control", "private, no-cache")],
+    );
+    session
+        .blob(
+            &identity,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let before = fixture.count();
+    fixture.push(200, blob(BLOB_A, "hello"));
+    session
+        .blob(
+            &identity,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.count(),
+        before + 1,
+        "no-cache hit must revalidate online"
+    );
+    let offline = session
+        .blob(
+            &identity,
+            &Default::default(),
+            RepositoryCacheMode::OfflineOnly,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        offline.value.value.body(),
+        &BlobBody::Bytes(b"hello".to_vec())
     );
 }
 

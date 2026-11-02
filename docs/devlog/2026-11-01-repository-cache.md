@@ -58,6 +58,10 @@ Codex 对 `a53e807` 提出 5 项问题，均可在既定约束内直接修复，
 
 第五轮对 `c6b169d` 的唯一 P1 修复：directory/blob/readme 在 cache gate 隔离时也先证明 locator 的数字仓库 ID，再允许响应重开 gate；正常已授权读取不加额外请求，本地 oversized 仍不确认权限。聚焦 `e6988c46-0eab-4228-a425-757ce21f3989` 12/12 通过。
 
+第六轮对 `043cbbf` 的 2 项 P2 修复：隔离态请求不再在网络成功后补取 ticket/写入，只在本次证明权限并返回网络值，下一次已授权读取才按请求前 ticket 发布，消除旧响应覆盖新值的窗口；固定 commit/tree/blob/README 的 `no-cache` 缓存不再走在线快速命中，改为在线重验，离线仍可读。新增 no-cache 固定 blob 回归，聚焦 `d8a84a98-93a8-4bad-9ab1-1bbd5b407399` 13/13 通过。
+
+CI run `41345858631` 的 code-check 失败来自合并后的 `reader_images` 既有测试（Network vs NotFound），本模块本地全量通过；新 head 重新触发完整 CI 验证。
+
 ## 边界
 
 无 GUI/Shell 接线，无真实 PAT/实网写操作或 Star 验收。正式账户事件生产、应用级 CacheStore 组装与离线 UI 由后续任务交付。缓存适配层完成不等于应用离线功能已交付。
