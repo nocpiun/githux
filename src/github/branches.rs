@@ -4,11 +4,13 @@ use crate::auth::token::Pat;
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
     Branch, BranchesOutcome, Completeness, DynamicRef, IncompleteReason, ObjectSha,
-    RepositoryError, RepositoryIdentity,
+    RepositoryError, RepositoryIdentity, RepositoryResponseMetadata,
 };
 use crate::github::client::GitHubClient;
 use crate::github::headers::{parse_link_next, parse_sso_header};
-use crate::github::repository::{RepositoryLimits, check_status, decode, endpoint, get};
+use crate::github::repository::{
+    RepositoryLimits, check_status, decode, endpoint, get, response_metadata,
+};
 use crate::network::cancel::CancellationToken;
 use reqwest::Url;
 use serde::Deserialize;
@@ -33,6 +35,18 @@ pub async fn fetch_branches(
     limits: &RepositoryLimits,
     cancel: CancellationToken,
 ) -> Result<BranchesOutcome, RepositoryError> {
+    fetch_branches_with_metadata(client, token, repository, limits, cancel)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+pub async fn fetch_branches_with_metadata(
+    client: &GitHubClient,
+    token: &Pat,
+    repository: &RepositoryIdentity,
+    limits: &RepositoryLimits,
+    cancel: CancellationToken,
+) -> Result<(BranchesOutcome, RepositoryResponseMetadata), RepositoryError> {
     let mut url = endpoint(client, repository.locator(), &["branches"])?;
     url.query_pairs_mut().append_pair("per_page", "100");
     let initial_path = url.path().to_owned();
@@ -41,6 +55,7 @@ pub async fn fetch_branches(
     let mut branches = Vec::new();
     let mut reasons = Vec::new();
     let mut successful_pages = 0;
+    let mut metadata = RepositoryResponseMetadata::default();
     loop {
         if cancel.is_cancelled() {
             return Err(GitHubError::Cancelled.into());
@@ -84,6 +99,19 @@ pub async fn fetch_branches(
             }
         };
         successful_pages += 1;
+        let page_metadata = response_metadata(&response);
+        metadata.network_observed = true;
+        // Aggregate pages have no single validator. Any no-store contributor
+        // invalidates the whole aggregate; retain other directives as observed.
+        if page_metadata.cache_control.as_deref().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        }) {
+            metadata.cache_control = Some("no-store".into());
+        } else if metadata.cache_control.is_none() {
+            metadata.cache_control = page_metadata.cache_control;
+        }
         if let Some(organizations) = parse_sso_header(response.header("x-github-sso")) {
             reasons.push(IncompleteReason::SsoPartial { organizations });
         }
@@ -135,11 +163,14 @@ pub async fn fetch_branches(
             }
         }
     }
-    Ok(BranchesOutcome {
-        repository: repository.clone(),
-        branches,
-        completeness: Completeness::from_reasons(reasons),
-    })
+    Ok((
+        BranchesOutcome {
+            repository: repository.clone(),
+            branches,
+            completeness: Completeness::from_reasons(reasons),
+        },
+        metadata,
+    ))
 }
 
 // The shared next parser intentionally returns None both for no-next and for

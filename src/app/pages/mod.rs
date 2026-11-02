@@ -113,7 +113,8 @@ impl PageAvatars {
     }
 }
 
-/// Create the real RepositoryPage with Shell's navigation sink and no Star/Fork mutation handler.
+/// Create the real RepositoryPage with Shell's navigation sink. The page's injected
+/// RepositorySession provides the real Star action; Fork remains explicitly disabled.
 #[allow(clippy::too_many_arguments)]
 pub fn repository_page(
     _tab: TabId,
@@ -157,8 +158,8 @@ pub fn repository_page(
                 html_url: Some(url),
                 ..
             }) => navigation(PageNavigation::External(url), window, cx),
-            // These are intentionally not registered as successful actions: first release has no
-            // Star/Fork write operation. The existing page leaves their controls disabled.
+            // Star is handled inside RepositoryPage through RepositoryActionService. Fork and
+            // unsupported links stay inert; neither is reported as a successful host action.
             PageAction::StarRequested { .. }
             | PageAction::ForkRequested { .. }
             | PageAction::LinkNotFollowed { .. }
@@ -171,6 +172,13 @@ pub fn repository_page(
     // on later frames, so it only decodes pictures the overview does not already hold.
     sync_repository_avatars(&page, &avatars, cx);
     Some(MountedPage::Repository { page })
+}
+
+/// Test-only drain for the formal Shell composition suite. Production delivery
+/// stays on RepositoryPage's existing GPUI timer receiver.
+#[cfg(test)]
+pub fn drain_repository_for_test(page: &Entity<RepositoryPage>, window: &mut Window, cx: &mut App) {
+    page.update(cx, |page, cx| page.drain_for_shell_test(window, cx));
 }
 
 pub fn sync_repository_avatars(page: &Entity<RepositoryPage>, avatars: &PageAvatars, cx: &mut App) {

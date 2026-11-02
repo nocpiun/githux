@@ -317,7 +317,7 @@ fn old_actions_are_rejected_after_account_aba_and_rebind(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn counts_are_independent_and_actions_are_host_entries(cx: &mut TestAppContext) {
+fn counts_are_independent_and_star_is_a_real_action(cx: &mut TestAppContext) {
     let (fixture, page, cx) = ready(cx, Scene::Normal);
     for _ in 0..200 {
         page.update_in(cx, |p, w, cx| p.drain(w, cx));
@@ -334,23 +334,23 @@ fn counts_are_independent_and_actions_are_host_entries(cx: &mut TestAppContext) 
     });
     assert!(cx.debug_bounds("repository-badge-issues").is_some());
     assert!(cx.debug_bounds("repository-badge-pulls").is_some());
-    let received = Arc::new(Mutex::new(Vec::new()));
-    let sink = received.clone();
-    page.update(cx, |p, cx| {
-        p.enable_mutations(true);
-        p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
-        cx.notify();
-    });
+    settle(&page, cx, |p| p.starred_state().is_some());
     frames(cx);
     let star = cx.debug_bounds("repository-star").unwrap();
     cx.simulate_click(star.center(), Modifiers::none());
-    page.update_in(cx, |p, w, cx| w.focus(&p.star_focus.clone(), cx));
-    cx.simulate_keystrokes("enter space");
-    assert_eq!(received.lock().unwrap().len(), 3);
+    settle(&page, cx, |p| {
+        p.starred_state() == Some(crate::domain::repository_actions::StarredState::Starred)
+    });
+    assert_eq!(
+        fixture
+            .transport
+            .star_method_count(crate::network::transport::HttpMethod::Put),
+        1
+    );
+    assert!(!page.read_with(cx, |p, _| p.fork_mutations_enabled()));
     let binding = page.read_with(cx, |p, _| p.repository_binding().unwrap());
     page.update(cx, |p, cx| p.deactivate(cx));
     page.update_in(cx, |p, w, cx| p.repository_action(false, binding, w, cx));
-    assert_eq!(received.lock().unwrap().len(), 3);
     assert_eq!(fixture.transport.count("/graphql"), 1);
 }
 #[gpui::test]
@@ -456,14 +456,8 @@ fn neutral_count_pill_stays_inside_its_tab_click_target(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn action_count_pills_are_inside_one_action_and_expire_with_binding(cx: &mut TestAppContext) {
-    let (_fixture, page, cx) = ready(cx, Scene::Normal);
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let sink = calls.clone();
-    page.update(cx, |p, cx| {
-        p.enable_mutations(true);
-        p.on_action(Rc::new(move |a, _, _| sink.lock().unwrap().push(a)));
-        cx.notify();
-    });
+    let (fixture, page, cx) = ready(cx, Scene::Normal);
+    settle(&page, cx, |p| p.starred_state().is_some());
     frames(cx);
     for (button, count) in [
         ("repository-star", "repository-star-count"),
@@ -474,7 +468,13 @@ fn action_count_pills_are_inside_one_action_and_expire_with_binding(cx: &mut Tes
         assert!(inner.origin.x > outer.origin.x && inner.right() < outer.right());
         cx.simulate_click(inner.center(), Modifiers::none());
     }
-    assert_eq!(calls.lock().unwrap().len(), 2);
+    assert_eq!(
+        fixture
+            .transport
+            .star_method_count(crate::network::transport::HttpMethod::Put),
+        1
+    );
+    assert_eq!(fixture.transport.count("/forks"), 0, "Fork stays disabled");
     page.read_with(cx, |p, _| {
         assert_eq!(p.details().unwrap().stars, 128);
         assert_eq!(p.details().unwrap().forks, 9);

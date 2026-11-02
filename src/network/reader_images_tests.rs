@@ -432,3 +432,60 @@ fn every_answer_address_is_classified_by_one_policy() {
         assert!(!is_local_address(addr), "{public} must be public");
     }
 }
+
+#[test]
+fn external_revalidation_sends_conditional_headers_and_handles_304() {
+    let server = LocalHttpServer::start(vec![
+        ScriptedResponse::json(200, "initial-image")
+            .with_header("ETag", "\"tag123\"")
+            .with_header("Cache-Control", "public, max-age=60"),
+        ScriptedResponse::json(304, "").with_header("ETag", "\"tag123\""),
+    ]);
+
+    let fetcher = ReqwestExternalImages::with_local_http().expect("client");
+    let limits = ExternalImageLimits::default();
+    let url = format!("{}badge.png", server.base_url());
+
+    // 1. Initial request without conditional headers
+    let first = runtime()
+        .block_on(fetcher.load_with_metadata(
+            &url,
+            &limits,
+            ValidationHeaders::default(),
+            CancellationToken::default(),
+        ))
+        .expect("first response");
+
+    match first {
+        ExternalImageResponse::Fetched { bytes, metadata } => {
+            assert_eq!(bytes, b"initial-image");
+            assert_eq!(metadata.etag.as_deref(), Some("\"tag123\""));
+        }
+        _ => panic!("expected Fetched on first load"),
+    }
+
+    // 2. Revalidation request with If-None-Match
+    let validation = ValidationHeaders {
+        if_none_match: Some("\"tag123\""),
+        if_modified_since: None,
+    };
+    let second = runtime()
+        .block_on(fetcher.load_with_metadata(
+            &url,
+            &limits,
+            validation,
+            CancellationToken::default(),
+        ))
+        .expect("second response");
+
+    match second {
+        ExternalImageResponse::NotModified { metadata } => {
+            assert_eq!(metadata.etag.as_deref(), Some("\"tag123\""));
+        }
+        _ => panic!("expected NotModified on 304 response"),
+    }
+
+    let recorded = server.recorded();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1].header("if-none-match"), Some("\"tag123\""));
+}

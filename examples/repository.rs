@@ -237,7 +237,7 @@ impl Preview {
             page.on_action(std::rc::Rc::new(move |action, _window, cx| {
                 let text = match action {
                     PageAction::StarRequested { binding } => format!(
-                        "StarRequested for {} (host entry only, no mutation)",
+                        "legacy StarRequested for {} (real Star runs inside the page)",
                         binding.repository.locator().name()
                     ),
                     PageAction::ForkRequested { binding } => format!(

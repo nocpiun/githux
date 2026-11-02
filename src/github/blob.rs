@@ -3,10 +3,10 @@
 use crate::auth::token::Pat;
 use crate::domain::GitHubError;
 use crate::domain::blob::{BlobBody, BlobIdentity, BlobLimits, BlobRead};
-use crate::domain::repository::{ObjectSha, RepositoryError};
+use crate::domain::repository::{ObjectSha, RepositoryError, RepositoryResponseMetadata};
 use crate::github::client::GitHubClient;
 use crate::github::error::classify_transport;
-use crate::github::repository::{check_single, endpoint, invalid_response};
+use crate::github::repository::{check_single, endpoint, invalid_response, response_metadata};
 use crate::network::cancel::CancellationToken;
 use crate::network::transport::TransportError;
 use base64::Engine;
@@ -28,6 +28,20 @@ pub async fn fetch_blob(
     limits: &BlobLimits,
     cancel: CancellationToken,
 ) -> Result<BlobRead, RepositoryError> {
+    fetch_blob_with_metadata(client, token, identity, limits, None, cancel)
+        .await
+        .map(|(blob, _)| blob.expect("unconditional read cannot be 304"))
+}
+
+pub async fn fetch_blob_with_metadata(
+    client: &GitHubClient,
+    token: &Pat,
+    identity: &BlobIdentity,
+    limits: &BlobLimits,
+    conditional: Option<&RepositoryResponseMetadata>,
+    cancel: CancellationToken,
+) -> Result<(Option<BlobRead>, RepositoryResponseMetadata), RepositoryError> {
+    let local_metadata = RepositoryResponseMetadata::default();
     if cancel.is_cancelled() {
         return Err(GitHubError::Cancelled.into());
     }
@@ -35,27 +49,30 @@ pub async fn fetch_blob(
         .size()
         .filter(|size| *size > limits.decoded_bytes as u64)
     {
-        return Ok(too_large(identity, size, limits));
+        return Ok((Some(too_large(identity, size, limits)), local_metadata));
     }
     let url = endpoint(
         client,
         identity.repository().locator(),
         &["git", "blobs", identity.blob().as_str()],
     )?;
+    // Force JSON even if the generic client was configured for raw media.
+    let mut request = client.build_get(url.as_str(), token);
+    request
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("accept"));
+    request = request.with_header("Accept", "application/vnd.github+json");
+    if let Some(metadata) = conditional {
+        if let Some(etag) = &metadata.etag {
+            request = request.with_header("If-None-Match", etag);
+        }
+        if let Some(last_modified) = &metadata.last_modified {
+            request = request.with_header("If-Modified-Since", last_modified);
+        }
+    }
     let response = client
         .transport()
-        .execute_bounded(
-            // Force JSON even if the generic client was configured for raw media.
-            {
-                let mut request = client.build_get(url.as_str(), token);
-                request
-                    .headers
-                    .retain(|(name, _)| !name.eq_ignore_ascii_case("accept"));
-                request.with_header("Accept", "application/vnd.github+json")
-            },
-            cancel.clone(),
-            limits.response_bytes,
-        )
+        .execute_bounded(request, cancel.clone(), limits.response_bytes)
         .await
         .map_err(|error| match error {
             TransportError::ResponseTooLarge { limit } => RepositoryError::LimitExceeded {
@@ -74,6 +91,10 @@ pub async fn fetch_blob(
             limit: limits.response_bytes,
         });
     }
+    let metadata = response_metadata(&response);
+    if response.status == 304 {
+        return Ok((None, metadata));
+    }
     check_single(&response)?;
     // Don't copy untrusted field values into parse errors (they may echo secrets).
     let mut raw: BlobResponse =
@@ -89,7 +110,7 @@ pub async fn fetch_blob(
         return Err(invalid_response("blob size differs from descriptor"));
     }
     if raw.size > limits.decoded_bytes as u64 {
-        return Ok(too_large(identity, raw.size, limits));
+        return Ok((Some(too_large(identity, raw.size, limits)), metadata));
     }
     // GitHub wraps base64 with newlines. Compact in-place, avoiding an extra
     // full encoded copy. Reject all other whitespace through the strict decoder.
@@ -106,7 +127,10 @@ pub async fn fetch_blob(
         .saturating_mul(3)
         .saturating_sub(padding);
     if decoded_size > limits.decoded_bytes {
-        return Ok(too_large(identity, decoded_size as u64, limits));
+        return Ok((
+            Some(too_large(identity, decoded_size as u64, limits)),
+            metadata,
+        ));
     }
     let mut bytes = vec![0; decoded_size];
     let written = STANDARD
@@ -121,10 +145,13 @@ pub async fn fetch_blob(
     if cancel.is_cancelled() {
         return Err(GitHubError::Cancelled.into());
     }
-    Ok(BlobRead {
-        identity: identity.clone(),
-        body: BlobBody::Bytes(bytes),
-    })
+    Ok((
+        Some(BlobRead {
+            identity: identity.clone(),
+            body: BlobBody::Bytes(bytes),
+        }),
+        metadata,
+    ))
 }
 
 fn too_large(identity: &BlobIdentity, size: u64, limits: &BlobLimits) -> BlobRead {

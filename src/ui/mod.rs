@@ -843,6 +843,25 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub fn drain_repository_star_for_test(&self, window: &mut Window, cx: &mut App) {
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Repository { page }) = self.pages.get(&id) {
+            crate::app::pages::drain_repository_for_test(page, window, cx);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn active_repository_star_ready_for_test(&self, cx: &App) -> Option<bool> {
+        let id = self.workspace.active_id();
+        match self.pages.get(&id) {
+            Some(crate::app::pages::MountedPage::Repository { page }) => {
+                Some(page.read(cx).starred_state().is_some() && !page.read(cx).star_is_busy())
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub fn active_repository_mutations_enabled(&self, cx: &App) -> Option<bool> {
         let id = self.workspace.active_id();
         match self.pages.get(&id) {

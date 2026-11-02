@@ -3,12 +3,12 @@
 use crate::auth::token::Pat;
 use crate::domain::repository::{
     Completeness, DirectoryTree, IncompleteReason, ObjectSha, RepositoryError, RepositoryPath,
-    SnapshotDirectory, TreeEntry, TreeEntryKind,
+    RepositoryResponseMetadata, SnapshotDirectory, TreeEntry, TreeEntryKind,
 };
 use crate::github::client::GitHubClient;
 use crate::github::headers::parse_sso_header;
 use crate::github::repository::{
-    RepositoryLimits, check_status, decode, endpoint, get, invalid_response,
+    RepositoryLimits, check_status, decode, endpoint, get, invalid_response, response_metadata,
 };
 use crate::network::cancel::CancellationToken;
 use serde::Deserialize;
@@ -36,6 +36,18 @@ pub async fn fetch_directory(
     limits: &RepositoryLimits,
     cancel: CancellationToken,
 ) -> Result<DirectoryTree, RepositoryError> {
+    fetch_directory_with_metadata(client, token, directory, limits, cancel)
+        .await
+        .map(|(tree, _)| tree)
+}
+
+pub async fn fetch_directory_with_metadata(
+    client: &GitHubClient,
+    token: &Pat,
+    directory: &SnapshotDirectory,
+    limits: &RepositoryLimits,
+    cancel: CancellationToken,
+) -> Result<(DirectoryTree, RepositoryResponseMetadata), RepositoryError> {
     let url = endpoint(
         client,
         directory.repository.locator(),
@@ -43,18 +55,22 @@ pub async fn fetch_directory(
     )?;
     let response = get(client, token, &url, cancel).await?;
     check_status(&response)?;
+    let metadata = response_metadata(&response);
     let mut reasons = Vec::new();
     if let Some(organizations) = parse_sso_header(response.header("x-github-sso")) {
         reasons.push(IncompleteReason::SsoPartial { organizations });
     }
     if response.body.len() > limits.response_bytes {
         reasons.push(IncompleteReason::ResponseLimit);
-        return Ok(DirectoryTree {
-            directory: directory.clone(),
-            entries: Vec::new(),
-            truncated: None,
-            completeness: Completeness::from_reasons(reasons),
-        });
+        return Ok((
+            DirectoryTree {
+                directory: directory.clone(),
+                entries: Vec::new(),
+                truncated: None,
+                completeness: Completeness::from_reasons(reasons),
+            },
+            metadata,
+        ));
     }
     let raw: TreeResponse = decode(&response, limits)?;
     if ObjectSha::new(raw.sha)? != directory.tree {
@@ -98,10 +114,13 @@ pub async fn fetch_directory(
             kind,
         });
     }
-    Ok(DirectoryTree {
-        directory: directory.clone(),
-        entries,
-        truncated: raw.truncated,
-        completeness: Completeness::from_reasons(reasons),
-    })
+    Ok((
+        DirectoryTree {
+            directory: directory.clone(),
+            entries,
+            truncated: raw.truncated,
+            completeness: Completeness::from_reasons(reasons),
+        },
+        metadata,
+    ))
 }
