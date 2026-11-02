@@ -19,12 +19,16 @@ use std::sync::Arc;
 #[cfg(test)]
 mod authorization_tests;
 #[cfg(test)]
+mod capacity_tests;
+#[cfg(test)]
 mod graphql_feed_tests;
 #[cfg(test)]
 mod localhost_tests;
 #[cfg(test)]
 mod readme_tests;
 mod reads;
+#[cfg(test)]
+mod revocation_tests;
 #[cfg(test)]
 mod tests;
 
@@ -84,6 +88,10 @@ impl CachedPageReadSession {
     }
     pub fn context(&self) -> &RepositoryReadContext {
         self.session.context()
+    }
+    #[cfg(test)]
+    pub(crate) fn scope(&self) -> &CacheScope {
+        &self.scope
     }
     pub fn verify(&self) -> bool {
         self.session.verify()
@@ -300,7 +308,10 @@ impl CachedPageReadSession {
                         exchanges,
                     })
                     .map_err(|_| CacheError::Corrupt)?;
-                    store.put(ticket, &bytes, stored_metadata).map(|_| ())
+                    match store.put(ticket, &bytes, stored_metadata) {
+                        Ok(_) | Err(CacheError::TooLarge | CacheError::Capacity) => Ok(()),
+                        Err(error) => Err(error),
+                    }
                 })
                 .await?;
             }

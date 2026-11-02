@@ -12,7 +12,29 @@ use crate::{
     },
 };
 
+fn home_parameters(
+    updated: Option<&UpdatedWindow>,
+    limits: &HomeSearchLimits,
+) -> serde_json::Value {
+    serde_json::json!([format!("{updated:?}"), format!("{limits:?}")])
+}
+
 impl CachedPageReadSession {
+    /// Complete/Partial keys for the Home aggregate, so tests can hold a lease
+    /// or inspect slots without duplicating the request identity.
+    #[cfg(test)]
+    pub(super) fn home_keys(
+        &self,
+        updated: Option<&UpdatedWindow>,
+        limits: &HomeSearchLimits,
+    ) -> Result<(CacheKey, CacheKey), CacheError> {
+        let parameters = home_parameters(updated, limits);
+        Ok((
+            self.key(None, "home-open-involves", parameters.clone(), false)?,
+            self.key(None, "home-open-involves", parameters, true)?,
+        ))
+    }
+
     pub async fn home(
         &self,
         mode: PageReadMode,
@@ -20,7 +42,7 @@ impl CachedPageReadSession {
         limits: &HomeSearchLimits,
         cancel: CancellationToken,
     ) -> Result<Scoped<PageValue<HomeSearchOutcome>>, PageCacheError<HomeError>> {
-        let parameters = serde_json::json!([format!("{updated:?}"), format!("{limits:?}")]);
+        let parameters = home_parameters(updated.as_ref(), limits);
         let request_cancel = cancel.clone();
         self.read(
             mode,
