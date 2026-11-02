@@ -34,6 +34,7 @@ mod account_concurrency_tests;
 #[cfg(test)]
 mod account_tests;
 mod accounts;
+pub mod avatar_cache;
 #[cfg(test)]
 mod page_read_tests;
 mod page_reads;
@@ -43,10 +44,14 @@ pub mod repository;
 #[cfg(test)]
 mod repository_action_tests;
 pub mod repository_actions;
+pub mod repository_cache;
+#[cfg(test)]
+mod repository_cache_tests;
 #[cfg(test)]
 mod repository_content_tests;
 #[cfg(test)]
 mod repository_tests;
+pub mod work_items;
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::storage::accounts::StorageError;
@@ -58,6 +63,11 @@ pub use accounts::AccountError;
 pub use page_reads::{PageReadSession, ProfileReadme, ProfileReadmeIneligible};
 #[allow(unused_imports)]
 pub use repository::{RepositoryReadContext, RepositorySession, Scoped};
+#[allow(unused_imports)]
+pub use repository_cache::{
+    CachedRepositoryRead, CachedRepositorySession, RepositoryCacheError, RepositoryCacheMode,
+    RepositoryCacheOrigin, RepositoryCacheProvenance,
+};
 use std::sync::Arc;
 
 /// Account and credential lifecycle service.

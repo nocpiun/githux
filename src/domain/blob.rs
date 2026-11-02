@@ -88,7 +88,7 @@ impl Default for BlobLimits {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobBody {
     Bytes(Vec<u8>),
     TooLarge { size: u64, limit: usize },
@@ -96,7 +96,7 @@ pub enum BlobBody {
 
 /// Constructed only after validation or an explicit size rejection. No token,
 /// response JSON, download URL or duplicate base64 representation is retained.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobRead {
     pub(crate) identity: BlobIdentity,
     pub(crate) body: BlobBody,

@@ -2,11 +2,12 @@
 
 use crate::auth::token::Pat;
 use crate::domain::repository::{
-    GitSignature, ObjectSha, RepoSnapshot, RepositoryError, RepositoryIdentity, RevisionSpec,
+    GitSignature, ObjectSha, RepoSnapshot, RepositoryError, RepositoryIdentity,
+    RepositoryResponseMetadata, RevisionSpec,
 };
 use crate::github::client::GitHubClient;
 use crate::github::repository::{
-    RepositoryLimits, check_single, decode, endpoint, get, invalid_response,
+    RepositoryLimits, check_single, decode, endpoint, get_with_metadata, invalid_response,
 };
 use crate::network::cancel::CancellationToken;
 use serde::Deserialize;
@@ -51,12 +52,29 @@ pub async fn resolve_revision(
     limits: &RepositoryLimits,
     cancel: CancellationToken,
 ) -> Result<RepoSnapshot, RepositoryError> {
+    resolve_revision_with_metadata(client, token, repository, revision, limits, None, cancel)
+        .await
+        .map(|(snapshot, _)| snapshot.expect("unconditional read cannot be 304"))
+}
+
+pub async fn resolve_revision_with_metadata(
+    client: &GitHubClient,
+    token: &Pat,
+    repository: &RepositoryIdentity,
+    revision: RevisionSpec,
+    limits: &RepositoryLimits,
+    conditional: Option<&RepositoryResponseMetadata>,
+    cancel: CancellationToken,
+) -> Result<(Option<RepoSnapshot>, RepositoryResponseMetadata), RepositoryError> {
     let reference = match &revision {
         RevisionSpec::Ref(reference) => reference.as_str(),
         RevisionSpec::Commit(sha) => sha.as_str(),
     };
     let url = endpoint(client, repository.locator(), &["commits", reference])?;
-    let response = get(client, token, &url, cancel).await?;
+    let (response, metadata) = get_with_metadata(client, token, &url, conditional, cancel).await?;
+    if response.status == 304 {
+        return Ok((None, metadata));
+    }
     check_single(&response)?;
     let raw: CommitResponse = decode(&response, limits)?;
     let commit = ObjectSha::new(raw.sha)?;
@@ -67,13 +85,16 @@ pub async fn resolve_revision(
             "resolved commit differs from requested SHA",
         ));
     }
-    Ok(RepoSnapshot {
-        repository: repository.clone(),
-        requested: revision,
-        commit,
-        root_tree: ObjectSha::new(raw.commit.tree.sha)?,
-        message: raw.commit.message,
-        author: raw.commit.author.map(Into::into),
-        committer: raw.commit.committer.map(Into::into),
-    })
+    Ok((
+        Some(RepoSnapshot {
+            repository: repository.clone(),
+            requested: revision,
+            commit,
+            root_tree: ObjectSha::new(raw.commit.tree.sha)?,
+            message: raw.commit.message,
+            author: raw.commit.author.map(Into::into),
+            committer: raw.commit.committer.map(Into::into),
+        }),
+        metadata,
+    ))
 }

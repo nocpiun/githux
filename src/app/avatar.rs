@@ -30,9 +30,18 @@ use gpui::{Image, ImageFormat};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 pub use crate::ui::avatar::AvatarKey;
 
+impl crate::data::avatar_cache::AvatarKeyLike for AvatarKey {
+    fn subject(&self) -> &str {
+        &self.subject
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 /// Largest avatar payload accepted, in bytes. GitHub avatars are small; a larger body is treated as
 /// a failure instead of being decoded or buffered without bound.
-const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 
 /// How many decoded avatars stay cached. The sidebar shows at most a screenful of owners plus the
 /// saved accounts, so this is generous while still bounded.
@@ -149,6 +158,36 @@ pub trait AvatarBytes: Send + Sync + 'static {
     ) -> AvatarBytesFuture<'a>;
 }
 
+/// HTTP response headers relevant to caching and conditional requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AvatarResponseMetadata {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub cache_control: Option<String>,
+}
+
+/// The future one conditional avatar byte read resolves to: a status, optional metadata and the body.
+pub type AvatarDetailedFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(u16, AvatarResponseMetadata, Vec<u8>), ()>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Trait with conditional HTTP capabilities for avatar downloading.
+pub trait AvatarSource: Send + Sync + 'static {
+    /// Loads an avatar URL with optional conditional headers (`If-None-Match`, `If-Modified-Since`).
+    fn load_detailed<'a>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        etag: Option<&'a str>,
+        last_modified: Option<&'a str>,
+        cancel: CancellationToken,
+    ) -> AvatarDetailedFuture<'a>;
+}
+
 /// The production implementation: a dedicated reqwest client that follows redirects within the
 /// trusted CDN hosts and never carries an `Authorization` header. It is its own client so the
 /// shared REST client's credential injection cannot reach an image host by accident.
@@ -179,22 +218,45 @@ impl Default for ReqwestAvatars {
     }
 }
 
-impl AvatarBytes for ReqwestAvatars {
-    fn load<'a>(
+impl AvatarSource for ReqwestAvatars {
+    fn load_detailed<'a>(
         &'a self,
         url: &'a str,
         max_bytes: usize,
+        etag: Option<&'a str>,
+        last_modified: Option<&'a str>,
         cancel: CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(u16, Vec<u8>), ()>> + Send + 'a>>
-    {
+    ) -> AvatarDetailedFuture<'a> {
         Box::pin(async move {
-            let request = self.client.get(url);
+            let mut request = self.client.get(url);
+            if let Some(etag) = etag {
+                request = request.header("If-None-Match", etag);
+            }
+            if let Some(last_modified) = last_modified {
+                request = request.header("If-Modified-Since", last_modified);
+            }
             let response = tokio::select! {
                 biased;
                 _ = cancel.clone().cancelled() => return Err(()),
                 response = request.send() => response.map_err(|_| ())?,
             };
             let status = response.status().as_u16();
+            let metadata = AvatarResponseMetadata {
+                etag: response
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                last_modified: response
+                    .headers()
+                    .get("last-modified")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                cache_control: collect_cache_control(response.headers()),
+            };
+            if status == 304 {
+                return Ok((status, metadata, Vec::new()));
+            }
             let mut body = Vec::new();
             let mut stream = response;
             loop {
@@ -207,19 +269,40 @@ impl AvatarBytes for ReqwestAvatars {
                     break;
                 };
                 if body.len() + chunk.len() > max_bytes {
-                    // A larger payload than any avatar: treat it as a failure, not a decode target.
-                    return Err(());
+                    // The payload is beyond any avatar. Drop it, but keep the response
+                    // status and headers so the caller can still honour `Cache-Control`
+                    // (for example a `no-store` answer must invalidate an older entry).
+                    return Ok((status, metadata, Vec::new()));
                 }
                 body.extend_from_slice(&chunk);
             }
+            Ok((status, metadata, body))
+        })
+    }
+}
+
+impl AvatarBytes for ReqwestAvatars {
+    fn load<'a>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        cancel: CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(u16, Vec<u8>), ()>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let (status, _metadata, body) = self
+                .load_detailed(url, max_bytes, None, None, cancel)
+                .await?;
             Ok((status, body))
         })
     }
 }
 
-/// Executes one avatar fetch against an injected [`AvatarBytes`] source.
+/// Executes one avatar fetch against an injected [`AvatarBytes`] source, optionally backed by an [`AvatarDiskCache`].
 pub struct AvatarFetcher {
     bytes: Arc<dyn AvatarBytes>,
+    detailed: Option<Arc<dyn AvatarSource>>,
+    disk_cache: Option<crate::data::avatar_cache::AvatarDiskCache>,
     token: CancellationToken,
     cancel: CancellationTokenSource,
     /// Whether `http://` is allowed (only for the local test base), mirroring the trusted-origin
@@ -232,10 +315,24 @@ impl AvatarFetcher {
         let (token, cancel) = CancellationToken::new();
         Self {
             bytes,
+            detailed: None,
+            disk_cache: None,
             token,
             cancel,
             allow_plain_http,
         }
+    }
+
+    #[allow(dead_code)] // Wire-up in AccountService is pending coordinator assignment
+    pub fn with_cache(mut self, disk_cache: crate::data::avatar_cache::AvatarDiskCache) -> Self {
+        self.disk_cache = Some(disk_cache);
+        self
+    }
+
+    #[allow(dead_code)] // Wire-up in AccountService is pending coordinator assignment
+    pub fn with_source(mut self, source: Arc<dyn AvatarSource>) -> Self {
+        self.detailed = Some(source);
+        self
     }
 
     /// Fetches and decodes `key`'s URL. It returns the decoded image or `None` on any failure; a
@@ -246,18 +343,197 @@ impl AvatarFetcher {
         if !self.is_fetchable(url) {
             return None;
         }
-        let (status, bytes) = self
-            .bytes
-            .load(url, MAX_AVATAR_BYTES, self.token.clone())
+
+        // 1. If we have a disk cache:
+        //    a) Acquire write ticket BEFORE reading snapshot and starting download
+        //       to preserve stale-writer protections.
+        //    b) Read existing cached snapshot under the same operation.
+        let (cached_snapshot, write_ticket) = if let Some(cache) = &self.disk_cache {
+            let cache = cache.clone();
+            let key_clone = key.clone();
+            tokio::task::spawn_blocking(move || {
+                let ticket = cache.begin_write_sync(&key_clone).ok();
+                let snapshot = cache.read_sync(&key_clone);
+                (snapshot, ticket)
+            })
             .await
-            .ok()?;
-        if !(200..300).contains(&status) {
-            return None;
+            .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+
+        // 2. Perform network fetch, conditionally if validators exist and detailed source is available.
+        let etag = cached_snapshot
+            .as_ref()
+            .and_then(|s| s.metadata.etag.as_deref());
+        let last_modified = cached_snapshot
+            .as_ref()
+            .and_then(|s| s.metadata.last_modified.as_deref());
+
+        let has_metadata = self.detailed.is_some() || self.disk_cache.is_none();
+
+        let net_result: Result<(u16, AvatarResponseMetadata, Vec<u8>), ()> =
+            if let Some(detailed) = &self.detailed {
+                detailed
+                    .load_detailed(
+                        url,
+                        MAX_AVATAR_BYTES,
+                        etag,
+                        last_modified,
+                        self.token.clone(),
+                    )
+                    .await
+            } else {
+                self.bytes
+                    .load(url, MAX_AVATAR_BYTES, self.token.clone())
+                    .await
+                    .map(|(status, body)| (status, AvatarResponseMetadata::default(), body))
+            };
+
+        match net_result {
+            Ok((304, meta, _)) => {
+                // 304 Not Modified: only valid when a matching representation is still
+                // cached. The commit uses the pre-request ticket and snapshot, so a
+                // newer writer or an invalidation makes it stale instead of mixing
+                // generations.
+                let cached = cached_snapshot?;
+                let Some(cache) = &self.disk_cache else {
+                    return decode_image(cached.bytes);
+                };
+                let mut committed = false;
+                if has_metadata && let Some(ticket) = write_ticket {
+                    let cache = cache.clone();
+                    let original = cached.clone();
+                    let etag = meta.etag.clone();
+                    let lm = meta.last_modified.clone();
+                    let cc = meta.cache_control.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        cache.commit_revalidation_sync(ticket, original, etag, lm, cc)
+                    })
+                    .await;
+                    committed =
+                        matches!(outcome, Ok(Ok(crate::storage::cache::WriteOutcome::Stored)));
+                }
+                if committed {
+                    // The stored entry is exactly the pre-request snapshot this 304
+                    // validated; the ticket commit would have failed had the scope been
+                    // retired or the entry superseded in the meantime.
+                    decode_image(cached.bytes)
+                } else {
+                    // Either the commit was superseded/invalidated, or no metadata-capable
+                    // source produced a verifiable revalidation. Re-read the *current*
+                    // entry (rechecking authorization) and honour its own reuse policy.
+                    let cache = cache.clone();
+                    let key_clone = key.clone();
+                    let current = tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
+                        .await
+                        .ok()
+                        .flatten();
+                    current.and_then(|snapshot| {
+                        if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
+                            &snapshot,
+                        ) {
+                            decode_image(snapshot.bytes)
+                        } else {
+                            None
+                        }
+                    })
+                }
+            }
+            Ok((status, meta, bytes)) if (200..300).contains(&status) => {
+                // Storage policy is decided by the response headers alone, so a
+                // `no-store` response invalidates any previously usable
+                // representation even when its body turns out to be unusable.
+                let permits_storage = meta
+                    .cache_control
+                    .as_deref()
+                    .map(|cc| {
+                        !cc.split(',').any(|part| {
+                            part.split('=')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .eq_ignore_ascii_case("no-store")
+                        })
+                    })
+                    .unwrap_or(true);
+
+                // The payload is validated before anything is stored, so a
+                // corrupt body never replaces a usable cached avatar.
+                let decoded = if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
+                    None
+                } else {
+                    decode_image(bytes.clone())
+                };
+                let usable = decoded.is_some();
+
+                if let Some(cache) = &self.disk_cache {
+                    // Without response metadata (only the basic `AvatarBytes`
+                    // trait injected) disk semantics cannot be honoured.
+                    if has_metadata {
+                        let cache = cache.clone();
+                        let key_clone = key.clone();
+                        if permits_storage && usable {
+                            if let Some(ticket) = write_ticket {
+                                let etag = meta.etag.clone();
+                                let lm = meta.last_modified.clone();
+                                let cc = meta.cache_control.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    cache.commit_write_sync(ticket, &bytes, etag, lm, cc)
+                                })
+                                .await;
+                            }
+                        } else if !permits_storage {
+                            // no-store: commit through the same pre-request ticket so that
+                            // newer writers/invalidations win instead of being unconditionally deleted.
+                            if let Some(ticket) = write_ticket {
+                                let etag = meta.etag.clone();
+                                let lm = meta.last_modified.clone();
+                                let cc = meta.cache_control.clone();
+                                let body = bytes.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    cache.commit_write_sync(ticket, &body, etag, lm, cc)
+                                })
+                                .await;
+                            } else {
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    cache.invalidate_sync(&key_clone);
+                                })
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                decoded
+            }
+            _ => {
+                // Network failed or returned error status (e.g. 404, 500, offline).
+                // Fall back to the *current* cached entry, re-read on a blocking
+                // worker: that rechecks scope authorization and evaluates the reuse
+                // policy of whatever is stored now, so a superseded or invalidated
+                // snapshot is never resurrected.
+                if let Some(cache) = &self.disk_cache {
+                    let cache = cache.clone();
+                    let key_clone = key.clone();
+                    let current = tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
+                        .await
+                        .ok()
+                        .flatten();
+                    current.and_then(|snapshot| {
+                        if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
+                            &snapshot,
+                        ) {
+                            decode_image(snapshot.bytes)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
         }
-        if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
-            return None;
-        }
-        decode_image(bytes)
     }
 
     /// `https` always; `http` only when this fetcher was told the base is a local test server.
@@ -302,6 +578,22 @@ fn to_image_crate_format(format: ImageFormat) -> image::ImageFormat {
         ImageFormat::Gif => image::ImageFormat::Gif,
         // `detect_format` only ever returns the four above.
         _ => unreachable!("only avatar formats reach the decoder"),
+    }
+}
+
+/// Joins every `Cache-Control` field value into one directive list. A response
+/// with no such header returns `None` (not an empty string), so a 304 without
+/// the header does not erase the policy stored with the original representation.
+fn collect_cache_control(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let directives: Vec<&str> = headers
+        .get_all("cache-control")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    if directives.is_empty() {
+        None
+    } else {
+        Some(directives.join(", "))
     }
 }
 
@@ -394,6 +686,10 @@ impl AvatarFetcher {
         self.cancel.cancel();
     }
 }
+
+#[cfg(test)]
+#[path = "../data/avatar_cache/tests.rs"]
+mod avatar_cache_tests;
 
 #[cfg(test)]
 mod tests {
@@ -544,6 +840,46 @@ mod tests {
         }
     }
 
+    /// A response whose streamed body exceeds the caller's budget still reports
+    /// its status and headers, so a `no-store` answer can invalidate an older
+    /// entry even though the oversized body itself is dropped.
+    #[tokio::test]
+    async fn an_oversized_streamed_body_keeps_its_cache_control() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            socket.write_all(&[0u8; 64]).unwrap();
+            socket.flush().unwrap();
+        });
+
+        let source = ReqwestAvatars::new().unwrap();
+        let (status, metadata, body) = source
+            .load_detailed(
+                &format!("{base}/huge"),
+                16,
+                None,
+                None,
+                CancellationToken::default(),
+            )
+            .await
+            .expect("an oversized body is not a transport failure");
+        assert_eq!(status, 200);
+        assert_eq!(metadata.cache_control.as_deref(), Some("no-store"));
+        assert!(body.is_empty(), "the oversized body is not retained");
+        server.join().unwrap();
+    }
+
     #[test]
     fn the_key_separates_identity_and_url() {
         let a = AvatarKey::new("github.com", 1, "https://x/a.png");
@@ -686,5 +1022,24 @@ mod tests {
         assert_eq!(detect_format(b"GIF89a...."), Some(ImageFormat::Gif));
         assert_eq!(detect_format(b"<svg></svg>"), None);
         assert_eq!(detect_format(b""), None);
+    }
+
+    #[test]
+    fn cache_control_is_absent_only_when_no_field_is_present() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        // No field at all: absence must stay `None`, so a 304 without the header
+        // does not erase the policy stored with the original representation.
+        assert_eq!(collect_cache_control(&HeaderMap::new()), None);
+
+        // Repeated fields are merged into one directive list, so a later
+        // `no-store`/`no-cache` is not lost behind an earlier `max-age`.
+        let mut headers = HeaderMap::new();
+        headers.append("cache-control", HeaderValue::from_static("max-age=3600"));
+        headers.append("cache-control", HeaderValue::from_static("no-store"));
+        assert_eq!(
+            collect_cache_control(&headers).as_deref(),
+            Some("max-age=3600, no-store")
+        );
     }
 }
