@@ -94,6 +94,59 @@ impl AvatarBytes for MockAvatarSource {
     }
 }
 
+/// A source that simulates a newer writer replacing the cached entry while the
+/// request is in flight, then fails the network read. The offline fallback must
+/// use the current entry, not the permissive snapshot captured before the call.
+struct SupersedingSource {
+    cache: AvatarDiskCache,
+    key: AvatarKey,
+    replacement_body: Vec<u8>,
+    replacement_cache_control: Option<String>,
+    calls: AtomicUsize,
+}
+
+impl AvatarSource for SupersedingSource {
+    fn load_detailed<'a>(
+        &'a self,
+        _url: &'a str,
+        _max_bytes: usize,
+        _etag: Option<&'a str>,
+        _last_modified: Option<&'a str>,
+        _cancel: CancellationToken,
+    ) -> AvatarDetailedFuture<'a> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.cache
+                    .put_sync(
+                        &self.key,
+                        &self.replacement_body,
+                        None,
+                        None,
+                        self.replacement_cache_control.clone(),
+                    )
+                    .expect("the superseding write is accepted");
+            }
+            Err(())
+        })
+    }
+}
+
+impl AvatarBytes for SupersedingSource {
+    fn load<'a>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        cancel: CancellationToken,
+    ) -> crate::app::avatar::AvatarBytesFuture<'a> {
+        Box::pin(async move {
+            let (status, _meta, body) = self
+                .load_detailed(url, max_bytes, None, None, cancel)
+                .await?;
+            Ok((status, body))
+        })
+    }
+}
+
 fn valid_png() -> Vec<u8> {
     vec![
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
@@ -419,6 +472,82 @@ async fn a_304_without_cache_control_preserves_the_stored_policy() {
     assert!(
         offline.fetch(&key).await.is_none(),
         "a header-less 304 preserves the stored no-cache policy"
+    );
+}
+
+#[tokio::test]
+async fn offline_fallback_uses_the_current_snapshot_not_the_pre_request_one() {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig::at(dir.path().to_path_buf());
+    let store = CacheStore::open(config).unwrap();
+    let account = AccountKey::new(470, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk_cache = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let url = "https://avatars.test/superseded.png";
+    let key = AvatarKey::new("github.com", 471, url);
+
+    // Seed a permissive entry directly, as if it were read at request start.
+    disk_cache
+        .put_sync(&key, &valid_png(), None, None, None)
+        .unwrap();
+    assert!(disk_cache.read_sync(&key).is_some());
+
+    // While the request is in flight, a newer writer replaces the entry with a
+    // `no-cache` policy, then the network read fails.
+    let source = Arc::new(SupersedingSource {
+        cache: disk_cache.clone(),
+        key: key.clone(),
+        replacement_body: valid_png(),
+        replacement_cache_control: Some("no-cache".to_string()),
+        calls: AtomicUsize::new(0),
+    });
+    let fetcher = AvatarFetcher::new(source.clone(), false)
+        .with_source(source.clone())
+        .with_cache(disk_cache.clone());
+
+    assert!(
+        fetcher.fetch(&key).await.is_none(),
+        "the superseded permissive snapshot is not resurrected"
+    );
+    assert!(
+        disk_cache.read_sync(&key).is_some(),
+        "the newer writer's entry remains stored"
+    );
+}
+
+#[tokio::test]
+async fn oversized_no_store_body_invalidates_the_stored_avatar() {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig::at(dir.path().to_path_buf());
+    let store = CacheStore::open(config).unwrap();
+    let account = AccountKey::new(480, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk_cache = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let source = Arc::new(MockAvatarSource::new());
+    let url = "https://avatars.test/huge_no_store.png";
+    let key = AvatarKey::new("github.com", 481, url);
+
+    source.serve(url, 200, Some("\"h1\""), None, None, valid_png());
+    let fetcher = AvatarFetcher::new(source.clone(), false)
+        .with_source(source.clone())
+        .with_cache(disk_cache.clone());
+    assert!(fetcher.fetch(&key).await.is_some());
+    assert!(disk_cache.read_sync(&key).is_some());
+
+    source.serve(
+        url,
+        200,
+        None,
+        None,
+        Some("no-store"),
+        vec![0u8; MAX_AVATAR_BYTES + 10],
+    );
+    assert!(fetcher.fetch(&key).await.is_none());
+    assert!(
+        disk_cache.read_sync(&key).is_none(),
+        "an oversized no-store body still drops the previous representation"
     );
 }
 

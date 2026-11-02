@@ -269,7 +269,10 @@ impl AvatarSource for ReqwestAvatars {
                     break;
                 };
                 if body.len() + chunk.len() > max_bytes {
-                    return Err(());
+                    // The payload is beyond any avatar. Drop it, but keep the response
+                    // status and headers so the caller can still honour `Cache-Control`
+                    // (for example a `no-store` answer must invalidate an older entry).
+                    return Ok((status, metadata, Vec::new()));
                 }
                 body.extend_from_slice(&chunk);
             }
@@ -389,25 +392,13 @@ impl AvatarFetcher {
 
         match net_result {
             Ok((304, meta, _)) => {
-                // 304 Not Modified: must have matching representation in cache
-                if let Some(cached) = cached_snapshot {
-                    // Recheck scope access authorization on a blocking worker before returning cached bytes
-                    let authorized = if let Some(cache) = &self.disk_cache {
-                        let cache = cache.clone();
-                        let key_clone = key.clone();
-                        tokio::task::spawn_blocking(move || cache.read_sync(&key_clone).is_some())
-                            .await
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    };
-                    if !authorized {
-                        return None;
-                    }
-
-                    if let Some(cache) = &self.disk_cache
-                        && let Some(ticket) = write_ticket
-                    {
+                // 304 Not Modified: only valid when a matching representation is still
+                // cached. The commit uses the pre-request ticket and snapshot, so a
+                // newer writer or an invalidation makes it stale instead of mixing
+                // generations. The response then reflects the *current* entry.
+                let cached = cached_snapshot?;
+                if let Some(cache) = &self.disk_cache {
+                    if has_metadata && let Some(ticket) = write_ticket {
                         let cache = cache.clone();
                         let original = cached.clone();
                         let etag = meta.etag.clone();
@@ -418,10 +409,17 @@ impl AvatarFetcher {
                         })
                         .await;
                     }
-                    decode_image(cached.bytes)
+                    // Re-read on a blocking worker: this both rechecks scope
+                    // authorization and avoids returning a superseded snapshot.
+                    let cache = cache.clone();
+                    let key_clone = key.clone();
+                    let current = tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
+                        .await
+                        .ok()
+                        .flatten();
+                    current.and_then(|snapshot| decode_image(snapshot.bytes))
                 } else {
-                    // Received 304 without existing cache: cannot decode empty body, must treat as missing
-                    None
+                    decode_image(cached.bytes)
                 }
             }
             Ok((status, meta, bytes)) if (200..300).contains(&status) => {
@@ -493,30 +491,26 @@ impl AvatarFetcher {
             }
             _ => {
                 // Network failed or returned error status (e.g. 404, 500, offline).
-                // If we have an existing disk cache hit, we can fall back to the cached snapshot
-                // if permitted by cache_control policies (no-cache / must-revalidate prohibited offline).
-                if let Some(cached) = cached_snapshot {
-                    // Recheck scope access authorization on a blocking worker before offline fallback
-                    let authorized = if let Some(cache) = &self.disk_cache {
-                        let cache = cache.clone();
-                        let key_clone = key.clone();
-                        tokio::task::spawn_blocking(move || cache.read_sync(&key_clone).is_some())
-                            .await
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    };
-                    if !authorized {
-                        return None;
-                    }
-
-                    if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
-                        &cached,
-                    ) {
-                        decode_image(cached.bytes)
-                    } else {
-                        None
-                    }
+                // Fall back to the *current* cached entry, re-read on a blocking
+                // worker: that rechecks scope authorization and evaluates the reuse
+                // policy of whatever is stored now, so a superseded or invalidated
+                // snapshot is never resurrected.
+                if let Some(cache) = &self.disk_cache {
+                    let cache = cache.clone();
+                    let key_clone = key.clone();
+                    let current = tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
+                        .await
+                        .ok()
+                        .flatten();
+                    current.and_then(|snapshot| {
+                        if crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
+                            &snapshot,
+                        ) {
+                            decode_image(snapshot.bytes)
+                        } else {
+                            None
+                        }
+                    })
                 } else {
                     None
                 }
@@ -826,6 +820,46 @@ mod tests {
             let _ = release.send(());
             server.join().unwrap();
         }
+    }
+
+    /// A response whose streamed body exceeds the caller's budget still reports
+    /// its status and headers, so a `no-store` answer can invalidate an older
+    /// entry even though the oversized body itself is dropped.
+    #[tokio::test]
+    async fn an_oversized_streamed_body_keeps_its_cache_control() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            socket.write_all(&[0u8; 64]).unwrap();
+            socket.flush().unwrap();
+        });
+
+        let source = ReqwestAvatars::new().unwrap();
+        let (status, metadata, body) = source
+            .load_detailed(
+                &format!("{base}/huge"),
+                16,
+                None,
+                None,
+                CancellationToken::default(),
+            )
+            .await
+            .expect("an oversized body is not a transport failure");
+        assert_eq!(status, 200);
+        assert_eq!(metadata.cache_control.as_deref(), Some("no-store"));
+        assert!(body.is_empty(), "the oversized body is not retained");
+        server.join().unwrap();
     }
 
     #[test]
