@@ -988,10 +988,15 @@ impl CachedRepositorySession {
             let bytes = encode(&value)?;
             let complete = completeness(&value);
             let cache_metadata = metadata_for(&metadata, complete);
-            if cache_metadata.permits_storage() {
-                self.store(permit.ticket, &bytes, cache_metadata.clone(), cancel)
+            let ticket = permit.ticket.take();
+            if ticket.is_some() {
+                // put() is ticket-checked even for no-store: it invalidates the
+                // old representation only if this request is still the newest.
+                self.store(ticket, &bytes, cache_metadata.clone(), cancel)
                     .await?;
-            } else {
+            } else if !cache_metadata.permits_storage() {
+                // A quarantined request has no ordering ticket; it may only
+                // remove the stale old representation, never publish.
                 self.invalidate_key(&_key, cancel.clone()).await?;
             }
             return self.scoped(CachedRepositoryRead {
@@ -1009,15 +1014,16 @@ impl CachedRepositorySession {
             let merged = merge_not_modified_metadata(&prior.payload.metadata, &metadata);
             let mut refreshed = metadata_for(&merged, prior.payload.metadata.completeness.clone());
             refreshed.fetched_at_ms = prior.payload.metadata.fetched_at_ms;
-            if refreshed.permits_storage() {
+            let ticket = permit.ticket.take();
+            if ticket.is_some() {
                 self.store(
-                    permit.ticket,
+                    ticket,
                     &prior.payload.bytes,
                     refreshed.clone(),
                     cancel.clone(),
                 )
                 .await?;
-            } else {
+            } else if !refreshed.permits_storage() {
                 self.invalidate_key(&_key, cancel.clone()).await?;
             }
             return self.scoped(CachedRepositoryRead {
