@@ -93,3 +93,12 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。
 - `credential_rejected` 只接受已分类的明确拒绝，尚不替代 `read_authenticated` 的最终组装分类；网络/限流/模糊拒绝不生成该事件。
 - 无 GUI、真实 GitHub 或真实用户 PAT 验证；跨平台结果以 PR CI 为准。
+
+
+## 2026-11-02 协调者接手与组合验证
+
+负责人要求主 Agent 接手剩余交付。原 Pi 的全部历史 PID/创建身份与外部会话匹配均已确认停止，保留会话与旧锁证据，不启动第二个执行器。同步 main `97108a68f5eec8e36ed6be966f157ced22d99648`，保留 repository-cache、avatar-cache 和 global-work-items 的实现与注册；本轮没有新增产品行为。
+
+已独立核对 page-cache 消费同一 core 补丁 `5306d0c` 后的实际组合测试记录（run `8a84442a-1e51-4df6-9e9e-dcf830846b70`，19 项通过）：Complete/Partial 账户聚合、旧 lease、撤销前未完成的 Home 请求均无法复活撤销前内容；其他账户/仓库不受影响，新在线聚合仍可写入，PAT 替换后的隔离不被单仓库证明解除。该证据关闭 core 与页面适配器之间的联合契约依赖，不代表正式 Shell 已接入离线缓存。
+
+当前 main 组合的最终本地检查及最新 head 的云端 CI/review 另保存在本地运行记录与 PR，合并仍由协调者按最新基线、标签和审查门槛执行。应用 L008 的真实并发证据与 L009 的基线核验；本次没有新的可复用教训，不重复添加 LESSONS。
