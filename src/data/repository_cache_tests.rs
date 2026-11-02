@@ -1621,6 +1621,55 @@ async fn transient_fallback_decodes_the_latest_cached_observation_with_its_own_p
 }
 
 #[tokio::test]
+async fn quarantined_no_store_response_still_invalidates_the_old_representation() {
+    let accounts = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let svc = service(&accounts, fixture.clone()).await;
+    login(&svc, &fixture, 1).await;
+    let store = cache(&storage);
+    let session = cached(&svc, store.clone(), 1);
+    fixture.push(200, details());
+    session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    store
+        .access_event(
+            &store.saved_account(key(1)).unwrap(),
+            AccessEvent::PatReplaced,
+        )
+        .unwrap();
+    fixture.headers(200, details(), &[("cache-control", "no-store")]);
+    session
+        .repository(
+            &repository(),
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .repository(
+                &repository(),
+                &Default::default(),
+                RepositoryCacheMode::OfflineOnly,
+                Default::default()
+            )
+            .await
+            .unwrap_err(),
+        RepositoryCacheError::Miss(CacheMiss::NotCached),
+    );
+}
+
+#[tokio::test]
 async fn no_cache_fixed_blob_revalidates_online_but_remains_offline_readable() {
     let accounts = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
@@ -1644,7 +1693,10 @@ async fn no_cache_fixed_blob_revalidates_online_but_remains_offline_readable() {
     fixture.headers(
         200,
         blob(BLOB_A, "hello"),
-        &[("cache-control", "private, no-cache")],
+        &[
+            ("cache-control", "private, no-cache"),
+            ("etag", "\"blob-v1\""),
+        ],
     );
     session
         .blob(
@@ -1656,7 +1708,8 @@ async fn no_cache_fixed_blob_revalidates_online_but_remains_offline_readable() {
         .await
         .unwrap();
     let before = fixture.count();
-    fixture.push(200, blob(BLOB_A, "hello"));
+    // A 304 without Cache-Control must inherit the stored no-cache directive.
+    fixture.headers(304, json!({}), &[("etag", "\"blob-v1\"")]);
     session
         .blob(
             &identity,
@@ -1670,6 +1723,21 @@ async fn no_cache_fixed_blob_revalidates_online_but_remains_offline_readable() {
         fixture.count(),
         before + 1,
         "no-cache hit must revalidate online"
+    );
+    fixture.headers(304, json!({}), &[("etag", "\"blob-v1\"")]);
+    session
+        .blob(
+            &identity,
+            &Default::default(),
+            RepositoryCacheMode::OnlinePreferred,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.count(),
+        before + 2,
+        "304 must retain no-cache for the next read"
     );
     let offline = session
         .blob(

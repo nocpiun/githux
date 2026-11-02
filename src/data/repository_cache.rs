@@ -988,8 +988,12 @@ impl CachedRepositorySession {
             let bytes = encode(&value)?;
             let complete = completeness(&value);
             let cache_metadata = metadata_for(&metadata, complete);
-            self.store(permit.ticket, &bytes, cache_metadata.clone(), cancel)
-                .await?;
+            if cache_metadata.permits_storage() {
+                self.store(permit.ticket, &bytes, cache_metadata.clone(), cancel)
+                    .await?;
+            } else {
+                self.invalidate_key(&_key, cancel.clone()).await?;
+            }
             return self.scoped(CachedRepositoryRead {
                 value,
                 provenance: provenance(cache_metadata, RepositoryCacheOrigin::Network),
@@ -1002,16 +1006,20 @@ impl CachedRepositorySession {
             && validators_match(&prior.payload.metadata, &metadata)
         {
             self.confirm(&mut permit, &metadata).await?;
-            let mut refreshed =
-                metadata_for(&metadata, prior.payload.metadata.completeness.clone());
+            let merged = merge_not_modified_metadata(&prior.payload.metadata, &metadata);
+            let mut refreshed = metadata_for(&merged, prior.payload.metadata.completeness.clone());
             refreshed.fetched_at_ms = prior.payload.metadata.fetched_at_ms;
-            self.store(
-                permit.ticket,
-                &prior.payload.bytes,
-                refreshed.clone(),
-                cancel.clone(),
-            )
-            .await?;
+            if refreshed.permits_storage() {
+                self.store(
+                    permit.ticket,
+                    &prior.payload.bytes,
+                    refreshed.clone(),
+                    cancel.clone(),
+                )
+                .await?;
+            } else {
+                self.invalidate_key(&_key, cancel.clone()).await?;
+            }
             return self.scoped(CachedRepositoryRead {
                 value: prior.value.clone(),
                 provenance: provenance(refreshed, RepositoryCacheOrigin::Network),
@@ -1019,6 +1027,28 @@ impl CachedRepositorySession {
         }
 
         Err(RepositoryError::GitHub(GitHubError::UnexpectedStatus { status: 304 }).into())
+    }
+
+    async fn invalidate_key(
+        &self,
+        key: &CacheKey,
+        cancel: CancellationToken,
+    ) -> Result<(), RepositoryCacheError> {
+        self.check()?;
+        if cancel.is_cancelled() {
+            return Err(GitHubError::Cancelled.into());
+        }
+        let cache = self.cache.clone();
+        let scope = self.scope.clone();
+        let key = key.clone();
+        let worker = tokio::task::spawn_blocking(move || cache.invalidate(&scope, &key));
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(GitHubError::Cancelled.into()),
+            result = worker => result.map_err(|_| RepositoryCacheError::Storage)?,
+        };
+        self.check()?;
+        result.map_err(cache_error)
     }
 
     async fn store(
@@ -1133,6 +1163,24 @@ fn metadata_for(
         cache_control: response.cache_control.clone(),
     }
 }
+fn merge_not_modified_metadata(
+    prior: &CacheMetadata,
+    response: &RepositoryResponseMetadata,
+) -> RepositoryResponseMetadata {
+    RepositoryResponseMetadata {
+        etag: response.etag.clone().or_else(|| prior.etag.clone()),
+        last_modified: response
+            .last_modified
+            .clone()
+            .or_else(|| prior.last_modified.clone()),
+        cache_control: response
+            .cache_control
+            .clone()
+            .or_else(|| prior.cache_control.clone()),
+        network_observed: true,
+    }
+}
+
 fn provenance(metadata: CacheMetadata, origin: RepositoryCacheOrigin) -> RepositoryCacheProvenance {
     RepositoryCacheProvenance {
         origin,
