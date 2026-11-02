@@ -36,6 +36,7 @@ mod account_tests;
 mod accounts;
 pub mod avatar_cache;
 pub mod notifications;
+pub mod page_cache;
 #[cfg(test)]
 mod page_read_tests;
 mod page_reads;
