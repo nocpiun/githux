@@ -35,6 +35,7 @@ pub mod revision;
 pub mod starring;
 pub mod tree;
 pub mod user;
+pub mod work_items;
 
 #[allow(unused_imports)]
 pub use branches::fetch_branches;

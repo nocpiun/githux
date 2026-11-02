@@ -25,6 +25,7 @@ pub mod repository;
 pub mod repository_actions;
 pub mod repository_counts;
 pub mod repository_extras;
+pub mod work_item;
 
 // Re-exported surface for the pending UI integration; see docs/auth-and-network.md
 // for the minimal call example. Nothing in the current binary consumes it yet.
