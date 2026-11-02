@@ -66,6 +66,8 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 三条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
 
+**与最新 main 组合**：合并 `origin/main` 时 `src/data/mod.rs` 只有新增模块声明的文本冲突，保留双方声明即可。发现 Newer main 的 `global_work_items` 通过 `#[path = "../home/time.rs"]` 复用 Home 时间实现，而我已把实现移到 `src/ui/relative_time.rs`；为不破坏该消费者，把 `src/ui/home/time.rs` 恢复为仅转发的 shim，并在其独立装配 `work_items_modules.rs` 注册共享模块，仍只有一份解析器。第一次完整 `cargo test` 出现两个与本任务无关的 main 侧偶发失败（`repository_descriptions_deduplicates...`、`reader_images::fixed_revision_images...` 的 `InUse`），单独重跑均通过，随后完整重跑全部通过；记录为既有测试的顺序/资源偶发，不归因本任务，也不掩盖。
+
 未测边界：真实账户写操作、真实 tooltip 悬停/焦点到达、150% 缩放切换与触摸板仍未原生验证，交负责人验收。
 
 ## 验收与集成边界

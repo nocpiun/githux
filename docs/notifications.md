@@ -49,7 +49,7 @@
 
 ## 组件与挂载
 
-`src/ui/notifications/mod.rs` 的 `NotificationsView::new(controller, executor, on_repository, window, cx)` 在构造时开始 first load，通过共享后台 executor 和 oneshot 发布完成。render 不请求；实际列表用 GPUI ListState 虚拟化，公共 `scroll::Motion` / `Bars` / `Bar` 驱动 wheel 与 thumb。每个页面自己的列表焦点、选择、scroll/fade 状态不共享。相对时间复用 `src/ui/relative_time.rs`（由 Home 的 `time.rs` 抽取而来，仅移动/改名，Home 的引用与可见性同步调整，时间行为与回归测试原样保留）。
+`src/ui/notifications/mod.rs` 的 `NotificationsView::new(controller, executor, on_repository, window, cx)` 在构造时开始 first load，通过共享后台 executor 和 oneshot 发布完成。render 不请求；实际列表用 GPUI ListState 虚拟化，公共 `scroll::Motion` / `Bars` / `Bar` 驱动 wheel 与 thumb。每个页面自己的列表焦点、选择、scroll/fade 状态不共享。相对时间复用 `src/ui/relative_time.rs`（由 Home 的 `time.rs` 抽取而来，Home、Notifications 与其它已存在消费者共用同一实现；`src/ui/home/time.rs` 保留为仅转发的兼容 shim，避免其它 `#[path]` 消费者出现第二份解析器；Home 的行为与回归测试原样保留）。
 
 Arrow/Home/End/PageUp/PageDown 移动选择并 reveal；列表焦点下 Enter 明确打开当前 repository。仓库 link 可单独 Tab/Enter 激活，父列表不重复处理 link 键盘事件。通知标题无动作。刷新/加载更多有 in-flight 限制，加载以紧凑 spinner 表示；错误图标 tooltip 包含恢复建议，点击重试对应请求。窗口失活取消交互动画；页面隐藏（keyed state release）或宿主调用 `leave` 时取消在途读取，返回保留实体不会重新首载。宿主仍须在 callback 执行时核验自己的 tab/incarnation。
 
