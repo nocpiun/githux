@@ -123,9 +123,12 @@ impl AccountDatabase {
         };
         let mut connection = Connection::open_with_flags(&config.path, flags)?;
         connection.busy_timeout(config.busy_timeout.min(Duration::from_secs(5)))?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 1 {
+        let mut version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > 2 {
             return Err(StorageError::FutureSchema(version));
+        }
+        if !config.read_only {
+            connection.pragma_update(None, "synchronous", "FULL")?;
         }
         let integrity: String = connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if integrity != "ok" {
@@ -150,10 +153,20 @@ impl AccountDatabase {
                 CREATE TABLE cleanup(host TEXT NOT NULL, id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(host,id,revision));
                 PRAGMA user_version=1;")?;
             tx.commit()?;
+            version = 1;
+        }
+        if version == 1 {
+            if config.read_only {
+                return Err(StorageError::ReadOnly);
+            }
+            let tx = connection.transaction()?;
+            tx.execute_batch("CREATE TABLE cache_recovery(host TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('rejected','replaced','retire','retire_rejected')), PRIMARY KEY(host,id));
+                PRAGMA user_version=2;")?;
+            tx.commit()?;
         }
         if !config.read_only {
             connection.pragma_update(None, "synchronous", "FULL")?;
-            // Obtain a write transaction even for an existing v1 database so
+            // Obtain a write transaction even for an existing database so
             // startup reports read-only/locked storage before accepting writes.
             connection.execute_batch("BEGIN IMMEDIATE; COMMIT;")?;
         }
@@ -164,6 +177,7 @@ impl AccountDatabase {
         };
         db.load()?;
         db.pending()?;
+        db.cache_recovery()?;
         Ok(db)
     }
     pub fn load(&self) -> Result<Directory, StorageError> {
@@ -235,6 +249,15 @@ impl AccountDatabase {
         published: Option<&CredentialRef>,
         retired: Option<&CredentialRef>,
     ) -> Result<(), StorageError> {
+        self.commit_with_cache_recovery(directory, published, retired, true)
+    }
+    pub fn commit_with_cache_recovery(
+        &mut self,
+        directory: &Directory,
+        published: Option<&CredentialRef>,
+        retired: Option<&CredentialRef>,
+        cache_enabled: bool,
+    ) -> Result<(), StorageError> {
         self.writable()?;
         let tx = self
             .connection
@@ -284,9 +307,100 @@ impl AccountDatabase {
                 ],
             )?;
         }
+        // Replacement/removal supersedes a rejection only in the same durable
+        // transaction that publishes its credential reference or removes it.
+        if let Some(r) = retired
+            && (cache_enabled || published.is_none())
+        {
+            tx.execute(
+                "DELETE FROM cache_recovery WHERE host=?1 AND id=?2",
+                params![r.host().as_str(), r.account_id().to_string()],
+            )?;
+        }
+        if !cache_enabled && let Some(reference) = published {
+            // Legacy/network-only services still leave a durable barrier for a
+            // future cache-enabled open. The catalog and marker publish together.
+            tx.execute(
+                "INSERT INTO cache_recovery VALUES(?1,?2,?3)
+                 ON CONFLICT(host,id) DO UPDATE SET kind=CASE
+                 WHEN cache_recovery.kind IN ('retire','retire_rejected') THEN 'retire'
+                 ELSE excluded.kind END",
+                params![
+                    reference.host().as_str(),
+                    reference.account_id().to_string(),
+                    if retired.is_some() {
+                        "replaced"
+                    } else {
+                        "retire"
+                    }
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
+    /// Persist a credential-rejection barrier before changing the independent
+    /// cache ledger. It contains no token or business payload.
+    pub fn stage_cache_rejection(&self, account: &AccountKey) -> Result<(), StorageError> {
+        self.writable()?;
+        self.connection().execute(
+            "INSERT INTO cache_recovery VALUES(?1,?2,'rejected')
+             ON CONFLICT(host,id) DO UPDATE SET kind=CASE
+             WHEN cache_recovery.kind IN ('retire','retire_rejected') THEN 'retire_rejected'
+             ELSE 'rejected' END",
+            params![account.host.as_str(), account.id.to_string()],
+        )?;
+        Ok(())
+    }
+    pub fn cache_rejections(&self) -> Result<Vec<AccountKey>, StorageError> {
+        Ok(self
+            .cache_recovery()?
+            .into_iter()
+            .filter(|(_, kind)| matches!(kind.as_str(), "rejected" | "retire_rejected"))
+            .map(|(account, _)| account)
+            .collect())
+    }
+    pub fn cache_recovery(&self) -> Result<Vec<(AccountKey, String)>, StorageError> {
+        let mut statement = self
+            .connection()
+            .prepare("SELECT host,id,kind FROM cache_recovery")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (host, id, kind) = row?;
+            if !matches!(
+                kind.as_str(),
+                "rejected" | "replaced" | "retire" | "retire_rejected"
+            ) {
+                return Err(StorageError::Corrupt);
+            }
+            records.push((key(host, id)?, kind));
+        }
+        Ok(records)
+    }
+
+    pub fn cache_recovered(&self, account: &AccountKey, kind: &str) -> Result<(), StorageError> {
+        self.writable()?;
+        if kind == "retire_rejected" {
+            self.connection().execute(
+                "UPDATE cache_recovery SET kind='rejected' WHERE host=?1 AND id=?2 AND kind=?3",
+                params![account.host.as_str(), account.id.to_string(), kind],
+            )?;
+        } else {
+            self.connection().execute(
+                "DELETE FROM cache_recovery WHERE host=?1 AND id=?2 AND kind=?3",
+                params![account.host.as_str(), account.id.to_string(), kind],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn pending(&self) -> Result<Vec<CredentialRef>, StorageError> {
         let mut stmt = self
             .connection()

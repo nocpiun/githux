@@ -9,6 +9,8 @@ use crate::domain::AccountKey;
 pub struct CacheScope {
     pub(super) account: AccountKey,
     pub(super) partition: String,
+    /// Local uncertain-outcome barrier, deliberately not persisted as permission.
+    pub(super) generation: u64,
 }
 impl CacheScope {
     pub fn account(&self) -> &AccountKey {
