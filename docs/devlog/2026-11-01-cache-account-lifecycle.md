@@ -78,6 +78,12 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 
 目标基线更新至 `a4ea4bafd366a7b05e7fb892caaaa11f3e385edc`（Star/Unstar）；自动合并保留双方独立注册，未修改 Star/reader-image 实现。最终完整组合验证和云端检查绑定本轮最新 head。
 
+## 协调者追加：聚合撤权核心修复
+
+负责人已批准 page-cache P1 的保守方案 A（裁决见 PR #59 `discussion_r4436066238`）。独立核心 commit `5306d0c322151d7287264c6d55684379b24f0428` 扩展 `revoke_repository(scope, Some(R))`：同一持久事务中撤销 R 并清理 R 条目，同时 ensure 账户聚合（repository=None）门禁、推进其 revision、删除全部旧聚合条目。旧聚合 lease/在途写 ticket/旧重验 proof 均变 Stale，重启不复活；聚合 `allowed/epoch` 不变，原允许且未隔离时可新建在线快照，PAT 替换/凭据拒绝仍隔离，单个仓库 proof 不解锁 None；非撤权网络事件不触发。这是保守取舍，可损失部分与 R 无关的账户普通缓存，不新增网络请求/数据库/授权注册表。核心测试三项（`repository_revocation_invalidates_account_aggregate_without_blocking_fresh_reads`、`revocation_without_aggregate_entries_still_blocks_inflight_writes_and_proofs`、`aggregate_stays_isolated_after_pat_replacement_and_repository_proof_does_not_unlock_it`）随 `cargo test --locked storage::cache::tests` 20 项通过；完整 check/test/clippy/build/fmt 通过。
+
+交接：`.agents/task/aggregate-revocation-ready.json` 记录 commit、变更路径、验证和 page-cache 消费方式（沿用 `revoke_repository(scope, Some(repo_id))`，无新公共 API）。**协调依赖：PR #61 在协调者核对联合契约前不得以旧 ready 状态自动合并。**
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。
