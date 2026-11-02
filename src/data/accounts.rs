@@ -116,6 +116,7 @@ impl AccountService {
                     },
                 )?;
             }
+            let cache_enabled = cache.lock().expect("account cache lock").is_some();
             let mut db = database.lock().expect("database lock");
             let credential = if db.is_some() {
                 CredentialRef::versioned(
@@ -139,7 +140,12 @@ impl AccountService {
             }
             let summary = next.upsert_verified(identity, credential.clone());
             if let Some(db) = db.as_mut()
-                && let Err(error) = db.commit(&next.directory(), Some(&credential), old.as_ref())
+                && let Err(error) = db.commit_with_cache_recovery(
+                    &next.directory(),
+                    Some(&credential),
+                    old.as_ref(),
+                    cache_enabled,
+                )
             {
                 // Old credential/registry stay authoritative. New slot is
                 // still journalled even if rollback cleanup itself fails.
@@ -147,6 +153,7 @@ impl AccountService {
                 return Err(LoginError::Storage(error));
             }
             *registry.lock().expect("registry lock") = next;
+            super::account_cache::published(&cache, &summary.identity.key);
             // New accounts (including remove/re-add) receive a fresh partition.
             // Rejected/replaced accounts retain their isolated partition until
             // repository-specific permission proof arrives from the consumer.
@@ -229,7 +236,8 @@ impl AccountService {
             };
             if removed.is_some() {
                 let directory = registry.lock().expect("registry lock").directory();
-                result.and_then(|()| super::account_cache::recover(&cache, &directory))
+                let cache_result = super::account_cache::recover(&cache, &directory);
+                result.and(cache_result)
             } else {
                 result
             }
@@ -276,7 +284,8 @@ impl AccountService {
                 None => Ok(()),
             };
             let directory = registry.lock().expect("registry lock").directory();
-            let cache_result = super::account_cache::recover(&cache, &directory);
+            let cache_result =
+                super::account_cache::recover_with_catalog(&cache, &directory, &database);
             result.and(cache_result)
         })
         .await
@@ -353,12 +362,14 @@ impl AccountService {
         let gate = self.credential_commit.clone();
         let registry = self.registry.clone();
         let closed = self.closed.clone();
+        let cache = self.cache.clone();
+        let database = self.database.clone();
         tokio::task::spawn_blocking(move || {
             let _gate = gate.lock().expect("account commit lock");
             if closed.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(LoginError::Storage(StorageError::Closed));
             }
-            let mut reg = registry.lock().expect("registry lock");
+            let reg = registry.lock().expect("registry lock");
             if reg.active_context() != selection
                 || reg.credential_ref(account.clone()).as_ref() != Some(&credential)
                 || !reg
@@ -368,8 +379,17 @@ impl AccountService {
             {
                 return Err(LoginError::GitHub(GitHubError::StaleContext));
             }
-            // This operation changes runtime evidence only; display refresh is
-            // persisted on the next explicit login/replacement.
+            drop(reg);
+            // Only a classified Unauthorized is revocation evidence; outages,
+            // limits and ambiguous errors leave the last-known gate intact.
+            if matches!(result, Err(LoginError::GitHub(GitHubError::Unauthorized))) {
+                super::account_cache::reject(&cache, &database, &account).map_err(|_| {
+                    LoginError::CredentialSave(CredentialError::Platform {
+                        message: "private cache authorization update failed".into(),
+                    })
+                })?;
+            }
+            let mut reg = registry.lock().expect("registry lock");
             reg.revalidated(&account, state);
             result?;
             Ok(reg

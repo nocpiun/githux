@@ -44,11 +44,19 @@ pub(super) struct AccountCaches {
     /// A classified rejection whose durable outcome was uncertain. Replaying it
     /// is a prerequisite for recovery; replacing the credential supersedes it.
     rejected: HashSet<AccountKey>,
+    /// Catalog commits made while caching was disabled; acknowledge only after
+    /// their durable cache gate has been replayed, before issuing a binding.
+    catalog: HashMap<AccountKey, String>,
 }
 pub(super) type Shared = Arc<Mutex<Option<AccountCaches>>>;
 
 impl AccountCaches {
-    pub(super) fn new(store: CacheStore, directory: &crate::storage::accounts::Directory) -> Self {
+    pub(super) fn new(
+        store: CacheStore,
+        directory: &crate::storage::accounts::Directory,
+        records: Vec<(AccountKey, String)>,
+        database: &crate::storage::accounts::AccountDatabase,
+    ) -> Self {
         let mut this = Self {
             store,
             scopes: HashMap::new(),
@@ -56,9 +64,48 @@ impl AccountCaches {
             reconciled: false,
             blocked: HashSet::new(),
             rejected: HashSet::new(),
+            catalog: HashMap::new(),
         };
+        for (account, kind) in records {
+            if directory
+                .accounts
+                .iter()
+                .any(|saved| saved.identity.key == account)
+            {
+                if matches!(kind.as_str(), "rejected" | "retire_rejected") {
+                    this.rejected.insert(account.clone());
+                }
+                if kind != "rejected" {
+                    this.catalog.insert(account, kind);
+                }
+            }
+        }
+        this.replay_catalog(database);
         this.reconcile(directory);
         this
+    }
+
+    fn replay_catalog(&mut self, database: &crate::storage::accounts::AccountDatabase) {
+        for (account, kind) in self.catalog.clone() {
+            let applied = if matches!(kind.as_str(), "retire" | "retire_rejected") {
+                self.store.live_scopes().and_then(|scopes| {
+                    for scope in scopes
+                        .into_iter()
+                        .filter(|scope| scope.account() == &account)
+                    {
+                        self.store.retire(&scope)?;
+                    }
+                    Ok(())
+                })
+            } else {
+                self.store
+                    .saved_account(account.clone())
+                    .and_then(|scope| self.store.access_event(&scope, AccessEvent::PatReplaced))
+            };
+            if applied.is_ok() && database.cache_recovered(&account, &kind).is_ok() {
+                self.catalog.remove(&account);
+            }
+        }
     }
 
     /// Unknown live scopes are retired before any saved-account handle is
@@ -96,15 +143,25 @@ impl AccountCaches {
             }
         }
         for saved in &directory.accounts {
-            if orphans.contains(&saved.identity.key) {
-                continue;
-            }
-            if self.rejected.contains(&saved.identity.key)
-                && self
-                    .event(&saved.identity.key, AccessEvent::CredentialRejected)
-                    .is_err()
+            if orphans.contains(&saved.identity.key)
+                || self.catalog.contains_key(&saved.identity.key)
             {
                 continue;
+            }
+            if self.rejected.contains(&saved.identity.key) {
+                // The account journal remains authoritative even if the cache
+                // ledger was unavailable (or replaced by an empty cache).
+                let rejection = self
+                    .store
+                    .saved_account(saved.identity.key.clone())
+                    .and_then(|scope| {
+                        self.store
+                            .access_event(&scope, AccessEvent::CredentialRejected)
+                    });
+                if rejection.is_err() {
+                    self.recovery_pending = true;
+                    continue;
+                }
             }
             match self.store.saved_account(saved.identity.key.clone()) {
                 Ok(scope) => {
@@ -125,6 +182,7 @@ impl AccountCaches {
         if self.store.recover().is_err() {
             self.recovery_pending = true;
         }
+        self.recovery_pending |= !self.catalog.is_empty();
         self.reconciled = true;
     }
 
@@ -139,6 +197,11 @@ impl AccountCaches {
     /// way; a later reconciliation is allowed to issue it only if the persisted
     /// gate still accepts the saved account. The catalog mutation is not attempted.
     fn event(&mut self, account: &AccountKey, event: AccessEvent) -> Result<(), CacheError> {
+        if matches!(event, AccessEvent::PatReplaced) && self.catalog.contains_key(account) {
+            // A pending retirement cannot be superseded by a new credential:
+            // complete catalog replay first, including its durable acknowledgement.
+            return Err(CacheError::AccessDenied);
+        }
         let result = match self.scopes.get(account) {
             Some(scope) => self.store.access_event(scope, event),
             // A cache-enabled saved account may have had its handle withdrawn
@@ -164,8 +227,6 @@ impl AccountCaches {
             if matches!(event, AccessEvent::CredentialRejected) {
                 self.rejected.insert(account.clone());
             }
-        } else if matches!(event, AccessEvent::PatReplaced) {
-            self.rejected.remove(account);
         }
         result
     }
@@ -226,10 +287,16 @@ impl AccountService {
     ) -> Result<Self, StorageError> {
         let service = Self::open(config, store, client, executor).await?;
         let directory = service.registry.lock().expect("registry lock").directory();
-        let caches = tokio::task::spawn_blocking(move || AccountCaches::new(cache, &directory))
-            .await
-            .map_err(|_| StorageError::Closed)?;
-        *service.cache.lock().expect("account cache lock") = Some(caches);
+        let database = service.database.clone();
+        let caches = tokio::task::spawn_blocking(move || {
+            let database = database.lock().expect("database lock");
+            let database = database.as_ref().ok_or(StorageError::Closed)?;
+            let records = database.cache_recovery()?;
+            Ok::<_, StorageError>(AccountCaches::new(cache, &directory, records, database))
+        })
+        .await
+        .map_err(|_| StorageError::Closed)?;
+        *service.cache.lock().expect("account cache lock") = Some(caches?);
         Ok(service)
     }
 
@@ -314,6 +381,14 @@ impl RepoService {
             if binding.scope() != &proof_scope {
                 return Err(CacheError::Stale);
             }
+            if cache
+                .lock()
+                .expect("account cache lock")
+                .as_ref()
+                .is_some_and(|cache| cache.rejected.contains(&expected.auth().account))
+            {
+                return Err(CacheError::AccessDenied);
+            }
             binding.store().permission_confirmed(proof)
         })
         .await
@@ -370,6 +445,7 @@ impl RepoService {
         let registry = self.registry.clone();
         let cache = self.cache.clone();
         let closed = self.closed.clone();
+        let database = self.database.clone();
         let expected = context.clone();
         let account = context.auth().account.clone();
         #[cfg(test)]
@@ -391,15 +467,9 @@ impl RepoService {
             {
                 return Err(GitHubError::StaleContext);
             }
-            let mut cache = cache.lock().expect("account cache lock");
-            match cache.as_mut() {
-                Some(cache) => cache
-                    .event(&account, AccessEvent::CredentialRejected)
-                    .map_err(|_| GitHubError::CredentialStore {
-                        message: "private cache authorization update failed".into(),
-                    }),
-                None => Ok(()),
-            }
+            reject(&cache, &database, &account).map_err(|_| GitHubError::CredentialStore {
+                message: "private cache authorization update failed".into(),
+            })
         })
         .await
         .map_err(|_| GitHubError::StaleContext)?
@@ -436,7 +506,7 @@ pub(super) fn prepare_new(
     if !cache.reconciled {
         cache.reconcile(directory);
     }
-    if !cache.reconciled {
+    if !cache.reconciled || cache.catalog.contains_key(account) {
         cache.blocked.insert(account.clone());
         return Err(CacheError::AccessDenied);
     }
@@ -492,16 +562,62 @@ pub(super) fn recover(
     directory: &crate::storage::accounts::Directory,
 ) -> Result<(), AccountError> {
     let mut cache = cache.lock().expect("account cache lock");
-    match cache.as_mut() {
+    if let Some(cache) = cache.as_mut()
+        && !cache.recover(directory)
+    {
+        return Err(AccountError::CleanupPending);
+    }
+    Ok(())
+}
+
+/// Caller holds the account commit lock and has checked credential ownership.
+/// Journal first; still deny cache handles if the journal operation itself fails.
+pub(super) fn reject(
+    cache: &Shared,
+    database: &accounts::Database,
+    account: &AccountKey,
+) -> Result<(), AccountError> {
+    let journal = match database.lock().expect("database lock").as_ref() {
+        Some(database) => database
+            .stage_cache_rejection(account)
+            .map_err(AccountError::Storage),
+        None => Ok(()),
+    };
+    let mut cache = cache.lock().expect("account cache lock");
+    let gate = match cache.as_mut() {
         Some(cache) => {
-            if cache.recover(directory) {
-                Ok(())
-            } else {
-                Err(AccountError::CleanupPending)
-            }
+            cache.rejected.insert(account.clone());
+            cache
+                .event(account, AccessEvent::CredentialRejected)
+                .map_err(|_| AccountError::CleanupPending)
         }
         None => Ok(()),
+    };
+    journal.and(gate)
+}
+
+/// Only after the account transaction has published replacement credentials.
+pub(super) fn published(cache: &Shared, account: &AccountKey) {
+    if let Some(cache) = cache.lock().expect("account cache lock").as_mut() {
+        cache.rejected.remove(account);
+        cache.catalog.remove(account);
     }
+}
+
+pub(super) fn recover_with_catalog(
+    cache: &Shared,
+    directory: &crate::storage::accounts::Directory,
+    database: &accounts::Database,
+) -> Result<(), AccountError> {
+    {
+        let database = database.lock().expect("database lock");
+        if let Some(database) = database.as_ref()
+            && let Some(cache) = cache.lock().expect("account cache lock").as_mut()
+        {
+            cache.replay_catalog(database);
+        }
+    }
+    recover(cache, directory)
 }
 
 pub(super) fn mark_recovery(cache: &Shared) {

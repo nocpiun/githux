@@ -732,6 +732,143 @@ async fn failed_rejection_is_replayed_before_recovery_reissues_scope() {
 }
 
 #[tokio::test]
+async fn user_revalidation_rejects_only_unauthorized_and_identity_success_does_not_unlock() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = open_cached(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+        cache.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    service.login(Pat::from_str("fake")).await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    put(&binding, &private_key(1), b"private");
+    for status in [500, 403, 404, 429] {
+        mock.enqueue(Ok(crate::network::transport::HttpResponse {
+            status,
+            headers: vec![],
+            body: "{}".into(),
+        }))
+        .await;
+        assert!(service.revalidate(key(1)).await.is_err());
+        assert_eq!(value(&binding, &private_key(1)), b"private");
+    }
+    mock.enqueue(Ok(crate::network::transport::HttpResponse {
+        status: 401,
+        headers: vec![],
+        body: "{}".into(),
+    }))
+    .await;
+    assert_eq!(
+        service.revalidate(key(1)).await,
+        Err(LoginError::GitHub(GitHubError::Unauthorized))
+    );
+    denied(&binding, &private_key(1));
+    user(&mock, 1).await;
+    service.revalidate(key(1)).await.unwrap();
+    denied(&binding, &private_key(1));
+    service.close().await.unwrap();
+    let service = open_cached(accounts, credentials, mock, executor, cache).await;
+    denied(
+        &service.cache(&account_summary(&service, 1)).unwrap(),
+        &private_key(1),
+    );
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_rejection_journal_survives_restart_and_replays_before_cache_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = open_cached(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+        cache.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    service.login(Pat::from_str("fake")).await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    put(&binding, &private_key(1), b"private");
+    let context = service.repo_service().session().unwrap().context().clone();
+    let connection =
+        rusqlite::Connection::open(cache_config(&temp).root.join("cache.sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_reject BEFORE UPDATE ON scopes BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(
+        service
+            .repo_service()
+            .credential_rejected(&context)
+            .await
+            .is_err()
+    );
+    service.close().await.unwrap();
+    connection
+        .execute_batch("DROP TRIGGER fail_reject")
+        .unwrap();
+    drop(connection);
+    // Release every store clone: this exercises a fresh store instance, where
+    // the process-local suspension map no longer exists.
+    drop(binding);
+    drop(service);
+    drop(cache);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let service = open_cached(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+        cache.clone(),
+    )
+    .await;
+    denied(
+        &service.cache(&account_summary(&service, 1)).unwrap(),
+        &private_key(1),
+    );
+    let connection = rusqlite::Connection::open(&accounts.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM cache_recovery", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    user(&mock, 1).await;
+    service
+        .replace(key(1), Pat::from_str("new_fake"))
+        .await
+        .unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    denied(&binding, &private_key(1));
+    let session = service.repo_service().session().unwrap();
+    let proof = service
+        .repo_service()
+        .begin_revalidation(session.context(), Some(1))
+        .unwrap();
+    service
+        .repo_service()
+        .permission_confirmed(session.context(), proof)
+        .await
+        .unwrap();
+    assert_eq!(value(&binding, &private_key(1)), b"private");
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn blocked_orphan_is_retired_before_readd_gets_a_fresh_partition() {
     let temp = tempfile::tempdir().unwrap();
     let accounts = config(&temp);
@@ -883,6 +1020,182 @@ async fn failed_scope_enumeration_blocks_provisioning_until_reconciliation_succe
         Ok(CacheRead::Miss(_))
     ));
     denied(&test_binding(&cache, &orphan), &private_key(1));
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn network_only_catalog_changes_replay_before_later_cache_enabled_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let orphan = cache.saved_account(key(1)).unwrap();
+    put(&test_binding(&cache, &orphan), &private_key(1), b"orphan");
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let online = super::account_tests::open(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    online.login(Pat::from_str("first_fake")).await.unwrap();
+    // A second network-only save before any cache binding must preserve the
+    // stronger retirement barrier, rather than downgrade it to replacement.
+    user(&mock, 1).await;
+    online
+        .replace(key(1), Pat::from_str("first_updated_fake"))
+        .await
+        .unwrap();
+    online.close().await.unwrap();
+    let service = open_cached(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+        cache.clone(),
+    )
+    .await;
+    let first = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_ne!(first.scope().partition(), orphan.partition());
+    put(&first, &private_key(1), b"first");
+    service.close().await.unwrap();
+    let online = super::account_tests::open(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    online
+        .replace(key(1), Pat::from_str("second_fake"))
+        .await
+        .unwrap();
+    online.close().await.unwrap();
+    let service = open_cached(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+        cache.clone(),
+    )
+    .await;
+    let second = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_eq!(first.scope(), second.scope());
+    denied(&second, &private_key(1));
+    let repos = service.repo_service();
+    let session = repos.session().unwrap();
+    let proof = repos
+        .begin_revalidation(session.context(), Some(1))
+        .unwrap();
+    repos
+        .permission_confirmed(session.context(), proof)
+        .await
+        .unwrap();
+    service.close().await.unwrap();
+    let service = open_cached(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+        cache.clone(),
+    )
+    .await;
+    assert_eq!(
+        value(
+            &service.cache(&account_summary(&service, 1)).unwrap(),
+            &private_key(1)
+        ),
+        b"first"
+    );
+    service.close().await.unwrap();
+    let online = super::account_tests::open(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+    )
+    .await;
+    online.remove_saved(key(1)).await.unwrap();
+    user(&mock, 1).await;
+    online.login(Pat::from_str("third_fake")).await.unwrap();
+    online.close().await.unwrap();
+    let service = open_cached(accounts, credentials, mock, executor, cache).await;
+    let third = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_ne!(second.scope().partition(), third.scope().partition());
+    assert!(matches!(
+        third.store().read(third.scope(), &private_key(1)),
+        Ok(CacheRead::Miss(_))
+    ));
+    denied(&second, &private_key(1));
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn offline_constructor_rejection_preserves_pending_retirement_until_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let orphan = cache.saved_account(key(1)).unwrap();
+    put(&test_binding(&cache, &orphan), &private_key(1), b"orphan");
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let online = super::account_tests::open(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    online.login(Pat::from_str("fake")).await.unwrap();
+    mock.enqueue(Ok(crate::network::transport::HttpResponse {
+        status: 401,
+        headers: vec![],
+        body: "{}".into(),
+    }))
+    .await;
+    assert_eq!(
+        online.revalidate(key(1)).await,
+        Err(LoginError::GitHub(GitHubError::Unauthorized))
+    );
+    online.close().await.unwrap();
+    let service = open_cached(accounts.clone(), credentials, mock.clone(), executor, cache).await;
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_ne!(binding.scope().partition(), orphan.partition());
+    denied(&binding, &private_key(1));
+    let connection = rusqlite::Connection::open(&accounts.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT kind FROM cache_recovery", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "rejected"
+    );
+    drop(connection);
+    user(&mock, 1).await;
+    service
+        .replace(key(1), Pat::from_str("new_fake"))
+        .await
+        .unwrap();
+    let repos = service.repo_service();
+    let session = repos.session().unwrap();
+    let proof = repos
+        .begin_revalidation(session.context(), Some(1))
+        .unwrap();
+    repos
+        .permission_confirmed(session.context(), proof)
+        .await
+        .unwrap();
+    let binding = repos.cache(session.context()).unwrap();
+    assert!(matches!(
+        binding.store().read(binding.scope(), &private_key(1)),
+        Ok(CacheRead::Miss(_))
+    ));
     service.close().await.unwrap();
 }
 

@@ -86,6 +86,7 @@ pub struct RepoService {
     credential_commit: Arc<std::sync::Mutex<()>>,
     closed: Arc<std::sync::atomic::AtomicBool>,
     cache: account_cache::Shared,
+    database: accounts::Database,
     #[cfg(test)]
     rejection_probe: Arc<std::sync::Mutex<Option<account_cache::RejectionProbe>>>,
 }
@@ -160,6 +161,7 @@ impl AccountService {
             credential_commit: self.credential_commit.clone(),
             closed: self.closed.clone(),
             cache: self.cache.clone(),
+            database: self.database.clone(),
             #[cfg(test)]
             rejection_probe: Arc::new(std::sync::Mutex::new(None)),
         }

@@ -362,6 +362,62 @@ async fn interrupted_staged_save_is_cleaned_on_reopen_without_creating_account()
 }
 
 #[test]
+fn v1_migration_preserves_accounts_and_rejection_is_cleared_with_catalog_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = config(&temp);
+    let mut db = AccountDatabase::open(cfg.clone()).unwrap();
+    let reference = CredentialRef::versioned(HostId::github(), 1, uuid::Uuid::new_v4().to_string());
+    let mut registry = AccountRegistry::default();
+    registry.upsert_verified(
+        crate::domain::AccountIdentity {
+            key: key(1),
+            login: "saved".into(),
+            display_name: None,
+            avatar_url: None,
+            html_url: None,
+        },
+        reference.clone(),
+    );
+    db.commit(&registry.directory(), None, None).unwrap();
+    db.close();
+    // Construct the genuine previous schema while retaining a saved account.
+    let connection = rusqlite::Connection::open(&cfg.path).unwrap();
+    connection
+        .execute_batch("DROP TABLE cache_recovery; PRAGMA user_version=1;")
+        .unwrap();
+    drop(connection);
+    let mut db = AccountDatabase::open(cfg.clone()).unwrap();
+    assert_eq!(db.load().unwrap().accounts[0].credential, reference);
+    db.stage_cache_rejection(&key(1)).unwrap();
+    assert_eq!(db.cache_rejections().unwrap(), vec![key(1)]);
+    let replacement =
+        CredentialRef::versioned(HostId::github(), 1, uuid::Uuid::new_v4().to_string());
+    let mut next = db.load().unwrap();
+    next.accounts[0].credential = replacement.clone();
+    // Failure in the catalog transaction must retain the barrier and old slot.
+    let connection = rusqlite::Connection::open(&cfg.path).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_commit BEFORE UPDATE ON selection BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(
+        db.commit(&next, Some(&replacement), Some(&reference))
+            .is_err()
+    );
+    assert_eq!(db.cache_rejections().unwrap(), vec![key(1)]);
+    assert_eq!(db.load().unwrap().accounts[0].credential, reference);
+    connection
+        .execute_batch("DROP TRIGGER fail_commit")
+        .unwrap();
+    drop(connection);
+    db.commit(&next, Some(&replacement), Some(&reference))
+        .unwrap();
+    assert!(db.cache_rejections().unwrap().is_empty());
+    db.stage_cache_rejection(&key(1)).unwrap();
+    db.commit(&Default::default(), None, Some(&replacement))
+        .unwrap();
+    assert!(db.cache_rejections().unwrap().is_empty());
+    db.close();
+}
+
+#[test]
 fn schema_migration_future_corrupt_readonly_and_real_busy_errors_preserve_file() {
     let temp = tempfile::tempdir().unwrap();
     let cfg = config(&temp);
@@ -370,13 +426,13 @@ fn schema_migration_future_corrupt_readonly_and_real_busy_errors_preserve_file()
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1);
-    conn.pragma_update(None, "user_version", 2).unwrap();
+    assert_eq!(version, 2);
+    conn.pragma_update(None, "user_version", 3).unwrap();
     drop(conn);
     let before = std::fs::read(&cfg.path).unwrap();
     assert!(matches!(
         AccountDatabase::open(cfg.clone()),
-        Err(StorageError::FutureSchema(2))
+        Err(StorageError::FutureSchema(3))
     ));
     assert_eq!(std::fs::read(&cfg.path).unwrap(), before);
     std::fs::write(&cfg.path, b"invalid sqlite fixture").unwrap();

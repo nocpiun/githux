@@ -62,6 +62,16 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 
 对 `08a9a67c1ea4b1cf6a27a9e3f02eb52ef6572fea` 的 P1 指出进程内 blocked 在“先登录后退休”下跨重启丢失。改为 `prepare_new` 在账户目录/新凭据提交前完成对账与必要退休；故障时不保存新账户，而不是提交后仅撤回绑定。既有账户目录保持可用，故障解除后重试登录并分配新分区。lifecycle 15 项通过（`4b6d605e-e723-4aad-b3a7-3a4b18c97463`）；全量 test `5f14b1f7-975d-4055-a6f5-19d667a3836c`、clippy `4437846e-ea33-4c08-b113-9e7f74459e75`、build `00d6fa94-ead3-4569-9008-2228aa89ef9d`、fmt check `b1dc5987-6502-47a7-bc09-ff6987f0cd1b` 通过。无需新增账户 DB schema，也无需裁决。
 
+## Codex 第七轮：拒绝屏障跨重启
+
+对 `edcd75e442b7501f82866e71496eb0822812878d` 的 [P1](https://github.com/nocpiun/githux/pull/61#discussion_r4437048005) 成立：cache UPDATE 失败后的明确拒绝不能仅保存在内存。最终使用账户 DB v2 的 `cache_recovery(host,id,kind)`，先写拒绝屏障，再更新 cache；重放成功不删除拒绝屏障，只有发布替换凭据或移除账户的同一目录事务能取代它。既有 v1→v2 迁移保留账户和凭据引用；目录提交失败保留旧引用与拒绝屏障。`revalidate()` 的明确 401 同步进入该路径，成功的 `/user` 不解除仓库门禁。
+
+纯在线 `open()` 的保存/替换同样在目录事务中记录 `retire/replaced`，日后启用缓存须先重放；连续操作保留最强的退休要求，退休与拒绝组合先退休旧分区再拒绝新分区。恢复重放与 acknowledgement 完成前不发对应账户绑定，避免无缓存 fallback 后复活旧数据。
+
+验证新增真实迁移及事务回滚、释放全部旧 store clone 后重开 journal、无缓存构造器连续保存/替换/移除重加后再启用缓存，以及 401 与 403/404/429/500 的区别。最新账户回归通过（run `04903fb8-3e8c-4df5-8fd2-a4b9d02fb54a`）。最终完整检查全部通过：all-target check `33b26ca5-7d18-4452-86f0-96e059a7177b`、test `943feaa5-4b4b-420e-a8c6-bc2f011d4438`（应用测试 976 项及全部既有集成目标）、clippy `d294c375-cefd-4b56-95b3-8962b484a217`、build `469c673b-19d6-4f84-91e0-4fa5cc06c3a9`、fmt check `61e842e6-74a4-48f4-93ae-ab2418122c37`。本轮仍是已确认 C1–C5 的直接修复，无待裁决事项；云端状态以最新 head/PR 证据为准。
+
+本轮得到的补充教训候选：恢复标记必须与其取代的目录变更同事务提交；仅在进程内封禁或在 cache DB 重放成功后提前删除 journal，不能证明跨 DB 的崩溃恢复安全。候选留给协调者维护共享 LESSONS。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。
