@@ -19,6 +19,28 @@ fn home_parameters(
     serde_json::json!([format!("{updated:?}"), format!("{limits:?}")])
 }
 
+/// Fixed-size identity for the complete ordered batch and lookup budget.
+/// Order affects which coordinates receive lookups; even unresolved coordinates
+/// appear in the returned map. Keep both in the identity, and preserve exact
+/// spelling because replay matches the original request URL.
+fn description_batch_identity(repositories: &[(String, String)], max_lookups: usize) -> String {
+    digest128(&serde_json::json!([repositories, max_lookups]).to_string())
+}
+
+/// Deterministic pair of 64-bit FNV-1a hashes with distinct seeds. Used only to
+/// bound a cache identity, never for authorization or integrity verification.
+fn digest128(input: &str) -> String {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut low: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut high: u64 = 0x8422_2325_cbf2_9ce4;
+    for byte in input.as_bytes() {
+        let byte = u64::from(*byte);
+        low = (low ^ byte).wrapping_mul(PRIME);
+        high = (high ^ byte.wrapping_add(0x9e37_79b9_7f4a_7c15)).wrapping_mul(PRIME);
+    }
+    format!("{low:016x}{high:016x}")
+}
+
 impl CachedPageReadSession {
     /// Complete/Partial keys for the Home aggregate, so tests can hold a lease
     /// or inspect slots without duplicating the request identity.
@@ -237,7 +259,8 @@ impl CachedPageReadSession {
         Scoped<PageValue<std::collections::HashMap<String, Option<String>>>>,
         PageCacheError<HomeError>,
     > {
-        let parameters = serde_json::json!([repositories, max_lookups]);
+        let parameters =
+            serde_json::Value::String(description_batch_identity(&repositories, max_lookups));
         let request_cancel = cancel.clone();
         self.read(
             mode,

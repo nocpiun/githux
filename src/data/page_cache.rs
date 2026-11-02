@@ -21,6 +21,8 @@ mod authorization_tests;
 #[cfg(test)]
 mod capacity_tests;
 #[cfg(test)]
+mod description_tests;
+#[cfg(test)]
 mod graphql_feed_tests;
 #[cfg(test)]
 mod localhost_tests;

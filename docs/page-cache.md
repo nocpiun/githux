@@ -22,6 +22,8 @@
 
 任一依赖响应（包括失败状态和首次意外 304）的 `no-store` 都使完整与 Partial 两个旧 slot 失效；该次内容仍可交给在线调用者。写 ticket 在请求前领取，较旧刷新不能覆盖新快照或用 no-store 删除新一轮值。当前有效会话的任一 HTTP 401 会记录 `CredentialRejected` 并拒绝发布，包括被 Feed 当作作者未解析的依赖失败；旧会话的 401 先被 context 检查丢弃。常规网络/超时/服务失败/限流及模糊 403/404 不会清缓存或更改授权账本。latest release 404 保留 NotFound-or-inaccessible 含义，标 Partial，不当作“确定不存在”。
 
+描述批次对完整有序坐标向量与 `max_lookups` 生成固定长度的双 64 位 FNV-1a 摘要，避免 `CacheKey` 的 4 KiB request 预算把合法的大批次在线读取变成缓存错误。保留顺序、拼写、未解析尾部和预算身份；它们影响请求选择、重放 URL 或结果映射，不能仅按参与查找的前几个坐标共享快照。摘要只作缓存索引，不承担授权或内容完整性验证。
+
 持久 DTO 不保存请求 Authorization/cookie/PAT；响应仅保留解析/验证所需 headers，不存 Set-Cookie。失败响应不保存服务端正文；GraphQL errors 只保存 type/path，丢弃可回显输入的 message。未使用的 `download_url` 字段递归剔除。数据库、编解码和 README 内容准备在现有 Tokio blocking pool 执行；不创建 runtime，不在 UI render 中读取。
 
 离线读持有 CacheLease，并在 adapter 解析结束后再次 `snapshot()` 检查；完成网络、blocking I/O 和发布前继续检查原 session。blocking worker 复用现有账户提交锁，把最后的 session 检查与缓存副作用串行到 PAT/selection 提交；网络请求不持锁，旧 401 不得隔离替换后的新凭据。缓存清理/退休/撤权会使 lease 或 ticket 失效；页面仍须在真正应用结果前复核 context、TabId、路由与 section generation，已复制的字节无法由 storage 撤回。

@@ -48,7 +48,7 @@ fn readable(lease: &crate::storage::cache::CacheLease) -> bool {
 #[tokio::test]
 async fn revoking_a_repository_clears_complete_and_partial_account_aggregate_snapshots() {
     let fixture = Fixture::new().await;
-    let (_directory, store) = temp();
+    let (directory, store) = temp();
     let cached = fixture.cached(&store);
 
     fixture.enqueue(&home_with_private_repository()).await;
@@ -131,6 +131,27 @@ async fn revoking_a_repository_clears_complete_and_partial_account_aggregate_sna
             Ok(CacheRead::Miss(_)) | Err(_)
         ),
         "the Partial slot is not a bypass around revocation"
+    );
+    drop(complete_lease);
+    drop(cached);
+    drop(store);
+    let store = CacheStore::open(crate::storage::cache::CacheConfig::at(
+        directory.path().to_path_buf(),
+    ))
+    .unwrap();
+    let cached = fixture.cached(&store);
+    let offline = cached
+        .home(
+            PageReadMode::Offline,
+            None,
+            &HomeSearchLimits::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(offline.value, PageValue::Miss(CacheMiss::NotCached)),
+        "restart must not revive either aggregate slot"
     );
 }
 

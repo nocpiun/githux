@@ -53,6 +53,14 @@ P2 已独立本地修复：仅 TooLarge/Capacity 允许返回未缓存的成功 
 
 验证边界：以上是数据层核心 + 页面适配器组合，mock/localhost 与临时 CacheStore，无真实 PAT、外部写产物或原生 GUI；正式 Shell 离线接线仍未完成。已复制到 UI 的字节无法由 storage 撤回，页面发布前复核仍属后续组装。
 
+## PR 审查第二轮（新 head `add0705`）
+
+Codex 对本轮修复提出 1 项新的 P2：`repository_descriptions` 把整批坐标向量塞进缓存 request 身份，超过 `CacheKey` 的 4096 字节上限时，合法的大批次在线读取会在查缓存前就以 `CacheError::InvalidInput` 失败。这是真实缺陷，已修复：完整有序坐标向量与 `max_lookups` 序列化后生成固定长度的双 64 位 FNV-1a 摘要。复查时发现仅取参与查找的前几个坐标会漏掉结果映射的未解析尾部；最终保留完整输入、顺序、拼写和预算身份，防止尾部不同的批次串用快照。摘要不承担授权或内容完整性验证。
+
+新增 [description_tests](D:/githux-page-cache/src/data/page_cache/description_tests.rs)：200 条长坐标（旧身份 >4 KiB，测试内显式断言该前提）在 `max_lookups = 1` 下在线成功、只发 1 次查找请求、离线可读、不同批次仍为 Miss、Home 聚合键仍在上限内。初版聚焦 20 项 page_cache 测试通过（`3c541665`）；最终补上首项相同而尾部不同、顺序变化、零预算及完整结果映射的断言，并明确测试撤权后关闭/重开 CacheStore 不会复活 Complete/Partial。main 又推进到 `97108a6`（#57 全局列表），修复前先同步该基线，无冲突。修复过程中先遇到两处本地问题：`parameters` 需包成 `Value::String`（编译错误 `d7a14f11`）、请求计数断言漏算登录请求（`57300929` 失败后改为比较增量），均已修正。
+
+本轮最终组合检查（main `97108a6` + 独立核心依赖 + 页面修复）：聚焦 page_cache 20 项通过（`0b46ef86`），fmt check `3081582a`、全 targets check `094617ee`、全 targets clippy `3e2adf0d`（-D warnings）、build `95c83b6c`、完整 test `122f6f5a` 全部通过；完整测试 1041/95/279/250/686/770/44，0 failed。所有 Cargo 均使用共享 verify runner。本轮重新执行是因完整批次身份修正、重启撤权断言及 main #57 基线变化；通过后不重复验证未变化源码。
+
 ## 未接入与剩余边界
 
 正式 Shell 离线呈现和账户聚合重新授权证明没有在本任务接线。无真实 PAT、外部写操作或原生 GUI 验收。后续唯一组装点及调用方职责见主题文档；缓存数据层完成不代表离线产品已交付。
