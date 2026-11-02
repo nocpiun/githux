@@ -463,8 +463,16 @@ async fn repository_descriptions_deduplicates_requests_and_handles_failures() {
         "html_url": "https://github.com/acme/demo",
         "description": "Towards a More Autonomous Agent System"
     });
-    transport.push(200, demo_repo);
-    transport.push(404, json!({"message": "Not Found"}));
+    let (demo_entered, demo_release) = transport.block_url(
+        "https://api.github.com/repos/acme/demo".to_string(),
+        200,
+        demo_repo,
+    );
+    let (missing_entered, missing_release) = transport.block_url(
+        "https://api.github.com/repos/acme/missing".to_string(),
+        404,
+        json!({"message": "Not Found"}),
+    );
 
     // Pass duplicates for acme/demo plus acme/missing.
     let repos = vec![
@@ -472,11 +480,19 @@ async fn repository_descriptions_deduplicates_requests_and_handles_failures() {
         ("acme".to_string(), "demo".to_string()),
         ("acme".to_string(), "missing".to_string()),
     ];
-    let descriptions = session
-        .repository_descriptions(repos, 20, Default::default())
-        .await
-        .expect("repository descriptions")
-        .value;
+    let read = tokio::spawn(async move {
+        session
+            .repository_descriptions(repos, 20, Default::default())
+            .await
+    });
+    // Both requests must be in flight before either can finish. Release them in
+    // the opposite order from the input without assuming their arrival order.
+    ready(demo_entered).await;
+    ready(missing_entered).await;
+    assert!(!read.is_finished());
+    missing_release.send(()).unwrap();
+    demo_release.send(()).unwrap();
+    let descriptions = read.await.unwrap().expect("repository descriptions").value;
 
     assert_eq!(descriptions.len(), 2);
     assert_eq!(
@@ -493,8 +509,16 @@ async fn repository_descriptions_deduplicates_requests_and_handles_failures() {
         "detail requests must be deduplicated: {:?}",
         requests.iter().map(|r| &r.url).collect::<Vec<_>>()
     );
-    assert!(requests[1].url.ends_with("/repos/acme/demo"));
-    assert!(requests[2].url.ends_with("/repos/acme/missing"));
+    for url in [
+        "https://api.github.com/repos/acme/demo",
+        "https://api.github.com/repos/acme/missing",
+    ] {
+        assert_eq!(
+            requests.iter().filter(|request| request.url == url).count(),
+            1,
+            "each repository identity must be requested exactly once"
+        );
+    }
 }
 
 /// Merged PR detail response body is parsed and extracted into a compact plain-text
