@@ -72,6 +72,12 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 
 本轮得到的补充教训候选：恢复标记必须与其取代的目录变更同事务提交；仅在进程内封禁或在 cache DB 重放成功后提前删除 journal，不能证明跨 DB 的崩溃恢复安全。候选留给协调者维护共享 LESSONS。
 
+## 最新审查：移除后的内存恢复状态
+
+`9e772a4c08fd633d025431e0161d8c228d02e5aa` 的 [P2](https://github.com/nocpiun/githux/pull/61#discussion_r4438020716) 成立：移除提交已清除持久 journal 时，应同时清除该账户的内存 catalog/rejected 状态。修复放在成功目录提交之后，失败事务不改变它；新增 `removal_clears_failed_catalog_replay_and_allows_immediate_readd` 验证 replay UPDATE 失败、修复故障、移除后无需 recover/重启即可重加且新 partition 不读旧内容。无需裁决。
+
+目标基线更新至 `a4ea4bafd366a7b05e7fb892caaaa11f3e385edc`（Star/Unstar）；自动合并保留双方独立注册，未修改 Star/reader-image 实现。最终完整组合验证和云端检查绑定本轮最新 head。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。

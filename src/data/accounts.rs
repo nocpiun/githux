@@ -227,6 +227,11 @@ impl AccountService {
                 return Err(AccountError::Storage(error));
             }
             *registry.lock().expect("registry lock") = next;
+            if let Some(account) = removed.as_ref() {
+                // The removal transaction superseded the durable recovery row;
+                // discard its in-memory counterpart only after that commit.
+                super::account_cache::published(&cache, account);
+            }
             let result = if let Some(db) = db.as_ref() {
                 cleanup(db, store.as_ref())
             } else if let Some(r) = retired {

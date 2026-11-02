@@ -1199,6 +1199,56 @@ async fn offline_constructor_rejection_preserves_pending_retirement_until_replac
     service.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn removal_clears_failed_catalog_replay_and_allows_immediate_readd() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let online = super::account_tests::open(
+        accounts.clone(),
+        credentials.clone(),
+        mock.clone(),
+        executor.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    online.login(Pat::from_str("first_fake")).await.unwrap();
+    online.close().await.unwrap();
+    let scope = cache.saved_account(key(1)).unwrap();
+    put(&test_binding(&cache, &scope), &private_key(1), b"old");
+    let connection =
+        rusqlite::Connection::open(cache_config(&temp).root.join("cache.sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_catalog BEFORE UPDATE ON scopes BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    let service = open_cached(
+        accounts.clone(),
+        credentials,
+        mock.clone(),
+        executor,
+        cache.clone(),
+    )
+    .await;
+    assert!(service.cache(&account_summary(&service, 1)).is_none());
+    assert!(service.recovery_pending().await.unwrap());
+    connection
+        .execute_batch("DROP TRIGGER fail_catalog")
+        .unwrap();
+    drop(connection);
+    service.remove_saved(key(1)).await.unwrap();
+    assert!(!service.recovery_pending().await.unwrap());
+    user(&mock, 1).await;
+    service.login(Pat::from_str("second_fake")).await.unwrap();
+    let readded = service.cache(&account_summary(&service, 1)).unwrap();
+    assert_ne!(readded.scope().partition(), scope.partition());
+    assert!(matches!(
+        cache.read(readded.scope(), &private_key(1)),
+        Ok(CacheRead::Miss(_))
+    ));
+    service.close().await.unwrap();
+}
+
 #[test]
 fn scope_enumeration_is_read_only_and_validates_persisted_account_ids() {
     let temp = tempfile::tempdir().unwrap();
