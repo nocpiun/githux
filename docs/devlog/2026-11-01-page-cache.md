@@ -61,6 +61,16 @@ Codex 对本轮修复提出 1 项新的 P2：`repository_descriptions` 把整批
 
 本轮最终组合检查（main `97108a6` + 独立核心依赖 + 页面修复）：聚焦 page_cache 20 项通过（`0b46ef86`），fmt check `3081582a`、全 targets check `094617ee`、全 targets clippy `3e2adf0d`（-D warnings）、build `95c83b6c`、完整 test `122f6f5a` 全部通过；完整测试 1041/95/279/250/686/770/44，0 failed。所有 Cargo 均使用共享 verify runner。本轮重新执行是因完整批次身份修正、重启撤权断言及 main #57 基线变化；通过后不重复验证未变化源码。
 
+## 账户 lifecycle 合入后的最终组合
+
+在 `3cdb95f` 推送后，main 合入 #61 到 `9e48f44`。按已批准依赖策略同步该已合入基线，自动合并无冲突；核心原修复与 main 相同，`git diff origin/main -- src/storage/cache` 为空，PR 最终差异不再携带核心文件，也未引入 lifecycle 未提交分支。因此重新运行组合验证，覆盖账户生命周期字段/构造与页面会话、撤权和描述批次路径；此前检查结果不代替这个新基线的证据。
+
+旧 head `3cdb95f` 已收到 clean Code Review（[收据](https://github.com/nocpiun/githux/pull/59#issuecomment-6570372827)），但其 CI `41397803713` 在既有 reader-images `missing_images_fail_without_blocking_other_images_or_context` 用例收到 `Network` 而非 `NotFound`，1055 通过/1 失败，四平台构建全过。直接读取原始 CI 日志保留此失败；未修改其他任务所有的 reader-images 源文件，也不将旧 head 审查或 CI 作为本次新组合的放行证据。
+
+#61 组合最终记录：聚焦 20 项（`aaa76d66`），fmt check `e796a209`、全 targets check `6c47e616`、clippy `a28eb2f1`（-D warnings）、build `b45829cd`、完整 test `90a9abc8` 全部通过，完整测试 1063/95/279/250/708/792/44，0 failed。此轮包含旧 CI 失败的既有 reader-images 用例，未改变其实现或断言。
+
+随后 main 合入 `44678e6`（#56 Settings 独立预览）。已同步且无冲突；核对 `src/data/domain/github/network/storage/app`、`src/main.rs` 和正式 `src/ui/mod.rs` 相对 #61 组合均未变化，Settings 模块仅由 `examples/settings.rs` 通过 path 引入。因此保留刚通过的正式应用检查，补验 Settings example 的 check/test（`faf37a75` / `fa780fbf`，1075 项通过，0 failed），最终 CI 负责新 head 与最新 main 的完整组合；不因独立预览新增而机械重跑相同应用测试。
+
 ## 未接入与剩余边界
 
 正式 Shell 离线呈现和账户聚合重新授权证明没有在本任务接线。无真实 PAT、外部写操作或原生 GUI 验收。后续唯一组装点及调用方职责见主题文档；缓存数据层完成不代表离线产品已交付。
