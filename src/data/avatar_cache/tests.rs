@@ -147,6 +147,56 @@ impl AvatarBytes for SupersedingSource {
     }
 }
 
+/// A source that supersedes the cached entry with a `no-cache` representation
+/// and then answers 304, reproducing the stale-revalidation path.
+struct Superseding304Source {
+    cache: AvatarDiskCache,
+    key: AvatarKey,
+    calls: AtomicUsize,
+}
+
+impl AvatarSource for Superseding304Source {
+    fn load_detailed<'a>(
+        &'a self,
+        _url: &'a str,
+        _max_bytes: usize,
+        _etag: Option<&'a str>,
+        _last_modified: Option<&'a str>,
+        _cancel: CancellationToken,
+    ) -> AvatarDetailedFuture<'a> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.cache
+                    .put_sync(
+                        &self.key,
+                        &valid_png(),
+                        None,
+                        None,
+                        Some("no-cache".to_string()),
+                    )
+                    .expect("the superseding write is accepted");
+            }
+            Ok((304, AvatarResponseMetadata::default(), Vec::new()))
+        })
+    }
+}
+
+impl AvatarBytes for Superseding304Source {
+    fn load<'a>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        cancel: CancellationToken,
+    ) -> crate::app::avatar::AvatarBytesFuture<'a> {
+        Box::pin(async move {
+            let (status, _meta, body) = self
+                .load_detailed(url, max_bytes, None, None, cancel)
+                .await?;
+            Ok((status, body))
+        })
+    }
+}
+
 fn valid_png() -> Vec<u8> {
     vec![
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
@@ -548,6 +598,38 @@ async fn oversized_no_store_body_invalidates_the_stored_avatar() {
     assert!(
         disk_cache.read_sync(&key).is_none(),
         "an oversized no-store body still drops the previous representation"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_304_does_not_return_a_superseded_no_cache_entry() {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig::at(dir.path().to_path_buf());
+    let store = CacheStore::open(config).unwrap();
+    let account = AccountKey::new(490, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk_cache = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let url = "https://avatars.test/stale_304.png";
+    let key = AvatarKey::new("github.com", 491, url);
+
+    // Seed a validated representation with an ETag so a conditional request is made.
+    disk_cache
+        .put_sync(&key, &valid_png(), Some("\"v1\"".to_string()), None, None)
+        .unwrap();
+
+    let source = Arc::new(Superseding304Source {
+        cache: disk_cache.clone(),
+        key: key.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let fetcher = AvatarFetcher::new(source.clone(), false)
+        .with_source(source.clone())
+        .with_cache(disk_cache.clone());
+
+    assert!(
+        fetcher.fetch(&key).await.is_none(),
+        "a superseded 304 must not return the unvalidated no-cache replacement"
     );
 }
 

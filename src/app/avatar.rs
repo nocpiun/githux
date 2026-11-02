@@ -395,29 +395,46 @@ impl AvatarFetcher {
                 // 304 Not Modified: only valid when a matching representation is still
                 // cached. The commit uses the pre-request ticket and snapshot, so a
                 // newer writer or an invalidation makes it stale instead of mixing
-                // generations. The response then reflects the *current* entry.
+                // generations.
                 let cached = cached_snapshot?;
                 if let Some(cache) = &self.disk_cache {
+                    // Whether this 304 actually revalidated the representation that is
+                    // still current. When a newer writer superseded it, the ticket commit
+                    // is rejected as stale and the unvalidated current entry must only be
+                    // returned if its own reuse policy permits it.
+                    let mut revalidated = false;
                     if has_metadata && let Some(ticket) = write_ticket {
                         let cache = cache.clone();
                         let original = cached.clone();
                         let etag = meta.etag.clone();
                         let lm = meta.last_modified.clone();
                         let cc = meta.cache_control.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
+                        let outcome = tokio::task::spawn_blocking(move || {
                             cache.commit_revalidation_sync(ticket, original, etag, lm, cc)
                         })
                         .await;
+                        revalidated =
+                            matches!(outcome, Ok(Ok(crate::storage::cache::WriteOutcome::Stored)));
                     }
                     // Re-read on a blocking worker: this both rechecks scope
-                    // authorization and avoids returning a superseded snapshot.
+                    // authorization and reflects the *current* entry.
                     let cache = cache.clone();
                     let key_clone = key.clone();
                     let current = tokio::task::spawn_blocking(move || cache.read_sync(&key_clone))
                         .await
                         .ok()
                         .flatten();
-                    current.and_then(|snapshot| decode_image(snapshot.bytes))
+                    current.and_then(|snapshot| {
+                        if revalidated
+                            || crate::data::avatar_cache::AvatarDiskCache::is_snapshot_reusable_offline(
+                                &snapshot,
+                            )
+                        {
+                            decode_image(snapshot.bytes)
+                        } else {
+                            None
+                        }
+                    })
                 } else {
                     decode_image(cached.bytes)
                 }

@@ -88,6 +88,14 @@
 1. **超大响应保留策略头**：生产 `ReqwestAvatars::load_detailed` 在 body 超限时不再 `Err(())` 丢弃状态/头，而是返回状态与元数据、丢弃 body，使 `no-store` 仍能通过同一票据失效旧缓存。新增 `an_oversized_streamed_body_keeps_its_cache_control`（真实 socket）与 `oversized_no_store_body_invalidates_the_stored_avatar`。
 2. **离线回退改用当前快照**：304 与网络失败分支都不再直接渲染请求前捕获的快照，而是在 blocking worker 上重读当前条目（同时复核授权），并按当前条目的 `Cache-Control` 策略决定是否回退。新增 `offline_fallback_uses_the_current_snapshot_not_the_pre_request_one` 覆盖“请求在途时被更新写入者替换为 no-cache”的场景。
 
+### Round 9
+
+1. **304 变陈旧时仍须检查复用策略**：304 分支现在追踪 `commit_revalidation_sync` 是否返回 `Stored`；若被更新写入者判为 `Stale`（例如被替换为 `no-cache` 的 v2），则对重读到的当前条目按 `is_snapshot_reusable_offline` 判定，不允许时回退 initials。新增 `a_stale_304_does_not_return_a_superseded_no_cache_entry`。
+
+### 基线同步
+
+main 推进至 `c44f34d`（合并 #58/#62/#63，与本任务并行）。本分支已 `rebase` 到该基线上，冲突零，重跑 `cargo check/clippy/fmt/test` 全绿（1007 passed 主二进制）。
+
 所有 Cargo 检查通过 `node scripts/verify.mjs -- cargo ...` 执行：
 - `cargo fmt --all -- --check`：通过。
 - `cargo check --locked --all-targets`：通过。
