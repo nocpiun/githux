@@ -408,6 +408,26 @@ impl CacheStore {
             "DELETE FROM entries WHERE partition=?1 AND repository=?2",
             params![scope.partition, repository],
         )?;
+        // Revoking one concrete repository also invalidates this account's
+        // aggregate (repository=None) snapshots in the same durable transaction.
+        // Existing leases, in-flight write tickets and earlier revalidation
+        // proofs are all bound to the aggregate gate revision and therefore stop
+        // reading/repopulating/reopening old bytes. The aggregate's allowed and
+        // epoch columns are deliberately untouched: a fresh online read may
+        // still publish under the pre-existing authorization (or stay
+        // quarantined if a PAT replacement/rejection is still in effect).
+        if repository != "account" {
+            let account = repository_key(None);
+            ensure_gate(&tx, scope, &account, &epoch)?;
+            tx.execute(
+                "UPDATE gates SET revision=?1 WHERE partition=?2 AND repository=?3",
+                params![nonce(), scope.partition, account],
+            )?;
+            tx.execute(
+                "DELETE FROM entries WHERE partition=?1 AND repository=?2",
+                params![scope.partition, account],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
