@@ -5,13 +5,13 @@
 use crate::auth::token::Pat;
 use crate::domain::repository::{
     Completeness, ObjectSha, ReadmeDescriptor, ReadmeDiscovery, RepoSnapshot, RepositoryError,
-    RepositoryPath, SnapshotDirectory,
+    RepositoryPath, RepositoryResponseMetadata, SnapshotDirectory,
 };
 use crate::github::client::GitHubClient;
 use crate::github::repository::{
-    RepositoryLimits, check_single, decode, endpoint, get, invalid_response,
+    RepositoryLimits, check_single, decode, endpoint, get, invalid_response, response_metadata,
 };
-use crate::github::tree::fetch_directory;
+use crate::github::tree::fetch_directory_with_metadata;
 use crate::network::cancel::CancellationToken;
 use serde::Deserialize;
 
@@ -31,6 +31,18 @@ pub async fn discover_readme(
     limits: &RepositoryLimits,
     cancel: CancellationToken,
 ) -> Result<ReadmeDiscovery, RepositoryError> {
+    discover_readme_with_metadata(client, token, snapshot, limits, cancel)
+        .await
+        .map(|(readme, _)| readme)
+}
+
+pub async fn discover_readme_with_metadata(
+    client: &GitHubClient,
+    token: &Pat,
+    snapshot: &RepoSnapshot,
+    limits: &RepositoryLimits,
+    cancel: CancellationToken,
+) -> Result<(ReadmeDiscovery, RepositoryResponseMetadata), RepositoryError> {
     let mut url = endpoint(client, snapshot.repository.locator(), &["readme"])?;
     url.query_pairs_mut()
         .append_pair("ref", snapshot.commit.as_str());
@@ -39,7 +51,7 @@ pub async fn discover_readme(
         // Access may have changed since resolution. A complete, readable empty
         // root is positive absence evidence; a bare 404 never is. This bounded
         // extra request also propagates cancellation/authorization/409 errors.
-        let root = fetch_directory(
+        let (root, root_metadata) = fetch_directory_with_metadata(
             client,
             token,
             &SnapshotDirectory::root(snapshot),
@@ -48,26 +60,36 @@ pub async fn discover_readme(
         )
         .await?;
         if root.completeness == Completeness::Complete && root.entries.is_empty() {
-            return Ok(ReadmeDiscovery::AbsentInEmptyTree {
+            return Ok((
+                ReadmeDiscovery::AbsentInEmptyTree {
+                    repository: snapshot.repository.clone(),
+                    commit: snapshot.commit.clone(),
+                },
+                root_metadata,
+            ));
+        }
+        return Ok((
+            ReadmeDiscovery::NotFoundOrInaccessible {
                 repository: snapshot.repository.clone(),
                 commit: snapshot.commit.clone(),
-            });
-        }
-        return Ok(ReadmeDiscovery::NotFoundOrInaccessible {
-            repository: snapshot.repository.clone(),
-            commit: snapshot.commit.clone(),
-        });
+            },
+            root_metadata,
+        ));
     }
     check_single(&response)?;
+    let metadata = response_metadata(&response);
     let raw: ReadmeResponse = decode(&response, limits)?;
     if raw.kind != "file" {
         return Err(invalid_response("README is not a file descriptor"));
     }
-    Ok(ReadmeDiscovery::Found(ReadmeDescriptor {
-        repository: snapshot.repository.clone(),
-        commit: snapshot.commit.clone(),
-        path: RepositoryPath::new(raw.path)?,
-        blob: ObjectSha::new(raw.sha)?,
-        size: raw.size,
-    }))
+    Ok((
+        ReadmeDiscovery::Found(ReadmeDescriptor {
+            repository: snapshot.repository.clone(),
+            commit: snapshot.commit.clone(),
+            path: RepositoryPath::new(raw.path)?,
+            blob: ObjectSha::new(raw.sha)?,
+            size: raw.size,
+        }),
+        metadata,
+    ))
 }
