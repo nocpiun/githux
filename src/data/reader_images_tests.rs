@@ -5,7 +5,7 @@
 //! service uses a temporary SQLite directory with a synthetic PAT. No real
 //! credential or network is touched.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use crate::domain::repository::RepositoryLocator;
 use crate::github::client::GitHubClient;
 use crate::network::reader_images::ExternalImageMetadata;
 use crate::network::transport::{
-    HttpRequest, HttpResponse, Transport, TransportError, json_response,
+    HttpMethod, HttpRequest, HttpResponse, Transport, TransportError, json_response,
 };
 use serde_json::json;
 
@@ -90,13 +90,63 @@ struct Step {
     entered: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+struct RequestGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+struct Route {
+    response: HttpResponse,
+    gates: VecDeque<RequestGate>,
+}
+
 #[derive(Default)]
 struct Controlled {
     steps: Mutex<VecDeque<Step>>,
     requests: Mutex<Vec<HttpRequest>>,
+    // Opt in only for unordered reads; existing scripted gate/cancel tests
+    // retain their FIFO contract. Responses repeat; only gates are consumed.
+    routes: Mutex<Option<HashMap<String, Route>>>,
 }
 
 impl Controlled {
+    fn serve(&self, path: &str, body: serde_json::Value) {
+        let url = reqwest::Url::parse(&format!("https://api.github.com{path}"))
+            .expect("fixture URL")
+            .to_string();
+        self.routes.lock().unwrap().get_or_insert_default().insert(
+            url,
+            Route {
+                response: json_response(200, &body.to_string()),
+                gates: VecDeque::new(),
+            },
+        );
+    }
+
+    fn gate(
+        &self,
+        path: &str,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        self.routes
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("URL fixture enabled")
+            .get_mut(&format!("https://api.github.com{path}"))
+            .expect("model the route before gating it")
+            .gates
+            .push_back(RequestGate {
+                entered,
+                release: wait,
+            });
+        (ready, release)
+    }
+
     fn push(&self, status: u16, body: serde_json::Value) {
         self.steps.lock().unwrap().push_back(Step {
             response: json_response(status, &body.to_string()),
@@ -136,13 +186,33 @@ impl Transport for Controlled {
         _cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
-            self.requests.lock().unwrap().push(request);
-            let step = self
-                .steps
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("scripted response");
+            self.requests.lock().unwrap().push(request.clone());
+            let routed = {
+                let mut routes = self.routes.lock().unwrap();
+                routes.as_mut().map(|routes| {
+                    assert_eq!(request.method, HttpMethod::Get, "fixture only models GET");
+                    let url = reqwest::Url::parse(&request.url).expect("request URL");
+                    let route = routes.get_mut(url.as_str()).unwrap_or_else(|| {
+                        panic!("unmodelled reader image fixture request: {}", request.url)
+                    });
+                    let (entered, gate) = match route.gates.pop_front() {
+                        Some(gate) => (Some(gate.entered), Some(gate.release)),
+                        None => (None, None),
+                    };
+                    Step {
+                        response: route.response.clone(),
+                        entered,
+                        gate,
+                    }
+                })
+            };
+            let step = routed.unwrap_or_else(|| {
+                self.steps
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("scripted response")
+            });
             if let Some(entered) = step.entered {
                 let _ = entered.send(());
             }
@@ -1045,81 +1115,170 @@ async fn private_cache_isolation_and_quarantine_rejection() {
 }
 
 #[tokio::test]
-async fn missing_images_fail_without_blocking_other_images_or_context() {
+#[should_panic(expected = "unmodelled reader image fixture request")]
+async fn unordered_image_fixture_rejects_unmodelled_requests() {
+    let transport = Controlled::default();
+    transport.serve("/known", json!({}));
+    transport
+        .execute(
+            HttpRequest::get("https://api.github.com/known?unmodelled=1"),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("fixture request");
+}
+
+async fn missing_image_fixture() -> (Fixture, RepositoryImageService) {
     let fixture = fixture().await;
     fixture.login(1).await;
-    let session = fixture.session();
-
     let bytes = png_bytes();
-    // Two requests will both look up commit. The first will fetch commit, and cache it in ResolutionCache.
-    // When "missing.png" resolves ROOT tree, it sees only "good.png", so it returns ImageFailure::NotFound!
-    // But if both start concurrently, they might both hit the transport before the first finishes caching.
-    // So push two commit_jsons just in case, or root tree.
-    fixture.transport.push(200, commit_json());
-    fixture.transport.push(200, commit_json());
-    fixture.transport.push(
-        200,
-        tree(
-            ROOT,
-            json!([
-                {"path": "good.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()},
-            ]),
-        ),
+    fixture
+        .transport
+        .serve(&format!("/repos/octo/repo/commits/{COMMIT}"), commit_json());
+    fixture.transport.serve(
+        &format!("/repos/octo/repo/git/trees/{ROOT}"),
+        tree(ROOT, json!([
+            {"path": "good.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()},
+        ])),
     );
-    fixture.transport.push(
-        200,
-        tree(
-            ROOT,
-            json!([
-                {"path": "good.png", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": bytes.len()},
-            ]),
-        ),
+    fixture.transport.serve(
+        &format!("/repos/octo/repo/git/blobs/{IMAGE_BLOB}"),
+        blob_json(IMAGE_BLOB, &bytes),
     );
-    fixture.transport.push(200, blob_json(IMAGE_BLOB, &bytes));
+    let service = fixture.service(
+        fixture.session(),
+        Arc::new(MemoryExternal::default()),
+        ImageLimits::default(),
+    );
+    (fixture, service)
+}
 
-    let (source, _) = external("https://example.com/never.png", Vec::new());
-    let service = fixture.service(session, source, ImageLimits::default());
+async fn request_entered(ready: tokio::sync::oneshot::Receiver<()>) {
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .expect("request reached its gate")
+        .expect("request entry signal");
+}
 
+fn start_picture(service: &RepositoryImageService, name: &str) -> ImageSink {
     let sink = ImageSink::new();
-    // Request missing image
     service.start(
         ImageRequest {
             scope: test_scope(1),
-            key: ImageKey::new("missing"),
-            target: repository_request(COMMIT, "missing.png"),
+            key: ImageKey::new(name),
+            target: repository_request(COMMIT, &format!("{name}.png")),
         },
         sink.clone(),
     );
-    // Request existing image
-    service.start(
-        ImageRequest {
-            scope: test_scope(1),
-            key: ImageKey::new("good"),
-            target: repository_request(COMMIT, "good.png"),
-        },
-        sink.clone(),
-    );
+    sink
+}
 
-    let mut completions = Vec::new();
-    for _ in 0..500 {
-        let drained = sink.drain();
-        completions.extend(drained);
-        if completions.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+fn assert_good(completion: ImageCompletion) {
+    assert_eq!(completion.key.as_str(), "good");
+    assert_eq!(completion.scope, test_scope(1));
+    let decoded = completion.result.expect("good picture remains readable");
+    assert_eq!((decoded.width, decoded.height), (6, 3));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_images_fail_without_blocking_other_images_or_context() {
+    // start() spawns independent tasks on the real background executor. Hold
+    // both commit reads before either can fill the shared resolution cache,
+    // then reverse their order at the tree boundary. Exercise both start orders.
+    for first in ["missing", "good"] {
+        let (fixture, service) = missing_image_fixture().await;
+        let commit_path = format!("/repos/octo/repo/commits/{COMMIT}");
+        let tree_path = format!("/repos/octo/repo/git/trees/{ROOT}");
+        let (commit1, release_commit1) = fixture.transport.gate(&commit_path);
+        let (commit2, release_commit2) = fixture.transport.gate(&commit_path);
+        let (tree1, release_tree1) = fixture.transport.gate(&tree_path);
+        let (tree2, release_tree2) = fixture.transport.gate(&tree_path);
+
+        let first_sink = start_picture(&service, first);
+        request_entered(commit1).await;
+        let second_sink = start_picture(
+            &service,
+            if first == "missing" {
+                "good"
+            } else {
+                "missing"
+            },
+        );
+        request_entered(commit2).await;
+        assert!(first_sink.drain().is_empty());
+        assert!(second_sink.drain().is_empty(), "both loads are in flight");
+
+        release_commit2.send(()).unwrap();
+        request_entered(tree1).await;
+        release_commit1.send(()).unwrap();
+        request_entered(tree2).await;
+        release_tree2.send(()).unwrap();
+        release_tree1.send(()).unwrap();
+
+        let (missing, good) = if first == "missing" {
+            (&first_sink, &second_sink)
+        } else {
+            (&second_sink, &first_sink)
+        };
+        let missing = next_completion(missing).await;
+        assert_eq!(missing.key.as_str(), "missing");
+        assert_eq!(missing.scope, test_scope(1));
+        assert_eq!(missing.result, Err(ImageFailure::NotFound));
+        assert_good(next_completion(good).await);
+        assert!(
+            service.verify(),
+            "missing image preserves the account context"
+        );
+        let urls = fixture.transport.urls();
+        assert_eq!(urls.len(), 5, "two commits, two trees, one blob: {urls:?}");
+        assert_eq!(
+            urls.iter()
+                .filter(|url| url.ends_with(&commit_path))
+                .count(),
+            2
+        );
+        assert_eq!(
+            urls.iter().filter(|url| url.ends_with(&tree_path)).count(),
+            2
+        );
     }
-    assert_eq!(completions.len(), 2, "expected 2 completions");
+}
 
-    let good = completions
-        .iter()
-        .find(|c| c.key.as_str() == "good")
-        .unwrap();
-    let missing = completions
-        .iter()
-        .find(|c| c.key.as_str() == "missing")
-        .unwrap();
-
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_image_reuses_resolution_while_good_image_is_still_in_flight() {
+    let (fixture, service) = missing_image_fixture().await;
+    let blob_path = format!("/repos/octo/repo/git/blobs/{IMAGE_BLOB}");
+    let (blob, release_blob) = fixture.transport.gate(&blob_path);
+    let good = start_picture(&service, "good");
+    request_entered(blob).await;
+    // The good load is blocked, but its commit and tree are already cached.
+    // A second independent task must finish without another resolution read.
+    let missing = start_picture(&service, "missing");
+    let missing = next_completion(&missing).await;
+    assert_eq!(missing.key.as_str(), "missing");
     assert_eq!(missing.result, Err(ImageFailure::NotFound));
-    assert!(good.result.is_ok(), "good result was: {:?}", good.result);
+    assert!(
+        good.drain().is_empty(),
+        "good load is still waiting on its blob"
+    );
+    assert_eq!(
+        fixture.transport.urls().len(),
+        3,
+        "one commit, one tree, one blob"
+    );
+    release_blob.send(()).unwrap();
+    assert_good(next_completion(&good).await);
+    assert!(service.verify());
+
+    // Responses remain available after the one-shot gates have been consumed.
+    // Successful follow-up reads also prove that the missing image did not
+    // invalidate the service's account/document context.
+    let again = start_picture(&service, "good");
+    assert_good(next_completion(&again).await);
+    let urls = fixture.transport.urls();
+    assert_eq!(urls.len(), 4, "only the repeated blob is fetched: {urls:?}");
+    assert_eq!(
+        urls.iter().filter(|url| url.ends_with(&blob_path)).count(),
+        2
+    );
 }
