@@ -543,7 +543,14 @@ impl Notifications {
         // Dropping the per-thread generations makes any late reply stale.
         state.action_generations.clear();
         state.snapshot.busy = None;
-        state.snapshot.thread_states.clear();
+        // Busy/failed progress is transient, but a confirmed unsubscription is
+        // a server fact: keep its pending-Done presentation so a retained view
+        // returning later still retries only Done instead of re-offering
+        // Unsubscribe (which the controller would refuse anyway).
+        state
+            .snapshot
+            .thread_states
+            .retain(|_, value| matches!(value, ThreadActionState::UnsubscribedPendingDone { .. }));
     }
 }
 /// Concurrent completions may each report a rate-limit deadline. A later,

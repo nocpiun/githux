@@ -617,3 +617,37 @@ async fn a_shorter_rate_hint_never_shortens_an_outstanding_cooldown() {
         Err(NotificationError::Cooldown { .. })
     ));
 }
+
+#[tokio::test]
+async fn pending_done_survives_leaving_and_returning_to_a_retained_view() {
+    let (_accounts, inbox, _) = setup(Scene::UnsubscribeStepTwoFailure).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Unsubscribe).await;
+    assert!(matches!(
+        inbox.snapshot().thread_states.get("9000"),
+        Some(ThreadActionState::UnsubscribedPendingDone { .. })
+    ));
+    // Leaving the page cancels in-flight work and drops transient state.
+    inbox.cancel();
+    let snapshot = inbox.snapshot();
+    assert!(
+        matches!(
+            snapshot.thread_states.get("9000"),
+            Some(ThreadActionState::UnsubscribedPendingDone { .. })
+        ),
+        "the confirmed ignore must stay visible after leaving"
+    );
+    // Unsubscribe is still not offered again; only Done may be retried.
+    assert!(
+        inbox
+            .begin_thread_action("9000", ThreadAction::Unsubscribe)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        inbox
+            .begin_thread_action("9000", ThreadAction::Done)
+            .unwrap()
+            .is_some()
+    );
+}
