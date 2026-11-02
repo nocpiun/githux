@@ -420,6 +420,13 @@ fn long_text_stays_inside_a_constrained_pane_and_after_resize_and_append(cx: &mu
         let updated = cx
             .debug_bounds(Box::leak(format!("work-updated-{id}").into_boxed_str()))
             .unwrap();
+        let number = cx
+            .debug_bounds(Box::leak(format!("work-number-{id}").into_boxed_str()))
+            .unwrap();
+        assert!(
+            number.left() < repository.left(),
+            "number {number:?} must precede repository {repository:?}"
+        );
         assert!(
             list.size.width <= px(460.0),
             "list {list:?} exceeds pane {pane:?}"

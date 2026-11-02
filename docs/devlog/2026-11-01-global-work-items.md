@@ -55,3 +55,11 @@ UI 要求负责人原生验收，交付 PR 保持 pending，不自动合并。�
 fixture 时间改为相对预览固定时钟 2026-11-02T12:00:00Z 的确定性分布（Just now 边界、分钟、小时、Yesterday、多天、+09:00 offset），预览使用同一固定时钟，因此原生窗口能看到真实相对文本且可重复。测试断言 Issues/PR 两种列表的真实行标签包含分钟/小时/天/Yesterday，主文本不含 ISO 或 `Updated`，tooltip 保留精确值，invalid/future/offset 由共享 formatter 处理（未镜像重写 parser 测试）；并验证失活、隐藏、固定 clock 与释放后的计时停止。
 
 验证：聚焦 `cargo test --locked --example global_work_items work_items` 为 24 passed / 0 failed（run `0b413c96-1280-41fa-a544-3ff3654dc90f`）。原生 DPI 感知宽/窄帧与最终必需检查记录见本轮 PR 评论与交付状态。
+
+## 编号前移与基线微调（负责人截图反馈）
+
+「把 issue/PR 的编号移到前面，其他的不用改」：仅调整元数据行子节点顺序为 `#number → 仓库名 → 状态 → 相对时间`，Issues 与 Pull Requests 共同生效。编号字体、字号、颜色、gap、行高、图标、标题、原生长文本截断、仓库链接语义、状态、时间 tooltip 与筛选/分页/键盘行为均未改；没有把编号移入标题或重复显示。
+
+原生复核后负责人反馈编号与仓库名上下未居中：数字为大写高度、仓库名为小写高度，即使基线相同，仓库名在视觉上仍低约 1 logical px。改为 `items_baseline()` 对齐基线，并对仓库名链接使用 `relative().top(px(-1.0))` 做纯绘制上移（不影响布局与横向位置）；负责人确认「这次可以了」。此前尝试给编号加 `mt` 会造成观感偏差，已撤销。
+
+验证：`work_items` 聚焦测试（含编号位于仓库名之前的断言）通过；原生 144 DPI 帧覆盖 Issues/PR 宽窄窗口，确认编号在前且仅一次、长仓库名正确截断、状态与时间未被挤出。最终必需检查记录见交付状态与 PR 评论。

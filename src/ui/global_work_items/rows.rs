@@ -40,6 +40,12 @@ pub(super) fn row(
         .min_w_0()
         .flex_1()
         .overflow_hidden()
+        // Digit glyphs are cap-height while the UI-font repository is
+        // lowercase: equal baselines still leave the repository optically
+        // ~1px low. Relative offset paints only; it does not reflow or
+        // shift the row horizontally.
+        .relative()
+        .top(px(-1.0))
         .cursor_pointer()
         .hover(|style| style.underline())
         .on_click(move |_, window, cx| {
@@ -117,14 +123,16 @@ pub(super) fn row(
             div()
                 .debug_selector(move || format!("work-metadata-{id}"))
                 .flex()
-                .items_center()
+                // The mono number has taller metrics than the UI-font
+                // repository/state/time, so align their text baselines instead
+                // of only centring each child's box.
+                .items_baseline()
                 .gap_2()
                 .w_full()
                 .min_w_0()
                 .overflow_hidden()
                 .text_size(cx.theme().text_size(TextSize::Xs))
                 .text_color(colors.fg_subtle)
-                .child(link)
                 .child(
                     div()
                         .debug_selector(move || format!("work-number-{id}"))
@@ -132,6 +140,7 @@ pub(super) fn row(
                         .font_family("Google Sans Code")
                         .child(format!("#{}", item.number)),
                 )
+                .child(link)
                 .child(div().flex_none().child(item.state.label()))
                 .child(
                     div()

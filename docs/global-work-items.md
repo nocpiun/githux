@@ -46,6 +46,8 @@ page.update(cx, |view, _| view.on_repository(callback));
 
 `RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
 
+元数据行顺序为 `#number → 仓库名 → 状态 → 相对时间`：编号使用 Google Sans Code，位于仓库名之前且只出现一次；两种列表相同。整行按文本基线对齐，并对仓库名做 1 logical px 的相对上移，以抵消数字大写高度与仓库名小写高度造成的视觉偏差（相对定位不参与布局，不改变横向位置）。长仓库名在该行内仍正确截断，不会挤掉编号、状态或时间。
+
 时间显示：主行只显示相对年龄（`Just now`、`3 minutes ago`、`2 hours ago`、`Yesterday`、`4 days ago`），不再显示 `Updated` 前缀或 ISO 日期；精确 RFC3339 值只保留在 tooltip 与无障碍说明。解析与格式化复用 `src/ui/home/time.rs` 的同一纯函数（本模块以 `#[path]` 引用该源文件，不复制 parser），因此 offset、小数秒、无效和未来值得到与 Home 一致的诚实结果。页面可见且有行时，本地 wall clock 每 30 秒更新一次以刷新相对文本；窗口失活、隐藏、切离前台或视图释放时停止计时，不产生 GitHub 刷新或后台轮询。这是过渡消费者接点，Notifications 的共享 helper 落地后由协调者统一为单一公共模块。
 
 标题和行没有详情动作、浏览器跳转或替代仓库跳转，也不建立空详情路由。列表 Up/Down/Home/End 改变选择并 reveal；仓库名是独立 Tab/Enter 键盘入口，刷新、筛选和 Load more 使用 Ely 控件。每个视图使用有界 GPUI ListState、共享 Bars/Motion 和 FocusHandle，按可见行渲染；追加不重置滚动，失活/窗口 activation 变化清理 motion/drag。
