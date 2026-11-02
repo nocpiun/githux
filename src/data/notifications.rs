@@ -55,7 +55,9 @@ struct State {
     /// page-one representation; only explicit cancel/leave/teardown stops them.
     action_cancel: CancellationToken,
     action_cancel_source: CancellationTokenSource,
-    tombstones: HashSet<String>,
+    /// thread id -> the updated_at version the user completed/removed.
+    /// A newer server version must be allowed back into the inbox.
+    tombstones: HashMap<String, String>,
     action_generations: HashMap<String, u64>,
     /// Threads whose ignored=true subscription was confirmed by the server.
     unsubscribed: HashSet<String>,
@@ -75,7 +77,7 @@ impl Default for State {
             cancel_source,
             action_cancel,
             action_cancel_source,
-            tombstones: HashSet::new(),
+            tombstones: HashMap::new(),
             action_generations: HashMap::new(),
             unsubscribed: HashSet::new(),
         }
@@ -85,6 +87,8 @@ impl Default for State {
 pub struct ThreadActionRequest {
     pub thread_id: String,
     pub action: ThreadAction,
+    /// The `updated_at` the user acted on; a later version is a new notification.
+    version: String,
     generation: u64,
     cancel: CancellationToken,
 }
@@ -305,9 +309,12 @@ impl Notifications {
                     .collect();
                 let mut truncated = false;
                 for item in page.items {
-                    if state.tombstones.contains(&item.id) {
+                    // Only the exact version the user completed is suppressed;
+                    // newer activity with the same thread id is a new inbox row.
+                    if state.tombstones.get(&item.id) == Some(&item.updated_at) {
                         continue;
                     }
+                    state.tombstones.remove(&item.id);
                     if ids.insert(item.id.clone()) {
                         if state.snapshot.items.len() >= self.limits.max_items {
                             truncated = true;
@@ -359,9 +366,13 @@ impl Notifications {
             return Err(GitHubError::StaleContext.into());
         }
         let mut state = self.state.lock().expect("inbox state");
-        if state.tombstones.contains(thread_id) {
-            return Ok(None);
-        }
+        let acted_version = state
+            .snapshot
+            .items
+            .iter()
+            .find(|item| item.id == thread_id)
+            .map(|item| item.updated_at.clone())
+            .unwrap_or_default();
         if let Some(ThreadActionState::Busy(_)) = state.snapshot.thread_states.get(thread_id) {
             return Err(NotificationError::Busy);
         }
@@ -389,6 +400,7 @@ impl Notifications {
         Ok(Some(ThreadActionRequest {
             thread_id: thread_id.to_string(),
             action,
+            version: acted_version,
             generation: action_generation,
             cancel: state.action_cancel.clone(),
         }))
@@ -495,7 +507,11 @@ impl Notifications {
         match result {
             Ok(notifications::UnsubscribeOutcome::Completed(_)) => {
                 // Done succeeded: remove from items, add to tombstones, remove thread state
-                state.tombstones.insert(request.thread_id.clone());
+                if !request.version.is_empty() {
+                    state
+                        .tombstones
+                        .insert(request.thread_id.clone(), request.version.clone());
+                }
                 state.unsubscribed.remove(&request.thread_id);
                 state
                     .snapshot

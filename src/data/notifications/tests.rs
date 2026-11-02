@@ -651,3 +651,33 @@ async fn pending_done_survives_leaving_and_returning_to_a_retained_view() {
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn newer_activity_reenters_the_inbox_after_a_done() {
+    let (_accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let old_version = inbox
+        .snapshot()
+        .items
+        .iter()
+        .find(|item| item.id == "9000")
+        .unwrap()
+        .updated_at
+        .clone();
+    run_action(&inbox, "9000", ThreadAction::Done).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+    // The same refresh that returns the old version stays suppressed...
+    run(&inbox, RequestKind::Refresh).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+    // ...but a newer server version of the same thread is a new notification.
+    fixture.set_clock(fixture::PREVIEW_NOW + 3600);
+    run(&inbox, RequestKind::Refresh).await;
+    let revived = inbox
+        .snapshot()
+        .items
+        .iter()
+        .find(|item| item.id == "9000")
+        .cloned();
+    assert!(revived.is_some(), "newer activity must re-enter the inbox");
+    assert_ne!(revived.unwrap().updated_at, old_version);
+}

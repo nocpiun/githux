@@ -91,6 +91,9 @@ impl Fixture {
         state.scene = scene;
         state.failed = false;
     }
+    pub fn set_clock(&self, now: u64) {
+        self.state.lock().unwrap().now = now;
+    }
     pub fn requests(&self) -> Vec<HttpRequest> {
         self.state.lock().unwrap().requests.clone()
     }
