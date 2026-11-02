@@ -84,6 +84,10 @@ PR #61 对 `46b3a18ba24fa26d5acd655c56fa265ea9f15ce7` 的审查提出三项均�
 
 交接：`.agents/task/aggregate-revocation-ready.json` 记录 commit、变更路径、验证和 page-cache 消费方式（沿用 `revoke_repository(scope, Some(repo_id))`，无新公共 API）。**协调依赖：PR #61 在协调者核对联合契约前不得以旧 ready 状态自动合并。**
 
+## 最新审查：对账失败后挂起已外发句柄
+
+对 `0bb0443b4aca3dac684199fc328303205df8bb2c` 的 [P1](https://github.com/nocpiun/githux/pull/61#discussion_r4438366479) 成立：对账枚举失败若清空 `scopes`，明确拒绝时找不到 scope 就无法本地挂起此前外发的旧绑定。修复为仅在成功枚举后重建 `scopes`，失败时保留旧 scope 身份；`current()` 在对账未完成时拒绝发旧绑定，`event()/retire()` 仍能据此调用 `suspend`/`retire` 让旧 lease 立即失效。新增 `rejection_suspends_outstanding_handles_when_reconciliation_enumeration_fails` 用真实 SQLite EXCLUSIVE 锁验证：枚举失败→拒绝→旧 lease 拒绝→解锁 recover→新绑定仍拒绝。无裁决。
+
 ## 剩余边界
 
 - `src/app/accounts` 和正式 Shell 仍调用旧 `open`，尚未创建/注入 app 级 CacheStore；需唯一后续组装 owner。

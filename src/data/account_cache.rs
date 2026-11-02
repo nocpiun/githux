@@ -112,16 +112,20 @@ impl AccountCaches {
     /// issued. This covers a catalog commit followed by a crash before cache
     /// retirement, and also prevents remove/re-add from resurrecting a partition.
     fn reconcile(&mut self, directory: &crate::storage::accounts::Directory) {
-        self.scopes.clear();
         self.recovery_pending = false;
         self.reconciled = false;
         let live = match self.store.live_scopes() {
             Ok(scopes) => scopes,
             Err(_) => {
+                // Keep previously issued scope identities so a later rejection
+                // or retirement can still locally suspend outstanding handles
+                // even though this enumeration failed (e.g. an exclusive SQLite
+                // lock). current() refuses to hand out those stale bindings.
                 self.recovery_pending = true;
                 return;
             }
         };
+        self.scopes.clear();
         let mut orphans = HashSet::new();
         for scope in live {
             let account = scope.account().clone();
@@ -187,6 +191,9 @@ impl AccountCaches {
     }
 
     fn current(&self, account: &AccountKey) -> Option<AccountCache> {
+        if !self.reconciled {
+            return None;
+        }
         self.scopes.get(account).map(|scope| AccountCache {
             store: self.store.clone(),
             scope: scope.clone(),

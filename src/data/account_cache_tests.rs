@@ -1249,6 +1249,58 @@ async fn removal_clears_failed_catalog_replay_and_allows_immediate_readd() {
     service.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn rejection_suspends_outstanding_handles_when_reconciliation_enumeration_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts = config(&temp);
+    let cache = CacheStore::open(cache_config(&temp)).unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::new());
+    let mock = Arc::new(MockTransport::new());
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = open_cached(
+        accounts.clone(),
+        credentials,
+        mock.clone(),
+        executor,
+        cache.clone(),
+    )
+    .await;
+    user(&mock, 1).await;
+    service.login(Pat::from_str("fake")).await.unwrap();
+    let binding = service.cache(&account_summary(&service, 1)).unwrap();
+    put(&binding, &private_key(1), b"private");
+    let lease = match binding
+        .store()
+        .read(binding.scope(), &private_key(1))
+        .unwrap()
+    {
+        CacheRead::Hit(lease) => lease,
+        CacheRead::Miss(_) => panic!(),
+    };
+    let context = service.repo_service().session().unwrap().context().clone();
+
+    let lock = rusqlite::Connection::open(cache_config(&temp).root.join("cache.sqlite3")).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(service.recover().await.is_err());
+    assert!(service.recovery_pending().await.unwrap());
+    // The map was cleared by the failed reconciliation, but the previously
+    // issued binding must still be locally suspended on rejection.
+    assert!(
+        service
+            .repo_service()
+            .credential_rejected(&context)
+            .await
+            .is_err()
+    );
+    assert!(matches!(lease.snapshot(), Err(CacheError::AccessDenied)));
+    drop(lock);
+    service.recover().await.unwrap();
+    denied(&binding, &private_key(1));
+    let restored = service.cache(&account_summary(&service, 1)).unwrap();
+    denied(&restored, &private_key(1));
+    service.close().await.unwrap();
+}
+
 #[test]
 fn scope_enumeration_is_read_only_and_validates_persisted_account_ids() {
     let temp = tempfile::tempdir().unwrap();
