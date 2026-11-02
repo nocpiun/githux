@@ -16,6 +16,8 @@
 mod extras_tests;
 #[path = "header_tests.rs"]
 mod header_tests;
+#[path = "star_tests.rs"]
+mod star_tests;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

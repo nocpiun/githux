@@ -22,6 +22,7 @@ pub mod home;
 pub mod profile;
 pub mod repo;
 pub mod repository;
+pub mod repository_actions;
 pub mod repository_counts;
 pub mod repository_extras;
 

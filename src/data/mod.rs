@@ -41,6 +41,9 @@ pub mod repository_cache;
 #[cfg(test)]
 mod repository_cache_tests;
 #[cfg(test)]
+mod repository_action_tests;
+pub mod repository_actions;
+#[cfg(test)]
 mod repository_content_tests;
 #[cfg(test)]
 mod repository_tests;
