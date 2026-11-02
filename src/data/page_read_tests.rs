@@ -1,15 +1,16 @@
 //! End-to-end through AccountService: synthetic credentials, mock transport.
+mod feed_refresh_tests;
 use super::account_tests::{config, key};
 use super::*;
 use crate::auth::memory::InMemoryCredentialStore;
 use crate::content::PreparedBody;
-use crate::domain::home::{DateBound, FeedFetch, HomeError, UpdatedWindow};
+use crate::domain::home::{DateBound, FeedPartialReason, FeedReadiness, HomeError, UpdatedWindow};
 use crate::domain::profile::{ContributionRange, ProfileBasic, ProfileError, Showcase};
 use crate::domain::repository::*;
 use crate::domain::repository_extras::{
     ContributorsState, ExtrasCompleteness, RepositoryExtrasError,
 };
-use crate::github::home::{FeedLimits, HomeSearchLimits};
+use crate::github::home::{FeedLimits, FollowingLimits, HomeSearchLimits, PullRequestDetailLimits};
 use crate::github::profile::ProfileLimits;
 use crate::github::repository_extras::RepositoryExtrasLimits;
 use crate::network::transport::{
@@ -72,6 +73,27 @@ fn root_tree(truncated: bool) -> Value {
     ]})
 }
 
+/// The Feed read needs explicit auxiliary budgets; tests use small, fixed ones so
+/// a misuse shows up as a request-count assertion rather than a silent default.
+fn feed_args(author_lookups: usize) -> (FollowingLimits, PullRequestDetailLimits, usize) {
+    (
+        FollowingLimits::default(),
+        PullRequestDetailLimits::default(),
+        author_lookups,
+    )
+}
+
+async fn feed_call(
+    session: &PageReadSession,
+    limits: &FeedLimits,
+    cancel: CancellationToken,
+) -> Result<crate::data::Scoped<crate::domain::home::FeedOutcome>, HomeError> {
+    let (following, author, lookups) = feed_args(4);
+    session
+        .feed(limits, &following, &author, lookups, cancel)
+        .await
+}
+
 type Step = (
     HttpResponse,
     Option<tokio::sync::oneshot::Receiver<()>>,
@@ -80,6 +102,7 @@ type Step = (
 #[derive(Default)]
 struct Controlled {
     steps: Mutex<VecDeque<Step>>,
+    routed_steps: Mutex<std::collections::HashMap<String, Step>>,
     requests: Mutex<Vec<HttpRequest>>,
 }
 impl Controlled {
@@ -109,6 +132,28 @@ impl Controlled {
     fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+
+    fn block_url(
+        &self,
+        url: String,
+        status: u16,
+        body: Value,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        self.routed_steps.lock().unwrap().insert(
+            url,
+            (
+                json_response(status, &body.to_string()),
+                Some(gate),
+                Some(entered),
+            ),
+        );
+        (ready, release)
+    }
 }
 impl Transport for Controlled {
     fn execute<'a>(
@@ -117,13 +162,15 @@ impl Transport for Controlled {
         _cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
+            let routed = self.routed_steps.lock().unwrap().remove(&request.url);
             self.requests.lock().unwrap().push(request);
-            let (response, gate, entered) = self
-                .steps
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("scripted response");
+            let (response, gate, entered) = routed.unwrap_or_else(|| {
+                self.steps
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("scripted response")
+            });
             if let Some(entered) = entered {
                 let _ = entered.send(());
             }
@@ -212,6 +259,9 @@ async fn home_and_feed_use_captured_login_credentials_bounds_and_no_validators()
             .total_count,
         0
     );
+    // Feed now walks three reads in a fixed order: source events, followed
+    // accounts, then one author lookup per distinct merged pull request. With no
+    // merged events in the source, no detail request is made.
     transport.push_response(HttpResponse {
         status: 200,
         headers: vec![
@@ -220,27 +270,32 @@ async fn home_and_feed_use_captured_login_credentials_bounds_and_no_validators()
         ],
         body: "[]".into(),
     });
-    let FeedFetch::Events(feed) = session
-        .feed(
-            &FeedLimits {
-                per_page: 23,
-                ..Default::default()
-            },
-            Default::default(),
-        )
-        .await
-        .unwrap()
-        .value
-    else {
-        panic!("events")
-    };
+    transport.push(200, json!([]));
+    let feed = feed_call(
+        &session,
+        &FeedLimits {
+            per_page: 23,
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .value;
     assert_eq!(feed.etag.as_deref(), Some("\"feed\""));
     assert_eq!(feed.poll_interval_seconds, Some(60));
+    assert!(feed.activities.is_empty());
+    // A complete source plus a complete following list and no merges is a normal
+    // empty Feed, not a partial read.
+    assert_eq!(feed.readiness, FeedReadiness::Complete);
     let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5, "home, events, following");
     assert!(
         requests[2]
             .url
-            .contains("q=involves%3Aauthoritative+updated%3A%3E%3D2026-10-01")
+            .contains("q=involves%3Aauthoritative+is%3Aopen+updated%3A%3E%3D2026-10-01"),
+        "the confirmed Home query keeps involves + is:open and the explicit window: {}",
+        requests[2].url
     );
     assert!(
         requests[2].url.contains("sort=updated")
@@ -252,8 +307,19 @@ async fn home_and_feed_use_captured_login_credentials_bounds_and_no_validators()
             .url
             .ends_with("/users/authoritative/received_events?per_page=23&page=1")
     );
-    for request in &requests[2..4] {
-        assert_eq!(auth(request), "Bearer account-token");
+    assert!(
+        requests[4]
+            .url
+            .ends_with("/user/following?per_page=100&page=1"),
+        "the followed-account read targets the authenticated endpoint: {}",
+        requests[4].url
+    );
+    for request in &requests[2..5] {
+        assert_eq!(
+            auth(request),
+            "Bearer account-token",
+            "every Feed read uses the captured account credential"
+        );
     }
     assert!(
         !requests[3]
@@ -397,6 +463,370 @@ async fn extras_preserve_distinct_models_metadata_and_share_one_account() {
     }
 }
 
+/// End-to-end through the **real adapters**: live-shaped received events, a real
+/// `/user/following` page set and a real pull-request detail response produce the
+/// visible Feed. This is the regression for the failures found against live data:
+/// the old classifier accepted none of the 17 real `action=merged` events (they
+/// carry no author), and nothing checked the followed relationship, so unfollowed
+/// subjects appeared on 8 of 13 stars.
+#[tokio::test]
+async fn real_adapter_shapes_produce_only_followed_contribution_star_and_create_cards() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    // 1. Source events: a live `action=merged` (no embedded author, no merged
+    //    flag), a star by a followed account, a star by an unfollowed account, a
+    //    branch creation, and a repository creation by a followed account.
+    transport.push(
+        200,
+        json!([
+            {
+                "id": "evt-merged",
+                "type": "PullRequestEvent",
+                "actor": {"id": 10, "login": "merging-maintainer", "avatar_url": null},
+                "repo": {"id": 99, "name": "acme/widgets", "url": "https://api.github.com/repos/acme/widgets"},
+                "payload": {
+                    "action": "merged",
+                    "number": 42,
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/acme/widgets/pulls/42",
+                        "id": 424242u64,
+                        "number": 42,
+                        "head": {"ref": "feat/x", "sha": "aaaa"},
+                        "base": {"ref": "main", "sha": "bbbb"}
+                    }
+                },
+                "created_at": "2026-10-30T12:00:41Z"
+            },
+            {
+                "id": "evt-star-followed",
+                "type": "WatchEvent",
+                "actor": {"id": 11, "login": "followed-friend", "avatar_url": null},
+                "repo": {"id": 99, "name": "acme/widgets", "url": "https://api.github.com/repos/acme/widgets"},
+                "payload": {"action": "started"},
+                "created_at": "2026-10-30T11:00:00Z"
+            },
+            {
+                "id": "evt-star-unfollowed",
+                "type": "WatchEvent",
+                "actor": {"id": 12, "login": "unfollowed-stranger", "avatar_url": null},
+                "repo": {"id": 98, "name": "acme/other", "url": "https://api.github.com/repos/acme/other"},
+                "payload": {"action": "started"},
+                "created_at": "2026-10-30T10:00:00Z"
+            },
+            {
+                "id": "evt-branch",
+                "type": "CreateEvent",
+                "actor": {"id": 11, "login": "followed-friend", "avatar_url": null},
+                "repo": {"id": 99, "name": "acme/widgets", "url": "https://api.github.com/repos/acme/widgets"},
+                "payload": {"ref_type": "branch", "ref": "feature"},
+                "created_at": "2026-10-30T09:30:00Z"
+            },
+            {
+                "id": "evt-create-repo",
+                "type": "CreateEvent",
+                "actor": {"id": 11, "login": "followed-friend", "avatar_url": null},
+                "repo": {"id": 97, "name": "followed-friend/new-project", "url": "https://api.github.com/repos/followed-friend/new-project"},
+                "payload": {"ref_type": "repository", "ref": null},
+                "created_at": "2026-10-30T09:00:00Z"
+            }
+        ]),
+    );
+    // 2. Followed accounts: the contributor author, the starring account and the
+    //    repository-creating account, but not the merging maintainer and not the
+    //    unfollowed stargazer.
+    transport.push(
+        200,
+        json!([
+            {"id": 31, "login": "real-contributor", "avatar_url": null},
+            {"id": 11, "login": "followed-friend", "avatar_url": null}
+        ]),
+    );
+    // 3. The merged pull request's detail response supplies the author.
+    transport.push(
+        200,
+        json!({
+            "id": 424242u64,
+            "number": 42,
+            "state": "closed",
+            "merged": true,
+            "merged_at": "2026-10-30T12:00:41Z",
+            "title": "Real merged contribution",
+            "html_url": "https://github.com/acme/widgets/pull/42",
+            "user": {"id": 31, "login": "real-contributor", "avatar_url": null}
+        }),
+    );
+
+    let feed = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .expect("feed")
+        .value;
+
+    let summary: Vec<(String, String, String)> = feed
+        .activities
+        .iter()
+        .map(|activity| {
+            (
+                format!("{:?}", activity.kind),
+                activity.subject.login.clone(),
+                activity.event.id.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "PullRequestMerged".to_string(),
+                "real-contributor".to_string(),
+                "evt-merged".to_string()
+            ),
+            (
+                "RepositoryStarred".to_string(),
+                "followed-friend".to_string(),
+                "evt-star-followed".to_string()
+            ),
+            (
+                "RepositoryCreated".to_string(),
+                "followed-friend".to_string(),
+                "evt-create-repo".to_string()
+            ),
+        ],
+        "only followed subjects, in source order, crediting the PR author"
+    );
+    // The merged card carries the detail title and number.
+    let merged = &feed.activities[0];
+    assert_eq!(
+        merged.subject.login, "real-contributor",
+        "the author, not the merging maintainer"
+    );
+    assert_ne!(merged.subject.login, merged.event.actor.login);
+    assert_eq!(
+        merged
+            .pull_request
+            .as_ref()
+            .and_then(|target| target.number),
+        Some(42)
+    );
+    assert_eq!(
+        merged
+            .pull_request
+            .as_ref()
+            .and_then(|target| target.title.as_deref()),
+        Some("Real merged contribution")
+    );
+    assert_eq!(feed.readiness, FeedReadiness::Complete);
+
+    let requests = transport.requests.lock().unwrap();
+    // login + events + following + one detail read. Five source events with one
+    // merged PR must not fan out further.
+    assert_eq!(
+        requests.len(),
+        4,
+        "{:?}",
+        requests.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(requests[1].url.contains("/users/viewer/received_events"));
+    assert!(requests[2].url.contains("/user/following"));
+    assert_eq!(
+        requests[3].url, "https://api.github.com/repos/acme/widgets/pulls/42",
+        "the detail URL is rebuilt from the parsed event, not taken from the payload"
+    );
+    for request in &requests[1..] {
+        assert_eq!(auth(request), "Bearer viewer-token");
+    }
+}
+
+/// A merged contribution whose author is followed but whose detail read fails must
+/// be withheld and reported, never silently dropped and never credited to the
+/// merger.
+#[tokio::test]
+async fn a_failed_author_read_withholds_the_contribution_and_reports_partial() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    transport.push(
+        200,
+        json!([{
+            "id": "evt-merged",
+            "type": "PullRequestEvent",
+            "actor": {"id": 10, "login": "merging-maintainer", "avatar_url": null},
+            "repo": {"id": 99, "name": "acme/widgets", "url": "https://api.github.com/repos/acme/widgets"},
+            "payload": {
+                "action": "merged",
+                "number": 42,
+                "pull_request": {
+                    "url": "https://api.github.com/repos/acme/widgets/pulls/42",
+                    "id": 424242u64, "number": 42,
+                    "head": {"ref": "x", "sha": "a"}, "base": {"ref": "main", "sha": "b"}
+                }
+            },
+            "created_at": "2026-10-30T12:00:41Z"
+        }]),
+    );
+    transport.push(200, json!([{"id": 10, "login": "merging-maintainer"}]));
+    transport.push_response(HttpResponse {
+        status: 503,
+        headers: vec![],
+        body: "{}".to_string(),
+    });
+
+    let feed = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .expect("feed returns a partial outcome")
+        .value;
+    assert!(feed.activities.is_empty());
+    assert!(
+        matches!(
+            feed.readiness,
+            FeedReadiness::Partial { ref reasons }
+                if reasons.iter().any(|reason| matches!(
+                    reason,
+                    FeedPartialReason::AuthorUnresolved { count: 1 }
+                ))
+        ),
+        "an unresolved author must be reported, got {:?}",
+        feed.readiness
+    );
+}
+
+/// A partial or failed followed-account read must never certify membership. Here
+/// the second `/user/following` page fails, so the subject on it cannot be
+/// confirmed even though the same login stars something.
+#[tokio::test]
+async fn incomplete_following_read_withholds_unconfirmed_subjects() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    transport.push(
+        200,
+        json!([{
+            "id": "evt-star",
+            "type": "WatchEvent",
+            "actor": {"id": 12, "login": "second-page-friend", "avatar_url": null},
+            "repo": {"id": 99, "name": "acme/widgets", "url": "https://api.github.com/repos/acme/widgets"},
+            "payload": {"action": "started"},
+            "created_at": "2026-10-30T11:00:00Z"
+        }]),
+    );
+    transport.push_response(HttpResponse {
+        status: 200,
+        headers: vec![(
+            "link".to_string(),
+            r#"<https://api.github.com/user/following?per_page=100&page=2>; rel="next""#
+                .to_string(),
+        )],
+        body: json!([{"id": 11, "login": "first-page-friend"}]).to_string(),
+    });
+    transport.push(503, json!({}));
+
+    let feed = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .expect("feed returns a partial outcome")
+        .value;
+    assert!(
+        feed.activities.is_empty(),
+        "an unconfirmed subject must not be shown: {:?}",
+        feed.activities
+    );
+    assert!(matches!(
+        feed.readiness,
+        FeedReadiness::Partial { ref reasons }
+            if reasons.iter().any(|reason| matches!(
+                reason,
+                FeedPartialReason::FollowingIncomplete { .. }
+            ))
+    ));
+}
+
+/// A failed `/user/following` first page is a hard error, never a complete empty
+/// Feed: "could not read" and "follows nobody" are different answers.
+#[tokio::test]
+async fn a_failed_following_read_is_an_error_not_an_empty_feed() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    transport.push(200, json!([]));
+    transport.push(401, json!({"message": "Bad credentials"}));
+
+    let error = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .expect_err("a failed relationship read must fail the Feed");
+    assert!(matches!(
+        error,
+        HomeError::GitHub(GitHubError::Unauthorized)
+    ));
+}
+
+/// Repeated refinement: two source events target the same merged pull request, so
+/// exactly one detail read is made and both dedupe to one card identity source.
+#[tokio::test]
+async fn duplicate_merged_events_share_one_author_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 4).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let session = svc.page_session().unwrap();
+
+    let merged = |id: &str| {
+        json!({
+            "id": id,
+            "type": "PullRequestEvent",
+            "actor": {"id": 10, "login": "maintainer", "avatar_url": null},
+            "repo": {"id": 99, "name": "acme/widgets", "url": "https://api.github.com/repos/acme/widgets"},
+            "payload": {
+                "action": "merged",
+                "number": 42,
+                "pull_request": {
+                    "url": "https://api.github.com/repos/acme/widgets/pulls/42",
+                    "id": 424242u64, "number": 42,
+                    "head": {"ref": "x", "sha": "a"}, "base": {"ref": "main", "sha": "b"}
+                }
+            },
+            "created_at": "2026-10-30T12:00:41Z"
+        })
+    };
+    transport.push(200, json!([merged("evt-1"), merged("evt-2")]));
+    transport.push(200, json!([{"id": 31, "login": "real-contributor"}]));
+    transport.push(
+        200,
+        json!({
+            "id": 424242u64, "number": 42, "state": "closed", "merged": true,
+            "title": "Real merged contribution",
+            "user": {"id": 31, "login": "real-contributor"}
+        }),
+    );
+
+    let feed = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .expect("feed")
+        .value;
+    assert_eq!(feed.activities.len(), 2, "both events keep their identity");
+    assert_eq!(
+        transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.contains("/pulls/42"))
+            .count(),
+        1,
+        "one detail read per distinct pull request"
+    );
+}
+
 #[tokio::test]
 async fn unexpected_304_and_rate_limit_remain_errors_not_empty_values() {
     let temp = tempfile::tempdir().unwrap();
@@ -409,13 +839,18 @@ async fn unexpected_304_and_rate_limit_remain_errors_not_empty_values() {
         headers: vec![],
         body: String::new(),
     });
-    assert!(matches!(
-        session
-            .feed(&Default::default(), Default::default())
-            .await
-            .unwrap_err(),
-        HomeError::InvalidResponse { .. }
-    ));
+    let error = feed_call(&session, &Default::default(), Default::default())
+        .await
+        .unwrap_err();
+    // No validator is sent, so an unexpected 304 is a genuine unexpected status,
+    // not a NotModified replay; it is never a successful empty Feed.
+    assert!(
+        matches!(
+            error,
+            HomeError::GitHub(GitHubError::UnexpectedStatus { status: 304 })
+        ),
+        "{error:?}"
+    );
     transport.push(200, extras_details());
     let repository = svc
         .repo_service()
@@ -764,8 +1199,7 @@ async fn cancellation_service_instance_mismatch_and_stale_pre_call_have_no_leaka
     second.set_active(key(1)).await.unwrap();
     login(&first, &transport, 2, "other", "other-token").await;
     assert_eq!(
-        session
-            .feed(&Default::default(), Default::default())
+        feed_call(&session, &Default::default(), Default::default())
             .await
             .unwrap_err(),
         HomeError::GitHub(GitHubError::StaleContext)
@@ -856,10 +1290,9 @@ async fn slow_credentials_and_shared_permit_never_send_under_superseded_auth() {
         } else {
             None
         };
-        let task =
-            tokio::spawn(
-                async move { session.feed(&Default::default(), Default::default()).await },
-            );
+        let task = tokio::spawn(async move {
+            feed_call(&session, &Default::default(), Default::default()).await
+        });
         if let Some((signal, release)) = release_load {
             ready(signal).await;
             svc.set_active(key(2)).await.unwrap();
@@ -895,7 +1328,8 @@ async fn cancelled_load_does_not_send_and_worker_failure_after_switch_is_stale()
         let session = svc.page_session().unwrap();
         let (ready_signal, release) = pause(&store);
         let (cancel, source) = CancellationToken::new();
-        let task = tokio::spawn(async move { session.feed(&Default::default(), cancel).await });
+        let task =
+            tokio::spawn(async move { feed_call(&session, &Default::default(), cancel).await });
         ready(ready_signal).await;
         if outcome == "panic" {
             svc.close().await.unwrap();

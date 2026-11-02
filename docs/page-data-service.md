@@ -1,6 +1,6 @@
 # Home / Profile / 仓库附加资料的账户数据服务
 
-更新：2026-10-28。已实现于 `src/data/page_reads.rs`；它是现有低层 GitHub 适配器与后续页面集成之间的**账户作用域在线读取 facade**，不是 UI view model，也不表示三个页面已经接入真实数据。低层接口、字段和错误契约继续分别见 [Home/Feed](home-query-service.md)、[Profile](profile-api-service.md)、[仓库附加资料](repository-extras-service.md)，本文不替代这些文档。
+更新：2026-10-30（第二轮）。已实现于 `src/data/page_reads.rs`；它是现有低层 GitHub 适配器与后续页面集成之间的**账户作用域在线读取 facade**，不是 UI view model，也不表示三个页面已经接入真实数据。低层接口、字段和错误契约继续分别见 [Home/Feed](home-query-service.md)、[Profile](profile-api-service.md)、[仓库附加资料](repository-extras-service.md)，本文不替代这些文档。
 
 ## 一个 session，一个授权归属
 
@@ -27,13 +27,45 @@ if repos.is_current(&publication) {
 
 ```rust
 let home = pages.home(updated_window, &HomeSearchLimits::default(), cancel.clone()).await?;
-let feed = pages.feed(&FeedLimits::default(), cancel).await?;
+// Feed composes three bounded reads and applies the product policy once.
+let feed = pages
+    .feed(
+        &FeedLimits::default(),
+        &FollowingLimits::default(),
+        &PullRequestDetailLimits::default(),
+        /* max author lookups */ 30,
+        cancel.clone(),
+    )
+    .await?;
+// Lower-level pieces, for callers that need one of them directly:
+let following = pages.following(&FollowingLimits::default(), cancel.clone()).await?;
+let first = pages.feed_source_page(
+    FeedSourceCursor { page: 1 },
+    &FeedLimits::default(),
+    cancel.clone(),
+).await?;
+let page = pages.feed_page(
+    FeedSourceCursor { page: 2 },
+    &FeedLimits::default(),
+    &FollowingLimits::default(),
+    &PullRequestDetailLimits::default(),
+    /* max author lookups */ 30,
+    &mut seen_ids,
+    cancel,
+).await?;
+let detail = pages
+    .pull_request_detail("owner", "repo", 42, &PullRequestDetailLimits::default(), cancel)
+    .await?;
 ```
 
-- `home` 固定使用捕获活动账户的 login，查询仍为 `involves:<login>`、`updated` 降序。`Option<UpdatedWindow>` 是显式调用参数；传 `None` 不加时间窗口，不提供隐藏默认日期，不增加筛选或 review-requested 关系。
-- `feed` 同样派生捕获 login，是显式在线 received-events 读取；不自动轮询。`FeedOutcome` 原样保留 ETag、`X-Poll-Interval` 和分页 readiness 供未来刷新集成。
+- `home` 固定使用捕获活动账户的 login，查询为 `involves:<login> is:open`、`updated` 降序，最终只发布 open 条目。`Option<UpdatedWindow>` 是显式调用参数；传 `None` 不加时间窗口，不提供隐藏默认日期，不增加 review-requested 关系。
+- `feed` 派生捕获 login，只取**第一源页**并返回 `FeedOutcome.next_page` 游标；随后 `domain::home::build_feed_page` 应用产品策略，`FeedOutcome.activities` 只含“主语是当前账户关注的人”的合并贡献/星标/建库三类，保持源顺序与真实事件身份。触底追加调用 `feed_page(cursor, …, &mut seen_ids, …)`，重读关注关系、按 PR 身份去重解析作者，并用 `build_feed_page` 与调用方传入的 `seen_ids` 跨页去重。`FeedOutcome` 仍带 ETag、`X-Poll-Interval` 与 readiness。
+- `following` 单独暴露关注关系（`Following` + `FollowingReadiness`），供需要原始关系状态的调用方；`feed_events` 暴露未过滤的完整源列表；`feed_source_page` 只取一个游标页；`feed_page` 完成一页“源事件 + 关系 + 作者”并返回策略应用后的 `FeedPage`；`pull_request_detail` 暴露单条作者解析。各返回的 `Scoped` 上下文与 `feed` 相同，都经过同一 `RepoService::read_authenticated` 与 `is_current` 校验。
+- **失败与完整性语义**：关注关系第一页失败或完全读不到 ⇒ `feed` 返回 `Err`（不是空 Feed）；后续页失败或预算截断 ⇒ 相关主语按“未知”扣留并追加 `FollowingIncomplete`；作者详情失败、编号不匹配或详情未确认合并 ⇒ 该贡献扣留并追加 `AuthorUnresolved`；整页都是噪声或都不满足关注关系、且源与关系都完整 ⇒ `Complete` 空 Feed。Follow 两类**事件卡片**仍暂缓，不在此层合成事件。
+- 作者补全采用至多 4 个并行 worker，全部属于同一次读取的 future；取消时结束这一组读取，不派生脱离宿主生命周期的任务。先按 PR 身份去重并分配预算，再通过原授权读取路径请求详情；结果按身份归集，最终卡片仍按源事件顺序输出。每页最多 30 次详情的预算不变。
 - 本切片不接受、保存或发送 Feed 条件验证器。无验证器却收到 304 时，facade 返回 `HomeError::InvalidResponse`，绝不发布 `NotModified` 或空事件。未来只有具备相同账户/参数/表示的已验证缓存值后，才能另接条件读取。
-- `HomeReadiness` / `FeedReadiness` 的 Partial、空集合、SSO、分页、限流和错误语义不变。
+- `HomeReadiness` / `FeedReadiness` 的 Partial、空集合、SSO、分页、限流和错误语义不变；`FeedReadiness` 另有 `FollowingIncomplete` 与 `AuthorUnresolved` 两种 Partial 原因。
+- 关注关系与作者解析都使用同一捕获账户的凭据，切换账户后旧结果由 `is_current` 判为 `StaleContext`；本层不做缓存，因此不存在跨账户复用关系或长期保留已取关主语的问题。
 
 ### Profile
 
@@ -84,7 +116,7 @@ let languages = pages.languages(&repository, &extras_limits, cancel).await?;
 
 本层不建立第二套 DTO：`HomeSearchOutcome`、`FeedFetch`、`ProfileBasic`、`ProfilePinned`、`ContributionCalendar`、`ReleasesOutcome`、`LatestReleaseOutcome`、`ContributorsOutcome`、`LanguagesOutcome` 和 `PreparedContent` 直接供页面消费。UI 自己决定展示策略和本地 request identity，不接触 PAT。
 
-本轮没有 UI/Shell/repository-browser 挂载、缓存或存储、请求合并、轮询、自动刷新、离线读取、条件重验证、图片下载或 Home 新筛选。fixture preview 与真实数据接入是不同事项；即使后续页面接受这些模型，也不表示已完成生产接线。离线缓存、验证器与表示的对应关系、账户移除后的私有内容政策仍待相应集成任务明确实现。
+本轮没有缓存或存储、请求合并、轮询、自动刷新、离线读取、条件重验证或图片下载。fixture preview 与真实数据接入是不同事项；即使后续页面接受这些模型，也不表示已完成生产接线。离线缓存、验证器与表示的对应关系、账户移除后的私有内容政策仍待相应集成任务明确实现。
 
 ## 验证
 

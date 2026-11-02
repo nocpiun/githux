@@ -17,11 +17,16 @@ mod view;
 #[cfg(test)]
 mod tests;
 
+// These presentation helpers are consumed by the standalone Profile assembly and its tests. The
+// Shell mounts the same `ProfileView`; this allowance does not cover page or loading logic.
+#[allow(unused_imports)]
 pub use heatmap::{CellLevel, DayPresentation, HeatmapPresentation, heatmap_presentation};
+#[allow(unused_imports)]
 pub use model::{
     PresentationError, ProfileBinding, ProfileRequest, ProfileTarget, RepositoryPresentation,
     RepositoryTarget, SectionState, repository_presentation,
 };
+
 pub use view::ProfileView;
 
 use crate::ui::reader::ReaderAction;

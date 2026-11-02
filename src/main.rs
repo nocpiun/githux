@@ -15,6 +15,10 @@ mod storage;
 mod ui;
 mod workspace;
 
+#[cfg(test)]
+#[path = "bin_support/test_repository_modules.rs"]
+mod repository_modules;
+
 fn main() {
     app::run();
 }

@@ -1,11 +1,12 @@
 //! Flat profile identity header. Public metadata is secondary to the person.
 use super::{ProfileActionKind, ProfileView, SectionState};
+use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
-    primitives::{Icon, IconName, Tooltip},
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, TextSize},
 };
 use gpui::{
-    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px,
+    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*,
 };
 
 impl ProfileView {
@@ -64,7 +65,7 @@ impl ProfileView {
                         .color(theme.colors.fg_muted),
                 )
                 .child(div().hover(|s| s.underline()).child(label))
-                .tooltip(Tooltip::text(url.clone()))
+                .tooltip(ui_tooltip(url.clone()))
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if view.accepts(&request) {
                         view.emit(
@@ -95,21 +96,16 @@ impl ProfileView {
             .flex()
             .items_start()
             .gap_5()
-            .child(
-                div()
-                    .debug_selector(|| "profile-avatar-initials".into())
-                    .flex_none()
-                    .size(px(84.0))
-                    .rounded_full()
-                    .bg(theme.colors.accent.opacity(0.18))
-                    .text_color(theme.colors.fg)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(theme.text_size(TextSize::Xl))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(super::render::initials(basic)),
-            )
+            .child(crate::ui::avatar::avatar(
+                crate::ui::avatar::AvatarView {
+                    id: "profile-header-avatar",
+                    selector: "profile-avatar-initials",
+                    image: self.avatar.clone(),
+                    name: &display,
+                    slot: crate::ui::avatar::AvatarSlot::Rems(gpui::rems(84.0 / 16.0)),
+                },
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()

@@ -23,6 +23,16 @@ pub enum RepositoryError {
     SsoPartial { organizations: Vec<String> },
 }
 
+/// Validators belonging to one exact REST representation. These never grant
+/// repository access and are not synthesized for GraphQL or aggregate pages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepositoryResponseMetadata {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub cache_control: Option<String>,
+    pub(crate) network_observed: bool,
+}
+
 /// A validated full SHA-1, never a dynamic ref or arbitrary URL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectSha(String);

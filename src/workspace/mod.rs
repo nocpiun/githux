@@ -22,7 +22,7 @@
 
 use gpui::{App, FocusHandle, ScrollHandle};
 
-use crate::domain::{AccountKey, RepoSummary};
+use crate::domain::{AccountKey, AccountSummary, RepoSummary};
 
 /// Stable identity of one session. Ids increase monotonically and a closed id is never handed out
 /// again.
@@ -43,10 +43,22 @@ pub enum RouteKey {
     Home,
     Settings,
     Profile,
+    UserProfile {
+        host: crate::domain::HostId,
+        login: String,
+    },
     Notifications,
     Issues,
     PullRequests,
-    Repository { namespace: String, name: String },
+    PullRequest {
+        namespace: String,
+        name: String,
+        number: u64,
+    },
+    Repository {
+        namespace: String,
+        name: String,
+    },
 }
 
 /// One addressable page in the workspace.
@@ -57,14 +69,26 @@ pub enum Route {
     Home,
     /// Global settings. Options are not designed yet; the page is intentionally empty.
     Settings,
-    /// The signed-in profile. Overview content is not implemented this round.
+    /// The signed-in profile.
     Profile,
+    /// Another user's public profile, addressed by host and canonical-or-requested login until
+    /// the server confirms its stable numeric identity and canonical spelling.
+    UserProfile {
+        host: crate::domain::HostId,
+        login: String,
+    },
     /// Notification center. Content is not designed yet; the page is intentionally empty.
     Notifications,
     /// Cross-repository personal issues. Content is not designed yet.
     Issues,
     /// Cross-repository personal pull requests. Content is not designed yet.
     PullRequests,
+    /// One pull request in Githux. The detail surface is a separate task.
+    PullRequest {
+        namespace: String,
+        name: String,
+        number: u64,
+    },
     /// A repository identified by its namespace and name; its reader is a later task.
     Repository { namespace: String, name: String },
 }
@@ -83,15 +107,49 @@ impl Route {
         self.key() == Self::repository(repo).key()
     }
 
+    /// Route a profile link through the same own/other-user identity rules everywhere.
+    pub fn profile(login: impl Into<String>, account: Option<&AccountSummary>) -> Self {
+        let login = login.into();
+        if account.is_some_and(|account| account.identity.login.eq_ignore_ascii_case(&login)) {
+            Self::Profile
+        } else {
+            Self::UserProfile {
+                host: crate::domain::HostId::github(),
+                login,
+            }
+        }
+    }
+
+    pub fn profile_login(&self, account: Option<&AccountSummary>) -> Option<String> {
+        match self {
+            Self::Profile => account.map(|account| account.identity.login.clone()),
+            Self::UserProfile { login, .. } => Some(login.clone()),
+            _ => None,
+        }
+    }
+
     /// The comparable resource identity; see [`RouteKey`].
     pub fn key(&self) -> RouteKey {
         match self {
             Self::Home => RouteKey::Home,
             Self::Settings => RouteKey::Settings,
             Self::Profile => RouteKey::Profile,
+            Self::UserProfile { host, login } => RouteKey::UserProfile {
+                host: host.clone(),
+                login: login.to_ascii_lowercase(),
+            },
             Self::Notifications => RouteKey::Notifications,
             Self::Issues => RouteKey::Issues,
             Self::PullRequests => RouteKey::PullRequests,
+            Self::PullRequest {
+                namespace,
+                name,
+                number,
+            } => RouteKey::PullRequest {
+                namespace: namespace.to_ascii_lowercase(),
+                name: name.to_ascii_lowercase(),
+                number: *number,
+            },
             Self::Repository { namespace, name } => RouteKey::Repository {
                 namespace: namespace.to_ascii_lowercase(),
                 name: name.to_ascii_lowercase(),
@@ -106,9 +164,15 @@ impl Route {
             Self::Home => "Home".to_string(),
             Self::Settings => "Settings".to_string(),
             Self::Profile => "Profile".to_string(),
+            Self::UserProfile { login, .. } => login.clone(),
             Self::Notifications => "Notifications".to_string(),
             Self::Issues => "Issues".to_string(),
             Self::PullRequests => "Pull requests".to_string(),
+            Self::PullRequest {
+                namespace,
+                name,
+                number,
+            } => format!("{namespace}/{name} #{number}"),
             Self::Repository { namespace, name } => format!("{namespace}/{name}"),
         }
     }
@@ -144,6 +208,9 @@ pub struct PageState {
     pub bars: crate::ui::scroll::Bars,
     pub focus: FocusHandle,
     pub strip_focus: FocusHandle,
+    /// Navigation intent for a repository tab. The live page host owns fetched content; this
+    /// field is what survives an ordinary tab switch and the shell's routing tests.
+    #[allow(dead_code)]
     pub repository: Option<RepositorySession>,
 }
 
@@ -179,6 +246,10 @@ impl Session {
 
     pub fn state(&self) -> &PageState {
         &self.state
+    }
+
+    pub(crate) fn replace_route(&mut self, route: Route) {
+        self.route = route;
     }
 
     /// The reader that arrives in R3 mutates this; tests drive it until then.
@@ -269,6 +340,14 @@ impl Workspace {
     pub fn active(&self) -> &Session {
         self.session(self.active)
             .expect("the active session is always present")
+    }
+
+    /// A canonical server identity may replace only the requested resource's route. Never use
+    /// this for an unrelated late response: the caller has already checked the original request.
+    pub(crate) fn canonicalize(&mut self, id: TabId, route: Route) {
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            session.replace_route(route);
+        }
     }
 
     pub fn route(&self) -> &Route {
@@ -538,6 +617,38 @@ mod tests {
             );
             assert_eq!(workspace.sessions().len(), 2);
             assert_eq!(workspace.route(), &repo("Githux-Dev", "GitHux"));
+        });
+    }
+
+    #[gpui::test]
+    fn pull_request_sessions_reuse_case_aliases_and_keep_resource_identity(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut workspace = Workspace::new(cx);
+            let route = |owner: &str, repo: &str, number| Route::PullRequest {
+                namespace: owner.into(),
+                name: repo.into(),
+                number,
+            };
+            let opened = match workspace.open(route("Owner", "Repo", 41), cx) {
+                OpenResult::Opened(id) => id,
+                other => panic!("expected a new PR session, got {other:?}"),
+            };
+            assert_eq!(
+                workspace.open(route("owner", "repo", 41), cx),
+                OpenResult::Activated(opened)
+            );
+            assert_eq!(workspace.route().title(), "Owner/Repo #41");
+            assert!(matches!(
+                workspace.open(route("owner", "repo", 42), cx),
+                OpenResult::Opened(_)
+            ));
+            assert!(matches!(
+                workspace.open(route("owner", "other", 41), cx),
+                OpenResult::Opened(_)
+            ));
+            assert_eq!(workspace.sessions().len(), 4);
         });
     }
 

@@ -39,6 +39,8 @@ pub enum Scene {
     NoReadme,
     /// The first attempt to open `docs` fails; a retry succeeds.
     DirectoryFailure,
+    /// Branch enumeration fails once while the default branch still browses.
+    BranchesFailure,
     /// The first attempt to read `src/main.rs` fails; a retry succeeds.
     FileFailure,
     /// A complete, empty branch list: no commit can be selected.
@@ -59,20 +61,38 @@ pub enum Scene {
     OverviewZero,
     OverviewLong,
     LatestUnavailable,
+    ReleasesFailure,
     ReadmeParagraphEnd,
     ReadmeListEnd,
     ReadmeCodeEnd,
     ReadmeTableEnd,
+    /// The current account begins unstarred; PUT/DELETE change a stateful
+    /// offline fixture and each summary supplies its new authoritative count.
+    StarUnstarred,
+    /// The current account begins starred.
+    StarStarred,
+    /// Every PUT is forbidden; no local state or count changes.
+    StarRejected,
+    /// The first write times out after applying; GET reconciles it without a replay.
+    StarTimeoutApplied,
+    /// The first write times out before applying; GET proves the old state remains.
+    StarTimeoutNotApplied,
+    /// Writes and reconciliation both time out, leaving an explicit unknown outcome.
+    StarTimeoutUnknown,
+    /// A write succeeds but its first summary refresh fails once; Retry uses
+    /// two GETs to restore the authoritative count without replaying the write.
+    StarSummaryFailure,
 }
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 22] = [
+    pub const ALL: [Scene; 31] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
         Scene::NoReadme,
         Scene::DirectoryFailure,
+        Scene::BranchesFailure,
         Scene::FileFailure,
         Scene::NoBranches,
         Scene::TruncatedTree,
@@ -86,10 +106,18 @@ impl Scene {
         Scene::OverviewZero,
         Scene::OverviewLong,
         Scene::LatestUnavailable,
+        Scene::ReleasesFailure,
         Scene::ReadmeParagraphEnd,
         Scene::ReadmeListEnd,
         Scene::ReadmeCodeEnd,
         Scene::ReadmeTableEnd,
+        Scene::StarUnstarred,
+        Scene::StarStarred,
+        Scene::StarRejected,
+        Scene::StarTimeoutApplied,
+        Scene::StarTimeoutNotApplied,
+        Scene::StarTimeoutUnknown,
+        Scene::StarSummaryFailure,
     ];
 
     pub fn label(self) -> &'static str {
@@ -100,15 +128,24 @@ impl Scene {
             Scene::OverviewZero => "Overview zero",
             Scene::OverviewLong => "Overview long",
             Scene::LatestUnavailable => "Latest unavailable",
+            Scene::ReleasesFailure => "Releases failure",
             Scene::ReadmeParagraphEnd => "README paragraph end",
             Scene::ReadmeListEnd => "README list end",
             Scene::ReadmeCodeEnd => "README code end",
             Scene::ReadmeTableEnd => "README table end",
+            Scene::StarUnstarred => "Star · initially unstarred",
+            Scene::StarStarred => "Star · initially starred",
+            Scene::StarRejected => "Star · rejected",
+            Scene::StarTimeoutApplied => "Star · timeout applied",
+            Scene::StarTimeoutNotApplied => "Star · timeout not applied",
+            Scene::StarTimeoutUnknown => "Star · outcome unknown",
+            Scene::StarSummaryFailure => "Star · summary retry",
             Scene::Normal => "Normal",
             Scene::EmptyRepository => "Empty repository",
             Scene::ReadmeUncertain => "README uncertain",
             Scene::NoReadme => "No README",
             Scene::DirectoryFailure => "Directory failure",
+            Scene::BranchesFailure => "Branches failure",
             Scene::FileFailure => "File failure",
             Scene::NoBranches => "No branches",
             Scene::TruncatedTree => "Truncated tree",
@@ -140,11 +177,35 @@ impl Scene {
             Scene::LatestUnavailable => {
                 "The list contains releases but latest is 404: latest unavailable does not prove no releases."
             }
+            Scene::ReleasesFailure => {
+                "The first latest request fails once; the compact warning mark retries only Releases and recovers."
+            }
             Scene::ReadmeParagraphEnd
             | Scene::ReadmeListEnd
             | Scene::ReadmeCodeEnd
             | Scene::ReadmeTableEnd => {
                 "Long README with a representative final block. Wheel or drag the reader thumb to the bottom; content inset must remain visible."
+            }
+            Scene::StarUnstarred => {
+                "Initially unstarred. Star and Unstar use the real local service chain; the count comes from a fresh summary. Fork stays disabled."
+            }
+            Scene::StarStarred => {
+                "Initially starred. Unstar returns to Star only after the server confirms; repeat clicks are suppressed while busy."
+            }
+            Scene::StarRejected => {
+                "The write is rejected with 403. The last observed state stays unchanged; the warning retries with GET only."
+            }
+            Scene::StarTimeoutApplied => {
+                "The first write applies but its response times out. GET proves the new state; PUT/DELETE is not replayed."
+            }
+            Scene::StarTimeoutNotApplied => {
+                "The first write times out before applying. GET proves the old state and no write is replayed."
+            }
+            Scene::StarTimeoutUnknown => {
+                "The write and reconciliation time out. The warning preserves the last observed state and retries with GET only."
+            }
+            Scene::StarSummaryFailure => {
+                "The write succeeds but its first count refresh fails. Retry re-reads status and summary with GET only; the warning remains until the count recovers."
             }
             Scene::Normal => {
                 "Two branches, README, docs, src and a nested directory. Everything is browsable and repeatable."
@@ -160,6 +221,9 @@ impl Scene {
             }
             Scene::DirectoryFailure => {
                 "Opening docs fails once; the directory row reports it and one retry succeeds."
+            }
+            Scene::BranchesFailure => {
+                "The first branch listing fails; the default branch stays readable and the retry restores the picker."
             }
             Scene::FileFailure => {
                 "Reading src/main.rs fails once; the reader reports it and one retry succeeds."
@@ -322,9 +386,12 @@ fn locator_path() -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArmedFailure {
     Languages,
+    Releases,
+    Branches,
     Root,
     Directory,
     File,
+    StarSummary,
 }
 
 /// A deterministic, request-addressed repository.
@@ -340,6 +407,12 @@ pub struct FixtureTransport {
     /// Which synthetic identity the next `/user` answers. Tests use it to make
     /// A→B→A a real account change instead of two names for one account.
     identity: Mutex<(u64, String)>,
+    /// Per-account server state. Account switches cannot inherit another
+    /// account's starred observation; aggregate counts live only in summaries.
+    starred: Mutex<BTreeMap<u64, bool>>,
+    star_writes: Mutex<usize>,
+    star_methods: Mutex<Vec<(u64, crate::network::transport::HttpMethod)>>,
+    star_counts: Mutex<BTreeMap<u64, u64>>,
 }
 
 impl FixtureTransport {
@@ -350,12 +423,17 @@ impl FixtureTransport {
             requests: Mutex::new(Vec::new()),
             mismatches: Mutex::new(VecDeque::new()),
             identity: Mutex::new((7, OWNER.to_string())),
+            starred: Mutex::new(BTreeMap::new()),
+            star_writes: Mutex::new(0),
+            star_methods: Mutex::new(Vec::new()),
+            star_counts: Mutex::new(BTreeMap::from([(7, 128), (1, 128), (8, 128)])),
         }
     }
 
     /// Sets the identity a later `/user` (i.e. login) will verify.
     pub fn set_identity(&self, id: u64, login: &str) {
         *self.identity.lock().unwrap() = (id, login.to_string());
+        self.star_counts.lock().unwrap().entry(id).or_insert(128);
     }
 
     /// Switches scene, clearing any half-consumed failure and the request log.
@@ -364,6 +442,8 @@ impl FixtureTransport {
         *self.armed.lock().unwrap() = armed_for(scene);
         self.requests.lock().unwrap().clear();
         self.mismatches.lock().unwrap().clear();
+        self.starred.lock().unwrap().clear();
+        *self.star_writes.lock().unwrap() = 0;
     }
 
     pub fn scene(&self) -> Scene {
@@ -387,6 +467,15 @@ impl FixtureTransport {
 
     pub fn clear_recorded(&self) {
         self.requests.lock().unwrap().clear();
+    }
+
+    pub fn star_method_count(&self, method: crate::network::transport::HttpMethod) -> usize {
+        self.star_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, recorded)| *recorded == method)
+            .count()
     }
 
     /// Development configuration errors seen so far (unmodelled requests).
@@ -415,6 +504,9 @@ impl FixtureTransport {
         let scene = self.scene();
         let url = &request.url;
         self.record(url);
+        if split_url(url).is_some_and(|(path, _)| path == "/user/starred/octo/ledger") {
+            return self.answer_star(request, scene);
+        }
         if request.method == crate::network::transport::HttpMethod::Post
             && url.ends_with("/graphql")
         {
@@ -471,7 +563,13 @@ impl FixtureTransport {
 
         match rest {
             // GET /repos/{owner}/{name}
-            "" => Ok(json_response(200, &details_body(scene, url).to_string())),
+            "" if scene == Scene::StarSummaryFailure
+                && *self.star_writes.lock().unwrap() > 0
+                && self.take_armed(ArmedFailure::StarSummary) =>
+            {
+                Ok(json_response(503, "{}"))
+            }
+            "" => Ok(json_response(200, &self.details_body(scene).to_string())),
             "/branches" => Ok(self.branches(scene, url)),
             "/releases" | "/releases/latest" | "/contributors" | "/languages" => {
                 Ok(self.extras(rest, query, scene, url))
@@ -494,9 +592,95 @@ impl FixtureTransport {
         }
     }
 
+    fn answer_star(
+        &self,
+        request: &HttpRequest,
+        scene: Scene,
+    ) -> Result<HttpResponse, TransportError> {
+        let account = self.identity.lock().unwrap().0;
+        self.star_methods
+            .lock()
+            .unwrap()
+            .push((account, request.method));
+        let initially_starred = scene == Scene::StarStarred;
+        let starred = *self
+            .starred
+            .lock()
+            .unwrap()
+            .entry(account)
+            .or_insert(initially_starred);
+        if request.method == crate::network::transport::HttpMethod::Get {
+            if scene == Scene::StarTimeoutUnknown && *self.star_writes.lock().unwrap() > 0 {
+                return Err(TransportError::Timeout { seconds: 1 });
+            }
+            return Ok(json_response(if starred { 204 } else { 404 }, ""));
+        }
+        let desired = match request.method {
+            crate::network::transport::HttpMethod::Put => true,
+            crate::network::transport::HttpMethod::Delete => false,
+            _ => return Ok(self.mismatch(&request.url)),
+        };
+        *self.star_writes.lock().unwrap() += 1;
+        if scene == Scene::StarRejected {
+            return Ok(json_response(
+                403,
+                &serde_json::json!({"message":"Synthetic Starring permission denied"}).to_string(),
+            ));
+        }
+        let first_write = *self.star_writes.lock().unwrap() == 1;
+        let timeout = first_write
+            && matches!(
+                scene,
+                Scene::StarTimeoutApplied
+                    | Scene::StarTimeoutNotApplied
+                    | Scene::StarTimeoutUnknown
+            );
+        let applied = !matches!(
+            scene,
+            Scene::StarTimeoutNotApplied | Scene::StarTimeoutUnknown
+        );
+        if applied {
+            self.starred.lock().unwrap().insert(account, desired);
+            let count = self
+                .star_counts
+                .lock()
+                .unwrap()
+                .get(&account)
+                .copied()
+                .unwrap_or(128);
+            let count = match (starred, desired) {
+                (false, true) => count.saturating_add(1),
+                (true, false) => count.saturating_sub(1),
+                _ => count,
+            };
+            self.star_counts.lock().unwrap().insert(account, count);
+        }
+        if timeout {
+            return Err(TransportError::Timeout { seconds: 1 });
+        }
+        Ok(json_response(204, ""))
+    }
+
+    fn details_body(&self, scene: Scene) -> serde_json::Value {
+        let account = self.identity.lock().unwrap().0;
+        let mut body = details_body(scene);
+        body["stargazers_count"] = serde_json::json!(
+            self.star_counts
+                .lock()
+                .unwrap()
+                .get(&account)
+                .copied()
+                .unwrap_or(128)
+        );
+        body
+    }
+
     fn branches(&self, scene: Scene, url: &str) -> HttpResponse {
         if scene == Scene::NoBranches {
             return json_response(200, "[]");
+        }
+        if scene == Scene::BranchesFailure && self.take_armed(ArmedFailure::Branches) {
+            return json_response(500, "{}");
         }
         let names: Vec<&str> = BRANCHES
             .iter()
@@ -768,6 +952,7 @@ impl FixtureTransport {
         });
         let body = match resource {
             "/releases/latest" if matches!(scene, Scene::LatestUnavailable | Scene::OverviewZero) => return json_response(404,"{}"),
+            "/releases/latest" if scene == Scene::ReleasesFailure && self.take_armed(ArmedFailure::Releases) => return json_response(500,"{}"),
             "/releases/latest" => release,
             "/releases" => if scene == Scene::OverviewZero {serde_json::json!([])} else {serde_json::json!([release])},
             "/contributors" => serde_json::Value::Array((0..if scene == Scene::OverviewZero {0} else if scene == Scene::OverviewLong {35} else {4})
@@ -804,9 +989,12 @@ impl FixtureTransport {
 fn armed_for(scene: Scene) -> Option<ArmedFailure> {
     match scene {
         Scene::DirectoryFailure => Some(ArmedFailure::Directory),
+        Scene::BranchesFailure => Some(ArmedFailure::Branches),
         Scene::RootFailure => Some(ArmedFailure::Root),
         Scene::OverviewError => Some(ArmedFailure::Languages),
+        Scene::ReleasesFailure => Some(ArmedFailure::Releases),
         Scene::FileFailure => Some(ArmedFailure::File),
+        Scene::StarSummaryFailure => Some(ArmedFailure::StarSummary),
         _ => None,
     }
 }
@@ -1058,8 +1246,7 @@ fn long_tree_entries() -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn details_body(scene: Scene, url: &str) -> serde_json::Value {
-    let _ = (scene, url);
+fn details_body(_scene: Scene) -> serde_json::Value {
     serde_json::json!({
         "id": 42,
         "name": NAME,

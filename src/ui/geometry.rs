@@ -84,8 +84,7 @@ pub const REPO_ROW_HEIGHT: f32 = 30.0;
 pub const ACCOUNT_ROW_HEIGHT: f32 = 48.0;
 
 /// Height of a Home activity row.
-pub const ACTIVITY_ROW_HEIGHT: f32 = 52.0;
-
+///
 /// The application session tab strip at the top of the island.
 ///
 /// The strip's inset is one value on every in-scroll edge, so the first tab's top and left gaps

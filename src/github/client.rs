@@ -70,6 +70,29 @@ impl GitHubClient {
         .with_header("Content-Type", "application/json")
     }
 
+    /// Build the one supported empty-body PUT (Star). Redirects are never
+    /// followed by the transport and the caller never automatically replays it.
+    pub fn build_put(&self, path_or_url: &str, token: &Pat) -> HttpRequest {
+        self.build(
+            HttpMethod::Put,
+            path_or_url,
+            token,
+            &self.config.accept,
+            None,
+        )
+    }
+
+    /// Build the one supported empty-body DELETE (Unstar).
+    pub fn build_delete(&self, path_or_url: &str, token: &Pat) -> HttpRequest {
+        self.build(
+            HttpMethod::Delete,
+            path_or_url,
+            token,
+            &self.config.accept,
+            None,
+        )
+    }
+
     fn build(
         &self,
         method: HttpMethod,
@@ -91,6 +114,8 @@ impl GitHubClient {
         let mut req = match method {
             HttpMethod::Get => HttpRequest::get(&url),
             HttpMethod::Post => HttpRequest::post(&url, body.unwrap_or_default()),
+            HttpMethod::Put => HttpRequest::put(&url),
+            HttpMethod::Delete => HttpRequest::delete(&url),
         }
         .with_header("User-Agent", &self.config.user_agent)
         .with_header("Accept", accept)
@@ -204,6 +229,41 @@ mod tests {
 
         let untrusted = client.build_post("https://evil.com/graphql", &pat, "{}".to_string());
         assert!(!untrusted.headers.iter().any(|(k, _)| k == "Authorization"));
+    }
+
+    #[test]
+    fn starring_writes_keep_fixed_headers_and_origin_guards() {
+        let client = GitHubClient::new(
+            GitHubConfig::default(),
+            Arc::new(crate::network::transport::MockTransport::new()),
+        );
+        let token = Pat::from_str("ghp_secret123");
+        for (request, method) in [
+            (
+                client.build_put("user/starred/octo/ledger", &token),
+                HttpMethod::Put,
+            ),
+            (
+                client.build_delete("user/starred/octo/ledger", &token),
+                HttpMethod::Delete,
+            ),
+        ] {
+            assert_eq!(request.method, method);
+            assert!(request.body.is_none());
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "Authorization" && value == "Bearer ghp_secret123")
+            );
+        }
+        let hostile = client.build_put("https://evil.example/user/starred/a/b", &token);
+        assert!(
+            !hostile
+                .headers
+                .iter()
+                .any(|(name, _)| name == "Authorization")
+        );
     }
 
     /// Regression: an `@` or host-looking text in the *path* must not make an
