@@ -558,3 +558,62 @@ async fn confirmed_unsubscribe_survives_a_failed_done_retry() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn a_shorter_rate_hint_never_shortens_an_outstanding_cooldown() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let rate = |seconds: u32| NotificationMetadata {
+        rate_limit: NotificationRateLimit {
+            retry_after: Some(seconds),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let first = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    let second = inbox
+        .begin_thread_action("9001", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    // A long restriction lands first, then a shorter concurrent completion.
+    inbox.finish_thread_action(
+        &first,
+        Err(PageFailure {
+            error: GitHubError::RateLimited {
+                retry: crate::domain::error::RetryAfter {
+                    kind: crate::domain::error::RateLimitKind::Secondary,
+                    seconds: Some(90),
+                },
+            }
+            .into(),
+            metadata: rate(90),
+        }),
+        Instant::now(),
+    );
+    inbox.finish_thread_action(
+        &second,
+        Err(PageFailure {
+            error: GitHubError::RateLimited {
+                retry: crate::domain::error::RetryAfter {
+                    kind: crate::domain::error::RateLimitKind::Secondary,
+                    seconds: Some(5),
+                },
+            }
+            .into(),
+            metadata: rate(5),
+        }),
+        Instant::now(),
+    );
+    let cooldown = inbox.snapshot().action_cooldown_seconds;
+    assert!(
+        cooldown > 80,
+        "the 90s restriction must survive the later 5s hint, got {cooldown}s"
+    );
+    assert!(matches!(
+        inbox.begin_thread_action("9002", ThreadAction::Done),
+        Err(NotificationError::Cooldown { .. })
+    ));
+}

@@ -279,9 +279,7 @@ impl Notifications {
             .chain(reset)
             .max()
             .or(if rate_failure { Some(60) } else { None });
-        if let Some(retry) = retry {
-            state.request_after = now.checked_add(Duration::from_secs(retry.max(1)));
-        }
+        extend_request_after(&mut state, retry, now);
         match result {
             Err(failure) => {
                 state.snapshot.error = Some(failure.error);
@@ -492,9 +490,7 @@ impl Notifications {
             .chain(reset)
             .max()
             .or(if rate_failure { Some(60) } else { None });
-        if let Some(retry) = retry {
-            state.request_after = now.checked_add(Duration::from_secs(retry.max(1)));
-        }
+        extend_request_after(&mut state, retry, now);
 
         match result {
             Ok(notifications::UnsubscribeOutcome::Completed(_)) => {
@@ -550,6 +546,21 @@ impl Notifications {
         state.snapshot.thread_states.clear();
     }
 }
+/// Concurrent completions may each report a rate-limit deadline. A later,
+/// shorter hint must never shorten an already outstanding longer restriction.
+fn extend_request_after(state: &mut State, retry: Option<u64>, now: Instant) {
+    let Some(retry) = retry else {
+        return;
+    };
+    let Some(candidate) = now.checked_add(Duration::from_secs(retry.max(1))) else {
+        return;
+    };
+    state.request_after = Some(match state.request_after {
+        Some(existing) if existing > candidate => existing,
+        _ => candidate,
+    });
+}
+
 fn seconds(duration: Duration) -> u64 {
     duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
 }
