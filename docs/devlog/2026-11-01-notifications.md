@@ -78,7 +78,10 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 11. 冷却唤醒 task 完成后不清理 `cooldown_wake`，后续 render 不再为较晚截止计时。改为完成后清零并立即重排剩余截止。
 12. 页面销毁时 `visible_lifetime` 的弱引用无法升级，`leave` 不被调用，排队写请求仍会发出。改为 `cx.on_release` 无条件调用 `leave`，并在控制器最后一个持有者 `Drop` 时取消动作令牌。
 
-以上十二条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
+13. 页面销毁/离开后旧动作仍可能发布：`cancel()` 轮换令牌但不使在途代次失效。改为取消时对每个未完成线程递增 `action_lifecycle` 并重写其代次，旧取消回复/迟到的成功都无法覆盖或删除行；回归 `cancelling_invalidates_the_in_flight_action_generation`。
+14. 两步写操作之前包在同一个 `session.read` 里，账户在 PUT 与 DELETE 之间切换时第二步仍用旧 PAT。改为 `ignore_subscription` 与 `mark_done` 各走一次独立 `session.read`（两个授权检查点）；回归 `unsubscribe_revalidates_authorization_before_the_done_step`（在 PUT 挂起时切换账户，断言第二步 DELETE 零请求）。
+
+以上十四条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
 
 **与最新 main 组合**：合并 `origin/main` 时 `src/data/mod.rs` 只有新增模块声明的文本冲突，保留双方声明即可。发现 Newer main 的 `global_work_items` 通过 `#[path = "../home/time.rs"]` 复用 Home 时间实现，而我已把实现移到 `src/ui/relative_time.rs`；为不破坏该消费者，把 `src/ui/home/time.rs` 恢复为仅转发的 shim，并在其独立装配 `work_items_modules.rs` 注册共享模块，仍只有一份解析器。第一次完整 `cargo test` 出现两个与本任务无关的 main 侧偶发失败（`repository_descriptions_deduplicates...`、`reader_images::fixed_revision_images...` 的 `InUse`），单独重跑均通过，随后完整重跑全部通过；记录为既有测试的顺序/资源偶发，不归因本任务，也不掩盖。
 

@@ -442,21 +442,66 @@ impl Notifications {
                 }
             }
             ThreadAction::Unsubscribe => {
-                let tid = thread_id.clone();
-                let res = self
-                    .session
-                    .read(request.cancel.clone(), async move |pat, cancel| {
-                        Ok::<_, GitHubError>(
-                            notifications::unsubscribe_thread(&client, &pat, &tid, cancel).await,
-                        )
-                    })
-                    .await;
-                match res {
-                    Ok(scoped) => scoped.value,
-                    Err(err) => Err(PageFailure {
-                        error: err.into(),
-                        metadata: NotificationMetadata::default(),
-                    }),
+                // Two independent authorization checkpoints: an account switch
+                // or PAT replacement between the PUT and the DELETE must stop
+                // the second write from using the old credential.
+                let first = {
+                    let tid = thread_id.clone();
+                    let step_client = client.clone();
+                    let res = self
+                        .session
+                        .read(request.cancel.clone(), async move |pat, cancel| {
+                            Ok::<_, GitHubError>(
+                                notifications::ignore_subscription(
+                                    &step_client,
+                                    &pat,
+                                    &tid,
+                                    cancel,
+                                )
+                                .await,
+                            )
+                        })
+                        .await;
+                    match res {
+                        Ok(scoped) => scoped.value,
+                        Err(err) => Err(PageFailure {
+                            error: err.into(),
+                            metadata: NotificationMetadata::default(),
+                        }),
+                    }
+                };
+                match first {
+                    Ok(meta) => {
+                        let tid = thread_id.clone();
+                        let step_client = client.clone();
+                        let res = self
+                            .session
+                            .read(request.cancel.clone(), async move |pat, cancel| {
+                                Ok::<_, GitHubError>(
+                                    notifications::mark_done(&step_client, &pat, &tid, cancel)
+                                        .await,
+                                )
+                            })
+                            .await;
+                        match res {
+                            Ok(scoped) => match scoped.value {
+                                Ok(done_meta) => {
+                                    Ok(notifications::UnsubscribeOutcome::Completed(done_meta))
+                                }
+                                Err(failure) => {
+                                    Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed {
+                                        done_error: failure.error,
+                                        metadata: failure.metadata.merge_restrictions(&meta),
+                                    })
+                                }
+                            },
+                            Err(err) => Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed {
+                                done_error: err.into(),
+                                metadata: NotificationMetadata::default().merge_restrictions(&meta),
+                            }),
+                        }
+                    }
+                    Err(failure) => Err(failure),
                 }
             }
         };
@@ -585,7 +630,13 @@ impl Notifications {
         // publish a failure state or remove a row into the retained view.
         state.action_lifecycle += 1;
         let lifecycle = state.action_lifecycle;
-        for thread_id in state.snapshot.thread_states.keys().cloned().collect::<Vec<_>>() {
+        for thread_id in state
+            .snapshot
+            .thread_states
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             state.action_generations.insert(thread_id, lifecycle);
         }
         state.snapshot.busy = None;

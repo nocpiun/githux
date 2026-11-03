@@ -71,6 +71,8 @@ struct State {
     now: u64,
     failed: bool,
     requests: Vec<HttpRequest>,
+    /// When set, the subscription PUT parks until the returned receiver fires.
+    gate_subscription: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 pub struct Fixture {
     state: Mutex<State>,
@@ -86,6 +88,7 @@ impl Fixture {
                 now,
                 failed: false,
                 requests: vec![],
+                gate_subscription: None,
             }),
         }
     }
@@ -96,6 +99,13 @@ impl Fixture {
     }
     pub fn set_clock(&self, now: u64) {
         self.state.lock().unwrap().now = now;
+    }
+
+    /// The next subscription PUT parks until the returned receiver is signalled.
+    pub fn gate_next_subscription(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().gate_subscription = Some(rx);
+        tx
     }
     pub fn requests(&self) -> Vec<HttpRequest> {
         self.state.lock().unwrap().requests.clone()
@@ -296,8 +306,24 @@ impl Transport for Fixture {
         cancel: CancellationToken,
         max: usize,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        let gate = {
+            let mut state = self.state.lock().unwrap();
+            let is_subscription =
+                request.method == HttpMethod::Put && request.url.ends_with("/subscription");
+            if is_subscription {
+                state.gate_subscription.take()
+            } else {
+                None
+            }
+        };
         let (response, delayed) = self.response(request);
         Box::pin(async move {
+            if let Some(gate) = gate {
+                tokio::select! {
+                    _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
+                    _ = gate => {}
+                }
+            }
             if delayed {
                 tokio::select! { _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled), _ = tokio::time::sleep(Duration::from_millis(900)) => {} }
             }

@@ -826,3 +826,46 @@ async fn cancelling_invalidates_the_in_flight_action_generation() {
     assert!(snapshot.thread_states.get("9000").is_none());
     assert_eq!(snapshot.action_cooldown_seconds, 0);
 }
+
+#[tokio::test]
+async fn unsubscribe_revalidates_authorization_before_the_done_step() {
+    let (accounts, inbox, fixture) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let release = fixture.gate_next_subscription();
+    let action = inbox
+        .begin_thread_action("9000", ThreadAction::Unsubscribe)
+        .unwrap()
+        .unwrap();
+    let handle = tokio::spawn({
+        let inbox = inbox.clone();
+        async move { inbox.execute_thread_action(action).await }
+    });
+    // Wait until the PUT is parked, then switch the account before releasing it.
+    for _ in 0..200 {
+        let writes = fixture
+            .requests()
+            .into_iter()
+            .filter(|request| request.method == crate::network::transport::HttpMethod::Put)
+            .count();
+        if writes >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    accounts
+        .login(Pat::from_str("synthetic-second"))
+        .await
+        .unwrap();
+    let _ = release.send(());
+    handle.await.unwrap();
+    assert!(!inbox.verify());
+    let deletes = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.method == crate::network::transport::HttpMethod::Delete)
+        .count();
+    assert_eq!(
+        deletes, 0,
+        "the follow-up Done must not run after the account changed"
+    );
+}

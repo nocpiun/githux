@@ -28,7 +28,7 @@
 ### 条目动作（账户作用域）
 
 - `mark_done`：`DELETE /notifications/threads/{id}`，只有 **204 No Content** 才确认完成；200/403/404/超时都不当作成功，绝不使用 `PATCH` read 冒充完成。线程 ID 只允许 `[A-Za-z0-9_-]`，不能借分隔符跳出固定端点。
-- `unsubscribe_thread`：第一步 `PUT /notifications/threads/{id}/subscription`，JSON `{"ignored":true}` 与 `Content-Type: application/json`，必须 200 且响应 `ignored=true` 才算忽略成功；随后调用 `mark_done`，因为 GitHub 收件箱的 Unsubscribe 会从 inbox 移除通知。**只用 `DELETE subscription` 对 watched repo 无效，禁止使用**。
+- `unsubscribe_thread`：第一步 `PUT /notifications/threads/{id}/subscription`，JSON `{"ignored":true}` 与 `Content-Type: application/json`，必须 200 且响应 `ignored=true` 才算忽略成功；随后调用 `mark_done`，因为 GitHub 收件箱的 Unsubscribe 会从 inbox 移除通知。**只用 `DELETE subscription` 对 watched repo 无效，禁止使用**。两步各自经过一次 `RepositorySession::read` 的授权检查，账户切换/换 PAT 发生在两步之间时第二步不会用旧凭据发出。
 - 若第一步成功而第二步 Done 失败：保留「已确认取消订阅」的事实，状态为 `UnsubscribedPendingDone`，只提供重试剩余 Done 的入口，不回滚、不谎称全成功、不本地删行冒充完成。
 - 写请求按 thread 串行：进行中该条两个动作禁用并以 spinner 表示，其他行不受影响；重复点击不产生第二个请求。失败保留条目，显示 warning 图标 + tooltip 与真实重试入口。
 - 条目动作有独立的取消令牌：刷新/加载更多只替换列表请求令牌，不中止进行中的 Done/Unsubscribe；只有离开页面或视图销毁才停止动作。动作代次在控制器生命周期内单调递增，跨取消也不会被旧回复覆盖。控制器最后一个持有者释放时仍取消读写令牌（丢弃 source 不取消，见 L005），避免销毁页面后仍有排队写请求发出。动作冷却以截止时间实时计算，服务端冷却到期后按钮自行解锁，不需要额外网络请求。

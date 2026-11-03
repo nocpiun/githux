@@ -388,16 +388,18 @@ struct SubscriptionDto {
     ignored: bool,
 }
 
-pub async fn unsubscribe_thread(
+/// Step 1 of Unsubscribe: PUT the subscription with `ignored=true`. A 200 with
+/// `ignored: true` is the only confirmation. Callers performing the follow-up
+/// Done must re-run through their own authorization checkpoint.
+pub async fn ignore_subscription(
     client: &GitHubClient,
     pat: &Pat,
     thread_id: &str,
     cancel: CancellationToken,
-) -> Result<UnsubscribeOutcome, PageFailure> {
+) -> Result<NotificationMetadata, PageFailure> {
     if !valid_thread_id(thread_id) {
         return Err(NotificationError::InvalidResponse("invalid thread id").into());
     }
-    // Step 1: PUT /notifications/threads/{id}/subscription with {"ignored": true}
     let path = format!("notifications/threads/{thread_id}/subscription");
     let mut request = client.build_put(&path, pat);
     request.body = Some(r#"{"ignored":true}"#.to_string());
@@ -405,7 +407,7 @@ pub async fn unsubscribe_thread(
 
     let response = client
         .transport()
-        .execute_bounded(request, cancel.clone(), 32 * 1024)
+        .execute_bounded(request, cancel, 32 * 1024)
         .await
         .map_err(|err| {
             PageFailure::from(NotificationError::from(error::classify_transport(err)))
@@ -449,7 +451,16 @@ pub async fn unsubscribe_thread(
             metadata,
         });
     }
+    Ok(metadata)
+}
 
+pub async fn unsubscribe_thread(
+    client: &GitHubClient,
+    pat: &Pat,
+    thread_id: &str,
+    cancel: CancellationToken,
+) -> Result<UnsubscribeOutcome, PageFailure> {
+    let metadata = ignore_subscription(client, pat, thread_id, cancel.clone()).await?;
     // Step 2: In GitHub's inbox UI, Unsubscribe removes the thread from the inbox.
     // Call Done (DELETE) to complete the action.
     match mark_done(client, pat, thread_id, cancel).await {
