@@ -27,10 +27,11 @@ pub enum Scene {
     DoneFailure,
     UnsubscribeStepOneFailure,
     UnsubscribeStepTwoFailure,
+    UnsubscribeDoneRateLimited,
     DoneAlwaysFails,
 }
 impl Scene {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Mixed,
         Self::Empty,
         Self::AppendFailure,
@@ -43,6 +44,7 @@ impl Scene {
         Self::UnsubscribeStepOneFailure,
         Self::UnsubscribeStepTwoFailure,
         Self::DoneAlwaysFails,
+        Self::UnsubscribeDoneRateLimited,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -58,6 +60,7 @@ impl Scene {
             Self::UnsubscribeStepOneFailure => "Unsub step 1 fail",
             Self::UnsubscribeStepTwoFailure => "Unsub step 2 fail",
             Self::DoneAlwaysFails => "Done always fails",
+            Self::UnsubscribeDoneRateLimited => "Unsub Done 429",
         }
     }
 }
@@ -135,6 +138,16 @@ impl Fixture {
                     false,
                 );
             }
+            if scene == Scene::UnsubscribeDoneRateLimited {
+                return (
+                    HttpResponse {
+                        status: 429,
+                        headers: vec![("x-poll-interval".into(), "1".into())],
+                        body: r#"{"message":"secondary rate limit"}"#.into(),
+                    },
+                    false,
+                );
+            }
             // 204 No Content is the only confirmation of Done.
             return (
                 HttpResponse {
@@ -173,7 +186,17 @@ impl Fixture {
                     false,
                 );
             }
-            return (json_response(200, r#"{"ignored":true}"#), false);
+            let mut response = json_response(200, r#"{"ignored":true}"#);
+            if scene == Scene::UnsubscribeDoneRateLimited {
+                response
+                    .headers
+                    .push(("x-ratelimit-remaining".into(), "0".into()));
+                response.headers.push(("retry-after".into(), "90".into()));
+                response
+                    .headers
+                    .push(("x-poll-interval".into(), "120".into()));
+            }
+            return (response, false);
         }
         if request.method != HttpMethod::Get {
             return (invalid(), false);

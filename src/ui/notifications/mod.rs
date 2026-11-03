@@ -57,6 +57,7 @@ pub struct NotificationsView {
     on_repository: OnRepository,
     _activation: Subscription,
     _visibility: Subscription,
+    _release: Subscription,
 }
 impl NotificationsView {
     pub fn new(
@@ -80,6 +81,7 @@ impl NotificationsView {
                 }
                 cx.notify();
             });
+        let release = cx.on_release(|view, cx| view.leave(cx));
         let mut view = Self {
             controller,
             executor,
@@ -100,6 +102,7 @@ impl NotificationsView {
             on_repository,
             _activation: activation,
             _visibility: visibility,
+            _release: release,
         };
         view.sync(cx);
         view.request(RequestKind::First, cx);
@@ -137,9 +140,9 @@ impl NotificationsView {
 
     /// Host calls this when the retained page becomes hidden: stop both the
     /// interaction animation and the request (its result can no longer publish).
-    pub fn leave(&mut self, cx: &mut Context<Self>) {
+    pub fn leave(&mut self, _cx: &mut App) {
         self.controller.cancel();
-        self.sync(cx);
+        self.snapshot = self.controller.snapshot();
         self.cancel_activity();
     }
 
@@ -201,7 +204,13 @@ impl NotificationsView {
         let remaining = deadline.saturating_duration_since(now);
         self.cooldown_wake = Some(cx.spawn(async move |weak, cx| {
             cx.background_executor().timer(remaining).await;
-            let _ = weak.update(cx, |_, cx| cx.notify());
+            let _ = weak.update(cx, |view, cx| {
+                // Clear the completed task before notifying so a longer
+                // outstanding poll/action deadline gets its own wake-up too.
+                view.cooldown_wake = None;
+                view.sync_cooldown_wake(cx);
+                cx.notify();
+            });
         }));
     }
 

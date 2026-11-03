@@ -716,3 +716,88 @@ async fn a_late_done_does_not_remove_a_newer_version_already_loaded() {
         "newer activity must survive an older Done completion"
     );
 }
+
+#[tokio::test]
+async fn a_cancelled_old_action_cannot_overwrite_a_new_action_or_unlock_it() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let old = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    inbox.cancel();
+    let current = inbox
+        .begin_thread_action("9000", ThreadAction::Unsubscribe)
+        .unwrap()
+        .unwrap();
+    assert_ne!(old.generation, current.generation);
+    inbox.finish_thread_action(
+        &old,
+        Err(PageFailure {
+            error: GitHubError::Cancelled.into(),
+            metadata: NotificationMetadata::default(),
+        }),
+        Instant::now(),
+    );
+    assert!(matches!(
+        inbox.snapshot().thread_states.get("9000"),
+        Some(ThreadActionState::Busy(ThreadAction::Unsubscribe))
+    ));
+    inbox.execute_thread_action(current).await;
+    assert!(inbox.snapshot().items.iter().all(|item| item.id != "9000"));
+}
+
+#[tokio::test]
+async fn dropping_the_last_controller_cancels_the_action_lifecycle() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let action = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    drop(inbox);
+    assert!(
+        action.cancel.is_cancelled(),
+        "dropping the last owner must cancel queued writes; dropping a source alone does not cancel"
+    );
+}
+
+#[tokio::test]
+async fn nested_done_rate_limit_and_put_metadata_preserve_a_long_cooldown() {
+    let (_accounts, inbox, fixture) = setup(Scene::UnsubscribeDoneRateLimited).await;
+    run(&inbox, RequestKind::First).await;
+    run_action(&inbox, "9000", ThreadAction::Unsubscribe).await;
+    let snapshot = inbox.snapshot();
+    assert!(matches!(
+        snapshot.thread_states.get("9000"),
+        Some(ThreadActionState::UnsubscribedPendingDone {
+            error: NotificationError::GitHub(GitHubError::RateLimited { .. })
+        })
+    ));
+    assert!(
+        snapshot.action_cooldown_seconds >= 89,
+        "nested 429 fallback/PUT restriction must be preserved, got {}",
+        snapshot.action_cooldown_seconds
+    );
+    assert!(
+        snapshot.cooldown_seconds >= 119,
+        "the successful PUT poll interval must survive the failing Done, got {}",
+        snapshot.cooldown_seconds
+    );
+    assert!(matches!(
+        inbox.begin(RequestKind::More),
+        Err(NotificationError::Cooldown { .. })
+    ));
+    assert!(matches!(
+        inbox.begin_thread_action("9000", ThreadAction::Done),
+        Err(NotificationError::Cooldown { .. })
+    ));
+    assert_eq!(
+        fixture
+            .requests()
+            .iter()
+            .filter(|request| request.method != crate::network::transport::HttpMethod::Get)
+            .count(),
+        2
+    );
+}

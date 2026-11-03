@@ -336,6 +336,42 @@ fn valid_thread_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+impl NotificationMetadata {
+    /// Preserve the strongest server restriction across a multi-step action.
+    /// A successful first step can impose limits that a failing transport step
+    /// must not erase. Absolute values are conservative for distinct limits;
+    /// repeated/reset budgets use the latest observed values.
+    pub fn merge_restrictions(self, other: &NotificationMetadata) -> Self {
+        let earlier = self.rate_limit;
+        let later = &other.rate_limit;
+        let retry_after = match (earlier.retry_after, later.retry_after) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (left, right) => right.or(left),
+        };
+        let remaining = match (earlier.remaining, later.remaining) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => right.or(left),
+        };
+        let reset = match (earlier.reset, later.reset) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (left, right) => right.or(left),
+        };
+        Self {
+            last_modified: self.last_modified.or(other.last_modified.clone()),
+            poll_interval_seconds: match (self.poll_interval_seconds, other.poll_interval_seconds) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left, right) => right.or(left),
+            },
+            rate_limit: NotificationRateLimit {
+                limit: later.limit.or(earlier.limit),
+                remaining,
+                reset,
+                retry_after,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnsubscribeOutcome {
     Completed(NotificationMetadata),
@@ -420,7 +456,7 @@ pub async fn unsubscribe_thread(
         Ok(done_meta) => Ok(UnsubscribeOutcome::Completed(done_meta)),
         Err(failure) => Ok(UnsubscribeOutcome::IgnoredDoneFailed {
             done_error: failure.error,
-            metadata: failure.metadata,
+            metadata: failure.metadata.merge_restrictions(&metadata),
         }),
     }
 }

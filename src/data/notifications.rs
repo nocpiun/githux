@@ -59,6 +59,9 @@ struct State {
     /// A newer server version must be allowed back into the inbox.
     tombstones: HashMap<String, String>,
     action_generations: HashMap<String, u64>,
+    /// Monotonic per-controller lifecycle. It never resets on cancellation, so
+    /// an old reply cannot match a newer action started for the same thread.
+    action_lifecycle: u64,
     /// Threads whose ignored=true subscription was confirmed by the server.
     unsubscribed: HashSet<String>,
 }
@@ -79,6 +82,7 @@ impl Default for State {
             action_cancel_source,
             tombstones: HashMap::new(),
             action_generations: HashMap::new(),
+            action_lifecycle: 0,
             unsubscribed: HashSet::new(),
         }
     }
@@ -90,7 +94,7 @@ pub struct ThreadActionRequest {
     /// The `updated_at` the user acted on; a later version is a new notification.
     version: String,
     generation: u64,
-    cancel: CancellationToken,
+    pub(crate) cancel: CancellationToken,
 }
 
 pub struct InboxRequest {
@@ -255,7 +259,12 @@ impl Notifications {
             Err(failure) => &failure.metadata,
         };
         let poll = metadata.poll_interval_seconds.unwrap_or(60).max(1);
-        state.refresh_after = now.checked_add(Duration::from_secs(poll));
+        if let Some(deadline) = now.checked_add(Duration::from_secs(poll)) {
+            state.refresh_after = Some(match state.refresh_after {
+                Some(existing) if existing > deadline => existing,
+                _ => deadline,
+            });
+        }
         let rate = &metadata.rate_limit;
         let reset = if rate.remaining == Some(0) {
             rate.reset.map(|reset| {
@@ -387,12 +396,11 @@ impl Notifications {
                 seconds: seconds(deadline.duration_since(now)),
             });
         }
-        let generation = state
+        state.action_lifecycle += 1;
+        let action_generation = state.action_lifecycle;
+        state
             .action_generations
-            .entry(thread_id.to_string())
-            .or_insert(0);
-        *generation += 1;
-        let action_generation = *generation;
+            .insert(thread_id.to_string(), action_generation);
         state
             .snapshot
             .thread_states
@@ -474,7 +482,12 @@ impl Notifications {
             Err(failure) => &failure.metadata,
         };
         let poll = metadata.poll_interval_seconds.unwrap_or(60).max(1);
-        state.refresh_after = now.checked_add(Duration::from_secs(poll));
+        if let Some(deadline) = now.checked_add(Duration::from_secs(poll)) {
+            state.refresh_after = Some(match state.refresh_after {
+                Some(existing) if existing > deadline => existing,
+                _ => deadline,
+            });
+        }
         let rate = &metadata.rate_limit;
         let reset = if rate.remaining == Some(0) {
             rate.reset.map(|reset| {
@@ -488,13 +501,21 @@ impl Notifications {
         } else {
             None
         };
-        let rate_failure = matches!(
-            &result,
-            Err(PageFailure {
-                error: NotificationError::GitHub(GitHubError::RateLimited { .. }),
-                ..
-            })
-        );
+        // A partially completed Unsubscribe is Ok(IgnoredDoneFailed), so a
+        // nested Done rate-limit error needs the same fallback as outer errors.
+        let rate_failure = match &result {
+            Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed { done_error, .. }) => {
+                matches!(
+                    done_error,
+                    NotificationError::GitHub(GitHubError::RateLimited { .. })
+                )
+            }
+            Err(PageFailure { error, .. }) => matches!(
+                error,
+                NotificationError::GitHub(GitHubError::RateLimited { .. })
+            ),
+            _ => false,
+        };
         let retry = rate
             .retry_after
             .map(u64::from)
@@ -559,8 +580,8 @@ impl Notifications {
         (state.cancel, state.cancel_source) = CancellationToken::new();
         (state.action_cancel, state.action_cancel_source) = CancellationToken::new();
         state.generation += 1;
-        // Dropping the per-thread generations makes any late reply stale.
-        state.action_generations.clear();
+        // Keep monotonic per-thread generations: any late reply remains stale
+        // even when the same thread is started again in this controller.
         state.snapshot.busy = None;
         // Busy/failed progress is transient, but a confirmed unsubscription is
         // a server fact: keep its pending-Done presentation so a retained view
@@ -598,3 +619,16 @@ fn remaining(deadline: Option<Instant>) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+impl Drop for Notifications {
+    fn drop(&mut self) {
+        // The last owner must not leave an independent action token alive: UI
+        // release and account/session teardown then stop both read and write
+        // work without cancelling other clones that are still using it.
+        if Arc::strong_count(&self.state) == 1 {
+            let state = self.state.lock().expect("inbox state");
+            state.cancel_source.cancel();
+            state.action_cancel_source.cancel();
+        }
+    }
+}

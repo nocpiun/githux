@@ -72,7 +72,13 @@ UI 是单个有界 GPUI ListState，公共 scroll Motion/Bars/Bar，Noto Sans，
 
 7. Done 完成时按 ID 移除行，会误删并发刷新已载入的同一 ID 新版本 B。改为只移除 Done 捕获的版本 A，较新版本保留；回归 `a_late_done_does_not_remove_a_newer_version_already_loaded`。
 
-以上七条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
+8. 动作代次在 `cancel()` 时被清空，重新进入同一条 thread 会复用代次，旧取消回复可覆盖新动作的 Busy。改为控制器级单调 `action_lifecycle`，跨取消不复用。
+9. Unsubscribe 第二步 Done 收到 429 但无 Retry-After/reset 时，结果包在 `Ok(IgnoredDoneFailed)` 里，旧代码只查外层 `Err`，60 秒回退不会安装。改为同时检查嵌套 `done_error`。
+10. 成功的 PUT 带限流/较长 poll，但随后的 Done 传输失败只返回空 metadata，丢弃了 PUT 的限制。改为 `NotificationMetadata::merge_restrictions` 保留两步中的最强限制。
+11. 冷却唤醒 task 完成后不清理 `cooldown_wake`，后续 render 不再为较晚截止计时。改为完成后清零并立即重排剩余截止。
+12. 页面销毁时 `visible_lifetime` 的弱引用无法升级，`leave` 不被调用，排队写请求仍会发出。改为 `cx.on_release` 无条件调用 `leave`，并在控制器最后一个持有者 `Drop` 时取消动作令牌。
+
+以上十二条均按 L008 反向验证：临时移除修复后对应测试失败，恢复后通过。
 
 **与最新 main 组合**：合并 `origin/main` 时 `src/data/mod.rs` 只有新增模块声明的文本冲突，保留双方声明即可。发现 Newer main 的 `global_work_items` 通过 `#[path = "../home/time.rs"]` 复用 Home 时间实现，而我已把实现移到 `src/ui/relative_time.rs`；为不破坏该消费者，把 `src/ui/home/time.rs` 恢复为仅转发的 shim，并在其独立装配 `work_items_modules.rs` 注册共享模块，仍只有一份解析器。第一次完整 `cargo test` 出现两个与本任务无关的 main 侧偶发失败（`repository_descriptions_deduplicates...`、`reader_images::fixed_revision_images...` 的 `InUse`），单独重跑均通过，随后完整重跑全部通过；记录为既有测试的顺序/资源偶发，不归因本任务，也不掩盖。
 

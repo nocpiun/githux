@@ -321,3 +321,60 @@ fn action_buttons_unlock_when_the_server_cooldown_expires(cx: &mut TestAppContex
         view.action_available("9000", ThreadAction::Done)
     }));
 }
+
+#[gpui::test]
+fn an_expired_wake_task_arms_the_remaining_deadline(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx)
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    // An action deadline expires first; the later polling deadline still needs
+    // a wake-up after the first one-shot task has completed.
+    view.update(cx, |view, cx| {
+        view.action_cooldown_until = Some(Instant::now() + Duration::from_millis(50));
+        view.cooldown_until = Some(Instant::now() + Duration::from_secs(120));
+        view.cooldown_wake = None;
+        view.sync_cooldown_wake(cx);
+    });
+    assert!(view.read_with(cx, |view, _| view.cooldown_wake.is_some()));
+    std::thread::sleep(Duration::from_millis(180));
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |view, _| view.cooldown_wake.is_some()),
+        "the wake task must clear its slot and re-arm the remaining deadline"
+    );
+}
+
+#[gpui::test]
+fn releasing_the_view_cancels_its_thread_action(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let view = NotificationsView::new(
+            controller.clone(),
+            executor,
+            Rc::new(|_, _, _| {}),
+            window,
+            cx,
+        );
+        let _ = controller
+            .begin_thread_action("9000", ThreadAction::Done)
+            .unwrap();
+        view
+    });
+    let action = controller
+        .begin_thread_action("9001", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    // Remove the rendered view before dropping the last UI entity. on_release
+    // must cancel even if the weak visible-lifetime callback cannot be upgraded.
+    let weak = view.downgrade();
+    cx.replace_root_view(|_, _| gpui::EmptyView);
+    drop(view);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_none(), "the view must be released");
+    assert!(action.cancel.is_cancelled());
+}

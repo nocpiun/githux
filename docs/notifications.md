@@ -31,7 +31,7 @@
 - `unsubscribe_thread`：第一步 `PUT /notifications/threads/{id}/subscription`，JSON `{"ignored":true}` 与 `Content-Type: application/json`，必须 200 且响应 `ignored=true` 才算忽略成功；随后调用 `mark_done`，因为 GitHub 收件箱的 Unsubscribe 会从 inbox 移除通知。**只用 `DELETE subscription` 对 watched repo 无效，禁止使用**。
 - 若第一步成功而第二步 Done 失败：保留「已确认取消订阅」的事实，状态为 `UnsubscribedPendingDone`，只提供重试剩余 Done 的入口，不回滚、不谎称全成功、不本地删行冒充完成。
 - 写请求按 thread 串行：进行中该条两个动作禁用并以 spinner 表示，其他行不受影响；重复点击不产生第二个请求。失败保留条目，显示 warning 图标 + tooltip 与真实重试入口。
-- 条目动作有独立的取消令牌：刷新/加载更多只替换列表请求令牌，不中止进行中的 Done/Unsubscribe；只有离开页面、账户/视图 teardown 才停止动作。动作冷却以截止时间实时计算，服务端冷却到期后按钮自行解锁，不需要额外网络请求。
+- 条目动作有独立的取消令牌：刷新/加载更多只替换列表请求令牌，不中止进行中的 Done/Unsubscribe；只有离开页面或视图销毁才停止动作。动作代次在控制器生命周期内单调递增，跨取消也不会被旧回复覆盖。控制器最后一个持有者释放时仍取消读写令牌（丢弃 source 不取消，见 L005），避免销毁页面后仍有排队写请求发出。动作冷却以截止时间实时计算，服务端冷却到期后按钮自行解锁，不需要额外网络请求。
 - 已确认 `ignored=true` 的 thread 单独记录：之后重试 Done 再失败仍是“已取消订阅、待完成 Done”，不会重新提供 Unsubscribe。
 - 账户切换、移除、换 PAT 或旧响应到达时，动作成功/失败都按 `RepositorySession` 的 context 与动作 generation 丢弃；已确认 Done 的 thread ID 记入 tombstone，之后到达的旧列表页或刷新不会把它复活。
 - 写请求结果不明（超时/断连）不自动重放，也不把 401/403/404 当成功；`X-Poll-Interval` 与限流冷却沿用读取路径的语义，写失败同样进入冷却。
