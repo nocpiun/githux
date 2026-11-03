@@ -400,7 +400,7 @@ async fn unsubscribe_completed_preserves_put_cooldown_metadata() {
     use crate::network::transport::HttpResponse;
     let transport = Arc::new(MockTransport::new());
     // PUT responds with a 120s polling interval and an exhausted quota reset.
-    let mut put = HttpResponse {
+    let put = HttpResponse {
         status: 200,
         headers: vec![
             ("x-poll-interval".into(), "120".into()),
