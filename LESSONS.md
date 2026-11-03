@@ -116,3 +116,17 @@
 - **原因**：Feed Read more 的外跳来自主 Agent 的派发误解，worker 据此完成了一个技术上可用但目的地错误的入口；原测试只断言外链动作，未验证用户实际到达的 Githux 页面。
 - **证据**：2026-11-01 负责人纠正后，改用仓库/编号内部路由，`feed_read_more_opens_and_reuses_the_internal_pr_tab` 从实际控件点击验证 Shell 路由及复用行为，见 [修正记录](docs/devlog/2026-10-30-home-feed-focus.md#2026-11-01主-agent-修正-read-more-的导航目标)。原“键盘激活”测试实际调用鼠标模拟，本轮改用焦点切换与 Enter；验证报告必须描述真正运行的输入路径，遵循 L002。
 - **范围**：导航接线、任务派发、缺失页面的范围协调与交互验收。
+
+## L017：新页面不得把 API 字段直接变成产品展示
+
+- **规则**：新页面的呈现方式不能由 API 返回字段直接推导。开工先复用/核对跨页面已确认的状态、时间与对齐约定，再把它们写成截图与交互验收条件；不要因为派发只列了字段就自行决定文案、时间格式或行内布局。状态能用背景/图标表达时，不要默认加一行 Read/Unread/Unavailable 文字；时间先查现成 formatter 再决定；原生画面核验必须覆盖这些项目。
+- **原因**：Notifications 初版把 `unread` 画成 Read/Unread 文字、把 `updated_at` 原样显示成绝对时间、把 reason 单开一行、图标用 `pt_1` 补偿，均未遵守仓库里 Home 已验收的相对时间与图标/标题对齐约定。根因既有实现者把字段直接当展示，也有派发只列出字段、未约束呈现方式；测试只证明部分几何而未拦住设计偏差。负责人对照 GitHub 网页通知截图逐项否决。
+- **证据**：2026-11-01 负责人四条反馈与返工，见 [Notifications 开发日志](docs/devlog/2026-11-01-notifications.md#2026-11-01-负责人反馈后返工)。相对时间抽取复用 `src/ui/relative_time.rs`，读状态改为背景+圆点+字重，行几何断言与原生截图核验。稳定排版规则写入 [Notifications](docs/notifications.md)，不在此重复。
+- **范围**：任何把 API 字段直接映射成产品 UI 的新页面或组件；也提醒派发者在字段清单之外约束呈现方式。
+
+## L018：多步写操作必须保留已确认的中间事实
+
+- **规则**：一个用户动作需要多次 API 调用时，若较早步骤已被服务端明确确认、后续步骤失败，不能回滚或谎称整体失败；把已确认事实持久成显式状态，只暴露剩余步骤的重试入口，并让旧列表响应无法复活已确认删除的条目。反过来也不能在未获确认时本地乐观删改。
+- **原因**：GitHub 收件箱的 Unsubscribe 语义是「忽略订阅 + 从 inbox 移除」。只发 `PUT subscription` 会留下条目，只发 `DELETE subscription` 对 watched repo 无效，两者都不等于用户看到的结果。若第二步 Done 失败就整体回滚，会谎称订阅未取消；若本地删行，则谎称服务端完成。两者都会让用户对远端状态产生错误认知。
+- **证据**：2026-11-02 notifications 条目动作 `unsubscribe_thread` 与 `UnsubscribedPendingDone` 状态；测试 `unsubscribe_keeps_the_ignored_fact_when_the_followup_done_fails` 断言保留条目但只重试 Done，`a_done_row_is_not_resurrected_by_a_late_refresh_page` 断言 tombstone 阻止旧页面复活。见 [开发日志](docs/devlog/2026-11-01-notifications.md#2026-11-02-条目动作done--unsubscribe--save-for-later)。
+- **范围**：任何多端点组合动作（取消订阅并移除、写后刷新、转账式两步操作）。也适用于不可用能力：没有公开 API 的入口宁可禁用并说明，也不做只有本地的假成功。

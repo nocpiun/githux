@@ -13,7 +13,6 @@ mod presentation;
 mod rows;
 #[cfg(test)]
 mod tests;
-mod time;
 
 use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;

@@ -11,6 +11,8 @@ pub mod compact_status;
 pub mod geometry;
 #[path = "../ui/home/mod.rs"]
 pub mod home;
+#[path = "../ui/relative_time.rs"]
+pub mod relative_time;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
 #[path = "../ui/tooltip.rs"]

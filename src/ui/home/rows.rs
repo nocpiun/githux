@@ -1,6 +1,7 @@
 //! Content targets and activity cards; all navigation stays typed.
 use super::{Column, HomeAction, HomeView, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
+use crate::ui::relative_time::relative;
 use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
     data_display::Avatar,
@@ -10,6 +11,7 @@ use ely_core::{
 };
 use gpui::{AnyElement, App, Context, FontWeight, IntoElement, div, prelude::*, px};
 use std::time::SystemTime;
+
 pub(super) const HOME_ROW_HEIGHT: f32 = 68.0;
 
 fn link(name: String, label: String, action: HomeAction, cx: &mut Context<HomeView>) -> AnyElement {
@@ -98,7 +100,7 @@ fn repository_links(
 }
 
 fn timestamp(value: Option<&str>, name: String, now: SystemTime, cx: &App) -> AnyElement {
-    let label = super::time::relative(value, now);
+    let label = relative(value, now);
     let full = value
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Time not supplied")
