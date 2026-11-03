@@ -801,3 +801,28 @@ async fn nested_done_rate_limit_and_put_metadata_preserve_a_long_cooldown() {
         2
     );
 }
+
+#[tokio::test]
+async fn cancelling_invalidates_the_in_flight_action_generation() {
+    let (_accounts, inbox, _) = setup(Scene::Mixed).await;
+    run(&inbox, RequestKind::First).await;
+    let old = inbox
+        .begin_thread_action("9000", ThreadAction::Done)
+        .unwrap()
+        .unwrap();
+    inbox.cancel();
+    // Even without starting a new action on the same thread, the old reply must
+    // lose publication rights: a late success cannot remove the row, and a late
+    // cancellation cannot install a failure state or cooldown.
+    inbox.finish_thread_action(
+        &old,
+        Ok(notifications::UnsubscribeOutcome::Completed(
+            NotificationMetadata::default(),
+        )),
+        Instant::now(),
+    );
+    let snapshot = inbox.snapshot();
+    assert!(snapshot.items.iter().any(|item| item.id == "9000"));
+    assert!(snapshot.thread_states.get("9000").is_none());
+    assert_eq!(snapshot.action_cooldown_seconds, 0);
+}

@@ -580,8 +580,14 @@ impl Notifications {
         (state.cancel, state.cancel_source) = CancellationToken::new();
         (state.action_cancel, state.action_cancel_source) = CancellationToken::new();
         state.generation += 1;
-        // Keep monotonic per-thread generations: any late reply remains stale
-        // even when the same thread is started again in this controller.
+        // Keep monotonic per-thread generations, but also invalidate every
+        // currently in-flight action: after cancellation, no old reply may
+        // publish a failure state or remove a row into the retained view.
+        state.action_lifecycle += 1;
+        let lifecycle = state.action_lifecycle;
+        for thread_id in state.snapshot.thread_states.keys().cloned().collect::<Vec<_>>() {
+            state.action_generations.insert(thread_id, lifecycle);
+        }
         state.snapshot.busy = None;
         // Busy/failed progress is transient, but a confirmed unsubscription is
         // a server fact: keep its pending-Done presentation so a retained view
