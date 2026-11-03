@@ -5,6 +5,8 @@
 
 #[path = "../ui/avatar.rs"]
 pub mod avatar;
+#[path = "../ui/badge.rs"]
+pub mod badge;
 #[path = "../ui/compact_status.rs"]
 pub mod compact_status;
 #[path = "../ui/geometry.rs"]
@@ -13,6 +15,8 @@ pub mod geometry;
 pub mod profile;
 #[path = "../ui/reader/mod.rs"]
 pub mod reader;
+#[path = "../ui/relative_time.rs"]
+pub mod relative_time;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
 #[path = "../ui/tooltip.rs"]

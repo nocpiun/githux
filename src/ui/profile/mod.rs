@@ -23,8 +23,8 @@ mod tests;
 pub use heatmap::{CellLevel, DayPresentation, HeatmapPresentation, heatmap_presentation};
 #[allow(unused_imports)]
 pub use model::{
-    PresentationError, ProfileBinding, ProfileRequest, ProfileTarget, RepositoryPresentation,
-    RepositoryTarget, SectionState, repository_presentation,
+    PresentationError, ProfileBinding, ProfileProvenance, ProfileRequest, ProfileTarget,
+    RepositoryPresentation, RepositoryTarget, SectionState, repository_presentation,
 };
 
 pub use view::ProfileView;
@@ -46,4 +46,8 @@ pub enum ProfileActionKind {
     Repository(RepositoryTarget),
     ExternalLink { url: String },
     Readme(ReaderAction),
+    RetryBasic,
+    RetryRepositories,
+    RetryContributions,
+    RetryReadme,
 }

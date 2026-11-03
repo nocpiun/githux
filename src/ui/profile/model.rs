@@ -1,10 +1,12 @@
 //! Presentation-only identity, section states and repository policy.
 
 use std::fmt;
+use std::time::SystemTime;
 
 use crate::domain::{
     AccountKey, AuthEpoch, GitHubError, GraphqlErrorKind, HostId, ProfileError, ProfilePinned,
     ProfileRepo, Showcase,
+    cache::{CacheCompleteness, CacheMetadata, CacheMiss},
 };
 
 /// The profile being displayed. This is a resource identity, never evidence
@@ -57,6 +59,78 @@ pub enum SectionState<T> {
     Ready(T),
 }
 
+/// Host-supplied provenance for one Profile section.
+///
+/// Distinguishes freshly observed network values from historical cache snapshots
+/// and complete observations from partial ones without inventing TTLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileProvenance {
+    pub historical: bool,
+    pub fetched_at_ms: i64,
+    pub verified_at_ms: i64,
+    pub completeness: CacheCompleteness,
+}
+
+impl ProfileProvenance {
+    pub fn from_cache(historical: bool, metadata: &CacheMetadata) -> Self {
+        Self {
+            historical,
+            fetched_at_ms: metadata.fetched_at_ms,
+            verified_at_ms: metadata.verified_at_ms,
+            completeness: metadata.completeness.clone(),
+        }
+    }
+
+    pub fn is_historical(&self) -> bool {
+        self.historical
+    }
+
+    pub fn is_partial(&self) -> bool {
+        matches!(self.completeness, CacheCompleteness::Partial { .. })
+    }
+
+    pub fn partial_reason(&self) -> Option<&str> {
+        match &self.completeness {
+            CacheCompleteness::Complete => None,
+            CacheCompleteness::Partial { reason } => Some(reason.as_str()),
+        }
+    }
+
+    /// Formats the snapshot timestamp relative to `now` using the shared relative-time parser.
+    pub fn relative_time(&self, now: SystemTime) -> Option<String> {
+        let stamp_ms = self.verified_at_ms.max(self.fetched_at_ms);
+        if stamp_ms < 0 {
+            return None;
+        }
+        let iso = ms_to_rfc3339(stamp_ms as u64);
+        let text = crate::ui::relative_time::relative(Some(&iso), now);
+        (text != "Time unavailable").then_some(text)
+    }
+}
+
+fn ms_to_rfc3339(ms: u64) -> String {
+    let total_secs = (ms / 1000) as i64;
+    let rem_secs = total_secs.rem_euclid(86_400);
+    let days = total_secs.div_euclid(86_400);
+    let hour = rem_secs / 3600;
+    let minute = (rem_secs % 3600) / 60;
+    let second = rem_secs % 60;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    if month <= 2 {
+        year += 1;
+    }
+    let year = year.max(1);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 /// Safe, typed presentation failure. Raw service errors are not needed by the
 /// view, so integration maps them without adding credentials or server text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +141,8 @@ pub enum PresentationError {
     RateLimited,
     SsoRequired,
     Offline,
+    NotCached,
+    CacheCorrupt,
     Timeout,
     Cancelled,
     InvalidData,
@@ -74,6 +150,13 @@ pub enum PresentationError {
 }
 
 impl PresentationError {
+    pub fn from_cache_miss(miss: CacheMiss) -> Self {
+        match miss {
+            CacheMiss::NotCached => Self::NotCached,
+            CacheMiss::Corrupt | CacheMiss::RepresentationVersion => Self::CacheCorrupt,
+        }
+    }
+
     pub fn message(&self) -> &'static str {
         match self {
             Self::Unauthorized => "Authentication is required or expired.",
@@ -83,6 +166,10 @@ impl PresentationError {
             Self::NotFound => "This section was not found or is not visible.",
             Self::RateLimited => "GitHub rate limited this read. Try again later.",
             Self::Offline => "This section could not be read while offline.",
+            Self::NotCached => "Offline and no cached snapshot is available for this section.",
+            Self::CacheCorrupt => {
+                "Offline and the cached snapshot for this section is unreadable or outdated."
+            }
             Self::Timeout => "This section timed out.",
             Self::Cancelled => "This read was cancelled.",
             Self::InvalidData => "GitHub returned data this view cannot understand.",

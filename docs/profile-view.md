@@ -1,6 +1,6 @@
 # Profile Overview 展示组件
 
-更新：2026-11-01。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略及 Pinned 简介三行已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
+更新：2026-11-03。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、页面持久缓存、README 图片服务、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略、Pinned 简介三行及离线快照/图片展示已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
 
 ## 已实现的展示范围
 
@@ -37,9 +37,30 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
 
 - **正文不再自绘灰色矩形底。** Flow 布局下 `ReaderView` 根与 Markdown 根不再绘制 `theme.colors.surface`；宿主页面（Profile 的 section 背景）透出，正文与卡片背景一致。有界/Repository 布局的 `surface` 不变，代码围栏、inline code 与引用的语义色保留。见 [内容阅读器 Flow](content-reader.md#自然高度布局flow2026-10-29)。
 - **确认缺失的 README 整段省略。** `SectionState::Unavailable` 不再渲染 border、header、说明文字或占位，`render_readme` 返回 `None`，因此也不会留下空行间距；Pinned 与贡献区块不受影响。该状态内部仍与 `SectionState::Error` 分开。
-- **真实失败使用紧凑指示。** README 的 `SectionState::Error` 改为 `compact_status::failed` 的单个 warning 图标，原因在 tooltip 与无障碍名称里；本组件没有真实 retry 回调，因此不显示 Retry。不再使用共享大错误面板。
-- **404 归入可选缺省。** 同名仓库读取返回的 `GitHubError::NotFound`（GitHub 用 404 同时表示不存在与不可见）在 `app::pages::ProfilePage` 映射为 `Unavailable`，不显示 “not found or is not visible” 文案；网络、认证、限流、解析失败仍为 `Error`。
-- **无残留旧 README。** `bind`、`set_readme_unavailable`、非 Ready 的 `update_readme*` 都会取消并丢弃旧 `ReaderView`；ready→缺失→换账户不会复用旧正文、旧 action 或旧图片请求。
+- **真实失败使用紧凑指示。** README 的 `SectionState::Error` 使用 `compact_status::failed` 的 warning 图标，原因在 tooltip 与无障碍名称里；正式 host 注册 `on_action` 时提供单次重试（`ProfileActionKind::RetryReadme`），独立无 handler 视图仍不显示 Retry。不再使用共享大错误面板。
+- **404 归入可选缺省。** 同名仓库读取返回的 `GitHubError::NotFound`（GitHub 用 404 同时表示不存在与不可见）在 `app::pages::ProfilePage` 映射为 `Unavailable`，不显示 “not found or is not visible” 文案；网络、认证、限流、解析失败与离线未缓存（`NotCached`）仍为 `Error`。
+- **无残留旧 README。** `bind`、`set_readme_unavailable`、非 Ready 的 `update_readme*` 都会通过 `set_image_provider(None, cx)` 和 `cancel_interactions(cx)` 取消并丢弃旧 `ReaderView` 及其在途图片请求；ready→缺失→换账户不会复用旧正文、旧 action、旧高度通知或旧图片请求。
+
+## 2026-11-03 持久缓存与 README 图片正式接线
+
+正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 已接入 [`CachedPageReadSession`](page-cache.md) 与 [`RepositoryImageService::with_cache`](reader-images.md)，在保留原有 `ProfilePage::new` 构造签名兼容的前提下支持已访问 Profile 资料与 README（含图片）的离线阅读：
+
+1. **缓存会话注入与在线回退**：
+   - `ProfilePage` 捕获 `PageReadSession` 后，通过 `services.repositories().cache(session.context())` 查询当前保存账户的 `(CacheStore, CacheScope)` 并构造 `CachedPageReadSession`。
+   - 当应用尚未绑定 `CacheStore`（如 `cache-runtime` 未合入或缓存处于未对账恢复态）或当前 scope 被隔离（`AccessDenied`）时，自动保留原有在线 `PageReadSession` 读取能力，不额外打开第二套数据库。
+   - 四个独立区块（`profile`、`profile_pinned`、`contribution_calendar`、`profile_readme`）优先执行 `PageReadMode::Online`；当遇到网络断开、超时、5xx 或限流错误时，自动回退尝试 `PageReadMode::Offline`。
+2. **README 图片服务正式附着**：
+   - 当 `profile_readme` 返回 `ProfileReadme::Prepared { repository, content, .. }` 时，`ProfilePage` 使用该已验证同名公开仓库的真实 `RepositoryIdentity`、当前有效 `RepositorySession`、`ReqwestExternalImages`（独立无凭据 HTTPS 通路，绝不向外部图片主机发送 PAT）以及 `services.repositories().cache(&context)`（`is_private = false`）构造 `RepositoryImageService::with_cache`。
+   - 通过新增的 `ProfileView::update_readme_with_provider` 将 provider 交给 `ReaderView::set_image_provider`，同时保持 `MarkdownLayout::Flow` 自然高度、无灰底、无内嵌竖向滚动条和 HTML 子集行为。共享图片管线与缓存细节见 [README 图片加载与显示](reader-images.md)。
+3. **历史快照、Partial 与缺失缓存的紧凑视觉区分**：
+   - `ProfileProvenance` 记录 `historical`（`PageOrigin::HistoricalSnapshot`）、时间戳与 `CacheCompleteness`。
+   - 离线历史快照在 Basic 标题行、README 头部、Pinned/Popular 标题行与 Contributions 标题行旁显示紧凑 Neutral `Badge`（`Cached · <relative time>`，复用 `ui::relative_time::relative`，hover tooltip 说明本地历史快照）。
+   - `CacheCompleteness::Partial` 显示紧凑 Warning `Badge`（`Partial`，hover tooltip 显示具体不完整原因），与完整结果明确区分。
+   - 离线无缓存快照（`PageValue::Miss(CacheMiss::NotCached)`）或缓存损坏映射为 `PresentationError::NotCached` / `CacheCorrupt`，显示黄色 warning 图标、hover 原因与点击重试（`RetryBasic` / `RetryRepositories` / `RetryContributions` / `RetryReadme`），绝不将未缓存或网络/授权失败伪装成“无 README”或空列表。
+   - 已缓存的确认无 README（`ProfileReadme::Missing` / `NotEligible`）离线恢复时继续映射为 `SectionState::Unavailable` 并整段省略。
+4. **授权、代次与缓存门禁（C1–C5）**：
+   - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
+   - 对历史缓存结果及已展示的历史快照，额外校验 `RepoService::cache(&context)` 与聚合缓存门禁：账户切换、移除（C2）、PAT 替换隔离（C3）、凭据 401 拒绝或具体仓库明确撤权推进聚合 revision（C4）时，立即清除旧 `ProfileView` 与 `ReaderView`、取消在途图片加载并阻断迟到图片或 `on_layout_changed` 回调复活旧页。
 
 ## Host adapter / mounting 职责
 

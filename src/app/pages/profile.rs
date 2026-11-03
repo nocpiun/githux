@@ -8,21 +8,30 @@ use tokio::sync::watch;
 
 use crate::app::accounts::AccountServices;
 use crate::app::avatar::AvatarKey;
-use crate::data::{PageReadSession, ProfileReadme, ProfileReadmeIneligible, RepositoryReadContext};
+use crate::data::page_cache::{
+    CachedPageReadSession, PageCacheError, PageOrigin, PageReadMode, PageValue,
+};
+use crate::data::reader_images::RepositoryImageService;
+use crate::data::{
+    AccountCache, PageReadSession, ProfileReadme, ProfileReadmeIneligible, RepositoryReadContext,
+    Scoped,
+};
 use crate::domain::blob::BlobLimits;
 use crate::domain::error::GitHubError;
 use crate::domain::profile::{
     ContributionCalendar, ContributionRange, ProfileBasic, ProfileError, ProfilePinned,
 };
-use crate::domain::repository::RepositoryError;
+use crate::domain::repository::{RepositoryError, RepositoryIdentity};
 use crate::github::RepositoryLimits;
 use crate::github::profile::ProfileLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
+use crate::storage::cache::CacheError;
 use crate::ui::profile::{
-    PresentationError, ProfileAction, ProfileActionKind, ProfileBinding, ProfileRequest,
-    ProfileTarget, ProfileView, SectionState,
+    PresentationError, ProfileAction, ProfileActionKind, ProfileBinding, ProfileProvenance,
+    ProfileRequest, ProfileTarget, ProfileView, SectionState,
 };
-use crate::ui::reader::{LinkTarget, ReaderAction};
+use crate::ui::reader::{ImageLimits, ImageProvider, LinkTarget, ReaderAction};
 use crate::workspace::{Route, TabId};
 
 use super::{NavigationSink, PageAvatars, PageNavigation};
@@ -97,11 +106,16 @@ impl Work {
     }
 }
 
+struct SectionOutcome<T> {
+    value: T,
+    provenance: Option<ProfileProvenance>,
+}
+
 enum SectionResult {
-    Basic(Result<ProfileBasic, ProfileError>),
-    Repositories(Result<ProfilePinned, ProfileError>),
-    Contributions(Result<ContributionCalendar, ProfileError>),
-    Readme(Result<ProfileReadme, RepositoryError>),
+    Basic(Result<SectionOutcome<ProfileBasic>, PresentationError>),
+    Repositories(Result<SectionOutcome<ProfilePinned>, PresentationError>),
+    Contributions(Result<SectionOutcome<ContributionCalendar>, PresentationError>),
+    Readme(Result<SectionOutcome<ProfileReadme>, PresentationError>),
 }
 
 struct Reply {
@@ -119,11 +133,15 @@ pub struct ProfilePage {
     login: String,
     services: Option<AccountServices>,
     session: Option<PageReadSession>,
+    cached_session: Option<CachedPageReadSession>,
+    external_images: Option<Arc<dyn ExternalImageBytes>>,
+    image_limits: ImageLimits,
     selection: u64,
     generation: u64,
     requests: [u64; 4],
     work: [Option<Work>; 4],
     inbox: Arc<Mutex<VecDeque<Reply>>>,
+    cache_invalidated: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<watch::Sender<bool>>,
     receiver: Option<gpui::Task<()>>,
     view: Option<Entity<ProfileView>>,
@@ -147,16 +165,23 @@ impl ProfilePage {
         cx: &mut Context<Self>,
     ) -> Self {
         let (alive, _) = watch::channel(true);
+        let external_images = ReqwestExternalImages::new()
+            .ok()
+            .map(|client| Arc::new(client) as Arc<dyn ExternalImageBytes>);
         let mut this = Self {
             tab,
             login,
             services: None,
             session: None,
+            cached_session: None,
+            external_images,
+            image_limits: ImageLimits::default(),
             selection: 0,
             generation: 0,
             requests: [0; 4],
             work: [None, None, None, None],
             inbox: Arc::new(Mutex::new(VecDeque::new())),
+            cache_invalidated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             alive: Arc::new(alive),
             receiver: None,
             view: None,
@@ -182,6 +207,9 @@ impl ProfilePage {
     }
 
     pub fn rebind(&mut self, services: Option<AccountServices>, cx: &mut Context<Self>) {
+        if let Some(view) = &self.view {
+            view.update(cx, |view, cx| view.suspend(cx));
+        }
         self.stop();
         self.services = services;
         self.selection = self.services.as_ref().map_or(0, AccountServices::selection);
@@ -189,19 +217,31 @@ impl ProfilePage {
         self.requests = [0; 4];
         self.request = None;
         self.unavailable = None;
+        self.cache_invalidated
+            .store(false, std::sync::atomic::Ordering::Release);
         self._avatars_changed = None;
         self.view = None;
         self._changed = None;
         let Some(services) = self.services.clone() else {
+            cx.notify();
             return;
         };
         match services.accounts().page_session() {
             Ok(session) if services.repositories().is_current(session.context()) => {
+                self.cached_session =
+                    services
+                        .repositories()
+                        .cache(session.context())
+                        .and_then(|cache| {
+                            let (store, scope) = cache.into_parts();
+                            CachedPageReadSession::new(session.clone(), store, scope).ok()
+                        });
                 self.session = Some(session);
                 self.start(Section::Basic, cx);
             }
             _ => {}
         }
+        cx.notify();
     }
 
     fn placeholder(&self, message: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -219,6 +259,96 @@ impl ProfilePage {
             .text_color(cx.theme().colors.fg_subtle)
             .child(message.to_string())
             .into_any_element()
+    }
+
+    fn error_placeholder(
+        &self,
+        error: &PresentationError,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use ely_core::theme::{ActiveTheme, TextSize};
+        use gpui::{IntoElement, ParentElement, Styled, div, prelude::*};
+        let message = error.message();
+        let weak = cx.weak_entity();
+        let generation = self.generation;
+        let mark = crate::ui::compact_status::failed(
+            "profile-page-basic-error",
+            "Profile could not be loaded",
+            message,
+            Some(move |_: &mut Window, cx: &mut gpui::App| {
+                let _ = weak.update(cx, |page, cx| {
+                    if page.generation == generation {
+                        page.retry_basic(cx);
+                    }
+                });
+            }),
+            Some("profile-page-basic-error"),
+            cx,
+        );
+        div()
+            .debug_selector(|| "profile-page-unavailable".to_string())
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_6()
+            .text_align(gpui::TextAlign::Center)
+            .text_size(cx.theme().text_size(TextSize::Sm))
+            .text_color(cx.theme().colors.warning)
+            .child(mark)
+            .child(message.to_string())
+            .into_any_element()
+    }
+
+    fn retry_basic(&mut self, cx: &mut Context<Self>) {
+        if self.work[Section::Basic.index()].is_some() {
+            return;
+        }
+        self.unavailable = None;
+        if let (Some(request), Some(view)) = (self.request.clone(), self.view.clone()) {
+            view.update(cx, |view, cx| {
+                view.update_basic(&request, SectionState::Loading, cx);
+            });
+        }
+        self.start(Section::Basic, cx);
+        cx.notify();
+    }
+
+    fn retry_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        if self.work[section.index()].is_some() {
+            return;
+        }
+        let (Some(request), Some(view)) = (self.request.clone(), self.view.clone()) else {
+            if section == Section::Basic {
+                self.retry_basic(cx);
+            }
+            return;
+        };
+        match section {
+            Section::Basic => {
+                self.retry_basic(cx);
+                return;
+            }
+            Section::Repositories => {
+                view.update(cx, |view, cx| {
+                    view.update_repositories(&request, SectionState::Loading, cx);
+                });
+            }
+            Section::Contributions => {
+                let range = self.range.clone();
+                view.update(cx, |view, cx| {
+                    view.update_contributions(&request, &range, SectionState::Loading, cx);
+                });
+            }
+            Section::Readme => {
+                view.update(cx, |view, cx| {
+                    view.update_readme(&request, SectionState::Loading, window, cx);
+                });
+            }
+        }
+        self.start(section, cx);
+        cx.notify();
     }
 
     fn create_view(
@@ -318,7 +448,48 @@ impl ProfilePage {
                 );
             }
             ProfileActionKind::Readme(_) => {}
+            ProfileActionKind::RetryBasic => {
+                self.retry_basic(cx);
+            }
+            ProfileActionKind::RetryRepositories => {
+                self.retry_section(Section::Repositories, window, cx);
+            }
+            ProfileActionKind::RetryContributions => {
+                self.retry_section(Section::Contributions, window, cx);
+            }
+            ProfileActionKind::RetryReadme => {
+                self.retry_section(Section::Readme, window, cx);
+            }
         }
+    }
+
+    fn build_readme_image_provider(
+        &self,
+        repository: RepositoryIdentity,
+        context: &RepositoryReadContext,
+    ) -> Option<Arc<dyn ImageProvider>> {
+        let services = self.services.as_ref()?;
+        let external = self.external_images.clone()?;
+        let session = services.repositories().session().ok()?;
+        if session.context() != context || !services.repositories().is_current(context) {
+            return None;
+        }
+        // Profile README comes only from a verified public same-name repository (`is_private = false`).
+        let cache = services
+            .repositories()
+            .cache(context)
+            .map(|account_cache: AccountCache| {
+                let (store, scope) = account_cache.into_parts();
+                (store, scope, false)
+            });
+        Some(Arc::new(RepositoryImageService::with_cache(
+            session,
+            repository,
+            services.executor().clone(),
+            external,
+            self.image_limits.clone(),
+            cache,
+        )))
     }
 
     fn start(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -333,6 +504,15 @@ impl ProfilePage {
         if !services.repositories().is_current(&context) {
             return;
         }
+        // Re-check cache availability from RepoService::cache(context) before starting.
+        let cached = services.repositories().cache(&context).and_then(|cache| {
+            let (store, scope) = cache.into_parts();
+            CachedPageReadSession::new(session.clone(), store, scope).ok()
+        });
+        self.cached_session = cached.clone();
+        self.cache_invalidated
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.start_cache_monitor(&services);
         self.requests[index] = self.requests[index].saturating_add(1);
         let request = self.requests[index];
         let work = Work::new();
@@ -354,36 +534,20 @@ impl ProfilePage {
         let submitted = services.executor().handle().spawn(async move {
             let result = match section {
                 Section::Basic => SectionResult::Basic(
-                    session
-                        .profile(&login, cancel)
-                        .await
-                        .map(|value| value.value),
+                    read_profile_basic(&session, cached.as_ref(), &login, cancel).await,
                 ),
                 Section::Repositories => SectionResult::Repositories(
-                    session
-                        .profile_pinned(&login, &ProfileLimits::default(), cancel)
-                        .await
-                        .map(|value| value.value),
+                    read_profile_pinned(&session, cached.as_ref(), &login, cancel).await,
                 ),
                 Section::Contributions => SectionResult::Contributions(
-                    session
-                        .contribution_calendar(&login, &range, &ProfileLimits::default(), cancel)
-                        .await
-                        .map(|value| value.value),
+                    read_profile_contributions(&session, cached.as_ref(), &login, &range, cancel)
+                        .await,
                 ),
                 Section::Readme => SectionResult::Readme(match basic {
-                    Some(basic) => session
-                        .profile_readme(
-                            &basic,
-                            &RepositoryLimits::default(),
-                            &BlobLimits::default(),
-                            cancel,
-                        )
-                        .await
-                        .map(|value| value.value),
-                    None => Err(RepositoryError::InvalidInput {
-                        field: "profile basic identity",
-                    }),
+                    Some(basic) => {
+                        read_profile_readme(&session, cached.as_ref(), &basic, cancel).await
+                    }
+                    None => Err(PresentationError::InvalidData),
                 }),
             };
             if *alive.borrow() {
@@ -403,6 +567,58 @@ impl ProfilePage {
         }
     }
 
+    fn start_cache_monitor(&self, services: &AccountServices) {
+        let Some(cached) = self.cached_session.clone() else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let context = session.context().clone();
+        let repos = services.repositories();
+        let login = self.login.clone();
+        let alive = self.alive.clone();
+        let invalidated = self.cache_invalidated.clone();
+        let _ = services.executor().handle().spawn(async move {
+            let mut had_cached_basic = false;
+            loop {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                if !*alive.borrow() || !repos.is_current(&context) || !session.verify() {
+                    break;
+                }
+                if repos.cache(&context).is_none() {
+                    invalidated.store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                }
+                match cached
+                    .profile(PageReadMode::Offline, &login, CancellationToken::default())
+                    .await
+                {
+                    Ok(Scoped {
+                        value: PageValue::Value { .. },
+                        ..
+                    }) => {
+                        had_cached_basic = true;
+                    }
+                    Ok(Scoped {
+                        value: PageValue::Miss(_),
+                        ..
+                    }) => {
+                        if had_cached_basic {
+                            // The aggregate snapshot was wiped (e.g. by explicit repository revocation).
+                            invalidated.store(true, std::sync::atomic::Ordering::Release);
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        invalidated.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     fn start_receiver(&mut self, cx: &mut Context<Self>) {
         self.receiver = Some(cx.spawn(async |this, cx| {
             loop {
@@ -420,22 +636,10 @@ impl ProfilePage {
         }));
     }
 
-    fn accepts(&self, reply: &Reply) -> bool {
-        reply.generation == self.generation
-            && reply.selection == self.selection
-            && reply.request == self.requests[reply.section.index()]
-            && reply.login == self.login
-            && self
-                .services
-                .as_ref()
-                .is_some_and(|services| services.repositories().is_current(&reply.context))
-            && self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.context() == &reply.context)
-    }
-
     fn drain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.check_authorization(cx) {
+            return;
+        }
         let replies: Vec<_> = self
             .inbox
             .lock()
@@ -447,8 +651,115 @@ impl ProfilePage {
         }
     }
 
+    fn check_authorization(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        let Some(services) = &self.services else {
+            return false;
+        };
+        if services.repositories().is_current(session.context()) && session.verify() {
+            // If a cache binding was attached, ensure the cache gate has not been retired/suspended/rejected.
+            let gate_lost = self
+                .cache_invalidated
+                .load(std::sync::atomic::Ordering::Acquire)
+                || (self.cached_session.is_some()
+                    && services.repositories().cache(session.context()).is_none());
+            if gate_lost {
+                self.cached_session = None;
+                if let Some(view) = &self.view {
+                    let any_historical = view
+                        .read(cx)
+                        .basic_provenance()
+                        .is_some_and(ProfileProvenance::is_historical)
+                        || view
+                            .read(cx)
+                            .repositories_provenance()
+                            .is_some_and(ProfileProvenance::is_historical)
+                        || view
+                            .read(cx)
+                            .contributions_provenance()
+                            .is_some_and(ProfileProvenance::is_historical)
+                        || view
+                            .read(cx)
+                            .readme_provenance()
+                            .is_some_and(ProfileProvenance::is_historical);
+                    if any_historical {
+                        view.update(cx, |view, cx| view.suspend(cx));
+                        self.view = None;
+                        self.request = None;
+                        self.unavailable = Some(PresentationError::Forbidden);
+                        cx.notify();
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        if let Some(view) = &self.view {
+            view.update(cx, |view, cx| view.suspend(cx));
+        }
+        self.stop();
+        self.view = None;
+        self.request = None;
+        self.unavailable = None;
+        cx.notify();
+        false
+    }
+
+    fn accepts(&self, reply: &Reply, has_historical_cache: bool) -> bool {
+        if reply.generation != self.generation
+            || reply.selection != self.selection
+            || reply.request != self.requests[reply.section.index()]
+            || reply.login != self.login
+        {
+            return false;
+        }
+        let Some(services) = &self.services else {
+            return false;
+        };
+        if !services.repositories().is_current(&reply.context) {
+            return false;
+        }
+        if !self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.context() == &reply.context && session.verify())
+        {
+            return false;
+        }
+        if has_historical_cache
+            && (self
+                .cache_invalidated
+                .load(std::sync::atomic::Ordering::Acquire)
+                || services.repositories().cache(&reply.context).is_none())
+        {
+            return false;
+        }
+        true
+    }
+
     fn apply(&mut self, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.accepts(&reply) {
+        let is_historical = match &reply.result {
+            SectionResult::Basic(Ok(outcome)) => outcome
+                .provenance
+                .as_ref()
+                .is_some_and(ProfileProvenance::is_historical),
+            SectionResult::Repositories(Ok(outcome)) => outcome
+                .provenance
+                .as_ref()
+                .is_some_and(ProfileProvenance::is_historical),
+            SectionResult::Contributions(Ok(outcome)) => outcome
+                .provenance
+                .as_ref()
+                .is_some_and(ProfileProvenance::is_historical),
+            SectionResult::Readme(Ok(outcome)) => outcome
+                .provenance
+                .as_ref()
+                .is_some_and(ProfileProvenance::is_historical),
+            _ => false,
+        };
+        if !self.accepts(&reply, is_historical) {
             return;
         }
         self.work[reply.section.index()] = None;
@@ -466,61 +777,114 @@ impl ProfilePage {
                         let SectionResult::Repositories(result) = reply.result else {
                             return;
                         };
-                        let state = match result {
-                            Ok(value) => SectionState::Ready(value),
-                            Err(error) => SectionState::Error(error.into()),
-                        };
-                        view.update(cx, |view, cx| {
-                            view.update_repositories(&request, state, cx);
-                        });
+                        match result {
+                            Ok(outcome) => {
+                                view.update(cx, |view, cx| {
+                                    view.update_repositories_with_provenance(
+                                        &request,
+                                        SectionState::Ready(outcome.value),
+                                        outcome.provenance,
+                                        cx,
+                                    );
+                                });
+                            }
+                            Err(error) => {
+                                view.update(cx, |view, cx| {
+                                    view.update_repositories(
+                                        &request,
+                                        SectionState::Error(error),
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
                     }
                     Section::Contributions => {
                         let SectionResult::Contributions(result) = reply.result else {
                             return;
                         };
-                        let state = match result {
-                            Ok(value) => SectionState::Ready(value),
-                            Err(error) => SectionState::Error(error.into()),
-                        };
                         let range = self.range.clone();
-                        view.update(cx, |view, cx| {
-                            view.update_contributions(&request, &range, state, cx);
-                        });
+                        match result {
+                            Ok(outcome) => {
+                                view.update(cx, |view, cx| {
+                                    view.update_contributions_with_provenance(
+                                        &request,
+                                        &range,
+                                        SectionState::Ready(outcome.value),
+                                        outcome.provenance,
+                                        cx,
+                                    );
+                                });
+                            }
+                            Err(error) => {
+                                view.update(cx, |view, cx| {
+                                    view.update_contributions(
+                                        &request,
+                                        &range,
+                                        SectionState::Error(error),
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
                     }
                     Section::Readme => {
                         let SectionResult::Readme(result) = reply.result else {
                             return;
                         };
                         match result {
-                            Ok(ProfileReadme::Prepared { content, .. }) => {
+                            Ok(SectionOutcome {
+                                value:
+                                    ProfileReadme::Prepared {
+                                        repository,
+                                        content,
+                                        ..
+                                    },
+                                provenance,
+                            }) => {
+                                let provider =
+                                    self.build_readme_image_provider(repository, &reply.context);
                                 view.update(cx, |view, cx| {
-                                    view.update_readme(
+                                    view.update_readme_with_provider(
                                         &request,
                                         SectionState::Ready(content),
+                                        provider,
+                                        provenance,
                                         window,
                                         cx,
                                     );
                                 });
                             }
-                            Ok(ProfileReadme::Missing { .. }) => {
+                            Ok(SectionOutcome {
+                                value: ProfileReadme::Missing { .. },
+                                provenance,
+                            }) => {
                                 view.update(cx, |view, cx| {
-                                    view.set_readme_unavailable(
+                                    view.set_readme_unavailable_with_provenance(
                                         &request,
                                         "No root README.md exists in this user's public same-name repository.",
+                                        provenance,
                                         cx,
                                     );
                                 });
                             }
-                            Ok(ProfileReadme::Unavailable { .. }) => {
+                            Ok(SectionOutcome {
+                                value: ProfileReadme::Unavailable { .. },
+                                provenance,
+                            }) => {
                                 view.update(cx, |view, cx| {
-                                    view.set_readme_unavailable(
+                                    view.set_readme_unavailable_with_provenance(
                                         &request,
                                         "The root README could not be confirmed from an incomplete repository tree.",
+                                        provenance,
                                         cx,
                                     );
                                 });
                             }
-                            Ok(ProfileReadme::NotEligible { reason, .. }) => {
+                            Ok(SectionOutcome {
+                                value: ProfileReadme::NotEligible { reason, .. },
+                                provenance,
+                            }) => {
                                 let message = match reason {
                                     ProfileReadmeIneligible::NotPublicSameNameRepository => {
                                         "This user has no visible public same-name profile repository."
@@ -530,7 +894,9 @@ impl ProfilePage {
                                     }
                                 };
                                 view.update(cx, |view, cx| {
-                                    view.set_readme_unavailable(&request, message, cx);
+                                    view.set_readme_unavailable_with_provenance(
+                                        &request, message, provenance, cx,
+                                    );
                                 });
                             }
                             Err(error) => {
@@ -539,10 +905,9 @@ impl ProfilePage {
                                 // repository: it hides missing and private resources the same
                                 // way. That is a quiet optional absence, so it must not surface
                                 // the generic "not found" error sentence. Real network, auth,
-                                // rate-limit and parse failures keep their typed error and the
-                                // compact warning mark.
-                                if matches!(&error, RepositoryError::GitHub(GitHubError::NotFound))
-                                {
+                                // rate-limit, cache-miss and parse failures keep their typed error
+                                // and the compact warning mark.
+                                if error == PresentationError::NotFound {
                                     view.update(cx, |view, cx| {
                                         view.set_readme_unavailable(
                                             &request,
@@ -554,7 +919,7 @@ impl ProfilePage {
                                     view.update(cx, |view, cx| {
                                         view.update_readme_with_context(
                                             &request,
-                                            SectionState::Error(repository_error(error)),
+                                            SectionState::Error(error),
                                             crate::ui::reader::ResourceContext::new(
                                                 &reply.login,
                                                 &reply.login,
@@ -583,7 +948,10 @@ impl ProfilePage {
         #[cfg(test)]
         eprintln!("apply_basic {:?}", result.as_ref().err());
         match result {
-            Ok(basic) => {
+            Ok(SectionOutcome {
+                value: basic,
+                provenance,
+            }) => {
                 // Server id/login are authoritative. An earlier login-only action is never used as
                 // a numeric identity; Shell canonicalizes the matching TabId after this callback.
                 self.login = basic.login.clone();
@@ -596,7 +964,7 @@ impl ProfilePage {
                 if let Some(view) = self.view.clone() {
                     let state = SectionState::Ready(basic.clone());
                     view.update(cx, |view, cx| {
-                        view.update_basic(&request, state, cx);
+                        view.update_basic_with_provenance(&request, state, provenance, cx);
                     });
                     self.sync_avatar(basic, cx);
                 }
@@ -617,7 +985,7 @@ impl ProfilePage {
             Err(error) => {
                 self.view = None;
                 self.request = None;
-                self.unavailable = Some(error.into());
+                self.unavailable = Some(error);
             }
         }
     }
@@ -640,6 +1008,16 @@ impl ProfilePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_external_images_for_test(&mut self, external: Arc<dyn ExternalImageBytes>) {
+        self.external_images = Some(external);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn view_for_test(&self) -> Option<&Entity<ProfileView>> {
+        self.view.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn target_for_test(&self, cx: &gpui::App) -> Option<(crate::domain::HostId, u64)> {
         let view = self.view.as_ref()?;
         let target = view.read(cx).target().clone();
@@ -659,6 +1037,357 @@ impl ProfilePage {
         }
         self.inbox.lock().expect("profile inbox").clear();
         self.session = None;
+        self.cached_session = None;
+    }
+}
+
+fn should_fallback_profile(error: &ProfileError) -> bool {
+    match error {
+        ProfileError::GitHub(
+            GitHubError::Network { .. }
+            | GitHubError::Timeout { .. }
+            | GitHubError::RateLimited { .. },
+        ) => true,
+        ProfileError::GitHub(GitHubError::UnexpectedStatus { status }) => *status >= 500,
+        ProfileError::Graphql { kind, .. } => matches!(
+            kind,
+            crate::domain::GraphqlErrorKind::RateLimitPrimary
+                | crate::domain::GraphqlErrorKind::RateLimitSecondary
+        ),
+        _ => false,
+    }
+}
+
+fn should_fallback_readme(error: &RepositoryError) -> bool {
+    match error {
+        RepositoryError::GitHub(
+            GitHubError::Network { .. }
+            | GitHubError::Timeout { .. }
+            | GitHubError::RateLimited { .. },
+        ) => true,
+        RepositoryError::GitHub(GitHubError::UnexpectedStatus { status }) => *status >= 500,
+        _ => false,
+    }
+}
+
+fn map_cache_error(error: CacheError) -> PresentationError {
+    match error {
+        CacheError::AccessDenied => PresentationError::Forbidden,
+        CacheError::Stale => PresentationError::Unauthorized,
+        CacheError::Corrupt => PresentationError::CacheCorrupt,
+        _ => PresentationError::Unavailable,
+    }
+}
+
+fn unpack_page_value<T>(value: PageValue<T>) -> Result<SectionOutcome<T>, PresentationError> {
+    match value {
+        PageValue::Value {
+            value,
+            origin,
+            metadata,
+        } => Ok(SectionOutcome {
+            value,
+            provenance: Some(ProfileProvenance::from_cache(
+                origin == PageOrigin::HistoricalSnapshot,
+                &metadata,
+            )),
+        }),
+        PageValue::Miss(miss) => Err(PresentationError::from_cache_miss(miss)),
+    }
+}
+
+async fn read_profile_basic(
+    session: &PageReadSession,
+    cached: Option<&CachedPageReadSession>,
+    login: &str,
+    cancel: CancellationToken,
+) -> Result<SectionOutcome<ProfileBasic>, PresentationError> {
+    let Some(cached) = cached else {
+        return session
+            .profile(login, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(PresentationError::from);
+    };
+    match cached
+        .profile(PageReadMode::Online, login, cancel.clone())
+        .await
+    {
+        Ok(scoped) => unpack_page_value(scoped.value),
+        Err(PageCacheError::Read(error)) => {
+            if should_fallback_profile(&error) {
+                match cached.profile(PageReadMode::Offline, login, cancel).await {
+                    Ok(scoped) => match scoped.value {
+                        PageValue::Value {
+                            value,
+                            origin,
+                            metadata,
+                        } => Ok(SectionOutcome {
+                            value,
+                            provenance: Some(ProfileProvenance::from_cache(
+                                origin == PageOrigin::HistoricalSnapshot,
+                                &metadata,
+                            )),
+                        }),
+                        PageValue::Miss(miss) => {
+                            if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
+                                Err(PresentationError::from_cache_miss(miss))
+                            } else {
+                                Err(error.into())
+                            }
+                        }
+                    },
+                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => Err(error.into()),
+                    Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+                    Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
+                    Err(PageCacheError::Read(read_err)) => Err(read_err.into()),
+                }
+            } else {
+                Err(error.into())
+            }
+        }
+        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
+            .profile(login, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(PresentationError::from),
+        Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+        Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
+    }
+}
+
+async fn read_profile_pinned(
+    session: &PageReadSession,
+    cached: Option<&CachedPageReadSession>,
+    login: &str,
+    cancel: CancellationToken,
+) -> Result<SectionOutcome<ProfilePinned>, PresentationError> {
+    let limits = ProfileLimits::default();
+    let Some(cached) = cached else {
+        return session
+            .profile_pinned(login, &limits, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(PresentationError::from);
+    };
+    match cached
+        .profile_pinned(PageReadMode::Online, login, &limits, cancel.clone())
+        .await
+    {
+        Ok(scoped) => unpack_page_value(scoped.value),
+        Err(PageCacheError::Read(error)) => {
+            if should_fallback_profile(&error) {
+                match cached
+                    .profile_pinned(PageReadMode::Offline, login, &limits, cancel)
+                    .await
+                {
+                    Ok(scoped) => match scoped.value {
+                        PageValue::Value {
+                            value,
+                            origin,
+                            metadata,
+                        } => Ok(SectionOutcome {
+                            value,
+                            provenance: Some(ProfileProvenance::from_cache(
+                                origin == PageOrigin::HistoricalSnapshot,
+                                &metadata,
+                            )),
+                        }),
+                        PageValue::Miss(miss) => {
+                            if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
+                                Err(PresentationError::from_cache_miss(miss))
+                            } else {
+                                Err(error.into())
+                            }
+                        }
+                    },
+                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => Err(error.into()),
+                    Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+                    Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
+                    Err(PageCacheError::Read(read_err)) => Err(read_err.into()),
+                }
+            } else {
+                Err(error.into())
+            }
+        }
+        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
+            .profile_pinned(login, &limits, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(PresentationError::from),
+        Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+        Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
+    }
+}
+
+async fn read_profile_contributions(
+    session: &PageReadSession,
+    cached: Option<&CachedPageReadSession>,
+    login: &str,
+    range: &ContributionRange,
+    cancel: CancellationToken,
+) -> Result<SectionOutcome<ContributionCalendar>, PresentationError> {
+    let limits = ProfileLimits::default();
+    let Some(cached) = cached else {
+        return session
+            .contribution_calendar(login, range, &limits, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(PresentationError::from);
+    };
+    match cached
+        .contribution_calendar(PageReadMode::Online, login, range, &limits, cancel.clone())
+        .await
+    {
+        Ok(scoped) => unpack_page_value(scoped.value),
+        Err(PageCacheError::Read(error)) => {
+            if should_fallback_profile(&error) {
+                match cached
+                    .contribution_calendar(PageReadMode::Offline, login, range, &limits, cancel)
+                    .await
+                {
+                    Ok(scoped) => match scoped.value {
+                        PageValue::Value {
+                            value,
+                            origin,
+                            metadata,
+                        } => Ok(SectionOutcome {
+                            value,
+                            provenance: Some(ProfileProvenance::from_cache(
+                                origin == PageOrigin::HistoricalSnapshot,
+                                &metadata,
+                            )),
+                        }),
+                        PageValue::Miss(miss) => {
+                            if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
+                                Err(PresentationError::from_cache_miss(miss))
+                            } else {
+                                Err(error.into())
+                            }
+                        }
+                    },
+                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => Err(error.into()),
+                    Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+                    Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
+                    Err(PageCacheError::Read(read_err)) => Err(read_err.into()),
+                }
+            } else {
+                Err(error.into())
+            }
+        }
+        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
+            .contribution_calendar(login, range, &limits, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(PresentationError::from),
+        Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+        Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
+    }
+}
+
+async fn read_profile_readme(
+    session: &PageReadSession,
+    cached: Option<&CachedPageReadSession>,
+    basic: &ProfileBasic,
+    cancel: CancellationToken,
+) -> Result<SectionOutcome<ProfileReadme>, PresentationError> {
+    let repo_limits = RepositoryLimits::default();
+    let blob_limits = BlobLimits::default();
+    let Some(cached) = cached else {
+        return session
+            .profile_readme(basic, &repo_limits, &blob_limits, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(repository_error);
+    };
+    match cached
+        .profile_readme(
+            PageReadMode::Online,
+            basic,
+            &repo_limits,
+            &blob_limits,
+            cancel.clone(),
+        )
+        .await
+    {
+        Ok(scoped) => unpack_page_value(scoped.value),
+        Err(PageCacheError::Read(error)) => {
+            if should_fallback_readme(&error) {
+                match cached
+                    .profile_readme(
+                        PageReadMode::Offline,
+                        basic,
+                        &repo_limits,
+                        &blob_limits,
+                        cancel,
+                    )
+                    .await
+                {
+                    Ok(scoped) => match scoped.value {
+                        PageValue::Value {
+                            value,
+                            origin,
+                            metadata,
+                        } => Ok(SectionOutcome {
+                            value,
+                            provenance: Some(ProfileProvenance::from_cache(
+                                origin == PageOrigin::HistoricalSnapshot,
+                                &metadata,
+                            )),
+                        }),
+                        PageValue::Miss(miss) => {
+                            if matches!(error, RepositoryError::GitHub(GitHubError::Network { .. }))
+                            {
+                                Err(PresentationError::from_cache_miss(miss))
+                            } else {
+                                Err(repository_error(error))
+                            }
+                        }
+                    },
+                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+                        Err(repository_error(error))
+                    }
+                    Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+                    Err(PageCacheError::Context(gh)) => {
+                        Err(PresentationError::from(ProfileError::GitHub(gh)))
+                    }
+                    Err(PageCacheError::Read(read_err)) => Err(repository_error(read_err)),
+                }
+            } else {
+                Err(repository_error(error))
+            }
+        }
+        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
+            .profile_readme(basic, &repo_limits, &blob_limits, cancel)
+            .await
+            .map(|scoped| SectionOutcome {
+                value: scoped.value,
+                provenance: None,
+            })
+            .map_err(repository_error),
+        Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
+        Err(PageCacheError::Context(gh)) => Err(PresentationError::from(ProfileError::GitHub(gh))),
     }
 }
 
@@ -680,7 +1409,7 @@ impl Render for ProfilePage {
             return view.into_any_element();
         }
         if let Some(error) = &self.unavailable {
-            return self.placeholder(error.message(), cx).into_any_element();
+            return self.error_placeholder(error, cx);
         }
         if self.services.is_none() {
             return self
@@ -712,6 +1441,1010 @@ impl Drop for ProfilePage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{AppContext, Entity, TestAppContext, VisualContext, VisualTestContext, px};
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::app::AccountsHandle;
+    use crate::app::accounts::Accounts;
+    use crate::app::accounts::runtime::AccountRuntime;
+    use crate::auth::InMemoryCredentialStore;
+    use crate::auth::token::Pat;
+    use crate::content::images::ImageKey;
+    use crate::data::AccountService;
+    use crate::domain::{AccountKey, HostId};
+    use crate::github::{GitHubClient, GitHubConfig};
+    use crate::network::executor::BackgroundExecutor;
+    use crate::network::reader_images::{
+        ExternalImageBytes, ExternalImageError, ExternalImageLimits, ExternalImageMetadata,
+        ExternalImageResponse, ValidationHeaders,
+    };
+    use crate::network::transport::{HttpRequest, HttpResponse, Transport, TransportError};
+    use crate::storage::accounts::AccountDatabaseConfig;
+    use crate::storage::cache::{CacheConfig, CacheStore};
+
+    const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ROOT_TREE: &str = "1111111111111111111111111111111111111111";
+    const DOCS_TREE: &str = "2222222222222222222222222222222222222222";
+    const README_BLOB: &str = "3333333333333333333333333333333333333333";
+    const DIAGRAM_BLOB: &str = "4444444444444444444444444444444444444444";
+    const SLOW_BLOB: &str = "5555555555555555555555555555555555555555";
+    const LOGO_URL: &str = "https://images.invalid/public/logo.png";
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([(x % 200) as u8, (y % 200) as u8, 120, 255])
+        });
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("encode png");
+        cursor.into_inner()
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn json(status: u16, body: serde_json::Value) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: vec![],
+            body: body.to_string(),
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ReadmeMode {
+        WithPictures,
+        Missing,
+        RepoNotFound,
+        ServerError,
+        SlowPicture,
+    }
+
+    struct ProfileFixtureTransport {
+        offline: AtomicBool,
+        readme_mode: Mutex<ReadmeMode>,
+        pinned_partial: AtomicBool,
+        calendar_partial: AtomicBool,
+        calendar_fail: AtomicBool,
+        pinned_fail: AtomicBool,
+        user_id: Mutex<u64>,
+        user_login: Mutex<String>,
+        reads: Mutex<Vec<String>>,
+        diagram: Vec<u8>,
+        slow_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl ProfileFixtureTransport {
+        fn new() -> Self {
+            Self {
+                offline: AtomicBool::new(false),
+                readme_mode: Mutex::new(ReadmeMode::WithPictures),
+                pinned_partial: AtomicBool::new(false),
+                calendar_partial: AtomicBool::new(false),
+                calendar_fail: AtomicBool::new(false),
+                pinned_fail: AtomicBool::new(false),
+                user_id: Mutex::new(1),
+                user_login: Mutex::new("alice".into()),
+                reads: Mutex::new(Vec::new()),
+                diagram: png_bytes(160, 90),
+                slow_gate: Mutex::new(None),
+            }
+        }
+
+        fn set_offline(&self, offline: bool) {
+            self.offline.store(offline, Ordering::SeqCst);
+        }
+
+        fn set_readme_mode(&self, mode: ReadmeMode) {
+            *self.readme_mode.lock().unwrap() = mode;
+        }
+
+        fn set_user(&self, id: u64, login: &str) {
+            *self.user_id.lock().unwrap() = id;
+            *self.user_login.lock().unwrap() = login.to_string();
+        }
+
+        fn readme_markdown(mode: ReadmeMode) -> String {
+            match mode {
+                ReadmeMode::SlowPicture => {
+                    "# Alice Profile\n\n![slow](docs/slow.png)\n\nEnd of profile.\n".into()
+                }
+                _ => format!(
+                    "# Alice Profile\n\nWelcome to Alice's profile.\n\n![diagram](docs/diagram.png)\n\n![logo]({LOGO_URL})\n\nEnd of profile.\n"
+                ),
+            }
+        }
+    }
+
+    impl Transport for ProfileFixtureTransport {
+        fn execute_bounded<'a>(
+            &'a self,
+            request: HttpRequest,
+            cancel: CancellationToken,
+            max_body_bytes: usize,
+        ) -> Pin<
+            Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let resp = self.execute(request, cancel).await?;
+                if resp.body.len() > max_body_bytes {
+                    return Err(TransportError::ResponseTooLarge {
+                        limit: max_body_bytes,
+                    });
+                }
+                Ok(resp)
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            request: HttpRequest,
+            cancel: CancellationToken,
+        ) -> Pin<
+            Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let url = request.url.clone();
+                self.reads.lock().unwrap().push(url.clone());
+                if url.ends_with("/user") {
+                    let id = *self.user_id.lock().unwrap();
+                    let login = self.user_login.lock().unwrap().clone();
+                    return Ok(json(200, serde_json::json!({"id": id, "login": login})));
+                }
+                if url.contains("/user/repos") {
+                    return Ok(json(200, serde_json::json!([])));
+                }
+                if self.offline.load(Ordering::SeqCst) {
+                    return Err(TransportError::Network {
+                        message: "simulated offline".into(),
+                    });
+                }
+                let lower = url.to_ascii_lowercase();
+                if lower.ends_with("/users/alice") {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "id": 1,
+                            "login": "alice",
+                            "name": "Alice Example",
+                            "bio": "Systems programmer",
+                            "avatar_url": null,
+                            "followers": 12,
+                            "following": 5
+                        }),
+                    ));
+                }
+                if lower.ends_with("/users/bob") {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "id": 2,
+                            "login": "bob",
+                            "name": "Bob Example",
+                            "bio": "Other user bio",
+                            "avatar_url": null
+                        }),
+                    ));
+                }
+                if url.ends_with("/graphql") {
+                    let body = request.body.unwrap_or_default();
+                    if body.contains("itemShowcase") {
+                        if self.pinned_fail.load(Ordering::SeqCst) {
+                            return Err(TransportError::Network {
+                                message: "pinned network fail".into(),
+                            });
+                        }
+                        let partial = self.pinned_partial.load(Ordering::SeqCst);
+                        let mut payload = serde_json::json!({
+                            "data": {
+                                "user": {
+                                    "pinnedItems": {
+                                        "totalCount": if partial { 5 } else { 1 },
+                                        "pageInfo": {"hasNextPage": partial},
+                                        "nodes": [{
+                                            "__typename": "Repository",
+                                            "databaseId": 101,
+                                            "name": "core",
+                                            "nameWithOwner": "alice/core",
+                                            "description": "Core library",
+                                            "url": "https://github.com/alice/core",
+                                            "isPrivate": false,
+                                            "isFork": false,
+                                            "stargazerCount": 42,
+                                            "forkCount": 3,
+                                            "primaryLanguage": {"name": "Rust"},
+                                            "owner": {"login": "alice"}
+                                        }]
+                                    },
+                                    "itemShowcase": {
+                                        "hasPinnedItems": true,
+                                        "items": {
+                                            "totalCount": 1,
+                                            "pageInfo": {"hasNextPage": partial},
+                                            "nodes": [{
+                                                "__typename": "Repository",
+                                                "databaseId": 101,
+                                                "name": "core",
+                                                "nameWithOwner": "alice/core",
+                                                "description": "Core library",
+                                                "url": "https://github.com/alice/core",
+                                                "isPrivate": false,
+                                                "isFork": false,
+                                                "stargazerCount": 42,
+                                                "forkCount": 3,
+                                                "primaryLanguage": {"name": "Rust"},
+                                                "owner": {"login": "alice"}
+                                            }]
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        if partial {
+                            payload["errors"] = serde_json::json!([{
+                                "type": "FORBIDDEN",
+                                "path": ["user", "pinnedItems"]
+                            }]);
+                        }
+                        return Ok(json(200, payload));
+                    }
+                    if body.contains("contributionsCollection") {
+                        if self.calendar_fail.load(Ordering::SeqCst) {
+                            return Err(TransportError::Network {
+                                message: "calendar network fail".into(),
+                            });
+                        }
+                        let partial = self.calendar_partial.load(Ordering::SeqCst);
+                        let mut payload = serde_json::json!({
+                            "data": {
+                                "user": {
+                                    "contributionsCollection": {
+                                        "contributionCalendar": {
+                                            "totalContributions": 5,
+                                            "weeks": [{
+                                                "contributionDays": [{
+                                                    "date": "2026-01-01",
+                                                    "contributionCount": 5,
+                                                    "contributionLevel": "SECOND_QUARTILE",
+                                                    "color": "#112233"
+                                                }]
+                                            }],
+                                            "months": []
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        if partial {
+                            payload["errors"] = serde_json::json!([{
+                                "type": "FORBIDDEN",
+                                "path": ["user", "contributionsCollection"]
+                            }]);
+                        }
+                        return Ok(json(200, payload));
+                    }
+                }
+                if lower.ends_with("/repos/alice/alice") {
+                    let mode = *self.readme_mode.lock().unwrap();
+                    return match mode {
+                        ReadmeMode::RepoNotFound => Ok(json(404, serde_json::json!({}))),
+                        ReadmeMode::ServerError => Ok(json(503, serde_json::json!({}))),
+                        _ => Ok(json(
+                            200,
+                            serde_json::json!({
+                                "id": 77,
+                                "name": "alice",
+                                "full_name": "alice/alice",
+                                "owner": {"id": 1, "login": "alice"},
+                                "visibility": "public",
+                                "private": false,
+                                "default_branch": "main",
+                                "fork": false,
+                                "archived": false,
+                                "stargazers_count": 0,
+                                "forks_count": 0,
+                                "open_issues_count": 0,
+                                "size": 1,
+                                "html_url": "https://github.com/alice/alice"
+                            }),
+                        )),
+                    };
+                }
+                if lower.contains("/repos/alice/alice/commits/") {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "sha": COMMIT,
+                            "commit": {
+                                "message": "profile readme",
+                                "tree": {"sha": ROOT_TREE},
+                                "author": null,
+                                "committer": null
+                            }
+                        }),
+                    ));
+                }
+                if lower.ends_with(&format!("/repos/alice/alice/git/trees/{ROOT_TREE}")) {
+                    let mode = *self.readme_mode.lock().unwrap();
+                    if mode == ReadmeMode::Missing {
+                        return Ok(json(
+                            200,
+                            serde_json::json!({
+                                "sha": ROOT_TREE,
+                                "truncated": false,
+                                "tree": []
+                            }),
+                        ));
+                    }
+                    let text = Self::readme_markdown(mode);
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "sha": ROOT_TREE,
+                            "truncated": false,
+                            "tree": [
+                                {"path": "README.md", "type": "blob", "mode": "100644", "sha": README_BLOB, "size": text.len()},
+                                {"path": "docs", "type": "tree", "mode": "040000", "sha": DOCS_TREE}
+                            ]
+                        }),
+                    ));
+                }
+                if lower.ends_with(&format!("/repos/alice/alice/git/trees/{DOCS_TREE}")) {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "sha": DOCS_TREE,
+                            "truncated": false,
+                            "tree": [
+                                {"path": "diagram.png", "type": "blob", "mode": "100644", "sha": DIAGRAM_BLOB, "size": self.diagram.len()},
+                                {"path": "slow.png", "type": "blob", "mode": "100644", "sha": SLOW_BLOB, "size": self.diagram.len()}
+                            ]
+                        }),
+                    ));
+                }
+                if lower.ends_with(&format!("/repos/alice/alice/git/blobs/{README_BLOB}")) {
+                    let mode = *self.readme_mode.lock().unwrap();
+                    let text = Self::readme_markdown(mode);
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "sha": README_BLOB,
+                            "encoding": "base64",
+                            "size": text.len(),
+                            "content": b64(text.as_bytes())
+                        }),
+                    ));
+                }
+                if lower.ends_with(&format!("/repos/alice/alice/git/blobs/{DIAGRAM_BLOB}")) {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "sha": DIAGRAM_BLOB,
+                            "encoding": "base64",
+                            "size": self.diagram.len(),
+                            "content": b64(&self.diagram)
+                        }),
+                    ));
+                }
+                if lower.ends_with(&format!("/repos/alice/alice/git/blobs/{SLOW_BLOB}")) {
+                    let rx = self.slow_gate.lock().unwrap().take();
+                    if let Some(rx) = rx {
+                        let _ = rx.await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(TransportError::Cancelled);
+                    }
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "sha": SLOW_BLOB,
+                            "encoding": "base64",
+                            "size": self.diagram.len(),
+                            "content": b64(&self.diagram)
+                        }),
+                    ));
+                }
+                Ok(json(404, serde_json::json!({})))
+            })
+        }
+    }
+
+    struct TestExternalImages {
+        offline: AtomicBool,
+        bodies: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl TestExternalImages {
+        fn new() -> Self {
+            let mut bodies = HashMap::new();
+            bodies.insert(LOGO_URL.to_string(), png_bytes(64, 64));
+            Self {
+                offline: AtomicBool::new(false),
+                bodies: Mutex::new(bodies),
+            }
+        }
+
+        fn set_offline(&self, offline: bool) {
+            self.offline.store(offline, Ordering::SeqCst);
+        }
+    }
+
+    impl ExternalImageBytes for TestExternalImages {
+        fn load_with_metadata<'a>(
+            &'a self,
+            url: &'a str,
+            _limits: &'a ExternalImageLimits,
+            _validation: ValidationHeaders<'a>,
+            cancel: CancellationToken,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ExternalImageResponse, ExternalImageError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                if cancel.is_cancelled() {
+                    return Err(ExternalImageError::Cancelled);
+                }
+                if self.offline.load(Ordering::SeqCst) {
+                    return Err(ExternalImageError::Network);
+                }
+                let bytes = self
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .get(url)
+                    .cloned()
+                    .ok_or(ExternalImageError::Status(404))?;
+                Ok(ExternalImageResponse::Fetched {
+                    bytes,
+                    metadata: ExternalImageMetadata {
+                        etag: Some("\"logo-etag\"".into()),
+                        last_modified: None,
+                        cache_control: Some("public, max-age=3600".into()),
+                        age_secs: None,
+                    },
+                })
+            })
+        }
+    }
+
+    fn setup_test_app(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            ely_core::init_for_tests(cx);
+            crate::platform::fonts::register(cx).expect("test fonts");
+        });
+    }
+
+    struct Harness {
+        _temp: tempfile::TempDir,
+        transport: Arc<ProfileFixtureTransport>,
+        external: Arc<TestExternalImages>,
+        accounts: Arc<AccountService>,
+        controller: Entity<Accounts>,
+        page: Entity<ProfilePage>,
+    }
+
+    fn build_harness(
+        cx: &mut TestAppContext,
+        with_cache: bool,
+    ) -> (Harness, &mut VisualTestContext) {
+        setup_test_app(cx);
+        let temp = tempfile::tempdir().unwrap();
+        let account_db = temp.path().join("accounts.sqlite3");
+        let cache_dir = temp.path().join("cache");
+        let cred_store = Arc::new(InMemoryCredentialStore::new());
+        let transport = Arc::new(ProfileFixtureTransport::new());
+        let external = Arc::new(TestExternalImages::new());
+        let executor = Arc::new(BackgroundExecutor::new(4));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let svc = rt.block_on(async {
+            let svc = if with_cache {
+                let store = CacheStore::open(CacheConfig::at(cache_dir.clone())).unwrap();
+                AccountService::open_with_cache(
+                    AccountDatabaseConfig::at(account_db),
+                    cred_store.clone(),
+                    Arc::new(GitHubClient::new(
+                        GitHubConfig::default(),
+                        transport.clone(),
+                    )),
+                    executor.clone(),
+                    store,
+                )
+                .await
+                .unwrap()
+            } else {
+                AccountService::open(
+                    AccountDatabaseConfig::at(account_db),
+                    cred_store.clone(),
+                    Arc::new(GitHubClient::new(
+                        GitHubConfig::default(),
+                        transport.clone(),
+                    )),
+                    executor.clone(),
+                )
+                .await
+                .unwrap()
+            };
+            svc.login(Pat::from_str("ghp_alice_token")).await.unwrap();
+            svc
+        });
+        let runtime = Arc::new(AccountRuntime::new(svc, executor));
+        let accounts = runtime.accounts.clone();
+        let external_for_page = external.clone();
+        let mut controller_slot = None;
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let controller = cx.new(|cx| Accounts::new(Some(runtime), window, cx));
+            cx.set_global(AccountsHandle(controller.clone()));
+            let services = controller.read(cx).services();
+            let avatars = PageAvatars::new(Some(controller.downgrade()));
+            let nav: NavigationSink = Rc::new(|_, _, _| {});
+            controller_slot = Some(controller);
+            let sessions = crate::workspace::Sessions::new(cx);
+            let tab_id = sessions.active_id();
+            let mut page =
+                ProfilePage::new(tab_id, "alice".to_string(), services, nav, avatars, cx);
+            page.set_external_images_for_test(external_for_page);
+            page
+        });
+        let controller = controller_slot.unwrap();
+        (
+            Harness {
+                _temp: temp,
+                transport,
+                external,
+                accounts,
+                controller,
+                page,
+            },
+            cx,
+        )
+    }
+
+    fn pump_page(harness: &Harness, cx: &mut VisualTestContext) {
+        harness
+            .controller
+            .update(cx, |accounts, cx| accounts.drain_for_test(cx));
+        cx.update_window_entity(&harness.page, |page, window, cx| {
+            page.drain_for_test(window, cx);
+            if let Some(view) = page.view_for_test().cloned()
+                && let Some(reader) = view.read(cx).reader().cloned()
+            {
+                reader.update(cx, |reader, cx| reader.beat_images(cx));
+            }
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    fn wait_for_profile(
+        harness: &Harness,
+        cx: &mut VisualTestContext,
+        mut check: impl FnMut(&mut VisualTestContext) -> bool,
+    ) {
+        for _ in 0..400 {
+            pump_page(harness, cx);
+            if check(cx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("profile page did not reach expected state");
+    }
+
+    #[gpui::test]
+    fn online_warmup_and_reopen_offline_restores_profile_readme_and_images_at_natural_height(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        let diagram_key = ImageKey::new(format!("repo:alice/alice@{COMMIT}:docs/diagram.png"));
+        let logo_key = ImageKey::new(format!("url:{LOGO_URL}"));
+
+        // 1. Warm up online: wait until basic, repos, calendar, README and both images are ready.
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                let Some(view) = page.view_for_test() else {
+                    return false;
+                };
+                let v = view.read(cx);
+                matches!(v.basic(), SectionState::Ready(_))
+                    && matches!(v.repositories(), SectionState::Ready(_))
+                    && matches!(v.contributions(), SectionState::Ready(_))
+                    && matches!(v.readme_state(), SectionState::Ready(()))
+                    && v.reader().is_some_and(|r| {
+                        r.read(cx).image_state(&diagram_key).as_deref() == Some("ready")
+                            && r.read(cx).image_state(&logo_key).as_deref() == Some("ready")
+                    })
+            })
+        });
+        // Let background cache writes settle.
+        std::thread::sleep(Duration::from_millis(50));
+        pump_page(&harness, cx);
+
+        // Check natural height and no nested scrollbars in online state.
+        let doc_bounds = cx.debug_bounds("reader-markdown").expect("README markdown");
+        assert!(doc_bounds.size.height > px(100.0));
+        assert!(cx.debug_bounds("reader-markdown-scrollbar-thumb").is_none());
+        assert!(
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+        );
+
+        // 2. Cut network (both GitHub transport and external image transport) and reopen ProfilePage.
+        harness.transport.set_offline(true);
+        harness.external.set_offline(true);
+        let reads_before = harness.transport.reads.lock().unwrap().len();
+
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                let Some(view) = page.view_for_test() else {
+                    return false;
+                };
+                let v = view.read(cx);
+                matches!(v.basic(), SectionState::Ready(_))
+                    && matches!(v.repositories(), SectionState::Ready(_))
+                    && matches!(v.contributions(), SectionState::Ready(_))
+                    && matches!(v.readme_state(), SectionState::Ready(()))
+                    && v.reader().is_some_and(|r| {
+                        r.read(cx).image_state(&diagram_key).as_deref() == Some("ready")
+                            && r.read(cx).image_state(&logo_key).as_deref() == Some("ready")
+                    })
+            })
+        });
+        let _ = reads_before;
+        // Historical badges are shown on all four sections.
+        assert!(
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("profile-repositories-provenance-historical")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("profile-contributions-provenance-historical")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("profile-readme-provenance-historical")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("reader-markdown").is_some());
+        assert!(cx.debug_bounds("reader-markdown-scrollbar-thumb").is_none());
+    }
+
+    #[gpui::test]
+    fn uncached_offline_and_online_recovery_work_without_masking_errors_as_absent_readme(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        // Start offline with an empty cache: basic fails with NotCached and offers retry.
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-page-basic-error").is_some()
+        });
+
+        // Restore network, but make README return 503 ServerError first: README must show compact warning mark, NOT disappear!
+        harness.transport.set_offline(false);
+        harness.transport.set_readme_mode(ReadmeMode::ServerError);
+        let basic_retry = cx.debug_bounds("profile-page-basic-error").unwrap();
+        cx.simulate_click(basic_retry.center(), gpui::Modifiers::none());
+
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-readme-error").is_some()
+                && cx.debug_bounds("profile-basic").is_some()
+        });
+        assert!(
+            cx.debug_bounds("profile-readme-section").is_some(),
+            "503 error must not be disguised as an absent README"
+        );
+
+        // Now switch README to 404 (RepoNotFound) and click the README retry mark.
+        harness.transport.set_readme_mode(ReadmeMode::RepoNotFound);
+        let readme_retry = cx.debug_bounds("profile-readme-error").unwrap();
+        cx.simulate_click(readme_retry.center(), gpui::Modifiers::none());
+
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-readme-section").is_none()
+        });
+
+        // Switch to Missing (empty root tree) online so it caches a Missing README outcome.
+        harness.transport.set_readme_mode(ReadmeMode::Missing);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    matches!(v.read(cx).readme_state(), SectionState::Unavailable(_))
+                })
+            })
+        });
+
+        // Go offline and reopen: confirmed Missing README is restored from cache and still omitted!
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+                && harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test().is_some_and(|v| {
+                        matches!(v.read(cx).readme_state(), SectionState::Unavailable(_))
+                    })
+                })
+        });
+        assert!(
+            cx.debug_bounds("profile-readme-section").is_none(),
+            "cached Missing README remains quietly omitted offline"
+        );
+    }
+
+    #[gpui::test]
+    fn partial_pins_and_calendar_and_section_miss_preserve_distinct_states(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        harness
+            .transport
+            .pinned_partial
+            .store(true, Ordering::SeqCst);
+        harness
+            .transport
+            .calendar_fail
+            .store(true, Ordering::SeqCst);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-repositories-provenance-partial")
+                .is_some()
+                && cx.debug_bounds("profile-section-error-mark").is_some()
+        });
+
+        // Now go offline and reopen: basic & partial pins & README come from cache, while calendar is NotCached!
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+                && cx
+                    .debug_bounds("profile-repositories-provenance-historical")
+                    .is_some()
+                && cx
+                    .debug_bounds("profile-repositories-provenance-partial")
+                    .is_some()
+                && harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test().is_some_and(|v| {
+                        matches!(
+                            v.read(cx).contributions(),
+                            SectionState::Error(PresentationError::NotCached)
+                        )
+                    })
+                })
+        });
+
+        // Bring network back with complete calendar, and click retry on contributions section!
+        harness.transport.set_offline(false);
+        harness
+            .transport
+            .calendar_fail
+            .store(false, Ordering::SeqCst);
+        let retry_mark = cx.debug_bounds("profile-section-error-mark").unwrap();
+        cx.simulate_click(retry_mark.center(), gpui::Modifiers::none());
+
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    matches!(v.read(cx).contributions(), SectionState::Ready(_))
+                        && v.read(cx)
+                            .contributions_provenance()
+                            .is_some_and(|p| !p.is_historical())
+                })
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn account_switch_pat_replace_removal_and_revocation_isolate_cache_and_stop_slow_pictures(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        let (tx_slow, rx_slow) = tokio::sync::oneshot::channel();
+        *harness.transport.slow_gate.lock().unwrap() = Some(rx_slow);
+        harness.transport.set_readme_mode(ReadmeMode::SlowPicture);
+
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+
+        // Wait until README is mounted and slow picture is in loading state.
+        let slow_key = ImageKey::new(format!("repo:alice/alice@{COMMIT}:docs/slow.png"));
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    v.read(cx).reader().is_some_and(|r| {
+                        r.read(cx).image_state(&slow_key).as_deref() == Some("loading")
+                    })
+                })
+            })
+        });
+        let old_reader = harness.page.read_with(cx, |page, cx| {
+            page.view_for_test()
+                .unwrap()
+                .read(cx)
+                .reader()
+                .unwrap()
+                .clone()
+        });
+
+        // Replace PAT while slow picture is in flight -> quarantines aggregate cache and advances epoch.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            harness
+                .accounts
+                .replace(
+                    AccountKey::new(1, HostId::github()),
+                    Pat::from_str("ghp_alice_replaced"),
+                )
+                .await
+                .unwrap();
+        });
+        // Release slow picture after PAT replacement.
+        let _ = tx_slow.send(());
+        pump_page(&harness, cx);
+
+        // Old view is cleared on next drain because session is no longer current.
+        wait_for_profile(&harness, cx, |cx| {
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+        // Old reader never transitioned to ready.
+        assert_ne!(
+            old_reader
+                .read_with(cx, |r, _| r.image_state(&slow_key))
+                .as_deref(),
+            Some("ready")
+        );
+
+        // Offline under replaced PAT: aggregate cache is quarantined (C3), so offline read cannot use old snapshot.
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-page-basic-error").is_some()
+                && harness
+                    .page
+                    .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+
+        // Remove account (C2): immediately clears/blocks.
+        rt.block_on(async {
+            harness
+                .accounts
+                .remove(AccountKey::new(1, HostId::github()))
+                .await
+                .unwrap();
+        });
+        pump_page(&harness, cx);
+        assert!(
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        );
+
+        // Sign in a second account (bob) and verify account switch isolation.
+        harness.transport.set_offline(false);
+        harness.transport.set_user(2, "bob");
+        rt.block_on(async {
+            harness
+                .accounts
+                .login(Pat::from_str("ghp_bob_token"))
+                .await
+                .unwrap();
+        });
+        pump_page(&harness, cx);
+    }
+
+    #[gpui::test]
+    fn explicit_repository_revocation_clears_historical_profile_and_blocks_offline_revival(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        // Go offline and reopen so ProfilePage displays a historical snapshot.
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+        });
+
+        // Explicit repository revocation invalidates the account aggregate snapshot and advances revision.
+        let context = harness.accounts.page_session().unwrap().context().clone();
+        let cache = harness.accounts.repo_service().cache(&context).unwrap();
+        cache
+            .store()
+            .revoke_repository(cache.scope(), Some(101))
+            .unwrap();
+
+        // Wait for cache monitor + drain to evict the historical view!
+        wait_for_profile(&harness, cx, |cx| {
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn uncached_service_preserves_online_behavior_without_regression(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, false);
+        let diagram_key = ImageKey::new(format!("repo:alice/alice@{COMMIT}:docs/diagram.png"));
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                let Some(view) = page.view_for_test() else {
+                    return false;
+                };
+                let v = view.read(cx);
+                matches!(v.basic(), SectionState::Ready(_))
+                    && matches!(v.repositories(), SectionState::Ready(_))
+                    && matches!(v.contributions(), SectionState::Ready(_))
+                    && matches!(v.readme_state(), SectionState::Ready(()))
+                    && v.reader().is_some_and(|r| {
+                        r.read(cx).image_state(&diagram_key).as_deref() == Some("ready")
+                    })
+            })
+        });
+        assert!(
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+        );
+    }
 
     #[test]
     fn rolling_year_handles_ordinary_leap_and_epoch_boundaries() {
