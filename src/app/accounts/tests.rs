@@ -12,15 +12,19 @@ use crate::workspace::{Route, TabId};
 
 use super::wait_for_shutdown;
 use super::*;
+use crate::app::avatar::{AvatarBytesFuture, AvatarDetailedFuture, AvatarResponseMetadata};
 use crate::auth::InMemoryCredentialStore;
 use crate::data::AccountService;
+use crate::data::avatar_cache::AvatarDiskCache;
 use crate::domain::account::AuthorizationState;
 use crate::github::{GitHubClient, GitHubConfig};
+use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::network::transport::{
     HttpRequest, HttpResponse, MockTransport, Transport, TransportError,
 };
 use crate::storage::accounts::AccountDatabaseConfig;
+use crate::storage::cache::{CacheConfig, CacheError, CacheStore};
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -98,6 +102,27 @@ fn open(
             executor.clone(),
         ))
         .expect("open test service");
+    (AccountRuntime::new(accounts, executor.clone()), executor)
+}
+
+/// The same test composition, but with a real business `CacheStore` injected exactly as production
+/// startup does through `open_accounts_with_cache`. Used by the avatar cache-binding tests.
+fn open_cached(
+    path: &std::path::Path,
+    store: Arc<InMemoryCredentialStore>,
+    transport: Arc<dyn Transport>,
+    cache: CacheStore,
+) -> (AccountRuntime, Arc<BackgroundExecutor>) {
+    let executor = Arc::new(BackgroundExecutor::new(4));
+    let accounts = host_runtime()
+        .block_on(AccountService::open_with_cache(
+            AccountDatabaseConfig::at(path.to_path_buf()),
+            store,
+            Arc::new(GitHubClient::new(GitHubConfig::default(), transport)),
+            executor.clone(),
+            cache,
+        ))
+        .expect("open test service with cache");
     (AccountRuntime::new(accounts, executor.clone()), executor)
 }
 
@@ -1963,4 +1988,227 @@ fn partial_results_keep_rows_usable_and_offer_a_scoped_retry(cx: &mut TestAppCon
     // The controller's own refresh is reachable and starts a fresh read for the same authorization.
     controller.update(cx, |accounts, cx| accounts.refresh(cx));
     wait_idle(&controller, cx);
+}
+
+/// A deterministic avatar transport for the cache-composition tests. It implements both the plain
+/// byte source and the conditional source, so the fetcher exercises the disk-cache path with
+/// response metadata without contacting a real avatar host.
+struct CacheTestAvatarSource {
+    responses: Mutex<std::collections::HashMap<String, (u16, Vec<u8>)>>,
+    reads: AtomicUsize,
+}
+
+impl CacheTestAvatarSource {
+    fn new() -> Self {
+        Self {
+            responses: Mutex::new(std::collections::HashMap::new()),
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn serve(&self, url: &str, status: u16, body: Vec<u8>) {
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), (status, body));
+    }
+}
+
+impl AvatarBytes for CacheTestAvatarSource {
+    fn load<'a>(
+        &'a self,
+        url: &'a str,
+        _max_bytes: usize,
+        _cancel: CancellationToken,
+    ) -> AvatarBytesFuture<'a> {
+        Box::pin(async move {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .get(url)
+                .map(|(status, body)| (*status, body.clone()))
+                .ok_or(())
+        })
+    }
+}
+
+impl AvatarSource for CacheTestAvatarSource {
+    fn load_detailed<'a>(
+        &'a self,
+        url: &'a str,
+        _max_bytes: usize,
+        _etag: Option<&'a str>,
+        _last_modified: Option<&'a str>,
+        _cancel: CancellationToken,
+    ) -> AvatarDetailedFuture<'a> {
+        Box::pin(async move {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .get(url)
+                .map(|(status, body)| {
+                    (
+                        *status,
+                        AvatarResponseMetadata {
+                            etag: Some("\"etag-1\"".to_string()),
+                            last_modified: None,
+                            cache_control: Some("max-age=3600".to_string()),
+                        },
+                        body.clone(),
+                    )
+                })
+                .ok_or(())
+        })
+    }
+}
+
+/// A real 1x1 PNG so GPUI's decoder succeeds on it.
+fn cache_test_png() -> Vec<u8> {
+    vec![
+        137u8, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+        6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 248,
+        15, 0, 1, 4, 1, 0, 95, 229, 195, 75, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]
+}
+
+/// The production avatar binding: the fetcher writes through the active account's own cache scope,
+/// and switching accounts both drops the decoded in-memory cache and stops the old scope from being
+/// read or resurrected. No real avatar host or credential is contacted.
+#[gpui::test]
+fn avatar_cache_binds_to_the_active_account_and_switching_accounts_drops_the_old_scope(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts_path = temp.path().join("accounts.sqlite3");
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    mock.serve_repos("alice-token", repos(1, "alice", &["a"]));
+    mock.serve_repos("bob-token", repos(2, "bob", &["b"]));
+
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(&accounts_path, store, mock.clone(), cache.clone());
+    let service = runtime.accounts.clone();
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    let avatars = Arc::new(CacheTestAvatarSource::new());
+    avatars.serve("https://avatars.test/alice.png", 200, cache_test_png());
+    controller.update(cx, |accounts, _| {
+        accounts.install_avatar_transport(avatars.clone(), Some(avatars.clone()));
+    });
+
+    // Log in alice and let the automatic repository read settle.
+    put_token(&controller, cx, "alice-token");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+
+    let alice_key = AvatarKey::new("github.com", 1, "https://avatars.test/alice.png");
+    assert!(matches!(
+        controller.update(cx, |accounts, _| accounts.avatar(alice_key.clone())),
+        AvatarState::Loading
+    ));
+    beat_until(&controller, cx, |controller, cx| {
+        matches!(
+            controller.read_with(cx, |accounts, _| accounts.avatar_state_for_test(&alice_key)),
+            Some(AvatarState::Ready(_))
+        )
+    });
+
+    // The image was fetched through the fetcher's disk cache and stored under alice's own scope.
+    {
+        let summary = service.active_summary().expect("alice is active");
+        let binding = service.cache(&summary).expect("cache binding for alice");
+        let disk = AvatarDiskCache::new(binding.store().clone(), binding.scope().clone());
+        assert!(
+            disk.read_sync(&alice_key).is_some(),
+            "alice's avatar is written to her account cache scope"
+        );
+    }
+
+    // Adding bob selects him: the avatar fetcher must rebind to bob's scope and drop alice's
+    // decoded display state and the old scope handle.
+    put_token(&controller, cx, "bob-token");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state.accounts.len() == 2 && state.active == Some(AccountKey::new(2, HostId::github()))
+    });
+    wait_idle(&controller, cx);
+
+    assert!(
+        matches!(
+            controller.read_with(cx, |accounts, _| accounts.avatar_state_for_test(&alice_key)),
+            Some(AvatarState::Unknown)
+        ),
+        "the decoded avatar cache is reset when the active account changes"
+    );
+    {
+        let summary = service.active_summary().expect("bob is active");
+        let binding = service.cache(&summary).expect("cache binding for bob");
+        let disk = AvatarDiskCache::new(binding.store().clone(), binding.scope().clone());
+        assert!(
+            disk.read_sync(&alice_key).is_none(),
+            "bob's scope does not contain alice's avatar"
+        );
+    }
+}
+
+/// The single production assembly point: a cache-open failure falls back to the ordinary online-only
+/// service instead of taking login and repository reads down with it.
+#[tokio::test]
+async fn cache_open_failure_falls_back_to_the_online_only_service() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(user(1, "alice"))).await;
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = super::runtime::open_accounts_with_cache(
+        AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), mock)),
+        executor.clone(),
+        Err(CacheError::PathUnavailable),
+    )
+    .await
+    .expect("the online-only service still opens when the cache cannot");
+    service
+        .login(Pat::from_str("ghp_fake"))
+        .await
+        .expect("login works without a cache");
+    let summary = service.active_summary().expect("logged in");
+    assert!(
+        service.cache(&summary).is_none(),
+        "a failed cache open yields no cache binding, not an empty one"
+    );
+}
+
+/// With a real CacheStore the same assembly point opts the service into private business caching.
+#[tokio::test]
+async fn a_cache_enabled_service_exposes_a_binding_after_login() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(user(1, "alice"))).await;
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let service = super::runtime::open_accounts_with_cache(
+        AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), mock)),
+        executor.clone(),
+        Ok(cache),
+    )
+    .await
+    .expect("the cache-enabled service opens");
+    service
+        .login(Pat::from_str("ghp_fake"))
+        .await
+        .expect("login");
+    let summary = service.active_summary().expect("logged in");
+    assert!(
+        service.cache(&summary).is_some(),
+        "a saved account with a working cache store receives a binding"
+    );
 }

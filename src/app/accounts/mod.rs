@@ -29,7 +29,8 @@ use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, Subscriptio
 use tokio::sync::watch;
 
 use crate::app::avatar::{
-    AvatarCache, AvatarFetcher, AvatarInbox, AvatarKey, AvatarRequest, AvatarState, run_fetch,
+    AvatarBytes, AvatarCache, AvatarFetcher, AvatarInbox, AvatarKey, AvatarRequest, AvatarSource,
+    AvatarState, ReqwestAvatars, run_fetch,
 };
 use crate::auth::token::Pat;
 use crate::data::{AccountError, LoginError, LoginOutcome, RepositoryReadContext};
@@ -239,6 +240,14 @@ pub(crate) struct Accounts {
     avatar_queue: Vec<AvatarRequest>,
     /// The fetcher every avatar read runs on.
     avatar_fetcher: Option<Arc<AvatarFetcher>>,
+    /// Test-injected byte transport. Production keeps this `None` and uses the real avatar client.
+    avatar_bytes_override: Option<Arc<dyn AvatarBytes>>,
+    /// Test-injected conditional source. Production keeps this `None`.
+    avatar_source_override: Option<Arc<dyn AvatarSource>>,
+    /// The active-account summary the current avatar fetcher's disk binding was built for. When the
+    /// active account or its authorization changes, the fetcher is rebuilt so decoded images,
+    /// in-flight reads and the old cache scope can never be reused under the new account.
+    avatar_bound: Option<AccountSummary>,
     /// Bounds how many avatar fetches run at once. A long repository list queues here instead of
     /// opening one connection per owner.
     avatar_permits: Arc<tokio::sync::Semaphore>,
@@ -298,8 +307,22 @@ impl Accounts {
     /// Replaces the avatar byte source before any fetch starts. Used by tests to serve local bytes
     /// instead of contacting an avatar host; production never calls it.
     #[cfg(test)]
-    pub fn install_avatar_source(&mut self, bytes: Arc<dyn crate::app::avatar::AvatarBytes>) {
-        self.avatar_fetcher = Some(Arc::new(AvatarFetcher::new(bytes, true)));
+    pub fn install_avatar_source(&mut self, bytes: Arc<dyn AvatarBytes>) {
+        self.install_avatar_transport(bytes, None);
+    }
+
+    /// Replaces the avatar byte source and optional conditional source before any fetch starts.
+    /// Used by the cache-composition tests to serve local bytes with response metadata; production
+    /// never calls it.
+    #[cfg(test)]
+    pub fn install_avatar_transport(
+        &mut self,
+        bytes: Arc<dyn AvatarBytes>,
+        source: Option<Arc<dyn AvatarSource>>,
+    ) {
+        self.avatar_bytes_override = Some(bytes);
+        self.avatar_source_override = source;
+        self.rebuild_avatar_fetcher(self.current_avatar_binding());
     }
 
     /// The state of one avatar for a renderer. Reading the cache is cheap; when the key is unknown
@@ -407,6 +430,9 @@ impl Accounts {
             avatar_inbox: Arc::new(Mutex::new(Vec::new())),
             avatar_queue: Vec::new(),
             avatar_fetcher: None,
+            avatar_bytes_override: None,
+            avatar_source_override: None,
+            avatar_bound: None,
             avatar_permits: Arc::new(tokio::sync::Semaphore::new(6)),
             previous_repositories: None,
             loaded: None,
@@ -596,13 +622,6 @@ impl Accounts {
         let Some(runtime) = self.runtime.clone() else {
             return;
         };
-        if self.avatar_fetcher.is_none() {
-            // Avatar bodies are binary, so they use a dedicated byte source rather than the
-            // JSON REST transport; production installs a reqwest client that never carries the PAT.
-            let bytes: Arc<dyn crate::app::avatar::AvatarBytes> =
-                Arc::new(crate::app::avatar::ReqwestAvatars::new().unwrap_or_default());
-            self.avatar_fetcher = Some(Arc::new(AvatarFetcher::new(bytes, false)));
-        }
         self.refresh_presentation();
         let restored = self.snapshot.accounts.iter().any(|summary| {
             summary.authorization == crate::domain::account::AuthorizationState::PendingVerification
@@ -670,6 +689,80 @@ impl Accounts {
             );
         }
         self.snapshot.active = active;
+        self.sync_avatar_binding();
+    }
+
+    /// Rebind the avatar fetcher to the current account's private cache partition.
+    ///
+    /// The fetcher holds an immutable `AvatarDiskCache` (store clone + scope). When the active
+    /// account, its authorization epoch or its runtime evidence changes, that binding may no longer
+    /// be the current partition (a replacement/removal quarantines or retires the old scope). Rebuild
+    /// the fetcher and drop the decoded cache, in-flight queue and pending completions so no image,
+    /// pending read or old permission copy survives into the new account's presentation.
+    fn sync_avatar_binding(&mut self) {
+        let summary = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.accounts.active_summary());
+        if self.avatar_bound.as_ref() != summary.as_ref() {
+            self.avatar_bound = summary;
+            let binding = self.current_avatar_binding();
+            self.rebuild_avatar_fetcher(binding);
+        }
+    }
+
+    /// The current account-level cache handle, or `None` while logged out or when the application
+    /// CacheStore is unavailable. Fail-closed: `None` means no disk cache, not an empty cache hit.
+    fn current_avatar_binding(&self) -> Option<crate::data::AccountCache> {
+        let runtime = self.runtime.as_ref()?;
+        let summary = runtime.accounts.active_summary()?;
+        runtime.accounts.cache(&summary)
+    }
+
+    /// Replaces the avatar fetcher and drops every decoded image, queued request and pending
+    /// completion. `binding` is the current account's cache handle, or `None` while logged out or
+    /// when the application CacheStore is unavailable.
+    fn rebuild_avatar_fetcher(&mut self, binding: Option<crate::data::AccountCache>) {
+        if let Some(fetcher) = &self.avatar_fetcher {
+            // In-flight reads observe cancellation; disk work already submitted on a blocking
+            // worker still finishes against the old (now isolated) scope, and its completion is
+            // discarded with the old inbox below.
+            fetcher.cancel();
+        }
+        let disk = binding.map(|binding| {
+            crate::data::avatar_cache::AvatarDiskCache::new(
+                binding.store().clone(),
+                binding.scope().clone(),
+            )
+        });
+        let fetcher = if let Some(bytes) = self.avatar_bytes_override.clone() {
+            let mut fetcher = AvatarFetcher::new(bytes, true);
+            if let Some(source) = self.avatar_source_override.clone() {
+                fetcher = fetcher.with_source(source);
+            }
+            if let Some(disk) = disk {
+                fetcher = fetcher.with_cache(disk);
+            }
+            fetcher
+        } else {
+            // Avatar bodies are binary, so they use a dedicated byte source rather than the
+            // JSON REST transport; production installs a reqwest client that never carries the PAT.
+            let production = Arc::new(ReqwestAvatars::new().unwrap_or_default());
+            let bytes: Arc<dyn AvatarBytes> = production.clone();
+            let source: Arc<dyn AvatarSource> = production;
+            let mut fetcher = AvatarFetcher::new(bytes, false).with_source(source);
+            if let Some(disk) = disk {
+                fetcher = fetcher.with_cache(disk);
+            }
+            fetcher
+        };
+        self.avatar_fetcher = Some(Arc::new(fetcher));
+        // Drop decoded display state, queued requests and completions from the previous binding.
+        // New requests use a new inbox so a late completion from the old fetcher can never mark a
+        // key Failed/Ready under the new account.
+        self.avatars = Arc::new(AvatarCache::new());
+        self.avatar_queue.clear();
+        self.avatar_inbox = Arc::new(Mutex::new(Vec::new()));
     }
 
     fn reconcile(&mut self, generation: u64, cx: &mut Context<Self>) {

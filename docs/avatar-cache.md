@@ -49,3 +49,13 @@ flowchart TD
 - 磁盘缓存读取的字节必须经过 `image::load_from_memory_with_format` 完整解码校验，才包装为 GPUI `Image`。损坏、截断或伪造签名的文件无法通过校验，安全回退到 initials fallback，绝不在 UI 产生破图。
 - 所有磁盘 I/O（`store.read`, `store.put`, `store.invalidate`, 票据与快照读取）严格在 Tokio 的 `spawn_blocking` 中执行，绝不在 UI 线程或事件循环主任务执行。
 - 未注入 `AvatarDiskCache` 或未登录时，保持原本纯内存缓存与无磁盘行为，完全兼容既有调用点。
+
+## 正式 Shell 接入与失效
+
+生产控制器 `src/app/accounts/mod.rs` 在每次权威账户状态刷新时核对当前 `active_summary`（`sync_avatar_binding`），summary 不变则不重建 fetcher；变化时：
+
+1. `cancel()` 旧 `AvatarFetcher`，停止在途下载；
+2. 用当前 `AccountCache` 的 `store`/`scope` 构造 `AvatarDiskCache`，并通过 `AvatarFetcher::with_source(...).with_cache(disk)` 重建 fetcher；
+3. 重置内存解码 `AvatarCache`、清空头像请求队列，并换新 `AvatarInbox`，使旧 fetcher 的迟到完成不再写入新账户展示。
+
+因此选择、替换、重验或移除账户后，已解码显示、在途读取和旧 scope 副本都不会在新账户下被复用。生产组装、回退与验证边界见 [app-cache-integration](app-cache-integration.md)。

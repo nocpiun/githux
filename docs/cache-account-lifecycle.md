@@ -1,6 +1,6 @@
 # 账户生命周期与私有缓存
 
-状态：`AccountService` 已能显式绑定应用级 `CacheStore`，保存、替换、明确拒绝、移除和重启对账已连接既有持久门禁。**正式 Shell 尚未调用 `open_with_cache` 或注入缓存消费者；本文不是正式离线 UI 已交付的声明。** 存储格式和 C1–C5 仍见 [cache-core](cache-core.md) 与[缓存策略](cache-strategy.md)。
+状态：`AccountService` 已能显式绑定应用级 `CacheStore`，保存、替换、明确拒绝、移除和重启对账已连接既有持久门禁。正式应用启动已在 `src/app/accounts/runtime.rs` 调用 `open_with_cache`（缓存打开失败回退在线-only 的 `open`），头像消费者已绑定当前 `AccountCache`；侧栏 `list_repos_cached` 与页面离线呈现仍依赖后续生产者/消费者，本文不是正式离线 UI 已全部交付的声明。组装细节见 [app-cache-integration](app-cache-integration.md)。存储格式和 C1–C5 仍见 [cache-core](cache-core.md) 与[缓存策略](cache-strategy.md)。
 
 ## 组装与消费契约
 
@@ -39,6 +39,6 @@ let accounts = AccountService::open_with_cache(
 
 ## 实现与验证边界
 
-实现位于 `src/data/account_cache.rs`、`src/data/accounts.rs`、AccountService/RepoService 构造字段，以及 cache core 的只读 `live_scopes` 与本地 suspension 防线。账户 DB 使用 v2：v1→v2 事务新增 `cache_recovery(host,id,kind)`，仅存稳定身份及 `rejected/replaced/retire/retire_rejected` 屏障，不存 PAT、授权成功证明或业务内容。拒绝记录保留到替换/移除的账户事务，目录回滚会保留它。无缓存构造器的保存/替换与 `retire/replaced` 记录同事务提交；下一次启用缓存须先退休旧分区或隔离旧数据，成功应用并确认 journal 后才发绑定。连续操作不会将退休屏障降级成替换；退休和拒绝并存时先退休旧分区，再拒绝新分区。缓存 DB 的 schema 不变。cache DB schema、Shell、repository/page 消费者和 GitHub 网络分类未改。
+实现位于 `src/data/account_cache.rs`、`src/data/accounts.rs`、AccountService/RepoService 构造字段，以及 cache core 的只读 `live_scopes` 与本地 suspension 防线。账户 DB 使用 v2：v1→v2 事务新增 `cache_recovery(host,id,kind)`，仅存稳定身份及 `rejected/replaced/retire/retire_rejected` 屏障，不存 PAT、授权成功证明或业务内容。拒绝记录保留到替换/移除的账户事务，目录回滚会保留它。无缓存构造器的保存/替换与 `retire/replaced` 记录同事务提交；下一次启用缓存须先退休旧分区或隔离旧数据，成功应用并确认 journal 后才发绑定。连续操作不会将退休屏障降级成替换；退休和拒绝并存时先退休旧分区，再拒绝新分区。缓存 DB 的 schema 不变。cache DB schema、GitHub 网络分类未改；生产启动与头像消费者接线见 [app-cache-integration](app-cache-integration.md)，repository/page 消费者（含侧栏 `list_repos_cached`）仍待对应生产者/消费者任务。
 
 离线确定性测试使用真实 `AccountService`、临时 SQLite 账户目录、真实 `CacheStore`、内存假凭据与 mock `/user`，覆盖正常重启、替换旧 lease/writer、逐仓库证明、账户聚合独立门槛、移除重加、跨账户隔离、迟到拒绝、门禁与账户 SQL 故障、目录已删而 scope 未退休的对账，以及 Windows 文件占用/Unix 目录权限导致的物理清理失败。未访问 GitHub 或真实 PAT。GUI、正式 Shell 注入、真实平台凭据与端到端离线阅读均未在本任务验证。

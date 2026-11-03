@@ -14,7 +14,8 @@ use crate::github::client::{GitHubClient, GitHubConfig};
 use crate::network::cancel::CancellationTokenSource;
 use crate::network::executor::BackgroundExecutor;
 use crate::network::transport::ReqwestTransport;
-use crate::storage::accounts::AccountDatabaseConfig;
+use crate::storage::accounts::{AccountDatabaseConfig, StorageError};
+use crate::storage::cache::{CacheConfig, CacheError, CacheStore};
 
 /// Process-exit gate for background account teardown.
 ///
@@ -164,8 +165,8 @@ impl Drop for CancelOnDrop {
 }
 
 /// Open the production stack inside a newly created background executor.
-/// `AccountService::open` performs SQLite and credential restoration on its
-/// blocking worker; no filesystem or credential API runs on GPUI.
+/// `AccountService::open`/`open_with_cache` perform SQLite, credential and cache
+/// restoration on blocking workers; no filesystem or credential API runs on GPUI.
 pub(crate) async fn open_production() -> Result<(AccountRuntime, Arc<BackgroundExecutor>), String> {
     let config = AccountDatabaseConfig::application_data().map_err(|error| error.to_string())?;
     let executor = Arc::new(BackgroundExecutor::new(4));
@@ -178,9 +179,47 @@ pub(crate) async fn open_production() -> Result<(AccountRuntime, Arc<BackgroundE
             .map_err(|_| "Could not initialize the GitHub HTTP client.".to_string())?,
     );
     let client = Arc::new(GitHubClient::new(GitHubConfig::default(), transport));
-    let accounts = AccountService::open(config, store, client, executor.clone())
+    // The one application CacheStore, opened once and injected into the account
+    // service. A cache failure (missing directory, lock, corrupt ledger) must
+    // never take the online account surface down with it.
+    let cache = open_application_cache().await;
+    let accounts = open_accounts_with_cache(config, store, client, executor.clone(), cache)
         .await
         .map_err(|error| format!("Could not open account storage: {error}"))?;
     let runtime = AccountRuntime::new(accounts, executor.clone());
     Ok((runtime, executor))
+}
+
+/// Open the application CacheStore on a blocking worker. The caller decides how
+/// to degrade when this fails; it is intentionally not part of the account
+/// storage error path.
+async fn open_application_cache() -> Result<CacheStore, CacheError> {
+    let config = CacheConfig::application_cache()?;
+    match tokio::task::spawn_blocking(move || CacheStore::open(config)).await {
+        Ok(result) => result,
+        Err(_) => Err(CacheError::Io),
+    }
+}
+
+/// Open the account service against an already-attempted cache store.
+///
+/// `Ok(cache)` opts into private business caching through
+/// [`AccountService::open_with_cache`]; a cache *open* failure falls back to the
+/// ordinary online-only service, which stays fully usable. This is the single
+/// production assembly point, kept separate so the fallback is testable without
+/// touching the real application data/cache directories.
+pub(crate) async fn open_accounts_with_cache(
+    config: AccountDatabaseConfig,
+    store: Arc<dyn CredentialStore>,
+    client: Arc<GitHubClient>,
+    executor: Arc<BackgroundExecutor>,
+    cache: Result<CacheStore, CacheError>,
+) -> Result<AccountService, StorageError> {
+    match cache {
+        Ok(cache) => AccountService::open_with_cache(config, store, client, executor, cache).await,
+        Err(error) => {
+            eprintln!("Business cache unavailable; continuing online-only: {error}");
+            AccountService::open(config, store, client, executor).await
+        }
+    }
 }
