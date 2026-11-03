@@ -1,25 +1,27 @@
 ---
 name: githux-agent-dispatch
-description: Create isolated Githux task worktrees and start, inspect or resume the configured coding executor in a visible interactive Windows CMD. Use when dispatching a scoped task or recovering its existing session.
+description: Create isolated Githux task worktrees and start, inspect or resume the configured coding executor in a local Kero terminal on Windows. Use when dispatching a scoped task or recovering its existing session.
+metadata:
+  internal: true
 ---
 
 # Githux Agent Dispatch
 
 主 Agent 使用本 skill 准备任务并启动配置的执行工具。普通 create/start/resume 在已有任务授权内直接执行，不重复索取批准。执行工具的 `--approve` 代表信任项目文件，不是权限沙箱，也不扩大任务范围。
 
-先读 [配置、命令、状态和恢复](references/operations.md)。脚本入口为本 skill 的 `scripts/dispatch.mjs`，需要 Node.js 20+；实际执行工具可能要求更高版本。可见启动仅支持 Windows，status 不联网。
+先读 [配置、命令、状态和恢复](references/operations.md)。脚本入口为本 skill 的 `scripts/dispatch.mjs`，需要 Node.js 20+；实际执行工具可能要求更高版本。可见启动仅支持 Windows，必须通过 PATH 中的 `kero` 使用本机 Kero；status 不调用 Kero、不联网。
 
 1. 检查协调仓库分支、worktree 和已有改动；明确任务范围、验收、相关文档及交付模式。首次试跑人数由主 Agent 管理，脚本不设置全局上限。
 2. 在忽略的 `.agents/dispatch.local.json` 配置执行工具；凭据只由执行工具既有配置管理。可用 `--config` 指定另一份本地 JSON，不改用户全局配置。
 3. 写 UTF-8 任务规格文件，至少包含 `# Goal`、`# Scope`、`# Acceptance`、`# Relevant docs`（也接受目标、范围、验收、相关文档）。写清依赖、共享接口、不做内容和检查。只传必要任务上下文，不复制私人记忆。
    规格应简短聚焦：目标、硬性产品约束、真实反例、所有权/依赖、验收证据和完成条件。链接共享规则而非复制。外部 API 假设需当前一手文档和代表性真实响应形状，测试保持确定性/离线。
 4. 普通实现任务使用 `--delivery pr`，让原执行者完成 PR 闭环；实验、诊断或明确本地验收才用 `local-only`。`create` 显式指定已提交 base、新分支、task ID、规格文件、`local-only` 或 `pr`。首版配套任务显式加 `--first-release true`；其他任务不继承 milestone。create 不启动执行工具。
-5. 核对输出的 worktree、branch、base SHA 和 `.agents/task/TASK.md`，再 `start`。负责人在可见 CMD 中直接阅读、输入和接管配置的 CLI；脚本用继承的终端运行交互会话，没有 print/RPC 模式。本机真实启动、键盘接管、正常退出和同一会话恢复已验证，证据与边界见 reference。
+5. 核对输出的 worktree、branch、base SHA 和 `.agents/task/TASK.md`，再 `start`。每次 start/resume 都新建独立 Kero 会话，负责人可在 Kero 中直接阅读、输入和接管配置的 CLI；脚本用继承的终端运行交互会话，没有 print/RPC 模式。用 status 返回的 `terminal.session_id/pane_id` 定位本任务；实际验证证据与边界见 reference。
 
    确认实际启动成功后，主 Agent 可以结束当前轮次，交代任务/终端位置；不持续读取日志或重复执行检查。后续由负责人手动提醒完成或裁决事项。继续阅读完整过程和交互在可见终端进行。
 
 6. `status` 获取 JSON；`active` 仅来自进程身份存活，不能推断模型正在推理、任务完成或可以合并。任务进度、PR URL 和裁决历史写入 `.agents/task/delivery-state.json`，与监督进程维护的 `dispatch-state.json` 分开；status 合并读取。出现裁决后保持 `true/coordinator`，恢复或换模型不得重置。
-7. 要补充任务可在当前终端输入。要通过 `resume` 恢复，先正常退出旧 CLI，确认进程停止，再提供 UTF-8 follow-up 文件。resume 严格恢复原会话，不覆盖 TASK.md 或既有补充。
+7. 要补充任务可在当前 Kero pane 输入，或核对 pane 身份后用 `kero send PANE_ID "补充内容" --enter`；具体命令和退出顺序见 reference。要通过 `resume` 恢复，先正常退出旧 CLI，确认进程停止，再提供 UTF-8 follow-up 文件。resume 严格恢复原会话，不覆盖 TASK.md 或既有补充。
 
 ```sh
 node .agents/skills/githux-agent-dispatch/scripts/dispatch.mjs create --task example --branch chore/example --base origin/main --spec task-spec.md --delivery pr
@@ -42,4 +44,4 @@ node .agents/skills/githux-agent-dispatch/scripts/dispatch.mjs resume --worktree
 node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
 ```
 
-可见 CMD、真实 TTY 接管、真实 CLI 会话持久化和真实模型接入由负责人/主 Agent 单独实测；子进程模拟不能证明这些体验已通过。
+Kero 可见会话、真实 TTY 接管、真实 CLI 会话持久化和真实模型接入由负责人/主 Agent 单独实测；子进程模拟不能证明这些体验已通过。

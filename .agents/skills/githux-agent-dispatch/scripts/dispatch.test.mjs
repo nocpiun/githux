@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { createTask, launchTask, taskStatus, loadConfig, processTable, encodePS, terminalCommand } from './dispatch.mjs';
+import { createTask, launchTask, taskStatus, loadConfig, processTable, encodePS, terminalCommand, keroPreflight, keroCommand, visibleLaunch } from './dispatch.mjs';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(source, 'dispatch.mjs');
@@ -60,13 +60,14 @@ function fixture(t) {
   function launch(payload) {
     const encoded = Buffer.from(JSON.stringify(payload)).toString('base64');
     const code = `import {supervise} from ${JSON.stringify(new URL('./dispatch.mjs', import.meta.url).href)}; const p=JSON.parse(Buffer.from(process.argv[1],'base64')); await supervise(p.worktree,p.token,{allowNonTTY:true});`;
-    const proc = spawn(process.execPath, ['--input-type=module', '-e', code, encoded], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const proc = spawn(process.execPath, ['--input-type=module', '-e', code, encoded], { env: { ...process.env, KERO_SESSION: `fixture-session-${children.length}`, KERO_PANE: `fixture-pane-${children.length}` }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let output = '';
     proc.stdout.on('data', d => output += d); proc.stderr.on('data', d => output += d);
     const record = { sessionDir: path.join(payload.worktree, '.agents', 'task', 'sessions'), done: new Promise(resolve => proc.on('exit', code => resolve({ code, output }))) };
     children.push(record);
     return record;
   }
+  launch.prepare = payload => ({ kind: 'kero', name: `githux-${payload.task}-${payload.token.slice(0, 8)}` });
   return { root, repo, parent, settings, config, spec, opts, children, launch };
 }
 
@@ -85,6 +86,7 @@ test('create uses explicit committed base, isolated branch/context, local-only h
   assert.match(handoff, /\.agents\/task\/implementation-result\.md/);
   assert.doesNotMatch(handoff, /(^|[^.\/])implementation-result\.md/m);
   assert.match(handoff, /delivery-state\.json/);
+  assert.match(handoff, /```sh\nnode scripts\/verify\.mjs[^\n]*\n```\n/);
   const delivery = json(path.join(s.worktree, '.agents', 'task', 'delivery-state.json'));
   assert.equal(delivery.arbitration_ever_required, false);
   assert.equal(delivery.merge_owner, 'worker');
@@ -145,6 +147,8 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   await until(() => fs.existsSync(invocation));
   const active = await until(() => { const v = taskStatus(s.worktree); return v.process_state === 'active' && v; });
   assert.ok(active.runtime.attempts[0].child.birth);
+  assert.equal(active.terminal.session_id, 'fixture-session-0');
+  assert.equal(active.terminal.pane_id, 'fixture-pane-0');
   // Deterministic overlap: atomically publish arbitration true/coordinator while runtime changes around child exit.
   const workerWrite = patch => {
     const current = json(deliveryFile);
@@ -210,6 +214,9 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.equal(exited.pr_url, 'https://example.invalid/pr/7');
   assert.equal(exited.progress.task, 'awaiting-decision');
   assert.equal(exited.session_id, s.session_id);
+  assert.equal(exited.terminal.session_id, 'fixture-session-1');
+  assert.equal(exited.terminal.pane_id, 'fixture-pane-1');
+  assert.equal(exited.runtime.attempts[0].terminal.session_id, 'fixture-session-0');
   assert.deepEqual(exited.model_history.map(h => h.configured_model), ['group/exact&%!', 'new/model']);
   assert.deepEqual(exited.model_history.map(h => h.provider), ['fixture', 'alternate']);
   const cfg = json(f.config); put(f.config, { ...cfg, model: 'new/model' });
@@ -283,11 +290,65 @@ test('Windows process identity and encoded bridge preserve shell characters with
   // Runner TEMP may use an 8.3 alias; cwd can resolve to the same directory's long name.
   assert.equal(fs.realpathSync.native(recorded.cwd), fs.realpathSync.native(f.parent));
   assert.deepEqual(recorded.args, ['__supervise', f.parent, 'fixture-token']);
-  assert.throws(() => terminalCommand({ ...bridgeArgs, script: 'x'.repeat(10000) }), /CMD length/);
+  assert.throws(() => terminalCommand({ ...bridgeArgs, script: 'x'.repeat(10000) }), /terminal command length/);
   const input = "路径 with spaces & %TEMP% ! bang $(evil) '";
   const encoded = encodePS(`$s=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(input).toString('base64')}')); [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; [Console]::Write($s)`);
   const exe = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const result = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { encoding: 'utf8', windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.replace(/^\uFEFF/, ''), input);
+});
+
+test('Kero preflight failures refuse launch before lock and never fall back to another terminal', t => {
+  const f = fixture(t), s = createTask(f.opts);
+  let launches = 0;
+  const launch = () => { launches++; };
+  const offline = () => { throw new Error('daemon unreachable'); };
+  const cases = [
+    [offline, {}, /Local Kero unavailable/],
+    [() => 'not json', {}, /Local Kero unavailable/],
+    [() => '{}', {}, /Invalid Kero session inventory/],
+    [() => { throw new Error('must not query remote'); }, { KERO_HOST: 'build' }, /Remote KERO_HOST/],
+  ];
+  for (const [execute, env, error] of cases) {
+    launch.prepare = () => keroPreflight(execute, env);
+    assert.throws(() => launchTask('start', { config: f.config, worktree: s.worktree }, launch), error);
+    assert.equal(fs.existsSync(path.join(s.worktree, '.agents', 'task', 'launch.lock')), false);
+    assert.equal(taskStatus(s.worktree).process_state, 'created');
+  }
+  assert.equal(launches, 0);
+  const calls = [];
+  keroPreflight((...args) => { calls.push(args); return '[]'; }, {});
+  assert.equal(calls[0][0], 'kero');
+  assert.deepEqual(calls[0][1], ['ls', '--json']);
+});
+
+test('Kero launch uses argument boundaries and writes its receipt without overwriting supervisor state', t => {
+  const f = fixture(t), s = createTask(f.opts);
+  const payload = { node: process.execPath, script, worktree: s.worktree, task: s.task_id, token: 'receipt-test' };
+  const args = keroCommand(payload);
+  assert.deepEqual(args.slice(0, 6), ['new', '--name', 'githux-sample-receipt-', '--dir', s.worktree, '--']);
+  assert.ok(args.includes('-NoExit'));
+  assert.equal(args.at(-1), terminalCommand(payload));
+  const stateFile = path.join(s.worktree, '.agents', 'task', 'dispatch-state.json');
+  const receiptFile = path.join(s.worktree, '.agents', 'task', 'kero-receipt-test.json');
+  const stateBefore = fs.readFileSync(stateFile, 'utf8');
+  visibleLaunch(payload, (exe, actual) => {
+    assert.equal(exe, 'kero');
+    assert.deepEqual(actual, args);
+    // Supervisor may have already exited and released the lock when Kero returns.
+    assert.equal(fs.existsSync(path.join(s.worktree, '.agents', 'task', 'launch.lock')), false);
+    return 'session123\n';
+  });
+  assert.equal(json(receiptFile).session_id, 'session123');
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), stateBefore);
+  assert.throws(() => visibleLaunch({ ...payload, token: 'bad-output' }, () => 'unexpected output'), /session ID/);
+  assert.equal(fs.existsSync(path.join(s.worktree, '.agents', 'task', 'kero-bad-output.json')), false);
+  const state = json(stateFile);
+  state.runtime.attempts.push({ token: payload.token, terminal: { kind: 'kero', name: 'githux-sample-receipt-' } });
+  put(stateFile, state);
+  assert.equal(taskStatus(s.worktree).terminal.session_id, 'session123');
+  state.runtime.attempts[0].terminal.session_id = 'different-session';
+  put(stateFile, state);
+  assert.throws(() => taskStatus(s.worktree), /receipt differs/);
 });

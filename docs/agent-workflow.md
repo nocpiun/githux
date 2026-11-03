@@ -24,7 +24,7 @@
 
 **验证命令约定**：所有 Cargo check/test/build/fmt/clippy 均通过共享 runner 执行：`node scripts/verify.mjs [options] -- cargo <args...>`。参数以数组形式在 `--` 后传递，不做 shell 文本插值。每次运行自动在 `.agents/task/runs/<run_id>.json` 记录 exit code、stdout/stderr 日志路径、source identity、时序与结果。Windows 下 runner 持有共享 mutex `Local\Githux-Cargo-20261029`，禁止并发重编译。失败日志直接读取，不为修改 grep 表达式而重新编译。最终检查通过后，仅在发生实际变更、失败或未解决疑虑时重跑，并记录原因。
 
-基层 Agents 的 worktree/上下文生成和可见会话启动使用 [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md)：create 不自动启动，start 在 Windows 可见 CMD 中运行配置的交互 CLI，status 只报告进程事实，resume 严格恢复原会话。负责人可在该终端阅读、补充和接管；本机真实 CLI 启动、键盘输入、正常退出及同会话恢复已验证，见 [开发日志](devlog/2026-10-21-agent-dispatch.md)。脚本没有自动唤醒、调度或自行合并。手工外部 attach 不受脚本锁保护，不能与已有 TUI/RPC 同时使用。后续多实现者并行集成仍待验证。
+基层 Agents 的 worktree/上下文生成和可见会话启动使用 [githux-agent-dispatch skill](../.agents/skills/githux-agent-dispatch/SKILL.md)：create 不自动启动，start 在本机 Kero 会话中运行配置的交互 CLI，status 只报告进程事实，resume 严格恢复原会话。负责人可在该终端阅读、补充和接管；Kero 会话的 session/pane ID 记录在任务状态中；本机验证覆盖启动、输入、正常退出及同会话恢复，见 [开发日志](devlog/2026-11-03-agent-dispatch-kero.md)。脚本没有自动唤醒、调度或自行合并。手工外部 attach 不受脚本锁保护，不能与已有 TUI/RPC 同时使用。后续多实现者并行集成仍待验证。
 
 ## 执行成本与交接
 

@@ -33,7 +33,7 @@
 - 正式 Shell 已通过 [`app::pages`](../src/app/pages/mod.rs) 挂载 Home/Feed、Profile Overview 与统一 RepositoryPage，替换原先的 fixture/stubs。已整合 Profile README Flow/HTML/图片、紧凑状态、字体与滚动布局修复，以及 Home open 筛选和三类 Feed。具体行为与验证边界见[正式页面接入](shell-page-integration.md)，剩余依赖见[路线图](roadmap.md#当前证据与下一步)。
 - 账户元数据、活动选择与凭据引用保存于 SQLite，PAT 在 Windows Credential Manager。[cache-core](cache-core.md) 已实现独立的业务缓存存储与已确认的 C1–C5 授权政策；尚未接入账户事件生产及正式页面，**应用离线内容阅读仍未交付**。Settings 仍是过渡入口，其他全局页与最终设置需单独交付。
 - `githux-pr-review` 的等待脚本有离线测试，跨平台 CI 配置已建立。具体 PR 的检查、审查和合并状态以 GitHub 记录为准，不由本地测试或规范文档推断。
-- `githux-agent-dispatch` 提供 create/start/status/resume，生成独立 worktree 和任务上下文，在可见 Windows CMD 中启动配置的交互 CLI。离线测试以及本机真实启动、键盘接管、正常退出与同会话恢复已通过，见[验证记录](devlog/2026-10-21-agent-dispatch.md)。手工 attach 不在单写入者锁保证内；多实现者并行集成仍待验证。
+- `githux-agent-dispatch` 提供 create/start/status/resume，生成独立 worktree 和任务上下文，在本机 Kero 会话中启动配置的交互 CLI。离线测试与本机 Kero 启动、输入、正常退出及同会话恢复的证据，见[验证记录](devlog/2026-11-03-agent-dispatch-kero.md)。手工 attach 不在单写入者锁保证内；多实现者并行集成仍待验证。
 - 实际选型已有 Classic PAT、reqwest + Tokio、rusqlite 账户目录与独立缓存存储。缓存政策、参数和接线状态以[缓存策略](cache-strategy.md)为准，不能把存储核心存在当作正式离线阅读已实现。
 
 ## 文档怎样维护

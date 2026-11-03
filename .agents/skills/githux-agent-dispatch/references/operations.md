@@ -15,7 +15,7 @@
 }
 ```
 
-只接受这些字段，不接受 API key、token、env、URL、自定义参数或凭据文件路径。认证由执行工具自己的既有配置提供；脚本不读写或打印其认证配置，也不修改全局设置。`node` 可为字面值 `node`（解析为运行调度器的 Node），或绝对 Node executable 路径；CLI 必须为已有 .js/.mjs/.cjs 文件。使用 CMD 启动时所需 Windows PowerShell、CMD 来自系统。worktree parent 缺省采用项目约定的盘根目录；测试和其他本地布局显式指定现有目录。
+只接受这些字段，不接受 API key、token、env、URL、自定义参数或凭据文件路径。认证由执行工具自己的既有配置提供；脚本不读写或打印其认证配置，也不修改全局设置。`node` 可为字面值 `node`（解析为运行调度器的 Node），或绝对 Node executable 路径；CLI 必须为已有 .js/.mjs/.cjs 文件。启动使用 PATH 中的 `kero` 与系统 Windows PowerShell；Kero 应已运行。PATH 刚更新时重开终端或刷新当前进程的 PATH，不写死本机安装路径，不改全局配置。worktree parent 缺省采用项目约定的盘根目录；测试和其他本地布局显式指定现有目录。
 
 配置文件和相关目录应由本机可信用户维护；任务进程不是沙箱。实际 CLI 的 Node 版本要求另行满足。脚本把交互子进程挂在 supervisor 下，因此 start/resume 命令返回时 CLI 可能仍在启动；随后用 status 确认，而不是把短暂的 starting 当成已完成。路径支持空格、Unicode、`& % !`、单引号和 `$()` 等字符；拒绝控制字符、双引号、`< > |`。model/provider 只接受字母数字开头及字母数字、`_ . / - & % !`，拒绝空格、冒号 thinking 后缀、通配符和参数注入。过长编码命令在创建 launch lock 之前拒绝，缩短脚本或 worktree 路径再试。
 
@@ -26,7 +26,7 @@
 | 命令 | 必需参数 | 可选参数 | 效果 |
 | --- | --- | --- | --- |
 | create | `--task ID --branch TYPE/NAME --base REF --spec FILE --delivery local-only或pr` | `--repo ROOT --config FILE --first-release true或false` | 将 REF 解析为完整 commit SHA，建立新 branch + linked worktree，生成本地上下文，不启动 |
-| start | `--worktree ROOT` | `--config FILE` | 仅首次 created 状态，库存精确匹配后启动新可见 CMD |
+| start | `--worktree ROOT` | `--config FILE` | 仅首次 created 状态，库存及本机 Kero 检查通过后新建 Kero 会话 |
 | status | `--worktree ROOT` | 无 | 本地 JSON，包含诊断和进程观察 |
 | resume | `--worktree ROOT --followup FILE` | `--config FILE --model EXACT_ID --provider EXACT_PROVIDER` | 确认全部旧进程停止且原会话有效，再从精确文件恢复 |
 
@@ -36,9 +36,27 @@ create 使用显式 committed base，保留协调工作区的未提交修改；�
 
 库存命令为配置 Node + CLI 参数数组：`--offline --no-extensions --no-mcp --no-approve --list-models EXACT_ID`。从表格各列精确比较 provider 与 model（至少六列），不接受模糊包含。CLI 报错、超时或缺少匹配均停止。启动前在协调侧和监督进程各核验一次。
 
-首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。没有 `--print`、JSON/RPC 或管道输入。新 CMD `/k` 保持终端可用，内层 PowerShell 通过参数数组启动 Node，继承 TTY。标题为 Githux 加 task ID；CLI 和错误都在该终端显示。
+首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
 
 resume 要求有效 session header（`type=session`、精确 `id`、原 `cwd`），已有记录路径也必须一致；缺失、重复、损坏或工作目录不同都拒绝。每份 follow-up 以独立唯一文件保留。原 TASK.md、session ID、branch、worktree 不变。配置模型变化不会被默默采用：resume 明示 `--model`，需要换 provider 时一并给 `--provider`；库存仍必须通过。requested/configured model 和每次启动历史保存；provider/model 或 group 名称不证明最终实际使用的后端模型。
+
+## 在 Kero 中定位、交接和恢复
+
+`start/resume` 先通过 `kero ls --json` 检查本机 Kero；不可用或返回无效时，在创建锁前报错。非空 `KERO_HOST` 被拒绝：本脚本的 worktree 与 PID 校验只覆盖本机，不提供远程派发。调用者无需本身运行在 Kero 内。
+
+启动返回时可能仍为 starting，先通过 dispatch status 确认 `active` 和 `terminal`。监督进程从实际 Kero 环境记录 session/pane ID；启动者将 Kero 返回的 session ID 写到独立 `kero-TOKEN.json` 回执，避免覆盖并行更新的 runtime。status 合并回执，身份不一致时拒绝继续。ID 尚未出现时，可按已记录的唯一 `terminal.name` 在 `kero ls --json` 中定位，不猜测或复用其他人的 pane。
+
+```sh
+kero status PANE_ID --json
+kero read PANE_ID -n 40
+kero send PANE_ID "补充任务内容" --enter
+kero send PANE_ID "/quit" --enter
+node .agents/skills/githux-agent-dispatch/scripts/dispatch.mjs status --worktree ABSOLUTE_WORKTREE
+```
+
+发送前核对该 pane 属于本任务的 session 和 worktree；使用明确的 pane ID，不依赖 focused pane 或默认当前终端。任务仍在生成时，补充内容遵循 CLI 的排队语义。只有 dispatch status 确认旧 CLI 已停止，才能用本 skill 的 `resume --followup` 恢复原 Pi session；`kero resume` 不替代这条带进程锁和精确会话文件核验的路径。Kero 的 idle/exited 标签不代表任务完成，也不能替代进程身份检查。
+
+确认本次测试或任务 CLI 已退出、无需保留终端后，才可 `kero close SESSION_ID` 关闭自己创建的会话；不使用 force，不删除 worktree，不关闭负责人正在使用的终端。若继承的是旧 CMD 会话，先在旧终端正常退出 CLI；既有状态文件仍可读取，下一次 dispatch resume 自动进入 Kero。启动失败可能已创建 Kero 会话：保留锁和回执，按下方恢复步骤核验，禁止盲目重复 new/start。
 
 ## 状态所有权与单写入者
 
@@ -54,6 +72,8 @@ resume 要求有效 session header（`type=session`、精确 `id`、原 `cwd`）
 | provider/requested_model/configured_model/thinking/model_history | dispatch | 配置请求与启动历史；backend_model=unverified |
 | delivery_scope/milestone | dispatch | local-only 或 pr；显式首版任务为 1，否则 null |
 | runtime.phase/attempts | dispatch | launcher/supervisor/child 的 PID + 创建时间、时间戳、exit code/signal；与任务是否完成无关 |
+| runtime.attempts[].terminal | dispatch | Kero kind/name；监督进程观测到的 session_id/pane_id，每轮保留 |
+| terminal | status 派生 | 最近一次启动的 Kero 身份，合并独立启动回执；旧 CMD 任务为 null |
 | arbitration_ever_required/merge_owner/pr_url/progress | delivery | 交付状态；出现过裁决就保持 true/coordinator，PR 历史仍需按共享流程核验 |
 | process_state/observed/diagnostic | status 派生 | 即时进程观察，不落盘、不写假 heartbeat |
 
@@ -75,8 +95,10 @@ resume 要求有效 session header（`type=session`、精确 `id`、原 `cwd`）
 
 ## 验证边界
 
-`node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs` 在 disposable Git 仓库使用假 CLI，覆盖真实 worktree、命令数组、进程创建时间、生命周期、原会话恢复、模型库存和冲突拒绝。Windows 专项隐藏执行内层 PowerShell recorder，验证路径/参数字符往返，**不打开可见 CMD**。临时 Git 身份只传给测试 commit，签名只对该测试 commit 禁用，不改全局配置。
+`node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs` 在 disposable Git 仓库使用假 CLI，覆盖真实 worktree、命令数组、进程创建时间、生命周期、原会话恢复、模型库存和冲突拒绝。Windows 专项隐藏执行内层 PowerShell recorder，验证路径/参数字符往返，**不创建真实 Kero 会话**。临时 Git 身份只传给测试 commit，签名只对该测试 commit 禁用，不改全局配置。
 
-这些测试不证明真实 CLI 的 TTY、Windows 新窗口、人工输入/接管、真实模型接入或路由后端。负责人/主 Agent用本地配置实测 create → start → 读写/接管 → 退出 → status → resume，并验证最新安装 CLI 的会话 header/参数与本脚本契约一致。离线脚本测试不替代 PR 的最新 head CI/review 门槛。
+这些测试不证明真实 CLI 的 TTY、Kero 会话、人工输入/接管、真实模型接入或路由后端。负责人/主 Agent用本地配置实测 create → start → 读写/接管 → 退出 → status → resume，并验证最新安装 CLI 的会话 header/参数与本脚本契约一致。离线脚本测试不替代 PR 的最新 head CI/review 门槛。
 
 2026-10-21 已用本机配置完成真实 create/start/status/resume：负责人确认可见窗口显示和键盘输入正常，并用 `/quit` 正常退出；监督进程记录退出码 0、释放锁，resume 保留原会话 ID/文件与历史，并完成补充任务。证据见 [开发日志](../../../../docs/devlog/2026-10-21-agent-dispatch.md)。这仅验证当时的本机 Windows/CLI 配置，不证明其他 CLI 版本、路由后端或并行集成已验证；特殊字符路径的证据仍限于离线编码桥测试。
+
+Kero 启动与恢复的本机验证记录见 [2026-11-03 开发日志](../../../../docs/devlog/2026-11-03-agent-dispatch-kero.md)。历史 CMD 验证只代表当时的旧启动载体。
