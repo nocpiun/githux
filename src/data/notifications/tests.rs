@@ -823,7 +823,7 @@ async fn cancelling_invalidates_the_in_flight_action_generation() {
     );
     let snapshot = inbox.snapshot();
     assert!(snapshot.items.iter().any(|item| item.id == "9000"));
-    assert!(snapshot.thread_states.get("9000").is_none());
+    assert!(!snapshot.thread_states.contains_key("9000"));
     assert_eq!(snapshot.action_cooldown_seconds, 0);
 }
 
