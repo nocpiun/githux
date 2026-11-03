@@ -1,6 +1,6 @@
 # 开发路线图
 
-更新：2026-11-01。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 正式 Home/Profile/统一 Repository 页面已接线，业务缓存存储核心已存在；应用离线阅读、最终 Settings 和其他全局页面仍需后续接入与验收。本文不承诺日期，也不把路线图建议变成新产品授权。
+更新：2026-11-03。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 正式 Home/Profile/统一 Repository 页面已接线，仓库 Star/Unstar 已接入；缓存存储核心、账户生命周期与仓库/页面/头像/图片适配器已合并但尚未组装进正式 Shell；应用离线阅读、最终 Settings 和其他全局页面仍需后续接入与验收。本文不承诺日期，也不把路线图建议变成新产品授权。
 
 功能范围以 [产品约定](product.md#首版范围) 为准；状态边界、数据策略及交付规则分别见 [架构方案](architecture.md)、[缓存策略](cache-strategy.md)、[Agent 工作流](agent-workflow.md)。路线图只维护顺序、依赖和完成标准，不复制另一套产品规则。
 
@@ -16,7 +16,7 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 
 ## 当前证据与下一步
 
-本节依据 main `f7144b6`（含 Reader 图片/HTML 与 cache-core）及本次 shell-pages 集成的实际源码记录能力；最终合并状态见 [PR #42](https://github.com/nocpiun/githux/pull/42)。其他并行任务不因已派发而算作正式产品接线。
+本节依据 main `d217116`（2026-11-03，含已合并的正式页面接线、Star 写动作、缓存存储核心/生命周期/适配器与全局组件）的实际源码记录能力；具体 PR/CI/review 状态到 GitHub 核验。本批并行集成任务不因已派发而算作正式产品接线。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
@@ -24,8 +24,9 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 | 真实账户、仓库侧栏与每账户工作区 | PR #38 已合并；[`app::accounts`](../src/app/accounts/mod.rs)、[`storage::accounts`](../src/storage/accounts.rs) 接入正式 Shell。真实 `/user/repos` 自动读取、独立账户标签、真实圆头像、空 mask 防护和头像有限总超时已实现 | Settings › Accounts 是过渡入口，不是最终 Settings 设计。真实 PAT 登录、Settings/footer 同屏交互、部分原生滚动手感与多 DPI 产品路径仍待验收，见[account-shell 记录](devlog/2026-10-28-account-shell.md) |
 | Home / Feed | [`app::pages::home`](../src/app/pages/home.rs) 正式挂载 HomeView；open Issues/PRs、关注账号的三类 Feed、自动续页和描述摘要已接入 | Read more 导航到内部 PR 标签，详情留空；Events 来源仍有 API 范围限制，不能承诺与 GitHub 网页 Feed 完全一致。见 [Home](home-view.md) |
 | Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
-| 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合 | Star/Fork 仅显示计数，正式只读宿主保持按钮禁用；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md) |
-| 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用，以及 [cache-core](cache-core.md) 的持久存储/授权门槛存在 | 正式账户事件与页面尚未消费业务缓存，仍不支持重启离线内容阅读。workspace 仅内存、重启 Home。缓存政策已确认，接线不等同于存储核心 |
+| 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合；Star/Unstar 已接入真实写路径（[PR #63](https://github.com/nocpiun/githux/pull/63)） | Fork 仍只有禁用入口，没有写 API；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md) |
+| 全局组件（Settings/Notifications/Issues-PR） | 独立组件、数据适配与离线预览已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)） | 未注册进正式 Shell 路由，正式挂载由本批集成任务进行；预览不代表产品功能已上线 |
+| 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用；[cache-core](cache-core.md) 存储/授权门槛、[账户生命周期](cache-account-lifecycle.md) 绑定，以及[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器均已合并 | 正式 Shell 尚未打开应用级 `CacheStore` 或消费快照，仍不支持重启离线内容阅读。workspace 仅内存、重启 Home。缓存政策已确认，适配器存在不等于应用接线或离线阅读已交付 |
 | CI 与交付流程 | PR #1/#2 起已有检查；PR #7 起 Ubuntu code-check，四平台 Debug build 与最终 `CI` 汇总保留；PR #31 增加 PR Check 门槛 | 具体 required checks 和当前 head 结果必须到 GitHub 核验；编译通过不是 Windows 以外原生产品支持，也不是 GUI 验收 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用 | 派发 skill 和完整并行调度未产品化；并行工作不能成为 main 的实现证据 |
 
@@ -33,7 +34,7 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 
 1. **正式页面基础已接线**：后续页面复用既有账户上下文、typed 导航和每会话生命周期；组合验收仍必须来自产品路由，不能由独立 examples 推断。
 2. **Settings 独立设计与验收**：过渡 Accounts 功能可继续服务开发，但最终页面不能直接沿用。先确认全局/仓库分类与首批项目，再实现本地设置持久化；local-only 提案未获批准，不是接线依赖或共享规则。
-3. **持久业务内容缓存与离线**：基于已确认政策与 cache-core，接入账户事件和仓库/Home/Profile 等消费者，验证失效、授权和清理。存储接口本身不提供页面离线体验。
+3. **持久业务内容缓存与离线**：存储核心、账户生命周期与仓库/页面/头像/图片适配器已合并；剩余工作是正式 Shell 组装唯一 `CacheStore`、接入 Home/Profile/Repository 等消费者并选择在线/离线模式，验证失效、授权和清理。适配器与存储接口本身不提供页面离线体验。
 4. **README 图片与 HTML 已接入**：Reader 图片/Flow 与 HTML 任务已合并并整合到正式 Profile/Repository 页面；保留固定版本、来源和图片请求边界，详见[阅读器](content-reader.md)。
 5. **输入、DPI 与首版整体验收**：在正式接线后的真实 Windows 窗口核验中文 IME、文本选择、键盘/焦点、触控板/滚动、多 DPI/跨屏、长内容和账户切换。各组件已有的局部原生证据保留，但不代替端到端验收。
 6. **保留首版剩余范围**：H1–H4/H7、command palette 搜索范围及最终 Settings 项目仍待逐项决定；Issue/PR 详情等已排除/留空项不借接线恢复。持久缓存、图片、全局入口和综合验收未做完前，不能宣布首版完成。
@@ -136,14 +137,14 @@ Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确�
 
 ## R5：补齐全局入口与选定动作
 
-**状态：功能范围待细化，不能直接派发成“大而全”的协作中心。** H1–H4/H7 仍在待定范围内，先逐项确定最小目标，之后按依赖交付，不必等待所有 R4 页面。
+**状态：功能范围待细化，不能直接派发成“大而全”的协作中心。** H1–H4 与 H7 其余动作仍在待定范围内（H7 已有仓库 Star/Unstar 首个实现），先逐项确定最小目标，之后按依赖交付，不必等待所有 R4 页面。
 
 | 项目 | 需要决定的最小范围 |
 | --- | --- |
 | H1 Notifications | 列表范围、未读语义、筛选、是否首版标记已读，以及条目去向 |
 | H2/H3 全局 Issues/PRs | 默认查询、是否包含关闭/合并条目、筛选与分页；保持与仓库页内 Tabs 的区别 |
 | H4 New | 实际可创建的资源清单、所需输入、权限与提交结果；入口存在不代表已承诺创建组织等所有动作 |
-| H7 远程写操作 | 明确选哪些动作、影响哪些页面、权限与确认/失败反馈；例如 Star、标记已读只是候选，不是已批准清单 |
+| H7 远程写操作 | 明确选哪些动作、影响哪些页面、权限与确认/失败反馈；仓库 Star/Unstar 已作为首个动作实现，标记已读等仍是候选，不是已批准清单 |
 
 涉及 Issue/PR 详情编辑区的动作，与当前详情留空约定存在依赖冲突，须先重新确认设计范围，不能由执行者顺手补出详情/编辑器。列表条目在详情暂空时如何导航，也需要最小交互约定。
 
@@ -179,7 +180,7 @@ Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确�
 具体当前优先级与依赖见[下一步依赖](#下一步依赖当前排期不新增产品授权)，这里只保留进入条件，避免旧建议覆盖已交付事实：
 
 - shell-pages 以本基线已合并组件和账户接口为输入，正式路由验证后才标记接通。
-- Settings、持久缓存、README 图片分别需要自己的明确规格；未批准的 local-only 方案不自动成为依赖。
+- Settings 最终设计与持久缓存应用接线分别需要自己的明确规格；README 图片与各类缓存适配器已合并，未批准的 local-only 方案不自动成为依赖。
 - H1–H4/H7、搜索范围和设置首批项目在相关实现前消除范围歧义；基础标签、账户切换恢复、Home/Feed/Profile 默认规则及仓库摘要位置已经确定，不重复裁决。
 - 输入/DPI 与综合验收随正式链路推进，不把组件预览或 CI 当最终证据。
 

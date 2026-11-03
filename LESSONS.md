@@ -130,3 +130,24 @@
 - **原因**：GitHub 收件箱的 Unsubscribe 语义是「忽略订阅 + 从 inbox 移除」。只发 `PUT subscription` 会留下条目，只发 `DELETE subscription` 对 watched repo 无效，两者都不等于用户看到的结果。若第二步 Done 失败就整体回滚，会谎称订阅未取消；若本地删行，则谎称服务端完成。两者都会让用户对远端状态产生错误认知。
 - **证据**：2026-11-02 notifications 条目动作 `unsubscribe_thread` 与 `UnsubscribedPendingDone` 状态；测试 `unsubscribe_keeps_the_ignored_fact_when_the_followup_done_fails` 断言保留条目但只重试 Done，`a_done_row_is_not_resurrected_by_a_late_refresh_page` 断言 tombstone 阻止旧页面复活。见 [开发日志](docs/devlog/2026-11-01-notifications.md#2026-11-02-条目动作done--unsubscribe--save-for-later)。
 - **范围**：任何多端点组合动作（取消订阅并移除、写后刷新、转账式两步操作）。也适用于不可用能力：没有公开 API 的入口宁可禁用并说明，也不做只有本地的假成功。
+
+## L019：写操作旁的旧读取要用写意图代次拦截
+
+- **规则**：当一个资源既有写动作又有并发读取（如写后刷新摘要），除了资源/账户代次，还要为写推进一个独立的“写意图代次”；读取发布前必须同时核对它，否则写之前发出、写之后到达的旧读取会回盖写后状态与计数。
+- **原因**：Star 写成功后要再读权威摘要刷新 count。若只按账户/资源代次校验，较早发出的摘要读取仍可能晚到并覆盖已确认的写后状态，让 UI 显示旧 count 而看不出写已生效。
+- **证据**：2026-11-01 `repository-star` 自查补上 `star_write_generation` 与“旧摘要回盖”回归（`4ce1069b`/`81f3b523`），正式 Shell 组合 `production_shell_composes_real_star` 验证写后只走 GET 摘要；见[开发日志](docs/devlog/2026-11-01-repository-star.md)。
+- **范围**：任何“写后必须重新读权威值”的页面或数据服务（Star、设置保存、评论、计数刷新）。不授权乐观本地改写；未获服务端确认前不得显示成功。
+
+## L020：组合读取的 no-store 要在任一依赖失败时也失效旧快照
+
+- **规则**：聚合多个响应的缓存读，只要**任一依赖**（包括失败/错误响应）带 `no-store`，就必须让该组合此前可复用的 Complete/Partial 快照失效；不能只在整体成功 outcome 上处理 no-store。
+- **原因**：Feed/Profile 等组合包含多个 REST/GraphQL 请求。若只在成功结果上检查 no-store，依赖失败时旧快照会继续保留，下次离线/重试仍复用一个已被服务端标记不可存储的表示。
+- **证据**：2026-11-01 `page-cache` 用 Feed following 503 + `no-store` 建立回归；契约见 [页面缓存](docs/page-cache.md)「HTTP 与授权边界」，日志见[开发记录](docs/devlog/2026-11-01-page-cache.md)。
+- **范围**：多响应聚合缓存、条件请求与离线快照的失效判定。单项响应缓存同样适用。
+
+## L021：跨存储安全操作失败要留下只能拒绝的持久屏障
+
+- **规则**：账户目录与缓存等两个存储不能共享事务时，安全相关的变更（替换 PAT、移除、凭据拒绝）失败后，仅撤回进程内 map 条目不足以封禁已经 clone 出去的 `{store, scope}`；要在共享存储内设置只能拒绝、不能授权的代次/屏障，并用旧 lease、writer、revalidation ticket 验证其确实失效。恢复标记必须与它取代的目录变更在同一事务提交，不能在另一存储重放成功后就提前删除。
+- **原因**：账户生命周期中，门禁 SQL 失败后旧 scope clone 仍可能继续读写；只清 map 会让“已隔离/已退休”名存实亡。跨 DB 崩溃窗口下，若恢复标记与目录变更分属不同事务，重启可能把旧分区误认给新身份。
+- **证据**：2026-11-01 `cache-account-lifecycle` 用真多线程 runtime 交错验证旧 lease/writer/revalidation proof 在替换后变为 `Stale`，并以故障注入覆盖目录已删而 cache 仍 live 的对账；见[开发日志](docs/devlog/2026-11-01-cache-account-lifecycle.md)与[账户生命周期](docs/cache-account-lifecycle.md)。
+- **范围**：多存储间的一致性提交、凭据/授权隔离、可取消的旧句柄封禁。适用范围限定于确有安全语义的变更，不推广成所有跨表操作的通用事务要求。
