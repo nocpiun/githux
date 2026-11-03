@@ -240,7 +240,14 @@ pub fn avatar_cache_key<K: AvatarKeyLike>(
     // Request string must not contain control characters and length bounded
     CacheKey::mutable(
         None, // avatar is account-level, not tied to a single repository numeric ID
-        true, // private to the viewing account's CacheScope
+        // Avatars are fetched without credentials from public CDN URLs. The cache
+        // representation is still isolated per viewing account by the CacheScope
+        // partition, but it must NOT be marked private: a private account-aggregate
+        // key (`repository=None`) is quarantined by `PatReplaced` until an account-level
+        // permission proof is confirmed, which an unauthenticated image fetch can never
+        // produce. Marking it public keeps avatar downloads/restores working across a PAT
+        // replacement without unlocking unrelated private Home/Profile/Feed snapshots.
+        false,
         AVATAR_RESOURCE_KIND,
         &request_id,
         AVATAR_REPRESENTATION_NAME,

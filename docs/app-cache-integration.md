@@ -31,6 +31,8 @@
   - 用当前 `AccountCache` 的 `store`/`scope` 构造 `AvatarDiskCache`，`AvatarFetcher::with_source(生产 ReqwestAvatars).with_cache(disk)`；
   - 重置内存 `AvatarCache`、清空头像队列，并换新 `AvatarInbox`，使旧 fetcher 的迟到完成不再写入新账户展示。
 
+头像缓存键 `private = false`：头像是无凭据的公开 CDN 图片，账户隔离由 `CacheScope` partition 保证；若标为 `private = true` 会与账户级私有聚合共用 `repository=None` 门槛，PAT 替换后被隔离且匿名头像 GET 无法产生账户级证明，离线重启将无法恢复。详见 [avatar-cache](avatar-cache.md)。
+
 所有磁盘 I/O 都发生在 `AvatarFetcher` 既有的 `spawn_blocking` 路径，不在 GPUI render/事件线程。头像仍按 owner 身份键去重、圆形绘制与 initials 兜底不变。
 
 ## 页面绑定

@@ -33,7 +33,9 @@ flowchart TD
   - `request = "subject={subject};url={clean_url}"`
   - `representation = "avatar-image-v1"`
   - `version = 1`
-  - `repository = None`，`private = true`。
+  - `repository = None`，`private = false`。
+
+头像是无凭据的公开 CDN 图片，`private = false` 使它在 PAT 替换后仍可读写，同时隔离仍由 `CacheScope` 的 partition 保证（每个登录账户独立分区，退休/移除后仍拒绝读写）。若设为 `private = true`，头像会与账户级私有聚合共用 `repository=None` 门槛，PAT 替换后必须等待账户级证明才能写，而头像的匿名 GET 无法产生该证明，离线重启将无法恢复头像。详见 [app-cache-integration](app-cache-integration.md)。
 - **URL 敏感参数脱敏**：`sanitize_avatar_url` 会剥离包含签名（`token`, `sig`, `signature`, `auth`, `key`, `secret`, `cred`, `expires`）的查询字符串，绝不将含有敏感凭据签名的完整链接作为键或暴露在日志中。
 
 ### 2. HTTP 缓存新鲜度与条件请求

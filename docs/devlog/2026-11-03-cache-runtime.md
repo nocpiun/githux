@@ -25,6 +25,12 @@
 
 **未执行**：真实应用冷启动/断网、侧栏与头像原生窗口恢复、真实 PAT 与平台凭据、真实 GitHub。这些属于本批组合验收与负责人验收，不由本机单元测试推断。
 
+## 审查修复
+
+Codex 在 PR #68 指出：PAT 替换后 `commit_login` 施加 `AccessEvent::PatReplaced`，使 `repository=None` 的私有聚合被隔离；而 `avatar_cache_key` 原先把头像标成 `private = true`，匿名头像 GET 又无法产生账户级证明，导致替换后头像仍能在线渲染但写不进磁盘，离线重启无法恢复。
+
+修复为把头像缓存键改为 `private = false`（`src/data/avatar_cache.rs` 的一处最小改动，本文件非本任务默认所有权，已在 PR 记录原因与最小接口）：头像是无凭据公开 CDN 图片，账户隔离由 `CacheScope` partition 保证，退休/移除仍拒绝读写；改为 public 后头像跨 PAT 替换仍可读写，同时不会解锁无关的 Home/Profile/Feed 私有聚合快照。新增 `avatar_writes_survive_pat_replacement_but_the_private_aggregate_stays_quarantined` 回归：替换后头像可写、私有聚合仍拒绝，确认账户级证明后才解锁私有聚合。
+
 ## 依赖与交接
 
 - 依赖 `sidebar-cache` 的 `repository_list_cache` 数据适配器与 `RepoService::list_repos_cached`。生产者尚未合入（本批 base 即 main `d217116`，本地 `feature/sidebar-cache` 无领先提交）。其合入 main 后在本分支 rebase 并完成侧栏组合，不直接改写其分支/文件。

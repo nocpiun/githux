@@ -24,7 +24,7 @@ use crate::network::transport::{
     HttpRequest, HttpResponse, MockTransport, Transport, TransportError,
 };
 use crate::storage::accounts::AccountDatabaseConfig;
-use crate::storage::cache::{CacheConfig, CacheError, CacheStore};
+use crate::storage::cache::{AccessEvent, CacheConfig, CacheError, CacheKey, CacheStore};
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -2210,5 +2210,50 @@ async fn a_cache_enabled_service_exposes_a_binding_after_login() {
     assert!(
         service.cache(&summary).is_some(),
         "a saved account with a working cache store receives a binding"
+    );
+}
+
+/// A PAT replacement quarantines private account-aggregate entries until an account-level proof is
+/// confirmed. Avatars are unauthenticated public images fetched without a credential, so their cache
+/// keys are public and must keep reading/writing across a replacement without unlocking the private
+/// aggregate gate that protects Home/Profile/Feed snapshots.
+#[tokio::test]
+async fn avatar_writes_survive_pat_replacement_but_the_private_aggregate_stays_quarantined() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let account = AccountKey::new(1, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let avatar = AvatarKey::new("github.com", 1, "https://avatars.test/a.png");
+    disk.put_sync(&avatar, &cache_test_png(), None, None, None)
+        .expect("initial avatar write");
+
+    // Replace the PAT: the durable gate restricts private account-aggregate entries.
+    store
+        .access_event(&scope, AccessEvent::PatReplaced)
+        .expect("PAT replacement event");
+
+    assert!(
+        disk.put_sync(&avatar, &cache_test_png(), None, None, None)
+            .is_ok(),
+        "an avatar download after PAT replacement still writes to disk"
+    );
+    assert!(disk.read_sync(&avatar).is_some());
+
+    // The private account-aggregate gate is untouched by avatars.
+    let aggregate = CacheKey::mutable(None, true, "account-feed", "page=1", "json-v1", 1).unwrap();
+    assert!(
+        store.begin_write(&scope, &aggregate).is_err(),
+        "private aggregate snapshots stay quarantined until their own proof"
+    );
+
+    // Confirming the account-level proof unlocks private aggregates, proving the avatar path did
+    // not silently do so on its own.
+    let proof = store.begin_revalidation(&scope, None).unwrap();
+    store.permission_confirmed(proof).unwrap();
+    assert!(
+        store.begin_write(&scope, &aggregate).is_ok(),
+        "an explicit account-level proof unlocks private aggregates"
     );
 }
