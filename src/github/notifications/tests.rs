@@ -394,3 +394,43 @@ async fn a_thread_id_cannot_escape_the_fixed_endpoint() {
         0
     );
 }
+
+#[tokio::test]
+async fn unsubscribe_completed_preserves_put_cooldown_metadata() {
+    use crate::network::transport::HttpResponse;
+    let transport = Arc::new(MockTransport::new());
+    // PUT responds with a 120s polling interval and an exhausted quota reset.
+    let mut put = HttpResponse {
+        status: 200,
+        headers: vec![
+            ("x-poll-interval".into(), "120".into()),
+            ("x-ratelimit-remaining".into(), "0".into()),
+            ("retry-after".into(), "45".into()),
+        ],
+        body: r#"{"ignored":true}"#.into(),
+    };
+    // DELETE responds with default headers that do not mention the restriction.
+    let done = HttpResponse {
+        status: 204,
+        headers: vec![("x-poll-interval".into(), "60".into())],
+        body: String::new(),
+    };
+    transport.enqueue(Ok(put)).await;
+    transport.enqueue(Ok(done)).await;
+    let outcome = unsubscribe_thread(
+        &client(transport),
+        &Pat::from_str("synthetic"),
+        "9000",
+        CancellationToken::default(),
+    )
+    .await
+    .unwrap();
+    match outcome {
+        UnsubscribeOutcome::Completed(meta) => {
+            assert_eq!(meta.poll_interval_seconds, Some(120));
+            assert_eq!(meta.rate_limit.remaining, Some(0));
+            assert_eq!(meta.rate_limit.retry_after, Some(45));
+        }
+        other => panic!("expected Completed with merged metadata, got {other:?}"),
+    }
+}

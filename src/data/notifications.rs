@@ -485,9 +485,9 @@ impl Notifications {
                             .await;
                         match res {
                             Ok(scoped) => match scoped.value {
-                                Ok(done_meta) => {
-                                    Ok(notifications::UnsubscribeOutcome::Completed(done_meta))
-                                }
+                                Ok(done_meta) => Ok(notifications::UnsubscribeOutcome::Completed(
+                                    done_meta.merge_restrictions(&meta),
+                                )),
                                 Err(failure) => {
                                     Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed {
                                         done_error: failure.error,

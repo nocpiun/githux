@@ -464,7 +464,11 @@ pub async fn unsubscribe_thread(
     // Step 2: In GitHub's inbox UI, Unsubscribe removes the thread from the inbox.
     // Call Done (DELETE) to complete the action.
     match mark_done(client, pat, thread_id, cancel).await {
-        Ok(done_meta) => Ok(UnsubscribeOutcome::Completed(done_meta)),
+        // A successful Done may omit the headers the PUT advertised; keep the
+        // strongest restriction from both steps rather than discarding them.
+        Ok(done_meta) => Ok(UnsubscribeOutcome::Completed(
+            done_meta.merge_restrictions(&metadata),
+        )),
         Err(failure) => Ok(UnsubscribeOutcome::IgnoredDoneFailed {
             done_error: failure.error,
             metadata: failure.metadata.merge_restrictions(&metadata),
