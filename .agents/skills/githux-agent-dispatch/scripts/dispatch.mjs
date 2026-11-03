@@ -22,7 +22,7 @@ function text(value, label) {
 }
 function optionPath(value, label) {
   text(value, label);
-  if (!path.isAbsolute(value)) fail(`${label} must be absolute so the visible CMD does not depend on its cwd`);
+  if (!path.isAbsolute(value)) fail(`${label} must be absolute so the Kero terminal does not depend on its cwd`);
   return value;
 }
 function utf8(p) {
@@ -159,7 +159,7 @@ export function createTask(o) {
       schema_version: 1, task_id: id, arbitration_ever_required: false, merge_owner: 'worker', pr_url: null,
       progress: { task: 'pending', note: 'Process state does not establish task completion.' }, updated_at: now(),
     };
-    const handoff = `# Dispatch handoff: ${id}\n\nWorktree: ${target}\nBranch: ${o.branch}\nCommitted base: ${sha}\nSession ID: ${sessionId}\nDelivery: ${o.delivery}\nFirst release milestone: ${state.milestone ?? 'not assigned'}\n\nRead AGENTS.md, docs/README.md, docs/code-standards.md and LESSONS.md from this committed worktree; then the relevant docs below.\nFollow [shared workflow](../../docs/agent-workflow.md), including latest-head CI/review, arbitration history, squash and default commit message rules. For PR review use [githux-pr-review](../skills/githux-pr-review/SKILL.md). Paths in this handoff resolve from .agents/task/TASK.md.\n\n## Verification runner\nUse the shared local verification command for all Cargo checks/tests/builds/fmt/clippy:\n\`\`\`sh\nnode scripts/verify.mjs [options] -- cargo <args...>\n\`\`\n- Pass arguments as an array after \`--\`; never interpolate into a shell string.\n- Each run writes an atomic JSON record under \`.agents/task/runs/<run_id>.json\` with exit code, log path, source identity, timing, and result.\n- The runner holds the shared Windows mutex \`Local\\Githux-Cargo-20261029\` while running; do not start a second heavy build concurrently.\n- Read failed logs directly instead of recompiling merely to change grep expressions.\n- After final checks pass, rerun only if there is an actual change, failure, or unresolved concern; record why.\n\n${o.delivery === 'local-only' ? 'Implement and validate locally, write .agents/task/implementation-result.md, then stop generation while keeping the interactive terminal available. Do not commit, push or create a PR.' : 'Implement, validate, document and deliver through the explicitly scoped PR workflow. Preserve arbitration history in delivery-state.json and PR records; milestone #1 is required only when assigned above.'}\nDispatch performs no GitHub mutation. Task progress/PR/arbitration metadata belongs only in delivery-state.json (worker-owned); runtime belongs in dispatch-state.json (supervisor-owned). Never reset arbitration_ever_required or merge_owner on resume.\n\n---\n\n${spec}\n`;
+    const handoff = `# Dispatch handoff: ${id}\n\nWorktree: ${target}\nBranch: ${o.branch}\nCommitted base: ${sha}\nSession ID: ${sessionId}\nDelivery: ${o.delivery}\nFirst release milestone: ${state.milestone ?? 'not assigned'}\n\nRead AGENTS.md, docs/README.md, docs/code-standards.md and LESSONS.md from this committed worktree; then the relevant docs below.\nFollow [shared workflow](../../docs/agent-workflow.md), including latest-head CI/review, arbitration history, squash and default commit message rules. For PR review use [githux-pr-review](../skills/githux-pr-review/SKILL.md). Paths in this handoff resolve from .agents/task/TASK.md.\n\n## Verification runner\nUse the shared local verification command for all Cargo checks/tests/builds/fmt/clippy:\n\`\`\`sh\nnode scripts/verify.mjs [options] -- cargo <args...>\n\`\`\`\n- Pass arguments as an array after \`--\`; never interpolate into a shell string.\n- Each run writes an atomic JSON record under \`.agents/task/runs/<run_id>.json\` with exit code, log path, source identity, timing, and result.\n- The runner holds the shared Windows mutex \`Local\\Githux-Cargo-20261029\` while running; do not start a second heavy build concurrently.\n- Read failed logs directly instead of recompiling merely to change grep expressions.\n- After final checks pass, rerun only if there is an actual change, failure, or unresolved concern; record why.\n\n${o.delivery === 'local-only' ? 'Implement and validate locally, write .agents/task/implementation-result.md, then stop generation while keeping the interactive terminal available. Do not commit, push or create a PR.' : 'Implement, validate, document and deliver through the explicitly scoped PR workflow. Preserve arbitration history in delivery-state.json and PR records; milestone #1 is required only when assigned above.'}\nDispatch performs no GitHub mutation. Task progress/PR/arbitration metadata belongs only in delivery-state.json (worker-owned); runtime belongs in dispatch-state.json (supervisor-owned). Never reset arbitration_ever_required or merge_owner on resume.\n\n---\n\n${spec}\n`;
     fs.writeFileSync(path.join(dir, 'TASK.md'), handoff, { flag: 'wx', encoding: 'utf8' });
     fs.writeFileSync(path.join(dir, 'dispatch-state.json'), `${JSON.stringify(state, null, 2)}\n`, { flag: 'wx' });
     fs.writeFileSync(path.join(dir, 'delivery-state.json'), `${JSON.stringify(delivery, null, 2)}\n`, { flag: 'wx' });
@@ -215,6 +215,14 @@ export function taskStatus(worktree) {
   let table;
   try { table = processTable(); } catch { return { ...s, ...delivery, process_state: 'unknown', diagnostic: 'Process inventory unavailable; do not launch until identities can be checked.' }; }
   const last = s.runtime.attempts.at(-1);
+  let terminal = last?.terminal ?? null;
+  const receiptPath = last && path.join(t.dir, `kero-${last.token}.json`);
+  if (terminal?.kind === 'kero' && receiptPath && exists(receiptPath)) {
+    const receipt = readJSON(receiptPath);
+    if (!keroId(receipt.session_id) || receipt.name !== terminal.name || (terminal.session_id && terminal.session_id !== receipt.session_id)) fail('Kero receipt differs from supervisor identity; inspect preserved task state');
+    terminal = { ...terminal, session_id: receipt.session_id };
+  }
+
   const supervisor = last?.supervisor ? alive(last.supervisor, table) : false;
   const child = last?.child ? alive(last.child, table) : false;
   const external = matchingSession(s, table).filter(r => r.pid !== last?.child?.pid);
@@ -234,7 +242,7 @@ export function taskStatus(worktree) {
   } else if (!['created', 'exited', 'failed'].includes(phase)) {
     phase = 'unknown'; diagnostic = 'Runtime metadata is incomplete; inspect startup/exit records before recovery.';
   }
-  return { ...s, ...delivery, process_state: phase, diagnostic, observed: { supervisor, child, possible_external_session_pids: external.map(r => r.pid), lock_present: exists(t.lock) } };
+  return { ...s, ...delivery, terminal, process_state: phase, diagnostic, observed: { supervisor, child, possible_external_session_pids: external.map(r => r.pid), lock_present: exists(t.lock) } };
 }
 function stopped(s, table) {
   for (const a of s.runtime.attempts) {
@@ -263,23 +271,38 @@ export function findSession(s) {
   if (matches.length !== 1 || (s.session_path && !same(matches[0], s.session_path))) fail('Exact existing session is missing, duplicated or differs from recorded path; resume refused, never create a replacement');
   return matches[0];
 }
-export function terminalOuter(payload, inner) {
-  return `$s=New-Object System.Diagnostics.ProcessStartInfo; $s.FileName=$env:ComSpec; $s.UseShellExecute=$true; $s.WorkingDirectory=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(payload.worktree).toString('base64')}')); $s.Arguments='/d /v:off /k powershell.exe -NoLogo -NoProfile -EncodedCommand ${inner}'; [System.Diagnostics.Process]::Start($s) | Out-Null`;
-}
 export function terminalCommand(payload) {
   const data = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
   // Child inherits the visible terminal. Any final message stays readable; errors include the supervisor's exit.
   const inner = encodePS(`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { $p=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${data}')) | ConvertFrom-Json; [Console]::Title=('Githux: '+$p.task); Set-Location -LiteralPath $p.worktree; & $p.node $p.script '__supervise' $p.worktree $p.token; if ($LASTEXITCODE -ne 0) { Write-Host ('Dispatch supervisor exited: '+$LASTEXITCODE) } } catch { Write-Host ('Dispatch failed: '+$_.Exception.Message); Write-Host ('State is preserved; run: node "'+$p.script+'" status --worktree "'+$p.worktree+'"') }`);
-  // CMD command-line limit is smaller than CreateProcess. Reject before taking a lock.
-  if (inner.length + 100 > 8000) fail('Encoded terminal command exceeds supported CMD length; shorten coordinator/script/worktree paths');
+  // Keep a conservative command-line budget, including the Kero/PowerShell bridge.
+  if (inner.length + 100 > 8000) fail('Encoded terminal command exceeds supported terminal command length; shorten coordinator/script/worktree paths');
   return inner;
 }
-export function visibleLaunch(payload) {
-  if (process.platform !== 'win32') fail('Visible interactive launch currently requires Windows CMD');
-  const inner = terminalCommand(payload);
-  const outer = terminalOuter(payload, inner);
-  run(powershell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePS(`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; ${outer}`)], { stdio: ['ignore', 'inherit', 'inherit'] });
+function keroName(payload) { return `githux-${payload.task}-${payload.token.slice(0, 8)}`; }
+function keroId(value) { return typeof value === 'string' && /^[a-zA-Z0-9_-]+$/.test(value); }
+export function keroPreflight(execute = run, env = process.env) {
+  // Local PID/worktree checks cannot protect an agent launched on another host.
+  if (env.KERO_HOST) fail('Remote KERO_HOST is unsupported; use a local Kero session for this local-worktree dispatcher');
+  let sessions;
+  try { sessions = JSON.parse(execute('kero', ['ls', '--json'], { stdio: ['ignore', 'pipe', 'inherit'] })); }
+  catch (error) { fail(`Local Kero unavailable. Ensure kero is on PATH and Kero is running; reopen the shell after changing PATH. No terminal fallback. ${error.message}`); }
+  if (!Array.isArray(sessions)) fail('Invalid Kero session inventory; no launch attempted');
 }
+export function keroCommand(payload) {
+  return ['new', '--name', keroName(payload), '--dir', payload.worktree, '--', powershell(), '-NoLogo', '-NoProfile', '-NoExit', '-EncodedCommand', terminalCommand(payload)];
+}
+export function visibleLaunch(payload, execute = run) {
+  const session = execute('kero', keroCommand(payload), { stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+  if (!keroId(session)) fail('Kero did not return a session ID; inspect the recorded terminal name before recovery');
+  // A separate receipt avoids racing supervisor updates or recreating an already released lock.
+  atomicJSON(path.join(payload.worktree, '.agents', 'task', `kero-${payload.token}.json`), { session_id: session, name: keroName(payload) });
+}
+visibleLaunch.prepare = payload => {
+  terminalCommand(payload); // Validate length before creating the launch lock.
+  keroPreflight();
+  return { kind: 'kero', name: keroName(payload) };
+};
 export function launchTask(mode, o, launch = visibleLaunch) {
   if (!['start', 'resume'].includes(mode)) fail('Invalid launch command');
   const t = loadTask(optionPath(o.worktree, 'worktree')), s = t.stateData;
@@ -317,7 +340,7 @@ export function launchTask(mode, o, launch = visibleLaunch) {
   checkInventory(c, t.root);
   const token = randomUUID();
   const payload = { node: process.execPath, script: SELF, worktree: t.root, token, task: s.task_id };
-  if (launch === visibleLaunch) terminalCommand(payload);
+  const terminal = launch.prepare?.(payload) ?? null;
   // Exclusive lock spans terminal startup, supervisor and child lifetime. Never auto-reclaim.
   fs.mkdirSync(t.lock);
   try {
@@ -328,7 +351,7 @@ export function launchTask(mode, o, launch = visibleLaunch) {
     update(t.root, latest => {
       latest.runtime.phase = 'starting';
       latest.runtime.starting_at = now();
-      latest.runtime.attempts.push({ token, mode, launcher, requested_at: now(), supervisor: null, child: null, child_spawn_pending: false });
+      latest.runtime.attempts.push({ token, mode, terminal, launcher, requested_at: now(), supervisor: null, child: null, child_spawn_pending: false });
       return latest;
     });
     launch(payload);
@@ -347,7 +370,16 @@ export async function supervise(worktree, token, { allowNonTTY = false } = {}) {
   // Atomic supervisor claim also protects against replay of the same encoded terminal command.
   fs.writeFileSync(path.join(t.lock, 'supervisor.claim'), `${process.pid}\n`, { flag: 'wx' });
   const supervisor = identity(process.pid);
-  update(t.root, s => { s.runtime.attempts.at(-1).supervisor = supervisor; return s; });
+  update(t.root, s => {
+    const a = s.runtime.attempts.at(-1);
+    a.supervisor = supervisor;
+    if (a.terminal?.kind === 'kero') {
+      const session = process.env.KERO_SESSION, pane = process.env.KERO_PANE;
+      if (!keroId(session) || !keroId(pane)) fail('Kero session/pane environment missing; lock retained, no CLI started');
+      Object.assign(a.terminal, { session_id: session, pane_id: pane });
+    }
+    return s;
+  });
   if (!allowNonTTY && (!process.stdin.isTTY || !process.stdout.isTTY)) fail('Interactive inherited TTY required; lock retained, no print/RPC fallback');
   stopped({ ...t.stateData, runtime: { attempts: t.stateData.runtime.attempts.slice(0, -1) } }, processTable());
   // Revalidate in the terminal: there may have been a delay after the initial inventory.
