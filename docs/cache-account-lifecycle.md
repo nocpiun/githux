@@ -19,14 +19,14 @@ let accounts = AccountService::open_with_cache(
 - 返回的 `AccountCache` 提供同一个 `CacheStore` clone 与已保存账户的 `CacheScope`，也可 `into_parts()`。消费者仍须校验 `scope.account() == session.context().auth().account`，保留现有 session、context、资源代次、取消与 lease 复核。
 - 消费者不得自行创建分区、打开另一 DB、绕过现有服务或把旧句柄当成持续许可。`None` 表示无可用私有缓存，不是空内容。
 
-替换后消费者先通过 `RepoService::begin_revalidation(session.context(), Some(repo_id))` 取得 ticket，使用**当前 session 固定的新凭据**成功读取该仓库后，再检查 context 并 `await RepoService::permission_confirmed(session.context(), ticket)`。完成证明与账户替换共用提交锁，写门禁前再次核对 context，旧 session 在替换提交窗口内也不能解锁新 cache epoch。不得绕过该服务入口直接发布 core proof。`GET /user` 和 `revalidate()` 不会解锁仓库。账户级私有聚合使用 `repository=None` 的独立证明，不随任一仓库证明解锁。
+替换后消费者先通过 `RepoService::begin_revalidation(session.context(), Some(repo_id))` 取得 ticket，使用**当前 session 固定的新凭据**成功读取该仓库后，再检查 context 并 `await RepoService::permission_confirmed(session.context(), ticket)`。完成证明与账户替换共用提交锁，写门禁前再次核对 context，旧 session 在替换提交窗口内也不能解锁新 cache epoch。不得绕过该服务入口直接发布 core proof。`GET /user` 和 `revalidate()` 不会解锁仓库。账户级私有聚合使用 `repository=None` 的独立门槛，不随任一仓库证明解锁。2026-11-04 已批准替换时丢弃可重取的旧聚合：新凭据目录成功发布后，生命周期建立新的空聚合代次；新结果可直接落盘，旧 Home/Profile/Feed 快照已清除，不通过列表成功恢复旧快照。
 
 ## 跨 DB 顺序与崩溃窗口
 
 账户目录与缓存 DB 不共享事务。所有生命周期提交沿用 `credential_commit` 串行化，采用以下持久顺序：
 
 1. **保存**：先对账并完成新身份可能存在的旧分区退休，再按既有独立 revision 协议提交目录/凭据并 provision scope。对账或退休未确认时不保存该新身份，避免重启后把旧分区误认给新账户。remove/re-add 通过退休记录获得新 UUID partition；新保存不会重置已有 quarantine。
-2. **替换 PAT**：先核对账户 incarnation，再持久 `PatReplaced`，之后才能保存新槽并提交目录。旧私有内容先进入逐仓库隔离。若随后凭据/目录步骤失败，旧凭据和旧目录继续权威，但缓存保持隔离，不能因回滚重新放开。
+2. **替换 PAT**：先核对账户 incarnation，再持久 `PatReplaced`（推进 epoch、隔离仓库、删除旧聚合），之后才能保存新槽并提交目录。若随后凭据/目录步骤失败，旧凭据和旧目录继续权威，但缓存保持隔离。成功发布新凭据引用的目录事务必定同时留下既有 `replaced` journal（复用 `commit_with_cache_recovery(..., false)`，不改 schema）；随后 `complete_replacement` 调用内部 `start_fresh_aggregate`，原子删除旧聚合/写入槽并建立新 epoch 对应的空聚合 revision，完成后才 `cache_recovered` 确认 journal。重置失败或确认失败返回已提交的 `CleanupPending(summary)`，撤回 binding 并 suspend 旧 scope；重启/recover 先重放隔离、清除和新代次，最后确认。目录事务前失败不能建立新 gate；目录事务后任意崩溃窗口都有可重放屏障。旧 lease 固定捕获时 epoch，后续仓库证明也不复活旧 lease；旧 writer/proof 仍由 epoch/revision 拒绝。
 3. **明确凭据拒绝**：先在账户 DB 记录账户级拒绝屏障，再更新缓存门禁。`RepoService::credential_rejected(context)` 只接收已分类的明确拒绝，blocking 前后都复核原 context，并在提交锁内再次复核；迟到 401 返回 `StaleContext`，不能污染替换后的凭据或 remove/re-add 账户。`AccountService::revalidate()` 读到明确 401 也走同一屏障；网络、超时、5xx、限流、模糊 403/404 不记录拒绝。
 4. **移除**：先持久 `retire`，再提交目录删除与凭据 cleanup journal。退休成功立即拒绝读、写和旧 lease；目录提交失败可留下“账户仍保存但缓存仍退休”的保守状态，之后重试移除或重启对账。目录已删除而进程在退休前崩溃的反向窗口由启动对账覆盖。
 5. **启动/恢复**：读取账户 DB 的拒绝屏障，枚举 live scopes，退休所有不在持久账户目录中的分区，重放保存账户的拒绝后才发绑定，最后回收退休 entries/slots 和孤儿对象。目录不存在账户时不能 provision。`recover()` 重试凭据 cleanup、目录对账与物理回收，不自动无限重试。

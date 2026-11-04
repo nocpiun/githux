@@ -44,9 +44,11 @@
 3. 只有 `Network`、`Timeout`、`RateLimited` 与 5xx `UnexpectedStatus` 这类已允许的瞬时故障才用 `PageReadMode::Offline` 回放最后一次快照，发布 `RepositoryListOrigin::Historical { verified_at_ms }`。
 4. `Unauthorized`(401)、`Forbidden`/`NotFound`/SSO、`Cancelled`、`StaleContext` 与缓存错误保持原义，不回退历史；网络失败后无快照时显示可重试的失败，而不是空列表。
 
-`Repositories::historical_status()` 把历史来源转为一条简短行（`Offline snapshot · last synced <相对时间>`）；侧栏 `src/ui/mod.rs` 只消费这个方法，并在历史状态保留同样的 scoped Retry，历史/部分数据不会被渲染成在线完整结果。该 `src/ui/mod.rs` 改动是渲染所需的最小跨所有权改动（shell-global-pages 已合入、无并发写者），仅读取 `Repositories` 新增的只读方法，不修改壳布局或页面 hosts。
+`Repositories::historical_status()` 把历史来源转为一条简短行（`Offline snapshot · last synced <相对时间>`）；侧栏 `src/ui/mod.rs` 只消费这个方法，并在历史状态保留同样的 scoped Retry，历史/部分数据不会被渲染成在线完整结果。前轮曾直接修改 `src/ui/mod.rs` 的历史提示接线，并错误声称 shell-global-pages 已合入、无并发写者；协调验收已证实当时 #71 仍 OPEN 且在返工。该所有权判断错误，本轮不再编辑 `ui/mod.rs`、页面 hosts 或 Home rows；Shell 组合由其原执行者处理。
 
-**已知数据层限制（供协调）**：PAT 替换会把账户聚合 gate（`repository=None`）隔离；`repository_list_cache` 适配器只在该 gate 允许时 `begin_write`，并不建立账户级 `permission_confirmed(None)` 证明。因此替换后侧栏仍能在线读取（走回退），但聚合快照暂时不可写，直到有一个账户级消费者用当前凭据显式完成该证明。该证明不能由单仓库或本次列表读取代替，否则会同时解锁无关的 Home/Profile/Feed 私有聚合（与头像问题的边界一致）。本任务未在数据层新造证明接口。
+**PAT 替换恢复（验收返工 F3）**：替换前仍推进持久 epoch、隔离旧凭据；新凭据目录提交时同时保存现有 `replaced` recovery journal。目录发布后，生命周期原子删除旧账户聚合 entries/slots，并建立新 aggregate revision，只接收新凭据的新结果，成功后才确认 journal。重启发现 journal 会保守重做隔离/清除/新代次，再发绑定。未经重新读取的旧 Home/Profile/Feed 聚合不会恢复，单仓库旧内容仍须该仓库证明。`CredentialRejected` 的持久 journal 不会被普通 recover、GET /user 或列表成功清除；只有成功发布替换凭据的目录事务可取代它。侧栏和既有页面适配器无需调用 `permission_confirmed(None)`，正常在线刷新即可保存新快照。
+
+在线/历史副本共用 `CacheAuthorization`：请求前通过同一 binding 的 `store.authorization(scope, None)` 捕获，后台完成及 UI apply 前检查同一 token 的 `is_current()`，显示期间由 drain 继续检查。`None` 资源表示聚合，独立仓库使用 `Some(repo_id)`。Token 捕获只取独立内存锁、检查只做原子读取，不等待 SQLite；撤权或新 gate 恢复后旧 token 永远无效。侧栏已经消费此接口，Home/Profile/Repository 由各自原执行者消费。详见 [cache-core](cache-core.md#已显示副本的权限失效接口)。
 
 ## 页面绑定
 

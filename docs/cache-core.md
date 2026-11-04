@@ -8,7 +8,7 @@
 
 - C1：账户仍保存、没有已知授权失败时，断网冷启动允许按最后已知授权读私有缓存。返回 bytes + fetched/verified 时间、DTO 版本、完整性和验证器；消费者标明历史快照、离线和上次同步，不能据此声称当前权限或最新版本。
 - C2：`retire` 持久退休分区后立即拒绝所有读写。`recover` 可稍后删除退休内容并清理文件，open 自动尝试恢复。重加同 host + 数字账户 ID 获得新 UUID partition；其他账户不受影响。
-- C3：`PatReplaced` 推进持久授权 epoch，隔离所有旧私有 scope。新凭据逐仓库确认访问权后才能 `permission_confirmed`，`GET /user` 不构成仓库权限证明。账户级私有聚合数据使用 `repository=None` 的独立门槛，必须独立确认其数据范围，不能随某个仓库重验一起恢复。
+- C3：`PatReplaced` 推进持久授权 epoch，隔离所有旧私有 scope。新凭据逐仓库确认访问权后才能 `permission_confirmed`，`GET /user` 不构成仓库权限证明。账户级私有聚合数据使用 `repository=None` 的独立门槛，不能随某个仓库重验一起恢复旧值。2026-11-04 补充授权：成功发布新凭据后可废弃可重取的旧聚合，建立只接收新凭据新结果的空聚合代次；不保留/解锁旧 Home/Profile/Feed 快照。两 DB 恢复顺序见[账户生命周期](cache-account-lifecycle.md)。
 - C4：`CredentialRejected` 持久拒绝私有读取，重启或 `saved_account` 不解除；接受替换凭据后仍逐仓库重验。Offline/Timeout/ServerFailure/RateLimited/AmbiguousDenial 不改变最后已知许可。明确仓库撤权使用 `revoke_repository` 清理该仓库全部条目并拒绝私有读取；模糊 403/404 不足以调用它。撤销某具体仓库 R 时，同事务还使该账户 `repository=None` 的旧聚合快照（Complete/Partial）全部失效并推进聚合门禁 revision：既有聚合 lease、在途写 ticket 和旧重验 proof 均不能回填或重新打开旧数据，重启不复活；聚合门禁的 `allowed/epoch` 保持不变，因此在原本允许且未受 PAT 替换/凭据拒绝隔离的 scope 下，撤权后由当前凭据完成的新在线聚合读取仍可建立新快照。其他账户、同账户其他仓库及其在途写入不受影响。
 - C5：普通可淘汰缓存，没有 pin/永久保留或离线下载保证。读取 lease 仅阻止容量淘汰，`snapshot()` 每次检查授权；退休、撤权、clear 可以立即使 lease 失效。已复制到调用方的字节无法由 storage 撤回，消费者必须继续复核现有 Account/RepositoryReadContext 与页面代次并清掉旧画面。
 
@@ -83,7 +83,25 @@ cache.retire(&scope)?; // 账户移除先提交逻辑拒绝；随后处理 recov
 cache.recover()?;
 ```
 
-ticket 绑定当前 store 实例、partition、持久 auth epoch、repository revocation revision、最新 key writer revision；更早结果返回 Stale，不能恢复门槛。跨重启不能复用 ticket。`saved_account` 不是“新 token 已通过”的通知。账户目录与缓存不共享事务，账户生产者未来必须安排崩溃可恢复的事件顺序/对账；本交付不声称账户移除已在正式应用触发上述调用。
+ticket 绑定当前 store 实例、partition、持久 auth epoch、repository revocation revision、最新 key writer revision；更早结果返回 Stale，不能恢复门槛。跨重启不能复用 ticket。`saved_account` 不是“新 token 已通过”的通知。`start_fresh_aggregate` 是内部生命周期入口，只在新凭据目录/journal 已提交后调用；它原子清空旧聚合与写槽、推进聚合 revision，再允许新结果，拒绝 rejected scope。普通消费者不得调用它。账户目录与缓存不共享事务，账户生产者未来必须安排崩溃可恢复的事件顺序/对账；本交付不声称账户移除已在正式应用触发上述调用。
+
+## 已显示副本的权限失效接口
+
+```rust
+// 请求开始前捕获，随后台 reply 一起传递，并保留到显示结束。
+let authorization = binding.store().authorization(binding.scope(), None);
+// None 表示账户聚合；仓库独立资源用 Some(repository_id)。
+// 有绑定却无法捕获票据时保守拒绝发布，不把缺失票据当授权。
+if authorization.as_ref().is_some_and(|token| !token.is_current()) {
+    // 清掉在线/历史以及衍生副本，或丢弃后台迟到回复。
+}
+```
+
+`CacheAuthorization` 可 Clone/Debug/Eq。`CacheStore::authorization(scope, repository)` 只取得独立于数据库 State 的内存锁；`CacheAuthorization::is_current()` 仅三次原子读取，无锁无 I/O。`is_authorization_current(&token)` 为兼容便利方法。票据不授予读取权限，仍须保留 session/context/cancel/资源与页面 generation、持久 gate/lease 的既有校验。
+
+PAT 替换、明确凭据拒绝、退休、suspend 使该分区全部旧票据失效；仓库 R 明确撤权使 R 与该账户聚合 None 失效，未撤权仓库和其他账户不受影响；clear 使全部票据失效。普通刷新/写入/淘汰不推进权限票据，不需要为票据 pin 一个 entry。失效票据永远不恢复，新 gate/新证明只能供新请求捕获新票据。
+
+在线与历史结果都须在后台完成和 UI apply 前复核同一张请求前票据，显示期间由已有 drain 复核并清除失效数据；不能只在后台检查一次，也不能用新票据为旧 reply 背书。`CachedPageReadSession`、`list_repos_cached` 还在 adapter 返回前验证自己的票据；UI 仍需保留自己的票据覆盖返回后到真正发布的窗口。旧 Profile AggregateGateStamp/CacheLease 语义仍兼容，但不再需要每页永久 80ms 磁盘轮询作为共享失效机制。Home/Profile/Repository 的组件消费由各原执行者完成。
 
 ## 表示与策略边界
 

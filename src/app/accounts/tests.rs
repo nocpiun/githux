@@ -2376,12 +2376,13 @@ fn a_401_is_not_shown_as_offline_history(cx: &mut TestAppContext) {
         state.repositories.historical_status().is_none(),
         "a 401 must not be labelled as an offline snapshot"
     );
+    let message = match &state.repositories.preview {
+        RepositoryPreview::Failed(message) => message.clone(),
+        other => format!("unexpected preview {other:?}"),
+    };
     assert!(
-        matches!(
-            &state.repositories.preview,
-            RepositoryPreview::Failed(message) if message.contains("401")
-        ),
-        "the failure keeps its credential-rejection meaning"
+        message.contains("401"),
+        "the failure keeps its credential-rejection meaning, got: {message}"
     );
 }
 
@@ -2491,6 +2492,91 @@ fn cache_failures_fall_back_online_while_auth_errors_keep_their_meaning() {
         assert_eq!(
             repository_read_fallback(&PageCacheError::Context(error)),
             RepositoryReadFallback::KeepError
+        );
+    }
+}
+
+/// Both network and historical copies need the same permission token. A revocation between the
+/// background completion and UI publication cannot be repaired by reopening a new gate.
+#[gpui::test]
+fn revocation_clears_online_rows_and_rejects_queued_replies_even_after_gate_recovery(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    mock.serve_repos("synthetic", repos(1, "alice", &["alpha"]));
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        Arc::new(InMemoryCredentialStore::new()),
+        mock,
+        cache,
+    );
+    let service = runtime.accounts.clone();
+    let (_view, controller, cx) = product_shell(cx, Some(runtime));
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(state.repositories.preview, RepositoryPreview::Ready(_))
+    });
+    wait_idle(&controller, cx);
+    let repos = service.repo_service();
+    let context = repos.session().unwrap().context().clone();
+    let binding = repos.cache(&context).unwrap();
+    let token = binding
+        .store()
+        .authorization(binding.scope(), None)
+        .unwrap();
+    let outcome = host_runtime()
+        .block_on(super::read_repositories(&repos, Default::default()))
+        .outcome
+        .unwrap();
+    binding
+        .store()
+        .revoke_repository(binding.scope(), Some(10))
+        .unwrap();
+    assert!(
+        repos.is_current(&context),
+        "repository revocation is not account logout"
+    );
+    pump(&controller, cx);
+    assert!(
+        snapshot(&controller, cx).repositories.rows().is_empty(),
+        "already displayed ONLINE rows cleared"
+    );
+    // A new online read is allowed but must not authorize the old queued reply.
+    host_runtime()
+        .block_on(super::read_repositories(&repos, Default::default()))
+        .outcome
+        .unwrap();
+    assert!(!token.is_current());
+    for origin in [
+        RepositoryListOrigin::Network,
+        RepositoryListOrigin::Historical { verified_at_ms: 1 },
+    ] {
+        controller.update(cx, |accounts, cx| {
+            accounts.generation += 1;
+            accounts.operation = Some(control());
+            accounts.current_operation = Some(Operation::Repositories);
+            let reply = Reply {
+                generation: accounts.generation,
+                operation: Operation::Repositories,
+                result: Ok(Success::Repositories),
+                publication: Some(context.clone()),
+                for_account: Some(context.auth().account.clone()),
+                recovery_pending: false,
+                repositories: Some(RepositoryReply {
+                    outcome: Ok(outcome.clone()),
+                    origin,
+                }),
+                repository_authorization: Some(token.clone()),
+            };
+            accounts.apply(reply, cx);
+        });
+        assert!(
+            snapshot(&controller, cx).repositories.rows().is_empty(),
+            "queued old reply cannot borrow the new gate"
         );
     }
 }

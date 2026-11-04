@@ -183,6 +183,7 @@ fn a_pat_replacement_purges_old_aggregates_and_opens_a_new_generation() {
     put(&store, &scope, &aggregate, b"old aggregate");
     put(&store, &scope, &repo, b"old repo");
     let aggregate_lease = hit(&store, &scope, &aggregate);
+    let repository_lease = hit(&store, &scope, &repo);
     let old_aggregate = store.authorization(&scope, None).unwrap();
     let old_repo = store.authorization(&scope, Some(10)).unwrap();
 
@@ -196,7 +197,7 @@ fn a_pat_replacement_purges_old_aggregates_and_opens_a_new_generation() {
     // Only after the catalog publishes new credentials does the lifecycle reset the aggregate.
     store.start_fresh_aggregate(&scope).unwrap();
     miss(&store, &scope, &aggregate, CacheMiss::NotCached);
-    assert!(aggregate_lease.snapshot().unwrap().is_none());
+    assert!(aggregate_lease.snapshot().is_err());
     // Captured UI authorizations are invalidated for the whole replaced credential, not only the
     // resource that happened to be displayed.
     assert!(!store.is_authorization_current(&old_aggregate));
@@ -217,6 +218,7 @@ fn a_pat_replacement_purges_old_aggregates_and_opens_a_new_generation() {
         .permission_confirmed(store.begin_revalidation(&scope, Some(10)).unwrap())
         .unwrap();
     assert_eq!(value(&store, &scope, &repo), b"old repo");
+    assert!(repository_lease.snapshot().is_err(), "new repository proof cannot revive an old credential's lease");
 }
 
 /// The lightweight authorization generation follows only the affected partition/resource: a
@@ -278,7 +280,7 @@ fn authorization_checks_do_not_wait_for_sqlite_and_old_tokens_never_revive() {
     let result = rx.recv_timeout(Duration::from_secs(2));
     drop(state);
     job.join().unwrap();
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
     let aggregate = CacheKey::mutable(None, true, "feed", "page=1", "json", 1).unwrap();
     let old_write = store.begin_write(&scope, &aggregate).unwrap();
     let old_proof = store.begin_revalidation(&scope, None).unwrap();

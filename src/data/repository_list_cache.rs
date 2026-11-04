@@ -160,6 +160,9 @@ impl RepoService {
             None => return Err(PageCacheError::Cache(CacheError::AccessDenied)),
         };
         self.guard(&context, &cancel)?;
+        let authorization = store
+            .authorization(&scope, None)
+            .ok_or(PageCacheError::Cache(CacheError::Stale))?;
 
         let config = self.client.config();
         let complete_key = CacheKey::mutable(
@@ -249,6 +252,9 @@ impl RepoService {
 
         if !self.is_current(&context) {
             return Err(PageCacheError::Context(GitHubError::StaleContext));
+        }
+        if !authorization.is_current() {
+            return Err(PageCacheError::Cache(CacheError::Stale));
         }
         if transport.rejected() {
             // Honor no-store even on a 401. Attempt invalidation while these
@@ -361,6 +367,9 @@ impl RepoService {
             .await?;
         }
         self.guard(&context, &cancel)?;
+        if !authorization.is_current() {
+            return Err(PageCacheError::Cache(CacheError::Stale));
+        }
         Ok(Scoped {
             context: context.clone(),
             value: PageValue::Value {
@@ -699,7 +708,7 @@ mod tests {
             .list_repos_cached(PageReadMode::Online, CancellationToken::default())
             .await
             .unwrap();
-        // Replace the PAT: the account aggregate gate becomes restricted.
+        // Replacement discards old aggregate representations; only new-credential results may fill it.
         user(&fixture.mock, 1).await;
         fixture
             .service
@@ -708,11 +717,25 @@ mod tests {
             .unwrap();
         let offline = repos
             .list_repos_cached(PageReadMode::Offline, CancellationToken::default())
+            .await
+            .unwrap();
+        assert!(matches!(offline.value, PageValue::Miss(_)));
+        fixture
+            .mock
+            .enqueue(Ok(json_response(200, &page(&[(6, "new")]))))
             .await;
-        assert!(matches!(
-            offline,
-            Err(PageCacheError::Cache(CacheError::AccessDenied))
-        ));
+        repos
+            .list_repos_cached(PageReadMode::Online, Default::default())
+            .await
+            .unwrap();
+        let (fresh, origin, _) = value(
+            repos
+                .list_repos_cached(PageReadMode::Offline, Default::default())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(fresh.repositories[0].id, 6);
+        assert_eq!(origin, PageOrigin::HistoricalSnapshot);
     }
 
     #[tokio::test]

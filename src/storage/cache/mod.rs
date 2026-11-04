@@ -98,7 +98,7 @@ struct State {
     /// Process-local fail-closed barrier for an uncertain durable gate outcome.
     /// Freshly reconciled scopes capture the new generation; old clones cannot.
     suspended: HashMap<String, u64>,
- } 
+}
 
 /// In-memory invalidation flags have a separate short-held lock from SQLite.
 #[derive(Default)]
@@ -121,19 +121,30 @@ impl AuthorizationFlag {
     }
 }
 impl AuthorizationGenerations {
-    fn bump_global(&mut self) { self.global.invalidate(); }
+    fn bump_global(&mut self) {
+        self.global.invalidate();
+    }
     fn bump_partition(&mut self, partition: &str) {
-        self.partitions.entry(partition.into()).or_default().invalidate();
+        self.partitions
+            .entry(partition.into())
+            .or_default()
+            .invalidate();
     }
     fn bump_resource(&mut self, partition: &str, repository: &str) {
-        self.resources.entry((partition.into(), repository.into())).or_default().invalidate();
+        self.resources
+            .entry((partition.into(), repository.into()))
+            .or_default()
+            .invalidate();
     }
     fn capture(&mut self, partition: &str, repository: &str) -> CacheAuthorization {
         CacheAuthorization {
             flags: [
                 self.global.clone(),
                 self.partitions.entry(partition.into()).or_default().clone(),
-                self.resources.entry((partition.into(), repository.into())).or_default().clone(),
+                self.resources
+                    .entry((partition.into(), repository.into()))
+                    .or_default()
+                    .clone(),
             ],
         }
     }
@@ -170,17 +181,24 @@ impl CacheAuthorization {
     /// Lock-free atomic loads only: safe on the UI thread, during publication and while displayed.
     /// Once invalid, this exact token never becomes valid again even if a new read restores access.
     pub fn is_current(&self) -> bool {
-        self.flags.iter().all(|flag| flag.0.load(std::sync::atomic::Ordering::Acquire))
+        self.flags
+            .iter()
+            .all(|flag| flag.0.load(std::sync::atomic::Ordering::Acquire))
     }
 }
 impl std::fmt::Debug for CacheAuthorization {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CacheAuthorization").field("current", &self.is_current()).finish_non_exhaustive()
+        f.debug_struct("CacheAuthorization")
+            .field("current", &self.is_current())
+            .finish_non_exhaustive()
     }
 }
 impl PartialEq for CacheAuthorization {
     fn eq(&self, other: &Self) -> bool {
-        self.flags.iter().zip(&other.flags).all(|(a,b)| Arc::ptr_eq(&a.0, &b.0))
+        self.flags
+            .iter()
+            .zip(&other.flags)
+            .all(|(a, b)| Arc::ptr_eq(&a.0, &b.0))
     }
 }
 impl Eq for CacheAuthorization {}
@@ -224,6 +242,11 @@ pub enum AccessEvent {
     AmbiguousDenial,
 }
 
+/// `Hit` carries the whole lease (store, scope, key, id and captured durable epoch) so
+/// `snapshot()` can re-verify that the scope epoch did not change. Boxing would ripple through
+/// every consumer's match arm for no behavioral gain; the size is bounded and this enum is not
+/// copied in bulk.
+#[allow(clippy::large_enum_variant)]
 pub enum CacheRead {
     Hit(CacheLease),
     Miss(CacheMiss),
@@ -236,6 +259,7 @@ pub struct CacheLease {
     scope: CacheScope,
     key: CacheKey,
     id: String,
+    epoch: String,
 }
 impl Drop for CacheLease {
     fn drop(&mut self) {
@@ -253,6 +277,9 @@ impl CacheLease {
     pub fn snapshot(&self) -> Result<Option<CacheSnapshot>> {
         let state = self.store.lock()?;
         check_local_access(&state, &self.scope)?;
+        if validate_scope(&state.db, &self.scope)?.1 != self.epoch {
+            return Err(CacheError::AccessDenied);
+        }
         check_access(&state.db, &self.scope, &self.key)?;
         self.store
             .load(&state.db, &self.id, &self.key)
@@ -309,8 +336,18 @@ impl CacheStore {
     /// Capture before starting a read, carry through its reply and retain while displayed.
     /// This takes only a separate memory lock; never waits for SQLite/file I/O. It is an invalidation
     /// token, not permission to read. Continue checking the account session and durable cache gate.
-    pub fn authorization(&self, scope: &CacheScope, repository: Option<u64>) -> Option<CacheAuthorization> {
-        Some(self.inner.authorizations.lock().ok()?.capture(&scope.partition, &repository_key(repository)))
+    pub fn authorization(
+        &self,
+        scope: &CacheScope,
+        repository: Option<u64>,
+    ) -> Option<CacheAuthorization> {
+        Some(
+            self.inner
+                .authorizations
+                .lock()
+                .ok()?
+                .capture(&scope.partition, &repository_key(repository)),
+        )
     }
     pub fn is_authorization_current(&self, authorization: &CacheAuthorization) -> bool {
         authorization.is_current()
@@ -396,7 +433,11 @@ impl CacheStore {
         let mut state = self.lock()?;
         let generation = state.suspended.entry(scope.partition.clone()).or_default();
         *generation = generation.saturating_add(1);
-        self.inner.authorizations.lock().map_err(|_| CacheError::Database)?.bump_partition(&scope.partition);
+        self.inner
+            .authorizations
+            .lock()
+            .map_err(|_| CacheError::Database)?
+            .bump_partition(&scope.partition);
         Ok(())
     }
     /// Durable logical retirement first. recover() can finish physical deletion
@@ -408,7 +449,11 @@ impl CacheStore {
         // durable row; retirement never turns a local barrier into permission.
         let generation = state.suspended.entry(scope.partition.clone()).or_default();
         *generation = generation.saturating_add(1);
-        self.inner.authorizations.lock().map_err(|_| CacheError::Database)?.bump_partition(&scope.partition);
+        self.inner
+            .authorizations
+            .lock()
+            .map_err(|_| CacheError::Database)?
+            .bump_partition(&scope.partition);
         validate_scope(&state.db, scope)?;
         state.db.execute(
             "UPDATE scopes SET state='retired',epoch=?1 WHERE partition=?2",
@@ -425,7 +470,11 @@ impl CacheStore {
                 let replaced = matches!(event, AccessEvent::PatReplaced);
                 let status = if replaced { "active" } else { "rejected" };
                 // The epoch change and, for a replacement, the old aggregate purge commit atomically.
-                self.inner.authorizations.lock().map_err(|_| CacheError::Database)?.bump_partition(&scope.partition);
+                self.inner
+                    .authorizations
+                    .lock()
+                    .map_err(|_| CacheError::Database)?
+                    .bump_partition(&scope.partition);
                 let tx = state.db.transaction()?;
                 tx.execute(
                     "UPDATE scopes SET state=?1,epoch=?2,restricted=1 WHERE partition=?3",
@@ -462,14 +511,24 @@ impl CacheStore {
             return Err(CacheError::AccessDenied);
         }
         let account = repository_key(None);
-        tx.execute("DELETE FROM entries WHERE partition=?1 AND repository=?2", params![scope.partition, account])?;
+        tx.execute(
+            "DELETE FROM entries WHERE partition=?1 AND repository=?2",
+            params![scope.partition, account],
+        )?;
         // slots encode the full key; dropping all slots conservatively cancels outstanding writes
         // in this replaced partition. Other repositories still require their own permission proof.
         tx.execute("DELETE FROM slots WHERE partition=?1", [&scope.partition])?;
         ensure_gate(&tx, scope, &account, &epoch)?;
-        tx.execute("UPDATE gates SET epoch=?1,revision=?2,allowed=1 WHERE partition=?3 AND repository=?4", params![epoch, nonce(), scope.partition, account])?;
+        tx.execute(
+            "UPDATE gates SET epoch=?1,revision=?2,allowed=1 WHERE partition=?3 AND repository=?4",
+            params![epoch, nonce(), scope.partition, account],
+        )?;
         tx.commit()?;
-        self.inner.authorizations.lock().map_err(|_| CacheError::Database)?.bump_resource(&scope.partition, &account);
+        self.inner
+            .authorizations
+            .lock()
+            .map_err(|_| CacheError::Database)?
+            .bump_resource(&scope.partition, &account);
         Ok(())
     }
     pub fn begin_revalidation(
@@ -521,7 +580,11 @@ impl CacheStore {
         check_local_access(&state, scope)?;
         let repository = repository_key(repository);
         {
-            let mut authorizations = self.inner.authorizations.lock().map_err(|_| CacheError::Database)?;
+            let mut authorizations = self
+                .inner
+                .authorizations
+                .lock()
+                .map_err(|_| CacheError::Database)?;
             authorizations.bump_resource(&scope.partition, &repository);
             if repository != "account" {
                 authorizations.bump_resource(&scope.partition, &repository_key(None));
@@ -684,6 +747,7 @@ impl CacheStore {
             scope: scope.clone(),
             key: key.clone(),
             id,
+            epoch: validate_scope(&state.db, scope)?.1,
         }))
     }
     fn load(
@@ -762,7 +826,11 @@ impl CacheStore {
         tx.execute("DELETE FROM entries", [])?;
         tx.execute("DELETE FROM slots", [])?;
         tx.commit()?;
-        self.inner.authorizations.lock().map_err(|_| CacheError::Database)?.bump_global();
+        self.inner
+            .authorizations
+            .lock()
+            .map_err(|_| CacheError::Database)?
+            .bump_global();
         Ok(())
     }
     pub fn usage(&self) -> Result<(u64, usize)> {

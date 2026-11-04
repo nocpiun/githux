@@ -39,6 +39,7 @@ use crate::domain::error::GitHubError;
 use crate::domain::repo::ReposOutcome;
 use crate::domain::{AccountKey, AccountSummary, HostId, RepoSummary};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::storage::cache::CacheAuthorization;
 use crate::ui::accounts::{RepositoryPreview, StatusMessage, StatusTone};
 
 use runtime::AccountRuntime;
@@ -134,6 +135,7 @@ struct Reply {
     /// this operation's own outcome.
     recovery_pending: bool,
     repositories: Option<RepositoryReply>,
+    repository_authorization: Option<CacheAuthorization>,
 }
 
 /// The result of one repository-list read and where it came from. A historical fallback is a
@@ -293,6 +295,8 @@ pub(crate) struct Accounts {
     /// without changing the authorization, this is restored instead of leaving an idle placeholder
     /// that the automatic loader will not refill (its key already matched).
     previous_repositories: Option<Repositories>,
+    repository_authorization: Option<CacheAuthorization>,
+    repository_context: Option<RepositoryReadContext>,
     /// What the automatic loader has already satisfied. It records the `(account, auth epoch,
     /// selection generation)` triple and the outcome kind it loaded for, so a list is fetched once
     /// per settled authorization even though the view repaints, resizes or collapses constantly.
@@ -473,6 +477,8 @@ impl Accounts {
             avatar_bound: None,
             avatar_permits: Arc::new(tokio::sync::Semaphore::new(6)),
             previous_repositories: None,
+            repository_authorization: None,
+            repository_context: None,
             loaded: None,
             receiver_task: None,
         };
@@ -561,6 +567,7 @@ impl Accounts {
     }
 
     fn drain(&mut self, cx: &mut Context<Self>) {
+        self.clear_revoked_repositories(cx);
         let messages: Vec<Message> = {
             let mut inbox = self.inbox.lock().expect("account inbox");
             inbox.drain(..).collect()
@@ -842,6 +849,40 @@ impl Accounts {
         cx.notify();
     }
 
+    /// Includes online and historical copies; atomic token checks never perform disk I/O.
+    fn clear_revoked_repositories(&mut self, cx: &mut Context<Self>) {
+        // Only clear a *displayed* list from the drain. While a read is in flight its reply is
+        // validated against the same token/context in `apply`, which also owns replacing the
+        // pending list; clearing here would overwrite that reply's own failure (e.g. a classified
+        // 401) and reset the auto-load marker into a retry loop.
+        if self.operation.is_some() {
+            return;
+        }
+        let invalid = self
+            .repository_authorization
+            .as_ref()
+            .is_some_and(|a| !a.is_current())
+            || self.repository_context.as_ref().is_some_and(|context| {
+                self.runtime
+                    .as_ref()
+                    .is_none_or(|r| !r.accounts.repo_service().is_current(context))
+            });
+        if invalid {
+            self.repository_authorization = None;
+            self.repository_context = None;
+            self.previous_repositories = None;
+            self.snapshot.repositories = Repositories {
+                account: self.snapshot.active.clone(),
+                preview: RepositoryPreview::Failed(
+                    "Repository access changed. Retry to read the current list.".into(),
+                ),
+                origin: RepositoryListOrigin::Network,
+            };
+            self.loaded = None;
+            cx.notify();
+        }
+    }
+
     fn apply(&mut self, reply: Reply, cx: &mut Context<Self>) {
         if self.generation != reply.generation || self.operation.is_none() {
             return;
@@ -850,6 +891,32 @@ impl Accounts {
         self.current_operation = None;
         self.input
             .update(cx, |input, cx| input.set_disabled(false, cx));
+        if reply.operation == Operation::Repositories
+            && reply.result.is_ok()
+            && reply
+                .repository_authorization
+                .as_ref()
+                .is_some_and(|a| !a.is_current())
+        {
+            self.repository_authorization = reply.repository_authorization;
+            self.clear_revoked_repositories(cx);
+            return;
+        }
+        if reply.operation == Operation::Repositories {
+            // Only a successful, displayed list is tied to a permission token/context. A failed
+            // reply has no rows to revoke, and its own message must survive (e.g. a classified 401
+            // is a credential rejection, not an "access changed" notice).
+            self.repository_authorization = if reply.result.is_ok() {
+                reply.repository_authorization
+            } else {
+                None
+            };
+            self.repository_context = if reply.result.is_ok() {
+                reply.publication.clone()
+            } else {
+                None
+            };
+        }
         if let (Some(publication), Some(runtime)) = (&reply.publication, &self.runtime)
             && !runtime.accounts.repo_service().is_current(publication)
         {
@@ -1091,6 +1158,10 @@ impl Accounts {
         let inbox = self.inbox.clone();
         let alive = self.alive.clone();
         let accounts = runtime.accounts.clone();
+        let repository_authorization = publication
+            .as_ref()
+            .and_then(|context| runtime.accounts.repo_service().cache(context))
+            .and_then(|binding| binding.store().authorization(binding.scope(), None));
         let settled = settled_signal(self.inbox.clone(), self.alive.clone(), generation);
         let spawned = runtime.spawn(control.source, settled, async move {
             let (result, repositories) = match operation {
@@ -1136,6 +1207,7 @@ impl Accounts {
                     for_account,
                     recovery_pending: false,
                     repositories,
+                    repository_authorization,
                 },
             )
             .await;
@@ -1241,6 +1313,7 @@ impl Accounts {
                     for_account: None,
                     recovery_pending: false,
                     repositories: None,
+                    repository_authorization: None,
                 },
             )
             .await;

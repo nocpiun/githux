@@ -161,6 +161,10 @@ impl CachedPageReadSession {
         Fut: Future<Output = Result<Scoped<T>, E>>,
     {
         self.guard(&cancel)?;
+        let authorization = self
+            .store
+            .authorization(&self.scope, repository)
+            .ok_or(PageCacheError::Cache(CacheError::Stale))?;
         let key = self
             .key(repository, resource, parameters.clone(), false)
             .map_err(PageCacheError::Cache)?;
@@ -237,6 +241,9 @@ impl CachedPageReadSession {
             transport.clone(),
         ));
         let result = read(self.session.with_page_client(client)).await;
+        if !authorization.is_current() {
+            return Err(PageCacheError::Cache(CacheError::Stale));
+        }
         if !self.verify() {
             return Err(PageCacheError::Context(GitHubError::StaleContext));
         }
@@ -273,6 +280,9 @@ impl CachedPageReadSession {
             .await?;
             let value = result.map_err(PageCacheError::Read)?.value;
             self.guard(&cancel)?;
+            if !authorization.is_current() {
+                return Err(PageCacheError::Cache(CacheError::Stale));
+            }
             Ok(Scoped {
                 context: self.context().clone(),
                 value: PageValue::Value {
@@ -318,6 +328,9 @@ impl CachedPageReadSession {
                 .await?;
             }
             self.guard(&cancel)?;
+            if !authorization.is_current() {
+                return Err(PageCacheError::Cache(CacheError::Stale));
+            }
             Ok(Scoped {
                 context: self.context().clone(),
                 value: PageValue::Value {

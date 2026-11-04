@@ -15,10 +15,10 @@
 `sidebar-cache` 以 squash 合入 main（`0cdb59c`）后，在原分支 rebase main，未改写其文件。
 
 - `src/app/accounts/mod.rs`：新增 `read_repositories`，自动加载/重试统一走 `RepoService::list_repos_cached`。在线读取发布 `RepositoryListOrigin::Network`；任意 `PageCacheError::Cache(_)`（未绑定、对账未完成、私有聚合门禁隔离或运行期 I/O 故障）回退原 `list_repos_cancellable` 保持在线能力；仅 `Network`/`Timeout`/`RateLimited`/5xx 这四类瞬时故障回退 `PageReadMode::Offline`，发布 `Historical { verified_at_ms }`；401/403/404/SSO/取消/过期保持原义。网络失败但无快照时显示可重试失败，不伪造空列表。
-- `Repositories` 增加 `origin` 与 `historical_status()`；侧栏 `src/ui/mod.rs` 只消费该方法，把历史来源显示为 `Offline snapshot · last synced <相对时间>` 并保留 scoped Retry；历史空列表不再显示“当前无仓库”的旧文案。这是渲染所需的最小跨所有权改动（shell-global-pages 已合入且无并发写者），不改布局/页面 hosts。
+- `Repositories` 增加 `origin` 与 `historical_status()`；侧栏消费该方法，把历史来源显示为 `Offline snapshot · last synced <相对时间>` 并保留 scoped Retry；历史空列表不再显示“当前无仓库”的旧文案。**前轮曾直接改 `src/ui/mod.rs` 并错误声称 shell-global-pages 已合入、无并发写者；协调验收已指正该所有权错误。本轮不再编辑 `ui/mod.rs`、Home/Profile/rows 或页面 hosts，Shell 组合由原执行者处理。**
 - 新用例：`a_network_failure_falls_back_to_the_cached_list_as_history`（网络失败→历史行/侧栏状态可见）、`a_401_is_not_shown_as_offline_history`（401 不冒充离线）、`only_a_historical_ready_list_reports_an_offline_label`、`epoch_milliseconds_convert_to_the_relative_formatter_input`。
 
-**已知数据层限制（供协调）**：PAT 替换隔离账户聚合 gate（`repository=None`），而 `repository_list_cache` 不建立账户级 `permission_confirmed(None)` 证明；替换后侧栏仍可在线读取（走回退），但聚合快照暂时不可写，直到有账户级消费者用当前凭据显式完成该证明。该证明不能由单仓库或本次列表读取代替，否则会解锁无关私有聚合。本任务未在数据层新造证明接口。
+**验收返工 F3 已实现（2026-11-04）**：PAT 替换后侧栏仍可在线读，且新凭据的新结果可保存。旧账户聚合被丢弃，不再等待“其他消费者 permission_confirmed(None)”；旧 Home/Profile/Feed 未经重读不恢复，单仓库旧内容仍须该仓库证明；`CredentialRejected` 持久 journal 不因 recover/GET /user/列表成功解除。
 
 ## 验证
 

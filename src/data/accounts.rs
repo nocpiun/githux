@@ -144,7 +144,9 @@ impl AccountService {
                     &next.directory(),
                     Some(&credential),
                     old.as_ref(),
-                    cache_enabled,
+                    // A replacement always leaves the existing `replaced` journal in the same
+                    // catalog transaction. Acknowledged only after fresh aggregate reset succeeds.
+                    cache_enabled && old.is_none(),
                 )
             {
                 // Old credential/registry stay authoritative. New slot is
@@ -154,6 +156,13 @@ impl AccountService {
             }
             *registry.lock().expect("registry lock") = next;
             super::account_cache::published(&cache, &summary.identity.key);
+            if old.is_some()
+                && let Some(db) = db.as_ref()
+                && super::account_cache::complete_replacement(&cache, &summary.identity.key, db)
+                    .is_err()
+            {
+                return Err(LoginError::CleanupPending(Box::new(summary)));
+            }
             // New accounts (including remove/re-add) receive a fresh partition.
             // Rejected/replaced accounts retain their isolated partition until
             // repository-specific permission proof arrives from the consumer.
