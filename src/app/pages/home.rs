@@ -34,7 +34,7 @@ struct CachedRead<T> {
 }
 
 enum CachedReadFailure {
-    Network,
+    Network(HomeError),
     AuthOrContext(HomeError),
     /// Quarantine, stale leases, I/O and other cache failures say nothing about
     /// the validity of the current account session. Retry the online read with
@@ -44,7 +44,7 @@ enum CachedReadFailure {
 
 fn cache_failure(error: PageCacheError<HomeError>) -> CachedReadFailure {
     match error {
-        PageCacheError::Read(error) if can_fall_back(&error) => CachedReadFailure::Network,
+        PageCacheError::Read(error) if can_fall_back(&error) => CachedReadFailure::Network(error),
         PageCacheError::Read(error) => CachedReadFailure::AuthOrContext(error),
         PageCacheError::Context(error) => {
             CachedReadFailure::AuthOrContext(HomeError::GitHub(error))
@@ -120,7 +120,7 @@ async fn read_home(
                 return unpack_cached(value, &cache_partition).map_err(cache_miss_failure);
             }
             Err(error) => match cache_failure(error) {
-                CachedReadFailure::Network => {
+                CachedReadFailure::Network(_) => {
                     let offline = cached
                         .home(
                             PageReadMode::Offline,
@@ -171,7 +171,7 @@ async fn read_feed(
                 return unpack_cached(value, &cache_partition).map_err(cache_miss_failure);
             }
             Err(error) => match cache_failure(error) {
-                CachedReadFailure::Network => {
+                CachedReadFailure::Network(_) => {
                     let offline = cached
                         .feed(
                             PageReadMode::Offline,
@@ -1287,7 +1287,7 @@ impl HomePage {
                             )
                             .await
                             .map_err(AppendError::Read),
-                        CachedReadFailure::Network => Err(AppendError::NotCached),
+                        CachedReadFailure::Network(error) => Err(AppendError::Read(error)),
                         CachedReadFailure::AuthOrContext(error) => Err(AppendError::Read(error)),
                     },
                     Err(error) => Err(AppendError::Read(cache_miss_failure(error))),
