@@ -95,6 +95,14 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；Feed 的数据层负责源事件、`/user/following` 与有界 PR 作者详情读取，并在发布前完成策略过滤（`FEED_AUTHOR_LOOKUP_LIMIT = 30`、关注列表最多 1,000 账户/10 页）；`FeedOutcome` 带 `next_page` 游标，host 在 `LoadMoreFeed` 时按游标逐页追加，而不是预先读完整条（至多 300 条/30 天）时间线。两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经 `set_avatar_renderer` 只传入已解码元素；renderer 接收的是 credited subject（合并 PR 时为 PR 作者）。`FeedOutcome` 只含已通过策略的 `FeedActivity`，视图不会再自行过滤，也无法从显示字符串推断关注状态。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
+## 2026-11-03 离线页面缓存与历史快照呈现
+
+`HomePage` 现已消费 `data::page_cache::CachedPageReadSession`：
+- **离线回退与历史标识**：当且仅当在线网络或超时失败、且当前账户拥有合规缓存时，回退展示本地持久快照；历史快照明确保留其原有的 `fetched_at_ms`，并在栏目标题旁显示紧凑的 `Saved <relative-time>` 提示（如 `Saved 2 hours ago`）与 tooltip 说明，绝不把历史内容冒充为最新确认结果。
+- **分页同源约束**：Feed 触底续读保持严格的同源集合（一次快照周期内全为网络结果或全为历史快照）。若历史 Feed 某一后续页未被缓存，显示紧凑的 `Page N is not available offline` 提示并停止自动重试，绝不把不同代次或新旧混合的分页盲目拼接；在线刷新成功后原子替换整个集合与游标，重置去重集合，并清除历史保存标记。
+- **授权门槛与安全防御**：401 凭据拒绝、明确撤权、请求取消和过时账户上下文绝不转为历史成功或读取私有缓存；账户移除或授权撤回后，即使后台返回了已读取数据，也会在发布前复核并立即清空可见内容，回退至中性“无当前数据”状态。
+- **无缓存平滑回退**：当宿主未注入 `CacheStore` 或未绑定分区时，完全保留原有的在线请求链路，行为与接口不发生回归。
+
 ## 2026-10-29 第二轮状态呈现
 
 列级硬失败改为共享 warning 标记 + tooltip 原因，不再用整段错误说明占据状态区；first load 仍显示 spinner 与 Loading 文案，Unavailable 仍显示中性圆点和文字。原因是登录/缺数据与硬失败不是同一语义，不能用 spinner 或 warning 互相冒充；刷新、Partial 和空结果行为不变。
