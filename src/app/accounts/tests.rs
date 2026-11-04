@@ -21,7 +21,7 @@ use crate::github::{GitHubClient, GitHubConfig};
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::network::transport::{
-    HttpRequest, HttpResponse, MockTransport, Transport, TransportError,
+    HttpRequest, HttpResponse, MockFailure, MockTransport, Transport, TransportError,
 };
 use crate::storage::accounts::AccountDatabaseConfig;
 use crate::storage::cache::{AccessEvent, CacheConfig, CacheError, CacheKey, CacheStore};
@@ -1822,10 +1822,12 @@ fn restoring_an_unchanged_account_keeps_ready_and_failed_lists(cx: &mut TestAppC
             repositories: Vec::new(),
             readiness: crate::domain::repo::ReposReadiness::Complete,
         }),
+        origin: RepositoryListOrigin::Network,
     };
     let failed = crate::app::accounts::Repositories {
         account: Some(active.clone()),
         preview: RepositoryPreview::Failed("boom".into()),
+        origin: RepositoryListOrigin::Network,
     };
     for previous in [ready, failed] {
         let restored = controller.update(cx, |accounts, _| {
@@ -2256,4 +2258,177 @@ async fn avatar_writes_survive_pat_replacement_but_the_private_aggregate_stays_q
         store.begin_write(&scope, &aggregate).is_ok(),
         "an explicit account-level proof unlocks private aggregates"
     );
+}
+
+/// A transient network failure after an online read falls back to the recorded snapshot and is
+/// published as history, never as a live complete list.
+#[gpui::test]
+fn a_network_failure_falls_back_to_the_cached_list_as_history(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+        mock.enqueue(Err(MockFailure::Network("offline".into())))
+            .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        mock.clone(),
+        cache,
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    // The automatic online read records a snapshot and is published as live.
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+            && state.repositories.origin == RepositoryListOrigin::Network
+    });
+    wait_idle(&controller, cx);
+
+    // The next read hits the network error and replays the recorded snapshot.
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+            && matches!(
+                state.repositories.origin,
+                RepositoryListOrigin::Historical { .. }
+            )
+    });
+    let state = snapshot(&controller, cx);
+    assert!(
+        state.repositories.historical_status().is_some(),
+        "the replayed list is labelled as an offline snapshot"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories().len()),
+        1,
+        "the cached rows stay usable"
+    );
+    // The sidebar draws the offline snapshot line, so the cached rows do not masquerade as a live
+    // complete read.
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("repo-list-status").is_some(),
+        "the sidebar shows the offline snapshot line"
+    );
+}
+
+/// An explicit 401 is a credential rejection, not a transient outage: it must not be shown as
+/// offline history, and the old snapshot must not become current again.
+#[gpui::test]
+fn a_401_is_not_shown_as_offline_history(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+        mock.enqueue(Ok(HttpResponse {
+            status: 401,
+            headers: vec![],
+            body: "{}".into(),
+        }))
+        .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        mock.clone(),
+        cache,
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(_))
+            && state.repositories.origin == RepositoryListOrigin::Network
+    });
+    wait_idle(&controller, cx);
+
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Failed(_))
+    });
+    let state = snapshot(&controller, cx);
+    assert_eq!(
+        state.repositories.origin,
+        RepositoryListOrigin::Network,
+        "a 401 never becomes offline history"
+    );
+    assert!(
+        state.repositories.historical_status().is_none(),
+        "a 401 must not be labelled as an offline snapshot"
+    );
+    assert!(
+        matches!(
+            &state.repositories.preview,
+            RepositoryPreview::Failed(message) if message.contains("401")
+        ),
+        "the failure keeps its credential-rejection meaning"
+    );
+}
+
+/// The cache metadata stores milliseconds; the shared relative formatter takes RFC3339.
+#[test]
+fn epoch_milliseconds_convert_to_the_relative_formatter_input() {
+    assert_eq!(super::epoch_ms_to_rfc3339(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(
+        super::epoch_ms_to_rfc3339(1_700_000_000_123),
+        "2023-11-14T22:13:20.123Z"
+    );
+    assert_eq!(
+        super::epoch_ms_to_rfc3339(1_709_164_800_000),
+        "2024-02-29T00:00:00.000Z"
+    );
+}
+
+/// A historical snapshot reports one short offline label; a live or non-value state reports none.
+#[test]
+fn only_a_historical_ready_list_reports_an_offline_label() {
+    let account = AccountKey::new(1, HostId::github());
+    let outcome = || crate::domain::repo::ReposOutcome {
+        repositories: Vec::new(),
+        readiness: crate::domain::repo::ReposReadiness::Complete,
+    };
+    let historical = Repositories {
+        account: Some(account.clone()),
+        preview: RepositoryPreview::Ready(outcome()),
+        origin: RepositoryListOrigin::Historical {
+            verified_at_ms: 1_700_000_000_000,
+        },
+    };
+    let label = historical.historical_status().expect("historical label");
+    assert!(label.starts_with("Offline snapshot"));
+    assert!(!label.contains("Time unavailable"));
+
+    let live = Repositories {
+        account: Some(account.clone()),
+        preview: RepositoryPreview::Ready(outcome()),
+        origin: RepositoryListOrigin::Network,
+    };
+    assert!(live.historical_status().is_none());
+
+    let failed = Repositories {
+        account: Some(account),
+        preview: RepositoryPreview::Failed("boom".into()),
+        origin: RepositoryListOrigin::Network,
+    };
+    assert!(failed.historical_status().is_none());
 }

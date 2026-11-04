@@ -33,11 +33,13 @@ use crate::app::avatar::{
     AvatarState, ReqwestAvatars, run_fetch,
 };
 use crate::auth::token::Pat;
+use crate::data::page_cache::{PageCacheError, PageOrigin, PageReadMode, PageValue};
 use crate::data::{AccountError, LoginError, LoginOutcome, RepositoryReadContext};
 use crate::domain::error::GitHubError;
 use crate::domain::repo::ReposOutcome;
 use crate::domain::{AccountKey, AccountSummary, HostId, RepoSummary};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::storage::cache::CacheError;
 use crate::ui::accounts::{RepositoryPreview, StatusMessage, StatusTone};
 
 use runtime::AccountRuntime;
@@ -48,12 +50,25 @@ mod tests;
 pub(crate) const PAT_HELP: &str =
     "https://github.com/settings/personal-access-tokens/new?type=classic";
 
+/// Where the shown repository list came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RepositoryListOrigin {
+    /// A live read in this operation.
+    Network,
+    /// A replayed persistent snapshot after an allowed network failure. Carries the snapshot's last
+    /// verified time so the UI can label it as offline history rather than a live complete result.
+    Historical { verified_at_ms: i64 },
+}
+
 /// What the account UI currently shows for one account's repository access.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Repositories {
     /// The account this state belongs to. A list is never published under another account.
     pub account: Option<AccountKey>,
     pub preview: RepositoryPreview,
+    /// Provenance of `preview`; `Historical` is rendered distinctly so a cached list never looks
+    /// like a live complete read.
+    pub origin: RepositoryListOrigin,
 }
 
 impl Repositories {
@@ -61,6 +76,7 @@ impl Repositories {
         Self {
             account,
             preview: RepositoryPreview::Idle(message.into()),
+            origin: RepositoryListOrigin::Network,
         }
     }
 
@@ -77,6 +93,22 @@ impl Repositories {
     /// Number of rows, for the `Repositories (N)` heading.
     pub fn len(&self) -> usize {
         self.rows().len()
+    }
+
+    /// A short, honest line for a replayed historical snapshot: the rows are the last synced copy,
+    /// not a live complete read. `None` for a live read or a state without rows.
+    pub fn historical_status(&self) -> Option<String> {
+        match self.origin {
+            RepositoryListOrigin::Historical { verified_at_ms }
+                if matches!(self.preview, RepositoryPreview::Ready(_)) =>
+            {
+                Some(format!(
+                    "Offline snapshot · last synced {}",
+                    relative_ms(verified_at_ms)
+                ))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -102,7 +134,14 @@ struct Reply {
     /// Global journalled cleanup observed after this reply. Reported separately and never rewrites
     /// this operation's own outcome.
     recovery_pending: bool,
-    repositories: Option<Result<ReposOutcome, GitHubError>>,
+    repositories: Option<RepositoryReply>,
+}
+
+/// The result of one repository-list read and where it came from. A historical fallback is a
+/// successful reply with `origin = Historical`; it is never folded into a live complete result.
+struct RepositoryReply {
+    outcome: Result<ReposOutcome, String>,
+    origin: RepositoryListOrigin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +156,7 @@ enum Success {
 
 enum Message {
     Opened(Result<Arc<AccountRuntime>, String>),
-    Operation(Reply),
+    Operation(Box<Reply>),
     /// A cancelled operation's background future ended. A durable commit may already have
     /// happened, so the foreground reconciles authoritative state without publishing its reply.
     Settled(u64),
@@ -608,7 +647,7 @@ impl Accounts {
                 }
                 cx.notify();
             }
-            Message::Operation(reply) => self.apply(reply, cx),
+            Message::Operation(reply) => self.apply(*reply, cx),
             Message::Settled(generation) => self.reconcile(generation, cx),
             Message::CleanupPending => {
                 self.append_cleanup_warning();
@@ -892,19 +931,28 @@ impl Accounts {
                 }
                 if success == Success::Repositories {
                     self.snapshot.repositories = match reply.repositories {
-                        Some(Ok(outcome)) => Repositories {
+                        Some(RepositoryReply {
+                            outcome: Ok(outcome),
+                            origin,
+                        }) => Repositories {
                             account: reply.for_account.clone(),
                             preview: RepositoryPreview::Ready(outcome),
+                            origin,
                         },
-                        Some(Err(error)) => Repositories {
+                        Some(RepositoryReply {
+                            outcome: Err(message),
+                            ..
+                        }) => Repositories {
                             account: reply.for_account.clone(),
-                            preview: RepositoryPreview::Failed(error_text(&error)),
+                            preview: RepositoryPreview::Failed(message),
+                            origin: RepositoryListOrigin::Network,
                         },
                         None => Repositories {
                             account: reply.for_account.clone(),
                             preview: RepositoryPreview::Failed(
                                 "The repository response was not returned.".into(),
                             ),
+                            origin: RepositoryListOrigin::Network,
                         },
                     };
                 } else if !switched {
@@ -918,16 +966,14 @@ impl Accounts {
                 if reply.operation == Operation::Repositories {
                     self.snapshot.repositories = Repositories {
                         account: reply.for_account.clone(),
-                        preview: RepositoryPreview::Failed(
-                            reply
-                                .repositories
-                                .and_then(|result| result.err())
-                                .map(|error| error_text(&error))
-                                .unwrap_or_else(|| {
-                                    "The request failed; no successful empty list is implied."
-                                        .into()
-                                }),
-                        ),
+                        preview: RepositoryPreview::Failed(match reply.repositories {
+                            Some(RepositoryReply {
+                                outcome: Err(message),
+                                ..
+                            }) => message,
+                            _ => "The request failed; no successful empty list is implied.".into(),
+                        }),
+                        origin: RepositoryListOrigin::Network,
                     };
                 } else if !switched {
                     // An errored mutation may still have committed: `CleanupPending` is returned
@@ -1017,6 +1063,7 @@ impl Accounts {
             self.snapshot.repositories = Repositories {
                 account: for_account.clone(),
                 preview: RepositoryPreview::Loading,
+                origin: RepositoryListOrigin::Network,
             };
             // Record the settled authorization this read belongs to, so a later plain
             // `autoload_if_needed` (from a repaint-driven settlement) will not repeat it.
@@ -1069,12 +1116,12 @@ impl Accounts {
                 ),
                 Operation::Repositories => {
                     let repos = accounts.repo_service();
-                    let result = repos.list_repos_cancellable(control.token).await;
-                    let mapped = match &result {
+                    let reply = read_repositories(&repos, control.token.clone()).await;
+                    let mapped = match &reply.outcome {
                         Ok(_) => Ok(Success::Repositories),
-                        Err(error) => Err(error_text(error)),
+                        Err(message) => Err(message.clone()),
                     };
-                    (mapped, Some(result))
+                    (mapped, Some(reply))
                 }
                 Operation::Add | Operation::Replace(_) => unreachable!("token path"),
             };
@@ -1251,6 +1298,7 @@ impl Accounts {
                     "The repository read was cancelled before any result was applied. Retry to read the current account's repositories."
                         .into(),
                 ),
+                origin: RepositoryListOrigin::Network,
             },
         };
         self.input
@@ -1409,7 +1457,7 @@ async fn send_reply(
     mut reply: Reply,
 ) {
     reply.recovery_pending = accounts.recovery_pending().await.unwrap_or(true);
-    enqueue(inbox, alive, Message::Operation(reply));
+    enqueue(inbox, alive, Message::Operation(Box::new(reply)));
 }
 
 /// Completion signal for one background operation. It runs on the network thread and only pushes
@@ -1503,6 +1551,161 @@ fn error_text(error: &GitHubError) -> String {
         GitHubError::CredentialStore { .. } => "The platform credential is missing or unavailable. Revalidate or replace the PAT; this is not an empty repository set.".into(),
         other => format!("GitHub read failed: {other}"),
     }
+}
+
+/// Read the active account's repository list through the account-bound snapshot adapter.
+///
+/// * A live read is recorded and published as [`RepositoryListOrigin::Network`].
+/// * When no usable cache binding exists (cache disabled, account not reconciled, or the private
+///   aggregate gate is quarantined) the ordinary online read is kept, so a cache problem never
+///   removes online account functionality.
+/// * Only an explicitly allowed transient network failure (connectivity, timeout, rate limit, 5xx)
+///   falls back to the last replayed snapshot, labelled [`RepositoryListOrigin::Historical`].
+/// * A 401, an explicit/ambiguous denial, cancellation and a stale context keep their own meaning
+///   and never become offline history. A cache miss after a network failure surfaces the original
+///   failure instead of a fake empty list.
+async fn read_repositories(
+    repos: &crate::data::RepoService,
+    cancel: CancellationToken,
+) -> RepositoryReply {
+    match repos
+        .list_repos_cached(PageReadMode::Online, cancel.clone())
+        .await
+    {
+        Ok(scoped) => match scoped.value {
+            PageValue::Value {
+                value,
+                origin: PageOrigin::Network,
+                ..
+            } => RepositoryReply {
+                outcome: Ok(value),
+                origin: RepositoryListOrigin::Network,
+            },
+            // Online mode should never replay a snapshot; if it does, it is still not live.
+            PageValue::Value {
+                value,
+                origin: PageOrigin::HistoricalSnapshot,
+                metadata,
+            } => RepositoryReply {
+                outcome: Ok(value),
+                origin: RepositoryListOrigin::Historical {
+                    verified_at_ms: metadata.verified_at_ms,
+                },
+            },
+            PageValue::Miss(reason) => RepositoryReply {
+                outcome: Err(format!(
+                    "No repository list is cached ({reason:?}); this is not a complete empty set."
+                )),
+                origin: RepositoryListOrigin::Network,
+            },
+        },
+        Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+            // No usable cache binding, or the private aggregate is quarantined. Keep the original
+            // online-only behavior; a cache problem must not remove online account functionality.
+            match repos.list_repos_cancellable(cancel).await {
+                Ok(outcome) => RepositoryReply {
+                    outcome: Ok(outcome),
+                    origin: RepositoryListOrigin::Network,
+                },
+                Err(error) => RepositoryReply {
+                    outcome: Err(error_text(&error)),
+                    origin: RepositoryListOrigin::Network,
+                },
+            }
+        }
+        Err(error) if offline_fallback_is_allowed(&error) => {
+            let network_text = page_cache_error_text(&error);
+            match repos.list_repos_cached(PageReadMode::Offline, cancel).await {
+                Ok(scoped) => match scoped.value {
+                    PageValue::Value {
+                        value,
+                        origin: PageOrigin::HistoricalSnapshot,
+                        metadata,
+                    } => RepositoryReply {
+                        outcome: Ok(value),
+                        origin: RepositoryListOrigin::Historical {
+                            verified_at_ms: metadata.verified_at_ms,
+                        },
+                    },
+                    // An offline request must not publish a live-origin list as current, and a miss
+                    // is not an empty list: keep the original network failure.
+                    PageValue::Value { .. } | PageValue::Miss(_) => RepositoryReply {
+                        outcome: Err(network_text),
+                        origin: RepositoryListOrigin::Network,
+                    },
+                },
+                Err(_) => RepositoryReply {
+                    outcome: Err(network_text),
+                    origin: RepositoryListOrigin::Network,
+                },
+            }
+        }
+        Err(error) => RepositoryReply {
+            outcome: Err(page_cache_error_text(&error)),
+            origin: RepositoryListOrigin::Network,
+        },
+    }
+}
+
+/// Only a transient transport/service failure may fall back to a persistent snapshot. A 401, an
+/// explicit or ambiguous denial, a cancellation, a stale context or a cache failure keeps its own
+/// meaning.
+fn offline_fallback_is_allowed(error: &PageCacheError<GitHubError>) -> bool {
+    let error = match error {
+        PageCacheError::Read(error) | PageCacheError::Context(error) => error,
+        PageCacheError::Cache(_) => return false,
+    };
+    match error {
+        GitHubError::Network { .. }
+        | GitHubError::Timeout { .. }
+        | GitHubError::RateLimited { .. } => true,
+        GitHubError::UnexpectedStatus { status } => (500..600).contains(status),
+        _ => false,
+    }
+}
+
+fn page_cache_error_text(error: &PageCacheError<GitHubError>) -> String {
+    match error {
+        PageCacheError::Read(error) | PageCacheError::Context(error) => error_text(error),
+        PageCacheError::Cache(error) => format!(
+            "The account cache is unavailable ({error}). Retry to read the repository list; this is not an empty repository set."
+        ),
+    }
+}
+
+/// The cache stores verification time as milliseconds since the Unix epoch; the shared relative
+/// formatter accepts RFC3339. Convert here rather than adding a date dependency.
+fn relative_ms(verified_at_ms: i64) -> String {
+    let text = epoch_ms_to_rfc3339(verified_at_ms);
+    crate::ui::relative_time::relative(Some(&text), std::time::SystemTime::now())
+}
+
+fn epoch_ms_to_rfc3339(ms: i64) -> String {
+    let seconds = ms.div_euclid(1000);
+    let millis = ms.rem_euclid(1000);
+    let days = seconds.div_euclid(86_400);
+    let rem = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Days-since-1970 to proleptic Gregorian civil date (Howard Hinnant's algorithm).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Keep the process alive until background account teardown finishes. Called by `app::run` after

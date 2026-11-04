@@ -1,6 +1,6 @@
 # /user/repos 仓库列表持久缓存适配器
 
-状态：数据层已实现并通过确定性测试。**尚未接入正式 Shell**，不代表应用已支持离线仓库导航；由 cache-runtime 任务通过同一应用 `CacheStore` 和 `RepoService::cache(&context)` 挂载。
+状态：数据层已实现并通过确定性测试；**已由 cache-runtime 通过同一应用 `CacheStore` 和 `RepoService::cache(&context)` 接入正式侧栏**（Online 记录 + 允许的网络故障回退 Offline 历史，`Historical` 来源在侧栏标示）。组装与回退策略见 [app-cache-integration](app-cache-integration.md)。
 
 ## 入口与账户绑定
 
