@@ -1037,8 +1037,15 @@ fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestApp
     );
     assert!(feed_ids(&page, cx).is_empty());
     assert!(page.read_with(cx, |page, _| page.feed_repo_descriptions.is_empty()));
+    assert!(page.read_with(cx, |page, _| page.cache_authorization.is_none()));
+    page.update(cx, |page, cx| page.drain_for_test(cx));
+    assert_eq!(home_title(&page, cx), None);
     page.update(cx, |page, cx| {
         let auth = authorization.clone();
+        assert!(
+            page.cache_authorization.is_none(),
+            "stop clears retained authorization"
+        );
         page.apply_append(
             AppendReply {
                 generation,

@@ -69,6 +69,8 @@
 `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::home::tests -- --test-threads=1`：12/12 通过（run `b5b15498-3a06-4d7a-8d3e-a6fed99c5099`）。
 `node scripts/verify.mjs -- cargo fmt --all`：通过（run `b19c1194-b873-46b6-bcee-aa4ba9cb073d`）。
 
+Codex 本轮另指出 `stop()` 必须清除保留的权限票据，避免撤权后反复重绘；已补充 `cache_authorization = None` 与断言，12/12 测试通过（run `938e2569-27fb-4737-bdb6-57b157e37495`），clippy 通过（run `28ab071f-ad2d-4dc0-ba4a-a48a72f265a8`）。共享核心测试的 Clippy 修正同步自 cache-runtime 76815c0 的已修内容，未搬入其他页面文件。
+
 原生窗口与真实 GitHub PAT 仍未验证，保留 `pending`。
 
 

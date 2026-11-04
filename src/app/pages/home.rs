@@ -1174,6 +1174,7 @@ impl HomePage {
         self.session = None;
         self.cached = None;
         self.cache_partition = None;
+        self.cache_authorization = None;
     }
 
     fn stop_work_without_session(&mut self) {
