@@ -1448,31 +1448,49 @@ impl HomePage {
         let reply_context = context.clone();
 
         let submitted = services.executor().handle().spawn(async move {
-            let result = if let Some(cached) = cached {
-                cached
-                    .repository_descriptions(mode, needed, 20, cancel)
-                    .await
-                    .map_err(cache_miss_failure)
-                    .and_then(|value| match value.value {
-                        PageValue::Value { value, origin, .. } => Ok(EnrichmentResult {
-                            descriptions: value,
-                            cache_partition: matches!(origin, PageOrigin::HistoricalSnapshot)
-                                .then_some(cache_partition)
-                                .flatten(),
-                        }),
-                        PageValue::Miss(_) => Err(HomeError::InvalidResponse {
-                            message: "Repository descriptions are not cached.".into(),
-                        }),
-                    })
-            } else {
-                session
-                    .repository_descriptions(needed, 20, cancel)
-                    .await
-                    .map(|value| EnrichmentResult {
-                        descriptions: value.value,
-                        cache_partition: None,
-                    })
-            };
+            let result =
+                if let Some(cached) = cached {
+                    match cached
+                        .repository_descriptions(mode, needed.clone(), 20, cancel.clone())
+                        .await
+                    {
+                        Err(error) if matches!(mode, PageReadMode::Online) => match cache_failure(error) {
+                            CachedReadFailure::UncachedOnline => session
+                                .repository_descriptions(needed, 20, cancel.clone())
+                                .await
+                                .map(|value| EnrichmentResult {
+                                    descriptions: value.value,
+                                    cache_partition: None,
+                                }),
+                            CachedReadFailure::Network(error) => Err(error),
+                            CachedReadFailure::AuthOrContext(error) => Err(error),
+                        },
+                        result => result
+                            .map_err(cache_miss_failure)
+                            .and_then(|value| match value.value {
+                                PageValue::Value { value, origin, .. } => Ok(EnrichmentResult {
+                                    descriptions: value,
+                                    cache_partition: matches!(
+                                        origin,
+                                        PageOrigin::HistoricalSnapshot
+                                    )
+                                    .then_some(cache_partition)
+                                    .flatten(),
+                                }),
+                                PageValue::Miss(_) => Err(HomeError::InvalidResponse {
+                                    message: "Repository descriptions are not cached.".into(),
+                                }),
+                            }),
+                    }
+                } else {
+                    session
+                        .repository_descriptions(needed, 20, cancel)
+                        .await
+                        .map(|value| EnrichmentResult {
+                            descriptions: value.value,
+                            cache_partition: None,
+                        })
+                };
             if *alive.borrow()
                 && authorization
                     .as_ref()
