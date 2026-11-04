@@ -5,6 +5,7 @@ use crate::github::client::{GitHubClient, GitHubConfig};
 use gpui::{Modifiers, TestAppContext, size};
 use std::cell::RefCell;
 use std::time::Duration;
+
 #[path = "../../bin_support/notifications_fixture.rs"]
 mod fixture;
 
@@ -219,6 +220,117 @@ fn cooldown_wake_is_rearmed_after_deactivation(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+}
+
+/// Leaving the page before its first response cancels the request without setting `loaded`.
+/// Returning to the retained tab must therefore retry that read; a loaded, busy or failed
+/// snapshot must not be retried. The decision is asserted directly on the view's own rule and on
+/// the observable attempt, without waiting for a background response to land on the test
+/// scheduler.
+#[gpui::test]
+fn reactivating_an_interrupted_cold_inbox_resumes_the_first_read(cx: &mut TestAppContext) {
+    cx.update(ely_core::init_for_tests);
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let fixture = Arc::new(fixture::Fixture::new(fixture::Scene::Mixed));
+    let accounts = AccountService::new(
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), fixture.clone())),
+        executor.clone(),
+    );
+    let controller = executor.raw_handle().block_on(async {
+        accounts.login(Pat::from_str("synthetic")).await.unwrap();
+        accounts.repo_service().notifications().unwrap()
+    });
+    let cold = controller.clone();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = NotificationsView::new(
+            controller,
+            executor.clone(),
+            Rc::new(|_, _, _| {}),
+            window,
+            cx,
+        );
+        // Simulate the interrupted first read: cancel it before any response is applied.
+        view.leave(cx);
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    view.update(cx, |view, cx| view.set_active(false, cx));
+    cx.run_until_parked();
+    assert!(!cold.snapshot().loaded, "the interrupted read never loaded");
+    assert!(cold.snapshot().busy.is_none());
+
+    // The rule: an idle, never-loaded inbox is resumed; a loaded/busy/failed one is not.
+    view.update(cx, |view, _| {
+        assert!(view.resume_needed(), "an idle unloaded inbox must resume");
+        assert_eq!(view.resume_kind(), RequestKind::First);
+    });
+    view.update(cx, |view, _| {
+        view.snapshot.loaded = true;
+        assert!(!view.resume_needed(), "a loaded inbox is not re-read");
+        assert_eq!(view.resume_kind(), RequestKind::Refresh);
+        view.snapshot.loaded = false;
+    });
+    view.update(cx, |view, _| {
+        view.snapshot.busy = Some(RequestKind::More);
+        assert!(
+            !view.resume_needed(),
+            "an in-flight request is not duplicated"
+        );
+        view.snapshot.busy = None;
+    });
+    view.update(cx, |view, _| {
+        view.snapshot.error = Some(crate::domain::error::GitHubError::Unauthorized.into());
+        assert!(
+            !view.resume_needed(),
+            "a real failure keeps its retry control"
+        );
+        view.snapshot.error = None;
+    });
+
+    // The behaviour: reactivation is not a no-op. The read may complete immediately against the
+    // fixture, so "a request was started" is asserted through the controller's generation/
+    // busy-or-loaded progress rather than a specific intermediate state.
+    let before = cold.snapshot();
+    view.update(cx, |view, cx| view.set_active(true, cx));
+    cx.run_until_parked();
+    let after = view.read_with(cx, |view, _| view.snapshot.clone());
+    assert!(
+        after.busy.is_some() || after.loaded || after.error.is_some(),
+        "an unloaded inbox must attempt its initial read (before: loaded={} busy={:?})",
+        before.loaded,
+        before.busy
+    );
+}
+
+/// A loaded snapshot is reused across tab switches: `set_active` never re-reads it.
+#[gpui::test]
+fn reactivating_a_loaded_inbox_does_not_re_read(cx: &mut TestAppContext) {
+    let (controller, executor, fixture) = setup(cx);
+    let reads = || {
+        fixture
+            .requests()
+            .iter()
+            .filter(|request| request.method == crate::network::transport::HttpMethod::Get)
+            .count()
+    };
+    let before = reads();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view =
+            NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx);
+        view.sync(cx);
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.snapshot.loaded));
+    view.update(cx, |view, cx| {
+        view.set_active(false, cx);
+        view.set_active(true, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(reads(), before, "a loaded inbox is not re-read");
 }
 
 #[gpui::test]

@@ -124,8 +124,30 @@ impl NotificationsView {
         self.active = active;
         if !active {
             self.cancel_activity();
+        } else if self.resume_needed() {
+            // Leaving before the first response cancels the request and clears `busy` without
+            // setting `loaded`. Returning to the retained tab must therefore resume that initial
+            // read, or the inbox stays blank until the user presses Refresh. A successfully loaded
+            // snapshot is reused untouched, so ordinary tab switching never re-reads.
+            self.request(self.resume_kind(), cx);
         }
         cx.notify();
+    }
+
+    /// True when the retained view never completed its first read and has no request running.
+    /// A confirmed empty inbox (`loaded`, zero rows, no error) is a real result and is not resumed.
+    fn resume_needed(&self) -> bool {
+        !self.snapshot.loaded && self.snapshot.busy.is_none() && self.snapshot.error.is_none()
+    }
+
+    /// An interrupted initial read restarts as `First`; the controller rejects a duplicate first
+    /// load, so this is safe even if a race already restarted it.
+    fn resume_kind(&self) -> RequestKind {
+        if self.snapshot.loaded {
+            RequestKind::Refresh
+        } else {
+            RequestKind::First
+        }
     }
 
     pub fn cancel_interactions(&mut self, cx: &mut Context<Self>) {

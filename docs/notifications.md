@@ -51,6 +51,8 @@
 
 页面内容 surface 使用与 Home/Settings/全局 Issues-PR 相同的 `colors.surface`；此前用 `colors.bg` 会与顶部 tab bar 形成两条不同底色。标题复用其它正式页面的标题体系（`TextSize::Lg` + `SEMIBOLD`，行高 40），正文 gutter/top/bottom 来自共享的 `src/ui/page_layout.rs`（与 Home 现有 `px_4 / pt_4 / pb_2` 一致），不再由 header 自带 `px_3/py_2` 叠加出双重留白。已读行底色改为 `colors.surface`，未读行仍是 `info_subtle` + 圆点 + 字重；通知行排版、右下角三个动作与相对时间不变。
 
+保留的 tab 若在首次读取返回前离开，控制器会取消请求但不设 `loaded`；`set_active(true)` 因此在未加载、无进行中请求且无错误时重启读取，避免返回后留下永久空白收件箱。已加载的空收件箱、进行中的请求与已有错误都不重发。
+
 ## 组件与挂载
 
 `src/ui/notifications/mod.rs` 的 `NotificationsView::new(controller, executor, on_repository, window, cx)` 在构造时开始 first load，通过共享后台 executor 和 oneshot 发布完成。render 不请求；实际列表用 GPUI ListState 虚拟化，公共 `scroll::Motion` / `Bars` / `Bar` 驱动 wheel 与 thumb。每个页面自己的列表焦点、选择、scroll/fade 状态不共享。相对时间复用 `src/ui/relative_time.rs`（由 Home 的 `time.rs` 抽取而来，Home、Notifications 与其它已存在消费者共用同一实现；`src/ui/home/time.rs` 保留为仅转发的兼容 shim，避免其它 `#[path]` 消费者出现第二份解析器；Home 的行为与回归测试原样保留）。

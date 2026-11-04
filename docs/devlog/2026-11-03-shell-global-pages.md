@@ -69,3 +69,9 @@
 ### 未覆盖
 
 - 原生 Windows 窗口的四页对照（宽/窄、图标与标题对齐、长标题/长仓库名、四种状态色彩）仍需负责人复验；GPUI 测试平台的 bounds 断言不替代原生视觉确认（L002/L017）。PR 保持 `pending`，由负责人重新验收后移除。
+
+### 审查反馈修复（Codex P2）
+
+Codex 对 `4e51b3e` 指出：首次通知请求未返回前切走页面会取消请求并清除 `busy`，但不设 `loaded`；返回保留 tab 时此前只调用 `set_active(true)`，既不重发请求也没有未加载态恢复路径，收件箱会一直空白直到手动 Refresh。
+
+修复：`NotificationsView::set_active(true)` 在 `resume_needed()`（`!loaded && busy.is_none() && error.is_none()`）时重启读取。已加载的空收件箱、进行中的请求和已有错误的快照都不重发，因此普通标签切换仍复用快照。回归 `reactivating_an_interrupted_cold_inbox_resumes_the_first_read` 断言恢复规则（未加载→First，已加载→不重读）与恢复实际触发了读取；`reactivating_a_loaded_inbox_does_not_re_read` 断言已加载快照切 tab 不产生新请求。
