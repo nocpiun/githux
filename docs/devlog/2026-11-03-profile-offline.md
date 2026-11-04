@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条意见与第二轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
+- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条、第二轮 1 条、第三轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -39,7 +39,7 @@
 
 此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
 
-- 一次 `cargo test --locked`（run `03c5c6fc`）中 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 报 `reopen cache store: InUse`：同一二进制内另一个测试持有的 store 尚未释放，属既有测试并行敏感；该用例单独复跑通过（run `60e226d0`），随后整套复跑通过。
+- 三次 `cargo test --locked`（run `03c5c6fc`、`2451e558`、`4973b60b`）中 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 报 `reopen cache store: InUse`：`CacheStore` 是进程级独占文件租约，同二进制内其他测试（例如 `page_cache`/`repository` 的临时 store）尚未释放时该用例重开同一路径会失败。该用例单独复跑通过（`60e226d0`、`272c9ba7`），且失败点在本任务未修改的既有测试与存储层；整套复跑（`8dc4483b`）通过。属于既有测试并行敏感项，不在本任务范围内修改共享 cache 测试。
 - 一次整轮（run `886cc506`）中两个新增 profile 组合用例超时：`wait_for_profile` 原为固定 400 次轮询，在整套并行负载下不足以等待后台读取与图片解码。现改为 60 秒墙钟截止（run `43eac9a7` 定向通过，`8dc4483b` 整套通过）。
 
 新增受控组合与单元回归：
@@ -53,6 +53,7 @@
 - `app::pages::profile::tests::tab_suspension_preserves_readme_image_provider_across_deactivate_and_reactivate`：普通标签切换（`set_active(false/true)`）后已挂载 README 的在途图片仍能完成，证明 `suspend` 不再卸载 provider。
 - `app::pages::profile::tests::offline_reopen_on_a_later_day_restores_the_cached_contribution_interval`：在线预热后把 host 区间换成另一个滚动年再断网重开，贡献日历仍按缓存时的区间恢复，页面与组件的 `range` 都等于该区间并显示历史徽章。
 - `app::pages::profile::tests::concurrently_prepared_gate_stamps_converge_on_one_value`：四个真实线程并发准备门禁 stamp，全部成功且取到同一个值。
+- `app::pages::profile::tests::aggregate_gate_stamp_survives_capacity_eviction_but_not_revocation`：小预算 store 写入足量普通条目触发 LRU 淘汰（断言最早条目确被删除），stamp 仍有效；显式撤权后立即失效。
 - `ui::profile::tests::historical_and_partial_provenance_badges_and_section_retries_work`：组件级历史/Partial 徽章与单区块重试动作验证。
 
 ## 审查轮次
@@ -67,6 +68,10 @@ Codex 第二轮（head `8ff2a43`）一条意见成立并修复：
 
 4. **P2 离线重开时贡献日历按当天滚动年查询，跨日后必然 miss**：缓存键包含区间端点，而 `ProfilePage` 每次都用当天的 `rolling_year()`。现在成功读取日历（在线或离线）后把实际区间写入聚合门禁命名空间的 `profile-calendar-range` 标记；离线回退先试当天区间，miss 后再用记录的区间重读，命中即由 host 采用该区间（`ProfileView::set_range`）并把标题与 tooltip 一起显示为实际区间，同时刷新标记。标记与 stamp 一样受聚合门禁约束（撤权/换 PAT/拒绝会一并失效）；标记缺失时保持 `NotCached` 与重试，不伪造“无贡献”。
    - 并发准备 stamp 时新增进程内 `GATE_STAMP_LOCK` 串行化创建，避免同一页面多个 section 得到不同 stamp（store 已持独占文件租约，跨进程不会并发写同一分区）。回归 `concurrently_prepared_gate_stamps_converge_on_one_value` 用四个真实线程验证收敛。
+
+Codex 第三轮（head `5e4916a`）一条意见成立并修复：
+
+5. **P2 gate stamp 会被普通容量淘汰误判为撤权**：stamp 原为普通可变条目，`CacheStore::put` 的 LRU 淘汰会在授权未变时清掉它，导致有效历史内容被丢弃成 `Forbidden`。现 `AggregateGateStamp` 持有该条目的 `CacheLease` 并在整个绑定生命周期内保留：容量淘汰（`evict` 跳过 pinned 条目）无法删除它；而撤权、换 PAT、凭据拒绝、退休仍会删除条目，使 `lease.snapshot()` 返回空。校验同时比对 lease 内字节与「当前键仍解析为同一 stamp」，避免删除后重建同分区 stamp 让旧历史复活。回归 `aggregate_gate_stamp_survives_capacity_eviction_but_not_revocation` 先证明最早的普通条目确实被淘汰，再断言 stamp 仍有效、撤权后立即失效。
 
 ## 原生验收步骤与边界（`pending`）
 

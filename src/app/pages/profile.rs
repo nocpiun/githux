@@ -26,7 +26,7 @@ use crate::github::RepositoryLimits;
 use crate::github::profile::ProfileLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
-use crate::storage::cache::{CacheError, CacheKey, CacheRead};
+use crate::storage::cache::{CacheError, CacheKey, CacheLease, CacheRead};
 use crate::ui::profile::{
     PresentationError, ProfileAction, ProfileActionKind, ProfileBinding, ProfileProvenance,
     ProfileRequest, ProfileTarget, ProfileView, SectionState,
@@ -108,11 +108,35 @@ impl Work {
 
 /// Monotonic token proving the aggregate (`repository = None`) cache gate has not been
 /// revoked, replaced, rejected or retired since the historical snapshot was read.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The retained [`CacheLease`] pins the stamp entry for as long as the page binding depends on it,
+/// so ordinary capacity eviction cannot make a still-authorized page look revoked. Revocation,
+/// PAT replacement, credential rejection and retirement delete the entry, which invalidates the
+/// lease's snapshot and therefore the stamp.
+#[derive(Clone)]
 struct AggregateGateStamp {
     partition: String,
     stamp_id: String,
+    lease: Arc<CacheLease>,
 }
+
+impl std::fmt::Debug for AggregateGateStamp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AggregateGateStamp")
+            .field("partition", &self.partition)
+            .field("stamp_id", &self.stamp_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for AggregateGateStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.partition == other.partition && self.stamp_id == other.stamp_id
+    }
+}
+
+impl Eq for AggregateGateStamp {}
 
 struct SectionOutcome<T> {
     value: T,
@@ -1244,6 +1268,7 @@ fn read_aggregate_gate_stamp(
     Some(AggregateGateStamp {
         partition: scope.partition().to_string(),
         stamp_id: stamp_id.to_string(),
+        lease: Arc::new(lease),
     })
 }
 
@@ -1296,20 +1321,20 @@ fn verify_aggregate_gate_stamp(
     if scope.partition() != expected.partition {
         return false;
     }
-    let Ok(key) = aggregate_gate_stamp_key() else {
+    // The lease pins this exact entry: a capacity eviction cannot remove it, while a revocation,
+    // replacement, rejection or retirement deletes it and every later snapshot is empty.
+    let Ok(Some(snapshot)) = expected.lease.snapshot() else {
         return false;
     };
-    match store.read(scope, &key) {
-        Ok(CacheRead::Hit(lease)) => match lease.snapshot() {
-            Ok(Some(snapshot)) => snapshot.bytes == expected.stamp_id.as_bytes(),
-            _ => false,
-        },
-        _ => false,
+    if snapshot.bytes != expected.stamp_id.as_bytes() {
+        return false;
     }
+    // Also require that the live key still resolves to this stamp, so a stamp that was deleted and
+    // replaced under the same partition cannot keep an old historical snapshot alive.
+    read_aggregate_gate_stamp(store, scope)
+        .is_some_and(|current| current.stamp_id == expected.stamp_id)
 }
 
-/// Ensure the aggregate gate stamp exists **before** any offline read, so a revocation that
-/// happens during the read deletes it and the snapshot cannot be published.
 async fn prepare_gate_stamp(
     repos: &crate::data::RepoService,
     context: &RepositoryReadContext,
@@ -2937,6 +2962,70 @@ mod tests {
                 })
             })
         });
+    }
+
+    #[test]
+    fn aggregate_gate_stamp_survives_capacity_eviction_but_not_revocation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = CacheConfig::at(temp.path().join("cache"));
+        config.capacity_bytes = 128 * 1024;
+        config.max_entry_bytes = 64 * 1024;
+        config.inline_bytes = 1024;
+        config.max_entries = 6;
+        let store = CacheStore::open(config).unwrap();
+        let scope = store
+            .saved_account(AccountKey::new(1, HostId::github()))
+            .unwrap();
+        let stamp = ensure_aggregate_gate_stamp(&store, &scope).expect("gate stamp");
+
+        // Unrelated account-level writes fill the budget and force LRU eviction of ordinary
+        // entries. The stamp is held by a lease, so eviction must not drop it.
+        let payload = vec![7u8; 40 * 1024];
+        for index in 0..12u32 {
+            let key = CacheKey::mutable(
+                None,
+                true,
+                "profile-eviction-filler",
+                &index.to_string(),
+                "profile-eviction-filler-v1",
+                1,
+            )
+            .unwrap();
+            let ticket = store.begin_write(&scope, &key).unwrap();
+            let now = 1_760_000_000_000i64;
+            let metadata = crate::domain::cache::CacheMetadata {
+                representation_version: 1,
+                fetched_at_ms: now,
+                verified_at_ms: now,
+                completeness: crate::domain::cache::CacheCompleteness::Complete,
+                etag: None,
+                last_modified: None,
+                cache_control: None,
+            };
+            let _ = store.put(ticket, &payload, metadata);
+        }
+        // Prove the budget was really exceeded, otherwise the assertion below would be vacuous.
+        let first_filler = CacheKey::mutable(
+            None,
+            true,
+            "profile-eviction-filler",
+            "0",
+            "profile-eviction-filler-v1",
+            1,
+        )
+        .unwrap();
+        assert!(
+            matches!(store.read(&scope, &first_filler), Ok(CacheRead::Miss(_))),
+            "the earliest ordinary entry must have been evicted"
+        );
+        assert!(
+            verify_aggregate_gate_stamp(&store, &scope, &stamp),
+            "ordinary capacity eviction must not make an authorized page look revoked"
+        );
+
+        // Explicit revocation is still authoritative.
+        store.revoke_repository(&scope, Some(101)).unwrap();
+        assert!(!verify_aggregate_gate_stamp(&store, &scope, &stamp));
     }
 
     #[test]
