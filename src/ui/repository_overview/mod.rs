@@ -94,6 +94,9 @@ pub struct ReleasesData {
     pub list: ReleasesOutcome,
     pub latest: Option<LatestReleaseOutcome>,
     pub latest_error: Option<String>,
+    pub historical: bool,
+    pub latest_historical: bool,
+    pub sync_label: Option<String>,
 }
 
 impl ReleasesData {
@@ -102,6 +105,9 @@ impl ReleasesData {
             list,
             latest,
             latest_error: None,
+            historical: false,
+            latest_historical: false,
+            sync_label: None,
         }
     }
 
@@ -110,7 +116,22 @@ impl ReleasesData {
             list,
             latest: None,
             latest_error: Some(latest_error.into()),
+            historical: false,
+            latest_historical: false,
+            sync_label: None,
         }
+    }
+
+    pub fn with_provenance(
+        mut self,
+        historical: bool,
+        latest_historical: bool,
+        sync_label: Option<String>,
+    ) -> Self {
+        self.historical = historical;
+        self.latest_historical = latest_historical;
+        self.sync_label = sync_label;
+        self
     }
 }
 
@@ -123,14 +144,26 @@ pub enum SectionState<T, P> {
     Idle,
     Loading,
     Ready(T),
-    Partial { value: T, reason: P },
-    Error { message: String },
+    Historical {
+        value: T,
+        sync_label: Option<String>,
+        reason: Option<P>,
+    },
+    Partial {
+        value: T,
+        reason: P,
+    },
+    Error {
+        message: String,
+    },
 }
 
 impl<T, P> SectionState<T, P> {
     pub fn value(&self) -> Option<&T> {
         match self {
-            Self::Ready(value) | Self::Partial { value, .. } => Some(value),
+            Self::Ready(value) | Self::Historical { value, .. } | Self::Partial { value, .. } => {
+                Some(value)
+            }
             _ => None,
         }
     }
@@ -147,7 +180,25 @@ impl<T, P> SectionState<T, P> {
     }
 
     pub fn is_partial(&self) -> bool {
-        matches!(self, Self::Partial { .. })
+        matches!(
+            self,
+            Self::Partial { .. }
+                | Self::Historical {
+                    reason: Some(_),
+                    ..
+                }
+        )
+    }
+
+    pub fn is_historical(&self) -> bool {
+        matches!(self, Self::Historical { .. })
+    }
+
+    pub fn sync_label(&self) -> Option<&str> {
+        match self {
+            Self::Historical { sync_label, .. } => sync_label.as_deref(),
+            _ => None,
+        }
     }
 }
 

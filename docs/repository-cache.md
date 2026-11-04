@@ -1,6 +1,6 @@
 # 仓库持久缓存适配层
 
-状态：已实现可复用数据服务及离线组合测试；**尚未接入正式 Shell**。账户 lifecycle 的正式事件生产、CacheStore 应用组装和离线 UI 由后续唯一接线任务完成。本模块不自行打开数据库、创建账户分区或读取 PAT。
+状态：已实现可复用数据服务、离线组合测试，并已在 `RepositoryPage`（`src/ui/repository/`）完成仓库页面与 overview/README 图片的持久缓存接线。应用启动级的 `CacheStore` 组装由 `cache-runtime` 负责；在未启用 `AccountService::open_with_cache` 的环境中页面自动保持原有在线行为。本模块不自行打开数据库、创建账户分区或读取 PAT。
 
 ## 接口与策略
 
@@ -36,4 +36,4 @@ let snapshot = cached.revision(&repository, RevisionSpec::Ref(main), &limits,
 
 `src/data/repository_cache_tests.rs` 使用临时账户目录、临时 CacheStore、合成凭据和 mock transport，经过真实 AccountService/RepositorySession/GitHub 适配链，覆盖在线读取→关闭存储/服务→重建→离线 repository/tree/README/content、未读目录 NotCached、main A→B、同 SHA 跨账户、304 匹配与重取、no-store、网络旧值回退、Partial/空/二进制、取消/旧 ticket、权限 proof 和坏 DTO。
 
-这些离线组合测试不是正式 Shell 的 GUI 验收，也未使用真实 PAT 或访问 GitHub。正式页面离线标记、Home 冷启动导航和账户 lifecycle 事件组合仍需后续接线与相应验收。
+这些离线组合测试不是正式 Shell 的 GUI 验收，也未使用真实 PAT 或访问 GitHub。`RepositoryPage` 的整页离线组合测试（`src/ui/repository/offline_tests.rs`）已覆盖跨重启离线浏览、历史快照标记与手动 Refresh、README 图片持久复用、换 PAT 隔离、明确撤权清空与离线 Star 禁用，详见 [仓库浏览页面](repository-browser.md#持久缓存与跨重启离线阅读2026-11-03)。正式 Shell 原生窗口验收仍需结合 `cache-runtime` 完成后由负责人确认。

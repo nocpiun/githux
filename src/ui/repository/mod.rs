@@ -38,6 +38,7 @@
 #![allow(dead_code)]
 
 mod extras;
+mod locator_index;
 mod navigation;
 mod page_tabs;
 #[cfg(test)]
@@ -59,9 +60,15 @@ use gpui::{
 use tokio::sync::watch;
 
 use crate::content::PreparedContent;
+use crate::data::reader_images::RepositoryImageService;
 use crate::data::repository_actions::RepositoryActionService;
-use crate::data::{AccountService, RepositoryReadContext, RepositorySession, Scoped};
+use crate::data::{
+    AccountCache, AccountService, CachedRepositorySession, RepositoryCacheError,
+    RepositoryCacheMode, RepositoryCacheOrigin, RepositoryCacheProvenance, RepositoryReadContext,
+    RepositorySession, Scoped,
+};
 use crate::domain::blob::{BlobIdentity, BlobLimits};
+use crate::domain::repo::RepoVisibility;
 use crate::domain::repository::{
     BranchesOutcome, DirectoryTree, DynamicRef, ObjectSha, RepoSnapshot, RepositoryDetails,
     RepositoryError, RepositoryIdentity, RepositoryLocator, RevisionSpec, SnapshotDirectory,
@@ -71,7 +78,11 @@ use crate::domain::repository_actions::{RepositoryActionError, StarActionOutcome
 use crate::github::RepositoryLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::executor::BackgroundExecutor;
-use crate::ui::reader::{DocumentKind, LinkTarget, ReaderAction, ReaderView};
+use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
+use crate::storage::cache::{CacheKey, CacheScope, CacheStore};
+use crate::ui::reader::{
+    DocumentKind, ImageLimits, ImageProvider, LinkTarget, ReaderAction, ReaderView,
+};
 
 use navigation::{BranchChoice, RowState, TreeModel, branch_choice};
 pub use navigation::{PageError, ReadmeState, RepositoryNavigation, TreeRow, TreeRowKind};
@@ -89,6 +100,8 @@ pub struct RepositoryPageServices {
     accounts: Arc<AccountService>,
     executor: Arc<BackgroundExecutor>,
     limits: PageLimits,
+    external_images: Option<Arc<dyn ExternalImageBytes>>,
+    image_limits: ImageLimits,
 }
 
 /// Engineering limits, overridable by tests and previews.
@@ -104,11 +117,23 @@ impl RepositoryPageServices {
             accounts,
             executor,
             limits: PageLimits::default(),
+            external_images: None,
+            image_limits: ImageLimits::default(),
         }
     }
 
     pub fn with_limits(mut self, limits: PageLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    pub fn with_external_images(mut self, external: Arc<dyn ExternalImageBytes>) -> Self {
+        self.external_images = Some(external);
+        self
+    }
+
+    pub fn with_image_limits(mut self, limits: ImageLimits) -> Self {
+        self.image_limits = limits;
         self
     }
 
@@ -237,6 +262,7 @@ enum StarReplyBody {
 struct BranchState {
     name: String,
     snapshot: RepoSnapshot,
+    snapshot_provenance: Option<RepositoryCacheProvenance>,
     tree: TreeModel,
     readme: ReadmeState,
 }
@@ -275,30 +301,30 @@ struct Message {
 
 enum Body {
     Repository {
-        result: Result<RepositoryDetails, RepositoryError>,
+        result: Result<(RepositoryDetails, Option<RepositoryCacheProvenance>), PageError>,
         star_write_generation: u64,
     },
-    Branches(Result<BranchesOutcome, RepositoryError>),
+    Branches(Result<(BranchesOutcome, Option<RepositoryCacheProvenance>), PageError>),
     Revision {
         branch: String,
         request: u64,
-        result: Result<RepoSnapshot, RepositoryError>,
+        result: Result<(RepoSnapshot, Option<RepositoryCacheProvenance>), PageError>,
     },
     Root {
         branch: String,
         commit: ObjectSha,
-        result: Result<DirectoryTree, RepositoryError>,
+        result: Result<DirectoryTree, PageError>,
     },
     Readme {
         branch: String,
         commit: ObjectSha,
-        result: Result<ReadmeState, RepositoryError>,
+        result: Result<ReadmeState, PageError>,
     },
     Directory {
         branch: String,
         commit: ObjectSha,
         path: String,
-        result: Result<DirectoryTree, RepositoryError>,
+        result: Result<DirectoryTree, PageError>,
     },
     Content(ContentReply),
 }
@@ -310,7 +336,7 @@ struct ContentReply {
     role: Role,
     selection_request: u64,
     path: String,
-    result: Result<PreparedContent, RepositoryError>,
+    result: Result<PreparedContent, PageError>,
 }
 
 /// Which document a content request answers.
@@ -337,6 +363,8 @@ pub struct RepositoryPage {
     locator: RepositoryLocator,
     generation: u64,
     session: Option<RepositorySession>,
+    cached_session: Option<CachedRepositorySession>,
+    cache_binding: Option<AccountCache>,
     context: Option<RepositoryReadContext>,
     work: Option<Work>,
     /// Navigation intent: branch, selected path and expanded directories. This
@@ -344,7 +372,9 @@ pub struct RepositoryPage {
     /// rebind keeps.
     intent: RepositoryNavigation,
     details: Option<RepositoryDetails>,
+    details_provenance: Option<RepositoryCacheProvenance>,
     branches: Option<BranchesOutcome>,
+    branches_provenance: Option<RepositoryCacheProvenance>,
     branches_error: Option<PageError>,
     branch: Option<BranchState>,
     /// Monotonic identity of the newest branch resolution. A → B → A shares the
@@ -420,6 +450,8 @@ impl RepositoryPage {
             locator,
             generation: 0,
             session: None,
+            cached_session: None,
+            cache_binding: None,
             context: None,
             work: None,
             selection: match &intent.path {
@@ -428,7 +460,9 @@ impl RepositoryPage {
             },
             intent,
             details: None,
+            details_provenance: None,
             branches: None,
+            branches_provenance: None,
             branches_error: None,
             branch: None,
             branch_request: 0,
@@ -516,6 +550,13 @@ impl RepositoryPage {
         self.active
     }
 
+    /// Closes any retained cache store / session handles so dropping or
+    /// deactivating the page leaves no open references to the cache directory.
+    pub fn release_cache(&mut self) {
+        self.cached_session = None;
+        self.cache_binding = None;
+    }
+
     /// Starts (or restarts) reading under a freshly captured session.
     ///
     /// A new session is always created; a saved branch or file is restored
@@ -536,9 +577,13 @@ impl RepositoryPage {
         // early return.
         self.active = false;
         self.session = None;
+        self.cached_session = None;
+        self.cache_binding = None;
         self.context = None;
         self.details = None;
+        self.details_provenance = None;
         self.branches = None;
+        self.branches_provenance = None;
         self.branches_error = None;
         self.branch = None;
         self.reader = None;
@@ -546,7 +591,8 @@ impl RepositoryPage {
         self.reader_status = ReaderStatus::Loading;
         self.cursor = None;
         self.invalidate_rows();
-        let session = match self.services.accounts.repo_service().session() {
+        let repo_service = self.services.accounts.repo_service();
+        let session = match repo_service.session() {
             Ok(session) => session,
             Err(error) => {
                 self.error = Some(PageError::from_repository(&error));
@@ -554,7 +600,14 @@ impl RepositoryPage {
                 return;
             }
         };
+        let cache_binding = repo_service.cache(session.context());
+        let cached_session = cache_binding.as_ref().and_then(|binding| {
+            let (store, scope) = binding.clone().into_parts();
+            CachedRepositorySession::new(session.clone(), store, scope).ok()
+        });
         self.context = Some(session.context().clone());
+        self.cache_binding = cache_binding;
+        self.cached_session = cached_session;
         self.session = Some(session);
         self.active = true;
         self.error = None;
@@ -562,6 +615,8 @@ impl RepositoryPage {
         self.spawn_job(Job::Repository {
             locator: self.locator.clone(),
             star_write_generation: self.star_write_generation,
+            mode: RepositoryCacheMode::OnlinePreferred,
+            hint: self.cache_hint(),
         });
         cx.notify();
     }
@@ -574,10 +629,17 @@ impl RepositoryPage {
         self.stop_star();
         self.extras.stop();
         self.cancel_reader_interactions(cx);
+        if let Some(reader) = self.reader.take() {
+            reader.update(cx, |reader, cx| {
+                reader.set_image_provider(None, cx);
+            });
+        }
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.active = false;
         self.session = None;
+        self.cached_session = None;
+        self.cache_binding = None;
         self.context = None;
         if self.details.is_some() || self.error.is_some() || self.branch.is_some() {
             self.error = Some(PageError::deactivated());
@@ -602,10 +664,14 @@ impl RepositoryPage {
         self.generation = self.generation.wrapping_add(1);
         self.active = false;
         self.session = None;
+        self.cached_session = None;
+        self.cache_binding = None;
         self.context = None;
         // Data read under the previous authorization must not stay visible.
         self.details = None;
+        self.details_provenance = None;
         self.branches = None;
+        self.branches_provenance = None;
         self.branches_error = None;
         self.branch = None;
         self.reader = None;
@@ -634,7 +700,10 @@ impl RepositoryPage {
                 return;
             }
             if let Some(details) = self.details.clone() {
-                self.spawn_job(Job::Branches(details.identity));
+                self.spawn_job(Job::Branches {
+                    identity: details.identity,
+                    mode: RepositoryCacheMode::OnlinePreferred,
+                });
             }
             cx.notify();
             return;
@@ -649,9 +718,43 @@ impl RepositoryPage {
         }
         self.branches_loading = true;
         if let Some(details) = &self.details {
-            self.spawn_job(Job::Branches(details.identity.clone()));
+            self.spawn_job(Job::Branches {
+                identity: details.identity.clone(),
+                mode: RepositoryCacheMode::OnlinePreferred,
+            });
             cx.notify();
         }
+    }
+
+    /// Revalidates repository summary, branches, revision and overview online.
+    pub fn refresh_repository(&mut self, cx: &mut Context<Self>) {
+        if !self.active || self.authorization_lost {
+            self.activate(cx);
+            return;
+        }
+        self.stop_star();
+        self.extras.stop();
+        self.cancel_reader_interactions(cx);
+        self.stop_work();
+        self.work = Some(Work::new());
+        self.pending_content = None;
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.branch = None;
+        self.branches = None;
+        self.branches_error = None;
+        self.reader = None;
+        self.readme_path = None;
+        self.reader_status = ReaderStatus::Loading;
+        self.error = None;
+        self.cursor = None;
+        self.invalidate_rows();
+        self.spawn_job(Job::Repository {
+            locator: self.locator.clone(),
+            star_write_generation: self.star_write_generation,
+            mode: RepositoryCacheMode::OnlinePreferred,
+            hint: self.cache_hint(),
+        });
+        cx.notify();
     }
 
     /// Switches to `name`, re-resolving it to a new fixed commit. Old tree and
@@ -772,6 +875,7 @@ impl RepositoryPage {
         self.spawn_job(Job::Readme {
             branch: name,
             snapshot,
+            mode: RepositoryCacheMode::OnlinePreferred,
         });
         cx.notify();
     }
@@ -804,6 +908,7 @@ impl RepositoryPage {
             commit,
             path: path.to_string(),
             handle,
+            mode: RepositoryCacheMode::OnlinePreferred,
         });
         cx.notify();
     }
@@ -847,8 +952,35 @@ impl RepositoryPage {
         self.details.as_ref()
     }
 
+    pub fn details_provenance(&self) -> Option<&RepositoryCacheProvenance> {
+        self.details_provenance.as_ref()
+    }
+
     pub fn branches(&self) -> Option<&BranchesOutcome> {
         self.branches.as_ref()
+    }
+
+    pub fn branches_provenance(&self) -> Option<&RepositoryCacheProvenance> {
+        self.branches_provenance.as_ref()
+    }
+
+    pub fn revision_provenance(&self) -> Option<&RepositoryCacheProvenance> {
+        self.branch
+            .as_ref()
+            .and_then(|branch| branch.snapshot_provenance.as_ref())
+    }
+
+    pub fn is_showing_cached_snapshot(&self) -> bool {
+        self.details_provenance
+            .as_ref()
+            .is_some_and(|p| p.origin == RepositoryCacheOrigin::Snapshot)
+            || self
+                .branches_provenance
+                .as_ref()
+                .is_some_and(|p| p.origin == RepositoryCacheOrigin::Snapshot)
+            || self
+                .revision_provenance()
+                .is_some_and(|p| p.origin == RepositoryCacheOrigin::Snapshot)
     }
 
     pub fn branches_error(&self) -> Option<&PageError> {
@@ -986,12 +1118,14 @@ impl RepositoryPage {
         branch.tree.begin_load(path);
         let branch_name = branch.name.clone();
         let commit = branch.commit().clone();
+        let mode = self.current_read_mode();
         self.invalidate_rows();
         self.spawn_job(Job::Directory {
             branch: branch_name,
             commit,
             path: path.to_string(),
             handle,
+            mode,
         });
         cx.notify();
     }
@@ -1119,6 +1253,7 @@ impl RepositoryPage {
                     self.reader_status = ReaderStatus::Loading;
                     let commit = branch.commit().clone();
                     let branch_name = branch.name.clone();
+                    let mode = self.current_read_mode();
                     self.pending_content = Some(identity.clone());
                     self.spawn_job(Job::Content {
                         branch: branch_name,
@@ -1126,6 +1261,7 @@ impl RepositoryPage {
                         role: Role::File(path.to_string()),
                         selection_request: self.selection_request,
                         identity,
+                        mode,
                     });
                 }
                 Err(error) => {
@@ -1173,6 +1309,7 @@ impl RepositoryPage {
                 if self.pending_content.as_ref() == Some(&identity) {
                     return;
                 }
+                let mode = self.current_read_mode();
                 self.pending_content = Some(identity.clone());
                 self.reader_status = ReaderStatus::Loading;
                 self.spawn_job(Job::Content {
@@ -1181,6 +1318,7 @@ impl RepositoryPage {
                     role: Role::Readme,
                     selection_request: self.selection_request,
                     identity,
+                    mode,
                 });
             }
             ReadmeState::Absent => {
@@ -1235,8 +1373,56 @@ impl RepositoryPage {
             branch: name,
             request,
             identity: details.identity,
+            mode: RepositoryCacheMode::OnlinePreferred,
         });
         cx.notify();
+    }
+
+    pub(super) fn current_read_mode(&self) -> RepositoryCacheMode {
+        if self
+            .branch
+            .as_ref()
+            .and_then(|branch| branch.snapshot_provenance.as_ref())
+            .is_some_and(|prov| prov.origin == RepositoryCacheOrigin::Snapshot)
+            || self
+                .details_provenance
+                .as_ref()
+                .is_some_and(|prov| prov.origin == RepositoryCacheOrigin::Snapshot)
+        {
+            RepositoryCacheMode::OfflineOnly
+        } else {
+            RepositoryCacheMode::OnlinePreferred
+        }
+    }
+
+    pub(super) fn cache_allowed(&self, repository_id: u64) -> bool {
+        let Some(context) = self.context.as_ref() else {
+            return false;
+        };
+        let Some(expected) = self.cache_binding.as_ref() else {
+            return true;
+        };
+        let Some(current) = self.services.accounts.repo_service().cache(context) else {
+            return false;
+        };
+        if current.scope() != expected.scope() {
+            return false;
+        }
+        let Ok(key) = CacheKey::mutable(
+            Some(repository_id),
+            true,
+            "authorization-probe",
+            "gate-v1",
+            "githux-repository-v1",
+            1,
+        ) else {
+            return false;
+        };
+        !matches!(
+            current.store().read(current.scope(), &key),
+            Err(crate::storage::cache::CacheError::AccessDenied
+                | crate::storage::cache::CacheError::Stale)
+        )
     }
 
     fn stop_work(&mut self) {
@@ -1297,25 +1483,44 @@ impl RepositoryPage {
         self.drain_star(cx);
     }
 
-    /// Detects an account/authorization change even when no message is pending,
-    /// so data read under a previous authorization cannot stay on screen.
+    /// Detects an account/authorization change (including cache gate revocation
+    /// or credential rejection) even when no message is pending, so data read
+    /// under a previous or revoked authorization cannot stay on screen.
     fn check_authorization(&mut self, cx: &mut Context<Self>) {
         if !self.active || self.authorization_lost {
             return;
         }
-        if self.session.as_ref().is_some_and(RepositorySession::verify) {
+        let cache_ok = match &self.details {
+            Some(details) => self.cache_allowed(details.identity.id()),
+            None => self.cache_binding.as_ref().is_none_or(|expected| {
+                self.context
+                    .as_ref()
+                    .and_then(|context| self.services.accounts.repo_service().cache(context))
+                    .is_some_and(|current| current.scope() == expected.scope())
+            }),
+        };
+        if self.session.as_ref().is_some_and(RepositorySession::verify) && cache_ok {
             return;
         }
         self.stop_star();
         self.cancel_reader_interactions(cx);
+        if let Some(reader) = self.reader.take() {
+            reader.update(cx, |reader, cx| {
+                reader.set_image_provider(None, cx);
+            });
+        }
         self.extras.stop();
         self.authorization_lost = true;
         self.active = false;
         self.stop_work();
         self.session = None;
+        self.cached_session = None;
+        self.cache_binding = None;
         self.context = None;
         self.details = None;
+        self.details_provenance = None;
         self.branches = None;
+        self.branches_provenance = None;
         self.branches_error = None;
         self.branch = None;
         self.reader = None;
@@ -1344,6 +1549,10 @@ impl RepositoryPage {
                 .accounts
                 .repo_service()
                 .is_current(&message.context)
+            || self
+                .details
+                .as_ref()
+                .is_some_and(|details| !self.cache_allowed(details.identity.id()))
             || (message.branch_request != self.branch_request
                 && !matches!(&message.body, Body::Branches(_)))
         {
@@ -1382,7 +1591,7 @@ impl RepositoryPage {
 
     fn apply_repository(
         &mut self,
-        result: Result<RepositoryDetails, RepositoryError>,
+        result: Result<(RepositoryDetails, Option<RepositoryCacheProvenance>), PageError>,
         star_write_generation: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1391,20 +1600,28 @@ impl RepositoryPage {
             return;
         }
         match result {
-            Ok(details) => {
+            Ok((details, provenance)) => {
                 // An older summary response cannot roll back a newer Star
                 // observation or its authoritative count refresh.
                 let star_request = self.star_request;
-                self.spawn_job(Job::Branches(details.identity.clone()));
                 let identity = details.identity.clone();
                 self.details = Some(details);
+                // Provenance is applied *before* choosing the next read mode, so a
+                // page that was showing a cached snapshot switches back to
+                // `OnlinePreferred` for the dependent branches/revision reads.
+                self.details_provenance = provenance;
+                let mode = self.current_read_mode();
+                self.spawn_job(Job::Branches {
+                    identity: identity.clone(),
+                    mode,
+                });
                 self.start_overview(identity, window, cx);
                 if star_request == self.star_request {
                     self.start_star_read(cx);
                 }
             }
             Err(error) => {
-                self.error = Some(PageError::from_repository(&error));
+                self.error = Some(error);
             }
         }
         cx.notify();
@@ -1412,18 +1629,19 @@ impl RepositoryPage {
 
     fn apply_branches(
         &mut self,
-        result: Result<BranchesOutcome, RepositoryError>,
+        result: Result<(BranchesOutcome, Option<RepositoryCacheProvenance>), PageError>,
         cx: &mut Context<Self>,
     ) {
         self.branches_loading = false;
         let Some(details) = self.details.clone() else {
             return;
         };
-        let (outcome, error) = match result {
-            Ok(outcome) => (Some(outcome), None),
-            Err(error) => (None, Some(PageError::from_repository(&error))),
+        let (outcome, provenance, error) = match result {
+            Ok((outcome, provenance)) => (Some(outcome), provenance, None),
+            Err(error) => (None, None, Some(error)),
         };
         self.branches_error = error;
+        self.branches_provenance = provenance;
         self.branches = outcome.clone();
         if self.branch.is_some() {
             // Retrying enumeration updates only the picker, never the loaded snapshot.
@@ -1474,7 +1692,7 @@ impl RepositoryPage {
         &mut self,
         branch: String,
         request: u64,
-        result: Result<RepoSnapshot, RepositoryError>,
+        result: Result<(RepoSnapshot, Option<RepositoryCacheProvenance>), PageError>,
         cx: &mut Context<Self>,
     ) {
         // A superseded resolution is discarded whether it succeeded or failed.
@@ -1483,10 +1701,11 @@ impl RepositoryPage {
             return;
         }
         match result {
-            Ok(snapshot) => {
+            Ok((snapshot, provenance)) => {
                 self.branch = Some(BranchState {
                     name: branch.clone(),
                     snapshot: snapshot.clone(),
+                    snapshot_provenance: provenance,
                     tree: TreeModel::default(),
                     readme: ReadmeState::Unknown,
                 });
@@ -1495,17 +1714,23 @@ impl RepositoryPage {
                 self.readme_path = None;
                 self.reader_status = ReaderStatus::Loading;
                 self.invalidate_rows();
+                let mode = self.current_read_mode();
                 self.spawn_job(Job::Root {
                     branch: branch.clone(),
                     snapshot: snapshot.clone(),
+                    mode,
                 });
-                self.spawn_job(Job::Readme { branch, snapshot });
+                self.spawn_job(Job::Readme {
+                    branch,
+                    snapshot,
+                    mode,
+                });
             }
             Err(error) => {
                 self.branch = None;
                 self.reader = None;
                 self.reader_status = ReaderStatus::Loading;
-                self.error = Some(PageError::from_repository(&error));
+                self.error = Some(error);
             }
         }
         cx.notify();
@@ -1515,7 +1740,7 @@ impl RepositoryPage {
         &mut self,
         branch: String,
         commit: ObjectSha,
-        result: Result<DirectoryTree, RepositoryError>,
+        result: Result<DirectoryTree, PageError>,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.branch.as_mut() else {
@@ -1532,7 +1757,6 @@ impl RepositoryPage {
                 self.resolve_selection(cx);
             }
             Err(error) => {
-                let error = PageError::from_repository(&error);
                 state.tree.fail_load("", error.clone());
                 self.invalidate_rows();
                 self.error = Some(error);
@@ -1545,7 +1769,7 @@ impl RepositoryPage {
         &mut self,
         branch: String,
         commit: ObjectSha,
-        result: Result<ReadmeState, RepositoryError>,
+        result: Result<ReadmeState, PageError>,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.branch.as_mut() else {
@@ -1556,7 +1780,7 @@ impl RepositoryPage {
         }
         state.readme = match result {
             Ok(readme) => readme,
-            Err(error) => ReadmeState::Failed(PageError::from_repository(&error)),
+            Err(error) => ReadmeState::Failed(error),
         };
         if self.selection == Selection::Readme {
             self.request_readme_content(cx);
@@ -1569,7 +1793,7 @@ impl RepositoryPage {
         branch: String,
         commit: ObjectSha,
         path: String,
-        result: Result<DirectoryTree, RepositoryError>,
+        result: Result<DirectoryTree, PageError>,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.branch.as_mut() else {
@@ -1584,9 +1808,7 @@ impl RepositoryPage {
                 self.error = None;
             }
             Ok(tree) => state.tree.set_children(tree),
-            Err(error) => state
-                .tree
-                .fail_load(&path, PageError::from_repository(&error)),
+            Err(error) => state.tree.fail_load(&path, error),
         }
         let failure = state.tree.failure(&path).cloned();
         if failure.is_none()
@@ -1657,9 +1879,12 @@ impl RepositoryPage {
                 let generation = self.generation;
                 let branch_request = self.branch_request;
                 let selected_request = self.selection_request;
+                let provider = self.image_provider_for(&content);
                 let reader = cx.new(|cx| {
                     let mut reader = ReaderView::from_prepared(content, kind, window, cx);
                     reader.set_markdown_layout(crate::ui::reader::MarkdownLayout::Repository, cx);
+                    reader.set_image_limits(self.services.image_limits.clone(), cx);
+                    reader.set_image_provider(provider, cx);
                     reader.on_action(Rc::new(move |action, window, cx| {
                         // The callback runs inside ReaderView::update. Defer the
                         // host action so cancelling/replacing that reader cannot
@@ -1685,8 +1910,7 @@ impl RepositoryPage {
             }
             Err(error) => {
                 self.reader = None;
-                self.reader_status =
-                    ReaderStatus::ContentFailed(PageError::from_repository(&error));
+                self.reader_status = ReaderStatus::ContentFailed(error);
             }
         }
         cx.notify();
@@ -1800,6 +2024,18 @@ impl RepositoryPage {
         if self.star_work.is_some() || !self.mutations_enabled {
             return;
         }
+        // A repository summary loaded from the offline cache means the network
+        // was unreachable; do not send a follow-up Star status request until
+        // the page is refreshed online.
+        if self
+            .details_provenance
+            .as_ref()
+            .is_some_and(|prov| prov.origin == RepositoryCacheOrigin::Snapshot)
+        {
+            self.star.observed = None;
+            self.star.phase = StarPhase::Idle;
+            return;
+        }
         let Some(binding) = self.star_binding() else {
             return;
         };
@@ -1823,7 +2059,8 @@ impl RepositoryPage {
     }
 
     fn press_star(&mut self, cx: &mut Context<Self>) {
-        if !self.mutations_enabled || self.star_work.is_some() {
+        if !self.mutations_enabled || self.star_work.is_some() || self.is_showing_cached_snapshot()
+        {
             return;
         }
         let Some(observed) = self.star.observed else {
@@ -2140,6 +2377,66 @@ impl RepositoryPage {
 
     // ---- background work ----
 
+    /// Builds the README picture provider for one document generation.
+    ///
+    /// Repository pictures are read at the document's fixed commit through this
+    /// page's own authorized session and, when the account has a persistent cache
+    /// binding, through `RepositoryImageService::with_cache`. External images keep
+    /// their credential-free HTTPS path. Without a usable external fetcher the
+    /// provider is omitted and the reader keeps its honest placeholders.
+    fn image_provider_for(&self, content: &PreparedContent) -> Option<Arc<dyn ImageProvider>> {
+        let details = self.details.as_ref()?;
+        let identity = details.identity.clone();
+        // The reader document must belong to the repository this page authorized.
+        if !content
+            .identity
+            .repository()
+            .locator()
+            .owner()
+            .eq_ignore_ascii_case(identity.locator().owner())
+            || !content
+                .identity
+                .repository()
+                .locator()
+                .name()
+                .eq_ignore_ascii_case(identity.locator().name())
+        {
+            return None;
+        }
+        let session = self.session.clone()?;
+        let external = match &self.services.external_images {
+            Some(external) => external.clone(),
+            None => match ReqwestExternalImages::new() {
+                Ok(client) => Arc::new(client) as Arc<dyn ExternalImageBytes>,
+                Err(_) => return None,
+            },
+        };
+        let cache = self.cache_binding.as_ref().map(|binding| {
+            (
+                binding.store().clone(),
+                binding.scope().clone(),
+                details.visibility == RepoVisibility::Private,
+            )
+        });
+        let service = RepositoryImageService::with_cache(
+            session,
+            identity,
+            self.services.executor.clone(),
+            external,
+            self.services.image_limits.clone(),
+            cache,
+        );
+        Some(Arc::new(service) as Arc<dyn ImageProvider>)
+    }
+
+    fn cache_hint(&self) -> Option<CacheHint> {
+        let binding = self.cache_binding.as_ref()?;
+        Some(CacheHint {
+            store: binding.store().clone(),
+            scope: binding.scope().clone(),
+        })
+    }
+
     fn spawn_job(&mut self, job: Job) {
         let Some(session) = self.session.clone() else {
             return;
@@ -2150,13 +2447,14 @@ impl RepositoryPage {
         let Some(cancel) = self.work.as_ref().map(Work::token) else {
             return;
         };
+        let cached = self.cached_session.clone();
         let inbox = self.inbox.clone();
         let alive = self.alive.clone();
         let generation = self.generation;
         let branch_request = self.branch_request;
         let limits = self.services.limits.clone();
         let spawned = self.services.executor.handle().spawn(async move {
-            let body = run_job(&session, job, &limits, cancel).await;
+            let body = run_job(cached.as_ref(), &session, job, &limits, cancel).await;
             if *alive.borrow() {
                 inbox
                     .lock()
@@ -2196,26 +2494,35 @@ enum Job {
     Repository {
         locator: RepositoryLocator,
         star_write_generation: u64,
+        mode: RepositoryCacheMode,
+        hint: Option<CacheHint>,
     },
-    Branches(RepositoryIdentity),
+    Branches {
+        identity: RepositoryIdentity,
+        mode: RepositoryCacheMode,
+    },
     Revision {
         branch: String,
         request: u64,
         identity: RepositoryIdentity,
+        mode: RepositoryCacheMode,
     },
     Root {
         branch: String,
         snapshot: RepoSnapshot,
+        mode: RepositoryCacheMode,
     },
     Readme {
         branch: String,
         snapshot: RepoSnapshot,
+        mode: RepositoryCacheMode,
     },
     Directory {
         branch: String,
         commit: ObjectSha,
         path: String,
         handle: SnapshotDirectory,
+        mode: RepositoryCacheMode,
     },
     Content {
         branch: String,
@@ -2223,13 +2530,17 @@ enum Job {
         role: Role,
         selection_request: u64,
         identity: BlobIdentity,
+        mode: RepositoryCacheMode,
     },
 }
 
 /// Runs exactly one service call. Sequencing stays in the foreground so every
-/// result is checked before the next step is requested.
+/// result is checked before the next step is requested. A missing cache binding
+/// keeps the original online path; an available binding adds snapshot provenance
+/// and the explicit offline fallback.
 async fn run_job(
-    session: &RepositorySession,
+    session: Option<&CachedRepositorySession>,
+    plain: &RepositorySession,
     job: Job,
     limits: &PageLimits,
     cancel: CancellationToken,
@@ -2238,52 +2549,159 @@ async fn run_job(
         Job::Repository {
             locator,
             star_write_generation,
-        } => Body::Repository {
-            result: session
-                .repository(locator, &limits.repository, cancel)
+            mode,
+            hint,
+        } => {
+            let known = match &hint {
+                Some(hint) => read_identity(hint, &locator).await,
+                None => None,
+            };
+            let result = match (session, known) {
+                (Some(cached), Some(identity)) => {
+                    match cached
+                        .repository(&identity, &limits.repository, mode, cancel.clone())
+                        .await
+                    {
+                        Ok(scoped) => Ok((scoped.value.value, Some(scoped.value.provenance))),
+                        // A live read may legitimately discover a different
+                        // numeric repository behind the same name (delete and
+                        // re-create). The online path stays authoritative and the
+                        // refreshed identity replaces the stale hint below.
+                        Err(RepositoryCacheError::Online(RepositoryError::InvalidResponse {
+                            ..
+                        })) if mode != RepositoryCacheMode::OfflineOnly => plain
+                            .repository(locator.clone(), &limits.repository, cancel)
+                            .await
+                            .map(|Scoped { value, .. }| (value, None))
+                            .map_err(|error| PageError::from_repository(&error)),
+                        Err(error) => Err(PageError::from(error)),
+                    }
+                }
+                // The numeric id is not known yet (first activation after a
+                // restart without an index entry, or after a cache clear).
+                // Resolve it with the ordinary authorized read, remember it for
+                // later activations, and publish through the cached adapter so
+                // the summary itself is persisted too.
+                (Some(cached), None) if mode != RepositoryCacheMode::OfflineOnly => match plain
+                    .repository(locator.clone(), &limits.repository, cancel.clone())
+                    .await
+                {
+                    Ok(Scoped { value, .. }) => {
+                        let identity = value.identity.clone();
+                        match cached
+                            .repository(
+                                &identity,
+                                &limits.repository,
+                                RepositoryCacheMode::OnlinePreferred,
+                                cancel,
+                            )
+                            .await
+                        {
+                            Ok(scoped) => Ok((scoped.value.value, Some(scoped.value.provenance))),
+                            Err(_) => Ok((value, None)),
+                        }
+                    }
+                    Err(error) => Err(PageError::from_repository(&error)),
+                },
+                _ => plain
+                    .repository(locator.clone(), &limits.repository, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| (value, None))
+                    .map_err(|error| PageError::from_repository(&error)),
+            };
+            if let (Some(hint), Ok((details, _))) = (hint, &result) {
+                write_identity(hint.clone(), details.identity.clone()).await;
+            }
+            Body::Repository {
+                result,
+                star_write_generation,
+            }
+        }
+        Job::Branches { identity, mode } => Body::Branches(match session {
+            Some(cached) => cached
+                .branches(&identity, &limits.repository, mode, cancel)
                 .await
-                .map(|Scoped { value, .. }| value),
-            star_write_generation,
-        },
-        Job::Branches(identity) => Body::Branches(
-            session
+                .map(|Scoped { value, .. }| (value.value, Some(value.provenance)))
+                .map_err(PageError::from),
+            None => plain
                 .branches(&identity, &limits.repository, cancel)
                 .await
-                .map(|Scoped { value, .. }| value),
-        ),
+                .map(|Scoped { value, .. }| (value, None))
+                .map_err(|error| PageError::from_repository(&error)),
+        }),
         Job::Revision {
             branch,
             request,
             identity,
+            mode,
         } => {
             // `branch` was validated as a ref before the job was created.
             let spec = RevisionSpec::Ref(DynamicRef::new(branch.clone()).expect("validated ref"));
-            let result = session
-                .revision(&identity, spec, &limits.repository, cancel)
-                .await;
+            let result = match session {
+                Some(cached) => cached
+                    .revision(&identity, spec, &limits.repository, mode, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| (value.value, Some(value.provenance)))
+                    .map_err(PageError::from),
+                None => plain
+                    .revision(&identity, spec, &limits.repository, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| (value, None))
+                    .map_err(|error| PageError::from_repository(&error)),
+            };
             Body::Revision {
                 branch,
                 request,
-                result: result.map(|Scoped { value, .. }| value),
+                result,
             }
         }
-        Job::Root { branch, snapshot } => {
+        Job::Root {
+            branch,
+            snapshot,
+            mode,
+        } => {
             let commit = snapshot.commit().clone();
             let root = SnapshotDirectory::root(&snapshot);
-            let result = session.directory(&root, &limits.repository, cancel).await;
+            let result = match session {
+                Some(cached) => cached
+                    .directory(&root, &limits.repository, mode, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| value.value)
+                    .map_err(PageError::from),
+                None => plain
+                    .directory(&root, &limits.repository, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| value)
+                    .map_err(|error| PageError::from_repository(&error)),
+            };
             Body::Root {
                 branch,
                 commit,
-                result: result.map(|Scoped { value, .. }| value),
+                result,
             }
         }
-        Job::Readme { branch, snapshot } => {
+        Job::Readme {
+            branch,
+            snapshot,
+            mode,
+        } => {
             let commit = snapshot.commit().clone();
-            let result = session.readme(&snapshot, &limits.repository, cancel).await;
+            let result = match session {
+                Some(cached) => cached
+                    .readme(&snapshot, &limits.repository, mode, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| ReadmeState::from_discovery(Ok(value.value)))
+                    .map_err(PageError::from),
+                None => plain
+                    .readme(&snapshot, &limits.repository, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| ReadmeState::from_discovery(Ok(value)))
+                    .map_err(|error| PageError::from_repository(&error)),
+            };
             Body::Readme {
                 branch,
                 commit,
-                result: result.map(|Scoped { value, .. }| ReadmeState::from_discovery(Ok(value))),
+                result,
             }
         }
         Job::Directory {
@@ -2291,13 +2709,25 @@ async fn run_job(
             commit,
             path,
             handle,
+            mode,
         } => {
-            let result = session.directory(&handle, &limits.repository, cancel).await;
+            let result = match session {
+                Some(cached) => cached
+                    .directory(&handle, &limits.repository, mode, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| value.value)
+                    .map_err(PageError::from),
+                None => plain
+                    .directory(&handle, &limits.repository, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| value)
+                    .map_err(|error| PageError::from_repository(&error)),
+            };
             Body::Directory {
                 branch,
                 commit,
                 path,
-                result: result.map(|Scoped { value, .. }| value),
+                result,
             }
         }
         Job::Content {
@@ -2306,18 +2736,70 @@ async fn run_job(
             role,
             selection_request,
             identity,
+            mode,
         } => {
             let path = identity.path().as_str().to_string();
-            let result = session.content(&identity, &limits.blob, cancel).await;
+            let result = match session {
+                Some(cached) => cached
+                    .content(&identity, &limits.blob, mode, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| value.value)
+                    .map_err(PageError::from),
+                None => plain
+                    .content(&identity, &limits.blob, cancel)
+                    .await
+                    .map(|Scoped { value, .. }| value)
+                    .map_err(|error| PageError::from_repository(&error)),
+            };
             Body::Content(ContentReply {
                 branch,
                 commit,
                 role,
                 selection_request,
                 path,
-                result: result.map(|Scoped { value, .. }| value),
+                result,
             })
         }
+    }
+}
+
+/// One account-scoped cache handle handed to a background job so the locator
+/// index can be read and refreshed off the UI thread.
+#[derive(Clone)]
+struct CacheHint {
+    store: CacheStore,
+    scope: CacheScope,
+}
+
+async fn read_identity(
+    hint: &CacheHint,
+    locator: &RepositoryLocator,
+) -> Option<RepositoryIdentity> {
+    let store = hint.store.clone();
+    let scope = hint.scope.clone();
+    let locator = locator.clone();
+    tokio::task::spawn_blocking(move || locator_index::read(&store, &scope, &locator))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn write_identity(hint: CacheHint, identity: RepositoryIdentity) {
+    let CacheHint { store, scope } = hint;
+    let _ =
+        tokio::task::spawn_blocking(move || locator_index::write(&store, &scope, &identity)).await;
+}
+
+/// A short, human-readable "synced N ago" label for an explicit historical
+/// snapshot. This never presents cached data as freshly verified.
+pub(crate) fn format_sync_age(verified_at_ms: i64) -> String {
+    let now = crate::data::reader_image_cache::now_ms();
+    let seconds = ((now - verified_at_ms).max(0) / 1000) as u64;
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", seconds / 60),
+        3600..=86_399 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86_400),
     }
 }
 
@@ -2354,6 +2836,7 @@ impl Drop for RepositoryPage {
             work.source.cancel();
         }
         self.tree_bars.cancel(&self.tree_motion);
+        self.release_cache();
     }
 }
 

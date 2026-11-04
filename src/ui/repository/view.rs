@@ -181,6 +181,7 @@ fn header(
                 .children(facts),
         )
         .children(description);
+    let cached = cached_marker(page, cx);
     let actions = repository_actions(page, window, cx);
     div()
         .debug_selector(|| "repository-header".to_string())
@@ -193,7 +194,83 @@ fn header(
         .pt_4()
         .pb_2()
         .child(summary)
+        .child(cached)
         .child(actions)
+        .into_any_element()
+}
+
+/// Explicit "this page is showing a cached snapshot" marker with the last
+/// verified time and the one explicit online refresh. It is only drawn for
+/// historical data: a network-verified page shows nothing extra.
+fn cached_marker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
+    if !page.is_showing_cached_snapshot() {
+        return div().into_any_element();
+    }
+    let synced = page
+        .details_provenance()
+        .or_else(|| page.revision_provenance())
+        .or_else(|| page.branches_provenance())
+        .map(|provenance| super::format_sync_age(provenance.verified_at_ms))
+        .unwrap_or_else(|| "an earlier sync".to_string());
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let entity = cx.weak_entity();
+    div()
+        .debug_selector(|| "repository-cached-snapshot".to_string())
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .id("repository-cached-badge")
+                .debug_selector(|| "repository-cached-badge".to_string())
+                .tooltip(ui_tooltip(format!(
+                    "Showing a cached snapshot from {synced}. Not a live GitHub read."
+                )))
+                .child(Badge::new("Cached").tone(Tone::Warning).outline()),
+        )
+        .child(
+            // A plain bordered control rather than a nested Button: the whole
+            // element is the single hit target, so the debug selector and the
+            // click cannot land on different boxes.
+            div()
+                .id("repository-refresh")
+                .debug_selector(|| "repository-refresh".to_string())
+                .role(gpui::Role::Button)
+                .aria_label("Refresh")
+                .tab_index(0)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(theme.control_height(ControlSize::Sm))
+                .px(theme.control_padding(ControlSize::Sm))
+                .rounded(theme.radius(Radius::Sm))
+                .border_1()
+                .border_color(colors.border_strong)
+                .bg(colors.surface)
+                .text_size(theme.text_size(TextSize::Xs))
+                .text_color(colors.fg)
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.hover))
+                .on_key_down({
+                    let entity = entity.clone();
+                    move |event: &gpui::KeyDownEvent, _, cx| {
+                        if !event.is_held
+                            && !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            cx.stop_propagation();
+                            let _ = entity.update(cx, |page, cx| page.refresh_repository(cx));
+                        }
+                    }
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = entity.update(cx, |page, cx| page.refresh_repository(cx));
+                })
+                .child("Refresh"),
+        )
         .into_any_element()
 }
 
@@ -223,7 +300,10 @@ fn repository_actions(
     .map(|(star, label, icon)| {
         let enabled = binding.is_some()
             && if star {
-                page.mutations_enabled() && page.starred_state().is_some() && !star_busy
+                page.mutations_enabled()
+                    && !page.is_showing_cached_snapshot()
+                    && page.starred_state().is_some()
+                    && !star_busy
             } else {
                 page.on_action.is_some() && page.fork_mutations_enabled()
             };

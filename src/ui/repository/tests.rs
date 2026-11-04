@@ -16,6 +16,8 @@
 mod extras_tests;
 #[path = "header_tests.rs"]
 mod header_tests;
+#[path = "offline_tests.rs"]
+mod offline_tests;
 #[path = "star_tests.rs"]
 mod star_tests;
 
@@ -1647,7 +1649,9 @@ fn superseded_same_file_success_and_failure_cannot_publish(cx: &mut TestAppConte
             role: super::Role::File("src/main.rs".into()),
             selection_request: old,
             path: "src/main.rs".into(),
-            result: Err(GitHubError::Unauthorized.into()),
+            result: Err(super::PageError::from_github_for_test(
+                GitHubError::Unauthorized,
+            )),
         };
         p.apply_content(reply, window, cx);
     });
@@ -1679,11 +1683,13 @@ fn old_branch_identity_rejects_success_and_error_after_returning_to_same_name(
     });
     let reader = page.read_with(cx, |p, _| p.reader().unwrap().entity_id());
     page.update(cx, |p, cx| {
-        p.apply_revision("main".into(), old, Ok(snapshot), cx);
+        p.apply_revision("main".into(), old, Ok((snapshot, None)), cx);
         p.apply_revision(
             "main".into(),
             old,
-            Err(GitHubError::Unauthorized.into()),
+            Err(super::PageError::from_github_for_test(
+                GitHubError::Unauthorized,
+            )),
             cx,
         );
         assert_eq!(p.reader().unwrap().entity_id(), reader);
@@ -1700,14 +1706,19 @@ fn enumeration_failure_preserves_saved_branch_and_recovery_preserves_reader(
     page.update(cx, |p, cx| {
         p.intent.branch = Some("feature/docs-polish".into());
         p.branch = None;
-        p.apply_branches(Err(GitHubError::Timeout { seconds: 1 }.into()), cx);
+        p.apply_branches(
+            Err(super::PageError::from_github_for_test(
+                GitHubError::Timeout { seconds: 1 },
+            )),
+            cx,
+        );
     });
     settle(&page, cx, |p| {
         p.selected_branch() == Some("feature/docs-polish")
             && p.reader_status() == &ReaderStatus::Showing
     });
     let reader = page.read_with(cx, |p, _| p.reader().unwrap().entity_id());
-    page.update(cx, |p, cx| p.apply_branches(Ok(listing), cx));
+    page.update(cx, |p, cx| p.apply_branches(Ok((listing, None)), cx));
     assert_eq!(
         reader,
         page.read_with(cx, |p, _| p.reader().unwrap().entity_id())
