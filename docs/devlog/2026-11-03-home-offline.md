@@ -71,6 +71,8 @@
 
 Codex 本轮另指出 `stop()` 必须清除保留的权限票据，避免撤权后反复重绘；已补充 `cache_authorization = None` 与断言，12/12 测试通过（run `938e2569-27fb-4737-bdb6-57b157e37495`），clippy 通过（run `28ab071f-ad2d-4dc0-ba4a-a48a72f265a8`）。共享核心测试的 Clippy 修正同步自 cache-runtime 76815c0 的已修内容，未搬入其他页面文件。
 
+随后修复 401 清理的幂等性（仅在页面仍保留缓存/票据状态时清理），以及有效新 PAT 的网络 Feed 后续页在缓存故障时回退普通在线读取；历史分页仍严格离线。新增 `online_feed_continuation_survives_cache_failure_after_replacement` 通过，当前 13/13 Home 测试通过（run `ae5bc282-ad24-447a-ace3-671fe5313791`），home 视图与 Shell 页面回归通过。
+
 原生窗口与真实 GitHub PAT 仍未验证，保留 `pending`。
 
 

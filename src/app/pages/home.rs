@@ -724,16 +724,17 @@ impl HomePage {
             .session
             .as_ref()
             .is_some_and(|session| !session.verify())
-            || self.services.as_ref().is_some_and(|services| {
-                services.accounts().active_summary().is_some_and(|summary| {
-                    matches!(
-                        summary.authorization,
-                        crate::domain::account::AuthorizationState::VerificationFailed(
-                            GitHubError::Unauthorized
+            || (self.cached.is_some() || self.cache_authorization.is_some())
+                && self.services.as_ref().is_some_and(|services| {
+                    services.accounts().active_summary().is_some_and(|summary| {
+                        matches!(
+                            summary.authorization,
+                            crate::domain::account::AuthorizationState::VerificationFailed(
+                                GitHubError::Unauthorized
+                            )
                         )
-                    )
+                    })
                 })
-            })
             || self
                 .cache_authorization
                 .as_ref()
@@ -1260,7 +1261,7 @@ impl HomePage {
                     ReadSource::Network => PageReadMode::Online,
                     ReadSource::Historical(_) => PageReadMode::Offline,
                 };
-                cached
+                let cached_result = cached
                     .feed_page(
                         mode,
                         next,
@@ -1269,18 +1270,38 @@ impl HomePage {
                         &PullRequestDetailLimits::default(),
                         FEED_AUTHOR_LOOKUP_LIMIT,
                         &mut seen,
-                        cancel,
+                        cancel.clone(),
                     )
-                    .await
-                    .map_err(|error| AppendError::Read(cache_miss_failure(error)))
-                    .and_then(|page| {
-                        unpack_cached(page, &cache_partition)
-                            .map_err(|error| AppendError::Read(cache_miss_failure(error)))
-                    })
-                    .map(|page| {
-                        page.map(|page| (page.value.into_outcome(), seen.clone(), page.source))
-                    })
-                    .and_then(|page| page.ok_or(AppendError::NotCached))
+                    .await;
+                let result = match cached_result {
+                    Err(error) if source == ReadSource::Network => match cache_failure(error) {
+                        CachedReadFailure::UncachedOnline => session
+                            .feed_page(
+                                next,
+                                &FeedLimits::default(),
+                                &FollowingLimits::default(),
+                                &PullRequestDetailLimits::default(),
+                                FEED_AUTHOR_LOOKUP_LIMIT,
+                                &mut seen,
+                                cancel.clone(),
+                            )
+                            .await
+                            .map_err(AppendError::Read),
+                        CachedReadFailure::Network => Err(AppendError::NotCached),
+                        CachedReadFailure::AuthOrContext(error) => Err(AppendError::Read(error)),
+                    },
+                    Err(error) => Err(AppendError::Read(cache_miss_failure(error))),
+                    Ok(page) => unpack_cached(page, &cache_partition)
+                        .map_err(|error| AppendError::Read(cache_miss_failure(error)))
+                        .and_then(|page| {
+                            page.ok_or(AppendError::NotCached)
+                                .map(|page| crate::data::Scoped {
+                                    context: context.clone(),
+                                    value: page.value,
+                                })
+                        }),
+                };
+                result.map(|page| (page.value.into_outcome(), seen.clone(), source))
             } else {
                 session
                     .feed_page(

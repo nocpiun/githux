@@ -995,6 +995,66 @@ async fn acceptance_valid_replacement_pat_keeps_feed_online() {
     );
 }
 
+#[tokio::test]
+async fn online_feed_continuation_survives_cache_failure_after_replacement() {
+    let fixture = Fixture::new(true).await;
+    fixture.warm().await;
+    let service = fixture.service.as_ref().unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#)))
+        .await;
+    service
+        .replace(
+            fixture.account.clone(),
+            Pat::from_str("synthetic-replacement"),
+        )
+        .await
+        .unwrap();
+    let session = service.page_session().unwrap();
+    let store = fixture.store();
+    let scope = store.saved_account(fixture.account.clone()).unwrap();
+    let cached = CachedPageReadSession::new(session.clone(), store, scope).unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(events("first", Some(2))))
+        .await;
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
+        .await;
+    let first = read_feed(
+        session.clone(),
+        Some(cached.clone()),
+        "continuation".into(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let next = first.value.next_page.unwrap();
+    fixture.mock.enqueue(Ok(events("second", None))).await;
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
+        .await;
+    let mut seen = Default::default();
+    let page = session
+        .feed_page(
+            next,
+            &FeedLimits::default(),
+            &FollowingLimits::default(),
+            &PullRequestDetailLimits::default(),
+            30,
+            &mut seen,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.value.activities.len(), 1);
+    assert_eq!(page.value.activities[0].event.id, "second");
+}
+
 #[gpui::test]
 fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
