@@ -1002,3 +1002,49 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
     });
     release_page(&host, cx);
 }
+
+/// A gate probe that is still outstanding when the page re-activates must not
+/// leave the new generation permanently unable to probe again, and a denial must
+/// remain recoverable through activation.
+#[gpui::test]
+fn activation_resets_gate_probe_bookkeeping_and_recovers_from_denial(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+
+    // Simulate an outstanding probe plus a denial, as if a stale reply had been
+    // dropped by the generation check in `apply`.
+    page.update_in(cx, |page, window, cx| {
+        page.gate_probe_in_flight = true;
+        page.gate_denied = true;
+        let stale_request = page.gate_probe_request;
+        page.activate(cx);
+        assert!(
+            !page.gate_probe_in_flight,
+            "activation clears the in-flight flag"
+        );
+        assert!(!page.gate_denied, "activation clears the previous denial");
+        assert!(
+            page.gate_probe_request != stale_request,
+            "activation advances the probe identity so stale replies are inert"
+        );
+        // A reply for the superseded probe must not settle the new one.
+        page.gate_probe_in_flight = true;
+        page.apply_gate(stale_request, false, cx);
+        assert!(
+            page.gate_probe_in_flight,
+            "a stale gate reply cannot clear a newer in-flight probe"
+        );
+        page.apply_gate(page.gate_probe_request, true, cx);
+        assert!(!page.gate_probe_in_flight);
+        assert!(!page.gate_denied);
+        let _ = (window, cx);
+    });
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    release_page(&host, cx);
+}

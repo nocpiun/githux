@@ -332,8 +332,11 @@ enum Body {
     },
     Content(ContentReply),
     /// Result of the background cache-gate probe. Storage I/O never runs on the
-    /// UI thread; only this boolean is published back.
+    /// UI thread; only this boolean is published back. `request` identifies the
+    /// probe so a reply from a superseded activation/refresh cannot settle a
+    /// newer one.
     Gate {
+        request: u64,
         allowed: bool,
     },
 }
@@ -595,6 +598,9 @@ impl RepositoryPage {
         self.pending_content = None;
         self.selection_request = self.selection_request.wrapping_add(1);
         self.generation = self.generation.wrapping_add(1);
+        // A fresh activation is a new authorization and repository binding, so
+        // any previous gate verdict/probe belongs to the old generation.
+        self.reset_gate_probe();
         self.authorization_lost = false;
         // Clear every authorization-bound value *before* capturing a session:
         // acquiring one can fail (for example the active account was removed),
@@ -704,6 +710,7 @@ impl RepositoryPage {
         self.reader_status = ReaderStatus::Loading;
         self.error = None;
         self.authorization_lost = false;
+        self.reset_gate_probe();
         self.cursor = None;
         self.invalidate_rows();
         self.services = services;
@@ -769,8 +776,7 @@ impl RepositoryPage {
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.branch_request = self.branch_request.wrapping_add(1);
-        self.gate_denied = false;
-        self.gate_probe_in_flight = false;
+        self.reset_gate_probe();
         self.inbox.lock().expect("repository page inbox").clear();
         self.work = Some(Work::new());
         self.pending_content = None;
@@ -1435,6 +1441,16 @@ impl RepositoryPage {
         }
     }
 
+    /// Drops generation-bound gate-probe bookkeeping so a new activation or
+    /// refresh starts from "no verdict yet, nothing in flight". Advancing
+    /// `gate_probe_request` makes any still-outstanding reply inert.
+    fn reset_gate_probe(&mut self) {
+        self.gate_probe_request = self.gate_probe_request.wrapping_add(1);
+        self.gate_probe_in_flight = false;
+        self.gate_probe_at = None;
+        self.gate_denied = false;
+    }
+
     /// Cheap, non-blocking gate verdict used by render/apply/acceptance checks.
     ///
     /// The store probe itself is blocking SQLite work, so it never runs here;
@@ -1479,6 +1495,7 @@ impl RepositoryPage {
         let repo_service = self.services.accounts.repo_service();
         let repository_id = self.details.as_ref().map(|details| details.identity.id());
         let message_context = context.clone();
+        let request = self.gate_probe_request;
         let spawned = self.services.executor.handle().spawn(async move {
             let allowed = tokio::task::spawn_blocking(move || {
                 let Some(current) = repo_service.cache(&context) else {
@@ -1518,7 +1535,7 @@ impl RepositoryPage {
                         generation,
                         branch_request,
                         context: message_context,
-                        body: Body::Gate { allowed },
+                        body: Body::Gate { request, allowed },
                     });
             }
         });
@@ -1527,8 +1544,15 @@ impl RepositoryPage {
         }
     }
 
-    /// Applies a background gate verdict for the current generation.
-    fn apply_gate(&mut self, allowed: bool, cx: &mut Context<Self>) {
+    /// Applies a background gate verdict for the matching probe only.
+    ///
+    /// A reply from a superseded activation or refresh must neither clear the
+    /// in-flight flag of a newer probe (leaving it permanently "running") nor
+    /// publish a verdict for a repository the page no longer shows.
+    fn apply_gate(&mut self, request: u64, allowed: bool, cx: &mut Context<Self>) {
+        if request != self.gate_probe_request {
+            return;
+        }
         self.gate_probe_in_flight = false;
         if allowed {
             return;
@@ -1692,7 +1716,7 @@ impl RepositoryPage {
                 result,
             } => self.apply_directory(branch, commit, path, result, cx),
             Body::Content(content) => self.apply_content(content, window, cx),
-            Body::Gate { allowed } => self.apply_gate(allowed, cx),
+            Body::Gate { request, allowed } => self.apply_gate(request, allowed, cx),
         }
     }
 

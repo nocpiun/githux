@@ -59,3 +59,15 @@ Codex 提出 3 项 P2，均成立且可直接修复；无待裁决事项，`merg
 回归：`manual_refresh_invalidates_queued_replies_from_the_previous_generation`（先注入旧代次排队 revision 回复再 `refresh_repository`，断言 generation/branch_request 前进且页面未被回填，随后刷新正常完成）；`cached_extras_report_a_historical_snapshot` 追加断言历史计数被隐藏且 `counts_historical` 为真。撤销修复后该刷新回归稳定失败（run `6fe4f051`），恢复后通过。
 
 本轮验证（同一源码）：`cargo test --locked --test repository offline` 全通过（17 项过滤命中）、`--test repository` 865 通过、`--test repository_overview` 44 通过、`cargo test --locked` 主程序 1137 / home 96 / notifications 579 / profile 279 / reader 250 / reader_images 771 / repository 865 / overview 44 全部通过；`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。期间默认并发 `--test repository` 一次出现与本任务无关的既有 `reader_images::fixed_revision_images_persist_across_reopened_store_and_service` `InUse` 偶发失败（未修改该文件、未放宽断言），定向与随后完整重跑均通过，原始失败日志保留。
+
+## PR #73 第二轮审查修复（c21f58e）
+
+Codex 对 `c21f58e` 提出 1 项 P1，成立且可直接修复；仍无待裁决事项，`merge_owner` 保持 worker。
+
+**激活/刷新与在途门禁探测竞争**：`activate`/`rebind`/`refresh_repository` 推进 `generation` 时没有重置 `gate_probe_in_flight`。上一轮 `Body::Gate` 回复会先在 `apply` 的 generation 检查处被丢弃，永远走不到 `apply_gate`，于是 `gate_probe_in_flight` 恒为真，后续不再发起探测；结果是新加载仓库内容在 `revoke_repository` 之后仍长期显示（`RepositorySession::verify` 只看服务上下文，不看 storage gate）。`gate_denied` 同样会残留，使激活后无法恢复。
+
+修复：新增 `reset_gate_probe()`（推进 `gate_probe_request`、清 `gate_probe_in_flight`/`gate_probe_at`/`gate_denied`），在 `activate`、`rebind`、`refresh_repository` 调用；`Body::Gate` 携带该次探测的 `request`，`apply_gate` 只在 `request == gate_probe_request` 时落定，旧回复因此既不清除新探测的在途标志，也不发布过期仓库的判定。
+
+回归：`activation_resets_gate_probe_bookkeeping_and_recovers_from_denial` 构造“在途 + 已拒绝 + 旧代次回复”状态后 `activate`，断言在途标志与 `gate_denied` 被清除、探测身份推进、旧回复无法清除新探测的在途标志，且新探测结果可正常落定。
+
+本轮验证（同一源码）：`cargo test --locked --test repository offline` 全通过（含上述新回归）、`--test repository` 866 通过、`--test repository_overview` 44 通过、`cargo test --locked` 主程序 1138 / home 96 / notifications 579 / profile 279 / reader 250 / reader_images 771 / repository 866 / overview 44 全通过；`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。默认并发下 `--test notifications` 再次出现与本任务无关的既有 `reader_images::fixed_revision_images_persist_across_reopened_store_and_service` `InUse` 偶发失败，`--test-threads=1` 定向与随后完整重跑均通过；未修改该文件、未放宽断言，原始失败日志保留。
