@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条、第二轮 1 条、第三轮 1 条、第四轮 1 条、第五轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
+- 状态：Codex 五轮意见与主 Agent 基础验收的 3 条反例均已处理并复验。等待 `cache-runtime` 发布共享权限票据接口后按其契约收尾，以及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -30,11 +30,11 @@
 
 所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all -- --check` → exit 0（run `636cccda`；`cargo fmt --all` run `9fbbb087`）
+- `cargo fmt --all -- --check` → exit 0（run `a83eb229`；`cargo fmt --all` run `a75b0f9f`）
 - `cargo check --locked --all-targets` → exit 0（run `4bcec08f`、`5c20bcbe`）
-- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `deda1155`）
-- `cargo build --locked` → exit 0（run `0ec0fd13`）
-- `cargo test --locked` → exit 0，1140 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `84cb5d7a`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `a5d411e8`）
+- `cargo build --locked` → exit 0（run `686f101a`）
+- `cargo test --locked` → exit 0，1144 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `674e94af`）
 - `git diff --check` → exit 0
 
 此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
@@ -44,7 +44,7 @@
 
 新增受控组合与单元回归：
 
-- `app::pages::profile::tests::online_warmup_and_reopen_offline_restores_profile_readme_and_images_at_natural_height`：真实 `AccountService::open_with_cache` + `CacheStore` + `Accounts` 控制器 + `ProfilePage` 在线预热基本资料、pins、贡献日历、README 正文、仓库相对图片与外部图片，断网重开后从持久缓存完整恢复，展示历史快照徽章并保持自然高度与无内嵌滚动条。
+- `app::pages::profile::tests::online_warmup_and_reopen_offline_restores_profile_readme_and_images_at_natural_height`：真实 `AccountService::open_with_cache` + `CacheStore` + `Accounts` 控制器 + `ProfilePage` 在线预热基本资料、pins、贡献日历、README 正文、仓库相对图片与外部图片，断网后 **`ProfilePage::rebind`**（不销毁账户服务/CacheStore）恢复四类内容、内外图片与历史徽章，保持自然高度与无内嵌滚动条。这是同一进程内的页面级离线回放；真正的服务/存储冷启动由主 Agent 的 `acceptance_profile_reopens_service_and_store_without_online_revalidation` 覆盖，本文件不把它称为冷启动。
 - `app::pages::profile::tests::uncached_offline_and_online_recovery_work_without_masking_errors_as_absent_readme`：断网无缓存报 `NotCached` 并可重试；503 错误显示紧凑警告而非省略；404 与确认 `Missing` 省略且离线恢复仍保持省略。
 - `app::pages::profile::tests::partial_pins_and_calendar_and_section_miss_preserve_distinct_states`：部分 pins、单区块离线 `NotCached` 与重试恢复。
 - `app::pages::profile::tests::account_switch_pat_replace_removal_and_revocation_isolate_cache_and_stop_slow_pictures`：慢图片在途时换 PAT、移除账户与切账户立即取消在途图片并隔离旧聚合缓存。
@@ -81,6 +81,26 @@ Codex 第五轮（head `3828ac7`）一条意见成立并修复：
 
 7. **P2 大小写不同的路由在离线重开时无法取回 Basic 快照**：缓存键包含请求时的 login 原始拼写，而 `apply_basic` 会用服务器返回的 canonical login 覆盖 `self.login`，Shell 也会把路由改写成 canonical。于是以 `ALICE` 首次在线访问后，离线重开 canonical 路由（`alice`）会 miss，Profile 直接无法挂载。现 `read_profile_basic` 在在线成功且 canonical 与请求拼写不同时，用 canonical 拼写再读一次（同一会话、同一授权），把同一观察写入 canonical 键；常见已 canonical 的情形不产生额外请求。回归 `canonical_login_reopen_offline_restores_the_profile_before_canonicalization` 以 `ALICE` 首次访问、断网后按 canonical login 重开，仍恢复历史快照；反向验证（去掉 canonical 预热读）该用例超时失败。
 
+## 2026-11-04 主 Agent 基础验收后的返工
+
+主 Agent 冻结 `ebc8dea` 组合进独立验收 worktree（含 cache-runtime `e2c2230`、home-offline `2af61aa`），用 `profile_acceptance_tests.rs` 经本文件 `tests` 模块 `include!` 引入，得到 14 passed / 3 failed（run `5f274477`）。三条失败均为源码缺口，已在本分支修复：
+
+1. **P1 在线显示的聚合内容不随明确仓库撤权失效。** 原实现只给历史结果保存门禁 stamp，`check_authorization` 也只在 `any_historical` 时清屏；而 `revoke_repository` 刻意不推进 `AuthEpoch`，在线读取显示的旧聚合会留在屏幕上。
+   - 现在 `unpack_page_value` 给**所有**受授权约束的观察附带它读取时的聚合门禁 stamp（在线 `Network` 与历史 `HistoricalSnapshot` 等价），字段由 `historical_stamps` 改名为 `gate_stamps`。
+   - `check_authorization` 增加 `displayed_sections_are_stale()`：只要任一已显示 section 的 stamp 不再有效就视为失效，先取消监测任务、释放所有 section 在途句柄与收件箱，再通过 `retire_displayed_sections` 清空 `ProfileView`、README `ReaderView` 与图片 provider，留下可重试占位。撤销在线结果与撤销历史结果走同一路径。
+2. **P1 后台历史成功到 UI 发布之间漏掉撤权。** `verified_historical_stamp` 只在后台校验，`accepts` 只查尚未更新的 `cache_invalidated` 与 context/binding。
+   - `apply` 现在在**出队之后、`view.update` 之前**对随回复携带的同一 stamp 再做一次 `is_current()`（持 `CacheLease` 的进程内检查，不读 SQLite），失败即丢弃该回复并退休已显示内容；新捕获的 stamp 不会为旧回复背书。`accepts` 额外要求已列出的缓存绑定仍然存在。
+   - 该提交点检查正是 cache-runtime 正在发布的共享权限票据接口要承担的位置。**依赖记录**：其契约（`D:/githux-cache-runtime/.agents/output/cache-recovery-contract.md`）规定 `CacheStore::authorization(scope, None) -> Option<CacheAuthorization>` 与 `CacheAuthorization::is_current()`（无锁、无磁盘）供 UI 发布前调用，并要求回复携带原票据、禁止在 `apply` 另取新票据。接口合入后本页应把 `AggregateGateStamp` 迁移到该票据，不再自制持久 stamp；在此之前保留现有 lease 方案，二者语义一致（撤权/换 PAT/拒绝/退休失效，普通淘汰与写入不失效）。
+3. **P2 运行期缓存故障让健康在线 Profile 失败。** 四个 `read_profile_*` 原来只对 `CacheError::AccessDenied` 回退普通在线读取，SQLite/I/O 故障被映射成 `Unavailable`。
+   - 新增 `is_uncached_fallback`：除 `CacheError::Stale`（授权/邻近代次结果，保留原义）外的缓存错误都回退普通 `PageReadSession` 读取，仍走原有取消、context 与授权检查，不读取旧私有缓存；外层离线回放遇到同类缓存故障时改为返回原始网络错误而不是缓存错误。
+   - 回退得到的在线结果同样携带 stamp，保持第 1 条的撤权义务。
+
+### 反例接入与反向验证
+
+- `src/app/pages/profile_acceptance_tests.rs` 原样纳入本分支，经 `tests` 模块末尾 `include!` 引入（不在 `app/pages/mod.rs` 注册）。
+- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 17 passed / 0 failed（run `3159ce36`、`f6587e20`），三条反例全部通过。
+- 反向验证（run `1e8ef5cf`）：把 stamp 恢复为「仅历史」、去掉发布前检查、把 `is_uncached_fallback` 收窄回仅 `AccessDenied` 后，三条反例重新全部失败（`acceptance_revocation_also_clears_online_profile`、`acceptance_queued_historical_profile_is_rejected_after_revocation`、`acceptance_profile_cache_write_failure_keeps_online_result`），冷启动用例仍通过——证明三条用例确实锁住这三处缺口。
+
 ## 原生验收步骤与边界（`pending`）
 
 - **Runtime 依赖说明**：应用启动处打开唯一 `CacheStore` 并调用 `AccountService::open_with_cache` 属于并行任务 `cache-runtime` 的文件所有权（`src/app/accounts/**`）。在 `cache-runtime` 合入 `main` 前，正式二进制启动默认走无缓存 `AccountService::open`（在线模式不回归）；合入并 rebase 后，正式二进制自动向 `ProfilePage` 提供 `RepoService::cache(context)` 绑定。
@@ -94,4 +114,8 @@ Codex 第五轮（head `3828ac7`）一条意见成立并修复：
 
 ## 候选可复用教训（供 `docs-current-state` 评估）
 
-- 本任务未遇到需要修改共享规范的新事故；既有 L012（组件与正式页面组合验证）、L013（Reader Flow 自然高度）与 L014（可选 README 缺省与真实错误区分）均已在实现与测试中直接应用。
+- **发布检查必须在 UI 真正提交之前覆盖权限代次。** 后台读完再校验、把「80ms 后可能补清理」当作保证，都会留下「后台成功已返回、UI 尚未 apply」的窗口；校验要作用在回复携带的**同一**代次票据上，并在 `view.update` 之前执行。重新捕获票据不能为旧回复背书。
+- **数据来源（在线/历史）不改变撤权义务。** 明确撤权不推进 `AuthEpoch`，所以「当前 session 仍有效」不能作为保留已显示内容的理由；在线读取的聚合、派生描述、README 及其图片都要与历史快照使用同一失效判据。
+- **缓存是能力增强，不是前置条件。** 运行期缓存故障（SQLite/I-O）必须降级到原在线路径；只有真正的授权拒绝、取消与过期上下文才保持原义。
+
+既有 L002（模拟与真实分层）、L012（组件与正式页面组合验收）、L013（Reader Flow 自然高度）与 L014（可选 README 缺省与真实错误区分）在本轮继续适用；LESSONS 文件由其他任务维护，本轮只在此记录证据。

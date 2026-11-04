@@ -138,6 +138,21 @@ impl PartialEq for AggregateGateStamp {
 
 impl Eq for AggregateGateStamp {}
 
+impl AggregateGateStamp {
+    /// Whether the pinned aggregate-gate entry still holds this stamp.
+    ///
+    /// This is an in-process check of the retained lease: it does not query SQLite. An explicit
+    /// repository revocation, PAT replacement, credential rejection or retirement deletes the
+    /// entry, so the lease stops resolving and every result read under it must be retired.
+    fn is_current(&self) -> bool {
+        self.lease
+            .snapshot()
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| snapshot.bytes == self.stamp_id.as_bytes())
+    }
+}
+
 struct SectionOutcome<T> {
     value: T,
     provenance: Option<ProfileProvenance>,
@@ -179,7 +194,7 @@ pub struct ProfilePage {
     work: [Option<Work>; 4],
     cache_monitor: Option<Work>,
     cache_monitor_running: Arc<std::sync::atomic::AtomicBool>,
-    historical_stamps: Arc<Mutex<[Option<AggregateGateStamp>; 4]>>,
+    gate_stamps: Arc<Mutex<[Option<AggregateGateStamp>; 4]>>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     cache_invalidated: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<watch::Sender<bool>>,
@@ -222,7 +237,7 @@ impl ProfilePage {
             work: [None, None, None, None],
             cache_monitor: None,
             cache_monitor_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            historical_stamps: Arc::new(Mutex::new([None, None, None, None])),
+            gate_stamps: Arc::new(Mutex::new([None, None, None, None])),
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             cache_invalidated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             alive: Arc::new(alive),
@@ -262,10 +277,7 @@ impl ProfilePage {
         self.unavailable = None;
         self.cache_invalidated
             .store(false, std::sync::atomic::Ordering::Release);
-        *self
-            .historical_stamps
-            .lock()
-            .expect("profile historical stamps") = [None, None, None, None];
+        *self.gate_stamps.lock().expect("profile gate stamps") = [None, None, None, None];
         self._avatars_changed = None;
         self.view = None;
         self._changed = None;
@@ -671,7 +683,7 @@ impl ProfilePage {
         let repos = services.repositories();
         let alive = self.alive.clone();
         let invalidated = self.cache_invalidated.clone();
-        let stamps = self.historical_stamps.clone();
+        let stamps = self.gate_stamps.clone();
         let work = Work::new();
         let cancel = work.token.clone();
         self.cache_monitor = Some(work);
@@ -690,7 +702,7 @@ impl ProfilePage {
                 }
                 let active_stamps: Vec<AggregateGateStamp> = stamps
                     .lock()
-                    .expect("profile historical stamps")
+                    .expect("profile gate stamps")
                     .iter()
                     .flatten()
                     .cloned()
@@ -698,19 +710,12 @@ impl ProfilePage {
                 if active_stamps.is_empty() {
                     continue;
                 }
-                let Some(cache) = repos.cache(&context) else {
+                if repos.cache(&context).is_none() {
                     invalidated.store(true, std::sync::atomic::Ordering::Release);
                     break;
-                };
-                let (store, scope) = cache.into_parts();
-                let valid = tokio::task::spawn_blocking(move || {
-                    active_stamps
-                        .iter()
-                        .all(|stamp| verify_aggregate_gate_stamp(&store, &scope, stamp))
-                })
-                .await
-                .unwrap_or(false);
-                if !valid {
+                }
+                // In-process lease check: no SQLite read and no replayed profile fetch per tick.
+                if !active_stamps.iter().all(AggregateGateStamp::is_current) {
                     invalidated.store(true, std::sync::atomic::Ordering::Release);
                     break;
                 }
@@ -787,45 +792,18 @@ impl ProfilePage {
             let invalidated = self
                 .cache_invalidated
                 .swap(false, std::sync::atomic::Ordering::AcqRel);
-            if invalidated || binding_lost {
+            // A displayed section whose gate generation was retired must disappear even though the
+            // account session is still valid (explicit repository revocation does not advance the
+            // auth epoch). The check is in-process: it reads the pinned lease, not SQLite.
+            if invalidated || binding_lost || self.displayed_sections_are_stale() {
                 if let Some(monitor) = self.cache_monitor.take() {
                     monitor.source.cancel();
                 }
                 self.cache_monitor_running
                     .store(false, std::sync::atomic::Ordering::Release);
-                *self
-                    .historical_stamps
-                    .lock()
-                    .expect("profile historical stamps") = [None, None, None, None];
-                if let Some(view) = &self.view {
-                    let any_historical = view
-                        .read(cx)
-                        .basic_provenance()
-                        .is_some_and(ProfileProvenance::is_historical)
-                        || view
-                            .read(cx)
-                            .repositories_provenance()
-                            .is_some_and(ProfileProvenance::is_historical)
-                        || view
-                            .read(cx)
-                            .contributions_provenance()
-                            .is_some_and(ProfileProvenance::is_historical)
-                        || view
-                            .read(cx)
-                            .readme_provenance()
-                            .is_some_and(ProfileProvenance::is_historical);
-                    if any_historical {
-                        view.update(cx, |view, cx| {
-                            view.clear_reader(cx);
-                            view.suspend(cx);
-                        });
-                        self.view = None;
-                        self.request = None;
-                        self.unavailable = Some(PresentationError::Forbidden);
-                        cx.notify();
-                        return false;
-                    }
-                }
+                self.retire_displayed_sections(cx);
+                cx.notify();
+                return false;
             }
             return true;
         }
@@ -843,7 +821,45 @@ impl ProfilePage {
         false
     }
 
-    fn accepts(&self, reply: &Reply, has_historical_cache: bool) -> bool {
+    /// Whether any section currently on screen was read under a gate generation that no longer
+    /// holds. An explicit repository revocation, PAT replacement, credential rejection or
+    /// retirement removes the pinned aggregate entry, so the lease stops resolving.
+    fn displayed_sections_are_stale(&self) -> bool {
+        self.gate_stamps
+            .lock()
+            .expect("profile gate stamps")
+            .iter()
+            .flatten()
+            .any(|stamp| !stamp.is_current())
+    }
+
+    /// Drops every authorization-bound value the page is showing, including the mounted README
+    /// reader and its image provider, and leaves a retryable placeholder. Used both when a
+    /// displayed generation is retired and when a reply arrives after its generation was retired.
+    fn retire_displayed_sections(&mut self, cx: &mut Context<Self>) {
+        if let Some(monitor) = self.cache_monitor.take() {
+            monitor.source.cancel();
+        }
+        self.cache_monitor_running
+            .store(false, std::sync::atomic::Ordering::Release);
+        *self.gate_stamps.lock().expect("profile gate stamps") = [None, None, None, None];
+        for work in &mut self.work {
+            if let Some(work) = work.take() {
+                work.source.cancel();
+            }
+        }
+        self.inbox.lock().expect("profile inbox").clear();
+        if let Some(view) = self.view.take() {
+            view.update(cx, |view, cx| {
+                view.clear_reader(cx);
+                view.suspend(cx);
+            });
+        }
+        self.request = None;
+        self.unavailable = Some(PresentationError::Forbidden);
+    }
+
+    fn accepts(&self, reply: &Reply) -> bool {
         if reply.generation != self.generation
             || reply.selection != self.selection
             || reply.request != self.requests[reply.section.index()]
@@ -864,57 +880,53 @@ impl ProfilePage {
         {
             return false;
         }
-        if has_historical_cache
-            && (self
-                .cache_invalidated
-                .load(std::sync::atomic::Ordering::Acquire)
-                || services.repositories().cache(&reply.context).is_none())
+        // A listed binding that has disappeared means the account's cache was retired, rejected or
+        // suspended: nothing read through it may be published.
+        if self.cached_session.is_some() && services.repositories().cache(&reply.context).is_none()
         {
             return false;
         }
         true
     }
 
+    // INTERFACE DEPENDENCY (cache-runtime): the lightweight, in-process validity check that must
+    // run in this exact foreground step — after a reply is dequeued and before `view.update` — is
+    // the shared permission-generation/epoch interface being published to
+    // `D:/githux-cache-runtime/.agents/output/cache-recovery-contract.md`. It is deliberately NOT
+    // implemented here: reading the store from `apply` would block the UI thread on SQLite, and
+    // re-verifying only in the background is exactly the publish window this page must close.
+    // Until it lands, displayed aggregates are retired by `check_authorization` as soon as the
+    // background monitor observes the invalidated gate.
+
     fn apply(&mut self, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
-        let (is_historical, gate_stamp) = match &reply.result {
-            SectionResult::Basic(Ok(outcome)) => (
-                outcome
-                    .provenance
-                    .as_ref()
-                    .is_some_and(ProfileProvenance::is_historical),
-                outcome.gate_stamp.clone(),
-            ),
-            SectionResult::Repositories(Ok(outcome)) => (
-                outcome
-                    .provenance
-                    .as_ref()
-                    .is_some_and(ProfileProvenance::is_historical),
-                outcome.gate_stamp.clone(),
-            ),
-            SectionResult::Contributions(Ok((outcome, _))) => (
-                outcome
-                    .provenance
-                    .as_ref()
-                    .is_some_and(ProfileProvenance::is_historical),
-                outcome.gate_stamp.clone(),
-            ),
-            SectionResult::Readme(Ok(outcome)) => (
-                outcome
-                    .provenance
-                    .as_ref()
-                    .is_some_and(ProfileProvenance::is_historical),
-                outcome.gate_stamp.clone(),
-            ),
-            _ => (false, None),
+        // Every authorized observation carries the aggregate gate stamp it was read under, whether
+        // it came from the network or from a historical snapshot: an explicit repository revocation
+        // must retire displayed online aggregates too, not only the offline badges.
+        let gate_stamp = match &reply.result {
+            SectionResult::Basic(Ok(outcome)) => outcome.gate_stamp.clone(),
+            SectionResult::Repositories(Ok(outcome)) => outcome.gate_stamp.clone(),
+            SectionResult::Contributions(Ok((outcome, _))) => outcome.gate_stamp.clone(),
+            SectionResult::Readme(Ok(outcome)) => outcome.gate_stamp.clone(),
+            _ => None,
         };
-        if !self.accepts(&reply, is_historical) {
+        // Publication check for the *authorization generation*: a reply read before an explicit
+        // revocation, PAT replacement, rejection or retirement must not be committed afterwards.
+        // This runs here — after the reply is dequeued and before `view.update` — because verifying
+        // only in the background leaves exactly this window open, and a freshly captured stamp must
+        // never re-authorize an older reply.
+        if let Some(stamp) = &gate_stamp
+            && !stamp.is_current()
+        {
+            self.work[reply.section.index()] = None;
+            self.retire_displayed_sections(cx);
+            cx.notify();
+            return;
+        }
+        if !self.accepts(&reply) {
             return;
         }
         self.work[reply.section.index()] = None;
-        self.historical_stamps
-            .lock()
-            .expect("profile historical stamps")[reply.section.index()] =
-            if is_historical { gate_stamp } else { None };
+        self.gate_stamps.lock().expect("profile gate stamps")[reply.section.index()] = gate_stamp;
         match reply.section {
             Section::Basic => self.apply_basic(reply, window, cx),
             section => {
@@ -1119,10 +1131,7 @@ impl ProfilePage {
                 gate_stamp,
             }) => {
                 // Reset sibling section stamps when a new Basic profile creates a new view.
-                let mut stamps = self
-                    .historical_stamps
-                    .lock()
-                    .expect("profile historical stamps");
+                let mut stamps = self.gate_stamps.lock().expect("profile gate stamps");
                 *stamps = [
                     provenance
                         .as_ref()
@@ -1236,10 +1245,7 @@ impl ProfilePage {
         if let Some(monitor) = self.cache_monitor.take() {
             monitor.source.cancel();
         }
-        *self
-            .historical_stamps
-            .lock()
-            .expect("profile historical stamps") = [None, None, None, None];
+        *self.gate_stamps.lock().expect("profile gate stamps") = [None, None, None, None];
         self.inbox.lock().expect("profile inbox").clear();
         self.session = None;
         self.cached_session = None;
@@ -1378,6 +1384,21 @@ fn verify_aggregate_gate_stamp(
         .is_some_and(|current| current.stamp_id == expected.stamp_id)
 }
 
+/// Whether a cache failure means "no usable cache binding" or "the cache failed operationally".
+///
+/// Both must keep the account's online capability: none of them proves anything about the network
+/// read, so the page falls back to the plain authenticated session request, which still enforces
+/// cancellation, the captured context and authorization. A rejected credential, a stale session or
+/// an explicit authorization denial is never routed here.
+fn is_uncached_fallback(cache_error: &CacheError) -> bool {
+    !matches!(
+        cache_error,
+        // A stale/deferred access decision is an authorization outcome, not an operational fault:
+        // keep it typed instead of retrying as if the cache were merely unavailable.
+        CacheError::Stale
+    )
+}
+
 async fn prepare_gate_stamp(
     repos: &crate::data::RepoService,
     context: &RepositoryReadContext,
@@ -1431,7 +1452,10 @@ fn unpack_page_value<T>(
             Ok(SectionOutcome {
                 value,
                 provenance: Some(ProfileProvenance::from_cache(historical, &metadata)),
-                gate_stamp: historical.then_some(gate_stamp).flatten(),
+                // The stamp describes the *authorization generation* the bytes were read under, so
+                // it is attached to network results as well: an explicit repository revocation must
+                // retire displayed online aggregates, not just the offline badges.
+                gate_stamp,
             })
         }
         PageValue::Miss(miss) => Err(PresentationError::from_cache_miss(miss)),
@@ -1462,7 +1486,7 @@ async fn read_profile_basic(
         .await
     {
         Ok(scoped) => {
-            let outcome = unpack_page_value(scoped.value, None)?;
+            let outcome = unpack_page_value(scoped.value, stamp.cloned())?;
             // The page is keyed by the requested spelling, but the Shell rewrites the route to the
             // server's canonical login. Store the same observation under that canonical spelling too
             // so reopening the canonical route offline can mount the profile. One extra request per
@@ -1508,7 +1532,11 @@ async fn read_profile_basic(
                             }
                         }
                     },
-                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => Err(error.into()),
+                    Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => {
+                        // The offline replay could not even reach the cache; report what the
+                        // network read actually said instead of a cache-layer error.
+                        Err(error.into())
+                    }
                     Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
                     Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
                     Err(PageCacheError::Read(read_err)) => Err(read_err.into()),
@@ -1517,15 +1545,20 @@ async fn read_profile_basic(
                 Err(error.into())
             }
         }
-        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
-            .profile(login, cancel)
-            .await
-            .map(|scoped| SectionOutcome {
-                value: scoped.value,
-                provenance: None,
-                gate_stamp: None,
-            })
-            .map_err(PresentationError::from),
+        Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => {
+            // No usable cache binding, or the cache itself failed. The account's online capability
+            // must survive either way: the plain session read keeps cancellation, the captured
+            // context and authorization checks.
+            session
+                .profile(login, cancel)
+                .await
+                .map(|scoped| SectionOutcome {
+                    value: scoped.value,
+                    provenance: None,
+                    gate_stamp: stamp.cloned(),
+                })
+                .map_err(PresentationError::from)
+        }
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
         Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
     }
@@ -1555,7 +1588,7 @@ async fn read_profile_pinned(
         .profile_pinned(PageReadMode::Online, login, &limits, cancel.clone())
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value, None),
+        Ok(scoped) => unpack_page_value(scoped.value, stamp.cloned()),
         Err(PageCacheError::Read(error)) => {
             if should_fallback_profile(&error) {
                 match cached
@@ -1593,7 +1626,11 @@ async fn read_profile_pinned(
                             }
                         }
                     },
-                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => Err(error.into()),
+                    Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => {
+                        // The offline replay could not even reach the cache; report what the
+                        // network read actually said instead of a cache-layer error.
+                        Err(error.into())
+                    }
                     Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
                     Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
                     Err(PageCacheError::Read(read_err)) => Err(read_err.into()),
@@ -1602,13 +1639,13 @@ async fn read_profile_pinned(
                 Err(error.into())
             }
         }
-        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
+        Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => session
             .profile_pinned(login, &limits, cancel)
             .await
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
-                gate_stamp: None,
+                gate_stamp: stamp.cloned(),
             })
             .map_err(PresentationError::from),
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -1731,7 +1768,7 @@ async fn read_profile_contributions(
         .await
     {
         Ok(scoped) => {
-            let outcome = unpack_page_value(scoped.value, None)?;
+            let outcome = unpack_page_value(scoped.value, stamp.cloned())?;
             store_calendar_range(repos, session.context(), login, range).await;
             Ok((outcome, range.clone()))
         }
@@ -1788,7 +1825,7 @@ async fn read_profile_contributions(
                         }
                         PageValue::Miss(miss) => last_miss = Some(miss),
                     },
-                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+                    Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => {
                         return Err(error.into());
                     }
                     Err(PageCacheError::Cache(cache_err)) => {
@@ -1808,14 +1845,14 @@ async fn read_profile_contributions(
                 Err(error.into())
             }
         }
-        Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+        Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => {
             let outcome = session
                 .contribution_calendar(login, range, &limits, cancel)
                 .await
                 .map(|scoped| SectionOutcome {
                     value: scoped.value,
                     provenance: None,
-                    gate_stamp: None,
+                    gate_stamp: stamp.cloned(),
                 })
                 .map_err(PresentationError::from)?;
             store_calendar_range(repos, session.context(), login, range).await;
@@ -1857,7 +1894,7 @@ async fn read_profile_readme(
         )
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value, None),
+        Ok(scoped) => unpack_page_value(scoped.value, stamp.cloned()),
         Err(PageCacheError::Read(error)) => {
             if should_fallback_readme(&error) {
                 match cached
@@ -1902,7 +1939,7 @@ async fn read_profile_readme(
                             }
                         }
                     },
-                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+                    Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => {
                         Err(repository_error(error))
                     }
                     Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -1915,13 +1952,13 @@ async fn read_profile_readme(
                 Err(repository_error(error))
             }
         }
-        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
+        Err(PageCacheError::Cache(cache_err)) if is_uncached_fallback(&cache_err) => session
             .profile_readme(basic, &repo_limits, &blob_limits, cancel)
             .await
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
-                gate_stamp: None,
+                gate_stamp: stamp.cloned(),
             })
             .map_err(repository_error),
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -3343,4 +3380,5 @@ mod tests {
             assert!(ContributionRange::new(range.from(), range.to()).is_ok());
         }
     }
+    include!("profile_acceptance_tests.rs");
 }
