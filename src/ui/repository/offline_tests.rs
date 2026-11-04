@@ -778,6 +778,11 @@ fn cached_extras_report_a_historical_snapshot(cx: &mut TestAppContext) {
         );
         assert!(view.languages().is_historical());
     });
+    assert!(
+        page.read_with(cx, |page, _| page.extras.counts.is_none()),
+        "cached OPEN counts are withheld instead of drawn as freshly verified badges"
+    );
+    assert!(page.read_with(cx, |page, _| page.extras.counts_historical));
     frames(cx);
     assert!(
         cx.debug_bounds("overview-releases-cached").is_some(),
@@ -933,4 +938,67 @@ fn cache_revocation_and_credential_rejection_clear_displayed_data_and_block_offl
         });
         release_page(&host, cx);
     }
+}
+
+/// A queued reply from before a manual refresh must not repopulate the page, and
+/// the refresh must invalidate the previous branch/revision identity.
+#[gpui::test]
+fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(!page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // Capture the current generation identities and a real snapshot, then queue a
+    // stale revision reply that would restore the previous branch state.
+    let (snapshot, old_branch_request, old_generation) = page.read_with(cx, |page, _| {
+        (
+            page.branch
+                .as_ref()
+                .expect("a loaded branch")
+                .snapshot
+                .clone(),
+            page.branch_request,
+            page.generation,
+        )
+    });
+    page.update_in(cx, |page, window, cx| {
+        page.inbox
+            .lock()
+            .expect("inbox")
+            .push_back(super::super::Message {
+                generation: old_generation,
+                branch_request: old_branch_request,
+                context: page.context.clone().expect("context"),
+                body: super::super::Body::Revision {
+                    branch: "main".into(),
+                    request: old_branch_request,
+                    result: Ok((snapshot.clone(), None)),
+                },
+            });
+        page.refresh_repository(cx);
+        page.drain(window, cx);
+    });
+    page.read_with(cx, |page, _| {
+        assert!(
+            page.generation != old_generation,
+            "refresh advances the page generation"
+        );
+        assert!(
+            page.branch_request != old_branch_request,
+            "refresh advances the branch request identity"
+        );
+        assert!(
+            page.details().is_none() && page.branch.is_none(),
+            "a queued reply from the previous generation cannot repopulate the page"
+        );
+    });
+    // The refresh itself completes normally under the new generation.
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && page.details().is_some()
+    });
+    release_page(&host, cx);
 }

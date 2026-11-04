@@ -96,7 +96,7 @@ impl Extras {
             && self.session.as_ref().is_some_and(|session| {
                 Some(session.context()) == page.context.as_ref() && session.verify()
             })
-            && page.cache_allowed(binding.repository.id())
+            && page.cache_allowed()
     }
 }
 impl RepositoryPage {
@@ -334,9 +334,17 @@ impl RepositoryPage {
                     .ok()
                     .filter(|(value, _)| value.repository == reply.binding.repository)
                 {
-                    Some((value, historical)) => {
+                    // Historical counts are withheld rather than drawn
+                    // identically to freshly verified OPEN counts: the tab badges
+                    // have no per-count provenance marker, so a stale number
+                    // would read as current.
+                    Some((_, true)) => {
+                        self.extras.counts = None;
+                        self.extras.counts_historical = true;
+                    }
+                    Some((value, false)) => {
                         self.extras.counts = Some(value);
-                        self.extras.counts_historical = historical;
+                        self.extras.counts_historical = false;
                     }
                     None => {
                         self.extras.counts = None;

@@ -93,6 +93,10 @@ pub const TREE_WIDTH: f32 = 268.0;
 /// Height of one file-tree row.
 pub const TREE_ROW_HEIGHT: f32 = 26.0;
 
+/// Minimum spacing between background cache-gate probes while the page is on
+/// screen. The gate changes only through explicit account/cache events.
+const GATE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The capabilities a host injects. They are the only way this page reaches
 /// GitHub; nothing here opens storage or credentials on its own.
 #[derive(Clone)]
@@ -327,6 +331,11 @@ enum Body {
         result: Result<DirectoryTree, PageError>,
     },
     Content(ContentReply),
+    /// Result of the background cache-gate probe. Storage I/O never runs on the
+    /// UI thread; only this boolean is published back.
+    Gate {
+        allowed: bool,
+    },
 }
 
 /// One content reply, bundled so the publication check reads as one step.
@@ -397,6 +406,18 @@ pub struct RepositoryPage {
     active: bool,
     /// Set when authorization changed under a running generation.
     authorization_lost: bool,
+    /// Latest background cache-gate verdict for the bound repository. Published
+    /// by `Body::Gate`; never computed by a synchronous store read on the UI
+    /// thread.
+    gate_denied: bool,
+    /// True while one gate probe is outstanding, so render/receiver ticks cannot
+    /// start unbounded storage work.
+    gate_probe_in_flight: bool,
+    /// Monotonic probe epoch, so a reply for an older generation is discarded.
+    gate_probe_request: u64,
+    /// When the last background gate probe started, so the 30 ms receiver beat
+    /// does not turn into a 33 Hz SQLite read loop.
+    gate_probe_at: Option<std::time::Instant>,
     tree_scroll: UniformListScrollHandle,
     tree_motion: crate::ui::scroll::Motion<gpui::ScrollHandle>,
     tree_bars: crate::ui::scroll::Bars,
@@ -476,6 +497,10 @@ impl RepositoryPage {
             tab: RepositoryTab::Code,
             active: false,
             authorization_lost: false,
+            gate_denied: false,
+            gate_probe_in_flight: false,
+            gate_probe_request: 0,
+            gate_probe_at: None,
             tree_scroll,
             tree_motion: crate::ui::scroll::Motion::new(base),
             tree_bars: crate::ui::scroll::Bars::new(),
@@ -727,6 +752,12 @@ impl RepositoryPage {
     }
 
     /// Revalidates repository summary, branches, revision and overview online.
+    ///
+    /// A refresh replaces the whole browsing generation: queued replies from the
+    /// previous load must not repopulate the page. Cancelling `work` only stops
+    /// future I/O, so the page generation *and* the branch request identity are
+    /// advanced before the new read starts; every older reply then fails the
+    /// publication checks in `apply`.
     pub fn refresh_repository(&mut self, cx: &mut Context<Self>) {
         if !self.active || self.authorization_lost {
             self.activate(cx);
@@ -736,12 +767,21 @@ impl RepositoryPage {
         self.extras.stop();
         self.cancel_reader_interactions(cx);
         self.stop_work();
+        self.generation = self.generation.wrapping_add(1);
+        self.branch_request = self.branch_request.wrapping_add(1);
+        self.gate_denied = false;
+        self.gate_probe_in_flight = false;
+        self.inbox.lock().expect("repository page inbox").clear();
         self.work = Some(Work::new());
         self.pending_content = None;
         self.selection_request = self.selection_request.wrapping_add(1);
+        self.details = None;
+        self.details_provenance = None;
         self.branch = None;
         self.branches = None;
+        self.branches_provenance = None;
         self.branches_error = None;
+        self.branches_loading = false;
         self.reader = None;
         self.readme_path = None;
         self.reader_status = ReaderStatus::Loading;
@@ -1395,34 +1435,106 @@ impl RepositoryPage {
         }
     }
 
-    pub(super) fn cache_allowed(&self, repository_id: u64) -> bool {
-        let Some(context) = self.context.as_ref() else {
-            return false;
-        };
-        let Some(expected) = self.cache_binding.as_ref() else {
+    /// Cheap, non-blocking gate verdict used by render/apply/acceptance checks.
+    ///
+    /// The store probe itself is blocking SQLite work, so it never runs here;
+    /// [`RepositoryPage::request_gate_probe`] schedules it on the background
+    /// executor and publishes the boolean back through `Body::Gate`.
+    pub(super) fn cache_allowed(&self) -> bool {
+        if self.cache_binding.is_none() {
             return true;
-        };
-        let Some(current) = self.services.accounts.repo_service().cache(context) else {
-            return false;
-        };
-        if current.scope() != expected.scope() {
-            return false;
         }
-        let Ok(key) = CacheKey::mutable(
-            Some(repository_id),
-            true,
-            "authorization-probe",
-            "gate-v1",
-            "githux-repository-v1",
-            1,
-        ) else {
-            return false;
+        self.context.is_some() && !self.gate_denied
+    }
+
+    /// Schedules at most one background cache-gate probe for the current
+    /// generation and repository. Called from render and the receiver tick, so it
+    /// must not perform storage I/O itself.
+    pub(super) fn request_gate_probe(&mut self) {
+        if self.gate_probe_in_flight || self.authorization_lost || !self.active {
+            return;
+        }
+        // A bounded refresh cadence: the gate only changes through explicit
+        // account/cache events, so a couple of seconds of latency is acceptable
+        // and the storage mutex is not taken on every receiver beat.
+        if self
+            .gate_probe_at
+            .is_some_and(|at| at.elapsed() < GATE_PROBE_INTERVAL)
+        {
+            return;
+        }
+        self.gate_probe_at = Some(std::time::Instant::now());
+        let Some(expected) = self.cache_binding.clone() else {
+            return;
         };
-        !matches!(
-            current.store().read(current.scope(), &key),
-            Err(crate::storage::cache::CacheError::AccessDenied
-                | crate::storage::cache::CacheError::Stale)
-        )
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.gate_probe_request = self.gate_probe_request.wrapping_add(1);
+        self.gate_probe_in_flight = true;
+        let inbox = self.inbox.clone();
+        let alive = self.alive.clone();
+        let generation = self.generation;
+        let branch_request = self.branch_request;
+        let repo_service = self.services.accounts.repo_service();
+        let repository_id = self.details.as_ref().map(|details| details.identity.id());
+        let message_context = context.clone();
+        let spawned = self.services.executor.handle().spawn(async move {
+            let allowed = tokio::task::spawn_blocking(move || {
+                let Some(current) = repo_service.cache(&context) else {
+                    return false;
+                };
+                if current.scope() != expected.scope() {
+                    return false;
+                }
+                let Some(repository_id) = repository_id else {
+                    // No per-repository gate yet; the account binding match is
+                    // the only available evidence and it already passed.
+                    return true;
+                };
+                let Ok(key) = CacheKey::mutable(
+                    Some(repository_id),
+                    true,
+                    "authorization-probe",
+                    "gate-v1",
+                    "githux-repository-v1",
+                    1,
+                ) else {
+                    return false;
+                };
+                !matches!(
+                    current.store().read(current.scope(), &key),
+                    Err(crate::storage::cache::CacheError::AccessDenied
+                        | crate::storage::cache::CacheError::Stale)
+                )
+            })
+            .await
+            .unwrap_or(false);
+            if *alive.borrow() {
+                inbox
+                    .lock()
+                    .expect("repository page inbox")
+                    .push_back(Message {
+                        generation,
+                        branch_request,
+                        context: message_context,
+                        body: Body::Gate { allowed },
+                    });
+            }
+        });
+        if spawned.is_err() {
+            self.gate_probe_in_flight = false;
+        }
+    }
+
+    /// Applies a background gate verdict for the current generation.
+    fn apply_gate(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        self.gate_probe_in_flight = false;
+        if allowed {
+            return;
+        }
+        self.gate_denied = true;
+        self.check_authorization(cx);
     }
 
     fn stop_work(&mut self) {
@@ -1475,6 +1587,9 @@ impl RepositoryPage {
             let mut inbox = self.inbox.lock().expect("repository page inbox");
             inbox.drain(..).collect()
         };
+        // Storage I/O stays on the background executor; only the resulting
+        // boolean is applied here.
+        self.request_gate_probe();
         self.check_authorization(cx);
         for message in messages {
             self.apply(message, window, cx);
@@ -1490,16 +1605,10 @@ impl RepositoryPage {
         if !self.active || self.authorization_lost {
             return;
         }
-        let cache_ok = match &self.details {
-            Some(details) => self.cache_allowed(details.identity.id()),
-            None => self.cache_binding.as_ref().is_none_or(|expected| {
-                self.context
-                    .as_ref()
-                    .and_then(|context| self.services.accounts.repo_service().cache(context))
-                    .is_some_and(|current| current.scope() == expected.scope())
-            }),
-        };
-        if self.session.as_ref().is_some_and(RepositorySession::verify) && cache_ok {
+        // Both checks are non-blocking: the session verifies in memory and the
+        // cache verdict is the last background probe result. Storage I/O is
+        // never performed here.
+        if self.session.as_ref().is_some_and(RepositorySession::verify) && self.cache_allowed() {
             return;
         }
         self.stop_star();
@@ -1549,12 +1658,9 @@ impl RepositoryPage {
                 .accounts
                 .repo_service()
                 .is_current(&message.context)
-            || self
-                .details
-                .as_ref()
-                .is_some_and(|details| !self.cache_allowed(details.identity.id()))
+            || !self.cache_allowed()
             || (message.branch_request != self.branch_request
-                && !matches!(&message.body, Body::Branches(_)))
+                && !matches!(&message.body, Body::Branches(_) | Body::Gate { .. }))
         {
             return;
         }
@@ -1586,6 +1692,7 @@ impl RepositoryPage {
                 result,
             } => self.apply_directory(branch, commit, path, result, cx),
             Body::Content(content) => self.apply_content(content, window, cx),
+            Body::Gate { allowed } => self.apply_gate(allowed, cx),
         }
     }
 
@@ -2805,6 +2912,10 @@ pub(crate) fn format_sync_age(verified_at_ms: i64) -> String {
 
 impl Render for RepositoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Both of these are non-blocking: the gate probe is scheduled on the
+        // background executor and its boolean result is applied on a later tick,
+        // so a paint never takes the cache store mutex or runs SQLite.
+        self.request_gate_probe();
         self.check_authorization(cx);
         let rows = self.refresh_rows();
         let view = view::render(self, rows, window, cx);

@@ -47,3 +47,15 @@
 
 - `cache-runtime`（应用启动时打开唯一 `CacheStore` 并通过 `AccountService::open_with_cache` 注入正式 Shell）目前仍在等待上游 `sidebar-cache`（PR #70），尚未合入 `main`。因此当前 `main` 的正式二进制启动仍走无缓存 `AccountService::open`，本页面在此状态下保持原有在线路径；待 `cache-runtime` 合入 `main` 并 rebase 后即可在正式 Shell 中端到端启用跨重启离线仓库浏览。
 - PR 标记 `pending`，等待负责人进行真实 Windows 原生窗口验收。
+
+## PR #73 第一轮审查修复（28436cd）
+
+Codex 提出 3 项 P2，均成立且可直接修复；无待裁决事项，`merge_owner` 保持 worker。
+
+1. **门禁探测占据 UI 线程**：原 `cache_allowed(repo_id)` 在 `check_authorization`（render 每帧 + receiver 每 30ms）里同步调用 `CacheStore::read`，即 UI 线程上取 store mutex 并执行 SQLite 查询，缓存发布/淘汰/恢复时可卡住滚动与输入。修复：`cache_allowed()` 改为纯内存判定（最近一次后台探测结果 + 绑定时 `scope` 语义），新增 `request_gate_probe`：最多每 2 秒调度一次、同一时刻只有一个在途，真正的 store 探测跑在 `BackgroundExecutor` 的 blocking worker，结果经新的 `Body::Gate { allowed }` 回到页面并复用同一条 context/generation 发布检查。
+2. **Refresh 未作废旧代次回复**：`refresh_repository` 只取消 `work`（只停未来 I/O），既不推进 `generation` 也不推进 `branch_request`，已排队的旧 revision 回复仍能通过 `apply`/`apply_revision` 回填旧分支快照，并使后续读取落入 `OfflineOnly`。修复：刷新前推进 `generation` 与 `branch_request`、清空在途队列、重置 `details/branches/provenance`，并把 `gate_denied`/探测状态归位。
+3. **历史计数冒充最新**：summary/branches/revision 在线成功而计数超时/限流时，旧 OPEN 计数被直接画进 tab badge，`counts_historical` 无人读取，`is_showing_cached_snapshot` 也不覆盖该情形。修复：历史计数只置 `counts_historical = true` 并隐藏 badge，不与刚验证的数值同形呈现（该处没有 per-count provenance 标记）。
+
+回归：`manual_refresh_invalidates_queued_replies_from_the_previous_generation`（先注入旧代次排队 revision 回复再 `refresh_repository`，断言 generation/branch_request 前进且页面未被回填，随后刷新正常完成）；`cached_extras_report_a_historical_snapshot` 追加断言历史计数被隐藏且 `counts_historical` 为真。撤销修复后该刷新回归稳定失败（run `6fe4f051`），恢复后通过。
+
+本轮验证（同一源码）：`cargo test --locked --test repository offline` 全通过（17 项过滤命中）、`--test repository` 865 通过、`--test repository_overview` 44 通过、`cargo test --locked` 主程序 1137 / home 96 / notifications 579 / profile 279 / reader 250 / reader_images 771 / repository 865 / overview 44 全部通过；`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。期间默认并发 `--test repository` 一次出现与本任务无关的既有 `reader_images::fixed_revision_images_persist_across_reopened_store_and_service` `InUse` 偶发失败（未修改该文件、未放宽断言），定向与随后完整重跑均通过，原始失败日志保留。
