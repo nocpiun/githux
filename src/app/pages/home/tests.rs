@@ -1015,10 +1015,7 @@ async fn online_feed_continuation_survives_cache_failure_after_replacement() {
     let store = fixture.store();
     let scope = store.saved_account(fixture.account.clone()).unwrap();
     let cached = CachedPageReadSession::new(session.clone(), store, scope).unwrap();
-    fixture
-        .mock
-        .enqueue(Ok(events("first", Some(2))))
-        .await;
+    fixture.mock.enqueue(Ok(events("first", Some(2)))).await;
     fixture
         .mock
         .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
