@@ -62,9 +62,9 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
 4. **授权、代次与缓存门禁（C1–C5）**：
    - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
    - 普通标签页切换（`ProfilePage::set_active(false)` → `ProfileView::suspend`）仅停止滚动与阅读器交互手势，保留已挂载 README 的图片 provider；而重新绑定、替换 README 或撕毁页面时调用 `clear_reader` / `cancel_reader` 显式取消并分离图片 provider。
-   - 每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消；不重放 profile 读取、不每拍读 SQLite）。判定依据是写在 `repository=None` 聚合门禁命名空间里的 `AggregateGateStamp`：读取任务开始时建立/读取并持有所在条目的 `CacheLease`，**在线与历史结果都携带它**，在屏期间由监测任务用 lease 的进程内检查核对。lease 使普通容量淘汰无法删除 stamp（不会把仍授权的页面误判为撤权），而 stamp 被撤权删除、门禁被换 PAT/401 拒绝隔离或 scope 退休都会使已显示内容失效。因此即使撤权发生在首轮轮询前，或之后又写入了新的 stamp/快照，已展示的旧内容也会被清除，并同步清理旧 `ProfileView`、`ReaderView` 与在途图片，阻断迟到图片或 `on_layout_changed` 回调复活旧页。
+   - 每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消；不重放 profile 读取）。该任务独占 store 访问，前台 30ms tick 只消费它得出的失效结论，绝不在 UI 线程做周期性数据库检查。判定依据是写在 `repository=None` 聚合门禁命名空间里的 `AggregateGateStamp`：读取任务开始时建立/读取并持有所在条目的 `CacheLease`，**在线与历史结果都携带它**（含 Basic：即使三个兄弟 section 全部失败，Basic 的 stamp 仍是唯一可验代次），在屏期间由监测任务核对。lease 使普通容量淘汰无法删除 stamp（不会把仍授权的页面误判为撤权），而 stamp 被撤权删除、门禁被换 PAT/401 拒绝隔离或 scope 退休都会使已显示内容失效。因此即使撤权发生在首轮轮询前，或之后又写入了新的 stamp/快照，已展示的旧内容也会被清除，并同步清理旧 `ProfileView`、`ReaderView` 与在途图片，阻断迟到图片或 `on_layout_changed` 回调复活旧页。
    - **撤权不推进 `AuthEpoch`**，所以「当前 session 仍有效」不能作为保留已显示内容的理由：在线读取的聚合、README 及其内外图片与历史快照使用同一失效判据。撤权只让当次展示的快照退休——清理后该页清除失效标记并释放旧请求，其他在线读取重新写入快照后，重试可按新 stamp 恢复，不会永久卡在错误态。
-   - 回复在 `drain` 出队后、`view.update` 之前，用**回复携带的同一** stamp 再做一次有效性检查：后台读到成功但发布前撤权、换 PAT 或被拒绝的回复直接丢弃并退休已显示内容；新捕获的 stamp 不等于旧回复可信。该提交点检查的最终形态是 cache-runtime 共享权限票据（`CacheStore::authorization(scope, None)` + `is_current()`，无锁无磁盘），本页先以等价的 lease 检查占位，接口发布后迁移。
+   - 回复先过 binding/request/context（旧绑定的迟到回复直接安静丢弃，无权改动新页面），再在 `drain` 出队后、`view.update` 之前用**回复携带的同一** stamp 做一次有效性检查：后台读到成功但发布前撤权、换 PAT 或被拒绝的回复丢弃并退休已显示内容；新捕获的 stamp 不等于旧回复可信。该提交点检查的最终形态是 cache-runtime 共享权限票据（`CacheStore::authorization(scope, None)` + `is_current()`，无锁无磁盘），本页先以等价的 lease 检查占位，接口发布后迁移。
    - 运行期缓存故障（SQLite/I-O 等）不是授权结论：除 `CacheError::Stale` 外，四类读取都会退回原 `PageReadSession` 在线读取，仍保留取消、上下文与授权检查；只有真实 401/取消/过期上下文才保持原义。
 
 ## Host adapter / mounting 职责

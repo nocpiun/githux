@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：Codex 五轮意见与主 Agent 基础验收的 3 条反例均已处理并复验。等待 `cache-runtime` 发布共享权限票据接口后按其契约收尾，以及负责人原生窗口验收（`pending`）。
+- 状态：Codex 六轮意见与主 Agent 基础验收的 3 条反例均已处理并复验。等待 `cache-runtime` 发布共享权限票据接口后按其契约收尾，以及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -30,11 +30,11 @@
 
 所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all -- --check` → exit 0（run `a83eb229`；`cargo fmt --all` run `a75b0f9f`）
+- `cargo fmt --all -- --check` → exit 0（run `157af114`；`cargo fmt --all` run `24c801a8`）
 - `cargo check --locked --all-targets` → exit 0（run `4bcec08f`、`5c20bcbe`）
-- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `a5d411e8`）
-- `cargo build --locked` → exit 0（run `686f101a`）
-- `cargo test --locked` → exit 0，1144 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `674e94af`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `ab8f7d62`）
+- `cargo build --locked` → exit 0（run `5ac8fcd0`）
+- `cargo test --locked` → exit 0，1146 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `e705a315`）
 - `git diff --check` → exit 0
 
 此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
@@ -98,8 +98,25 @@ Codex 第五轮（head `3828ac7`）一条意见成立并修复：
 ### 反例接入与反向验证
 
 - `src/app/pages/profile_acceptance_tests.rs` 原样纳入本分支，经 `tests` 模块末尾 `include!` 引入（不在 `app/pages/mod.rs` 注册）。
-- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 17 passed / 0 failed（run `3159ce36`、`f6587e20`），三条反例全部通过。
+- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 19 passed / 0 failed（run `d6f3ba28`），三条反例与两条新回归全部通过。
 - 反向验证（run `1e8ef5cf`）：把 stamp 恢复为「仅历史」、去掉发布前检查、把 `is_uncached_fallback` 收窄回仅 `AccessDenied` 后，三条反例重新全部失败（`acceptance_revocation_also_clears_online_profile`、`acceptance_queued_historical_profile_is_rejected_after_revocation`、`acceptance_profile_cache_write_failure_keeps_online_result`），冷启动用例仍通过——证明三条用例确实锁住这三处缺口。
+
+### 第六轮 Codex 意见（head `4428c61`）
+
+三条均成立于本轮新增代码，已修复：
+
+1. **P2 `CacheLease::snapshot()` 在 UI 线程做 SQLite 读取。** `displayed_sections_are_stale()` 原本在每 30ms 的 `drain` 里对每个已显示 stamp 取一次锁并查库，非活动标签也跑。
+   - 删除了该前台函数与调用：前台只消费后台监测任务已经得出的 `cache_invalidated` 结论，每拍不再有任何 store 访问。
+   - `apply` 中**每次回复一次**的发布前校验保留（它正是要关闭的窗口），并在源码注释里写明这是 cache-runtime 共享票据接口要替换的那一处，不得移回后台。该单次查询是有界的，且不随 tick 频率放大。
+2. **P2 Basic 在线成功时丢掉了刚安装的 gate stamp。** 若三个兄弟 section 都失败，`gate_stamps` 全为 `None`，监测与前台都无物可验，在线 Basic 会在撤权后无限保留。
+   - `apply_basic` 现在无论来源都保留 Basic 的 stamp（`*stamps = [gate_stamp, None, None, None]`），与其他 section 一致。
+3. **P2 过期回复可能退休刚重绑的新页面。** 原顺序是先做 stamp 检查、后做 `accepts()`；`rebind()` 之后再到达的上一代回复若 stamp 已失效，会清掉新一代页面。
+   - 现在先 `accepts()`（generation/selection/request/login/context/binding）再校验 stamp，旧绑定的回复直接安静丢弃，无权改动新页面。
+
+新增回归（均已反向验证：撤掉对应修复即失败）：
+
+- `online_sections_keep_the_gate_stamp_they_were_read_under`：四个 section 在线成功后 `gate_stamps` 全为 `Some`，随后显式撤权清除整页。
+- `a_late_reply_from_a_previous_binding_cannot_retire_the_new_page`：后台历史读取成功→重绑→新页面就绪→撤权→投递旧回复，新页面与其内容必须保留。
 
 ## 原生验收步骤与边界（`pending`）
 

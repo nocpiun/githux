@@ -794,8 +794,9 @@ impl ProfilePage {
                 .swap(false, std::sync::atomic::Ordering::AcqRel);
             // A displayed section whose gate generation was retired must disappear even though the
             // account session is still valid (explicit repository revocation does not advance the
-            // auth epoch). The check is in-process: it reads the pinned lease, not SQLite.
-            if invalidated || binding_lost || self.displayed_sections_are_stale() {
+            // auth epoch). The verdict comes from the background monitor, so this foreground tick
+            // performs no store access at all.
+            if invalidated || binding_lost {
                 if let Some(monitor) = self.cache_monitor.take() {
                     monitor.source.cancel();
                 }
@@ -819,18 +820,6 @@ impl ProfilePage {
         self.unavailable = None;
         cx.notify();
         false
-    }
-
-    /// Whether any section currently on screen was read under a gate generation that no longer
-    /// holds. An explicit repository revocation, PAT replacement, credential rejection or
-    /// retirement removes the pinned aggregate entry, so the lease stops resolving.
-    fn displayed_sections_are_stale(&self) -> bool {
-        self.gate_stamps
-            .lock()
-            .expect("profile gate stamps")
-            .iter()
-            .flatten()
-            .any(|stamp| !stamp.is_current())
     }
 
     /// Drops every authorization-bound value the page is showing, including the mounted README
@@ -909,20 +898,30 @@ impl ProfilePage {
             SectionResult::Readme(Ok(outcome)) => outcome.gate_stamp.clone(),
             _ => None,
         };
+        // Binding/request/context first: a late reply from a previous binding must be dropped
+        // quietly. It must never be able to retire the page that replaced it.
+        if !self.accepts(&reply) {
+            return;
+        }
         // Publication check for the *authorization generation*: a reply read before an explicit
         // revocation, PAT replacement, rejection or retirement must not be committed afterwards.
         // This runs here — after the reply is dequeued and before `view.update` — because verifying
         // only in the background leaves exactly this window open, and a freshly captured stamp must
         // never re-authorize an older reply.
+        //
+        // KNOWN LIMITATION / INTERFACE DEPENDENCY (cache-runtime): `is_current` currently resolves
+        // the retained lease, which takes the store mutex and touches SQLite, so a published reply
+        // costs one bounded query on the UI thread. The periodic foreground check was removed for
+        // exactly this reason; this single per-reply check is the one the shared contract replaces
+        // with `CacheStore::authorization(scope, None)` + `CacheAuthorization::is_current()`
+        // (lock-free, disk-free). It must not be moved back into the background: that reintroduces
+        // the publish window this check exists to close.
         if let Some(stamp) = &gate_stamp
             && !stamp.is_current()
         {
             self.work[reply.section.index()] = None;
             self.retire_displayed_sections(cx);
             cx.notify();
-            return;
-        }
-        if !self.accepts(&reply) {
             return;
         }
         self.work[reply.section.index()] = None;
@@ -1131,17 +1130,11 @@ impl ProfilePage {
                 gate_stamp,
             }) => {
                 // Reset sibling section stamps when a new Basic profile creates a new view.
+                // Basic keeps the stamp it was read under regardless of provenance: an online
+                // Basic is exactly as revocable as a historical one, and if the sibling sections
+                // all fail this stamp is the only thing the monitor can validate.
                 let mut stamps = self.gate_stamps.lock().expect("profile gate stamps");
-                *stamps = [
-                    provenance
-                        .as_ref()
-                        .is_some_and(ProfileProvenance::is_historical)
-                        .then_some(gate_stamp)
-                        .flatten(),
-                    None,
-                    None,
-                    None,
-                ];
+                *stamps = [gate_stamp, None, None, None];
                 drop(stamps);
                 // Server id/login are authoritative. An earlier login-only action is never used as
                 // a numeric identity; Shell canonicalizes the matching TabId after this callback.
@@ -3244,6 +3237,147 @@ mod tests {
         // Explicit revocation is still authoritative.
         store.revoke_repository(&scope, Some(101)).unwrap();
         assert!(!verify_aggregate_gate_stamp(&store, &scope, &stamp));
+    }
+
+    #[gpui::test]
+    fn online_sections_keep_the_gate_stamp_they_were_read_under(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page.view_for_test().is_some_and(|v| {
+                        matches!(v.read(cx).basic(), SectionState::Ready(_))
+                            && matches!(v.read(cx).repositories(), SectionState::Ready(_))
+                            && matches!(v.read(cx).contributions(), SectionState::Ready(_))
+                            && matches!(v.read(cx).readme_state(), SectionState::Ready(()))
+                    })
+            })
+        });
+        // Every section that was read online — including Basic, which used to drop its stamp when
+        // the result came from the network — carries the generation it was read under.
+        let stamped = harness.page.read_with(cx, |page, _| {
+            page.gate_stamps
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, stamp)| (index, stamp.is_some()))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            stamped,
+            vec![(0, true), (1, true), (2, true), (3, true)],
+            "online results keep their gate stamp: {stamped:?}"
+        );
+
+        // An explicit repository revocation retires the displayed online content even though the
+        // account session stays valid (revocation does not advance the auth epoch).
+        let context = harness.accounts.page_session().unwrap().context().clone();
+        let cache = harness.accounts.repo_service().cache(&context).unwrap();
+        cache
+            .store()
+            .revoke_repository(cache.scope(), Some(101))
+            .unwrap();
+        wait_for_profile(&harness, cx, |cx| {
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn a_late_reply_from_a_previous_binding_cannot_retire_the_new_page(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        let session = harness.accounts.page_session().unwrap();
+        let repos = harness.accounts.repo_service();
+        let binding = repos.cache(session.context()).unwrap();
+        let cached = CachedPageReadSession::new(
+            session.clone(),
+            binding.store().clone(),
+            binding.scope().clone(),
+        )
+        .unwrap();
+
+        // A background read for the *current* binding completes successfully.
+        harness.transport.set_offline(true);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let outcome = runtime
+            .block_on(async {
+                let stamp = prepare_gate_stamp(&repos, session.context()).await;
+                read_profile_basic(
+                    &repos,
+                    &session,
+                    Some(&cached),
+                    stamp.as_ref(),
+                    "alice",
+                    Default::default(),
+                )
+                .await
+            })
+            .unwrap();
+        assert!(
+            outcome
+                .provenance
+                .as_ref()
+                .is_some_and(ProfileProvenance::is_historical)
+        );
+
+        // Freeze the reply it would produce: old generation, selection and request.
+        let stale = cx.update_window_entity(&harness.page, |page, _, _| Reply {
+            section: Section::Basic,
+            generation: page.generation,
+            request: page.requests[Section::Basic.index()],
+            selection: page.selection,
+            context: session.context().clone(),
+            login: page.login.clone(),
+            result: SectionResult::Basic(Ok(outcome)),
+        });
+
+        // The page rebinds and mounts a fresh live profile under the same account.
+        harness.transport.set_offline(false);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        // Even if that fresh generation's gate is retired, an *obsolete* reply must not act on it.
+        let context = harness.accounts.page_session().unwrap().context().clone();
+        let cache = harness.accounts.repo_service().cache(&context).unwrap();
+        cache
+            .store()
+            .revoke_repository(cache.scope(), Some(101))
+            .unwrap();
+
+        cx.update_window_entity(&harness.page, |page, window, cx| {
+            page.apply(stale, window, cx);
+        });
+        assert!(
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_some()),
+            "an obsolete reply must not turn the newly bound Profile into a placeholder"
+        );
+        assert!(
+            harness.page.read_with(cx, |page, cx| page
+                .view_for_test()
+                .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))),
+            "the new binding keeps its own content"
+        );
     }
 
     #[test]
