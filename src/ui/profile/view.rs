@@ -522,12 +522,23 @@ impl ProfileView {
         }
     }
 
-    /// Stop background UI work while this page remains mounted but inactive. Valid content and
-    /// navigation stay intact; the host separately clears them when authorization changes.
+    /// Stop background UI work while this page remains mounted but inactive. Valid content,
+    /// attached image provider and navigation stay intact; the host separately clears them when
+    /// authorization changes or when the README is replaced.
     pub fn suspend(&mut self, cx: &mut Context<Self>) {
         scroll::cancel_region(&mut self.page_bars, &self.page_motion);
         scroll::cancel_region(&mut self.heatmap_bars, &self.heatmap_motion);
+        if let Some(reader) = &self.reader {
+            reader.update(cx, |reader, cx| reader.cancel_interactions(cx));
+        }
+        cx.notify();
+    }
+
+    /// Dispose the mounted reader and cancel any in-flight image loads when tearing down or
+    /// invalidating the page.
+    pub fn clear_reader(&mut self, cx: &mut Context<Self>) {
         self.cancel_reader(cx);
+        self.reader = None;
         cx.notify();
     }
 

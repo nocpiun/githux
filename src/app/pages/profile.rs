@@ -14,7 +14,6 @@ use crate::data::page_cache::{
 use crate::data::reader_images::RepositoryImageService;
 use crate::data::{
     AccountCache, PageReadSession, ProfileReadme, ProfileReadmeIneligible, RepositoryReadContext,
-    Scoped,
 };
 use crate::domain::blob::BlobLimits;
 use crate::domain::error::GitHubError;
@@ -26,7 +25,7 @@ use crate::github::RepositoryLimits;
 use crate::github::profile::ProfileLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
-use crate::storage::cache::CacheError;
+use crate::storage::cache::{CacheError, CacheKey, CacheRead};
 use crate::ui::profile::{
     PresentationError, ProfileAction, ProfileActionKind, ProfileBinding, ProfileProvenance,
     ProfileRequest, ProfileTarget, ProfileView, SectionState,
@@ -106,9 +105,18 @@ impl Work {
     }
 }
 
+/// Monotonic token proving the aggregate (`repository = None`) cache gate has not been
+/// revoked, replaced, rejected or retired since the historical snapshot was read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AggregateGateStamp {
+    partition: String,
+    stamp_id: String,
+}
+
 struct SectionOutcome<T> {
     value: T,
     provenance: Option<ProfileProvenance>,
+    gate_stamp: Option<AggregateGateStamp>,
 }
 
 enum SectionResult {
@@ -140,6 +148,8 @@ pub struct ProfilePage {
     generation: u64,
     requests: [u64; 4],
     work: [Option<Work>; 4],
+    cache_monitor: Option<Work>,
+    historical_stamps: Arc<Mutex<[Option<AggregateGateStamp>; 4]>>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     cache_invalidated: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<watch::Sender<bool>>,
@@ -180,6 +190,8 @@ impl ProfilePage {
             generation: 0,
             requests: [0; 4],
             work: [None, None, None, None],
+            cache_monitor: None,
+            historical_stamps: Arc::new(Mutex::new([None, None, None, None])),
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             cache_invalidated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             alive: Arc::new(alive),
@@ -208,7 +220,7 @@ impl ProfilePage {
 
     pub fn rebind(&mut self, services: Option<AccountServices>, cx: &mut Context<Self>) {
         if let Some(view) = &self.view {
-            view.update(cx, |view, cx| view.suspend(cx));
+            view.update(cx, |view, cx| view.clear_reader(cx));
         }
         self.stop();
         self.services = services;
@@ -219,6 +231,10 @@ impl ProfilePage {
         self.unavailable = None;
         self.cache_invalidated
             .store(false, std::sync::atomic::Ordering::Release);
+        *self
+            .historical_stamps
+            .lock()
+            .expect("profile historical stamps") = [None, None, None, None];
         self._avatars_changed = None;
         self.view = None;
         self._changed = None;
@@ -237,6 +253,7 @@ impl ProfilePage {
                             CachedPageReadSession::new(session.clone(), store, scope).ok()
                         });
                 self.session = Some(session);
+                self.ensure_cache_monitor(&services);
                 self.start(Section::Basic, cx);
             }
             _ => {}
@@ -510,9 +527,7 @@ impl ProfilePage {
             CachedPageReadSession::new(session.clone(), store, scope).ok()
         });
         self.cached_session = cached.clone();
-        self.cache_invalidated
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.start_cache_monitor(&services);
+        self.ensure_cache_monitor(&services);
         self.requests[index] = self.requests[index].saturating_add(1);
         let request = self.requests[index];
         let work = Work::new();
@@ -531,21 +546,59 @@ impl ProfilePage {
             });
         let alive = self.alive.clone();
         let inbox = self.inbox.clone();
+        let repos_for_stamp = services.repositories();
+        let stamp_context = context.clone();
         let submitted = services.executor().handle().spawn(async move {
+            // Prepare the aggregate gate stamp before any read, so a revocation that lands during
+            // this read deletes it and the historical value can never be published.
+            let stamp = prepare_gate_stamp(&repos_for_stamp, &stamp_context).await;
+            let stamp = stamp.as_ref();
             let result = match section {
                 Section::Basic => SectionResult::Basic(
-                    read_profile_basic(&session, cached.as_ref(), &login, cancel).await,
+                    read_profile_basic(
+                        &repos_for_stamp,
+                        &session,
+                        cached.as_ref(),
+                        stamp,
+                        &login,
+                        cancel,
+                    )
+                    .await,
                 ),
                 Section::Repositories => SectionResult::Repositories(
-                    read_profile_pinned(&session, cached.as_ref(), &login, cancel).await,
+                    read_profile_pinned(
+                        &repos_for_stamp,
+                        &session,
+                        cached.as_ref(),
+                        stamp,
+                        &login,
+                        cancel,
+                    )
+                    .await,
                 ),
                 Section::Contributions => SectionResult::Contributions(
-                    read_profile_contributions(&session, cached.as_ref(), &login, &range, cancel)
-                        .await,
+                    read_profile_contributions(
+                        &repos_for_stamp,
+                        &session,
+                        cached.as_ref(),
+                        stamp,
+                        &login,
+                        &range,
+                        cancel,
+                    )
+                    .await,
                 ),
                 Section::Readme => SectionResult::Readme(match basic {
                     Some(basic) => {
-                        read_profile_readme(&session, cached.as_ref(), &basic, cancel).await
+                        read_profile_readme(
+                            &repos_for_stamp,
+                            &session,
+                            cached.as_ref(),
+                            stamp,
+                            &basic,
+                            cancel,
+                        )
+                        .await
                     }
                     None => Err(PresentationError::InvalidData),
                 }),
@@ -567,56 +620,62 @@ impl ProfilePage {
         }
     }
 
-    fn start_cache_monitor(&self, services: &AccountServices) {
-        let Some(cached) = self.cached_session.clone() else {
+    fn ensure_cache_monitor(&mut self, services: &AccountServices) {
+        if self.cache_monitor.is_some() || self.cached_session.is_none() {
             return;
-        };
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
         let context = session.context().clone();
         let repos = services.repositories();
-        let login = self.login.clone();
         let alive = self.alive.clone();
         let invalidated = self.cache_invalidated.clone();
-        let _ = services.executor().handle().spawn(async move {
-            let mut had_cached_basic = false;
+        let stamps = self.historical_stamps.clone();
+        let work = Work::new();
+        let cancel = work.token.clone();
+        self.cache_monitor = Some(work);
+        let spawned = services.executor().handle().spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(80)).await;
+                tokio::select! {
+                    biased;
+                    _ = cancel.clone().cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(80)) => {}
+                }
                 if !*alive.borrow() || !repos.is_current(&context) || !session.verify() {
                     break;
                 }
-                if repos.cache(&context).is_none() {
+                let active_stamps: Vec<AggregateGateStamp> = stamps
+                    .lock()
+                    .expect("profile historical stamps")
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                if active_stamps.is_empty() {
+                    continue;
+                }
+                let Some(cache) = repos.cache(&context) else {
+                    invalidated.store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                };
+                let (store, scope) = cache.into_parts();
+                let valid = tokio::task::spawn_blocking(move || {
+                    active_stamps
+                        .iter()
+                        .all(|stamp| verify_aggregate_gate_stamp(&store, &scope, stamp))
+                })
+                .await
+                .unwrap_or(false);
+                if !valid {
                     invalidated.store(true, std::sync::atomic::Ordering::Release);
                     break;
                 }
-                match cached
-                    .profile(PageReadMode::Offline, &login, CancellationToken::default())
-                    .await
-                {
-                    Ok(Scoped {
-                        value: PageValue::Value { .. },
-                        ..
-                    }) => {
-                        had_cached_basic = true;
-                    }
-                    Ok(Scoped {
-                        value: PageValue::Miss(_),
-                        ..
-                    }) => {
-                        if had_cached_basic {
-                            // The aggregate snapshot was wiped (e.g. by explicit repository revocation).
-                            invalidated.store(true, std::sync::atomic::Ordering::Release);
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        invalidated.store(true, std::sync::atomic::Ordering::Release);
-                        break;
-                    }
-                }
             }
         });
+        if spawned.is_err() {
+            self.cache_monitor = None;
+        }
     }
 
     fn start_receiver(&mut self, cx: &mut Context<Self>) {
@@ -685,7 +744,14 @@ impl ProfilePage {
                             .readme_provenance()
                             .is_some_and(ProfileProvenance::is_historical);
                     if any_historical {
-                        view.update(cx, |view, cx| view.suspend(cx));
+                        view.update(cx, |view, cx| {
+                            view.clear_reader(cx);
+                            view.suspend(cx);
+                        });
+                        *self
+                            .historical_stamps
+                            .lock()
+                            .expect("profile historical stamps") = [None, None, None, None];
                         self.view = None;
                         self.request = None;
                         self.unavailable = Some(PresentationError::Forbidden);
@@ -697,7 +763,10 @@ impl ProfilePage {
             return true;
         }
         if let Some(view) = &self.view {
-            view.update(cx, |view, cx| view.suspend(cx));
+            view.update(cx, |view, cx| {
+                view.clear_reader(cx);
+                view.suspend(cx);
+            });
         }
         self.stop();
         self.view = None;
@@ -740,29 +809,45 @@ impl ProfilePage {
     }
 
     fn apply(&mut self, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
-        let is_historical = match &reply.result {
-            SectionResult::Basic(Ok(outcome)) => outcome
-                .provenance
-                .as_ref()
-                .is_some_and(ProfileProvenance::is_historical),
-            SectionResult::Repositories(Ok(outcome)) => outcome
-                .provenance
-                .as_ref()
-                .is_some_and(ProfileProvenance::is_historical),
-            SectionResult::Contributions(Ok(outcome)) => outcome
-                .provenance
-                .as_ref()
-                .is_some_and(ProfileProvenance::is_historical),
-            SectionResult::Readme(Ok(outcome)) => outcome
-                .provenance
-                .as_ref()
-                .is_some_and(ProfileProvenance::is_historical),
-            _ => false,
+        let (is_historical, gate_stamp) = match &reply.result {
+            SectionResult::Basic(Ok(outcome)) => (
+                outcome
+                    .provenance
+                    .as_ref()
+                    .is_some_and(ProfileProvenance::is_historical),
+                outcome.gate_stamp.clone(),
+            ),
+            SectionResult::Repositories(Ok(outcome)) => (
+                outcome
+                    .provenance
+                    .as_ref()
+                    .is_some_and(ProfileProvenance::is_historical),
+                outcome.gate_stamp.clone(),
+            ),
+            SectionResult::Contributions(Ok(outcome)) => (
+                outcome
+                    .provenance
+                    .as_ref()
+                    .is_some_and(ProfileProvenance::is_historical),
+                outcome.gate_stamp.clone(),
+            ),
+            SectionResult::Readme(Ok(outcome)) => (
+                outcome
+                    .provenance
+                    .as_ref()
+                    .is_some_and(ProfileProvenance::is_historical),
+                outcome.gate_stamp.clone(),
+            ),
+            _ => (false, None),
         };
         if !self.accepts(&reply, is_historical) {
             return;
         }
         self.work[reply.section.index()] = None;
+        self.historical_stamps
+            .lock()
+            .expect("profile historical stamps")[reply.section.index()] =
+            if is_historical { gate_stamp } else { None };
         match reply.section {
             Section::Basic => self.apply_basic(reply, window, cx),
             section => {
@@ -841,6 +926,7 @@ impl ProfilePage {
                                         ..
                                     },
                                 provenance,
+                                ..
                             }) => {
                                 let provider =
                                     self.build_readme_image_provider(repository, &reply.context);
@@ -858,6 +944,7 @@ impl ProfilePage {
                             Ok(SectionOutcome {
                                 value: ProfileReadme::Missing { .. },
                                 provenance,
+                                ..
                             }) => {
                                 view.update(cx, |view, cx| {
                                     view.set_readme_unavailable_with_provenance(
@@ -871,6 +958,7 @@ impl ProfilePage {
                             Ok(SectionOutcome {
                                 value: ProfileReadme::Unavailable { .. },
                                 provenance,
+                                ..
                             }) => {
                                 view.update(cx, |view, cx| {
                                     view.set_readme_unavailable_with_provenance(
@@ -884,6 +972,7 @@ impl ProfilePage {
                             Ok(SectionOutcome {
                                 value: ProfileReadme::NotEligible { reason, .. },
                                 provenance,
+                                ..
                             }) => {
                                 let message = match reason {
                                     ProfileReadmeIneligible::NotPublicSameNameRepository => {
@@ -951,7 +1040,24 @@ impl ProfilePage {
             Ok(SectionOutcome {
                 value: basic,
                 provenance,
+                gate_stamp,
             }) => {
+                // Reset sibling section stamps when a new Basic profile creates a new view.
+                let mut stamps = self
+                    .historical_stamps
+                    .lock()
+                    .expect("profile historical stamps");
+                *stamps = [
+                    provenance
+                        .as_ref()
+                        .is_some_and(ProfileProvenance::is_historical)
+                        .then_some(gate_stamp)
+                        .flatten(),
+                    None,
+                    None,
+                    None,
+                ];
+                drop(stamps);
                 // Server id/login are authoritative. An earlier login-only action is never used as
                 // a numeric identity; Shell canonicalizes the matching TabId after this callback.
                 self.login = basic.login.clone();
@@ -1035,6 +1141,13 @@ impl ProfilePage {
                 work.source.cancel();
             }
         }
+        if let Some(monitor) = self.cache_monitor.take() {
+            monitor.source.cancel();
+        }
+        *self
+            .historical_stamps
+            .lock()
+            .expect("profile historical stamps") = [None, None, None, None];
         self.inbox.lock().expect("profile inbox").clear();
         self.session = None;
         self.cached_session = None;
@@ -1079,26 +1192,142 @@ fn map_cache_error(error: CacheError) -> PresentationError {
     }
 }
 
-fn unpack_page_value<T>(value: PageValue<T>) -> Result<SectionOutcome<T>, PresentationError> {
+fn aggregate_gate_stamp_key() -> Result<CacheKey, CacheError> {
+    CacheKey::mutable(
+        None,
+        true,
+        "profile-aggregate-gate-stamp",
+        "v1",
+        "profile-aggregate-gate-stamp-v1",
+        1,
+    )
+}
+
+fn ensure_aggregate_gate_stamp(
+    store: &crate::storage::cache::CacheStore,
+    scope: &crate::storage::cache::CacheScope,
+) -> Option<AggregateGateStamp> {
+    let key = aggregate_gate_stamp_key().ok()?;
+    if let Ok(CacheRead::Hit(lease)) = store.read(scope, &key)
+        && let Ok(Some(snapshot)) = lease.snapshot()
+        && let Ok(stamp_id) = std::str::from_utf8(&snapshot.bytes)
+        && !stamp_id.is_empty()
+    {
+        return Some(AggregateGateStamp {
+            partition: scope.partition().to_string(),
+            stamp_id: stamp_id.to_string(),
+        });
+    }
+    let ticket = store.begin_write(scope, &key).ok()?;
+    let stamp_id = uuid::Uuid::new_v4().to_string();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let metadata = crate::domain::cache::CacheMetadata {
+        representation_version: 1,
+        fetched_at_ms: now,
+        verified_at_ms: now,
+        completeness: crate::domain::cache::CacheCompleteness::Complete,
+        etag: None,
+        last_modified: None,
+        cache_control: None,
+    };
+    store.put(ticket, stamp_id.as_bytes(), metadata).ok()?;
+    Some(AggregateGateStamp {
+        partition: scope.partition().to_string(),
+        stamp_id,
+    })
+}
+
+fn verify_aggregate_gate_stamp(
+    store: &crate::storage::cache::CacheStore,
+    scope: &crate::storage::cache::CacheScope,
+    expected: &AggregateGateStamp,
+) -> bool {
+    if scope.partition() != expected.partition {
+        return false;
+    }
+    let Ok(key) = aggregate_gate_stamp_key() else {
+        return false;
+    };
+    match store.read(scope, &key) {
+        Ok(CacheRead::Hit(lease)) => match lease.snapshot() {
+            Ok(Some(snapshot)) => snapshot.bytes == expected.stamp_id.as_bytes(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Ensure the aggregate gate stamp exists **before** any offline read, so a revocation that
+/// happens during the read deletes it and the snapshot cannot be published.
+async fn prepare_gate_stamp(
+    repos: &crate::data::RepoService,
+    context: &RepositoryReadContext,
+) -> Option<AggregateGateStamp> {
+    let cache = repos.cache(context)?;
+    let (store, scope) = cache.into_parts();
+    tokio::task::spawn_blocking(move || ensure_aggregate_gate_stamp(&store, &scope))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Re-verify the aggregate gate stamp for a historical value. A stamp that disappeared (explicit
+/// repository revocation deletes every `repository = None` aggregate entry), a retired/rejected
+/// scope or a replaced PAT must not publish historical bytes.
+async fn verified_historical_stamp(
+    repos: &crate::data::RepoService,
+    context: &RepositoryReadContext,
+    stamp: Option<&AggregateGateStamp>,
+) -> Result<AggregateGateStamp, PresentationError> {
+    let Some(stamp) = stamp.cloned() else {
+        return Err(PresentationError::Forbidden);
+    };
+    let Some(cache) = repos.cache(context) else {
+        return Err(PresentationError::Forbidden);
+    };
+    let (store, scope) = cache.into_parts();
+    let expected = stamp.clone();
+    let valid =
+        tokio::task::spawn_blocking(move || verify_aggregate_gate_stamp(&store, &scope, &expected))
+            .await
+            .unwrap_or(false);
+    if valid {
+        Ok(stamp)
+    } else {
+        Err(PresentationError::Forbidden)
+    }
+}
+
+fn unpack_page_value<T>(
+    value: PageValue<T>,
+    gate_stamp: Option<AggregateGateStamp>,
+) -> Result<SectionOutcome<T>, PresentationError> {
     match value {
         PageValue::Value {
             value,
             origin,
             metadata,
-        } => Ok(SectionOutcome {
-            value,
-            provenance: Some(ProfileProvenance::from_cache(
-                origin == PageOrigin::HistoricalSnapshot,
-                &metadata,
-            )),
-        }),
+        } => {
+            let historical = origin == PageOrigin::HistoricalSnapshot;
+            Ok(SectionOutcome {
+                value,
+                provenance: Some(ProfileProvenance::from_cache(historical, &metadata)),
+                gate_stamp: historical.then_some(gate_stamp).flatten(),
+            })
+        }
         PageValue::Miss(miss) => Err(PresentationError::from_cache_miss(miss)),
     }
 }
 
 async fn read_profile_basic(
+    repos: &crate::data::RepoService,
     session: &PageReadSession,
     cached: Option<&CachedPageReadSession>,
+    stamp: Option<&AggregateGateStamp>,
     login: &str,
     cancel: CancellationToken,
 ) -> Result<SectionOutcome<ProfileBasic>, PresentationError> {
@@ -1109,6 +1338,7 @@ async fn read_profile_basic(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(PresentationError::from);
     };
@@ -1116,7 +1346,7 @@ async fn read_profile_basic(
         .profile(PageReadMode::Online, login, cancel.clone())
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value),
+        Ok(scoped) => unpack_page_value(scoped.value, None),
         Err(PageCacheError::Read(error)) => {
             if should_fallback_profile(&error) {
                 match cached.profile(PageReadMode::Offline, login, cancel).await {
@@ -1125,13 +1355,24 @@ async fn read_profile_basic(
                             value,
                             origin,
                             metadata,
-                        } => Ok(SectionOutcome {
-                            value,
-                            provenance: Some(ProfileProvenance::from_cache(
-                                origin == PageOrigin::HistoricalSnapshot,
-                                &metadata,
-                            )),
-                        }),
+                        } => {
+                            let historical = origin == PageOrigin::HistoricalSnapshot;
+                            let gate_stamp = if historical {
+                                Some(
+                                    verified_historical_stamp(repos, session.context(), stamp)
+                                        .await?,
+                                )
+                            } else {
+                                None
+                            };
+                            Ok(SectionOutcome {
+                                value,
+                                provenance: Some(ProfileProvenance::from_cache(
+                                    historical, &metadata,
+                                )),
+                                gate_stamp,
+                            })
+                        }
                         PageValue::Miss(miss) => {
                             if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
                                 Err(PresentationError::from_cache_miss(miss))
@@ -1155,6 +1396,7 @@ async fn read_profile_basic(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(PresentationError::from),
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -1163,8 +1405,10 @@ async fn read_profile_basic(
 }
 
 async fn read_profile_pinned(
+    repos: &crate::data::RepoService,
     session: &PageReadSession,
     cached: Option<&CachedPageReadSession>,
+    stamp: Option<&AggregateGateStamp>,
     login: &str,
     cancel: CancellationToken,
 ) -> Result<SectionOutcome<ProfilePinned>, PresentationError> {
@@ -1176,6 +1420,7 @@ async fn read_profile_pinned(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(PresentationError::from);
     };
@@ -1183,7 +1428,7 @@ async fn read_profile_pinned(
         .profile_pinned(PageReadMode::Online, login, &limits, cancel.clone())
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value),
+        Ok(scoped) => unpack_page_value(scoped.value, None),
         Err(PageCacheError::Read(error)) => {
             if should_fallback_profile(&error) {
                 match cached
@@ -1195,13 +1440,24 @@ async fn read_profile_pinned(
                             value,
                             origin,
                             metadata,
-                        } => Ok(SectionOutcome {
-                            value,
-                            provenance: Some(ProfileProvenance::from_cache(
-                                origin == PageOrigin::HistoricalSnapshot,
-                                &metadata,
-                            )),
-                        }),
+                        } => {
+                            let historical = origin == PageOrigin::HistoricalSnapshot;
+                            let gate_stamp = if historical {
+                                Some(
+                                    verified_historical_stamp(repos, session.context(), stamp)
+                                        .await?,
+                                )
+                            } else {
+                                None
+                            };
+                            Ok(SectionOutcome {
+                                value,
+                                provenance: Some(ProfileProvenance::from_cache(
+                                    historical, &metadata,
+                                )),
+                                gate_stamp,
+                            })
+                        }
                         PageValue::Miss(miss) => {
                             if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
                                 Err(PresentationError::from_cache_miss(miss))
@@ -1225,6 +1481,7 @@ async fn read_profile_pinned(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(PresentationError::from),
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -1233,8 +1490,10 @@ async fn read_profile_pinned(
 }
 
 async fn read_profile_contributions(
+    repos: &crate::data::RepoService,
     session: &PageReadSession,
     cached: Option<&CachedPageReadSession>,
+    stamp: Option<&AggregateGateStamp>,
     login: &str,
     range: &ContributionRange,
     cancel: CancellationToken,
@@ -1247,6 +1506,7 @@ async fn read_profile_contributions(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(PresentationError::from);
     };
@@ -1254,7 +1514,7 @@ async fn read_profile_contributions(
         .contribution_calendar(PageReadMode::Online, login, range, &limits, cancel.clone())
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value),
+        Ok(scoped) => unpack_page_value(scoped.value, None),
         Err(PageCacheError::Read(error)) => {
             if should_fallback_profile(&error) {
                 match cached
@@ -1266,13 +1526,24 @@ async fn read_profile_contributions(
                             value,
                             origin,
                             metadata,
-                        } => Ok(SectionOutcome {
-                            value,
-                            provenance: Some(ProfileProvenance::from_cache(
-                                origin == PageOrigin::HistoricalSnapshot,
-                                &metadata,
-                            )),
-                        }),
+                        } => {
+                            let historical = origin == PageOrigin::HistoricalSnapshot;
+                            let gate_stamp = if historical {
+                                Some(
+                                    verified_historical_stamp(repos, session.context(), stamp)
+                                        .await?,
+                                )
+                            } else {
+                                None
+                            };
+                            Ok(SectionOutcome {
+                                value,
+                                provenance: Some(ProfileProvenance::from_cache(
+                                    historical, &metadata,
+                                )),
+                                gate_stamp,
+                            })
+                        }
                         PageValue::Miss(miss) => {
                             if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
                                 Err(PresentationError::from_cache_miss(miss))
@@ -1296,6 +1567,7 @@ async fn read_profile_contributions(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(PresentationError::from),
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -1304,8 +1576,10 @@ async fn read_profile_contributions(
 }
 
 async fn read_profile_readme(
+    repos: &crate::data::RepoService,
     session: &PageReadSession,
     cached: Option<&CachedPageReadSession>,
+    stamp: Option<&AggregateGateStamp>,
     basic: &ProfileBasic,
     cancel: CancellationToken,
 ) -> Result<SectionOutcome<ProfileReadme>, PresentationError> {
@@ -1318,6 +1592,7 @@ async fn read_profile_readme(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(repository_error);
     };
@@ -1331,7 +1606,7 @@ async fn read_profile_readme(
         )
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value),
+        Ok(scoped) => unpack_page_value(scoped.value, None),
         Err(PageCacheError::Read(error)) => {
             if should_fallback_readme(&error) {
                 match cached
@@ -1349,13 +1624,24 @@ async fn read_profile_readme(
                             value,
                             origin,
                             metadata,
-                        } => Ok(SectionOutcome {
-                            value,
-                            provenance: Some(ProfileProvenance::from_cache(
-                                origin == PageOrigin::HistoricalSnapshot,
-                                &metadata,
-                            )),
-                        }),
+                        } => {
+                            let historical = origin == PageOrigin::HistoricalSnapshot;
+                            let gate_stamp = if historical {
+                                Some(
+                                    verified_historical_stamp(repos, session.context(), stamp)
+                                        .await?,
+                                )
+                            } else {
+                                None
+                            };
+                            Ok(SectionOutcome {
+                                value,
+                                provenance: Some(ProfileProvenance::from_cache(
+                                    historical, &metadata,
+                                )),
+                                gate_stamp,
+                            })
+                        }
                         PageValue::Miss(miss) => {
                             if matches!(error, RepositoryError::GitHub(GitHubError::Network { .. }))
                             {
@@ -1384,6 +1670,7 @@ async fn read_profile_readme(
             .map(|scoped| SectionOutcome {
                 value: scoped.value,
                 provenance: None,
+                gate_stamp: None,
             })
             .map_err(repository_error),
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
@@ -2406,18 +2693,72 @@ mod tests {
         });
 
         // Explicit repository revocation invalidates the account aggregate snapshot and advances revision.
-        let context = harness.accounts.page_session().unwrap().context().clone();
+        // Perform revocation IMMEDIATELY after the historical view mounts (before the 80ms monitor tick),
+        // and even re-populate a fresh basic snapshot to prove that the revision-bound stamp still
+        // invalidates the displayed historical snapshot.
+        let session = harness.accounts.page_session().unwrap();
+        let context = session.context().clone();
         let cache = harness.accounts.repo_service().cache(&context).unwrap();
         cache
             .store()
             .revoke_repository(cache.scope(), Some(101))
             .unwrap();
+        // Re-create a gate stamp right after revocation, exactly as a later read would. A fresh
+        // stamp must NOT re-validate the historical snapshot that was read under the old revision.
+        let (store, scope) = cache.into_parts();
+        let recreated = ensure_aggregate_gate_stamp(&store, &scope);
+        assert!(
+            recreated.is_some(),
+            "a new read can still prepare its own gate stamp"
+        );
 
         // Wait for cache monitor + drain to evict the historical view!
         wait_for_profile(&harness, cx, |cx| {
             harness
                 .page
                 .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn tab_suspension_preserves_readme_image_provider_across_deactivate_and_reactivate(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        let (tx_slow, rx_slow) = tokio::sync::oneshot::channel();
+        *harness.transport.slow_gate.lock().unwrap() = Some(rx_slow);
+        harness.transport.set_readme_mode(ReadmeMode::SlowPicture);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+
+        let slow_key = ImageKey::new(format!("repo:alice/alice@{COMMIT}:docs/slow.png"));
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    v.read(cx).reader().is_some_and(|r| {
+                        r.read(cx).image_state(&slow_key).as_deref() == Some("loading")
+                    })
+                })
+            })
+        });
+
+        // Switch away from the Profile tab (`set_active(false)`) and back (`set_active(true)`).
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            page.set_active(false, cx);
+            page.set_active(true, cx);
+        });
+        // Release the in-flight picture and verify the attached provider still completes it.
+        let _ = tx_slow.send(());
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    v.read(cx).reader().is_some_and(|r| {
+                        r.read(cx).image_state(&slow_key).as_deref() == Some("ready")
+                    })
+                })
+            })
         });
     }
 

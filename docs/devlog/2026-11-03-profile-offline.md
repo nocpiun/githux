@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：独立实现与受控组合验证已完成；等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
+- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条意见已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -22,18 +22,23 @@
    - 已缓存的确认无 README（`Missing` / `NotEligible`）离线恢复时继续静默省略整段 README 区块。
 4. **授权、代次与 C1–C5 生命周期门禁**：
    - 读取启动与结果提交均校验 `generation`、`selection`、section `request`、`is_current(&context)` 与 `session.verify()`。
-   - 历史缓存结果及在屏历史快照额外核验 `RepoService::cache(&context)` 与账户聚合门禁：切账户、移除账户（C2）、换 PAT（C3）、401 拒绝或具体仓库明确撤权推进聚合 revision（C4）时，立即清除旧 `ProfileView` 与 `ReaderView`，通过 `set_image_provider(None, cx)` 取消在途图片，并校验 `reader_generation` 防止迟到图片或 `on_layout_changed` 回调复活旧页。
+   - 普通标签切换（`ProfileView::suspend`）只停止滚动与手势、保留 README 已挂载的图片 provider，使返回该标签时未完成或后续滚入的图片继续正常加载；页面重绑或替换 README 时调用 `clear_reader` / `cancel_reader` 显式卸下 provider 并取消在途请求。
+   - 每个页面绑定仅保留单个可取消的后台门禁监测任务（`ensure_cache_monitor`，在 `stop()` / `rebind` / `Drop` 时取消），不再按 section/重试各起一条循环。该任务每 80ms 在 blocking worker 上校验在屏历史快照的 `AggregateGateStamp`，不重放 profile 读取、不解析响应。
+   - `AggregateGateStamp` 是写在 `repository=None` 聚合门禁命名空间里的随机 version stamp：每次读取任务开始时先 `prepare_gate_stamp` 建立/读取，离线历史结果提交前再 `verified_historical_stamp` 复核，因此撤权期间被删除的 stamp、换 PAT/401 拒绝后的门禁拒绝、退休 scope 都会让历史结果不被发布；已展示的历史快照同样由监测任务按同一 stamp 失效。这样即使聚合快照在首轮轮询前被撤权、或随后重新写入了新的 stamp/快照，旧历史快照也不会继续展示。
 
 ## 验证
 
-所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行：
+所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。审查修复后的最终一轮（工作区含本轮改动）：
 
-- `node scripts/verify.mjs -- cargo fmt --all -- --check` → exit 0
-- `node scripts/verify.mjs -- cargo check --locked --all-targets` → exit 0
-- `node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings` → exit 0
-- `node scripts/verify.mjs -- cargo build --locked` → exit 0
-- `node scripts/verify.mjs -- cargo test --locked` → exit 0
+- `cargo fmt --all` → exit 0（run `655dff5f`）
+- `cargo fmt --all -- --check` → exit 0（run `7b140e75`）
+- `cargo check --locked --all-targets` → exit 0（run `c5e529e7`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `39ee6ea0`）
+- `cargo build --locked` → exit 0（run `c14d57b4`）
+- `cargo test --locked` → exit 0，1116 / 96 / 560 / 284 / 250 / 752 / 836 / 44 全部 0 failed（run `374eddd9`）
 - `git diff --check` → exit 0
+
+首轮提交 `ece9f4c` 上的整轮检查同样为 exit 0（run `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`）。
 
 新增受控组合与单元回归：
 
@@ -43,7 +48,16 @@
 - `app::pages::profile::tests::account_switch_pat_replace_removal_and_revocation_isolate_cache_and_stop_slow_pictures`：慢图片在途时换 PAT、移除账户与切账户立即取消在途图片并隔离旧聚合缓存。
 - `app::pages::profile::tests::explicit_repository_revocation_clears_historical_profile_and_blocks_offline_revival`：具体仓库明确撤权使账户聚合快照失效并清除已展示的历史快照。
 - `app::pages::profile::tests::uncached_service_preserves_online_behavior_without_regression`：无缓存绑定时在线行为与 README 图片加载无回归。
+- `app::pages::profile::tests::tab_suspension_preserves_readme_image_provider_across_deactivate_and_reactivate`：普通标签切换（`set_active(false/true)`）后已挂载 README 的在途图片仍能完成，证明 `suspend` 不再卸载 provider。
 - `ui::profile::tests::historical_and_partial_provenance_badges_and_section_retries_work`：组件级历史/Partial 徽章与单区块重试动作验证。
+
+## 审查轮次
+
+Codex 首轮（review `PRR_kwDOVN_Iuc8AAAABVw17Vg`，head `ece9f4c`）三条意见均成立并按以下方式修复：
+
+1. **P2 标签切换丢失图片 provider**：原实现让 `ProfileView::suspend` 顺带 `set_image_provider(None)`，返回标签后 provider 不会恢复。现拆分为「暂停交互」(`suspend`：只取消滚动/手势，保留 provider) 与「销毁 reader」(`clear_reader`：重绑、替换 README、授权失效时调用)，并新增上述标签切换回归。
+2. **P1 撤权在首轮轮询前发生仍显示旧快照**：原实现用「先看到 hit、后看到 miss」推断撤权，撤权早于首次轮询或中间重填快照时会漏判。现改为聚合门禁命名空间的 `AggregateGateStamp`：读取开始前建立、历史结果提交前复核、在屏期间由监测任务校验，版本不符即失效并清除视图；回归测试在历史快照显示后立即撤权并重新生成 stamp，仍要求清除。
+3. **P2 每个 section 各起一条永久轮询**：现只有 `ProfilePage::cache_monitor` 一条任务，`rebind`/`stop`/`Drop` 取消，且不再在循环里重放 `profile(Offline)` 读取。
 
 ## 原生验收步骤与边界（`pending`）
 

@@ -60,7 +60,8 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
    - 已缓存的确认无 README（`ProfileReadme::Missing` / `NotEligible`）离线恢复时继续映射为 `SectionState::Unavailable` 并整段省略。
 4. **授权、代次与缓存门禁（C1–C5）**：
    - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
-   - 对历史缓存结果及已展示的历史快照，额外校验 `RepoService::cache(&context)` 与聚合缓存门禁：账户切换、移除（C2）、PAT 替换隔离（C3）、凭据 401 拒绝或具体仓库明确撤权推进聚合 revision（C4）时，立即清除旧 `ProfileView` 与 `ReaderView`、取消在途图片加载并阻断迟到图片或 `on_layout_changed` 回调复活旧页。
+   - 普通标签页切换（`ProfilePage::set_active(false)` → `ProfileView::suspend`）仅停止滚动与阅读器交互手势，保留已挂载 README 的图片 provider；而重新绑定、替换 README 或撕毁页面时调用 `clear_reader` / `cancel_reader` 显式取消并分离图片 provider。
+   - 对历史缓存结果及已展示的历史快照，每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消，不重放 profile 读取）。判定依据是写在 `repository=None` 聚合门禁命名空间里的 `AggregateGateStamp`：读取任务开始时建立/读取，离线历史结果提交前复核，在屏期间由监测任务校验；stamp 被撤权删除、门禁被换 PAT/401 拒绝隔离或 scope 退休都会使历史内容失效。因此即使撤权发生在首轮轮询前，或之后又写入了新的 stamp/快照，已展示的旧历史快照也会被清除，并同步清理旧 `ProfileView`、`ReaderView` 与在途图片，阻断迟到图片或 `on_layout_changed` 回调复活旧页。
 
 ## Host adapter / mounting 职责
 
