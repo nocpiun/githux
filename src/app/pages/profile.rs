@@ -196,7 +196,10 @@ pub struct ProfilePage {
     cache_monitor_running: Arc<std::sync::atomic::AtomicBool>,
     gate_stamps: Arc<Mutex<[Option<AggregateGateStamp>; 4]>>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
-    cache_invalidated: Arc<std::sync::atomic::AtomicBool>,
+    /// Generation-tagged invalidation produced by a monitor. An older monitor may still be in
+    /// the middle of an iteration when its binding was replaced; its verdict must never be
+    /// consumed by the page that replaced it.
+    cache_invalidated: Arc<std::sync::atomic::AtomicU64>,
     alive: Arc<watch::Sender<bool>>,
     receiver: Option<gpui::Task<()>>,
     view: Option<Entity<ProfileView>>,
@@ -239,7 +242,7 @@ impl ProfilePage {
             cache_monitor_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gate_stamps: Arc::new(Mutex::new([None, None, None, None])),
             inbox: Arc::new(Mutex::new(VecDeque::new())),
-            cache_invalidated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cache_invalidated: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
             alive: Arc::new(alive),
             receiver: None,
             view: None,
@@ -276,7 +279,7 @@ impl ProfilePage {
         self.request = None;
         self.unavailable = None;
         self.cache_invalidated
-            .store(false, std::sync::atomic::Ordering::Release);
+            .store(u64::MAX, std::sync::atomic::Ordering::Release);
         *self.gate_stamps.lock().expect("profile gate stamps") = [None, None, None, None];
         self._avatars_changed = None;
         self.view = None;
@@ -684,6 +687,12 @@ impl ProfilePage {
         let alive = self.alive.clone();
         let invalidated = self.cache_invalidated.clone();
         let stamps = self.gate_stamps.clone();
+        // The verdict is tagged with the binding that produced it: a monitor left over from a
+        // previous binding cannot retire the page that replaced it.
+        let binding_generation = self.generation;
+        let invalidate = move || {
+            invalidated.store(binding_generation, std::sync::atomic::Ordering::Release);
+        };
         let work = Work::new();
         let cancel = work.token.clone();
         self.cache_monitor = Some(work);
@@ -711,12 +720,12 @@ impl ProfilePage {
                     continue;
                 }
                 if repos.cache(&context).is_none() {
-                    invalidated.store(true, std::sync::atomic::Ordering::Release);
+                    invalidate();
                     break;
                 }
                 // In-process lease check: no SQLite read and no replayed profile fetch per tick.
                 if !active_stamps.iter().all(AggregateGateStamp::is_current) {
-                    invalidated.store(true, std::sync::atomic::Ordering::Release);
+                    invalidate();
                     break;
                 }
             }
@@ -789,9 +798,13 @@ impl ProfilePage {
             // A concrete repository revocation keeps the aggregate gate usable for fresh reads, so
             // the invalidation only retires the snapshots that were on screen. It must not block a
             // later read that proves the gate again with a new stamp.
+            // Only the current binding's verdict may retire the page. A monitor cancelled during
+            // `rebind` may finish its iteration afterwards and publish the *old* generation; it must
+            // not cancel the new binding's fresh requests.
             let invalidated = self
                 .cache_invalidated
-                .swap(false, std::sync::atomic::Ordering::AcqRel);
+                .swap(u64::MAX, std::sync::atomic::Ordering::AcqRel)
+                == self.generation;
             // A displayed section whose gate generation was retired must disappear even though the
             // account session is still valid (explicit repository revocation does not advance the
             // auth epoch). The verdict comes from the background monitor, so this foreground tick
@@ -3476,6 +3489,54 @@ mod tests {
                 .view_for_test()
                 .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))),
             "the retry survives the following foreground tick"
+        );
+    }
+
+    #[gpui::test]
+    fn an_old_monitors_invalidation_cannot_retire_the_new_binding(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        // A monitor that belonged to the *previous* binding finishes an iteration after the page
+        // has already been rebound (its token was cancelled, but the iteration still completes).
+        let stale_flag =
+            cx.update_window_entity(&harness.page, |page, _, _| page.cache_invalidated.clone());
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        // Its verdict lands only now, tagged with the old generation: the new page must ignore it.
+        stale_flag.store(
+            cx.update_window_entity(&harness.page, |page, _, _| page.generation) - 1,
+            Ordering::Release,
+        );
+        pump_page(&harness, cx);
+        assert!(
+            harness.page.read_with(cx, |page, cx| page
+                .view_for_test()
+                .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))),
+            "a previous binding's monitor verdict must not retire the new page"
+        );
+        assert!(
+            harness
+                .page
+                .read_with(cx, |page, _| page.unavailable.clone())
+                .is_none(),
+            "the new binding is not left as a Forbidden placeholder"
         );
     }
 
