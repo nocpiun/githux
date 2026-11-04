@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：Codex 八轮意见与主 Agent 基础验收的 3 条反例均已处理并复验。等待 `cache-runtime` 发布共享权限票据接口后按其契约收尾，以及负责人原生窗口验收（`pending`）。
+- 状态：Codex 九轮意见与主 Agent 基础验收的 3 条反例均已处理并复验。等待 `cache-runtime` 发布共享权限票据接口后按其契约收尾，以及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -30,11 +30,11 @@
 
 所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all -- --check` → exit 0（run `84be2506`；`cargo fmt --all` run `7971fb26`）
+- `cargo fmt --all -- --check` → exit 0（run `79293be4`；`cargo fmt --all` run `b411405a`）
 - `cargo check --locked --all-targets` → exit 0（run `4bcec08f`、`5c20bcbe`）
-- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `dc6d5402`）
-- `cargo build --locked` → exit 0（run `f0a0cf6a`）
-- `cargo test --locked` → exit 0，1148 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `daefef33`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `9354c47d`）
+- `cargo build --locked` → exit 0（run `8ebc5460`）
+- `cargo test --locked` → exit 0，1149 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `cd0a8b66`）
 - `git diff --check` → exit 0
 
 此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
@@ -98,7 +98,7 @@ Codex 第五轮（head `3828ac7`）一条意见成立并修复：
 ### 反例接入与反向验证
 
 - `src/app/pages/profile_acceptance_tests.rs` 原样纳入本分支，经 `tests` 模块末尾 `include!` 引入（不在 `app/pages/mod.rs` 注册）。
-- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 21 passed / 0 failed（run `5ab19bd8`），三条反例与两条新回归全部通过。
+- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 22 passed / 0 failed（run `08a864ef`），三条反例与两条新回归全部通过。
 - 反向验证（run `1e8ef5cf`）：把 stamp 恢复为「仅历史」、去掉发布前检查、把 `is_uncached_fallback` 收窄回仅 `AccessDenied` 后，三条反例重新全部失败（`acceptance_revocation_also_clears_online_profile`、`acceptance_queued_historical_profile_is_rejected_after_revocation`、`acceptance_profile_cache_write_failure_keeps_online_result`），冷启动用例仍通过——证明三条用例确实锁住这三处缺口。
 
 ### 第六轮 Codex 意见（head `4428c61`）
@@ -131,6 +131,14 @@ Codex 第五轮（head `3828ac7`）一条意见成立并修复：
 
 - `cache_invalidated` 改为 `AtomicU64`：监测任务只写入**它所属绑定的 generation**；`check_authorization` 只在 `swap(u64::MAX) == self.generation` 时消费。旧绑定的结论无法再被新页面采纳。
 - 回归 `an_old_monitors_invalidation_cannot_retire_the_new_binding`：以旧 generation 标记的失效结论在新绑定就绪后到达，新页面必须保留。反向验证（任何代次都消费）确实失败。
+
+### 第九轮 Codex 意见（head `6faa084`）
+
+**P2 监测任务的存活标志被跨绑定共享。** `stop()` 只取消 token，不清 `cache_monitor_running`；旧任务若还在收尾，新绑定的 `ensure_cache_monitor` 会直接返回而不启动监测。旧任务随后写回 `false`，而 `drain` 已不再做前台 stamp 校验，于是完整加载的新页面可能永远没有监测，撤权后内容不清除。
+
+- 删除 `cache_monitor_running` 这个共享标志。`ensure_cache_monitor` 现在无条件取消并替换上一绑定的 `Work` 句柄，再启动属于当前绑定的新任务；每个 `Work` 句柄对自己的绑定是权威的，被取消任务迟到的收尾不会抑制新任务。
+- 回归 `the_new_binding_gets_its_own_monitor_even_if_the_old_one_finishes_late`：一次同步 update 内连续 `rebind` 两次（保证上一任务尚未收尾），新绑定必须持有一个**未取消**的新监测任务（`Work::id` 变化 + `token.is_cancelled() == false`），并在随后撤权时仍能清除页面。
+- **验证边界（如实记录）**：该用例无法被"改回共享布尔标志"反向证伪——`tokio::spawn` 在测试调度下一次 update 内从不运行，旧任务的收尾写回无法在此复现。因此它对"新绑定持有自己的、未被取消的监测任务"有确定性约束，但**不证明**取消后迟到写回的真实竞态已被复现；后者由删除共享状态在结构上消除（代码路径不再存在该标志）。
 
 ## 原生验收步骤与边界（`pending`）
 

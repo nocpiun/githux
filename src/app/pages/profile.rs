@@ -97,12 +97,23 @@ impl Section {
 struct Work {
     token: CancellationToken,
     source: CancellationTokenSource,
+    /// Unique per task instance. Lets a test tell a binding's own background task from a cancelled
+    /// one that is still finishing its last iteration.
+    #[cfg(test)]
+    id: u64,
 }
 
 impl Work {
     fn new() -> Self {
         let (token, source) = CancellationToken::new();
-        Self { token, source }
+        #[cfg(test)]
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            token,
+            source,
+            #[cfg(test)]
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 }
 
@@ -193,7 +204,6 @@ pub struct ProfilePage {
     requests: [u64; 4],
     work: [Option<Work>; 4],
     cache_monitor: Option<Work>,
-    cache_monitor_running: Arc<std::sync::atomic::AtomicBool>,
     gate_stamps: Arc<Mutex<[Option<AggregateGateStamp>; 4]>>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     /// Generation-tagged invalidation produced by a monitor. An older monitor may still be in
@@ -239,7 +249,6 @@ impl ProfilePage {
             requests: [0; 4],
             work: [None, None, None, None],
             cache_monitor: None,
-            cache_monitor_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gate_stamps: Arc::new(Mutex::new([None, None, None, None])),
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             cache_invalidated: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
@@ -667,19 +676,18 @@ impl ProfilePage {
     }
 
     fn ensure_cache_monitor(&mut self, services: &AccountServices) {
-        // A finished monitor keeps its handle until the foreground notices; treat a stopped task as
-        // absent so a later section read can start a new one for the current stamps.
-        if self
-            .cache_monitor_running
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return;
+        // Every binding owns its monitor: replace (and cancel) whatever the previous binding left
+        // behind instead of consulting a shared liveness flag. A cancelled task finishing late can
+        // no longer suppress the new binding's monitor, and each `Work` handle is authoritative for
+        // its own binding.
+        if let Some(previous) = self.cache_monitor.take() {
+            previous.source.cancel();
         }
-        self.cache_monitor = None;
         if self.cached_session.is_none() {
             return;
         }
         let Some(session) = self.session.clone() else {
+            self.cache_monitor = None;
             return;
         };
         let context = session.context().clone();
@@ -696,9 +704,6 @@ impl ProfilePage {
         let work = Work::new();
         let cancel = work.token.clone();
         self.cache_monitor = Some(work);
-        self.cache_monitor_running
-            .store(true, std::sync::atomic::Ordering::Release);
-        let running = self.cache_monitor_running.clone();
         let spawned = services.executor().handle().spawn(async move {
             loop {
                 tokio::select! {
@@ -729,12 +734,9 @@ impl ProfilePage {
                     break;
                 }
             }
-            running.store(false, std::sync::atomic::Ordering::Release);
         });
         if spawned.is_err() {
             self.cache_monitor = None;
-            self.cache_monitor_running
-                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -813,8 +815,6 @@ impl ProfilePage {
                 if let Some(monitor) = self.cache_monitor.take() {
                     monitor.source.cancel();
                 }
-                self.cache_monitor_running
-                    .store(false, std::sync::atomic::Ordering::Release);
                 self.retire_displayed_sections(cx);
                 cx.notify();
                 return false;
@@ -842,8 +842,6 @@ impl ProfilePage {
         if let Some(monitor) = self.cache_monitor.take() {
             monitor.source.cancel();
         }
-        self.cache_monitor_running
-            .store(false, std::sync::atomic::Ordering::Release);
         *self.gate_stamps.lock().expect("profile gate stamps") = [None, None, None, None];
         // Cancelling a token cannot stop a reply that a worker already finished and enqueued.
         // Advancing the page generation and clearing the per-section request ids makes every
@@ -3538,6 +3536,69 @@ mod tests {
                 .is_none(),
             "the new binding is not left as a Forbidden placeholder"
         );
+    }
+
+    #[gpui::test]
+    fn the_new_binding_gets_its_own_monitor_even_if_the_old_one_finishes_late(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        let before = harness.page.read_with(cx, |page, _| {
+            page.cache_monitor.as_ref().map(|work| work.id)
+        });
+        assert!(before.is_some(), "the first binding owns a monitor");
+        // Rebinding twice inside one synchronous update guarantees the previous monitor task has
+        // not run its cleanup yet, so the new binding must not depend on that cleanup happening.
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services.clone(), cx);
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        let monitor = harness.page.read_with(cx, |page, _| {
+            page.cache_monitor
+                .as_ref()
+                .map(|work| (work.id, work.token.is_cancelled()))
+        });
+        let (monitor_id, monitor_cancelled) =
+            monitor.expect("the new binding owns a monitor of its own");
+        assert_ne!(
+            Some(monitor_id),
+            before,
+            "the new binding's monitor is a new task, not the cancelled one"
+        );
+        assert!(
+            !monitor_cancelled,
+            "the new binding's monitor is live; it does not wait for the cancelled task to finish"
+        );
+        // Revoking while the new page is displayed must still retire it: the previous task finishing
+        // late cannot leave the new page unmonitored.
+        let context = harness.accounts.page_session().unwrap().context().clone();
+        let cache = harness.accounts.repo_service().cache(&context).unwrap();
+        cache
+            .store()
+            .revoke_repository(cache.scope(), Some(101))
+            .unwrap();
+        wait_for_profile(&harness, cx, |cx| {
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
     }
 
     #[test]
