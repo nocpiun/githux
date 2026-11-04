@@ -832,6 +832,12 @@ impl ProfilePage {
         self.cache_monitor_running
             .store(false, std::sync::atomic::Ordering::Release);
         *self.gate_stamps.lock().expect("profile gate stamps") = [None, None, None, None];
+        // Cancelling a token cannot stop a reply that a worker already finished and enqueued.
+        // Advancing the page generation and clearing the per-section request ids makes every
+        // outstanding reply fail `accepts()`, so a stale sibling reply cannot retire — and cancel —
+        // the retry the user starts after this cleanup.
+        self.generation = self.generation.saturating_add(1);
+        self.requests = [0; 4];
         for work in &mut self.work {
             if let Some(work) = work.take() {
                 work.source.cancel();
@@ -3377,6 +3383,99 @@ mod tests {
                 .view_for_test()
                 .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))),
             "the new binding keeps its own content"
+        );
+    }
+
+    #[gpui::test]
+    fn a_stale_sibling_reply_cannot_cancel_the_retry_that_replaced_it(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        let session = harness.accounts.page_session().unwrap();
+        let repos = harness.accounts.repo_service();
+        let binding = repos.cache(session.context()).unwrap();
+        let cached = CachedPageReadSession::new(
+            session.clone(),
+            binding.store().clone(),
+            binding.scope().clone(),
+        )
+        .unwrap();
+        // A sibling section finishes a read under the *current* generation…
+        harness.transport.set_offline(true);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let outcome = runtime
+            .block_on(async {
+                let stamp = prepare_gate_stamp(&repos, session.context()).await;
+                read_profile_pinned(
+                    &repos,
+                    &session,
+                    Some(&cached),
+                    stamp.as_ref(),
+                    "alice",
+                    Default::default(),
+                )
+                .await
+            })
+            .unwrap();
+        let stale = cx.update_window_entity(&harness.page, |page, _, _| Reply {
+            section: Section::Repositories,
+            generation: page.generation,
+            request: page.requests[Section::Repositories.index()],
+            selection: page.selection,
+            context: session.context().clone(),
+            login: page.login.clone(),
+            result: SectionResult::Repositories(Ok(outcome)),
+        });
+
+        // …then an explicit revocation retires the page.
+        let context = harness.accounts.page_session().unwrap().context().clone();
+        let cache = harness.accounts.repo_service().cache(&context).unwrap();
+        cache
+            .store()
+            .revoke_repository(cache.scope(), Some(101))
+            .unwrap();
+        wait_for_profile(&harness, cx, |cx| {
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+
+        // The user retries Basic while the stale sibling reply is still undelivered.
+        harness.transport.set_offline(false);
+        let retry = cx
+            .debug_bounds("profile-page-basic-error")
+            .expect("retirement leaves a retryable placeholder");
+        cx.simulate_click(retry.center(), gpui::Modifiers::none());
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+
+        // Delivering the stale sibling reply must not retire (and cancel) that retry.
+        cx.update_window_entity(&harness.page, |page, window, cx| {
+            page.apply(stale, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            harness.page.read_with(cx, |page, cx| page
+                .view_for_test()
+                .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))),
+            "a stale sibling reply must not cancel the fresh retry"
+        );
+        pump_page(&harness, cx);
+        assert!(
+            harness.page.read_with(cx, |page, cx| page
+                .view_for_test()
+                .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))),
+            "the retry survives the following foreground tick"
         );
     }
 
