@@ -73,6 +73,13 @@ Codex 本轮另指出 `stop()` 必须清除保留的权限票据，避免撤权�
 
 随后修复 401 清理的幂等性（仅在页面仍保留缓存/票据状态时清理），以及有效新 PAT 的网络 Feed 后续页在缓存故障时回退普通在线读取；历史分页仍严格离线。新增 `online_feed_continuation_survives_cache_failure_after_replacement` 通过，当前 13/13 Home 测试通过（run `ae5bc282-ad24-447a-ace3-671fe5313791`），home 视图与 Shell 页面回归通过。
 
+### Codex 审查后续修复（2026-11-04 晚）
+
+- 权限票据失效后不再永久禁用 Home：内容立即清空，但保留仍验证通过的 `PageReadSession`，刷新时重新捕获票据执行在线替换读取；`acceptance_confirmed_revocation_clears_already_rendered_home` 增加刷新恢复断言。
+- 网络 Feed 后续页失败保留可重试错误，不再误报 `Page not available offline`；网络描述读取在缓存 quarantine/操作故障时回退普通在线读取，历史描述仍严格离线。
+- 401 清理幂等，避免失效摘要导致空闲页面持续重绘。
+- 当前验证：13/13 Home 测试（run `bd001df6-be53-423f-9d64-22d21dc89f30`）、`tests/home`（run `f8771028-6e0e-403d-a30c-61214eff205a`）、Shell 页面（run `0c170ca1-d84f-402c-85b8-4e767f25dc48`）、clippy（run `4b421aaa-4544-4b37-8e12-ce1e2f224063`）通过。
+
 原生窗口与真实 GitHub PAT 仍未验证，保留 `pending`。
 
 

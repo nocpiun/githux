@@ -1058,9 +1058,10 @@ fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestApp
     let mut fixture = runtime.block_on(Fixture::new(true));
     runtime.block_on(fixture.warm());
     runtime.block_on(async {
-        for _ in 0..6 {
-            fixture.network_error().await;
-        }
+        // Exactly one failed first-page read per column; extra scripted failures
+        // would otherwise be consumed by the recovery refresh below.
+        fixture.network_error().await;
+        fixture.network_error().await;
     });
     let store = fixture.store();
     let scope = store.saved_account(fixture.account.clone()).unwrap();
@@ -1094,15 +1095,15 @@ fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestApp
     );
     assert!(feed_ids(&page, cx).is_empty());
     assert!(page.read_with(cx, |page, _| page.feed_repo_descriptions.is_empty()));
-    assert!(page.read_with(cx, |page, _| page.cache_authorization.is_none()));
+    assert!(page.read_with(cx, |page, _| {
+        page.cache_authorization
+            .as_ref()
+            .is_none_or(|authorization| !authorization.is_current())
+    }));
     page.update(cx, |page, cx| page.drain_for_test(cx));
     assert_eq!(home_title(&page, cx), None);
     page.update(cx, |page, cx| {
         let auth = authorization.clone();
-        assert!(
-            page.cache_authorization.is_none(),
-            "stop clears retained authorization"
-        );
         page.apply_append(
             AppendReply {
                 generation,
@@ -1147,6 +1148,30 @@ fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestApp
         None,
         "late append and enrichment must not resurrect revoked content"
     );
+    runtime.block_on(async {
+        fixture
+            .mock
+            .enqueue(Ok(response(200, &home("recovered online"))))
+            .await;
+        fixture.mock.enqueue(Ok(events("recovered", None))).await;
+        fixture
+            .mock
+            .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
+            .await;
+    });
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.refresh_for_test(Column::Home, window, cx);
+    });
+    cx.run_until_parked();
+    settle(&page, cx);
+    assert_eq!(
+        home_title(&page, cx).as_deref(),
+        Some("recovered online"),
+        "cache-only invalidation must keep an online recovery path"
+    );
+    assert!(page.read_with(cx, |page, cx| {
+        page.view.read(cx).provenance(Column::Home).is_none()
+    }));
 }
 
 #[tokio::test]

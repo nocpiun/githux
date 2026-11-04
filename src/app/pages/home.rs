@@ -459,8 +459,7 @@ impl HomePage {
                             .ok();
                     self.cache_authorization =
                         self.cached.as_ref().and_then(|_| store.authorization(&scope, None));
-                }
-                self.session = Some(session);
+                }                self.session = Some(session);
                 self.start(Column::Home, true, cx);
                 self.start(Column::Feed, true, cx);
             }
@@ -468,6 +467,41 @@ impl HomePage {
                 "The current account is not verified or its credential is unavailable. No online results are shown.",
                 cx,
             ),
+        }
+    }
+
+    /// Cache-only invalidation removes copied bytes but leaves the verified
+    /// account session usable, so the user can recover with an online refresh.
+    fn cache_invalidated(&mut self, message: &str, cx: &mut Context<Self>) {
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        self.view.update(cx, |view, cx| {
+            for column in [Column::Home, Column::Feed] {
+                view.set_unavailable(column, &binding, generation, message, cx);
+                view.set_refresh_availability(
+                    column,
+                    &binding,
+                    generation,
+                    RefreshAvailability::available(),
+                    cx,
+                );
+            }
+        });
+    }
+
+    fn rebind_cache_binding(&mut self, session: &PageReadSession) {
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        if let Some(cache) = services.repositories().cache(session.context()) {
+            let (store, scope) = cache.into_parts();
+            self.cache_partition = Some(scope.partition().to_string());
+            self.cached =
+                CachedPageReadSession::new(session.clone(), store.clone(), scope.clone()).ok();
+            self.cache_authorization = self
+                .cached
+                .as_ref()
+                .and_then(|_| store.authorization(&scope, None));
         }
     }
 
@@ -590,6 +624,9 @@ impl HomePage {
         let Some(session) = self.session.clone() else {
             return;
         };
+        if self.cached.is_none() {
+            self.rebind_cache_binding(&session);
+        }
         let Some(services) = self.services.clone() else {
             return;
         };
@@ -746,11 +783,26 @@ impl HomePage {
                     })
                 });
         if stale {
-            self.stop();
-            self.unavailable(
-                "The account or authorization changed. Refresh in the current account.",
-                cx,
-            );
+            let authorization_stale = self
+                .cache_authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current());
+            if authorization_stale && self.session.as_ref().is_some_and(|s| s.verify()) {
+                self.stop_work_without_session();
+                self.cache_invalidated(
+                    "Saved content is no longer available; refresh to read online for the current account.",
+                    cx,
+                );
+                self.cached = None;
+                self.cache_authorization = None;
+                self.cache_partition = None;
+            } else {
+                self.stop();
+                self.unavailable(
+                    "The account or authorization changed. Refresh in the current account.",
+                    cx,
+                );
+            }
         }
     }
 
@@ -1454,17 +1506,19 @@ impl HomePage {
                         .repository_descriptions(mode, needed.clone(), 20, cancel.clone())
                         .await
                     {
-                        Err(error) if matches!(mode, PageReadMode::Online) => match cache_failure(error) {
-                            CachedReadFailure::UncachedOnline => session
-                                .repository_descriptions(needed, 20, cancel.clone())
-                                .await
-                                .map(|value| EnrichmentResult {
-                                    descriptions: value.value,
-                                    cache_partition: None,
-                                }),
-                            CachedReadFailure::Network(error) => Err(error),
-                            CachedReadFailure::AuthOrContext(error) => Err(error),
-                        },
+                        Err(error) if matches!(mode, PageReadMode::Online) => {
+                            match cache_failure(error) {
+                                CachedReadFailure::UncachedOnline => session
+                                    .repository_descriptions(needed, 20, cancel.clone())
+                                    .await
+                                    .map(|value| EnrichmentResult {
+                                        descriptions: value.value,
+                                        cache_partition: None,
+                                    }),
+                                CachedReadFailure::Network(error) => Err(error),
+                                CachedReadFailure::AuthOrContext(error) => Err(error),
+                            }
+                        }
                         result => result
                             .map_err(cache_miss_failure)
                             .and_then(|value| match value.value {
