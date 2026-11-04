@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条、第二轮 1 条、第三轮 1 条、第四轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
+- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条、第二轮 1 条、第三轮 1 条、第四轮 1 条、第五轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -30,16 +30,16 @@
 
 所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all -- --check` → exit 0（run `e215a8d3`；`cargo fmt --all` run `01a7640b`）
+- `cargo fmt --all -- --check` → exit 0（run `636cccda`；`cargo fmt --all` run `9fbbb087`）
 - `cargo check --locked --all-targets` → exit 0（run `4bcec08f`、`5c20bcbe`）
-- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `ca902734`）
-- `cargo build --locked` → exit 0（run `06531fac`）
-- `cargo test --locked` → exit 0，1139 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `467163ee`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `deda1155`）
+- `cargo build --locked` → exit 0（run `0ec0fd13`）
+- `cargo test --locked` → exit 0，1140 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `84cb5d7a`）
 - `git diff --check` → exit 0
 
 此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
 
-- 三次 `cargo test --locked`（run `03c5c6fc`、`2451e558`、`4973b60b`）中 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 报 `reopen cache store: InUse`：`CacheStore` 是进程级独占文件租约，同二进制内其他测试（例如 `page_cache`/`repository` 的临时 store）尚未释放时该用例重开同一路径会失败。该用例单独复跑通过（`60e226d0`、`272c9ba7`），且失败点在本任务未修改的既有测试与存储层；整套复跑（`8dc4483b`）通过。属于既有测试并行敏感项，不在本任务范围内修改共享 cache 测试。
+- 多次 `cargo test --locked`（run `03c5c6fc`、`2451e558`、`4973b60b`、`5ab0d7a3`、`fc7d3bef`）中 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 报 `reopen cache store: InUse`：`CacheStore` 是进程级独占文件租约，同二进制内其他测试（例如 `page_cache`/`repository` 的临时 store）尚未释放时该用例重开同一路径会失败。该用例单独复跑通过（`60e226d0`、`272c9ba7`），且失败点在本任务未修改的既有测试与存储层；整套复跑（`8dc4483b`）通过。属于既有测试并行敏感项，不在本任务范围内修改共享 cache 测试。
 - 一次整轮（run `886cc506`）中两个新增 profile 组合用例超时：`wait_for_profile` 原为固定 400 次轮询，在整套并行负载下不足以等待后台读取与图片解码。现改为 60 秒墙钟截止（run `43eac9a7` 定向通过，`8dc4483b` 整套通过）。
 
 新增受控组合与单元回归：
@@ -76,6 +76,10 @@ Codex 第三轮（head `5e4916a`）一条意见成立并修复：
 Codex 第四轮（head `6bdaf7b`）一条意见成立并修复：
 
 6. **P2 撤权后 `cache_invalidated` 永久卡住，重试无法采纳新授权的快照**：`cache_invalidated` 原为一次性闩锁，只在 `rebind()` 清除；而具体仓库撤权刻意保留聚合门禁可用，其他页面重新在线写入快照后，本页重试得到的仍是被拒绝的历史结果，且 `apply()` 在 `accepts()` 失败前没有释放 section 的 `work` 句柄，导致后续重试彻底不动。现 `check_authorization` 在清理完在屏历史内容后**清除**该闩锁（撤权仅使当时展示的快照退休，不永久拒绝新证明），并释放该绑定下所有在途 section 句柄与收件箱；监测任务通过 `cache_monitor_running` 暴露存活状态，退出后允许为新的 stamp 重新启动。回归 `retry_after_revocation_adopts_a_newly_authorized_cache_stamp`：撤权清空在屏快照后，由另一读会话在线重填聚合快照，再在离线状态点击重试，页面正常恢复历史快照；反向验证（把 `swap(false)` 改回 `load()`）该用例超时失败。
+
+Codex 第五轮（head `3828ac7`）一条意见成立并修复：
+
+7. **P2 大小写不同的路由在离线重开时无法取回 Basic 快照**：缓存键包含请求时的 login 原始拼写，而 `apply_basic` 会用服务器返回的 canonical login 覆盖 `self.login`，Shell 也会把路由改写成 canonical。于是以 `ALICE` 首次在线访问后，离线重开 canonical 路由（`alice`）会 miss，Profile 直接无法挂载。现 `read_profile_basic` 在在线成功且 canonical 与请求拼写不同时，用 canonical 拼写再读一次（同一会话、同一授权），把同一观察写入 canonical 键；常见已 canonical 的情形不产生额外请求。回归 `canonical_login_reopen_offline_restores_the_profile_before_canonicalization` 以 `ALICE` 首次访问、断网后按 canonical login 重开，仍恢复历史快照；反向验证（去掉 canonical 预热读）该用例超时失败。
 
 ## 原生验收步骤与边界（`pending`）
 

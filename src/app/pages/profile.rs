@@ -1195,6 +1195,11 @@ impl ProfilePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn login_for_test(&self) -> &str {
+        &self.login
+    }
+
+    #[cfg(test)]
     pub(crate) fn range_for_test(&self) -> &ContributionRange {
         &self.range
     }
@@ -1456,7 +1461,19 @@ async fn read_profile_basic(
         .profile(PageReadMode::Online, login, cancel.clone())
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value, None),
+        Ok(scoped) => {
+            let outcome = unpack_page_value(scoped.value, None)?;
+            // The page is keyed by the requested spelling, but the Shell rewrites the route to the
+            // server's canonical login. Store the same observation under that canonical spelling too
+            // so reopening the canonical route offline can mount the profile. One extra request per
+            // alias spelling; the common (already canonical) case issues none.
+            if outcome.value.login != login && !cancel.is_cancelled() {
+                let _ = cached
+                    .profile(PageReadMode::Online, &outcome.value.login, cancel)
+                    .await;
+            }
+            Ok(outcome)
+        }
         Err(PageCacheError::Read(error)) => {
             if should_fallback_profile(&error) {
                 match cached.profile(PageReadMode::Offline, login, cancel).await {
@@ -2458,6 +2475,14 @@ mod tests {
         cx: &mut TestAppContext,
         with_cache: bool,
     ) -> (Harness, &mut VisualTestContext) {
+        build_harness_with_login(cx, with_cache, "alice")
+    }
+
+    fn build_harness_with_login<'a>(
+        cx: &'a mut TestAppContext,
+        with_cache: bool,
+        login: &str,
+    ) -> (Harness, &'a mut VisualTestContext) {
         setup_test_app(cx);
         let temp = tempfile::tempdir().unwrap();
         let account_db = temp.path().join("accounts.sqlite3");
@@ -2514,8 +2539,7 @@ mod tests {
             controller_slot = Some(controller);
             let sessions = crate::workspace::Sessions::new(cx);
             let tab_id = sessions.active_id();
-            let mut page =
-                ProfilePage::new(tab_id, "alice".to_string(), services, nav, avatars, cx);
+            let mut page = ProfilePage::new(tab_id, login.to_string(), services, nav, avatars, cx);
             page.set_external_images_for_test(external_for_page);
             page
         });
@@ -2958,6 +2982,51 @@ mod tests {
                 .page
                 .read_with(cx, |page, _| page.view_for_test().is_none())
         });
+    }
+
+    #[gpui::test]
+    fn canonical_login_reopen_offline_restores_the_profile_before_canonicalization(
+        cx: &mut TestAppContext,
+    ) {
+        // GitHub profile URLs are case-insensitive, so a route may arrive with a non-canonical
+        // spelling while the server answers with the canonical login.
+        let (harness, cx) = build_harness_with_login(cx, true, "ALICE");
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|v| match v.read(cx).basic() {
+                        SectionState::Ready(basic) => basic.login == "alice",
+                        _ => false,
+                    })
+            })
+        });
+        // The host now addresses this page by the canonical login, exactly like the rewritten route.
+        assert_eq!(
+            harness
+                .page
+                .read_with(cx, |page, _| page.login_for_test().to_string()),
+            "alice"
+        );
+
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    matches!(v.read(cx).basic(), SectionState::Ready(_))
+                        && v.read(cx)
+                            .basic_provenance()
+                            .is_some_and(|p| p.is_historical())
+                })
+            })
+        });
+        assert!(
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+        );
     }
 
     #[gpui::test]
