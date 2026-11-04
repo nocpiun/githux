@@ -45,7 +45,32 @@
 - `docs/home-view.md`：
   - 记录 2026-11-03 离线页面缓存、历史快照呈现、分页同源与无缓存回退契约。
 
-## 验证记录
+## 2026-11-04 F1/F2 返工与权限代次票据
+
+负责人要求继续原 PR #72，修复主 Agent 组合验收反例。复用其 `D:/githux-cache-home-acceptance/src/app/pages/home/tests.rs` 最后四条验收用例，保留原断言，不改缓存生产者接口。
+
+### F1：缓存拒绝不再关闭有效在线会话
+
+- 原实现把 `CacheError::AccessDenied`/`Stale` 映射为 `GitHubError::StaleContext`，导致同一身份新 PAT 已验证成功时 Home/Feed 被关闭。
+- 新增 `CachedReadFailure::{Network, AuthOrContext, UncachedOnline}` 分流：网络/超时回退历史；缓存 quarantine、lease、I/O 故障回退普通在线读取；真实 401、取消、stale 上下文保持原义。
+- 401 清空旧页面副本但不把当前 `PageReadSession` 误标 stale；无缓存对照与真实在线读取保持成功。
+- `acceptance_valid_replacement_pat_keeps_home_online`、`acceptance_valid_replacement_pat_keeps_feed_online`、`operational_cache_failure_degrades_to_online_without_unlocking_old_snapshots`、`replacement_pat_rejection_never_replays_the_quarantined_snapshot` 均通过。
+
+### F2：撤权后已显示副本与迟到响应失效
+
+- 采用 cache-runtime 独立核心提交 `9f87f47` 的 `CacheAuthorization`：`CacheStore::authorization(scope, None)` 捕获账户聚合票据，内存原子读取，不授予权限、不访问磁盘。
+- `HomePage` 在绑定/读取前捕获票据，Home/Feed 首屏、分页、描述回复都携带同一票据；后台入队前与 UI apply 前复核，旧票据永久失效后停止并清空 Home/Feed/描述副本。
+- 原 `acceptance_confirmed_revocation_clears_already_rendered_home` 通过，扩展覆盖撤权后迟到 append/enrichment 不复活旧内容。
+- `acceptance_cold_start_without_network_revalidation_replays_saved_home` 通过：真实关闭并重开服务/缓存、PendingVerification、无网络 revalidate 仍可回放。
+- 核心接口仍由 cache-runtime 唯一负责；本任务没有改 storage/data 生产者，后续按明确提交/协调基线完成正式组合。
+
+### 验证
+
+`node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::home::tests -- --test-threads=1`：12/12 通过（run `b5b15498-3a06-4d7a-8d3e-a6fed99c5099`）。
+`node scripts/verify.mjs -- cargo fmt --all`：通过（run `b19c1194-b873-46b6-bcee-aa4ba9cb073d`）。
+
+原生窗口与真实 GitHub PAT 仍未验证，保留 `pending`。
+
 
 所有 Cargo 检查与测试均经由 `node scripts/verify.mjs` 串行执行，确保遵循平台互斥锁：
 1. `node scripts/verify.mjs -- cargo fmt --all -- --check`：通过（exit 0）。
@@ -61,7 +86,7 @@
 - 正式生产启动注入 `CacheStore` 仍依赖 `cache-runtime`（PR #68，当前未合入 `main`；其前置 `sidebar-cache` PR #70 已合入 `main`）。在本任务分支上，通过真实 `AccountService::open_with_cache`、真实 SQLite 账户目录、真实 `CacheStore`、真实 `CachedPageReadSession` 和真实 `HomePage` 宿主完成受控组合断言，尚未做 `cache-runtime` 合入后的正式二进制冷启动组合验证。
 - 若未来要求单仓库明确撤权在不推进账户 `AuthEpoch`、也不触发新一轮读取的情况下立即撤下已渲染的 Home/Feed 副本，需协调共享层（如 `RepoService` 暴露当前账户聚合 gate 状态或失效序号）；本任务按文件所有权未修改 `src/data/**` 或 `src/storage/**`。
 - 自动化测试运行在 GPUI 测试平台，不覆盖真实 Windows 原生窗口绘制、DPI/输入法交互或真实 GitHub PAT/API 响应。
-- 候选教训（供 `docs-current-state` 评估，不改 `LESSONS.md`）：分页追加共用 `apply_*_page` 时不要复用“首屏网络替换清空 provenance / 取消前批异步丰富”的状态重置路径；测试中验证缓存跨重启恢复时须共享模拟凭据存储但先关闭旧 `CacheStore` 文件锁。
+- 候选教训（供 `docs-current-state` 评估，不改 `LESSONS.md`）：分页追加共用 `apply_*_page` 时不要复用“首屏网络替换清空 provenance / 取消前批异步丰富”的状态重置路径；缓存门禁拒绝不等于当前账户认证失败，需保留普通在线读取；已显示副本必须跟随权限代次票据失效，存储 lease 失效不等于 UI 副本已清除。测试中验证缓存跨重启恢复时须共享模拟凭据存储但先关闭旧 `CacheStore` 文件锁。
 - 本 PR 保持 `pending` 标签，等待 `cache-runtime` 合入后的组合核验及负责人手动 UI 验收。
 
 ## 正式 Shell 验收步骤（待 `cache-runtime` 合入后执行）

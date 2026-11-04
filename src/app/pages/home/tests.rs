@@ -719,6 +719,7 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
                 generation: page.generation,
                 append_epoch: page.feed_append_epoch,
                 selection: page.selection,
+                authorization: page.cache_authorization.clone(),
                 context: page.session.as_ref().unwrap().context().clone(),
                 result: Ok((
                     FeedOutcome {
@@ -791,6 +792,7 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
                 generation: page.generation,
                 append_epoch: old_epoch,
                 selection: page.selection,
+                authorization: page.cache_authorization.clone(),
                 context,
                 request: old_request,
                 result: Ok(EnrichmentResult {
@@ -890,6 +892,309 @@ fn offline_filtered_empty_first_page_continues_to_merged_pr_and_read_more_routes
             number: 44
         }]
     );
+}
+
+// Coordinator acceptance: exercise current credentials with a quarantined private cache.
+#[tokio::test]
+async fn acceptance_valid_replacement_pat_keeps_home_online() {
+    let fixture = Fixture::new(true).await;
+    let service = fixture.service.as_ref().unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#)))
+        .await;
+    service
+        .replace(
+            fixture.account.clone(),
+            Pat::from_str("synthetic-replacement"),
+        )
+        .await
+        .unwrap();
+    let session = service.page_session().unwrap();
+    assert!(session.verify());
+    let store = fixture.store();
+    let scope = store.saved_account(fixture.account.clone()).unwrap();
+    let cached = CachedPageReadSession::new(session.clone(), store, scope).unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(response(200, &home("fresh after PAT replacement"))))
+        .await;
+    let result = read_home(
+        session.clone(),
+        Some(cached),
+        "acceptance".into(),
+        Default::default(),
+    )
+    .await;
+    // A control read proves this is cache quarantine, not an expired credential/network failure.
+    if result.is_err() {
+        let online = session
+            .home(None, &HomeSearchLimits::default(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(online.value.items[0].title, "fresh after PAT replacement");
+    }
+    assert!(
+        result.is_ok(),
+        "current verified PAT must retain online Home access; actual={:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn acceptance_valid_replacement_pat_keeps_feed_online() {
+    let fixture = Fixture::new(true).await;
+    let service = fixture.service.as_ref().unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#)))
+        .await;
+    service
+        .replace(
+            fixture.account.clone(),
+            Pat::from_str("synthetic-replacement"),
+        )
+        .await
+        .unwrap();
+    let session = service.page_session().unwrap();
+    let store = fixture.store();
+    let scope = store.saved_account(fixture.account.clone()).unwrap();
+    let cached = CachedPageReadSession::new(session.clone(), store, scope).unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(events("fresh after replacement", None)))
+        .await;
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
+        .await;
+    let result = read_feed(
+        session.clone(),
+        Some(cached),
+        "acceptance".into(),
+        Default::default(),
+    )
+    .await;
+    if result.is_err() {
+        let online = session
+            .feed(
+                &FeedLimits::default(),
+                &FollowingLimits::default(),
+                &PullRequestDetailLimits::default(),
+                30,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(online.value.activities.len(), 1);
+    }
+    assert!(
+        result.is_ok(),
+        "current verified PAT must retain online Feed access; actual={:?}",
+        result.err()
+    );
+}
+
+#[gpui::test]
+fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    runtime.block_on(async {
+        for _ in 0..6 {
+            fixture.network_error().await;
+        }
+    });
+    let store = fixture.store();
+    let scope = store.saved_account(fixture.account.clone()).unwrap();
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("cached home"));
+    assert_eq!(feed_ids(&page, cx), ["first"]);
+    let context = page.read_with(cx, |page, _| {
+        page.session.as_ref().unwrap().context().clone()
+    });
+    let (generation, selection, authorization) = page.read_with(cx, |page, _| {
+        (
+            page.generation,
+            page.selection,
+            page.cache_authorization.clone(),
+        )
+    });
+    store.revoke_repository(&scope, Some(10)).unwrap();
+    assert!(
+        page.read_with(cx, |page, _| page.session.as_ref().unwrap().verify()),
+        "repository revocation does not revoke the whole account"
+    );
+    for _ in 0..5 {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        home_title(&page, cx),
+        None,
+        "the existing rendered aggregate must be cleared after confirmed repository revocation"
+    );
+    assert!(feed_ids(&page, cx).is_empty());
+    assert!(page.read_with(cx, |page, _| page.feed_repo_descriptions.is_empty()));
+    page.update(cx, |page, cx| {
+        let auth = authorization.clone();
+        page.apply_append(
+            AppendReply {
+                generation,
+                append_epoch: page.feed_append_epoch,
+                selection,
+                authorization: auth.clone(),
+                context: context.clone(),
+                result: Ok((
+                    FeedOutcome {
+                        activities: Vec::new(),
+                        etag: None,
+                        poll_interval_seconds: None,
+                        next_page: None,
+                        readiness: crate::domain::home::FeedReadiness::Complete,
+                    },
+                    Default::default(),
+                    ReadSource::Historical(scope.partition().to_string()),
+                )),
+            },
+            cx,
+        );
+        page.apply_enrichment(
+            EnrichReply {
+                generation,
+                append_epoch: page.feed_append_epoch,
+                selection,
+                authorization,
+                context,
+                request: 1,
+                result: Ok(EnrichmentResult {
+                    descriptions: [("octo/repo".into(), Some("revoked description".into()))].into(),
+                    cache_partition: Some(scope.partition().to_string()),
+                }),
+            },
+            cx,
+        );
+    });
+    assert_eq!(home_title(&page, cx), None);
+    assert!(feed_ids(&page, cx).is_empty());
+    assert_eq!(
+        page.read_with(cx, |page, _| page.description_for_test("octo/repo")),
+        None,
+        "late append and enrichment must not resurrect revoked content"
+    );
+}
+
+#[tokio::test]
+async fn operational_cache_failure_degrades_to_online_without_unlocking_old_snapshots() {
+    let fixture = Fixture::new(true).await;
+    // Simulate the failure at the existing cache boundary, not by deleting a
+    // live SQLite database (Windows correctly locks it against that deletion).
+    assert!(matches!(
+        cache_failure(PageCacheError::Cache(crate::storage::cache::CacheError::Io)),
+        CachedReadFailure::UncachedOnline
+    ));
+    let store = fixture.store();
+    let scope = store.saved_account(fixture.account.clone()).unwrap();
+    let session = fixture.service.as_ref().unwrap().page_session().unwrap();
+    let cached = CachedPageReadSession::new(session.clone(), store, scope).unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(response(200, &home("cache failed but online works"))))
+        .await;
+    let result = read_home(
+        session,
+        Some(cached),
+        "operational-failure".into(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.unwrap().value.items[0].title,
+        "cache failed but online works"
+    );
+}
+
+#[tokio::test]
+async fn replacement_pat_rejection_never_replays_the_quarantined_snapshot() {
+    let fixture = Fixture::new(true).await;
+    fixture.warm().await;
+    let service = fixture.service.as_ref().unwrap();
+    fixture
+        .mock
+        .enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#)))
+        .await;
+    service
+        .replace(
+            fixture.account.clone(),
+            Pat::from_str("synthetic-replacement"),
+        )
+        .await
+        .unwrap();
+    let session = service.page_session().unwrap();
+    let store = fixture.store();
+    let scope = store.saved_account(fixture.account.clone()).unwrap();
+    let cached = CachedPageReadSession::new(session.clone(), store, scope).unwrap();
+    fixture.mock.enqueue(Ok(response(401, "{}"))).await;
+    let result = read_home(
+        session,
+        Some(cached),
+        "rejected-replacement".into(),
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(HomeError::GitHub(GitHubError::Unauthorized))
+    ));
+}
+
+#[gpui::test]
+fn acceptance_cold_start_without_network_revalidation_replays_saved_home(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    runtime.block_on(async {
+        let old = fixture.service.take().unwrap();
+        old.close().await.unwrap();
+        drop(old);
+        let store = fixture.store.take().unwrap();
+        drop(store);
+        let reopened_store = CacheStore::open(CacheConfig::at(
+            fixture.cache_directory.path().to_path_buf(),
+        ))
+        .unwrap();
+        let client = Arc::new(GitHubClient::new(
+            GitHubConfig::default(),
+            fixture.mock.clone(),
+        ));
+        let reopened = AccountService::open_with_cache(
+            AccountDatabaseConfig::at(fixture.directory.path().join("accounts.sqlite3")),
+            fixture.credentials.clone(),
+            client,
+            fixture.executor.clone(),
+            reopened_store.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened.active_summary().unwrap().authorization,
+            crate::domain::account::AuthorizationState::PendingVerification
+        );
+        fixture.service = Some(reopened);
+        fixture.store = Some(reopened_store);
+        for _ in 0..6 {
+            fixture.network_error().await;
+        }
+    });
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("cached home"));
+    assert_eq!(feed_ids(&page, cx), ["first"]);
+    assert!(page.read_with(cx, |page, cx| {
+        page.view.read(cx).provenance(Column::Home).is_some()
+    }));
 }
 
 #[gpui::test]
