@@ -8,13 +8,13 @@ use crate::github::client::GitHubClient;
 use crate::github::error::{classify_status, classify_transport};
 use crate::github::headers::{parse_link_next, parse_sso_header};
 use crate::network::cancel::CancellationToken;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const AFFILIATION: &str = "owner,collaborator,organization_member";
 const PER_PAGE: u32 = 100;
 const MAX_PAGES: usize = 50;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RepoResponse {
     id: u64,
     name: String,
@@ -32,12 +32,22 @@ struct RepoResponse {
     owner: OwnerResponse,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct OwnerResponse {
     id: u64,
     login: String,
     #[serde(default)]
     avatar_url: Option<String>,
+}
+
+/// Project only the fields consumed by this adapter into a durable response.
+/// Invalid data keeps parse-failure semantics without persisting error/proxy
+/// text, even when it arrived with a successful HTTP status.
+pub(crate) fn snapshot_body(body: &str) -> String {
+    serde_json::from_str::<Vec<RepoResponse>>(body)
+        .ok()
+        .and_then(|repos| serde_json::to_string(&repos).ok())
+        .unwrap_or_else(|| "null".into())
 }
 
 /// Fetch all visible repositories across `owner`, `collaborator`, and
