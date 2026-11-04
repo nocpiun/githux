@@ -19,9 +19,7 @@ use crate::github::client::GitHubClient;
 use crate::github::home::cache::{Exchange, PageTransport};
 use crate::github::repos::fetch_user_repos;
 use crate::network::cancel::CancellationToken;
-use crate::storage::cache::{
-    AccessEvent, CacheError, CacheKey, CacheLease, CacheRead, CacheScope, CacheStore,
-};
+use crate::storage::cache::{CacheError, CacheKey, CacheLease, CacheRead, CacheScope, CacheStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -84,6 +82,28 @@ fn request_identity(
         "partial": partial,
     })
     .to_string()
+}
+
+/// Keep only the representation consumed by the repository adapter. The shared
+/// recorder already removes failed HTTP bodies and transport error text; a 2xx
+/// malformed body must also not persist a proxy/error page verbatim. `null`
+/// preserves its parse-failure semantics when replayed through fetch_user_repos.
+fn encode_snapshot(exchanges: Vec<Exchange>) -> Result<Vec<u8>, CacheError> {
+    let mut dto = serde_json::to_value(ReposSnapshotV1 {
+        version: VERSION,
+        exchanges,
+    })
+    .map_err(|_| CacheError::Corrupt)?;
+    if let Some(exchanges) = dto["exchanges"].as_array_mut() {
+        for exchange in exchanges {
+            let Some(body) = exchange["response"]["body"].as_str() else {
+                continue;
+            };
+            let body = crate::github::repos::snapshot_body(body);
+            exchange["response"]["body"] = serde_json::Value::String(body);
+        }
+    }
+    serde_json::to_vec(&dto).map_err(|_| CacheError::Corrupt)
 }
 
 fn load_snapshot(
@@ -173,6 +193,7 @@ impl RepoService {
                         move |store, scope| load_snapshot(&store, &scope, &complete, &partial),
                     )
                     .await?;
+                self.guard(&context, &cancel)?;
                 let (dto, metadata, lease) = match loaded {
                     Ok(value) => value,
                     Err(reason) => {
@@ -230,18 +251,33 @@ impl RepoService {
             return Err(PageCacheError::Context(GitHubError::StaleContext));
         }
         if transport.rejected() {
-            // A current-session 401 is an explicit credential rejection: refuse
-            // to publish and quarantine the account aggregate gate.
-            self.cache_blocking(
-                &context,
-                store.clone(),
-                scope.clone(),
-                move |store, scope| store.access_event(&scope, AccessEvent::CredentialRejected),
-            )
-            .await?;
+            // Honor no-store even on a 401. Attempt invalidation while these
+            // pre-request tickets still belong to the active cache epoch, then
+            // record rejection even if invalidation failed. Rejection itself
+            // advances the epoch and would make the tickets stale.
+            let invalidation = if transport.no_store()
+                && let Some((complete, partial)) = tickets
+            {
+                let invalidate = metadata(now_ms(), CacheCompleteness::Complete, true);
+                self.cache_blocking(&context, store.clone(), scope.clone(), move |store, _| {
+                    store.put(complete, &[], invalidate.clone())?;
+                    store.put(partial, &[], invalidate)?;
+                    Ok(())
+                })
+                .await
+            } else {
+                Ok(())
+            };
+            // A current-session 401 is an explicit credential rejection. Route it
+            // through the account lifecycle so the durable account journal and
+            // local scope suspension keep a later writable cache from serving the
+            // old private snapshot, including after restart.
+            self.credential_rejected(&context)
+                .await
+                .map_err(PageCacheError::Context)?;
+            invalidation?;
             return Err(PageCacheError::Context(GitHubError::Unauthorized));
         }
-        let outcome = outcome.map_err(PageCacheError::Read)?;
         if let Some(lease) = lease {
             // Revocation/PAT replacement during replay invalidates the lease; the
             // already-copied outcome must not be handed out as a live snapshot.
@@ -259,12 +295,13 @@ impl RepoService {
         }
 
         let stamp = now_ms();
-        let observed = completeness(&outcome);
         if transport.no_store()
             && let Some((complete, partial)) = tickets
         {
-            // no-store invalidates both slots without persisting this response.
-            let invalidate = metadata(stamp, observed.clone(), true);
+            // no-store invalidates both slots even when this first page later
+            // fails classification/parsing; only afterwards is the read error
+            // surfaced, matching the page-cache adapter.
+            let invalidate = metadata(stamp, CacheCompleteness::Complete, true);
             self.cache_blocking(
                 &context,
                 store.clone(),
@@ -276,6 +313,8 @@ impl RepoService {
                 },
             )
             .await?;
+            let outcome = outcome.map_err(PageCacheError::Read)?;
+            let observed = completeness(&outcome);
             self.guard(&context, &cancel)?;
             return Ok(Scoped {
                 context: context.clone(),
@@ -287,6 +326,8 @@ impl RepoService {
             });
         }
 
+        let outcome = outcome.map_err(PageCacheError::Read)?;
+        let observed = completeness(&outcome);
         let mut value_metadata =
             cached_metadata.unwrap_or_else(|| metadata(stamp, observed.clone(), false));
         if observed != CacheCompleteness::Complete {
@@ -310,11 +351,7 @@ impl RepoService {
                 store.clone(),
                 scope.clone(),
                 move |store, _scope| {
-                    let bytes = serde_json::to_vec(&ReposSnapshotV1 {
-                        version: VERSION,
-                        exchanges,
-                    })
-                    .map_err(|_| CacheError::Corrupt)?;
+                    let bytes = encode_snapshot(exchanges)?;
                     match store.put(ticket, &bytes, stored_metadata) {
                         Ok(_) | Err(CacheError::TooLarge | CacheError::Capacity) => Ok(()),
                         Err(error) => Err(error),
@@ -388,6 +425,8 @@ impl RepoService {
 
 #[cfg(test)]
 mod tests {
+    mod lifecycle_tests;
+
     use super::*;
     use crate::auth::memory::InMemoryCredentialStore;
     use crate::auth::token::Pat;
@@ -736,6 +775,34 @@ mod tests {
         );
         assert_eq!(origin, PageOrigin::Network);
         assert!(!metadata.permits_storage());
+        let offline = repos
+            .list_repos_cached(PageReadMode::Offline, CancellationToken::default())
+            .await
+            .unwrap();
+        assert!(matches!(offline.value, PageValue::Miss(_)));
+    }
+
+    #[tokio::test]
+    async fn no_store_on_failed_first_page_still_invalidates_snapshots() {
+        let fixture = Fixture::new().await;
+        let repos = fixture.service.repo_service();
+        fixture
+            .mock
+            .enqueue(Ok(json_response(200, &page(&[(1, "a")]))))
+            .await;
+        repos
+            .list_repos_cached(PageReadMode::Online, CancellationToken::default())
+            .await
+            .unwrap();
+        let mut response = json_response(503, "{}");
+        response
+            .headers
+            .push(("Cache-Control".into(), "no-store".into()));
+        fixture.mock.enqueue(Ok(response)).await;
+        let result = repos
+            .list_repos_cached(PageReadMode::Online, CancellationToken::default())
+            .await;
+        assert!(result.is_err());
         let offline = repos
             .list_repos_cached(PageReadMode::Offline, CancellationToken::default())
             .await
