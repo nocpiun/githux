@@ -181,6 +181,22 @@ impl ProfileView {
         &self.range
     }
 
+    /// Adopt a different contribution interval without clearing the other sections.
+    ///
+    /// Used when an offline snapshot was stored under an earlier rolling year: the host publishes
+    /// that range together with the restored calendar so the visible interval always describes the
+    /// data on screen.
+    pub fn set_range(&mut self, range: ContributionRange, cx: &mut Context<Self>) -> bool {
+        if self.range == range {
+            return false;
+        }
+        self.range = range;
+        self.selected_day = None;
+        self.heatmap_motion.set_offset(point(px(0.0), px(0.0)));
+        cx.notify();
+        true
+    }
+
     pub fn basic(&self) -> &SectionState<ProfileBasic> {
         &self.basic
     }

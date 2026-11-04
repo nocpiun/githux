@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条意见已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
+- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条意见与第二轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -49,6 +49,8 @@
 - `app::pages::profile::tests::explicit_repository_revocation_clears_historical_profile_and_blocks_offline_revival`：具体仓库明确撤权使账户聚合快照失效并清除已展示的历史快照。
 - `app::pages::profile::tests::uncached_service_preserves_online_behavior_without_regression`：无缓存绑定时在线行为与 README 图片加载无回归。
 - `app::pages::profile::tests::tab_suspension_preserves_readme_image_provider_across_deactivate_and_reactivate`：普通标签切换（`set_active(false/true)`）后已挂载 README 的在途图片仍能完成，证明 `suspend` 不再卸载 provider。
+- `app::pages::profile::tests::offline_reopen_on_a_later_day_restores_the_cached_contribution_interval`：在线预热后把 host 区间换成另一个滚动年再断网重开，贡献日历仍按缓存时的区间恢复，页面与组件的 `range` 都等于该区间并显示历史徽章。
+- `app::pages::profile::tests::concurrently_prepared_gate_stamps_converge_on_one_value`：四个真实线程并发准备门禁 stamp，全部成功且取到同一个值。
 - `ui::profile::tests::historical_and_partial_provenance_badges_and_section_retries_work`：组件级历史/Partial 徽章与单区块重试动作验证。
 
 ## 审查轮次
@@ -58,6 +60,11 @@ Codex 首轮（review `PRR_kwDOVN_Iuc8AAAABVw17Vg`，head `ece9f4c`）三条意�
 1. **P2 标签切换丢失图片 provider**：原实现让 `ProfileView::suspend` 顺带 `set_image_provider(None)`，返回标签后 provider 不会恢复。现拆分为「暂停交互」(`suspend`：只取消滚动/手势，保留 provider) 与「销毁 reader」(`clear_reader`：重绑、替换 README、授权失效时调用)，并新增上述标签切换回归。
 2. **P1 撤权在首轮轮询前发生仍显示旧快照**：原实现用「先看到 hit、后看到 miss」推断撤权，撤权早于首次轮询或中间重填快照时会漏判。现改为聚合门禁命名空间的 `AggregateGateStamp`：读取开始前建立、历史结果提交前复核、在屏期间由监测任务校验，版本不符即失效并清除视图；回归测试在历史快照显示后立即撤权并重新生成 stamp，仍要求清除。
 3. **P2 每个 section 各起一条永久轮询**：现只有 `ProfilePage::cache_monitor` 一条任务，`rebind`/`stop`/`Drop` 取消，且不再在循环里重放 `profile(Offline)` 读取。
+
+Codex 第二轮（head `8ff2a43`）一条意见成立并修复：
+
+4. **P2 离线重开时贡献日历按当天滚动年查询，跨日后必然 miss**：缓存键包含区间端点，而 `ProfilePage` 每次都用当天的 `rolling_year()`。现在成功读取日历（在线或离线）后把实际区间写入聚合门禁命名空间的 `profile-calendar-range` 标记；离线回退先试当天区间，miss 后再用记录的区间重读，命中即由 host 采用该区间（`ProfileView::set_range`）并把标题与 tooltip 一起显示为实际区间，同时刷新标记。标记与 stamp 一样受聚合门禁约束（撤权/换 PAT/拒绝会一并失效）；标记缺失时保持 `NotCached` 与重试，不伪造“无贡献”。
+   - 并发准备 stamp 时新增进程内 `GATE_STAMP_LOCK` 串行化创建，避免同一页面多个 section 得到不同 stamp（store 已持独占文件租约，跨进程不会并发写同一分区）。回归 `concurrently_prepared_gate_stamps_converge_on_one_value` 用四个真实线程验证收敛。
 
 ## 原生验收步骤与边界（`pending`）
 

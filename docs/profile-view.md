@@ -58,6 +58,7 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
    - `CacheCompleteness::Partial` 显示紧凑 Warning `Badge`（`Partial`，hover tooltip 显示具体不完整原因），与完整结果明确区分。
    - 离线无缓存快照（`PageValue::Miss(CacheMiss::NotCached)`）或缓存损坏映射为 `PresentationError::NotCached` / `CacheCorrupt`，显示黄色 warning 图标、hover 原因与点击重试（`RetryBasic` / `RetryRepositories` / `RetryContributions` / `RetryReadme`），绝不将未缓存或网络/授权失败伪装成“无 README”或空列表。
    - 已缓存的确认无 README（`ProfileReadme::Missing` / `NotEligible`）离线恢复时继续映射为 `SectionState::Unavailable` 并整段省略。
+   - 贡献日历的缓存键包含区间端点，而 host 的区间是当天最近滚动一年。成功读取后把实际区间写入聚合门禁命名空间的 `profile-calendar-range` 标记；离线回退在当天区间 miss 后用记录的区间重读，命中时 host 采用该区间（`ProfileView::set_range`），标题、tooltip 与热力图因此始终描述屏上数据。标记缺失（未缓存或已被撤权清理）仍是带重试的 `NotCached`，不会显示成“无贡献”。
 4. **授权、代次与缓存门禁（C1–C5）**：
    - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
    - 普通标签页切换（`ProfilePage::set_active(false)` → `ProfileView::suspend`）仅停止滚动与阅读器交互手势，保留已挂载 README 的图片 provider；而重新绑定、替换 README 或撕毁页面时调用 `clear_reader` / `cancel_reader` 显式取消并分离图片 provider。

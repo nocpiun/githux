@@ -16,6 +16,7 @@ use crate::data::{
     AccountCache, PageReadSession, ProfileReadme, ProfileReadmeIneligible, RepositoryReadContext,
 };
 use crate::domain::blob::BlobLimits;
+use crate::domain::cache::CacheMiss;
 use crate::domain::error::GitHubError;
 use crate::domain::profile::{
     ContributionCalendar, ContributionRange, ProfileBasic, ProfileError, ProfilePinned,
@@ -122,7 +123,11 @@ struct SectionOutcome<T> {
 enum SectionResult {
     Basic(Result<SectionOutcome<ProfileBasic>, PresentationError>),
     Repositories(Result<SectionOutcome<ProfilePinned>, PresentationError>),
-    Contributions(Result<SectionOutcome<ContributionCalendar>, PresentationError>),
+    /// The calendar and the interval it was actually read at (an offline snapshot may have been
+    /// stored under an earlier rolling year).
+    Contributions(
+        Result<(SectionOutcome<ContributionCalendar>, ContributionRange), PresentationError>,
+    ),
     Readme(Result<SectionOutcome<ProfileReadme>, PresentationError>),
 }
 
@@ -824,7 +829,7 @@ impl ProfilePage {
                     .is_some_and(ProfileProvenance::is_historical),
                 outcome.gate_stamp.clone(),
             ),
-            SectionResult::Contributions(Ok(outcome)) => (
+            SectionResult::Contributions(Ok((outcome, _))) => (
                 outcome
                     .provenance
                     .as_ref()
@@ -888,9 +893,17 @@ impl ProfilePage {
                         let SectionResult::Contributions(result) = reply.result else {
                             return;
                         };
-                        let range = self.range.clone();
                         match result {
-                            Ok(outcome) => {
+                            Ok((outcome, range)) => {
+                                // An offline snapshot can belong to an earlier rolling year; adopt
+                                // the interval it was stored under so the section, the tooltip and
+                                // the visible range stay consistent with the restored data.
+                                if range != self.range {
+                                    self.range = range.clone();
+                                    view.update(cx, |view, cx| {
+                                        view.set_range(range.clone(), cx);
+                                    });
+                                }
                                 view.update(cx, |view, cx| {
                                     view.update_contributions_with_provenance(
                                         &request,
@@ -902,6 +915,7 @@ impl ProfilePage {
                                 });
                             }
                             Err(error) => {
+                                let range = self.range.clone();
                                 view.update(cx, |view, cx| {
                                     view.update_contributions(
                                         &request,
@@ -1119,6 +1133,17 @@ impl ProfilePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn range_for_test(&self) -> &ContributionRange {
+        &self.range
+    }
+
+    /// Replaces the host's contribution interval, as a later calendar day would.
+    #[cfg(test)]
+    pub(crate) fn set_range_for_test(&mut self, range: ContributionRange) {
+        self.range = range;
+    }
+
+    #[cfg(test)]
     pub(crate) fn view_for_test(&self) -> Option<&Entity<ProfileView>> {
         self.view.as_ref()
     }
@@ -1203,21 +1228,44 @@ fn aggregate_gate_stamp_key() -> Result<CacheKey, CacheError> {
     )
 }
 
-fn ensure_aggregate_gate_stamp(
+fn read_aggregate_gate_stamp(
     store: &crate::storage::cache::CacheStore,
     scope: &crate::storage::cache::CacheScope,
 ) -> Option<AggregateGateStamp> {
     let key = aggregate_gate_stamp_key().ok()?;
-    if let Ok(CacheRead::Hit(lease)) = store.read(scope, &key)
-        && let Ok(Some(snapshot)) = lease.snapshot()
-        && let Ok(stamp_id) = std::str::from_utf8(&snapshot.bytes)
-        && !stamp_id.is_empty()
-    {
-        return Some(AggregateGateStamp {
-            partition: scope.partition().to_string(),
-            stamp_id: stamp_id.to_string(),
-        });
+    let CacheRead::Hit(lease) = store.read(scope, &key).ok()? else {
+        return None;
+    };
+    let snapshot = lease.snapshot().ok()??;
+    let stamp_id = std::str::from_utf8(&snapshot.bytes).ok()?;
+    if stamp_id.is_empty() {
+        return None;
     }
+    Some(AggregateGateStamp {
+        partition: scope.partition().to_string(),
+        stamp_id: stamp_id.to_string(),
+    })
+}
+
+/// Serializes stamp creation inside this process. The store already holds an exclusive file lease,
+/// so a second process cannot write the same partition; this lock only keeps concurrent section
+/// reads from publishing different stamp values for one page binding.
+static GATE_STAMP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Ensures the aggregate gate stamp exists, converging on one value when several section reads
+/// prepare it concurrently: a writer that loses the slot race re-reads the winner's stamp instead
+/// of failing the section.
+fn ensure_aggregate_gate_stamp(
+    store: &crate::storage::cache::CacheStore,
+    scope: &crate::storage::cache::CacheScope,
+) -> Option<AggregateGateStamp> {
+    let _creation = GATE_STAMP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(stamp) = read_aggregate_gate_stamp(store, scope) {
+        return Some(stamp);
+    }
+    let key = aggregate_gate_stamp_key().ok()?;
     let ticket = store.begin_write(scope, &key).ok()?;
     let stamp_id = uuid::Uuid::new_v4().to_string();
     let now = SystemTime::now()
@@ -1234,11 +1282,10 @@ fn ensure_aggregate_gate_stamp(
         last_modified: None,
         cache_control: None,
     };
-    store.put(ticket, stamp_id.as_bytes(), metadata).ok()?;
-    Some(AggregateGateStamp {
-        partition: scope.partition().to_string(),
-        stamp_id,
-    })
+    // A `Stale` ticket means another task already published its own stamp; either way the entry
+    // that is present now is the one this page must validate against.
+    let _ = store.put(ticket, stamp_id.as_bytes(), metadata);
+    read_aggregate_gate_stamp(store, scope)
 }
 
 fn verify_aggregate_gate_stamp(
@@ -1489,6 +1536,93 @@ async fn read_profile_pinned(
     }
 }
 
+/// Cache identity for the last interval a contribution calendar was read at.
+fn calendar_range_key(login: &str) -> Result<CacheKey, CacheError> {
+    CacheKey::mutable(
+        None,
+        true,
+        "profile-calendar-range",
+        login,
+        "profile-calendar-range-v1",
+        1,
+    )
+}
+
+fn read_calendar_range(
+    store: &crate::storage::cache::CacheStore,
+    scope: &crate::storage::cache::CacheScope,
+    login: &str,
+) -> Option<ContributionRange> {
+    let key = calendar_range_key(login).ok()?;
+    let CacheRead::Hit(lease) = store.read(scope, &key).ok()? else {
+        return None;
+    };
+    let snapshot = lease.snapshot().ok()??;
+    let text = std::str::from_utf8(&snapshot.bytes).ok()?;
+    let (from, to) = text.split_once('|')?;
+    ContributionRange::new(from, to).ok()
+}
+
+fn write_calendar_range(
+    store: &crate::storage::cache::CacheStore,
+    scope: &crate::storage::cache::CacheScope,
+    login: &str,
+    range: &ContributionRange,
+) -> Result<(), CacheError> {
+    let key = calendar_range_key(login)?;
+    let ticket = store.begin_write(scope, &key)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let metadata = crate::domain::cache::CacheMetadata {
+        representation_version: 1,
+        fetched_at_ms: now,
+        verified_at_ms: now,
+        completeness: crate::domain::cache::CacheCompleteness::Complete,
+        etag: None,
+        last_modified: None,
+        cache_control: None,
+    };
+    let payload = format!("{}|{}", range.from(), range.to());
+    store.put(ticket, payload.as_bytes(), metadata)?;
+    Ok(())
+}
+
+async fn load_calendar_range(
+    repos: &crate::data::RepoService,
+    context: &RepositoryReadContext,
+    login: &str,
+) -> Option<ContributionRange> {
+    let cache = repos.cache(context)?;
+    let (store, scope) = cache.into_parts();
+    let login = login.to_string();
+    tokio::task::spawn_blocking(move || read_calendar_range(&store, &scope, &login))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Records the interval of a successful calendar read. Best effort: a cache write failure only
+/// means a later offline reopen cannot restore the calendar, never that a wrong range is shown.
+async fn store_calendar_range(
+    repos: &crate::data::RepoService,
+    context: &RepositoryReadContext,
+    login: &str,
+    range: &ContributionRange,
+) {
+    let Some(cache) = repos.cache(context) else {
+        return;
+    };
+    let (store, scope) = cache.into_parts();
+    let login = login.to_string();
+    let range = range.clone();
+    let _ =
+        tokio::task::spawn_blocking(move || write_calendar_range(&store, &scope, &login, &range))
+            .await;
+}
+
 async fn read_profile_contributions(
     repos: &crate::data::RepoService,
     session: &PageReadSession,
@@ -1497,10 +1631,10 @@ async fn read_profile_contributions(
     login: &str,
     range: &ContributionRange,
     cancel: CancellationToken,
-) -> Result<SectionOutcome<ContributionCalendar>, PresentationError> {
+) -> Result<(SectionOutcome<ContributionCalendar>, ContributionRange), PresentationError> {
     let limits = ProfileLimits::default();
     let Some(cached) = cached else {
-        return session
+        let outcome = session
             .contribution_calendar(login, range, &limits, cancel)
             .await
             .map(|scoped| SectionOutcome {
@@ -1508,17 +1642,42 @@ async fn read_profile_contributions(
                 provenance: None,
                 gate_stamp: None,
             })
-            .map_err(PresentationError::from);
+            .map_err(PresentationError::from)?;
+        store_calendar_range(repos, session.context(), login, range).await;
+        return Ok((outcome, range.clone()));
     };
     match cached
         .contribution_calendar(PageReadMode::Online, login, range, &limits, cancel.clone())
         .await
     {
-        Ok(scoped) => unpack_page_value(scoped.value, None),
+        Ok(scoped) => {
+            let outcome = unpack_page_value(scoped.value, None)?;
+            store_calendar_range(repos, session.context(), login, range).await;
+            Ok((outcome, range.clone()))
+        }
         Err(PageCacheError::Read(error)) => {
-            if should_fallback_profile(&error) {
+            if !should_fallback_profile(&error) {
+                return Err(error.into());
+            }
+            // The requested interval is today's rolling year. A snapshot stored on an earlier date
+            // lives under that earlier interval, so also try the recorded interval instead of
+            // reporting a cache miss that would make offline reading date-dependent.
+            let mut offline_ranges = vec![range.clone()];
+            if let Some(previous) = load_calendar_range(repos, session.context(), login).await
+                && &previous != range
+            {
+                offline_ranges.push(previous);
+            }
+            let mut last_miss = None;
+            for offline_range in offline_ranges {
                 match cached
-                    .contribution_calendar(PageReadMode::Offline, login, range, &limits, cancel)
+                    .contribution_calendar(
+                        PageReadMode::Offline,
+                        login,
+                        &offline_range,
+                        &limits,
+                        cancel.clone(),
+                    )
                     .await
                 {
                     Ok(scoped) => match scoped.value {
@@ -1536,40 +1695,52 @@ async fn read_profile_contributions(
                             } else {
                                 None
                             };
-                            Ok(SectionOutcome {
+                            let outcome = SectionOutcome {
                                 value,
                                 provenance: Some(ProfileProvenance::from_cache(
                                     historical, &metadata,
                                 )),
                                 gate_stamp,
-                            })
+                            };
+                            store_calendar_range(repos, session.context(), login, &offline_range)
+                                .await;
+                            return Ok((outcome, offline_range));
                         }
-                        PageValue::Miss(miss) => {
-                            if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
-                                Err(PresentationError::from_cache_miss(miss))
-                            } else {
-                                Err(error.into())
-                            }
-                        }
+                        PageValue::Miss(miss) => last_miss = Some(miss),
                     },
-                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => Err(error.into()),
-                    Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
-                    Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
-                    Err(PageCacheError::Read(read_err)) => Err(read_err.into()),
+                    Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+                        return Err(error.into());
+                    }
+                    Err(PageCacheError::Cache(cache_err)) => {
+                        return Err(map_cache_error(cache_err));
+                    }
+                    Err(PageCacheError::Context(gh)) => {
+                        return Err(ProfileError::GitHub(gh).into());
+                    }
+                    Err(PageCacheError::Read(read_err)) => return Err(read_err.into()),
                 }
+            }
+            if matches!(error, ProfileError::GitHub(GitHubError::Network { .. })) {
+                Err(PresentationError::from_cache_miss(
+                    last_miss.unwrap_or(CacheMiss::NotCached),
+                ))
             } else {
                 Err(error.into())
             }
         }
-        Err(PageCacheError::Cache(CacheError::AccessDenied)) => session
-            .contribution_calendar(login, range, &limits, cancel)
-            .await
-            .map(|scoped| SectionOutcome {
-                value: scoped.value,
-                provenance: None,
-                gate_stamp: None,
-            })
-            .map_err(PresentationError::from),
+        Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
+            let outcome = session
+                .contribution_calendar(login, range, &limits, cancel)
+                .await
+                .map(|scoped| SectionOutcome {
+                    value: scoped.value,
+                    provenance: None,
+                    gate_stamp: None,
+                })
+                .map_err(PresentationError::from)?;
+            store_calendar_range(repos, session.context(), login, range).await;
+            Ok((outcome, range.clone()))
+        }
         Err(PageCacheError::Cache(cache_err)) => Err(map_cache_error(cache_err)),
         Err(PageCacheError::Context(gh)) => Err(ProfileError::GitHub(gh).into()),
     }
@@ -2760,6 +2931,96 @@ mod tests {
                 })
             })
         });
+    }
+
+    #[test]
+    fn concurrently_prepared_gate_stamps_converge_on_one_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+        let scope = store
+            .saved_account(AccountKey::new(1, HostId::github()))
+            .unwrap();
+        // Four section reads prepare the stamp at the same time. A losing writer must re-read the
+        // winner instead of failing its section.
+        let stamps = std::thread::scope(|threads| {
+            let handles = (0..4)
+                .map(|_| {
+                    let store = store.clone();
+                    let scope = scope.clone();
+                    threads.spawn(move || ensure_aggregate_gate_stamp(&store, &scope))
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            stamps.iter().all(Option::is_some),
+            "every concurrent preparation resolves a stamp: {stamps:?}"
+        );
+        let first = stamps[0].clone().unwrap();
+        assert!(
+            stamps
+                .iter()
+                .flatten()
+                .all(|stamp| stamp.stamp_id == first.stamp_id),
+            "all sections validate against the same stamp"
+        );
+    }
+
+    #[gpui::test]
+    fn offline_reopen_on_a_later_day_restores_the_cached_contribution_interval(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        // Online visit: the calendar is stored under the interval the host requested that day.
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|v| matches!(v.read(cx).contributions(), SectionState::Ready(_)))
+            })
+        });
+        let cached_range = harness
+            .page
+            .read_with(cx, |page, _| page.range_for_test().clone());
+        // A later UTC date means a different rolling year; without the recorded interval the
+        // snapshot could never be found again.
+        let later = ContributionRange::new("2024-01-01", "2024-12-31").unwrap();
+        assert_ne!(later, cached_range);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            page.set_range_for_test(later.clone());
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        harness.transport.set_offline(true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    let v = v.read(cx);
+                    matches!(v.contributions(), SectionState::Ready(_))
+                        && v.contributions_provenance()
+                            .is_some_and(|p| p.is_historical())
+                })
+            })
+        });
+        assert_eq!(
+            harness
+                .page
+                .read_with(cx, |page, _| page.range_for_test().clone()),
+            cached_range,
+            "the restored interval is the one the cached calendar was stored under"
+        );
+        let view_range = harness.page.read_with(cx, |page, cx| {
+            page.view_for_test()
+                .map(|v| v.read(cx).range().clone())
+                .unwrap()
+        });
+        assert_eq!(view_range, cached_range);
+        assert!(
+            cx.debug_bounds("profile-contributions-provenance-historical")
+                .is_some()
+        );
     }
 
     #[gpui::test]
