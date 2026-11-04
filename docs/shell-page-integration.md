@@ -82,6 +82,12 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 2026-11-01：Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签，保留仓库/编号，不走浏览器外链；其他 Issue/PR 入口未扩展。PR 详情内容、通知、搜索和所有写操作未扩展；未设计页面仍按产品约定留空。
 
+## 页面内容几何与共享行（2026-11-04 视觉返工）
+
+- `src/ui/page_layout.rs` 提供四个正式页面共用的内容几何：`PAGE_GUTTER = 16`、`PAGE_TOP = 16`、`PAGE_BOTTOM = 8`、`PAGE_HEADER_HEIGHT = 40`，与 Home 已有的 `px_4 / pt_4 / pb_2` 和 40px 列头一致。Home、Notifications 与全局 Issues/PR 都据此布局，页面 body 负责留白，标题行不再各自叠加内边距。
+- Notifications 的页面 surface 改为 `colors.surface`，与 Home/Settings/列表协调；标题使用 `TextSize::Lg` + `SEMIBOLD`。
+- Home 的 Involved 条目与全局 Issues/PR 条目改为同一 `src/ui/work_item_row.rs` 呈现（行高、标题、图标槽、圆角、选中底、元信息顺序与状态色一致），状态图标按 Open/Closed/Merged/Unknown 使用主题语义色。
+
 ## 滚动
 
 Home、Profile、Repository、Notifications 与全局 Issues/PR 都拥有自己的局部 viewport、`Motion`/`Bar`/`Bars`。Shell 不会在外层再给它们包一个抢占 wheel 的页面滚动器；该外层 scrolling 现在只用于 Settings、尚未设计的空白页（如 PR 详情）与无账户控制器时未挂载页面的回退。页面内滚动条仍使用共享 `ui::scroll`，没有第二套几何或 fade。

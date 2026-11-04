@@ -47,6 +47,10 @@
 - `X-Poll-Interval` 约束手动刷新，缺失时保守 60 秒；响应 headers 在 status/parse 失败时仍进入冷却。限流遵从共享 typed 分类、Retry-After 和 primary reset，未知限流至少 60 秒；冷却不自动重发。分页为显式 continuation，不受 page-one polling interval 阻止，但仍受 rate cooldown 约束。
 - 仅对同 controller、同参数、已保存且无 partial/error 的首页表示原样发送 `If-Modified-Since`。304 保留后续加载行和 continuation；没有验证器的 304 是错误。partial/失败清除 validator，不能因条件请求跳过缺页补取。
 
+## 页面背景、标题与内边距（2026-11-04 返工）
+
+页面内容 surface 使用与 Home/Settings/全局 Issues-PR 相同的 `colors.surface`；此前用 `colors.bg` 会与顶部 tab bar 形成两条不同底色。标题复用其它正式页面的标题体系（`TextSize::Lg` + `SEMIBOLD`，行高 40），正文 gutter/top/bottom 来自共享的 `src/ui/page_layout.rs`（与 Home 现有 `px_4 / pt_4 / pb_2` 一致），不再由 header 自带 `px_3/py_2` 叠加出双重留白。已读行底色改为 `colors.surface`，未读行仍是 `info_subtle` + 圆点 + 字重；通知行排版、右下角三个动作与相对时间不变。
+
 ## 组件与挂载
 
 `src/ui/notifications/mod.rs` 的 `NotificationsView::new(controller, executor, on_repository, window, cx)` 在构造时开始 first load，通过共享后台 executor 和 oneshot 发布完成。render 不请求；实际列表用 GPUI ListState 虚拟化，公共 `scroll::Motion` / `Bars` / `Bar` 驱动 wheel 与 thumb。每个页面自己的列表焦点、选择、scroll/fade 状态不共享。相对时间复用 `src/ui/relative_time.rs`（由 Home 的 `time.rs` 抽取而来，Home、Notifications 与其它已存在消费者共用同一实现；`src/ui/home/time.rs` 保留为仅转发的兼容 shim，避免其它 `#[path]` 消费者出现第二份解析器；Home 的行为与回归测试原样保留）。

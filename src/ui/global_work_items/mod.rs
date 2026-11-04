@@ -483,6 +483,9 @@ impl Render for WorkItemsView {
             .flex()
             .items_center()
             .gap_2()
+            // Same title slot height as Home's column header and Notifications, so the four
+            // production pages put their heading on the same line.
+            .h(px(crate::ui::page_layout::PAGE_HEADER_HEIGHT))
             .child(
                 div()
                     .flex_1()
@@ -568,7 +571,11 @@ impl Render for WorkItemsView {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .p_4()
+            // Same body gutter/top/bottom inset as Home, Settings and Notifications. The header
+            // row keeps the shared title height so the four production pages align at the top.
+            .px(px(crate::ui::page_layout::PAGE_GUTTER))
+            .pt(px(crate::ui::page_layout::PAGE_TOP))
+            .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
             .gap_2()
             .bg(colors.surface)
             .text_color(colors.fg)

@@ -39,3 +39,33 @@
 - 本任务属于 First Release（milestone #1）。
 - 提交 PR 时添加 `pending` 标签，等待负责人进行正式 Shell 原生窗口的人工验收（验证真实窗口下 Notifications、Issues、Pull Requests 的导航、读写动作与样式表现）。
 - 全程无裁决事项，`arbitration_ever_required` 保持 `false`。
+
+## 2026-11-04 负责人视觉验收返工
+
+负责人对 PR #71 的人工验收提出两点：Notifications 背景/标题/内外边距与其它正式页面不统一；全局 Issues/PR 与 Home 的条目必须是同一组件（Home 同步改用全局的彩色状态图标）。本轮在原分支/原 PR、原会话完成，保留 `pending`。
+
+### 改动
+
+1. **共享工作条目组件** `src/ui/work_item_row.rs`（新增，`ui::work_item_row`）：
+   - 单一 `WORK_ITEM_ROW_HEIGHT = 72`，替代 Home 的 68 与全局的 72 两套行高；Home 的 `HOME_ROW_HEIGHT` 改为引用它，导出名与调用签名保持不变。
+   - 统一标题（`TextSize::Base` + `MEDIUM` + GPUI 原生 `truncate()`）、图标槽竖直居中、`Radius::Md` 圆角、`colors.active` 选中底、`TextSize::Xs` 元信息、窄屏截断。
+   - 元信息顺序统一为 `#number → repository → state → relative time`，编号仍在前（负责人此前要求），编号用主题 `mono_family`（Google Sans Code）。
+   - 图标颜色按 `Tone::{Open, Closed, Merged, Unknown}` 映射到 `success / fg_subtle / accent / warning`，Home 因此从原来的固定 `fg_muted` 图标改为彩色状态图标。
+   - 组件只接收展示值与回调（`RowAction` / `TitleAction`），两端继续各自持有数据模型、账户上下文与 typed navigation。
+2. **Home 消费共享行** `src/ui/home/rows.rs`：`home_row` 改为构造共享 `Row`（owner 链接、repository 链接、标题激活仍走原 `HomeAction` / `view.select` + `view.activate`），保留 `home-item-row-*`、`home-title-*`、`home-icon-*`、`home-metadata-*`、`home-0-owner`、`home-0-repository`、`home-time-*` 这些既有 selector。Feed 卡片、数据获取与缓存语义未改。
+3. **全局列表消费共享行** `src/ui/global_work_items/rows.rs`：`ROW_HEIGHT` 引用共享常量；`work-item-*`、`work-title-*`、`work-metadata-*`、`work-number-*`、`work-repo-*`、`work-updated-*` selector 与仓库回调、键盘选择语义保持不变；新增 `work-*-state` selector。标题仍无详情动作。
+4. **页面背景/标题/内边距统一**：
+   - 新增 `src/ui/page_layout.rs` 作为四个正式页面共用的内容几何（`PAGE_GUTTER=16`、`PAGE_TOP=16`、`PAGE_BOTTOM=8`、`PAGE_HEADER_HEIGHT=40`），与 Home 现有的 `px_4 / pt_4 / pb_2` 和 40px 列头一致。
+   - Notifications：根背景由 `colors.bg` 改为 `colors.surface`（与 Home/Settings/全局列表一致），移除 header 自带的 `px_3/py_2`，改由页面 body 统一提供 gutter/top/bottom；标题补 `SEMIBOLD`、header 高 40；已读行底色由 `colors.bg` 改为 `colors.surface`，只保留未读行的 `info_subtle` 底色与圆点/字重差别。通知行排版、右下角动作与相对时间未改。
+   - 全局 Issues/PR：根 `p_4` 改为统一 gutter/top/bottom，header 固定 40 高；筛选行与列表随同一 gutter 对齐。
+5. **fixture/example 最小接线**：`home_modules.rs`、`work_items_modules.rs`、`notifications_modules.rs` 增加 `page_layout` / `work_item_row`（及 `tooltip`）的 `#[path]` 声明，使既有 preview 与组件测试继续编译同一份源文件。
+
+### 验证
+
+- `cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`：SUCCESS。
+- `cargo test --locked --bin githux`：SUCCESS，1151 passed。
+- 定向：`ui::home::tests::`（含新增 `home_work_item_row_is_the_shared_row_presentation`）、`ui::global_work_items::tests::`、`ui::notifications::tests::`、`app::pages::tests::` 全部通过。
+
+### 未覆盖
+
+- 原生 Windows 窗口的四页对照（宽/窄、图标与标题对齐、长标题/长仓库名、四种状态色彩）仍需负责人复验；GPUI 测试平台的 bounds 断言不替代原生视觉确认（L002/L017）。PR 保持 `pending`，由负责人重新验收后移除。

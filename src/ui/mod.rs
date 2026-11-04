@@ -43,6 +43,7 @@ pub mod home;
 mod island;
 pub mod notifications;
 mod page;
+pub(crate) mod page_layout;
 mod palette;
 pub mod profile;
 pub mod reader;
@@ -54,6 +55,10 @@ mod sidebar;
 mod sidebar_state;
 mod tabs;
 pub(crate) mod tooltip;
+// One work-item row presentation shared by Home's Involved column and the global Issues/PR
+// lists. It is a UI module (no service, controller or account state) so every caller keeps its
+// own data model and typed navigation.
+pub(crate) mod work_item_row;
 
 #[cfg(test)]
 mod sidebar_tests;

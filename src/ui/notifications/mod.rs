@@ -723,13 +723,16 @@ impl Render for NotificationsView {
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .py_2()
+            // Same heading slot as Home/Settings: full-bleed padding is owned by the page body,
+            // so the title line up with the other production pages instead of adding its own
+            // px_3/py_2 inset.
+            .h(px(40.0))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .text_size(cx.theme().text_size(TextSize::Lg))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .child("Notifications"),
             )
             .child(
@@ -858,13 +861,20 @@ impl Render for NotificationsView {
             }))
             .on_key_down(cx.listener(Self::key_down));
         div()
+            .debug_selector(|| "notifications-view".into())
             .size_full()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(colors.bg)
+            // Same content surface, gutter and top/bottom insets as Home/Settings and the global
+            // work lists: the page body owns the padding, so the title line and list edges line up
+            // across pages instead of this page adding its own px_3/py_2 rhythm.
+            .px(px(crate::ui::page_layout::PAGE_GUTTER))
+            .pt(px(crate::ui::page_layout::PAGE_TOP))
+            .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
+            .bg(colors.surface)
             .text_color(colors.fg)
             .child(visible_lifetime(cx))
             .child(header)
@@ -875,7 +885,6 @@ impl Render for NotificationsView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .px_3()
                         .children(error)
                         .when(partial, |row| {
                             row.child(
@@ -896,7 +905,7 @@ impl Render for NotificationsView {
             .child(viewport)
             .when(has_more, |element| {
                 element.child(
-                    div().flex_none().px_3().py_2().child(
+                    div().flex_none().py_2().child(
                         Button::new("notifications-more", "Load more")
                             .size(ControlSize::Sm)
                             .disabled(busy)
@@ -918,10 +927,12 @@ fn read_state_background(
     hovered: bool,
     colors: &ely_core::theme::Palette,
 ) -> gpui::Hsla {
+    // The page body is `colors.surface`, so a read row keeps that same fill and only the unread
+    // row is tinted; using `bg` here would draw a mismatched stripe over the content surface.
     let base = if unread {
         colors.info_subtle
     } else {
-        colors.bg
+        colors.surface
     };
     // Blend the interaction wash over the read-state fill, so hover/selection
     // retain the two backgrounds as well as the unread dot and title weight.

@@ -32,6 +32,11 @@ Assigned 不包含仅 author、mention、commenter 或 review-requested 的条�
 
 Search 最多可访问 1,000 个位置，包括非整除 page size 的最后一页；不会自动预取。updated 排序会随服务端变化移动，去重不能保证无漏项。total_count 是服务端快照元数据，不在 UI 承诺完整历史。
 
+## 共享工作条目组件（2026-11-04 返工）
+
+条目呈现由 `src/ui/work_item_row.rs` 提供，Home 的 Involved 列与全局 Issues/PR 列表消费同一实现，不再各写近似样式：
+行高固定 `WORK_ITEM_ROW_HEIGHT = 72`、标题 `TextSize::Base`/`MEDIUM` + GPUI 原生 `truncate()`、`Radius::Md` 圆角、`colors.active` 选中底、`TextSize::Xs` 元信息，图标槽竖直居中。元信息顺序统一为 `#number → 仓库名 → 状态 → 相对时间`，编号用主题 `mono_family` 且保持在最前；状态文案与图标颜色按 Open/Closed/Merged/Unknown 分别映射 `success / fg_subtle / accent / warning`，不再固定单色。组件只接收展示值与回调，两个列表各自保留数据模型、账户上下文、typed navigation 与键盘选择；Home 侧 `HomeAction` 与 `select`/`activate` 语义不变。
+
 ## Shell 接入契约
 
 ```rust,ignore

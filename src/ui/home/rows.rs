@@ -9,10 +9,11 @@ use ely_core::{
     theme::{ActiveTheme, AvatarSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
 };
-use gpui::{AnyElement, App, Context, FontWeight, IntoElement, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, FontWeight, IntoElement, div, prelude::*};
+use std::rc::Rc;
 use std::time::SystemTime;
 
-pub(super) const HOME_ROW_HEIGHT: f32 = 68.0;
+pub(super) const HOME_ROW_HEIGHT: f32 = crate::ui::work_item_row::WORK_ITEM_ROW_HEIGHT;
 
 fn link(name: String, label: String, action: HomeAction, cx: &mut Context<HomeView>) -> AnyElement {
     let weak = cx.entity().downgrade();
@@ -157,90 +158,103 @@ pub(super) fn home_row(
     now: SystemTime,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
-    let theme = cx.theme();
-    let colors = theme.colors.clone();
-    let radius = theme.radius(Radius::Md);
-    let body = theme.text_size(TextSize::Base);
-    let tiny = theme.text_size(TextSize::Xs);
-    let (kind, icon) = match item.kind {
-        HomeItemKind::Issue => ("Issue", IconName::CircleDot),
-        HomeItemKind::PullRequest => ("PR", IconName::GitPullRequest),
+    use crate::ui::work_item_row::{self, Glyph, RepositoryLink, Row, RowAction, Selectors, Tone};
+    let kind = match item.kind {
+        HomeItemKind::Issue => Glyph::Issue,
+        HomeItemKind::PullRequest => Glyph::PullRequest,
     };
-    let heading = title(
-        Column::Home,
-        index,
-        nonempty(&item.title, &format!("{kind} #{}", item.number)),
-        cx,
-    );
-    let repository = repository_links(
-        RepositoryIdentity {
-            id: None,
-            owner: item.repository.owner.clone(),
-            name: item.repository.name.clone(),
-        },
-        &format!("home-{index}"),
-        cx,
-    );
-    let when = timestamp(
-        Some(&item.updated_at),
-        format!("home-time-{index}"),
-        now,
-        cx,
-    );
-    // The icon and title share a single flex row; metadata is below that row.
-    div()
-        .id(("home-item", item.id))
-        .debug_selector(move || format!("home-item-row-{index}"))
-        .h(px(HOME_ROW_HEIGHT))
-        .w_full()
-        .min_w_0()
-        .px_2()
-        .py_2()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .rounded(radius)
-        .bg(if selected {
-            colors.active
-        } else {
-            gpui::transparent_black()
-        })
-        .child(
-            div()
-                .debug_selector(move || format!("home-title-line-{index}"))
-                .flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .text_size(body)
-                .child(
-                    div()
-                        .debug_selector(move || format!("home-icon-{index}"))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .child(Icon::new(icon).size(IconSize::Sm).color(colors.fg_muted)),
+    let mut selectors = Selectors {
+        row: format!("home-item-row-{index}"),
+        title_line: Some(format!("home-title-line-{index}")),
+        icon: Some(format!("home-icon-{index}")),
+        title: format!("home-title-{index}"),
+        metadata: Some(format!("home-metadata-{index}")),
+        number: None,
+        repository: Some(format!("home-{index}-repository")),
+        owner: Some(format!("home-{index}-owner")),
+        updated: Some(format!("home-time-{index}")),
+    };
+    let weak = cx.entity().downgrade();
+    let owner = item.repository.owner.clone();
+    let name = item.repository.name.clone();
+    let owner_action: RowAction = {
+        let weak = weak.clone();
+        let owner = owner.clone();
+        Rc::new(move |window, cx| {
+            let owner = owner.clone();
+            let _ = weak.update(cx, |view, cx| {
+                view.emit(
+                    HomeAction::Profile(ProfileIdentity {
+                        id: None,
+                        login: owner,
+                    }),
+                    window,
+                    cx,
                 )
-                .child(heading),
-        )
-        .child(
-            div()
-                .debug_selector(move || format!("home-metadata-{index}"))
-                .flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .text_size(tiny)
-                .text_color(colors.fg_subtle)
-                .child(div().flex_1().min_w_0().child(repository))
-                .child(div().flex_none().child(format!(
-                    "#{} · {}",
-                    item.number,
-                    nonempty(&item.state, "state unavailable")
-                )))
-                .child(when),
-        )
-        .into_any_element()
+            });
+        })
+    };
+    let name_action: RowAction = {
+        let weak = weak.clone();
+        let repository = RepositoryIdentity {
+            id: None,
+            owner: owner.clone(),
+            name: name.clone(),
+        };
+        Rc::new(move |window, cx| {
+            let repository = repository.clone();
+            let _ = weak.update(cx, |view, cx| {
+                view.emit(HomeAction::Repository(repository), window, cx)
+            });
+        })
+    };
+    let title_label = nonempty(&item.title, &format!("{} #{}", kind.label(), item.number));
+    let title_action: work_item_row::TitleAction = {
+        let weak = weak.clone();
+        Rc::new(move |pointer, window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                if pointer {
+                    view.select(Column::Home, index, window, cx);
+                }
+                view.activate(Column::Home, index, window, cx);
+            });
+        })
+    };
+    let _ = &mut selectors;
+    let state = nonempty(&item.state, "state unavailable");
+    let tone = Tone::from_state(&item.state);
+    // Home's own metadata line keeps its historical wording; the shared row only owns geometry,
+    // order and the state colour.
+    let repository = RepositoryLink::Split {
+        owner: item.repository.owner.clone(),
+        owner_action,
+        name: item.repository.name.clone(),
+        name_action,
+    };
+    let updated_label = relative(Some(&item.updated_at), now);
+    work_item_row::render(
+        Row {
+            selectors,
+            glyph: kind,
+            tone,
+            number: item.number,
+            title: title_label,
+            title_tooltip: nonempty(&item.title, &format!("{} #{}", kind.label(), item.number)),
+            repository,
+            updated_label,
+            updated_tooltip: item.updated_at.clone(),
+            aria: format!(
+                "{} {} #{}, {state}",
+                kind.label(),
+                item.title.trim(),
+                item.number
+            ),
+            selected,
+            on_row_click: None,
+            on_title_click: Some(title_action),
+        },
+        cx,
+    )
 }
 
 pub(super) fn feed_repository(event: &FeedEvent) -> RepositoryIdentity {
