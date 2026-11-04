@@ -28,17 +28,19 @@
 
 ## 验证
 
-所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。审查修复后的最终一轮（工作区含本轮改动）：
+所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all` → exit 0（run `655dff5f`）
-- `cargo fmt --all -- --check` → exit 0（run `7b140e75`）
-- `cargo check --locked --all-targets` → exit 0（run `c5e529e7`）
-- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `39ee6ea0`）
-- `cargo build --locked` → exit 0（run `c14d57b4`）
-- `cargo test --locked` → exit 0，1116 / 96 / 560 / 284 / 250 / 752 / 836 / 44 全部 0 failed（run `374eddd9`）
+- `cargo fmt --all -- --check` → exit 0（run `013c3d13`）
+- `cargo check --locked --all-targets` → exit 0（run `bf2afe2b`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `debe5a02`）
+- `cargo build --locked` → exit 0（run `ee196d34`）
+- `cargo test --locked` → exit 0，1137 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `8dc4483b`）
 - `git diff --check` → exit 0
 
-首轮提交 `ece9f4c` 上的整轮检查同样为 exit 0（run `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`）。
+此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
+
+- 一次 `cargo test --locked`（run `03c5c6fc`）中 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 报 `reopen cache store: InUse`：同一二进制内另一个测试持有的 store 尚未释放，属既有测试并行敏感；该用例单独复跑通过（run `60e226d0`），随后整套复跑通过。
+- 一次整轮（run `886cc506`）中两个新增 profile 组合用例超时：`wait_for_profile` 原为固定 400 次轮询，在整套并行负载下不足以等待后台读取与图片解码。现改为 60 秒墙钟截止（run `43eac9a7` 定向通过，`8dc4483b` 整套通过）。
 
 新增受控组合与单元回归：
 

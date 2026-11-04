@@ -2491,14 +2491,20 @@ mod tests {
         cx: &mut VisualTestContext,
         mut check: impl FnMut(&mut VisualTestContext) -> bool,
     ) {
-        for _ in 0..400 {
+        // A wall-clock deadline rather than a fixed iteration count: the shared test binary runs
+        // many suites in parallel, so background reads and image decoding can be starved for a while.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
             pump_page(harness, cx);
             if check(cx) {
                 return;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "profile page did not reach expected state"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("profile page did not reach expected state");
     }
 
     #[gpui::test]
