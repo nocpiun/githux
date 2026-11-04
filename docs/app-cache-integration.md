@@ -40,7 +40,7 @@
 `Accounts` 的自动加载与重试（`Operation::Repositories`）统一走 `read_repositories`：
 
 1. `RepoService::list_repos_cached(PageReadMode::Online, cancel)` 在线读取并记录账户聚合快照，发布 `RepositoryListOrigin::Network`。
-2. 返回 `PageCacheError::Cache(AccessDenied)`（未绑定缓存、缓存对账未完成或私有聚合门禁被隔离）时回退 `list_repos_cancellable`，保持原在线能力，绝不让缓存问题移除在线读取。
+2. 返回任意 `PageCacheError::Cache(_)`（未绑定缓存、对账未完成、私有聚合门禁被隔离，或运行期 SQLite/文件 I/O 故障）时回退 `list_repos_cancellable`，保持原在线能力；该回退仍保留取消、过期与授权检查，绝不让缓存问题移除在线读取。
 3. 只有 `Network`、`Timeout`、`RateLimited` 与 5xx `UnexpectedStatus` 这类已允许的瞬时故障才用 `PageReadMode::Offline` 回放最后一次快照，发布 `RepositoryListOrigin::Historical { verified_at_ms }`。
 4. `Unauthorized`(401)、`Forbidden`/`NotFound`/SSO、`Cancelled`、`StaleContext` 与缓存错误保持原义，不回退历史；网络失败后无快照时显示可重试的失败，而不是空列表。
 

@@ -2432,3 +2432,65 @@ fn only_a_historical_ready_list_reports_an_offline_label() {
     };
     assert!(failed.historical_status().is_none());
 }
+
+/// Cache-layer failures never prove the network read failed: they retry online without caching.
+/// Only transient transport/service failures replay history; authorization, cancellation,
+/// staleness and ambiguous failures keep their own meaning.
+#[test]
+fn cache_failures_fall_back_online_while_auth_errors_keep_their_meaning() {
+    use super::{RepositoryReadFallback, repository_read_fallback};
+    use crate::data::page_cache::PageCacheError;
+
+    for error in [
+        CacheError::AccessDenied,
+        CacheError::Io,
+        CacheError::Database,
+        CacheError::Stale,
+        CacheError::Capacity,
+    ] {
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Cache(error)),
+            RepositoryReadFallback::UncachedOnline,
+            "an operational cache failure must not remove the online read"
+        );
+    }
+
+    let retry = crate::domain::error::RetryAfter {
+        kind: crate::domain::error::RateLimitKind::Primary,
+        seconds: Some(1),
+    };
+    for error in [
+        GitHubError::Network {
+            message: "offline".into(),
+        },
+        GitHubError::Timeout { seconds: 1 },
+        GitHubError::RateLimited { retry },
+        GitHubError::UnexpectedStatus { status: 503 },
+    ] {
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Read(error)),
+            RepositoryReadFallback::OfflineHistory
+        );
+    }
+
+    for error in [
+        GitHubError::Unauthorized,
+        GitHubError::Forbidden,
+        GitHubError::NotFound,
+        GitHubError::SsoRequired {
+            authorization_url: None,
+        },
+        GitHubError::Cancelled,
+        GitHubError::StaleContext,
+        GitHubError::UnexpectedStatus { status: 400 },
+    ] {
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Read(error.clone())),
+            RepositoryReadFallback::KeepError
+        );
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Context(error)),
+            RepositoryReadFallback::KeepError
+        );
+    }
+}

@@ -14,7 +14,7 @@
 
 `sidebar-cache` 以 squash 合入 main（`0cdb59c`）后，在原分支 rebase main，未改写其文件。
 
-- `src/app/accounts/mod.rs`：新增 `read_repositories`，自动加载/重试统一走 `RepoService::list_repos_cached`。在线读取发布 `RepositoryListOrigin::Network`；`Cache(AccessDenied)`（未绑定、对账未完成或私有聚合门禁隔离）回退原 `list_repos_cancellable` 保持在线能力；仅 `Network`/`Timeout`/`RateLimited`/5xx 这四类瞬时故障回退 `PageReadMode::Offline`，发布 `Historical { verified_at_ms }`；401/403/404/SSO/取消/过期/缓存错误保持原义。网络失败但无快照时显示可重试失败，不伪造空列表。
+- `src/app/accounts/mod.rs`：新增 `read_repositories`，自动加载/重试统一走 `RepoService::list_repos_cached`。在线读取发布 `RepositoryListOrigin::Network`；任意 `PageCacheError::Cache(_)`（未绑定、对账未完成、私有聚合门禁隔离或运行期 I/O 故障）回退原 `list_repos_cancellable` 保持在线能力；仅 `Network`/`Timeout`/`RateLimited`/5xx 这四类瞬时故障回退 `PageReadMode::Offline`，发布 `Historical { verified_at_ms }`；401/403/404/SSO/取消/过期保持原义。网络失败但无快照时显示可重试失败，不伪造空列表。
 - `Repositories` 增加 `origin` 与 `historical_status()`；侧栏 `src/ui/mod.rs` 只消费该方法，把历史来源显示为 `Offline snapshot · last synced <相对时间>` 并保留 scoped Retry；历史空列表不再显示“当前无仓库”的旧文案。这是渲染所需的最小跨所有权改动（shell-global-pages 已合入且无并发写者），不改布局/页面 hosts。
 - 新用例：`a_network_failure_falls_back_to_the_cached_list_as_history`（网络失败→历史行/侧栏状态可见）、`a_401_is_not_shown_as_offline_history`（401 不冒充离线）、`only_a_historical_ready_list_reports_an_offline_label`、`epoch_milliseconds_convert_to_the_relative_formatter_input`。
 

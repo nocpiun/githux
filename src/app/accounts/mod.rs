@@ -39,7 +39,6 @@ use crate::domain::error::GitHubError;
 use crate::domain::repo::ReposOutcome;
 use crate::domain::{AccountKey, AccountSummary, HostId, RepoSummary};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
-use crate::storage::cache::CacheError;
 use crate::ui::accounts::{RepositoryPreview, StatusMessage, StatusTone};
 
 use runtime::AccountRuntime;
@@ -1556,8 +1555,8 @@ fn error_text(error: &GitHubError) -> String {
 /// Read the active account's repository list through the account-bound snapshot adapter.
 ///
 /// * A live read is recorded and published as [`RepositoryListOrigin::Network`].
-/// * When no usable cache binding exists (cache disabled, account not reconciled, or the private
-///   aggregate gate is quarantined) the ordinary online read is kept, so a cache problem never
+/// * Any cache-layer failure (no binding, quarantined aggregate gate, or an operational
+///   SQLite/filesystem failure) falls back to the ordinary online read, so a cache problem never
 ///   removes online account functionality.
 /// * Only an explicitly allowed transient network failure (connectivity, timeout, rate limit, 5xx)
 ///   falls back to the last replayed snapshot, labelled [`RepositoryListOrigin::Historical`].
@@ -1599,68 +1598,82 @@ async fn read_repositories(
                 origin: RepositoryListOrigin::Network,
             },
         },
-        Err(PageCacheError::Cache(CacheError::AccessDenied)) => {
-            // No usable cache binding, or the private aggregate is quarantined. Keep the original
-            // online-only behavior; a cache problem must not remove online account functionality.
-            match repos.list_repos_cancellable(cancel).await {
-                Ok(outcome) => RepositoryReply {
-                    outcome: Ok(outcome),
-                    origin: RepositoryListOrigin::Network,
-                },
-                Err(error) => RepositoryReply {
-                    outcome: Err(error_text(&error)),
-                    origin: RepositoryListOrigin::Network,
-                },
+        Err(error) => match repository_read_fallback(&error) {
+            RepositoryReadFallback::UncachedOnline => {
+                // No usable cache, or the cache failed operationally. Keep the original online-only
+                // behavior; the plain read still enforces cancellation, context and authorization.
+                match repos.list_repos_cancellable(cancel).await {
+                    Ok(outcome) => RepositoryReply {
+                        outcome: Ok(outcome),
+                        origin: RepositoryListOrigin::Network,
+                    },
+                    Err(error) => RepositoryReply {
+                        outcome: Err(error_text(&error)),
+                        origin: RepositoryListOrigin::Network,
+                    },
+                }
             }
-        }
-        Err(error) if offline_fallback_is_allowed(&error) => {
-            let network_text = page_cache_error_text(&error);
-            match repos.list_repos_cached(PageReadMode::Offline, cancel).await {
-                Ok(scoped) => match scoped.value {
-                    PageValue::Value {
-                        value,
-                        origin: PageOrigin::HistoricalSnapshot,
-                        metadata,
-                    } => RepositoryReply {
-                        outcome: Ok(value),
-                        origin: RepositoryListOrigin::Historical {
-                            verified_at_ms: metadata.verified_at_ms,
+            RepositoryReadFallback::OfflineHistory => {
+                let network_text = page_cache_error_text(&error);
+                match repos.list_repos_cached(PageReadMode::Offline, cancel).await {
+                    Ok(scoped) => match scoped.value {
+                        PageValue::Value {
+                            value,
+                            origin: PageOrigin::HistoricalSnapshot,
+                            metadata,
+                        } => RepositoryReply {
+                            outcome: Ok(value),
+                            origin: RepositoryListOrigin::Historical {
+                                verified_at_ms: metadata.verified_at_ms,
+                            },
+                        },
+                        // An offline request must not publish a live-origin list as current, and a
+                        // miss is not an empty list: keep the original network failure.
+                        PageValue::Value { .. } | PageValue::Miss(_) => RepositoryReply {
+                            outcome: Err(network_text),
+                            origin: RepositoryListOrigin::Network,
                         },
                     },
-                    // An offline request must not publish a live-origin list as current, and a miss
-                    // is not an empty list: keep the original network failure.
-                    PageValue::Value { .. } | PageValue::Miss(_) => RepositoryReply {
+                    Err(_) => RepositoryReply {
                         outcome: Err(network_text),
                         origin: RepositoryListOrigin::Network,
                     },
-                },
-                Err(_) => RepositoryReply {
-                    outcome: Err(network_text),
-                    origin: RepositoryListOrigin::Network,
-                },
+                }
             }
-        }
-        Err(error) => RepositoryReply {
-            outcome: Err(page_cache_error_text(&error)),
-            origin: RepositoryListOrigin::Network,
+            RepositoryReadFallback::KeepError => RepositoryReply {
+                outcome: Err(page_cache_error_text(&error)),
+                origin: RepositoryListOrigin::Network,
+            },
         },
     }
 }
 
-/// Only a transient transport/service failure may fall back to a persistent snapshot. A 401, an
-/// explicit or ambiguous denial, a cancellation, a stale context or a cache failure keeps its own
-/// meaning.
-fn offline_fallback_is_allowed(error: &PageCacheError<GitHubError>) -> bool {
-    let error = match error {
-        PageCacheError::Read(error) | PageCacheError::Context(error) => error,
-        PageCacheError::Cache(_) => return false,
-    };
+/// How a failed cached repository read should recover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepositoryReadFallback {
+    /// No usable cache, or an operational cache failure: read online without caching.
+    UncachedOnline,
+    /// An allowed transient network failure: replay the persistent snapshot.
+    OfflineHistory,
+    /// Keep the error's own meaning (authorization, cancellation, staleness, ...).
+    KeepError,
+}
+
+/// Cache-layer failures (including their own denial/staleness/I/O) never prove the network read
+/// failed; retrying online preserves cancellation, stale-context and authorization checks. Only a
+/// transient transport/service failure may fall back to a persistent snapshot.
+fn repository_read_fallback(error: &PageCacheError<GitHubError>) -> RepositoryReadFallback {
     match error {
-        GitHubError::Network { .. }
-        | GitHubError::Timeout { .. }
-        | GitHubError::RateLimited { .. } => true,
-        GitHubError::UnexpectedStatus { status } => (500..600).contains(status),
-        _ => false,
+        PageCacheError::Cache(_) => RepositoryReadFallback::UncachedOnline,
+        PageCacheError::Read(error) | PageCacheError::Context(error) => match error {
+            GitHubError::Network { .. }
+            | GitHubError::Timeout { .. }
+            | GitHubError::RateLimited { .. } => RepositoryReadFallback::OfflineHistory,
+            GitHubError::UnexpectedStatus { status } if (500..600).contains(status) => {
+                RepositoryReadFallback::OfflineHistory
+            }
+            _ => RepositoryReadFallback::KeepError,
+        },
     }
 }
 
