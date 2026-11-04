@@ -62,7 +62,7 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
 4. **授权、代次与缓存门禁（C1–C5）**：
    - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
    - 普通标签页切换（`ProfilePage::set_active(false)` → `ProfileView::suspend`）仅停止滚动与阅读器交互手势，保留已挂载 README 的图片 provider；而重新绑定、替换 README 或撕毁页面时调用 `clear_reader` / `cancel_reader` 显式取消并分离图片 provider。
-   - 对历史缓存结果及已展示的历史快照，每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消，不重放 profile 读取）。判定依据是写在 `repository=None` 聚合门禁命名空间里的 `AggregateGateStamp`：读取任务开始时建立/读取并持有所在条目的 `CacheLease`，离线历史结果提交前复核，在屏期间由监测任务校验。lease 使普通容量淘汰无法删除 stamp（不会把仍授权的页面误判为撤权），而 stamp 被撤权删除、门禁被换 PAT/401 拒绝隔离或 scope 退休都会使历史内容失效。因此即使撤权发生在首轮轮询前，或之后又写入了新的 stamp/快照，已展示的旧历史快照也会被清除，并同步清理旧 `ProfileView`、`ReaderView` 与在途图片，阻断迟到图片或 `on_layout_changed` 回调复活旧页。
+   - 对历史缓存结果及已展示的历史快照，每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消，不重放 profile 读取）。判定依据是写在 `repository=None` 聚合门禁命名空间里的 `AggregateGateStamp`：读取任务开始时建立/读取并持有所在条目的 `CacheLease`，离线历史结果提交前复核，在屏期间由监测任务校验。lease 使普通容量淘汰无法删除 stamp（不会把仍授权的页面误判为撤权），而 stamp 被撤权删除、门禁被换 PAT/401 拒绝隔离或 scope 退休都会使历史内容失效。撤权只让当次展示的快照退休：清理后该页清除失效标记并释放旧请求，其他在线读取重新写入快照后，重试可按新 stamp 恢复，不会永久卡在错误态。因此即使撤权发生在首轮轮询前，或之后又写入了新的 stamp/快照，已展示的旧历史快照也会被清除，并同步清理旧 `ProfileView`、`ReaderView` 与在途图片，阻断迟到图片或 `on_layout_changed` 回调复活旧页。
 
 ## Host adapter / mounting 职责
 

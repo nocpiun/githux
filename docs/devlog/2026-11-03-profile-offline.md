@@ -4,7 +4,7 @@
 - 任务 ID：`profile-offline`
 - 分支：`feature/profile-offline`（base `d21711622ea7860c79e9a4ea8d35a78f010c162c`）
 - 执行者：基层实现 Agent
-- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条、第二轮 1 条、第三轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
+- 状态：独立实现与受控组合验证已完成；Codex 首轮 3 条、第二轮 1 条、第三轮 1 条、第四轮 1 条意见均已处理并复验。等待 `cache-runtime` 合入 `main` 及负责人原生窗口验收（`pending`）。
 
 ## 改动与决定
 
@@ -30,11 +30,11 @@
 
 所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all -- --check` → exit 0（run `013c3d13`）
-- `cargo check --locked --all-targets` → exit 0（run `bf2afe2b`）
-- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `debe5a02`）
-- `cargo build --locked` → exit 0（run `ee196d34`）
-- `cargo test --locked` → exit 0，1137 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `8dc4483b`）
+- `cargo fmt --all -- --check` → exit 0（run `e215a8d3`；`cargo fmt --all` run `01a7640b`）
+- `cargo check --locked --all-targets` → exit 0（run `4bcec08f`、`5c20bcbe`）
+- `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `ca902734`）
+- `cargo build --locked` → exit 0（run `06531fac`）
+- `cargo test --locked` → exit 0，1139 / 96 / 579 / 284 / 250 / 771 / 855 / 44 全部 0 failed（run `467163ee`）
 - `git diff --check` → exit 0
 
 此前各轮同样全绿：`ece9f4c` 上 `3e29bda8`、`7031fe10`、`f1f201d6`、`a6e4d177`；首轮修复后 `daf4015e`–`374eddd9`。整轮两次失败均已定位为测试门限或既有并发竞态，不是产品缺陷：
@@ -72,6 +72,10 @@ Codex 第二轮（head `8ff2a43`）一条意见成立并修复：
 Codex 第三轮（head `5e4916a`）一条意见成立并修复：
 
 5. **P2 gate stamp 会被普通容量淘汰误判为撤权**：stamp 原为普通可变条目，`CacheStore::put` 的 LRU 淘汰会在授权未变时清掉它，导致有效历史内容被丢弃成 `Forbidden`。现 `AggregateGateStamp` 持有该条目的 `CacheLease` 并在整个绑定生命周期内保留：容量淘汰（`evict` 跳过 pinned 条目）无法删除它；而撤权、换 PAT、凭据拒绝、退休仍会删除条目，使 `lease.snapshot()` 返回空。校验同时比对 lease 内字节与「当前键仍解析为同一 stamp」，避免删除后重建同分区 stamp 让旧历史复活。回归 `aggregate_gate_stamp_survives_capacity_eviction_but_not_revocation` 先证明最早的普通条目确实被淘汰，再断言 stamp 仍有效、撤权后立即失效。
+
+Codex 第四轮（head `6bdaf7b`）一条意见成立并修复：
+
+6. **P2 撤权后 `cache_invalidated` 永久卡住，重试无法采纳新授权的快照**：`cache_invalidated` 原为一次性闩锁，只在 `rebind()` 清除；而具体仓库撤权刻意保留聚合门禁可用，其他页面重新在线写入快照后，本页重试得到的仍是被拒绝的历史结果，且 `apply()` 在 `accepts()` 失败前没有释放 section 的 `work` 句柄，导致后续重试彻底不动。现 `check_authorization` 在清理完在屏历史内容后**清除**该闩锁（撤权仅使当时展示的快照退休，不永久拒绝新证明），并释放该绑定下所有在途 section 句柄与收件箱；监测任务通过 `cache_monitor_running` 暴露存活状态，退出后允许为新的 stamp 重新启动。回归 `retry_after_revocation_adopts_a_newly_authorized_cache_stamp`：撤权清空在屏快照后，由另一读会话在线重填聚合快照，再在离线状态点击重试，页面正常恢复历史快照；反向验证（把 `swap(false)` 改回 `load()`）该用例超时失败。
 
 ## 原生验收步骤与边界（`pending`）
 

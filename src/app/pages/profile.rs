@@ -178,6 +178,7 @@ pub struct ProfilePage {
     requests: [u64; 4],
     work: [Option<Work>; 4],
     cache_monitor: Option<Work>,
+    cache_monitor_running: Arc<std::sync::atomic::AtomicBool>,
     historical_stamps: Arc<Mutex<[Option<AggregateGateStamp>; 4]>>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     cache_invalidated: Arc<std::sync::atomic::AtomicBool>,
@@ -220,6 +221,7 @@ impl ProfilePage {
             requests: [0; 4],
             work: [None, None, None, None],
             cache_monitor: None,
+            cache_monitor_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             historical_stamps: Arc::new(Mutex::new([None, None, None, None])),
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             cache_invalidated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -650,7 +652,16 @@ impl ProfilePage {
     }
 
     fn ensure_cache_monitor(&mut self, services: &AccountServices) {
-        if self.cache_monitor.is_some() || self.cached_session.is_none() {
+        // A finished monitor keeps its handle until the foreground notices; treat a stopped task as
+        // absent so a later section read can start a new one for the current stamps.
+        if self
+            .cache_monitor_running
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        self.cache_monitor = None;
+        if self.cached_session.is_none() {
             return;
         }
         let Some(session) = self.session.clone() else {
@@ -664,6 +675,9 @@ impl ProfilePage {
         let work = Work::new();
         let cancel = work.token.clone();
         self.cache_monitor = Some(work);
+        self.cache_monitor_running
+            .store(true, std::sync::atomic::Ordering::Release);
+        let running = self.cache_monitor_running.clone();
         let spawned = services.executor().handle().spawn(async move {
             loop {
                 tokio::select! {
@@ -701,9 +715,12 @@ impl ProfilePage {
                     break;
                 }
             }
+            running.store(false, std::sync::atomic::Ordering::Release);
         });
         if spawned.is_err() {
             self.cache_monitor = None;
+            self.cache_monitor_running
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -726,6 +743,16 @@ impl ProfilePage {
 
     fn drain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.check_authorization(cx) {
+            // The displayed snapshot (or the authorization itself) was retired. Every in-flight
+            // section request belonged to it, so stop them and release their handles: otherwise a
+            // retry would see `work[index].is_some()` and never start again.
+            for work in &mut self.work {
+                if let Some(work) = work.take() {
+                    work.source.cancel();
+                }
+            }
+            self.inbox.lock().expect("profile inbox").clear();
+            cx.notify();
             return;
         }
         let replies: Vec<_> = self
@@ -747,14 +774,29 @@ impl ProfilePage {
             return false;
         };
         if services.repositories().is_current(session.context()) && session.verify() {
-            // If a cache binding was attached, ensure the cache gate has not been retired/suspended/rejected.
-            let gate_lost = self
-                .cache_invalidated
-                .load(std::sync::atomic::Ordering::Acquire)
-                || (self.cached_session.is_some()
-                    && services.repositories().cache(session.context()).is_none());
-            if gate_lost {
+            let binding_lost = self.cached_session.is_some()
+                && services.repositories().cache(session.context()).is_none();
+            if binding_lost {
+                // The account's cache binding itself is gone (retired, rejected or suspended). The
+                // page keeps reading online; nothing historical may stay on screen.
                 self.cached_session = None;
+            }
+            // A concrete repository revocation keeps the aggregate gate usable for fresh reads, so
+            // the invalidation only retires the snapshots that were on screen. It must not block a
+            // later read that proves the gate again with a new stamp.
+            let invalidated = self
+                .cache_invalidated
+                .swap(false, std::sync::atomic::Ordering::AcqRel);
+            if invalidated || binding_lost {
+                if let Some(monitor) = self.cache_monitor.take() {
+                    monitor.source.cancel();
+                }
+                self.cache_monitor_running
+                    .store(false, std::sync::atomic::Ordering::Release);
+                *self
+                    .historical_stamps
+                    .lock()
+                    .expect("profile historical stamps") = [None, None, None, None];
                 if let Some(view) = &self.view {
                     let any_historical = view
                         .read(cx)
@@ -777,10 +819,6 @@ impl ProfilePage {
                             view.clear_reader(cx);
                             view.suspend(cx);
                         });
-                        *self
-                            .historical_stamps
-                            .lock()
-                            .expect("profile historical stamps") = [None, None, None, None];
                         self.view = None;
                         self.request = None;
                         self.unavailable = Some(PresentationError::Forbidden);
@@ -2919,6 +2957,80 @@ mod tests {
             harness
                 .page
                 .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn retry_after_revocation_adopts_a_newly_authorized_cache_stamp(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|v| matches!(v.read(cx).basic(), SectionState::Ready(_)))
+            })
+        });
+        harness.transport.set_offline(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+        });
+
+        // A concrete repository revocation retires the displayed snapshot. The aggregate gate stays
+        // usable for fresh reads, so this must not lock the page out permanently.
+        let context = harness.accounts.page_session().unwrap().context().clone();
+        let cache = harness.accounts.repo_service().cache(&context).unwrap();
+        cache
+            .store()
+            .revoke_repository(cache.scope(), Some(101))
+            .unwrap();
+        wait_for_profile(&harness, cx, |cx| {
+            harness
+                .page
+                .read_with(cx, |page, _| page.view_for_test().is_none())
+        });
+
+        // While the page still holds a retryable placeholder, another authorized read (here the same
+        // service, standing in for another mounted page) repopulates the aggregate snapshots.
+        harness.transport.set_offline(false);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let session = harness.accounts.page_session().unwrap();
+        let repopulated = runtime.block_on(async {
+            let cache = harness.accounts.repo_service().cache(&context).unwrap();
+            let (store, scope) = cache.into_parts();
+            let reader = CachedPageReadSession::new(session, store, scope).unwrap();
+            reader
+                .profile(PageReadMode::Online, "alice", CancellationToken::default())
+                .await
+                .map(|scoped| scoped.value)
+        });
+        assert!(
+            matches!(repopulated, Ok(PageValue::Value { .. })),
+            "a fresh online read repopulates the aggregate snapshot"
+        );
+
+        // Retrying the original page while offline must adopt that newly authorized snapshot instead
+        // of staying blocked by the earlier revocation.
+        harness.transport.set_offline(true);
+        let retry = cx
+            .debug_bounds("profile-page-basic-error")
+            .expect("the revoked snapshot leaves a retryable placeholder");
+        cx.simulate_click(retry.center(), gpui::Modifiers::none());
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|v| {
+                    matches!(v.read(cx).basic(), SectionState::Ready(_))
+                        && v.read(cx)
+                            .basic_provenance()
+                            .is_some_and(|p| p.is_historical())
+                })
+            })
         });
     }
 
