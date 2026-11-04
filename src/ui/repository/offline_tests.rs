@@ -1048,3 +1048,56 @@ fn activation_resets_gate_probe_bookkeeping_and_recovers_from_denial(cx: &mut Te
     });
     release_page(&host, cx);
 }
+
+/// A page whose summary is fresh online but whose branch/revision readings fell
+/// back to a snapshot must report the cached age, not "just now".
+#[gpui::test]
+fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    let now = crate::data::reader_image_cache::now_ms();
+    let old = now - 3 * 24 * 60 * 60 * 1000;
+    page.update(cx, |page, cx| {
+        // Fresh summary (Network), stale branch list and revision (Snapshot).
+        page.details_provenance = Some(super::super::RepositoryCacheProvenance {
+            origin: RepositoryCacheOrigin::Network,
+            fetched_at_ms: now,
+            verified_at_ms: now,
+            completeness: crate::domain::cache::CacheCompleteness::Complete,
+        });
+        page.branches_provenance = Some(super::super::RepositoryCacheProvenance {
+            origin: RepositoryCacheOrigin::Snapshot,
+            fetched_at_ms: old,
+            verified_at_ms: old,
+            completeness: crate::domain::cache::CacheCompleteness::Complete,
+        });
+        if let Some(branch) = page.branch.as_mut() {
+            branch.snapshot_provenance = Some(super::super::RepositoryCacheProvenance {
+                origin: RepositoryCacheOrigin::Snapshot,
+                fetched_at_ms: old + 60_000,
+                verified_at_ms: old + 60_000,
+                completeness: crate::domain::cache::CacheCompleteness::Complete,
+            });
+        }
+        cx.notify();
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert_eq!(
+            page.historical_verified_at_ms(),
+            Some(old),
+            "the oldest cached source decides the reported age"
+        );
+        assert_ne!(
+            page.historical_verified_at_ms(),
+            Some(now),
+            "a fresh network summary must not be reported as the cached age"
+        );
+    });
+    frames(cx);
+    assert!(cx.debug_bounds("repository-cached-badge").is_some());
+}

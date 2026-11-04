@@ -71,3 +71,15 @@ Codex 对 `c21f58e` 提出 1 项 P1，成立且可直接修复；仍无待裁决
 回归：`activation_resets_gate_probe_bookkeeping_and_recovers_from_denial` 构造“在途 + 已拒绝 + 旧代次回复”状态后 `activate`，断言在途标志与 `gate_denied` 被清除、探测身份推进、旧回复无法清除新探测的在途标志，且新探测结果可正常落定。
 
 本轮验证（同一源码）：`cargo test --locked --test repository offline` 全通过（含上述新回归）、`--test repository` 866 通过、`--test repository_overview` 44 通过、`cargo test --locked` 主程序 1138 / home 96 / notifications 579 / profile 279 / reader 250 / reader_images 771 / repository 866 / overview 44 全通过；`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。默认并发下 `--test notifications` 再次出现与本任务无关的既有 `reader_images::fixed_revision_images_persist_across_reopened_store_and_service` `InUse` 偶发失败，`--test-threads=1` 定向与随后完整重跑均通过；未修改该文件、未放宽断言，原始失败日志保留。
+
+## PR #73 第三轮审查修复（a4e8433）
+
+Codex 对 `a4e8433` 提出 1 项 P2，成立且可直接修复；仍无待裁决事项，`merge_owner` 保持 worker。
+
+**混合来源的时间归属错误**：当仓库摘要在线成功、而分支枚举或 revision 回退到旧快照时，`is_showing_cached_snapshot()` 正确点亮 `Cached` 胶囊，但 `cached_marker` 用 `details_provenance().or_else(revision).or_else(branches)` 取时间，摘要的 `Network` provenance 会先命中，于是把可能数天前的分支内容描述成 "cached from just now"。
+
+修复：`RepositoryPage` 新增 `historical_verified_at_ms()`，只在 `origin == Snapshot` 的摘要/分支/revision provenance 中取**最旧**的 `verified_at_ms`（无历史来源时为 `None`）；`is_showing_cached_snapshot()` 复用该判定，`cached_marker` 只用它生成同步时间文案。
+
+回归：`cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary` 构造 `Network` 摘要 + 两个不同时间的 `Snapshot` 分支/revision，断言胶囊出现、报告最旧时间且绝不等于摘要的当前时间。
+
+本轮验证（同一源码）：`cargo test --locked --test repository offline` 全通过、`--test repository` 867 通过、`--test repository_overview` 44 通过、`cargo test --locked` 主程序 1139 / home 96 / notifications 579 / profile 279 / reader 250 / reader_images 771 / repository 867 / overview 44 全通过；`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。

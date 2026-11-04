@@ -1017,16 +1017,26 @@ impl RepositoryPage {
     }
 
     pub fn is_showing_cached_snapshot(&self) -> bool {
-        self.details_provenance
-            .as_ref()
-            .is_some_and(|p| p.origin == RepositoryCacheOrigin::Snapshot)
-            || self
-                .branches_provenance
-                .as_ref()
-                .is_some_and(|p| p.origin == RepositoryCacheOrigin::Snapshot)
-            || self
-                .revision_provenance()
-                .is_some_and(|p| p.origin == RepositoryCacheOrigin::Snapshot)
+        self.historical_verified_at_ms().is_some()
+    }
+
+    /// The oldest verification time among the currently displayed sources that
+    /// actually came from the persistent cache, or `None` when every displayed
+    /// source was verified online.
+    ///
+    /// A mixed page (fresh summary, cached branch list or revision) must report
+    /// the cached part's age, not the fresh part's "just now".
+    pub fn historical_verified_at_ms(&self) -> Option<i64> {
+        [
+            self.details_provenance.as_ref(),
+            self.branches_provenance.as_ref(),
+            self.revision_provenance(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|provenance| provenance.origin == RepositoryCacheOrigin::Snapshot)
+        .map(|provenance| provenance.verified_at_ms)
+        .min()
     }
 
     pub fn branches_error(&self) -> Option<&PageError> {

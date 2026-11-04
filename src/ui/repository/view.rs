@@ -206,11 +206,13 @@ fn cached_marker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     if !page.is_showing_cached_snapshot() {
         return div().into_any_element();
     }
+    // Only sources that really came from the cache contribute their age; a page
+    // whose summary is fresh but whose branch list or revision fell back to a
+    // snapshot must not claim it was cached "just now". With several cached
+    // sources the oldest one is reported.
     let synced = page
-        .details_provenance()
-        .or_else(|| page.revision_provenance())
-        .or_else(|| page.branches_provenance())
-        .map(|provenance| super::format_sync_age(provenance.verified_at_ms))
+        .historical_verified_at_ms()
+        .map(super::format_sync_age)
         .unwrap_or_else(|| "an earlier sync".to_string());
     let theme = cx.theme();
     let colors = theme.colors.clone();
