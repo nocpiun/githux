@@ -12,15 +12,15 @@
 2. **离线回退与真实身份**：
    - 仅在网络错误或请求超时且本地有合规快照时，安全回退到历史快照。
    - 401 凭据拒绝、明确撤权、请求取消（`Cancelled`）或过期上下文（`StaleContext`）绝不回退为历史成功；不把 401 伪造成断网成功。
-   - 历史快照保留其原始保存时间戳（`fetched_at_ms`），并在栏目标题旁显示紧凑的 `Saved <time>` 提示与 tooltip 说明，绝不把历史快照当成当前网络新鲜结果。
+   - 历史快照保留其原始保存时间戳（`fetched_at_ms`），并在栏目标题旁显示紧凑 `Saved` 图标与相对时间 tooltip；离线追加旧页时保留该历史标记，只有在线刷新替换集合后才清除。
+   - 离线且本地无快照的首屏保持 Unavailable（“This page is not available offline.”），不渲染为错误图标或空结果。
 3. **分页同源与代次隔离**：
    - Feed 追加保持单代次同源约束：历史快照集只续读历史追加页，网络快照集只续读网络追加页，绝不拼接跨代次、新旧混合的分页。
    - 当历史快照的后续页缺失（`PageValue::Miss`）时，诚实呈现 `Page N is not available offline`，并终止该快照集的自动续读，绝不将其误报为“事件时间线已到末尾”，也不用无限重试循环骚扰用户。
    - 刷新时重置去重集合（`feed_seen_ids`）、游标与 epoch，成功后完全替换整栏并清除历史保存标记。
 4. **星标仓库描述富化与上下文防护**：
-   - 描述富化随 Feed 来源匹配（网络 Feed 查网络或当前缓存，历史 Feed 读历史描述快照）。
-   - 描述响应携带请求代次与分区标识，迟到或跨代次响应安全丢弃。
-   - 撤权或账户移除时，已发布的内存视图在收到屏障时立即清空，不遗留已撤权的私有数据展示。
+   - 描述富化随 Feed 来源匹配；同一 Feed 集合内的多次描述查找按独立批次并行保留，追加新页不取消上一页仍在途的描述请求，刷新/重绑取消旧批次并按 `feed_append_epoch` 拒绝迟到结果。
+   - 账户切换、移除或替换 PAT 推进会话上下文后，`rebind` 与前台检查清空已渲染副本并回到 Unavailable。不推进账户 epoch 的单仓库明确撤权已由 `CachedPageReadSession` 阻断在途/后续聚合读写，但共享 `CacheStore`/`RepoService` 当前没有页面订阅或只读 aggregate revision 接口，已渲染副本需在下次读取或共享通知接口补齐后主动撤下。
 
 ## 改动清单
 
@@ -35,10 +35,12 @@
   - 针对离线缺页新增 `FeedAppendState::NotCached { page }`，展示中性离线不可用提示。
   - 分离网络直接发布与快照发布内部 helper，确保网络结果不会误带历史来源标记。
 - `src/app/pages/home/tests.rs`：
-  - 增加确定性组合用例：
-    - `online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page`：预热后跨重启冷启动，断网回放 Home/Feed 首屏与多页追加，保留 `Saved` 标记与星标描述。
+  - 增加 6 项确定性组合用例：
+    - `online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page`：预热后跨重启冷启动，断网回放 Home/Feed 首屏与多页追加，追加后继续保留 `Saved` 历史标记与星标描述。
     - `offline_miss_partial_and_refresh_replacement_are_distinct`：第 3 页未缓存时命中 `NotCached { page: 3 }`；刷新后网络结果完全替换并清除历史标记。
-    - `authentication_failure_cancellation_and_uncached_pages_are_not_historical_success`：401 撤权与未缓存项绝不显示为历史成功；取消请求不产生快照。
+    - `authentication_failure_cancellation_and_uncached_pages_are_not_historical_success`：401 撤权、未缓存离线首屏、真实在途请求取消与移除账户清空已渲染副本。
+    - `append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches`：首屏描述暂停时追加第二页不丢失首屏描述，刷新拒绝旧 epoch 描述响应。
+    - `offline_filtered_empty_first_page_continues_to_merged_pr_and_read_more_routes_internally`：离线全噪声空首屏自动续读到合并 PR 页，点击 `Read more` 走内部 `Route::PullRequest`。
     - `no_cache_binding_keeps_the_original_online_path`：无缓存绑定的常规在线服务不发生功能回归。
 - `docs/home-view.md`：
   - 记录 2026-11-03 离线页面缓存、历史快照呈现、分页同源与无缓存回退契约。
@@ -49,13 +51,22 @@
 1. `node scripts/verify.mjs -- cargo fmt --all -- --check`：通过（exit 0）。
 2. `node scripts/verify.mjs -- cargo check --locked --all-targets`：通过（exit 0）。
 3. `node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings`：通过（exit 0）。
-4. `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::home::tests -- --test-threads=1`：4 项通过（exit 0）。
+4. `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::home::tests -- --test-threads=1`：6 项通过（exit 0）。
 5. `node scripts/verify.mjs -- cargo test --locked --test home`：84 项通过（exit 0）。
 6. `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::tests -- --test-threads=1`：6 项通过（exit 0）。
 7. `git diff --check`：无空白或行尾违例。
 
 ## 验证边界与限制
 
-- 真实原生 Shell 窗口下的端到端离线查看仍依赖 `cache-runtime` 统一注入 `CacheStore`。在本任务的隔离分支上，通过真实 `AccountService::open_with_cache`、真实 SQLite 账户目录、真实 `CacheStore`、真实 `CachedPageReadSession` 和真实 `HomePage` 宿主完成组合断言。
-- 自动化测试运行在 GPUI 测试平台，不覆盖真实的 Windows 原生窗口绘制、DPI 切换手感或真实 GitHub 网络抖动。
-- 本 PR 添加 `pending` 标签，等待协调者或负责人进行原生界面验收后方可合并。
+- 正式生产启动注入 `CacheStore` 仍依赖 `cache-runtime`（PR #68，当前未合入 `main`；其前置 `sidebar-cache` PR #70 已合入 `main`）。在本任务分支上，通过真实 `AccountService::open_with_cache`、真实 SQLite 账户目录、真实 `CacheStore`、真实 `CachedPageReadSession` 和真实 `HomePage` 宿主完成受控组合断言，尚未做 `cache-runtime` 合入后的正式二进制冷启动组合验证。
+- 若未来要求单仓库明确撤权在不推进账户 `AuthEpoch`、也不触发新一轮读取的情况下立即撤下已渲染的 Home/Feed 副本，需协调共享层（如 `RepoService` 暴露当前账户聚合 gate 状态或失效序号）；本任务按文件所有权未修改 `src/data/**` 或 `src/storage/**`。
+- 自动化测试运行在 GPUI 测试平台，不覆盖真实 Windows 原生窗口绘制、DPI/输入法交互或真实 GitHub PAT/API 响应。
+- 候选教训（供 `docs-current-state` 评估，不改 `LESSONS.md`）：分页追加共用 `apply_*_page` 时不要复用“首屏网络替换清空 provenance / 取消前批异步丰富”的状态重置路径；测试中验证缓存跨重启恢复时须共享模拟凭据存储但先关闭旧 `CacheStore` 文件锁。
+- 本 PR 保持 `pending` 标签，等待 `cache-runtime` 合入后的组合核验及负责人手动 UI 验收。
+
+## 正式 Shell 验收步骤（待 `cache-runtime` 合入后执行）
+
+1. 在线登录有效 Classic PAT，打开默认 Home 标签，确认左栏仅展示当前账户 `involves` 的 open Issue/PR，右栏仅展示已关注账号的合并 PR（作者归因 + 摘要/Read more）、星标仓库（含可选描述）与新建仓库，滚到底部自动加载更旧一页。
+2. 关闭应用并断开网络后重新启动，确认已访问的 Home 与 Feed 页从本地缓存恢复，栏标题旁显示 `Saved` 提示及保存时间 tooltip；继续滚到未缓存的更旧页时显示 `Page N is not available offline` 且不误称没有更多活动；合并 PR 的 `Read more` 仍打开内部 PR 标签。
+3. 恢复网络后点击两栏刷新按钮，确认新集合替换旧快照、清除 `Saved` 标记，且不把旧分页拼入新结果。
+4. 切换账户、替换 PAT 或移除账户后，确认原账户已展示的 Home/Feed 内容立即清空，不会在离线或未重验状态下继续显示。

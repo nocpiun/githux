@@ -625,6 +625,12 @@ impl HomeView {
         true
     }
 
+    /// A replacement Feed read starts a new description generation too.
+    pub fn clear_repository_descriptions(&mut self, cx: &mut Context<Self>) {
+        self.repo_descriptions.clear();
+        cx.notify();
+    }
+
     /// Enriches or clears a single repository description, guarded by the active
     /// request binding and generation.
     pub fn set_repository_description(
@@ -861,7 +867,6 @@ impl HomeView {
             content: PanelContent::Ready(outcome),
             refreshing: false,
         };
-        self.feed.provenance = None;
         self.feed_append = FeedAppendState::Idle;
         cx.notify();
         true

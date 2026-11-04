@@ -88,7 +88,7 @@ async fn read_home(
     cached: Option<CachedPageReadSession>,
     cache_partition: String,
     cancel: CancellationToken,
-) -> Result<CachedRead<HomeSearchOutcome>, HomeError> {
+) -> Result<Option<CachedRead<HomeSearchOutcome>>, HomeError> {
     if let Some(cached) = cached {
         match cached
             .home(
@@ -100,11 +100,7 @@ async fn read_home(
             .await
         {
             Ok(value) => {
-                return unpack_cached(value, &cache_partition)
-                    .map_err(cache_failure)?
-                    .ok_or_else(|| HomeError::InvalidResponse {
-                        message: "An online read did not produce a result.".into(),
-                    });
+                return unpack_cached(value, &cache_partition).map_err(cache_failure);
             }
             Err(PageCacheError::Read(error)) if can_fall_back(&error) => {
                 let offline = cached
@@ -116,9 +112,7 @@ async fn read_home(
                     )
                     .await
                     .map_err(cache_failure)?;
-                return unpack_cached(offline, &cache_partition)
-                    .map_err(cache_failure)?
-                    .ok_or(error);
+                return unpack_cached(offline, &cache_partition).map_err(cache_failure);
             }
             Err(error) => return Err(cache_failure(error)),
         }
@@ -126,10 +120,12 @@ async fn read_home(
     session
         .home(None, &HomeSearchLimits::default(), cancel)
         .await
-        .map(|value| CachedRead {
-            value: value.value,
-            source: ReadSource::Network,
-            metadata: None,
+        .map(|value| {
+            Some(CachedRead {
+                value: value.value,
+                source: ReadSource::Network,
+                metadata: None,
+            })
         })
 }
 
@@ -138,7 +134,7 @@ async fn read_feed(
     cached: Option<CachedPageReadSession>,
     cache_partition: String,
     cancel: CancellationToken,
-) -> Result<CachedRead<FeedOutcome>, HomeError> {
+) -> Result<Option<CachedRead<FeedOutcome>>, HomeError> {
     if let Some(cached) = cached {
         match cached
             .feed(
@@ -152,11 +148,7 @@ async fn read_feed(
             .await
         {
             Ok(value) => {
-                return unpack_cached(value, &cache_partition)
-                    .map_err(cache_failure)?
-                    .ok_or_else(|| HomeError::InvalidResponse {
-                        message: "An online read did not produce a result.".into(),
-                    });
+                return unpack_cached(value, &cache_partition).map_err(cache_failure);
             }
             Err(PageCacheError::Read(error)) if can_fall_back(&error) => {
                 let offline = cached
@@ -170,9 +162,7 @@ async fn read_feed(
                     )
                     .await
                     .map_err(cache_failure)?;
-                return unpack_cached(offline, &cache_partition)
-                    .map_err(cache_failure)?
-                    .ok_or(error);
+                return unpack_cached(offline, &cache_partition).map_err(cache_failure);
             }
             Err(error) => return Err(cache_failure(error)),
         }
@@ -186,10 +176,12 @@ async fn read_feed(
             cancel,
         )
         .await
-        .map(|value| CachedRead {
-            value: value.value,
-            source: ReadSource::Network,
-            metadata: None,
+        .map(|value| {
+            Some(CachedRead {
+                value: value.value,
+                source: ReadSource::Network,
+                metadata: None,
+            })
         })
 }
 
@@ -226,8 +218,8 @@ enum ReadSource {
 }
 
 enum ColumnResult {
-    Home(Result<CachedRead<HomeSearchOutcome>, HomeError>),
-    Feed(Result<CachedRead<FeedOutcome>, HomeError>),
+    Home(Result<Option<CachedRead<HomeSearchOutcome>>, HomeError>),
+    Feed(Result<Option<CachedRead<FeedOutcome>>, HomeError>),
 }
 
 enum AppendError {
@@ -263,8 +255,14 @@ struct AppendReply {
 }
 
 /// Asynchronous repository description enrichment for starred repositories.
+struct EnrichWork {
+    work: Work,
+    repositories: std::collections::HashSet<String>,
+}
+
 struct EnrichReply {
     generation: u64,
+    append_epoch: u64,
     selection: u64,
     context: RepositoryReadContext,
     request: u64,
@@ -301,7 +299,7 @@ pub struct HomePage {
     feed_enrich_request: u64,
     /// Known repository descriptions, keyed by lowercase "owner/name".
     feed_repo_descriptions: std::collections::HashMap<String, Option<String>>,
-    feed_enrich_work: Option<Work>,
+    feed_enrich_work: std::collections::HashMap<u64, EnrichWork>,
     view: Entity<HomeView>,
     navigation: NavigationSink,
     _changed: Subscription,
@@ -374,7 +372,7 @@ impl HomePage {
             feed_source: None,
             feed_enrich_request: 0,
             feed_repo_descriptions: std::collections::HashMap::new(),
-            feed_enrich_work: None,
+            feed_enrich_work: std::collections::HashMap::new(),
             view,
             navigation,
             _changed,
@@ -456,21 +454,6 @@ impl HomePage {
                 );
             }
         });
-    }
-
-    #[cfg(test)]
-    fn new_for_test(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let services = crate::app::AccountsHandle::services(cx);
-        let workspace = crate::workspace::Workspace::new(cx);
-        Self::new(
-            workspace.active_id(),
-            services,
-            1,
-            Rc::new(|_, _, _| {}),
-            PageAvatars::new(None),
-            window,
-            cx,
-        )
     }
 
     #[cfg(test)]
@@ -565,6 +548,12 @@ impl HomePage {
                 append.source.cancel();
             }
             self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
+            for (_, enrich) in self.feed_enrich_work.drain() {
+                enrich.work.source.cancel();
+            }
+            self.feed_repo_descriptions.clear();
+            self.view
+                .update(cx, |view, cx| view.clear_repository_descriptions(cx));
         }
         let Some(session) = self.session.clone() else {
             return;
@@ -690,7 +679,22 @@ impl HomePage {
                 .is_some_and(|session| session.context() == &reply.context)
     }
 
+    fn clear_stale_context(&mut self, cx: &mut Context<Self>) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.verify())
+        {
+            self.stop();
+            self.unavailable(
+                "The account or authorization changed. Refresh in the current account.",
+                cx,
+            );
+        }
+    }
+
     fn drain(&mut self, cx: &mut Context<Self>) {
+        self.clear_stale_context(cx);
         let replies: Vec<_> = self.inbox.lock().expect("home inbox").drain(..).collect();
         for reply in replies {
             self.apply(reply, cx);
@@ -755,6 +759,7 @@ impl HomePage {
                 // Merge into the retained outcome in place, preserving the
                 // earlier snapshot's partial reasons so an append can never make
                 // a previously-withheld set look complete.
+                let mut merged_activities = Vec::new();
                 self.view.update(cx, |view, cx| {
                     if let crate::ui::home::PanelState::Ready {
                         content: crate::ui::home::PanelContent::Ready(existing),
@@ -776,10 +781,11 @@ impl HomePage {
                         if let Some(poll) = page.poll_interval_seconds {
                             merged.poll_interval_seconds = Some(poll);
                         }
+                        merged_activities = merged.activities.clone();
                         view.apply_feed_page(&binding, generation, merged, cx);
                     }
                 });
-                self.enrich_starred_repositories(&page.activities, cx);
+                self.enrich_starred_repositories(&merged_activities, cx);
             }
             Err(AppendError::NotCached) => {
                 let page = self.feed_next_page.map(|cursor| cursor.page).unwrap_or(1);
@@ -840,11 +846,11 @@ impl HomePage {
         let generation = self.generation;
         let column = reply.column;
         let feed_activities = match &reply.result {
-            ColumnResult::Feed(Ok(read)) => Some(read.value.activities.clone()),
+            ColumnResult::Feed(Ok(Some(read))) => Some(read.value.activities.clone()),
             _ => None,
         };
         self.view.update(cx, |view, cx| match reply.result {
-            ColumnResult::Home(Ok(read)) => match read.source {
+            ColumnResult::Home(Ok(Some(read))) => match read.source {
                 ReadSource::Network => {
                     view.apply_home(&binding, generation, read.value, cx);
                 }
@@ -862,7 +868,20 @@ impl HomePage {
             ColumnResult::Home(Err(error)) => {
                 view.apply_error(column, &binding, generation, error, cx);
             }
-            ColumnResult::Feed(Ok(read)) => {
+            ColumnResult::Home(Ok(None)) | ColumnResult::Feed(Ok(None)) => {
+                if column == Column::Feed {
+                    self.feed_next_page = None;
+                    self.feed_source = None;
+                }
+                view.set_unavailable(
+                    column,
+                    &binding,
+                    generation,
+                    "This page is not available offline.",
+                    cx,
+                );
+            }
+            ColumnResult::Feed(Ok(Some(read))) => {
                 let outcome = read.value;
                 if matches!(read.source, ReadSource::Network)
                     && let Some(seconds) = outcome.poll_interval_seconds
@@ -1056,8 +1075,8 @@ impl HomePage {
         if let Some(append) = self.feed_append.take() {
             append.source.cancel();
         }
-        if let Some(enrich) = self.feed_enrich_work.take() {
-            enrich.source.cancel();
+        for (_, enrich) in self.feed_enrich_work.drain() {
+            enrich.work.source.cancel();
         }
         self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         self.inbox.lock().expect("home inbox").clear();
@@ -1227,6 +1246,10 @@ impl HomePage {
                 if !owner.is_empty()
                     && !repo.is_empty()
                     && !self.feed_repo_descriptions.contains_key(&key)
+                    && !self
+                        .feed_enrich_work
+                        .values()
+                        .any(|work| work.repositories.contains(&key))
                     && seen.insert(key)
                 {
                     needed.push((owner.to_string(), repo.to_string()));
@@ -1263,12 +1286,19 @@ impl HomePage {
 
         let work = Work::new();
         let cancel = work.token.clone();
-        if let Some(work) = self.feed_enrich_work.take() {
-            work.source.cancel();
-        }
-        self.feed_enrich_work = Some(work);
         self.feed_enrich_request = self.feed_enrich_request.saturating_add(1);
         let request = self.feed_enrich_request;
+        self.feed_enrich_work.insert(
+            request,
+            EnrichWork {
+                work,
+                repositories: needed
+                    .iter()
+                    .map(|(owner, name)| format!("{owner}/{name}").to_ascii_lowercase())
+                    .collect(),
+            },
+        );
+        let append_epoch = self.feed_append_epoch;
         let mode = match self.feed_source {
             Some(ReadSource::Network) | None => PageReadMode::Online,
             Some(ReadSource::Historical(_)) => PageReadMode::Offline,
@@ -1313,6 +1343,7 @@ impl HomePage {
                     .expect("enrich inbox")
                     .push_back(EnrichReply {
                         generation,
+                        append_epoch,
                         selection,
                         context: reply_context,
                         request,
@@ -1321,7 +1352,7 @@ impl HomePage {
             }
         });
         if submitted.is_err() {
-            self.feed_enrich_work = None;
+            self.feed_enrich_work.remove(&request);
         }
     }
 
@@ -1336,7 +1367,8 @@ impl HomePage {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.context() == &reply.context)
-            || reply.request != self.feed_enrich_request
+            || reply.append_epoch != self.feed_append_epoch
+            || !self.feed_enrich_work.contains_key(&reply.request)
         {
             return;
         }
@@ -1352,7 +1384,7 @@ impl HomePage {
             );
             return;
         }
-        self.feed_enrich_work = None;
+        self.feed_enrich_work.remove(&reply.request);
         let Ok(result) = reply.result else {
             return;
         };
@@ -1385,7 +1417,8 @@ impl HomePage {
 mod tests;
 
 impl Render for HomePage {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.clear_stale_context(cx);
         self.view.clone()
     }
 }

@@ -55,10 +55,106 @@ fn setup(cx: &mut TestAppContext) {
     });
 }
 
+#[derive(Default)]
+struct DescriptionGate {
+    enabled: std::sync::atomic::AtomicBool,
+    entered: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+    pause_search: std::sync::atomic::AtomicBool,
+    search_entered: std::sync::atomic::AtomicBool,
+}
+
+struct ControlledTransport {
+    mock: Arc<MockTransport>,
+    gate: Arc<DescriptionGate>,
+}
+
+impl crate::network::transport::Transport for ControlledTransport {
+    fn execute<'a>(
+        &'a self,
+        request: crate::network::transport::HttpRequest,
+        cancel: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        crate::network::transport::HttpResponse,
+                        crate::network::transport::TransportError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.gate.pause_search.load(SeqCst) && request.url.contains("/search/issues") {
+                self.gate.search_entered.store(true, SeqCst);
+                tokio::select! {
+                    _ = self.gate.release.notified() => {},
+                    _ = cancel.clone().cancelled() => return Err(crate::network::transport::TransportError::Cancelled),
+                }
+            }
+            if self.gate.enabled.load(SeqCst) && request.url.contains("/repos/octo/") {
+                let name = request.url.rsplit('/').next().unwrap();
+                if name == "repo" {
+                    self.gate.entered.store(true, SeqCst);
+                    tokio::select! {
+                        _ = self.gate.release.notified() => {},
+                        _ = cancel.clone().cancelled() => return Err(crate::network::transport::TransportError::Cancelled),
+                    }
+                }
+                return Ok(response(
+                    200,
+                    &serde_json::json!({
+                        "id": 10, "name": name, "owner": {"id": 1, "login": "octo"},
+                        "private": false, "default_branch": "main", "fork": false,
+                        "archived": false, "stargazers_count": 0, "forks_count": 0,
+                        "open_issues_count": 0, "size": 1,
+                        "description": format!("description for {name}"),
+                        "html_url": format!("https://github.com/octo/{name}")
+                    })
+                    .to_string(),
+                ));
+            }
+            self.mock.execute(request, cancel).await
+        })
+    }
+
+    fn execute_bounded<'a>(
+        &'a self,
+        request: crate::network::transport::HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        crate::network::transport::HttpResponse,
+                        crate::network::transport::TransportError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let value = self.execute(request, cancel).await?;
+            if value.body.len() > max_body_bytes {
+                return Err(
+                    crate::network::transport::TransportError::ResponseTooLarge {
+                        limit: max_body_bytes,
+                    },
+                );
+            }
+            Ok(value)
+        })
+    }
+}
+
 struct Fixture {
     service: Option<AccountService>,
     executor: Arc<BackgroundExecutor>,
     mock: Arc<MockTransport>,
+    gate: Arc<DescriptionGate>,
     directory: tempfile::TempDir,
     cache_directory: tempfile::TempDir,
     store: Option<CacheStore>,
@@ -87,7 +183,14 @@ impl Fixture {
     ) -> Self {
         let mock = Arc::new(MockTransport::new());
         let executor = Arc::new(BackgroundExecutor::new(4));
-        let client = Arc::new(GitHubClient::new(GitHubConfig::default(), mock.clone()));
+        let gate = Arc::new(DescriptionGate::default());
+        let client = Arc::new(GitHubClient::new(
+            GitHubConfig::default(),
+            Arc::new(ControlledTransport {
+                mock: mock.clone(),
+                gate: gate.clone(),
+            }),
+        ));
         let store = cache.clone();
         let service = if let Some(cache) = cache {
             AccountService::open_with_cache(
@@ -129,6 +232,7 @@ impl Fixture {
             service: Some(service),
             executor,
             mock,
+            gate,
             directory,
             cache_directory,
             store,
@@ -221,16 +325,30 @@ fn pump(controller: &Entity<crate::app::accounts::Accounts>, cx: &mut VisualTest
     cx.run_until_parked();
 }
 
-struct AccountsHolder(Entity<crate::app::accounts::Accounts>);
+struct AccountsHolder {
+    accounts: Entity<crate::app::accounts::Accounts>,
+    page: Option<Entity<HomePage>>,
+}
 
 impl gpui::Render for AccountsHolder {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        gpui::div()
+        match &self.page {
+            Some(page) => page.clone().into_any_element(),
+            None => gpui::div().into_any_element(),
+        }
     }
 }
 
 fn open_page<'a>(
     fixture: &mut Fixture,
+    cx: &'a mut TestAppContext,
+) -> (Entity<HomePage>, &'a mut VisualTestContext) {
+    open_page_with_navigation(fixture, std::rc::Rc::new(|_, _, _| {}), cx)
+}
+
+fn open_page_with_navigation<'a>(
+    fixture: &mut Fixture,
+    navigation: NavigationSink,
     cx: &'a mut TestAppContext,
 ) -> (Entity<HomePage>, &'a mut VisualTestContext) {
     setup(cx);
@@ -242,13 +360,15 @@ fn open_page<'a>(
         fixture.executor.clone(),
     );
     let (holder, cx) = cx.add_window_view(|window, cx| {
-        let controller =
+        let accounts =
             cx.new(|cx| crate::app::accounts::Accounts::new(Some(Arc::new(runtime)), window, cx));
-        cx.set_global(crate::app::AccountsHandle(controller.clone()));
-        AccountsHolder(controller)
+        cx.set_global(crate::app::AccountsHandle(accounts.clone()));
+        AccountsHolder {
+            accounts,
+            page: None,
+        }
     });
-    let controller = holder.read_with(cx, |h, _| h.0.clone());
-    // Let the background account catalog restore settle before constructing the HomePage.
+    let controller = holder.read_with(cx, |h, _| h.accounts.clone());
     for _ in 0..400 {
         pump(&controller, cx);
         std::thread::sleep(Duration::from_millis(2));
@@ -256,7 +376,24 @@ fn open_page<'a>(
             break;
         }
     }
-    let page = cx.update(|window, cx| cx.new(|cx| HomePage::new_for_test(window, cx)));
+    let page = cx.update_window_entity(&holder, |holder, window, cx| {
+        let services = crate::app::AccountsHandle::services(cx);
+        let workspace = crate::workspace::Workspace::new(cx);
+        let page = cx.new(|cx| {
+            HomePage::new(
+                workspace.active_id(),
+                services,
+                1,
+                navigation,
+                PageAvatars::new(None),
+                window,
+                cx,
+            )
+        });
+        holder.page = Some(page.clone());
+        cx.notify();
+        page
+    });
     (page, cx)
 }
 
@@ -354,6 +491,9 @@ fn online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page(
         std::thread::sleep(Duration::from_millis(2));
     }
     assert_eq!(feed_ids(&page, cx), ["first", "second"]);
+    assert!(page.read_with(cx, |page, cx| {
+        page.view.read(cx).provenance(Column::Feed).is_some()
+    }));
     assert!(page.read_with(cx, |page, _cx| {
         page.description_for_test("octo/repo").as_deref() == Some("saved description")
     }));
@@ -454,23 +594,302 @@ fn authentication_failure_cancellation_and_uncached_pages_are_not_historical_suc
 
     let mut fixture = runtime.block_on(Fixture::new(true));
     let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert!(page.read_with(cx, |page, cx| matches!(
+        page.view.read(cx).home_state(),
+        PanelState::Ready {
+            content: PanelContent::Unavailable { message },
+            ..
+        } if message.contains("not available offline")
+    )));
+
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    let gate = fixture.gate.clone();
+    gate.pause_search
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (page, cx) = open_page(&mut fixture, cx);
+    for _ in 0..300 {
+        if gate
+            .search_entered
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    page.update(cx, |page, _| {
+        if let Some(work) = page.work[0].as_ref() {
+            work.source.cancel();
+        }
+    });
     for _ in 0..200 {
         page.update(cx, |page, cx| page.drain_for_test(cx));
         cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(2));
     }
+    assert_eq!(
+        home_title(&page, cx),
+        None,
+        "cancellation must not fall back to saved Home"
+    );
     assert!(page.read_with(cx, |page, cx| matches!(
         page.view.read(cx).home_state(),
         PanelState::Ready {
-            content: PanelContent::Error(_),
+            content: PanelContent::Error(HomeError::GitHub(GitHubError::Cancelled)),
             ..
         }
     )));
-    page.update(cx, |page, _| {
-        if let Some(work) = page.work[0].take() {
-            work.source.cancel();
+
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    let account = fixture.account.clone();
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("cached home"));
+    let services = cx
+        .update(|_, cx| crate::app::AccountsHandle::services(cx))
+        .unwrap();
+    runtime
+        .block_on(services.accounts().remove_saved(account))
+        .unwrap();
+    page.update(cx, |page, cx| page.drain_for_test(cx));
+    assert_eq!(
+        home_title(&page, cx),
+        None,
+        "account removal clears the displayed copy"
+    );
+    assert!(page.read_with(cx, |page, cx| matches!(
+        page.view.read(cx).home_state(),
+        PanelState::Ready {
+            content: PanelContent::Unavailable { .. },
+            ..
         }
+    )));
+}
+
+#[gpui::test]
+fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    let gate = fixture.gate.clone();
+    gate.enabled.store(true, SeqCst);
+    runtime.block_on(async {
+        fixture
+            .mock
+            .enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#)))
+            .await;
+        fixture
+            .mock
+            .enqueue(Ok(response(200, &home("online home"))))
+            .await;
+        fixture.mock.enqueue(Ok(events("first", Some(2)))).await;
+        fixture
+            .mock
+            .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
+            .await;
     });
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    for _ in 0..300 {
+        if gate.entered.load(SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        gate.entered.load(SeqCst),
+        "first page description is paused in transport"
+    );
+    page.update(cx, |page, cx| {
+        let mut activities = match page.view.read(cx).feed_state() {
+            PanelState::Ready {
+                content: PanelContent::Ready(feed),
+                ..
+            } => feed.activities.clone(),
+            state => panic!("expected online feed, got {state:?}"),
+        };
+        activities[0].event.id = "second".into();
+        activities[0].event.repository.name = "octo/later".into();
+        page.apply_append(
+            AppendReply {
+                generation: page.generation,
+                append_epoch: page.feed_append_epoch,
+                selection: page.selection,
+                context: page.session.as_ref().unwrap().context().clone(),
+                result: Ok((
+                    FeedOutcome {
+                        activities,
+                        etag: None,
+                        poll_interval_seconds: None,
+                        next_page: None,
+                        readiness: crate::domain::home::FeedReadiness::Complete,
+                    },
+                    Default::default(),
+                    ReadSource::Network,
+                )),
+            },
+            cx,
+        );
+        assert_eq!(
+            page.feed_enrich_work.len(),
+            2,
+            "both same-collection batches remain live"
+        );
+        assert!(
+            page.feed_enrich_work
+                .values()
+                .all(|job| !job.work.token.is_cancelled())
+        );
+    });
+    for _ in 0..300 {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        if page.read_with(cx, |page, _| {
+            page.description_for_test("octo/later").is_some()
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        page.read_with(cx, |page, _| page.description_for_test("octo/later"))
+            .as_deref(),
+        Some("description for later")
+    );
+    assert_eq!(
+        page.read_with(cx, |page, _| page.description_for_test("octo/repo")),
+        None
+    );
+    gate.release.notify_one();
+    for _ in 0..300 {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        if page.read_with(cx, |page, _| {
+            page.description_for_test("octo/repo").is_some()
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        page.read_with(cx, |page, _| page.description_for_test("octo/repo"))
+            .as_deref(),
+        Some("description for repo")
+    );
+
+    page.update(cx, |page, cx| {
+        let old_epoch = page.feed_append_epoch;
+        let old_request = page.feed_enrich_request;
+        let context = page.session.as_ref().unwrap().context().clone();
+        page.feed_ready = None;
+        page.start(Column::Feed, false, cx);
+        assert!(page.feed_repo_descriptions.is_empty());
+        page.apply_enrichment(
+            EnrichReply {
+                generation: page.generation,
+                append_epoch: old_epoch,
+                selection: page.selection,
+                context,
+                request: old_request,
+                result: Ok(EnrichmentResult {
+                    descriptions: [("octo/repo".into(), Some("stale description".into()))].into(),
+                    cache_partition: None,
+                }),
+            },
+            cx,
+        );
+        assert!(
+            page.feed_repo_descriptions.is_empty(),
+            "refresh rejects the old description epoch"
+        );
+    });
+}
+
+#[gpui::test]
+fn offline_filtered_empty_first_page_continues_to_merged_pr_and_read_more_routes_internally(
+    cx: &mut TestAppContext,
+) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    let long_body = "Detailed offline summary word ".repeat(12);
+    runtime.block_on(async {
+        let store = fixture.store();
+        let scope = store.saved_account(fixture.account.clone()).unwrap();
+        let session = CachedPageReadSession::new(fixture.service.as_ref().unwrap().page_session().unwrap(), store, scope).unwrap();
+        fixture.mock.enqueue(Ok(response(200, &home("partial home")))).await;
+        session.home(PageReadMode::Online, None, &HomeSearchLimits::default(), Default::default()).await.unwrap();
+        let mut empty = response(200, &serde_json::json!([{
+            "id": "noise", "type": "PushEvent",
+            "actor": {"id": 7, "login": "bob", "avatar_url": null},
+            "repo": {"id": 10, "name": "octo/repo", "url": "https://api.github.com/repos/octo/repo"},
+            "payload": {"ref": "refs/heads/main", "before": "a", "head": "b", "size": 1},
+            "created_at": "2026-10-28T09:00:00Z"
+        }]).to_string());
+        empty.headers.push(("link".into(), "<https://api.github.com/users/octo/received_events?per_page=100&page=2>; rel=\"next\"".into()));
+        fixture.mock.enqueue(Ok(empty)).await;
+        fixture.mock.enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"},{"id":8,"login":"carol"}]"#))).await;
+        session.feed(PageReadMode::Online, &FeedLimits::default(), &FollowingLimits::default(), &PullRequestDetailLimits::default(), 30, Default::default()).await.unwrap();
+        fixture.mock.enqueue(Ok(response(200, &serde_json::json!([{
+            "id": "merged-pr", "type": "PullRequestEvent",
+            "actor": {"id": 7, "login": "bob", "avatar_url": null},
+            "repo": {"id": 10, "name": "octo/repo", "url": "https://api.github.com/repos/octo/repo"},
+            "payload": {"action": "merged", "number": 44, "pull_request": {"url": "https://api.github.com/repos/octo/repo/pulls/44", "id": 500, "number": 44, "head": {"ref": "f", "sha": "1"}, "base": {"ref": "main", "sha": "2"}}},
+            "created_at": "2026-10-28T08:00:00Z"
+        }]).to_string()))).await;
+        fixture.mock.enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"},{"id":8,"login":"carol"}]"#))).await;
+        fixture.mock.enqueue(Ok(response(200, &serde_json::json!({
+            "id": 500, "number": 44, "state": "closed", "merged": true,
+            "title": "Offline merged pull request", "html_url": "https://github.com/octo/repo/pull/44",
+            "user": {"id": 8, "login": "carol", "avatar_url": null}, "body": long_body
+        }).to_string()))).await;
+        session.feed_page(PageReadMode::Online, crate::domain::home::FeedSourceCursor { page: 2 }, &FeedLimits::default(), &FollowingLimits::default(), &PullRequestDetailLimits::default(), 30, &mut Default::default(), Default::default()).await.unwrap();
+    });
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    for _ in 0..200 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        if feed_ids(&page, cx) == ["merged-pr"] {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        feed_ids(&page, cx),
+        ["merged-pr"],
+        "filtered-empty page automatically loads page 2"
+    );
+    assert!(page.read_with(cx, |page, cx| {
+        page.view.read(cx).provenance(Column::Feed).is_some()
+    }));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let read_more = cx
+        .debug_bounds("feed-pr-read-more-0")
+        .expect("offline merged PR Read more control");
+    cx.simulate_click(read_more.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        *navigated.lock().unwrap(),
+        vec![Route::PullRequest {
+            namespace: "octo".into(),
+            name: "repo".into(),
+            number: 44
+        }]
+    );
 }
 
 #[gpui::test]
