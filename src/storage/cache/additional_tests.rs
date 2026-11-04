@@ -169,3 +169,124 @@ fn aggregate_stays_isolated_after_pat_replacement_and_repository_proof_does_not_
     let store = CacheStore::open(cfg).unwrap();
     assert_eq!(value(&store, &scope, &aggregate), b"after");
 }
+
+/// A valid PAT replacement discards the previous credential's account-aggregate snapshots and
+/// starts a fresh aggregate generation. Re-confirming the aggregate for the new credential can then
+/// save and read new snapshots, while the old per-repository bytes stay behind their own proof.
+#[test]
+fn a_pat_replacement_purges_old_aggregates_and_opens_a_new_generation() {
+    let dir = TempDir::new().unwrap();
+    let store = CacheStore::open(config(&dir)).unwrap();
+    let scope = store.saved_account(account(1)).unwrap();
+    let aggregate = CacheKey::mutable(None, true, "account-feed", "page=1", "json-v1", 1).unwrap();
+    let repo = key(10, "details");
+    put(&store, &scope, &aggregate, b"old aggregate");
+    put(&store, &scope, &repo, b"old repo");
+    let aggregate_lease = hit(&store, &scope, &aggregate);
+    let old_aggregate = store.authorization(&scope, None).unwrap();
+    let old_repo = store.authorization(&scope, Some(10)).unwrap();
+
+    store
+        .access_event(&scope, AccessEvent::PatReplaced)
+        .unwrap();
+
+    // The pre-publication quarantine still denies reads, including the old lease.
+    denied(&store, &scope, &aggregate);
+    assert!(aggregate_lease.snapshot().is_err());
+    // Only after the catalog publishes new credentials does the lifecycle reset the aggregate.
+    store.start_fresh_aggregate(&scope).unwrap();
+    miss(&store, &scope, &aggregate, CacheMiss::NotCached);
+    assert!(aggregate_lease.snapshot().unwrap().is_none());
+    // Captured UI authorizations are invalidated for the whole replaced credential, not only the
+    // resource that happened to be displayed.
+    assert!(!store.is_authorization_current(&old_aggregate));
+    assert!(!store.is_authorization_current(&old_repo));
+    // Per-repository bytes stay quarantined until their own proof.
+    denied(&store, &scope, &repo);
+
+    // A new-credential online read proves the aggregate and can publish a fresh snapshot.
+    store
+        .permission_confirmed(store.begin_revalidation(&scope, None).unwrap())
+        .unwrap();
+    put(&store, &scope, &aggregate, b"new aggregate");
+    assert_eq!(value(&store, &scope, &aggregate), b"new aggregate");
+
+    // The aggregate proof does not unlock the repository; its own proof does.
+    denied(&store, &scope, &repo);
+    store
+        .permission_confirmed(store.begin_revalidation(&scope, Some(10)).unwrap())
+        .unwrap();
+    assert_eq!(value(&store, &scope, &repo), b"old repo");
+}
+
+/// The lightweight authorization generation follows only the affected partition/resource: a
+/// repository revocation invalidates its own bytes and the account aggregate, never an unrevoked
+/// sibling repository or another account.
+#[test]
+fn authorization_generations_follow_revocation_scope_only() {
+    let dir = TempDir::new().unwrap();
+    let store = CacheStore::open(config(&dir)).unwrap();
+    let scope = store.saved_account(account(1)).unwrap();
+    let sibling = store.saved_account(account(2)).unwrap();
+    let aggregate = store.authorization(&scope, None).unwrap();
+    let revoked = store.authorization(&scope, Some(10)).unwrap();
+    let sibling_repo = store.authorization(&scope, Some(20)).unwrap();
+    let other_account = store.authorization(&sibling, None).unwrap();
+
+    store.revoke_repository(&scope, Some(10)).unwrap();
+
+    assert!(!store.is_authorization_current(&aggregate));
+    assert!(!store.is_authorization_current(&revoked));
+    assert!(store.is_authorization_current(&sibling_repo));
+    assert!(store.is_authorization_current(&other_account));
+}
+
+/// A classified credential rejection keeps its durable barrier: no later aggregate proof (or a
+/// restart) may turn it back into access.
+#[test]
+fn credential_rejection_is_not_recovered_by_a_new_proof() {
+    let dir = TempDir::new().unwrap();
+    let cfg = config(&dir);
+    let store = CacheStore::open(cfg.clone()).unwrap();
+    let scope = store.saved_account(account(1)).unwrap();
+    store
+        .access_event(&scope, AccessEvent::CredentialRejected)
+        .unwrap();
+    assert!(store.begin_revalidation(&scope, None).is_err());
+    drop(store);
+    let store = CacheStore::open(cfg).unwrap();
+    let scope = store.saved_account(account(1)).unwrap();
+    assert!(store.begin_revalidation(&scope, None).is_err());
+}
+
+#[test]
+fn authorization_checks_do_not_wait_for_sqlite_and_old_tokens_never_revive() {
+    let dir = TempDir::new().unwrap();
+    let store = CacheStore::open(config(&dir)).unwrap();
+    let scope = store.saved_account(account(1)).unwrap();
+    let authorization = store.authorization(&scope, None).unwrap();
+    // Hold the exact mutex every SQLite/object operation uses. Capturing/validating tokens must
+    // still complete on an independent thread, without waiting for the database lock.
+    let state = store.lock().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let copy = store.clone();
+    let s = scope.clone();
+    let a = authorization.clone();
+    let job = std::thread::spawn(move || {
+        tx.send(a.is_current() && copy.authorization(&s, None).unwrap().is_current()).unwrap();
+    });
+    let result = rx.recv_timeout(Duration::from_secs(2));
+    drop(state);
+    job.join().unwrap();
+    assert_eq!(result.unwrap(), true);
+    let aggregate = CacheKey::mutable(None, true, "feed", "page=1", "json", 1).unwrap();
+    let old_write = store.begin_write(&scope, &aggregate).unwrap();
+    let old_proof = store.begin_revalidation(&scope, None).unwrap();
+    store.revoke_repository(&scope, Some(10)).unwrap();
+    store.permission_confirmed(store.begin_revalidation(&scope, None).unwrap()).unwrap();
+    put(&store, &scope, &aggregate, b"new current data");
+    assert!(store.authorization(&scope, None).unwrap().is_current());
+    assert!(!authorization.is_current(), "a queued old reply cannot borrow the new gate");
+    assert!(matches!(store.put(old_write, b"late", metadata()), Err(CacheError::Stale)));
+    assert!(matches!(store.permission_confirmed(old_proof), Err(CacheError::Stale)));
+}
