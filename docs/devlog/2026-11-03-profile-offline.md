@@ -30,7 +30,7 @@
 
 所有 Cargo 命令均通过共享验证器 `node scripts/verify.mjs -- cargo ...` 串行执行。第二轮审查修复并 rebase 到 main `0cdb59c`（含 sidebar-cache #70）之后的最终一轮：
 
-- `cargo fmt --all -- --check` → exit 0（run `157af114`；`cargo fmt --all` run `24c801a8`）
+- `cargo fmt --all -- --check` → exit 0（run `157af114`、`f5ae7fdf`；`cargo fmt --all` run `24c801a8`）
 - `cargo check --locked --all-targets` → exit 0（run `4bcec08f`、`5c20bcbe`）
 - `cargo clippy --locked --all-targets -- -D warnings` → exit 0（run `ab8f7d62`）
 - `cargo build --locked` → exit 0（run `5ac8fcd0`）
@@ -98,7 +98,7 @@ Codex 第五轮（head `3828ac7`）一条意见成立并修复：
 ### 反例接入与反向验证
 
 - `src/app/pages/profile_acceptance_tests.rs` 原样纳入本分支，经 `tests` 模块末尾 `include!` 引入（不在 `app/pages/mod.rs` 注册）。
-- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 19 passed / 0 failed（run `d6f3ba28`），三条反例与两条新回归全部通过。
+- 修复后 `cargo test --locked --bin githux app::pages::profile::tests -- --test-threads=1` 为 19 passed / 0 failed（run `d6f3ba28`、`7dc8b7e0`），三条反例与两条新回归全部通过。
 - 反向验证（run `1e8ef5cf`）：把 stamp 恢复为「仅历史」、去掉发布前检查、把 `is_uncached_fallback` 收窄回仅 `AccessDenied` 后，三条反例重新全部失败（`acceptance_revocation_also_clears_online_profile`、`acceptance_queued_historical_profile_is_rejected_after_revocation`、`acceptance_profile_cache_write_failure_keeps_online_result`），冷启动用例仍通过——证明三条用例确实锁住这三处缺口。
 
 ### 第六轮 Codex 意见（head `4428c61`）
