@@ -1,9 +1,9 @@
 //! Page bodies not owned by a real page host.
 //!
-//! Home, Profile and Repository are mounted from `app::pages`; this module contains only the
-//! transitional Settings surface and the intentionally blank, not-yet-designed routes. It never
-//! supplies fixture activity or a second repository/profile implementation.
-
+//! Home, Profile, Repository, Notifications, Issues and Pull Requests are mounted from
+//! `app::pages`. This module contains only the transitional Settings surface, the fallback for
+//! unmounted global pages, and the intentionally blank, not-yet-designed pull-request detail route.
+//! It never supplies fixture activity or a second page implementation.
 use ely_core::theme::{ActiveTheme, TextSize};
 use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div, prelude::*};
 
@@ -15,10 +15,15 @@ pub(super) struct PageData {
 
 pub(super) fn page(session: &Session, data: PageData, cx: &App) -> AnyElement {
     match session.route() {
-        Route::Settings => data.settings.unwrap_or_else(blank),
-        Route::Notifications | Route::Issues | Route::PullRequests | Route::PullRequest { .. } => {
-            blank()
-        }
+        Route::Settings => data.settings.unwrap_or_else(|| {
+            unavailable("Account services are not available in this build.", cx)
+        }),
+        Route::Notifications | Route::Issues | Route::PullRequests => unavailable(
+            "This page needs an active account and verified online access. No saved page content is available.",
+            cx,
+        ),
+        // The pull-request detail surface is a separate task and stays intentionally empty.
+        Route::PullRequest { .. } => blank(),
         Route::Home | Route::Profile | Route::UserProfile { .. } => unavailable(
             "This page needs an active account and verified online access. No saved page content is available.",
             cx,

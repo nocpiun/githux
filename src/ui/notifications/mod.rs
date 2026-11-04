@@ -1,15 +1,16 @@
-//! Standalone inbox view/controller adapter. Official Shell mounting is owned
-//! by the coordinator. No route, browser redirect or notification write action.
+//! Standalone inbox view/controller adapter. Mounted by the Shell through `ui::notifications`;
+//! the standalone preview/example also compiles this module.
 //!
 //! Row layout follows the owner-confirmed GitHub inbox reference: a narrow
 //! left gutter (unread dot + subject icon) centred against a two-line block,
 //! repository metadata above the main title, and a relative time on the right.
 //! Read state is background + dot + weight, never a "Read"/"Unread" label.
+// Preview/test-only APIs (`set_now`, `cancel_interactions`) remain for the developer preview.
 #![allow(dead_code)]
 #[cfg(test)]
 mod tests;
 
-use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind, ThreadActionRequest};
+use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind};
 use crate::domain::notification::{
     NotificationThread, SubjectKind, ThreadAction, ThreadActionState,
 };

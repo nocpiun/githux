@@ -6,10 +6,14 @@
 //! narrow update methods. No host performs I/O from `render`.
 
 mod home;
+mod notifications;
 mod profile;
+mod work_items;
 
 pub use home::HomePage;
+pub use notifications::NotificationsPage;
 pub use profile::ProfilePage;
+pub use work_items::WorkItemsPage;
 
 use gpui::{App, AppContext, Entity, IntoElement, Window};
 use std::rc::Rc;
@@ -26,6 +30,8 @@ pub enum MountedPage {
     Home(Entity<HomePage>),
     Profile(Entity<ProfilePage>),
     Repository { page: Entity<RepositoryPage> },
+    Notifications(Entity<NotificationsPage>),
+    WorkItems(Entity<WorkItemsPage>),
 }
 
 impl MountedPage {
@@ -34,6 +40,8 @@ impl MountedPage {
             Self::Home(page) => page.clone().into_any_element(),
             Self::Profile(page) => page.clone().into_any_element(),
             Self::Repository { page } => page.clone().into_any_element(),
+            Self::Notifications(page) => page.clone().into_any_element(),
+            Self::WorkItems(page) => page.clone().into_any_element(),
         }
     }
 
@@ -42,6 +50,8 @@ impl MountedPage {
             Self::Home(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
             Self::Profile(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
             Self::Repository { page } => page.update(cx, |page, cx| page.suspend(cx)),
+            Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
+            Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
         }
     }
 
@@ -53,6 +63,8 @@ impl MountedPage {
                 // A still-valid repository session is retained; its own receiver and render check
                 // detect authorization loss. No re-read occurs for ordinary tab activation.
             }
+            Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
+            Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
         }
     }
 }

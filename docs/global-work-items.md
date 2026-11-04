@@ -1,6 +1,6 @@
 # 全局 Issues / Pull Requests
 
-本模块实现 G1–G3 已确认的只读列表与独立预览。正式 Shell 挂载由后续集成任务负责，Home 的 `involves:` 查询不变。代码入口为 `domain::work_item`、`github::work_items`、`data::work_items`、`ui::global_work_items`。
+本模块实现 G1–G3 已确认的只读列表与独立预览。正式 Shell 挂载已由 shell-global-pages 集成任务完成（`app::pages::WorkItemsPage`），Home 的 `involves:` 查询不变。代码入口为 `domain::work_item`、`github::work_items`、`data::work_items`、`ui::global_work_items`。
 
 ## 查询与单页读取
 
@@ -45,6 +45,8 @@ page.update(cx, |view, _| view.on_repository(callback));
 ```
 
 `RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
+
+正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`。
 
 元数据行顺序为 `#number → 仓库名 → 状态 → 相对时间`：编号使用 Google Sans Code，位于仓库名之前且只出现一次；两种列表相同。整行按文本基线对齐，并对仓库名做 1 logical px 的相对上移，以抵消数字大写高度与仓库名小写高度造成的视觉偏差（相对定位不参与布局，不改变横向位置）。长仓库名在该行内仍正确截断，不会挤掉编号、状态或时间。
 

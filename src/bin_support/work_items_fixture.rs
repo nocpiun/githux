@@ -1,4 +1,7 @@
 //! Repeatable request-keyed fixture shared by preview and its tests (L010).
+// The same fixture is included by the standalone preview and the component test tree; the allowance
+// stays confined to this shared assembly so each target compiles its own instance.
+#![allow(dead_code, clippy::duplicate_mod, unused_imports)]
 use crate::{
     auth::{InMemoryCredentialStore, token::Pat},
     data::AccountService,

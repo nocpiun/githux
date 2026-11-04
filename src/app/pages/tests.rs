@@ -47,6 +47,7 @@ fn graphql_ok(data: serde_json::Value) -> HttpResponse {
 #[derive(Default)]
 struct PageTransport {
     reads: Mutex<Vec<String>>,
+    writes: Mutex<Vec<String>>,
     starred: Mutex<bool>,
     long_pr_body: bool,
 }
@@ -58,6 +59,15 @@ impl PageTransport {
             .unwrap()
             .iter()
             .filter(|url| url.contains(needle))
+            .count()
+    }
+
+    fn wrote(&self, needle: &str) -> usize {
+        self.writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.contains(needle))
             .count()
     }
 }
@@ -134,7 +144,104 @@ impl Transport for PageTransport {
                     }]),
                 ));
             }
+            // Notifications: a two-thread unread inbox over the account-scoped endpoint. Done and
+            // Unsubscribe keep their real REST semantics (204 for Done, ignored=true for the
+            // subscription step).
+            if url.starts_with("https://api.github.com/notifications") {
+                match request.method {
+                    crate::network::transport::HttpMethod::Delete => {
+                        self.writes.lock().unwrap().push(format!("DELETE {url}"));
+                        return Ok(HttpResponse {
+                            status: 204,
+                            headers: vec![("x-poll-interval".into(), "1".into())],
+                            body: String::new(),
+                        });
+                    }
+                    crate::network::transport::HttpMethod::Put => {
+                        self.writes.lock().unwrap().push(format!("PUT {url}"));
+                        return Ok(json(200, serde_json::json!({ "ignored": true })));
+                    }
+                    crate::network::transport::HttpMethod::Get => {}
+                    _ => return Ok(json(599, serde_json::json!({}))),
+                }
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![
+                        ("x-poll-interval".into(), "1".into()),
+                        (
+                            "last-modified".into(),
+                            "Thu, 01 Nov 2026 12:00:00 GMT".into(),
+                        ),
+                    ],
+                    body: serde_json::json!([
+                        {
+                            "id": "9001", "unread": true, "reason": "subscribed",
+                            "updated_at": "2026-11-03T10:00:00Z", "last_read_at": null,
+                            "subject": {
+                                "title": "Fix the login flow", "type": "Issue",
+                                "url": "https://github.com/alice/demo/issues/1",
+                                "latest_comment_url": null
+                            },
+                            "repository": {
+                                "id": 10, "name": "demo",
+                                "owner": {"login": "alice"},
+                                "url": "https://api.github.com/repos/alice/demo"
+                            }
+                        },
+                        {
+                            "id": "9002", "unread": true, "reason": "review_requested",
+                            "updated_at": "2026-11-03T09:00:00Z", "last_read_at": null,
+                            "subject": {
+                                "title": "Update the pull request", "type": "PullRequest",
+                                "url": "https://github.com/alice/demo/pull/2",
+                                "latest_comment_url": null
+                            },
+                            "repository": {
+                                "id": 10, "name": "demo",
+                                "owner": {"login": "alice"},
+                                "url": "https://api.github.com/repos/alice/demo"
+                            }
+                        }
+                    ])
+                    .to_string(),
+                });
+            }
             if url.contains("/search/issues") {
+                // Global work lists use `is:issue`/`is:pr`; Home uses `involves:`. Decode the
+                // query so the two product surfaces never share a response shape.
+                let query = reqwest::Url::parse(url)
+                    .ok()
+                    .and_then(|parsed| {
+                        parsed
+                            .query_pairs()
+                            .find(|(key, _)| key == "q")
+                            .map(|(_, value)| value.into_owned())
+                    })
+                    .unwrap_or_default();
+                if query.starts_with("is:issue") || query.starts_with("is:pr") {
+                    let pr = query.starts_with("is:pr");
+                    let item = if pr {
+                        serde_json::json!({
+                            "id": 20001, "number": 7, "title": "Synthetic pull request",
+                            "state": "open", "updated_at": "2026-10-28T10:00:00Z",
+                            "repository_url": "https://api.github.com/repos/alice/demo",
+                            "pull_request": {"merged_at": null}
+                        })
+                    } else {
+                        serde_json::json!({
+                            "id": 10001, "number": 21, "title": "Synthetic issue",
+                            "state": "open", "updated_at": "2026-10-28T10:00:00Z",
+                            "repository_url": "https://api.github.com/repos/alice/demo",
+                            "pull_request": null
+                        })
+                    };
+                    return Ok(json(
+                        200,
+                        serde_json::json!({
+                            "total_count": 1, "incomplete_results": false, "items": [item]
+                        }),
+                    ));
+                }
                 // One open item and one closed item: the confirmed Home rule must
                 // return only the open one even if a non-conforming page leaks a
                 // closed row.
@@ -1144,4 +1251,124 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
         });
         cx.run_until_parked();
     }
+}
+
+fn wait_for_bounds(cx: &mut VisualTestContext, selector: &'static str) {
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        if cx.debug_bounds(selector).is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("{selector} did not appear");
+}
+
+fn wait_for_gone(cx: &mut VisualTestContext, selector: &'static str) {
+    for _ in 0..400 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        if cx.debug_bounds(selector).is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("{selector} did not disappear");
+}
+
+#[gpui::test]
+fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-row-0");
+    assert!(cx.debug_bounds("notification-row-1").is_some());
+    assert!(transport.seen("/notifications") >= 1, "the inbox is read");
+
+    // The repository link is a real typed navigation into the application, never a browser hop.
+    let repository_link = cx
+        .debug_bounds("notification-repository-0")
+        .expect("repository link");
+    cx.simulate_click(repository_link.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Repository {
+            namespace: "alice".into(),
+            name: "demo".into(),
+        }
+    );
+
+    // Returning reuses the retained Notifications tab and its already-loaded snapshot.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-row-0");
+
+    // Done is the real DELETE semantics; the confirmed thread leaves the inbox row set.
+    let done = cx
+        .debug_bounds("notification-action-done-0")
+        .expect("Done control");
+    cx.simulate_click(done.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_gone(cx, "notification-row-1");
+    assert!(transport.wrote("DELETE") >= 1);
+    assert!(transport.wrote("notifications/threads/9001") >= 1);
+}
+
+#[gpui::test]
+fn issues_and_pull_requests_read_distinct_lists_and_reuse_their_tabs(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-item-10001");
+    assert!(
+        cx.debug_bounds("work-item-20001").is_none(),
+        "Issues shows no PR rows"
+    );
+    let issues_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-item-20001");
+    assert!(
+        cx.debug_bounds("work-item-10001").is_none(),
+        "PRs shows no Issue rows"
+    );
+
+    // Re-opening the same resource reuses the existing tab instead of duplicating it.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    let pr_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(issues_tab, pr_tab, "Issues and PRs are distinct sessions");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        pr_tab,
+        "re-opening Pull requests reuses the same tab"
+    );
+    assert!(transport.seen("/search/issues") >= 2);
 }

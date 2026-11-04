@@ -31,14 +31,17 @@ use crate::{
     workspace::{OpenResult, Route, Sessions, TabId},
 };
 
+// The account presentation is shared with the developer `account` example.
 pub mod accounts;
 pub mod avatar;
 pub(crate) mod badge;
 mod chrome;
 pub(crate) mod compact_status;
 pub(crate) mod geometry;
+pub mod global_work_items;
 pub mod home;
 mod island;
+pub mod notifications;
 mod page;
 mod palette;
 pub mod profile;
@@ -547,11 +550,29 @@ impl Shell {
                     id, &route, services, intent, navigation, avatars, window, cx,
                 )
             }),
-            Route::Settings
-            | Route::Notifications
-            | Route::Issues
-            | Route::PullRequests
-            | Route::PullRequest { .. } => None,
+            Route::Settings => None,
+            Route::Notifications => Some(crate::app::pages::MountedPage::Notifications(cx.new(
+                |cx| crate::app::pages::NotificationsPage::new(services, navigation, window, cx),
+            ))),
+            Route::Issues => Some(crate::app::pages::MountedPage::WorkItems(cx.new(|cx| {
+                crate::app::pages::WorkItemsPage::new(
+                    crate::domain::work_item::WorkItemKind::Issue,
+                    services,
+                    navigation,
+                    window,
+                    cx,
+                )
+            }))),
+            Route::PullRequests => Some(crate::app::pages::MountedPage::WorkItems(cx.new(|cx| {
+                crate::app::pages::WorkItemsPage::new(
+                    crate::domain::work_item::WorkItemKind::PullRequest,
+                    services,
+                    navigation,
+                    window,
+                    cx,
+                )
+            }))),
+            Route::PullRequest { .. } => None,
         };
         if let Some(page) = page {
             self.pages.insert(id, page);
@@ -740,6 +761,10 @@ impl Shell {
             Some(crate::app::pages::MountedPage::Repository { .. }) => {
                 ("repository", ([0, 0], false))
             }
+            Some(
+                crate::app::pages::MountedPage::Notifications(_)
+                | crate::app::pages::MountedPage::WorkItems(_),
+            ) => ("global", ([0, 0], false)),
             None => ("none", ([0, 0], false)),
         }
     }

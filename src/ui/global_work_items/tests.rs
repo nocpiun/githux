@@ -1,5 +1,7 @@
 use super::*;
-use crate::ui::fixture::{FixtureRuntime, Scene};
+#[path = "../../bin_support/work_items_fixture.rs"]
+mod fixture;
+use fixture::{FixtureRuntime, Scene};
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, size};
 use std::cell::RefCell;
 

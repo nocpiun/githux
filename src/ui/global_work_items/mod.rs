@@ -1,6 +1,8 @@
 //! Reusable controller-backed global Issues / Pull Requests view.
 //! Construction/activation starts the initial read; rendering never requests.
-#![allow(dead_code)] // Shell mounting is owned by the integration task.
+// Mounted by the Shell through `ui::global_work_items`; the standalone preview also compiles it.
+// Preview/test-only APIs (`set_now`, `rebind`) remain for the developer preview.
+#![allow(dead_code)]
 pub mod controller;
 mod presentation;
 mod rows;
