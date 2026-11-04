@@ -1,4 +1,6 @@
-// Coordinator acceptance tests, kept local until the original task adopts the regressions.
+// Acceptance regressions adopted from the coordinator's basic acceptance run (run 5f274477), which
+// reproduced these three gaps against ebc8dea. They are included by the `tests` module at the end of
+// `profile.rs`; each one was verified to fail with the corresponding fix reverted.
 #[gpui::test]
 fn acceptance_revocation_also_clears_online_profile(cx: &mut TestAppContext) {
     let (harness, cx) = build_harness(cx, true);
