@@ -34,10 +34,14 @@
 
 ## 验证记录
 
-所有 Cargo 命令均通过 `node scripts/verify.mjs -- cargo ...` 执行：
-- 聚焦离线组合测试 `cargo test --locked --test repository offline`：8 项全部通过（含 `locator_index` 单元测试及 6 项整页 GPUI 离线组合测试：跨重启离线浏览仓库/分支/目录/README/源码与未读目录 miss、手动 `Refresh` 恢复在线 provenance、固定 commit README 图片跨重启离线复用、换 PAT 隔离阻止旧缓存读取、extras 历史快照标记、离线 Star 禁用不发请求且在线刷新后恢复写操作、明确 `revoke_repository` 清空已展示页面并跨重启阻断）。
-- `cargo test --locked --test repository` 與 `cargo test --locked --test repository_overview` 全部通过。
-- 全量 fmt / check / clippy / build / test 在提交前通过共享 runner 完整核验。
+所有 Cargo 命令均通过 `node scripts/verify.mjs -- cargo ...` 执行（共享 Windows mutex，独立 `target/`）。基线：rebase 到 `origin/main` `0cdb59c`（含 #67 文档校准与 #70 sidebar-cache）。
+
+- 聚焦离线组合测试 `cargo test --locked --test repository offline`：全部通过（含 `locator_index` 单元测试及 7 项整页 GPUI 离线组合测试：跨重启离线浏览仓库/分支/目录/README/源码与未读目录 miss、手动 `Refresh` 恢复在线 provenance、固定 commit README 图片跨重启离线复用、换 PAT 隔离阻止旧缓存读取、extras 历史快照标记、离线 Star 禁用不发请求且在线刷新后恢复写操作、明确 `revoke_repository` 清空已展示页面并跨重启阻断）。
+- `cargo test --locked --test repository`（864 项）与 `cargo test --locked --test repository_overview`（44 项）全部通过。
+- `cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。
+- 完整 `cargo test --locked` 通过：主程序 1136、home 96、notifications 579、profile 279、reader 250、reader_images 771、repository 864、repository_overview 44，0 failed。
+
+期间观察到一次与本任务无关的既有偶发失败：默认并发下 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 重开 CacheStore 时得到 `InUse`（该用例用 50ms sleep 等异步写入，不显式关闭服务）。本任务未修改 `src/data/reader_images*` 或放宽断言；定向重跑、`--test reader_images` 与 `--test notifications --test-threads=1` 均通过，随后完整套件也通过。记录为既有测试的顺序/资源偶发，不归因本任务，也不掩盖原始失败日志。
 
 ## 剩余依赖与原生验收边界
 
