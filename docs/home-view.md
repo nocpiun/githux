@@ -102,6 +102,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - **分页同源约束**：Feed 触底续读保持严格的同源集合（一次快照周期内全为网络结果或全为历史快照），全过滤空页仍自动续读下一页。若历史 Feed 某一后续页未被缓存，显示紧凑的 `Page N is not available offline` 提示并停止自动重试，绝不把不同代次或新旧混合的分页盲目拼接；同一 Feed 集合内的星标仓库描述批次独立完成，追加新页不会取消前页仍在途的描述查找，而在线刷新替换集合时会取消旧描述批次、重置去重集合与游标。
 - **授权门槛与边界**：401 凭据拒绝、请求取消和过时账户上下文绝不转为历史成功；缓存 quarantine/存储故障与账户会话有效性分开处理，当前 `PageReadSession` 仍有效时回退普通在线读取，不为恢复在线而解锁旧私有快照。切换账户、移除账户或替换 PAT 推进上下文后，已有展示副本在 `rebind`/前台检查时清空并回到 Unavailable。
 - **权限代次票据（2026-11-04）**：消费 cache-runtime 独立核心提交 `9f87f47` 的 `CacheAuthorization`（`CacheStore::authorization(scope, None)`），票据只做内存原子失效判断，不授予权限、不读磁盘。读取、追加、描述回复均携带同一票据，后台完成入队前与 UI 发布前复核；已显示 Home/Feed/描述副本在现有轻节拍 drain 检测到失效后清除，迟到结果不得复活旧内容。
+- **快照集合代次绑定（2026-11-05）**：经协调批准，在 `data::page_cache` 引入 `CollectionGeneration`，Feed 首页在线读取或离线回放时捕获该集合代次并与后续页绑定，快照元数据与 DTO 持久化代次；第一页在线替换后，离线续读旧代次后续页命中未缓存（`FeedAppendState::NotCached`），绝不拼接不同代次的分页。同代次后续页正常回放。通过确定性测试 `acceptance_replaced_first_page_never_appends_older_generation_continuation_offline`。
 - **无缓存平滑回退**：当宿主未注入 `CacheStore` 或未绑定分区时，完全保留原有的在线请求链路，行为与接口不发生回归。
 
 ## 2026-10-29 第二轮状态呈现

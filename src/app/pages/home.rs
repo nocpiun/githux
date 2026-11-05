@@ -78,18 +78,25 @@ fn unpack_cached<T>(
         PageValue::Value {
             value,
             origin: PageOrigin::Network,
-            ..
-        } => Ok(Some(CachedRead {
-            value,
-            source: ReadSource::Network,
-            metadata: None,
-        })),
+            metadata,
+        } => {
+            let collection = crate::data::page_cache::metadata_feed_collection(&metadata);
+            Ok(Some(CachedRead {
+                value,
+                source: ReadSource::Network { collection },
+                metadata: None,
+            }))
+        }
         PageValue::Value {
             value,
             origin: PageOrigin::HistoricalSnapshot,
             metadata,
         } => {
-            let source = ReadSource::Historical(partition.to_string());
+            let collection = crate::data::page_cache::metadata_feed_collection(&metadata);
+            let source = ReadSource::Historical {
+                partition: partition.to_string(),
+                collection,
+            };
             Ok(Some(CachedRead {
                 value,
                 source,
@@ -143,7 +150,7 @@ async fn read_home(
         .map(|value| {
             Some(CachedRead {
                 value: value.value,
-                source: ReadSource::Network,
+                source: ReadSource::Network { collection: None },
                 metadata: None,
             })
         })
@@ -202,7 +209,7 @@ async fn read_feed(
         .map(|value| {
             Some(CachedRead {
                 value: value.value,
-                source: ReadSource::Network,
+                source: ReadSource::Network { collection: None },
                 metadata: None,
             })
         })
@@ -234,10 +241,14 @@ impl Work {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReadSource {
-    Network,
-    /// The saved-account partition which produced this snapshot. The cache
-    /// adapter separately validates its aggregate gate and lease before return.
-    Historical(String),
+    Network {
+        collection: Option<crate::data::page_cache::CollectionGeneration>,
+    },
+    /// The saved-account partition and collection generation which produced this snapshot.
+    Historical {
+        partition: String,
+        collection: Option<crate::data::page_cache::CollectionGeneration>,
+    },
 }
 
 enum ColumnResult {
@@ -1022,10 +1033,10 @@ impl HomePage {
         };
         self.view.update(cx, |view, cx| match reply.result {
             ColumnResult::Home(Ok(Some(read))) => match read.source {
-                ReadSource::Network => {
+                ReadSource::Network { .. } => {
                     view.apply_home(&binding, generation, read.value, cx);
                 }
-                ReadSource::Historical(_) => {
+                ReadSource::Historical { .. } => {
                     if let Some(metadata) = read.metadata {
                         view.apply_home_snapshot(
                             &binding,
@@ -1054,11 +1065,11 @@ impl HomePage {
             }
             ColumnResult::Feed(Ok(Some(read))) => {
                 let outcome = read.value;
-                if matches!(read.source, ReadSource::Network)
+                if matches!(read.source, ReadSource::Network { .. })
                     && let Some(seconds) = outcome.poll_interval_seconds
                 {
                     self.feed_ready = Some(Instant::now() + Duration::from_secs(seconds.max(1)));
-                } else if matches!(read.source, ReadSource::Network) {
+                } else if matches!(read.source, ReadSource::Network { .. }) {
                     self.feed_ready = None;
                 }
                 // Seed continuation from the first page: the validated next
@@ -1073,8 +1084,10 @@ impl HomePage {
                     self.feed_seen_ids.insert(activity.event.id.clone());
                 }
                 match read.source {
-                    ReadSource::Network => view.apply_feed(&binding, generation, outcome, cx),
-                    ReadSource::Historical(_) => {
+                    ReadSource::Network { .. } => {
+                        view.apply_feed(&binding, generation, outcome, cx)
+                    }
+                    ReadSource::Historical { .. } => {
                         if let Some(metadata) = read.metadata {
                             view.apply_feed_snapshot(
                                 &binding,
@@ -1324,14 +1337,17 @@ impl HomePage {
             let result = if let Some(cached) = cached {
                 // A collection keeps its origin for its whole lifetime. Never
                 // append a historical page to a network first page (or vice versa).
-                let mode = match source {
-                    ReadSource::Network => PageReadMode::Online,
-                    ReadSource::Historical(_) => PageReadMode::Offline,
+                let (mode, collection) = match &source {
+                    ReadSource::Network { collection } => (PageReadMode::Online, *collection),
+                    ReadSource::Historical { collection, .. } => {
+                        (PageReadMode::Offline, *collection)
+                    }
                 };
                 let cached_result = cached
                     .feed_page(
                         mode,
                         next,
+                        collection,
                         &FeedLimits::default(),
                         &FollowingLimits::default(),
                         &PullRequestDetailLimits::default(),
@@ -1341,22 +1357,26 @@ impl HomePage {
                     )
                     .await;
                 let result = match cached_result {
-                    Err(error) if source == ReadSource::Network => match cache_failure(error) {
-                        CachedReadFailure::UncachedOnline => session
-                            .feed_page(
-                                next,
-                                &FeedLimits::default(),
-                                &FollowingLimits::default(),
-                                &PullRequestDetailLimits::default(),
-                                FEED_AUTHOR_LOOKUP_LIMIT,
-                                &mut seen,
-                                cancel.clone(),
-                            )
-                            .await
-                            .map_err(AppendError::Read),
-                        CachedReadFailure::Network(error) => Err(AppendError::Read(error)),
-                        CachedReadFailure::AuthOrContext(error) => Err(AppendError::Read(error)),
-                    },
+                    Err(error) if matches!(source, ReadSource::Network { .. }) => {
+                        match cache_failure(error) {
+                            CachedReadFailure::UncachedOnline => session
+                                .feed_page(
+                                    next,
+                                    &FeedLimits::default(),
+                                    &FollowingLimits::default(),
+                                    &PullRequestDetailLimits::default(),
+                                    FEED_AUTHOR_LOOKUP_LIMIT,
+                                    &mut seen,
+                                    cancel.clone(),
+                                )
+                                .await
+                                .map_err(AppendError::Read),
+                            CachedReadFailure::Network(error) => Err(AppendError::Read(error)),
+                            CachedReadFailure::AuthOrContext(error) => {
+                                Err(AppendError::Read(error))
+                            }
+                        }
+                    }
                     Err(error) => Err(AppendError::Read(cache_miss_failure(error))),
                     Ok(page) => unpack_cached(page, &cache_partition)
                         .map_err(|error| AppendError::Read(cache_miss_failure(error)))
@@ -1382,7 +1402,13 @@ impl HomePage {
                     )
                     .await
                     .map_err(AppendError::Read)
-                    .map(|page| (page.value.into_outcome(), seen.clone(), ReadSource::Network))
+                    .map(|page| {
+                        (
+                            page.value.into_outcome(),
+                            seen.clone(),
+                            ReadSource::Network { collection: None },
+                        )
+                    })
             };
             if *alive.borrow()
                 && authorization
@@ -1502,8 +1528,8 @@ impl HomePage {
         );
         let append_epoch = self.feed_append_epoch;
         let mode = match self.feed_source {
-            Some(ReadSource::Network) | None => PageReadMode::Online,
-            Some(ReadSource::Historical(_)) => PageReadMode::Offline,
+            Some(ReadSource::Network { .. }) | None => PageReadMode::Online,
+            Some(ReadSource::Historical { .. }) => PageReadMode::Offline,
         };
         let cached = self.cached.clone();
         let authorization = self.cache_authorization.clone();

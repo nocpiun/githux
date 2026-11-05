@@ -78,7 +78,13 @@ Codex 本轮另指出 `stop()` 必须清除保留的权限票据，避免撤权�
 - 权限票据失效后不再永久禁用 Home：内容立即清空，但保留仍验证通过的 `PageReadSession`，刷新时重新捕获票据执行在线替换读取；`acceptance_confirmed_revocation_clears_already_rendered_home` 增加刷新恢复断言。
 - 网络 Feed 后续页失败保留可重试错误，不再误报 `Page not available offline`；网络描述读取在缓存 quarantine/操作故障时回退普通在线读取，历史描述仍严格离线。
 - 401 清理幂等，避免失效摘要导致空闲页面持续重绘。
-- 当前验证：13/13 Home 测试（run `bd001df6-be53-423f-9d64-22d21dc89f30`）、`tests/home`（run `f8771028-6e0e-403d-a30c-61214eff205a`）、Shell 页面（run `0c170ca1-d84f-402c-85b8-4e767f25dc48`）、clippy（run `4b421aaa-4544-4b37-8e12-ce1e2f224063`）通过。
+- 当前验证：14/14 Home 测试（run `92e0e1f3-81e4-4fad-a914-061476c68866`）、17/17 page_cache 核心测试（run `a981e0ba-012c-4357-8430-cfbb3f2e79be`）、`tests/home`、Shell 页面、clippy 全部通过。
+
+### Codex 审查后续修复（2026-11-05：快照集合代次绑定）
+
+- 复现并修复 P2 问题：旧代码仅按 partition 区分离线来源，当第一页被在线替换、后续页未在线拉取并重开离线时，曾可能将上一代的旧续页拼接到新首屏后，导致活动遗漏或重复。
+- 引入 `CollectionGeneration`，第一页生成代次并持久化进 metadata/DTO；后续页带上第一页代次，离线未匹配到同代次后续页时返回 Miss，UI 报告 `Page N is not available offline` 并停止自动续读；同代次后续页离线正常回放。
+- 确定性回归：`acceptance_replaced_first_page_never_appends_older_generation_continuation_offline`。验证 14 项 Home 测试全部通过。
 
 原生窗口与真实 GitHub PAT 仍未验证，保留 `pending`。
 

@@ -1,6 +1,7 @@
 //! Deterministic HomePage composition with the real page-cache adapter.
 //! No GitHub, real credential, or native-window claim is made by these tests.
 
+use crate::data::page_cache::metadata_feed_collection;
 use std::sync::Arc;
 
 use gpui::{Entity, TestAppContext, VisualContext, VisualTestContext};
@@ -273,7 +274,7 @@ impl Fixture {
         self.mock
             .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
             .await;
-        session
+        let first = session
             .feed(
                 PageReadMode::Online,
                 &FeedLimits::default(),
@@ -284,6 +285,10 @@ impl Fixture {
             )
             .await
             .unwrap();
+        let collection = match &first.value {
+            PageValue::Value { metadata, .. } => metadata_feed_collection(metadata),
+            _ => None,
+        };
         self.mock.enqueue(Ok(events("second", Some(3)))).await;
         self.mock
             .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
@@ -292,6 +297,7 @@ impl Fixture {
             .feed_page(
                 PageReadMode::Online,
                 crate::domain::home::FeedSourceCursor { page: 2 },
+                collection,
                 &FeedLimits::default(),
                 &FollowingLimits::default(),
                 &PullRequestDetailLimits::default(),
@@ -730,7 +736,7 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
                         readiness: crate::domain::home::FeedReadiness::Complete,
                     },
                     Default::default(),
-                    ReadSource::Network,
+                    ReadSource::Network { collection: None },
                 )),
             },
             cx,
@@ -832,7 +838,11 @@ fn offline_filtered_empty_first_page_continues_to_merged_pr_and_read_more_routes
         empty.headers.push(("link".into(), "<https://api.github.com/users/octo/received_events?per_page=100&page=2>; rel=\"next\"".into()));
         fixture.mock.enqueue(Ok(empty)).await;
         fixture.mock.enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"},{"id":8,"login":"carol"}]"#))).await;
-        session.feed(PageReadMode::Online, &FeedLimits::default(), &FollowingLimits::default(), &PullRequestDetailLimits::default(), 30, Default::default()).await.unwrap();
+        let first = session.feed(PageReadMode::Online, &FeedLimits::default(), &FollowingLimits::default(), &PullRequestDetailLimits::default(), 30, Default::default()).await.unwrap();
+        let collection = match &first.value {
+            PageValue::Value { metadata, .. } => metadata_feed_collection(metadata),
+            _ => None,
+        };
         fixture.mock.enqueue(Ok(response(200, &serde_json::json!([{
             "id": "merged-pr", "type": "PullRequestEvent",
             "actor": {"id": 7, "login": "bob", "avatar_url": null},
@@ -846,7 +856,7 @@ fn offline_filtered_empty_first_page_continues_to_merged_pr_and_read_more_routes
             "title": "Offline merged pull request", "html_url": "https://github.com/octo/repo/pull/44",
             "user": {"id": 8, "login": "carol", "avatar_url": null}, "body": long_body
         }).to_string()))).await;
-        session.feed_page(PageReadMode::Online, crate::domain::home::FeedSourceCursor { page: 2 }, &FeedLimits::default(), &FollowingLimits::default(), &PullRequestDetailLimits::default(), 30, &mut Default::default(), Default::default()).await.unwrap();
+        session.feed_page(PageReadMode::Online, crate::domain::home::FeedSourceCursor { page: 2 }, collection, &FeedLimits::default(), &FollowingLimits::default(), &PullRequestDetailLimits::default(), 30, &mut Default::default(), Default::default()).await.unwrap();
     });
     let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink_routes = navigated.clone();
@@ -1120,7 +1130,10 @@ fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestApp
                         readiness: crate::domain::home::FeedReadiness::Complete,
                     },
                     Default::default(),
-                    ReadSource::Historical(scope.partition().to_string()),
+                    ReadSource::Historical {
+                        partition: scope.partition().to_string(),
+                        collection: None,
+                    },
                 )),
             },
             cx,
@@ -1284,6 +1297,107 @@ fn acceptance_cold_start_without_network_revalidation_replays_saved_home(cx: &mu
     assert!(page.read_with(cx, |page, cx| {
         page.view.read(cx).provenance(Column::Home).is_some()
     }));
+}
+
+#[gpui::test]
+fn acceptance_replaced_first_page_never_appends_older_generation_continuation_offline(
+    cx: &mut TestAppContext,
+) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    // 1. Warm two pages under generation A
+    runtime.block_on(fixture.warm());
+    // 2. Online: replace only page one with a fresh snapshot (starts generation B)
+    runtime.block_on(async {
+        let store = fixture.store();
+        let scope = store.saved_account(fixture.account.clone()).unwrap();
+        let session = CachedPageReadSession::new(
+            fixture.service.as_ref().unwrap().page_session().unwrap(),
+            store,
+            scope,
+        )
+        .unwrap();
+        fixture
+            .mock
+            .enqueue(Ok(events("fresh-first-b", Some(2))))
+            .await;
+        fixture
+            .mock
+            .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
+            .await;
+        session
+            .feed(
+                PageReadMode::Online,
+                &FeedLimits::default(),
+                &FollowingLimits::default(),
+                &PullRequestDetailLimits::default(),
+                30,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+    });
+    // 3. Reopen account service + cache store offline without network
+    runtime.block_on(async {
+        let old = fixture.service.take().unwrap();
+        old.close().await.unwrap();
+        drop(old);
+        let store = fixture.store.take().unwrap();
+        drop(store);
+        let reopened_store = CacheStore::open(CacheConfig::at(
+            fixture.cache_directory.path().to_path_buf(),
+        ))
+        .unwrap();
+        let client = Arc::new(GitHubClient::new(
+            GitHubConfig::default(),
+            fixture.mock.clone(),
+        ));
+        let reopened = AccountService::open_with_cache(
+            AccountDatabaseConfig::at(fixture.directory.path().join("accounts.sqlite3")),
+            fixture.credentials.clone(),
+            client,
+            fixture.executor.clone(),
+            reopened_store.clone(),
+        )
+        .await
+        .unwrap();
+        fixture.service = Some(reopened);
+        fixture.store = Some(reopened_store);
+        for _ in 0..6 {
+            fixture.network_error().await;
+        }
+    });
+    // 4. Mount HomePage offline: page 1 shows fresh-first-b (generation B)
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(feed_ids(&page, cx), ["fresh-first-b"]);
+    // 5. Append page 2: the cached page 2 belonged to generation A, not B.
+    // It must NOT append "second" (from generation A) to "fresh-first-b"!
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.load_more_for_test(window, cx);
+    });
+    for _ in 0..100 {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        feed_ids(&page, cx),
+        ["fresh-first-b"],
+        "older generation continuation must never be appended to replaced first page"
+    );
+    assert!(
+        page.read_with(cx, |page, cx| matches!(
+            page.view.read(cx).feed_append_state(),
+            FeedAppendState::NotCached { page: 2 }
+        )),
+        "incompatible continuation must be reported as not cached, actual={:?}",
+        page.read_with(cx, |page, cx| page
+            .view
+            .read(cx)
+            .feed_append_state()
+            .clone())
+    );
 }
 
 #[gpui::test]

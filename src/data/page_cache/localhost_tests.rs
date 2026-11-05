@@ -68,6 +68,7 @@ async fn representation_versions_and_corrupt_dtos_are_explicit_misses() {
     let mut encoded = serde_json::to_vec(&SnapshotV1 {
         version: 2,
         exchanges: vec![],
+        collection: None,
     })
     .unwrap();
     store
