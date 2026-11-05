@@ -479,15 +479,18 @@ impl Render for WorkItemsView {
             "Pull Requests"
         };
         let header = div()
+            .debug_selector(|| "work-header".into())
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
-            // Same title slot height as Home's column header and Notifications, so the four
-            // production pages put their heading on the same line.
+            // Same title slot height and inner inset as Home's column header and Notifications,
+            // so the four production pages put their heading on the same line and at the same x.
             .h(px(crate::ui::page_layout::PAGE_HEADER_HEIGHT))
+            .px(px(crate::ui::page_layout::PAGE_HEADER_INSET))
             .child(
                 div()
+                    .debug_selector(|| "work-title".into())
                     .flex_1()
                     .min_w_0()
                     .font_weight(gpui::FontWeight::SEMIBOLD)

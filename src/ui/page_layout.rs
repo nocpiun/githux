@@ -14,8 +14,14 @@
 //! Values live here rather than in `geometry.rs` so this task's page work does not rewrite the
 //! shared island/sidebar geometry module that unrelated work also reads.
 
-/// Horizontal page insert, the same 16 logical px Home already uses.
+/// Horizontal page insert, the same 16 logical px Home already uses (`px_4`).
 pub(crate) const PAGE_GUTTER: f32 = 16.0;
+
+/// Extra inset a *heading row* adds inside the page gutter, matching Home's panel header
+/// (`px_2`, 8 logical px). Home's title and its rows therefore start at different x: the title at
+/// gutter + 8, the rows at the gutter. Only the title line uses this inset — shifting the list or
+/// the empty state by it as well would push the content edges past Home's.
+pub(crate) const PAGE_HEADER_INSET: f32 = 8.0;
 
 /// Space above a page's first row of content.
 pub(crate) const PAGE_TOP: f32 = 16.0;

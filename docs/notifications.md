@@ -47,9 +47,11 @@
 - `X-Poll-Interval` 约束手动刷新，缺失时保守 60 秒；响应 headers 在 status/parse 失败时仍进入冷却。限流遵从共享 typed 分类、Retry-After 和 primary reset，未知限流至少 60 秒；冷却不自动重发。分页为显式 continuation，不受 page-one polling interval 阻止，但仍受 rate cooldown 约束。
 - 仅对同 controller、同参数、已保存且无 partial/error 的首页表示原样发送 `If-Modified-Since`。304 保留后续加载行和 continuation；没有验证器的 304 是错误。partial/失败清除 validator，不能因条件请求跳过缺页补取。
 
-## 页面背景、标题与内边距（2026-11-04 返工）
+## 页面背景、标题与内边距（2026-11-04 返工，2026-11-05 二次修正）
 
 页面内容 surface 使用与 Home/Settings/全局 Issues-PR 相同的 `colors.surface`；此前用 `colors.bg` 会与顶部 tab bar 形成两条不同底色。标题复用其它正式页面的标题体系（`TextSize::Lg` + `SEMIBOLD`，行高 40），正文 gutter/top/bottom 来自共享的 `src/ui/page_layout.rs`（与 Home 现有 `px_4 / pt_4 / pb_2` 一致），不再由 header 自带 `px_3/py_2` 叠加出双重留白。已读行底色改为 `colors.surface`，未读行仍是 `info_subtle` + 圆点 + 字重；通知行排版、右下角三个动作与相对时间不变。
+
+**2026-11-05 二次修正（负责人截图否决后）**：只统一 gutter 不等于标题对齐。Home 的列头在 16px gutter 内又加了 `px_2`（8px）内缩，所以 Home 的标题起点是 gutter + 8，而行起点才是 gutter。Notifications 的 header 此前只有 gutter，标题因此比 Home 更靠左。现在 header 额外使用 `page_layout::PAGE_HEADER_INSET = 8`（与 Home 的 `home-header` `px_2` 一致），**只有标题行**加这层内缩：列表与空状态仍只占 gutter，左右内容边缘与 Home 相同，不能跟着标题一起右移。空收件箱与有条目两种状态共用同一 header/列表容器，几何一致；不新增占位文案。回归 `notifications_heading_and_content_edges_match_home_in_empty_and_populated_states` 在 Empty 与 Mixed、宽/窄两种尺寸下分别断言列表左右边缘等于 gutter、标题文本起点等于 gutter + inset（`debug_bounds` 返回的是边框盒，内缩体现在标题内容盒上，不能拿 header 盒去比 inset）。
 
 保留的 tab 若在首次读取返回前离开，控制器会取消请求但不设 `loaded`；`set_active(true)` 因此在未加载、无进行中请求且无错误时重启读取，避免返回后留下永久空白收件箱。已加载的空收件箱、进行中的请求与已有错误都不重发。
 

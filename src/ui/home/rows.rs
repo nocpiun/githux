@@ -169,7 +169,7 @@ pub(super) fn home_row(
         icon: Some(format!("home-icon-{index}")),
         title: format!("home-title-{index}"),
         metadata: Some(format!("home-metadata-{index}")),
-        number: None,
+        number: Some(format!("home-{index}-number")),
         repository: Some(format!("home-{index}-repository")),
         owner: Some(format!("home-{index}-owner")),
         updated: Some(format!("home-time-{index}")),

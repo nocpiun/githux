@@ -40,6 +40,77 @@ fn setup(
     (controller, executor, fixture)
 }
 
+/// Home's panel header adds an 8px inset inside the 16px page gutter (`home-header` px_2), so its
+/// title starts at gutter + 8 while its rows start at the gutter. Notifications must reproduce
+/// that split: the heading takes the same inset, but the list and the empty state keep only the
+/// gutter — moving them too would push the content edges past Home's. Checked empty and populated.
+#[gpui::test]
+fn notifications_heading_and_content_edges_match_home_in_empty_and_populated_states(
+    cx: &mut TestAppContext,
+) {
+    for scene in [fixture::Scene::Empty, fixture::Scene::Mixed] {
+        cx.update(ely_core::init_for_tests);
+        let executor = Arc::new(BackgroundExecutor::new(2));
+        let fixture = Arc::new(fixture::Fixture::new(scene));
+        let accounts = AccountService::new(
+            Arc::new(InMemoryCredentialStore::new()),
+            Arc::new(GitHubClient::new(GitHubConfig::default(), fixture.clone())),
+            executor.clone(),
+        );
+        let controller = executor.raw_handle().block_on(async {
+            accounts.login(Pat::from_str("synthetic")).await.unwrap();
+            let controller = accounts.repo_service().notifications().unwrap();
+            controller
+                .execute(controller.begin(RequestKind::First).unwrap().unwrap())
+                .await;
+            controller
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NotificationsView::new(
+                controller.clone(),
+                executor.clone(),
+                Rc::new(|_, _, _| {}),
+                window,
+                cx,
+            );
+            view.sync(cx);
+            view
+        });
+        for dimensions in [size(px(960.0), px(740.0)), size(px(360.0), px(440.0))] {
+            cx.simulate_resize(dimensions);
+            cx.run_until_parked();
+            let page = cx.debug_bounds("notifications-view").unwrap();
+            let header = cx.debug_bounds("notifications-header").unwrap();
+            let title = cx.debug_bounds("notifications-title").unwrap();
+            let rows = cx.debug_bounds("notifications-rows").unwrap();
+            // Content edges: exactly the page gutter, empty or populated.
+            assert!(
+                (rows.left() - page.left() - px(crate::ui::page_layout::PAGE_GUTTER)).abs()
+                    <= px(1.0),
+                "{scene:?}: list left edge must sit on the page gutter (rows={rows:?}, page={page:?})"
+            );
+            // The header box itself starts at the gutter; its *padding* is the inset, so the
+            // title's content box is what must land at gutter + inset, exactly like Home's.
+            assert!(
+                (header.left() - rows.left()).abs() <= px(1.0),
+                "{scene:?}: header box and list share the same outer edge (header={header:?}, rows={rows:?})"
+            );
+            let expected = page.left()
+                + px(crate::ui::page_layout::PAGE_GUTTER)
+                + px(crate::ui::page_layout::PAGE_HEADER_INSET);
+            assert!(
+                (title.left() - expected).abs() <= px(1.0),
+                "{scene:?}: title text must start at gutter + inset (title={title:?}, expected={expected:?})"
+            );
+            assert!(
+                rows.right() <= page.right() - px(crate::ui::page_layout::PAGE_GUTTER) + px(1.0),
+                "{scene:?}: list right edge must stay inside the page gutter"
+            );
+        }
+        drop(view);
+    }
+}
+
 #[gpui::test]
 fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext) {
     let (controller, executor, fixture) = setup(cx);

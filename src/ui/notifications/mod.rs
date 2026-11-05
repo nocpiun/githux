@@ -741,16 +741,20 @@ impl Render for NotificationsView {
                 }
             });
         let header = div()
+            .debug_selector(|| "notifications-header".into())
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
-            // Same heading slot as Home/Settings: full-bleed padding is owned by the page body,
-            // so the title line up with the other production pages instead of adding its own
-            // px_3/py_2 inset.
-            .h(px(40.0))
+            // Same heading slot as Home: the page body owns the 16px gutter, and the title row
+            // adds Home's own 8px inner inset (`home-header` px_2), so the two titles start at
+            // the same x. The rows and the empty state keep only the gutter, exactly like Home's
+            // rows — they must not inherit this title-only inset.
+            .h(px(crate::ui::page_layout::PAGE_HEADER_HEIGHT))
+            .px(px(crate::ui::page_layout::PAGE_HEADER_INSET))
             .child(
                 div()
+                    .debug_selector(|| "notifications-title".into())
                     .flex_1()
                     .min_w_0()
                     .text_size(cx.theme().text_size(TextSize::Lg))

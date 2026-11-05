@@ -225,13 +225,19 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         element
     };
 
+    // Both lines share one explicit line box: GPUI's default line height is a *font* metric
+    // (phi × size, resolved per run), so the mono `#number` and the UI-font repository cells
+    // measured different line boxes and `items_center` only centred those unequal boxes against
+    // each other — the painted glyphs were still offset. A fixed line height in rems gives every
+    // cell the same box under the window's own font scale, and centring equal boxes also aligns
+    // the painted text. 1.5 is a deliberate, slightly tighter leading than GPUI's phi default so
+    // the two lines fit the 72px row with balanced slack.
+    let title_line_height = gpui::rems(body.0 * 1.5);
+    let metadata_line_height = gpui::rems(tiny.0 * 1.5);
     let mut metadata = div()
         .flex()
-        // Centre each cell's box. Baseline alignment looked right in isolation but the mono
-        // number has no shared baseline with the UI-font cells, and the resulting vertical shift
-        // pushed the link boxes outside the row's clip (their centres then hit the row, not the
-        // link). A relative 1px lift below keeps the number optically level without moving boxes.
         .items_center()
+        .line_height(metadata_line_height)
         .gap_2()
         .w_full()
         .min_w_0()
@@ -339,6 +345,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .items_center()
         .gap_2()
         .min_w_0()
+        .line_height(title_line_height)
         .text_size(body)
         .child({
             let mut icon_slot = div()
@@ -356,6 +363,11 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         title_line = title_line.debug_selector(move || debug);
     }
 
+    // Centre the two-line block inside the fixed row: `flex_col` + `gap_1` alone packed both
+    // lines at the top, leaving all the slack (72 − 2×8 padding − the two line boxes − the gap)
+    // beneath the metadata, which is exactly the lopsided selected fill the owner rejected.
+    // `justify_center` puts half the slack above the title and half below the metadata, so the
+    // rounded active background is balanced around the content at every width.
     let mut container = div()
         .id(SharedString::from(selectors.row.clone()))
         .aria_label(row.aria)
@@ -365,6 +377,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .py_2()
         .flex()
         .flex_col()
+        .justify_center()
         .gap_1()
         .min_w_0()
         .overflow_hidden()

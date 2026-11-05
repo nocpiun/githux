@@ -75,3 +75,39 @@
 Codex 对 `4e51b3e` 指出：首次通知请求未返回前切走页面会取消请求并清除 `busy`，但不设 `loaded`；返回保留 tab 时此前只调用 `set_active(true)`，既不重发请求也没有未加载态恢复路径，收件箱会一直空白直到手动 Refresh。
 
 修复：`NotificationsView::set_active(true)` 在 `resume_needed()`（`!loaded && busy.is_none() && error.is_none()`）时重启读取。已加载的空收件箱、进行中的请求和已有错误的快照都不重发，因此普通标签切换仍复用快照。回归 `reactivating_an_interrupted_cold_inbox_resumes_the_first_read` 断言恢复规则（未加载→First，已加载→不重读）与恢复实际触发了读取；`reactivating_a_loaded_inbox_does_not_re_read` 断言已加载快照切 tab 不产生新请求。
+
+## 2026-11-05 负责人第二次视觉验收返工（PR #71 仍 pending）
+
+负责人对 `5d78055` 的三张截图仍不通过，两处问题都被定位为真实几何缺陷，不是断言措辞：
+
+### 1. 共享工作条目：#编号与 owner/repo 不在同一条线上、选中底色下重上轻
+
+**根因 A（垂直分布）**：`work_item_row` 固定 `h(72)` + `px_2/py_2` + `flex_col/gap_1`，但没有竖直分布策略。两行（标题行 + 元信息行）实际只占约 43px，于是 `72 − 16(padding) − 43 ≈ 13px` 的余量全部落在元信息下方，选中圆角底色看起来"上面贴顶、下面一大块空"。修复：内容容器加 `justify_center`，余量均分到标题上方与元信息下方。
+
+**根因 B（行盒不一致）**：GPUI 默认行高是 **按 run 的字体度量**（phi × 字号）计算的；`#number` 用 `mono_family`、owner/repo 用 UI 字体，两者各自测出不同行盒，`items_center` 只是把不等的盒子互相对中，绘制出的字形仍然错位。修复：标题行与元信息行都设显式行高 `rems(字号 × 1.5)`（用 rems 而不是 px，跟随窗口实际 rem/字号缩放；`App` 上没有 `rem_size()`，只有 `Window` 有）。所有元信息单元格现在共享同一个行盒，居中后才真正落在同一条线上。旧注释里提到的"相对 1px 上移"在代码里根本不存在，已删掉换成实测依据。
+
+**验证**：
+- 新增 `home_work_item_row_balances_its_fill_and_shares_one_metadata_line`（宽 1180 / 窄 640）：断言标题行上方余量与元信息下方余量差 ≤1px、`#number`/owner/repository/relative time 的中心 y 与元信息行中心差 ≤1px、`#number` 仍在 owner 之前。
+- **反向证伪**：临时把 `justify_center` 去掉、行高改回 phi，该测试立即失败（above=8px, below=21px），证明断言确实咬住原缺陷而不是恒真；随后还原。
+- 新增 `work_item_rows_balance_their_fill_and_share_one_metadata_line`（全局 Issues 列表，宽/窄）：同样断言余量平衡、`#number` 与 repo 同线，并断言行实际高度等于 `ListState` 预留的 `WORK_ITEM_ROW_HEIGHT`（虚拟列表估算与真实高度不脱节）。
+- Home 行新增 `home-{index}-number` selector（原来 `number: None`，编号没有可断言的盒子），其余 selector 与回调签名未动。
+
+### 2. Notifications 标题仍比 Home 靠左
+
+**根因**：上一轮只把 `PAGE_GUTTER=16` 对齐了 Home 的 `px_4`，但 Home 的列头在 gutter 内**又**有 `px_2`（8px）内缩——Home 标题起点是 gutter+8，行起点才是 gutter。Notifications 的 header 只有 gutter，标题因此更靠左。
+
+**修复**：`page_layout` 新增 `PAGE_HEADER_INSET = 8`（与 Home `home-header` 的 `px_2` 对应），Notifications 与全局 Issues/PR 的 **header** 各自加这层内缩；列表与空状态保持只占 gutter，不跟着标题右移（否则内容边缘会越过 Home）。空收件箱与有条目共用同一 header/列表容器，不新增占位文案。`home/mod.rs` 未改。
+
+**验证**：新增 `notifications_heading_and_content_edges_match_home_in_empty_and_populated_states`，Empty 与 Mixed 两种 fixture、960/360 两种宽度下分别断言：列表左右边缘 = 页面 gutter；标题文本起点 = gutter + inset。注意 `debug_bounds` 返回边框盒，header 的 padding 体现在**标题内容盒**上，所以断言对象是标题而不是 header 盒（第一版断言写错对象已当场修正）。
+
+### 本轮检查
+
+- `cargo check --locked --all-targets`：SUCCESS。
+- `cargo clippy --locked --all-targets -- -D warnings`：SUCCESS。
+- `cargo fmt --all -- --check`：SUCCESS；`git diff --check` clean。
+- `cargo test --locked --bin githux`：SUCCESS，1156 passed（含上述 3 个新几何回归）。
+- 定向：home/global_work_items/notifications 全部 66 个用例通过。
+
+### 未覆盖 / 边界
+
+- 仍是 GPUI 测试平台的 bounds 证据，**不是原生窗口截图**。本轮环境未做真实 Ely 窗口复验；同一 Shell 几何下 Home/Issues/Pull Requests/Notifications 的宽窄对照、选中/未选中、长名称截断与四种状态色彩仍需负责人在原生窗口确认（L002/L017）。PR 保持 `pending`，不自行合并。

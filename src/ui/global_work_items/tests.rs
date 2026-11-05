@@ -378,6 +378,69 @@ impl gpui::Render for ConstrainedPane {
     }
 }
 
+/// Global Issues/PR rows consume the same shared presentation as Home: the selected fill is
+/// balanced around the two-line block, and the mono #number shares one line box with the
+/// UI-font repository link instead of sitting on its own font-metric line height.
+#[gpui::test]
+fn work_item_rows_balance_their_fill_and_share_one_metadata_line(cx: &mut TestAppContext) {
+    let fixture = FixtureRuntime::new(Scene::Mixed);
+    cx.update(ely_core::init_for_tests);
+    let repos = fixture.accounts.repo_service();
+    let executor = fixture.executor.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut controller = Controller::new(repos.work_item_session().unwrap(), WorkItemKind::Issue);
+    let request = controller.begin(RequestMode::Replace).unwrap();
+    let result = runtime.block_on(request.execute(&WorkItemLimits::default()));
+    assert!(controller.finish(&request, result));
+    let id = controller.rows[0].id;
+    let accounts = fixture.accounts.clone();
+    let (page, cx) = cx.add_window_view(|window, cx| {
+        WorkItemsView::with_controller(controller, accounts.repo_service(), executor, window, cx)
+    });
+    for dimensions in [size(px(1200.0), px(700.0)), size(px(640.0), px(620.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds(Box::leak(format!("work-item-{id}").into_boxed_str()))
+            .unwrap();
+        let metadata = cx
+            .debug_bounds(Box::leak(format!("work-metadata-{id}").into_boxed_str()))
+            .unwrap();
+        let title = cx
+            .debug_bounds(Box::leak(format!("work-title-{id}").into_boxed_str()))
+            .unwrap();
+        let number = cx
+            .debug_bounds(Box::leak(format!("work-number-{id}").into_boxed_str()))
+            .unwrap();
+        let repository = cx
+            .debug_bounds(Box::leak(format!("work-repo-{id}").into_boxed_str()))
+            .unwrap();
+        assert_eq!(
+            row.size.height,
+            px(crate::ui::work_item_row::WORK_ITEM_ROW_HEIGHT),
+            "ListState's reserved height must match the painted row"
+        );
+        let above = title.top() - row.top();
+        let below = row.bottom() - metadata.bottom();
+        assert!(
+            (above - below).abs() <= px(2.0),
+            "selected fill must be balanced around the two lines (above={above:?}, below={below:?})"
+        );
+        assert!(
+            (number.center().y - repository.center().y).abs() <= px(1.0),
+            "the mono #number and the UI-font repository must share one painted line"
+        );
+        assert!(
+            number.right() <= repository.left(),
+            "#number stays before repository"
+        );
+        let _ = &page;
+    }
+}
+
 #[gpui::test]
 fn long_text_stays_inside_a_constrained_pane_and_after_resize_and_append(cx: &mut TestAppContext) {
     let fixture = FixtureRuntime::new(Scene::Mixed);
