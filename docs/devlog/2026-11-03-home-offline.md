@@ -87,7 +87,7 @@ Codex 本轮另指出 `stop()` 必须清除保留的权限票据，避免撤权�
 1. `node scripts/verify.mjs -- cargo fmt --all -- --check`：通过（exit 0）。
 2. `node scripts/verify.mjs -- cargo check --locked --all-targets`：通过（exit 0）。
 3. `node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings`：通过（exit 0）。
-4. `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::home::tests -- --test-threads=1`：6 项通过（exit 0）。
+4. `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::home::tests -- --test-threads=1`：13 项通过（exit 0）。
 5. `node scripts/verify.mjs -- cargo test --locked --test home`：84 项通过（exit 0）。
 6. `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::tests -- --test-threads=1`：6 项通过（exit 0）。
 7. `git diff --check`：无空白或行尾违例。
@@ -95,7 +95,7 @@ Codex 本轮另指出 `stop()` 必须清除保留的权限票据，避免撤权�
 ## 验证边界与限制
 
 - 正式生产启动注入 `CacheStore` 仍依赖 `cache-runtime`（PR #68，当前未合入 `main`；其前置 `sidebar-cache` PR #70 已合入 `main`）。在本任务分支上，通过真实 `AccountService::open_with_cache`、真实 SQLite 账户目录、真实 `CacheStore`、真实 `CachedPageReadSession` 和真实 `HomePage` 宿主完成受控组合断言，尚未做 `cache-runtime` 合入后的正式二进制冷启动组合验证。
-- 若未来要求单仓库明确撤权在不推进账户 `AuthEpoch`、也不触发新一轮读取的情况下立即撤下已渲染的 Home/Feed 副本，需协调共享层（如 `RepoService` 暴露当前账户聚合 gate 状态或失效序号）；本任务按文件所有权未修改 `src/data/**` 或 `src/storage/**`。
+- 单仓库明确撤权（`revoke_repository`）已消费 `CacheStore::authorization(scope, None)` 的原子内存票据：即使不推进账户 `AuthEpoch`，已渲染的 Home/Feed 与描述副本也会在轻节拍 `clear_stale_context` 中立即撤下，迟到在途响应被立即丢弃，并且保留有效会话在用户点击刷新时的在线恢复能力。
 - 自动化测试运行在 GPUI 测试平台，不覆盖真实 Windows 原生窗口绘制、DPI/输入法交互或真实 GitHub PAT/API 响应。
 - 候选教训（供 `docs-current-state` 评估，不改 `LESSONS.md`）：分页追加共用 `apply_*_page` 时不要复用“首屏网络替换清空 provenance / 取消前批异步丰富”的状态重置路径；缓存门禁拒绝不等于当前账户认证失败，需保留普通在线读取；已显示副本必须跟随权限代次票据失效，存储 lease 失效不等于 UI 副本已清除。测试中验证缓存跨重启恢复时须共享模拟凭据存储但先关闭旧 `CacheStore` 文件锁。
 - 本 PR 保持 `pending` 标签，等待 `cache-runtime` 合入后的组合核验及负责人手动 UI 验收。

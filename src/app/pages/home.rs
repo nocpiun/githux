@@ -845,6 +845,10 @@ impl HomePage {
                 .as_ref()
                 .is_some_and(|session| session.context() == &append.context)
             || self.cache_authorization.as_ref() != append.authorization.as_ref()
+            || append
+                .authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current())
         {
             return;
         }
@@ -927,11 +931,22 @@ impl HomePage {
         if reply.authorization.as_ref().is_some_and(|authorization| {
             !authorization.is_current() || self.cache_authorization.as_ref() != Some(authorization)
         }) {
-            self.stop();
-            self.unavailable(
-                "Saved content is no longer available for this account or authorization.",
-                cx,
-            );
+            if self.session.as_ref().is_some_and(|s| s.verify()) {
+                self.stop_work_without_session();
+                self.cache_invalidated(
+                    "Saved content is no longer available; refresh to read online for the current account.",
+                    cx,
+                );
+                self.cached = None;
+                self.cache_authorization = None;
+                self.cache_partition = None;
+            } else {
+                self.stop();
+                self.unavailable(
+                    "Saved content is no longer available for this account or authorization.",
+                    cx,
+                );
+            }
             return;
         }
         let error_state = match &reply.result {
@@ -1583,6 +1598,10 @@ impl HomePage {
             || reply.append_epoch != self.feed_append_epoch
             || !self.feed_enrich_work.contains_key(&reply.request)
             || self.cache_authorization.as_ref() != reply.authorization.as_ref()
+            || reply
+                .authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current())
         {
             return;
         }
