@@ -111,3 +111,13 @@ Codex 对 `4e51b3e` 指出：首次通知请求未返回前切走页面会取消
 ### 未覆盖 / 边界
 
 - 仍是 GPUI 测试平台的 bounds 证据，**不是原生窗口截图**。本轮环境未做真实 Ely 窗口复验；同一 Shell 几何下 Home/Issues/Pull Requests/Notifications 的宽窄对照、选中/未选中、长名称截断与四种状态色彩仍需负责人在原生窗口确认（L002/L017）。PR 保持 `pending`，不自行合并。
+
+## 2026-11-05 Codex 二次审查修复（P2：无动作的标题仍是死链接）
+
+Codex 对 `5328553` 指出（`work_item_row.rs` line 199）：全局 Issues/PR 行传入 `on_title_click: None`，但共享标题组件**无条件**给标题加 `Role::Link`、`cursor_pointer` 和 `tab_index(0)`——对键盘与屏幕阅读器用户而言这是一个可聚焦、可点击但按下毫无反应的死链接。
+
+修复：只有存在 `on_title_click` 时才附加 link role / 可聚焦 / 指针 / hover 下划线 / `on_click`；无动作的标题保留 `flex_1/min_w_0/MEDIUM/truncate/tooltip` 的几何与外观，但不进 Tab 序、不承诺动作。Home 标题有动作，仍走原来的链接分支（Home 自己的测试覆盖）；全局列表的键盘入口继续只有仓库链接，不做外部跳转或未支持的详情导航。
+
+回归：`unconnected_title_is_not_a_tab_stop` 聚焦列表后只走一步 Tab 并 Enter，断言落点是仓库链接而非死标题。已反向证伪——临时把无动作标题重新设为 `tab_index(0)` 后该测试立即失败（actions=0），证明断言咬住的是 Tab 序而非恒真。
+
+验证：`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`cargo test --locked --bin githux`（1157 passed）全部 SUCCESS；`git diff --check` clean。PR 保持 `pending`，等待负责人原生窗口视觉验收。

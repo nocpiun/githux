@@ -295,6 +295,45 @@ fn real_rows_repository_callback_and_unconnected_title(cx: &mut TestAppContext) 
         "selection alone does not navigate or open details"
     );
 }
+
+/// A title without an activation callback is plain text, not a dead link: it must not get a
+/// Link role, a Tab stop or a pointer cursor that would promise keyboard/screen-reader users an
+/// action that does nothing. The repository link keeps the only keyboard entry. Home's titles
+/// still carry an action, so they stay focusable links (covered by Home's own tests).
+#[gpui::test]
+fn unconnected_title_is_not_a_tab_stop(cx: &mut TestAppContext) {
+    let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    cx.simulate_resize(size(px(900.0), px(650.0)));
+    cx.run_until_parked();
+
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = actions.clone();
+    view.update(cx, |view, _| {
+        view.on_repository(Rc::new(move |navigation, _, _| {
+            sink.borrow_mut().push(navigation.repository)
+        }))
+    });
+
+    // Focus the list, then step Tab stops and press Enter until the repository link activates.
+    // Before the fix the title was a focusable dead link (tab_index 0, no action) between the
+    // list and the repository link, so Enter on the first stop did nothing. Now the title is not
+    // a Tab stop and Enter on the first stop after the list opens the repository.
+    cx.update(|window, cx| view.update(cx, |view, cx| view.focus.focus(window, cx)));
+    cx.run_until_parked();
+    // A single Tab step must land on the repository link: the title is not a Tab stop, so it
+    // cannot sit between the list and the repository entry.
+    cx.update(|window, cx| window.focus_next(cx));
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        actions.borrow().len(),
+        1,
+        "the first Tab stop after the list must be the repository link, not a dead title"
+    );
+}
 #[gpui::test]
 fn append_then_keyboard_last_row_and_filter_render_real_identity(cx: &mut TestAppContext) {
     let (_fixture, view, cx) = open(cx, Scene::Mixed);

@@ -191,8 +191,12 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
     let color = tone_color(row.tone, &colors);
     let selectors = row.selectors.clone();
 
-    let title = {
-        let mut element = div()
+    // A title is a link only when the caller actually supplied an activation. Global Issues/PR
+    // deliberately have no detail navigation, so their titles must stay plain text: giving them
+    // a Link role, pointer cursor and a Tab stop would promise keyboard/screen-reader users an
+    // action that does nothing. Geometry (flex_1/min_w_0/weight/truncate) is shared either way.
+    let title = if let Some(action) = row.on_title_click {
+        div()
             .id(SharedString::from(selectors.title.clone()))
             .role(gpui::Role::Link)
             .aria_label(row.title.clone())
@@ -214,15 +218,25 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                 let debug = selectors.title.clone();
                 move || debug.clone()
             })
-            .child(row.title.clone());
-        if let Some(action) = row.on_title_click {
-            element = element.on_click(move |event: &ClickEvent, window, cx| {
+            .on_click(move |event: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 let pointer = !matches!(event, ClickEvent::Keyboard(_));
                 action(pointer, window, cx);
-            });
-        }
-        element
+            })
+            .child(row.title.clone())
+    } else {
+        div()
+            .id(SharedString::from(selectors.title.clone()))
+            .flex_1()
+            .min_w_0()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .truncate()
+            .tooltip(crate::ui::tooltip::ui_tooltip(row.title_tooltip.clone()))
+            .debug_selector({
+                let debug = selectors.title.clone();
+                move || debug.clone()
+            })
+            .child(row.title.clone())
     };
 
     // Both lines share one explicit line box: GPUI's default line height is a *font* metric
