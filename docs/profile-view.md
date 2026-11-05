@@ -1,6 +1,6 @@
 # Profile Overview 展示组件
 
-更新：2026-11-03。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、页面持久缓存、README 图片服务、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略、Pinned 简介三行及离线快照/图片展示已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
+更新：2026-11-05。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、页面持久缓存、README 图片服务、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略、Pinned 简介三行及离线快照/图片展示已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
 
 ## 已实现的展示范围
 
@@ -62,9 +62,12 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
 4. **授权、代次与缓存门禁（C1–C5）**：
    - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
    - 普通标签页切换（`ProfilePage::set_active(false)` → `ProfileView::suspend`）仅停止滚动与阅读器交互手势，保留已挂载 README 的图片 provider；而重新绑定、替换 README 或撕毁页面时调用 `clear_reader` / `cancel_reader` 显式取消并分离图片 provider。
-   - 每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消；不重放 profile 读取）。该任务独占 store 访问，前台 30ms tick 只消费它得出的失效结论，绝不在 UI 线程做周期性数据库检查；结论以产生它的绑定 generation 标记（`cache_invalidated: AtomicU64`），旧绑定遗留迭代发布的失效判定不会被新页面采纳；监测任务的存活也由每个绑定自己的 `Work` 句柄表示（`ensure_cache_monitor` 无条件替换上一绑定的任务），没有跨绑定的共享存活标志可供迟到任务压制。判定依据是写在 `repository=None` 聚合门禁命名空间里的 `AggregateGateStamp`：读取任务开始时建立/读取并持有所在条目的 `CacheLease`，**在线与历史结果都携带它**（含 Basic：即使三个兄弟 section 全部失败，Basic 的 stamp 仍是唯一可验代次），在屏期间由监测任务核对。lease 使普通容量淘汰无法删除 stamp（不会把仍授权的页面误判为撤权），而 stamp 被撤权删除、门禁被换 PAT/401 拒绝隔离或 scope 退休都会使已显示内容失效。因此即使撤权发生在首轮轮询前，或之后又写入了新的 stamp/快照，已展示的旧内容也会被清除，并同步清理旧 `ProfileView`、`ReaderView` 与在途图片，阻断迟到图片或 `on_layout_changed` 回调复活旧页。
-   - **撤权不推进 `AuthEpoch`**，所以「当前 session 仍有效」不能作为保留已显示内容的理由：在线读取的聚合、README 及其内外图片与历史快照使用同一失效判据。撤权只让当次展示的快照退休——清理时同时推进页面 generation、清空 section request id（使已读完但尚未投递的回复也过不了 `accepts()`，无法取消随后的重试），并清除失效标记、释放旧请求；其他在线读取重新写入快照后，重试可按新 stamp 恢复，不会永久卡在错误态。
-   - 回复先过 binding/request/context（旧绑定的迟到回复直接安静丢弃，无权改动新页面），再在 `drain` 出队后、`view.update` 之前用**回复携带的同一** stamp 做一次有效性检查：后台读到成功但发布前撤权、换 PAT 或被拒绝的回复丢弃并退休已显示内容；新捕获的 stamp 不等于旧回复可信。该提交点检查的最终形态是 cache-runtime 共享权限票据（`CacheStore::authorization(scope, None)` + `is_current()`，无锁无磁盘），本页先以等价的 lease 检查占位，接口发布后迁移。
+   - **授权票据（`CacheAuthorization`）**：每次 section 读取在真正发起前用 `CacheStore::authorization(scope, None)` 捕获一个共享票据（`repository = None` 的账户聚合）。它是**失效票据，不是读取权限证明**：账户/session/context/取消/页面代次与持久门禁检查照旧保留。`CacheAuthorization::is_current()` 只做原子读取——**不加锁、不访问 SQLite、不等待 store 的 State 锁**，因此可在 UI 发布路径直接调用。
+   - 票据随**在线（`Network`）与历史（`HistoricalSnapshot`）**两类结果一起返回，并由页面按 section 保留在 `authorizations` 中（含 Basic：即使三个兄弟 section 全部失败，Basic 的票据仍是唯一可验代次）。README 与其内外图片、Pinned/Popular 与贡献图都是同一账户聚合的派生数据，共用同一票据判据，不各自造许可。
+   - 有绑定却捕获不到票据时**失败关闭**：该 section 直接以 `Unavailable` 结束，不把受保护的缓存工作当作无票据输出发布；纯在线（无 cache 绑定）的结果继续由 session 守卫，不需要票据。
+   - 每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消；不重放 profile 读取）。前台 30ms tick 只消费它得出的失效结论，绝不在 UI 线程做周期性数据库检查；结论以产生它的绑定 generation 标记（`cache_invalidated: AtomicU64`），旧绑定遗留迭代发布的失效判定不会被新页面采纳；监测任务的存活也由每个绑定自己的 `Work` 句柄表示（`ensure_cache_monitor` 无条件替换上一绑定的任务），没有跨绑定的共享存活标志可供迟到任务压制。票据在 `revoke_repository(Some(R))`、PAT 替换、凭据拒绝、`retire`/`clear` 时失效，普通写入与容量淘汰**不**使其失效（因此不需要 pin 任何缓存条目，也没有页面自造的持久 stamp）。
+   - **撤权不推进 `AuthEpoch`**，所以「当前 session 仍有效」不能作为保留已显示内容的理由：在线读取的聚合、README 及其内外图片与历史快照使用同一失效判据。撤权只让当次展示的票据退休——清理时同时推进页面 generation、清空 section request id（使已读完但尚未投递的回复也过不了 `accepts()`，无法取消随后的重试），并清除失效标记、释放旧请求；其他在线读取重新捕获票据后，重试可恢复，不会永久卡在错误态。旧票据失效后即使重新授权、写入新快照也不会复活，必须重新捕获。
+   - 回复先过 binding/request/context（旧绑定的迟到回复直接安静丢弃，无权改动新页面），再在 `drain` 出队后、`view.update` 之前用**回复携带的同一**票据复核一次：后台读到成功但发布前撤权、换 PAT 或被拒绝的回复丢弃并退休已显示内容；新捕获的票据不等于旧回复可信。
    - 运行期缓存故障（SQLite/I-O 等）不是授权结论：除 `CacheError::Stale` 外，四类读取都会退回原 `PageReadSession` 在线读取，仍保留取消、上下文与授权检查；只有真实 401/取消/过期上下文才保持原义。
 
 ## Host adapter / mounting 职责
