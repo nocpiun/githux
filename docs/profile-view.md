@@ -1,6 +1,6 @@
 # Profile Overview 展示组件
 
-更新：2026-11-01。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略及 Pinned 简介三行已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
+更新：2026-11-05。可复用只读 Profile Overview 位于 [`src/ui/profile/`](../src/ui/profile/)，由正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 接入账户数据、页面持久缓存、README 图片服务、workspace 与路由。Overview 居中、README 自然高度/背景/缺失省略、Pinned 简介三行及离线快照/图片展示已整合；生命周期和验证边界见[正式页面接入](shell-page-integration.md)。独立预览 `examples/profile.rs` 与 `tests/profile.rs` 的合成场景仍只用于开发验证。
 
 ## 已实现的展示范围
 
@@ -37,9 +37,38 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
 
 - **正文不再自绘灰色矩形底。** Flow 布局下 `ReaderView` 根与 Markdown 根不再绘制 `theme.colors.surface`；宿主页面（Profile 的 section 背景）透出，正文与卡片背景一致。有界/Repository 布局的 `surface` 不变，代码围栏、inline code 与引用的语义色保留。见 [内容阅读器 Flow](content-reader.md#自然高度布局flow2026-10-29)。
 - **确认缺失的 README 整段省略。** `SectionState::Unavailable` 不再渲染 border、header、说明文字或占位，`render_readme` 返回 `None`，因此也不会留下空行间距；Pinned 与贡献区块不受影响。该状态内部仍与 `SectionState::Error` 分开。
-- **真实失败使用紧凑指示。** README 的 `SectionState::Error` 改为 `compact_status::failed` 的单个 warning 图标，原因在 tooltip 与无障碍名称里；本组件没有真实 retry 回调，因此不显示 Retry。不再使用共享大错误面板。
-- **404 归入可选缺省。** 同名仓库读取返回的 `GitHubError::NotFound`（GitHub 用 404 同时表示不存在与不可见）在 `app::pages::ProfilePage` 映射为 `Unavailable`，不显示 “not found or is not visible” 文案；网络、认证、限流、解析失败仍为 `Error`。
-- **无残留旧 README。** `bind`、`set_readme_unavailable`、非 Ready 的 `update_readme*` 都会取消并丢弃旧 `ReaderView`；ready→缺失→换账户不会复用旧正文、旧 action 或旧图片请求。
+- **真实失败使用紧凑指示。** README 的 `SectionState::Error` 使用 `compact_status::failed` 的 warning 图标，原因在 tooltip 与无障碍名称里；正式 host 注册 `on_action` 时提供单次重试（`ProfileActionKind::RetryReadme`），独立无 handler 视图仍不显示 Retry。不再使用共享大错误面板。
+- **404 归入可选缺省。** 同名仓库读取返回的 `GitHubError::NotFound`（GitHub 用 404 同时表示不存在与不可见）在 `app::pages::ProfilePage` 映射为 `Unavailable`，不显示 “not found or is not visible” 文案；网络、认证、限流、解析失败与离线未缓存（`NotCached`）仍为 `Error`。
+- **无残留旧 README。** `bind`、`set_readme_unavailable`、非 Ready 的 `update_readme*` 都会通过 `set_image_provider(None, cx)` 和 `cancel_interactions(cx)` 取消并丢弃旧 `ReaderView` 及其在途图片请求；ready→缺失→换账户不会复用旧正文、旧 action、旧高度通知或旧图片请求。
+
+## 2026-11-03 持久缓存与 README 图片正式接线
+
+正式 [`app::pages::ProfilePage`](../src/app/pages/profile.rs) 已接入 [`CachedPageReadSession`](page-cache.md) 与 [`RepositoryImageService::with_cache`](reader-images.md)，在保留原有 `ProfilePage::new` 构造签名兼容的前提下支持已访问 Profile 资料与 README（含图片）的离线阅读：
+
+1. **缓存会话注入与在线回退**：
+   - `ProfilePage` 捕获 `PageReadSession` 后，通过 `services.repositories().cache(session.context())` 查询当前保存账户的 `(CacheStore, CacheScope)` 并构造 `CachedPageReadSession`。
+   - 当应用尚未绑定 `CacheStore`（如 `cache-runtime` 未合入或缓存处于未对账恢复态）或当前 scope 被隔离（`AccessDenied`）时，自动保留原有在线 `PageReadSession` 读取能力，不额外打开第二套数据库。
+   - 四个独立区块（`profile`、`profile_pinned`、`contribution_calendar`、`profile_readme`）优先执行 `PageReadMode::Online`；当遇到网络断开、超时、5xx 或限流错误时，自动回退尝试 `PageReadMode::Offline`。
+2. **README 图片服务正式附着**：
+   - 当 `profile_readme` 返回 `ProfileReadme::Prepared { repository, content, .. }` 时，`ProfilePage` 使用该已验证同名公开仓库的真实 `RepositoryIdentity`、当前有效 `RepositorySession`、`ReqwestExternalImages`（独立无凭据 HTTPS 通路，绝不向外部图片主机发送 PAT）以及 `services.repositories().cache(&context)`（`is_private = false`）构造 `RepositoryImageService::with_cache`。
+   - 通过新增的 `ProfileView::update_readme_with_provider` 将 provider 交给 `ReaderView::set_image_provider`，同时保持 `MarkdownLayout::Flow` 自然高度、无灰底、无内嵌竖向滚动条和 HTML 子集行为。共享图片管线与缓存细节见 [README 图片加载与显示](reader-images.md)。
+3. **历史快照、Partial 与缺失缓存的紧凑视觉区分**：
+   - `ProfileProvenance` 记录 `historical`（`PageOrigin::HistoricalSnapshot`）、时间戳与 `CacheCompleteness`。
+   - 离线历史快照在 Basic 标题行、README 头部、Pinned/Popular 标题行与 Contributions 标题行旁显示紧凑 Neutral `Badge`（`Cached · <relative time>`，复用 `ui::relative_time::relative`，hover tooltip 说明本地历史快照）。
+   - `CacheCompleteness::Partial` 显示紧凑 Warning `Badge`（`Partial`，hover tooltip 显示具体不完整原因），与完整结果明确区分。
+   - 离线无缓存快照（`PageValue::Miss(CacheMiss::NotCached)`）或缓存损坏映射为 `PresentationError::NotCached` / `CacheCorrupt`，显示黄色 warning 图标、hover 原因与点击重试（`RetryBasic` / `RetryRepositories` / `RetryContributions` / `RetryReadme`），绝不将未缓存或网络/授权失败伪装成“无 README”或空列表。
+   - 已缓存的确认无 README（`ProfileReadme::Missing` / `NotEligible`）离线恢复时继续映射为 `SectionState::Unavailable` 并整段省略。
+   - 贡献日历的缓存键包含区间端点，而 host 的区间是当天最近滚动一年。成功读取后把实际区间写入聚合门禁命名空间的 `profile-calendar-range` 标记；离线回退在当天区间 miss 后用记录的区间重读，命中时 host 采用该区间（`ProfileView::set_range`），标题、tooltip 与热力图因此始终描述屏上数据。标记缺失（未缓存或已被撤权清理）仍是带重试的 `NotCached`，不会显示成“无贡献”。
+4. **授权、代次与缓存门禁（C1–C5）**：
+   - 每次读取启动与结果提交前，同时校验页面 `generation`、账户 `selection`、section `request`、`services.repositories().is_current(&context)` 与 `session.verify()`。
+   - 普通标签页切换（`ProfilePage::set_active(false)` → `ProfileView::suspend`）仅停止滚动与阅读器交互手势，保留已挂载 README 的图片 provider；而重新绑定、替换 README 或撕毁页面时调用 `clear_reader` / `cancel_reader` 显式取消并分离图片 provider。
+   - **授权票据（`CacheAuthorization`）**：每次 section 读取在真正发起前用 `CacheStore::authorization(scope, None)` 捕获一个共享票据（`repository = None` 的账户聚合）。它是**失效票据，不是读取权限证明**：账户/session/context/取消/页面代次与持久门禁检查照旧保留。`CacheAuthorization::is_current()` 只做原子读取——**不加锁、不访问 SQLite、不等待 store 的 State 锁**，因此可在 UI 发布路径直接调用。
+   - 票据随**在线（`Network`）与历史（`HistoricalSnapshot`）**两类结果一起返回，并由页面按 section 保留在 `authorizations` 中（含 Basic：即使三个兄弟 section 全部失败，Basic 的票据仍是唯一可验代次）。README 与其内外图片、Pinned/Popular 与贡献图都是同一账户聚合的派生数据，共用同一票据判据，不各自造许可。
+   - 有绑定却捕获不到票据时**失败关闭**：该 section 直接以 `Unavailable` 结束，不把受保护的缓存工作当作无票据输出发布；纯在线（无 cache 绑定）的结果继续由 session 守卫，不需要票据。
+   - 每个页面绑定只维护一条可取消的后台监测任务（`rebind`/`stop`/`Drop` 取消；不重放 profile 读取）。前台 30ms tick 只消费它得出的失效结论，绝不在 UI 线程做周期性数据库检查；结论以产生它的绑定 generation 标记（`cache_invalidated: AtomicU64`），旧绑定遗留迭代发布的失效判定不会被新页面采纳；监测任务的存活也由每个绑定自己的 `Work` 句柄表示（`ensure_cache_monitor` 无条件替换上一绑定的任务），没有跨绑定的共享存活标志可供迟到任务压制。票据在 `revoke_repository(Some(R))`、PAT 替换、凭据拒绝、`retire`/`clear` 时失效，普通写入与容量淘汰**不**使其失效（因此不需要 pin 任何缓存条目，也没有页面自造的持久 stamp）。
+   - **撤权不推进 `AuthEpoch`**，所以「当前 session 仍有效」不能作为保留已显示内容的理由：在线读取的聚合、README 及其内外图片与历史快照使用同一失效判据。撤权只让当次展示的票据退休——清理时同时推进页面 generation、清空 section request id（使已读完但尚未投递的回复也过不了 `accepts()`，无法取消随后的重试），并清除失效标记、释放旧请求；其他在线读取重新捕获票据后，重试可恢复，不会永久卡在错误态。旧票据失效后即使重新授权、写入新快照也不会复活，必须重新捕获。
+   - 回复先过 binding/request/context（旧绑定的迟到回复直接安静丢弃，无权改动新页面），再在 `drain` 出队后、`view.update` 之前用**回复携带的同一**票据复核一次：后台读到成功但发布前撤权、换 PAT 或被拒绝的回复丢弃并退休已显示内容；新捕获的票据不等于旧回复可信。
+   - 运行期缓存故障（SQLite/I-O 等）不是授权结论：除 `CacheError::Stale` 外，四类读取都会退回原 `PageReadSession` 在线读取，仍保留取消、上下文与授权检查；只有真实 401/取消/过期上下文才保持原义。
 
 ## Host adapter / mounting 职责
 

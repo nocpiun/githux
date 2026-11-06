@@ -1,4 +1,8 @@
-use std::{rc::Rc, time::Instant};
+use std::{
+    rc::Rc,
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, ScrollHandle, Subscription, Window, point, px,
@@ -8,7 +12,9 @@ use crate::{
     content::{PreparedBody, PreparedContent},
     domain::{ContributionCalendar, ContributionRange, ProfileBasic, ProfilePinned},
     ui::{
-        reader::{DocumentKind, MarkdownLayout, ReaderAction, ReaderView, ResourceContext},
+        reader::{
+            DocumentKind, ImageProvider, MarkdownLayout, ReaderAction, ReaderView, ResourceContext,
+        },
         scroll::{self, Bars, Motion},
     },
 };
@@ -16,8 +22,8 @@ use crate::{
 pub type OnProfileAction = Rc<dyn Fn(super::ProfileAction, &mut Window, &mut App)>;
 
 use super::{
-    ProfileAction, ProfileActionKind, ProfileBinding, ProfileRequest, ProfileTarget, SectionState,
-    heatmap::HeatmapPresentation,
+    ProfileAction, ProfileActionKind, ProfileBinding, ProfileProvenance, ProfileRequest,
+    ProfileTarget, SectionState, heatmap::HeatmapPresentation,
 };
 
 pub struct ProfileView {
@@ -29,6 +35,11 @@ pub struct ProfileView {
     pub(super) repositories: SectionState<ProfilePinned>,
     pub(super) contributions: SectionState<ContributionCalendar>,
     pub(super) readme: SectionState<()>,
+    pub(super) basic_provenance: Option<ProfileProvenance>,
+    pub(super) repositories_provenance: Option<ProfileProvenance>,
+    pub(super) contributions_provenance: Option<ProfileProvenance>,
+    pub(super) readme_provenance: Option<ProfileProvenance>,
+    pub(super) now: SystemTime,
     pub(super) avatar: Option<gpui::ImageSource>,
     pub(super) reader: Option<Entity<ReaderView>>,
     reader_generation: u64,
@@ -81,6 +92,11 @@ impl ProfileView {
             repositories: SectionState::Loading,
             contributions: SectionState::Loading,
             readme: SectionState::Loading,
+            basic_provenance: None,
+            repositories_provenance: None,
+            contributions_provenance: None,
+            readme_provenance: None,
+            now: SystemTime::now(),
             avatar: None,
             reader: None,
             reader_generation: 0,
@@ -125,6 +141,10 @@ impl ProfileView {
         self.repositories = SectionState::Loading;
         self.contributions = SectionState::Loading;
         self.readme = SectionState::Loading;
+        self.basic_provenance = None;
+        self.repositories_provenance = None;
+        self.contributions_provenance = None;
+        self.readme_provenance = None;
         self.avatar = None;
         self.cancel_reader(cx);
         self.reader = None;
@@ -161,6 +181,22 @@ impl ProfileView {
         &self.range
     }
 
+    /// Adopt a different contribution interval without clearing the other sections.
+    ///
+    /// Used when an offline snapshot was stored under an earlier rolling year: the host publishes
+    /// that range together with the restored calendar so the visible interval always describes the
+    /// data on screen.
+    pub fn set_range(&mut self, range: ContributionRange, cx: &mut Context<Self>) -> bool {
+        if self.range == range {
+            return false;
+        }
+        self.range = range;
+        self.selected_day = None;
+        self.heatmap_motion.set_offset(point(px(0.0), px(0.0)));
+        cx.notify();
+        true
+    }
+
     pub fn basic(&self) -> &SectionState<ProfileBasic> {
         &self.basic
     }
@@ -177,11 +213,42 @@ impl ProfileView {
         &self.readme
     }
 
+    pub fn basic_provenance(&self) -> Option<&ProfileProvenance> {
+        self.basic_provenance.as_ref()
+    }
+
+    pub fn repositories_provenance(&self) -> Option<&ProfileProvenance> {
+        self.repositories_provenance.as_ref()
+    }
+
+    pub fn contributions_provenance(&self) -> Option<&ProfileProvenance> {
+        self.contributions_provenance.as_ref()
+    }
+
+    pub fn readme_provenance(&self) -> Option<&ProfileProvenance> {
+        self.readme_provenance.as_ref()
+    }
+
+    pub fn set_now(&mut self, now: SystemTime, cx: &mut Context<Self>) {
+        self.now = now;
+        cx.notify();
+    }
+
     /// Publish a confirmed non-error absence (no eligible public root README).
     pub fn set_readme_unavailable(
         &mut self,
         request: &ProfileRequest,
         message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.set_readme_unavailable_with_provenance(request, message, None, cx)
+    }
+
+    pub fn set_readme_unavailable_with_provenance(
+        &mut self,
+        request: &ProfileRequest,
+        message: impl Into<String>,
+        provenance: Option<ProfileProvenance>,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.accepts(request) {
@@ -190,6 +257,7 @@ impl ProfileView {
         self.cancel_reader(cx);
         self.reader = None;
         self.readme = SectionState::Unavailable(message.into());
+        self.readme_provenance = provenance;
         cx.notify();
         true
     }
@@ -228,10 +296,21 @@ impl ProfileView {
         state: SectionState<ProfileBasic>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.update_basic_with_provenance(request, state, None, cx)
+    }
+
+    pub fn update_basic_with_provenance(
+        &mut self,
+        request: &ProfileRequest,
+        state: SectionState<ProfileBasic>,
+        provenance: Option<ProfileProvenance>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.accepts(request) {
             return false;
         }
         self.basic = state;
+        self.basic_provenance = provenance;
         cx.notify();
         true
     }
@@ -242,11 +321,22 @@ impl ProfileView {
         state: SectionState<ProfilePinned>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.update_repositories_with_provenance(request, state, None, cx)
+    }
+
+    pub fn update_repositories_with_provenance(
+        &mut self,
+        request: &ProfileRequest,
+        state: SectionState<ProfilePinned>,
+        provenance: Option<ProfileProvenance>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.accepts(request) {
             return false;
         }
         self.selected_repository = 0;
         self.repositories = state;
+        self.repositories_provenance = provenance;
         cx.notify();
         true
     }
@@ -258,6 +348,17 @@ impl ProfileView {
         state: SectionState<ContributionCalendar>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.update_contributions_with_provenance(request, range, state, None, cx)
+    }
+
+    pub fn update_contributions_with_provenance(
+        &mut self,
+        request: &ProfileRequest,
+        range: &ContributionRange,
+        state: SectionState<ContributionCalendar>,
+        provenance: Option<ProfileProvenance>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.accepts(request) || range != &self.range {
             return false;
         }
@@ -266,6 +367,7 @@ impl ProfileView {
             _ => None,
         };
         self.contributions = state;
+        self.contributions_provenance = provenance;
         self.heatmap_motion.set_offset(point(px(0.0), px(0.0)));
         cx.notify();
         true
@@ -278,38 +380,58 @@ impl ProfileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.update_readme_with_provider(request, state, None, None, window, cx)
+    }
+
+    pub fn update_readme_with_provider(
+        &mut self,
+        request: &ProfileRequest,
+        state: SectionState<PreparedContent>,
+        provider: Option<Arc<dyn ImageProvider>>,
+        provenance: Option<ProfileProvenance>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.accepts(request) {
             return false;
         }
         match state {
             SectionState::Ready(content) => {
                 let context = ResourceContext::from_prepared(&content);
-                self.update_readme_with_context(
+                self.update_readme_with_context_and_provider(
                     request,
                     SectionState::Ready(content.body),
                     context,
+                    provider,
+                    provenance,
                     window,
                     cx,
                 )
             }
-            SectionState::Loading => self.update_readme_with_context(
+            SectionState::Loading => self.update_readme_with_context_and_provider(
                 request,
                 SectionState::Loading,
                 ResourceContext::new("", "", "", "README.md"),
+                None,
+                provenance,
                 window,
                 cx,
             ),
-            SectionState::Error(error) => self.update_readme_with_context(
+            SectionState::Error(error) => self.update_readme_with_context_and_provider(
                 request,
                 SectionState::Error(error),
                 ResourceContext::new("", "", "", "README.md"),
+                None,
+                provenance,
                 window,
                 cx,
             ),
-            SectionState::Unavailable(message) => self.update_readme_with_context(
+            SectionState::Unavailable(message) => self.update_readme_with_context_and_provider(
                 request,
                 SectionState::Unavailable(message),
                 ResourceContext::new("", "", "", "README.md"),
+                None,
+                provenance,
                 window,
                 cx,
             ),
@@ -327,6 +449,22 @@ impl ProfileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.update_readme_with_context_and_provider(
+            request, state, context, None, None, window, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_readme_with_context_and_provider(
+        &mut self,
+        request: &ProfileRequest,
+        state: SectionState<PreparedBody>,
+        context: ResourceContext,
+        provider: Option<Arc<dyn ImageProvider>>,
+        provenance: Option<ProfileProvenance>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.accepts(request) {
             return false;
         }
@@ -337,23 +475,36 @@ impl ProfileView {
         let reader_generation = self.reader_generation;
         self.cancel_reader(cx);
         self.reader = None;
+        self.readme_provenance = provenance;
         self.readme = match state {
             SectionState::Loading => SectionState::Loading,
             SectionState::Error(error) => SectionState::Error(error),
             SectionState::Unavailable(message) => SectionState::Unavailable(message),
             SectionState::Ready(body) => {
                 let reader_request = self.request();
+                let layout_request = reader_request.clone();
                 let this = cx.entity().downgrade();
+                let layout_owner = cx.entity().downgrade();
                 let reader = cx.new(|cx| {
                     let mut reader =
                         ReaderView::new(body, DocumentKind::Markdown, context, window, cx);
                     // The README is one section of the Profile page's own scrolling flow: the
                     // reader must report its natural height instead of owning a bounded viewport.
                     reader.set_markdown_layout(MarkdownLayout::Flow, cx);
+                    reader.set_image_provider(provider, cx);
                     let layout_view = cx.entity().downgrade();
                     reader.on_layout_changed(Rc::new(move |_, cx| {
-                        if let Some(view) = layout_view.upgrade() {
-                            view.update(cx, |_, cx| cx.notify());
+                        if let Some(owner) = layout_owner.upgrade() {
+                            let still_current = owner.read(cx).accepts(&layout_request)
+                                && owner.read(cx).reader_generation == reader_generation
+                                && owner.read(cx).reader.is_some();
+                            if !still_current {
+                                return;
+                            }
+                            if let Some(view) = layout_view.upgrade() {
+                                view.update(cx, |_, cx| cx.notify());
+                            }
+                            owner.update(cx, |_, cx| cx.notify());
                         }
                     }));
                     reader.on_action(Rc::new(move |action, window, cx| {
@@ -380,16 +531,30 @@ impl ProfileView {
 
     fn cancel_reader(&self, cx: &mut Context<Self>) {
         if let Some(reader) = &self.reader {
-            reader.update(cx, |reader, cx| reader.cancel_interactions(cx));
+            reader.update(cx, |reader, cx| {
+                reader.set_image_provider(None, cx);
+                reader.cancel_interactions(cx);
+            });
         }
     }
 
-    /// Stop background UI work while this page remains mounted but inactive. Valid content and
-    /// navigation stay intact; the host separately clears them when authorization changes.
+    /// Stop background UI work while this page remains mounted but inactive. Valid content,
+    /// attached image provider and navigation stay intact; the host separately clears them when
+    /// authorization changes or when the README is replaced.
     pub fn suspend(&mut self, cx: &mut Context<Self>) {
         scroll::cancel_region(&mut self.page_bars, &self.page_motion);
         scroll::cancel_region(&mut self.heatmap_bars, &self.heatmap_motion);
+        if let Some(reader) = &self.reader {
+            reader.update(cx, |reader, cx| reader.cancel_interactions(cx));
+        }
+        cx.notify();
+    }
+
+    /// Dispose the mounted reader and cancel any in-flight image loads when tearing down or
+    /// invalidating the page.
+    pub fn clear_reader(&mut self, cx: &mut Context<Self>) {
         self.cancel_reader(cx);
+        self.reader = None;
         cx.notify();
     }
 

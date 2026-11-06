@@ -13,7 +13,20 @@ impl ProfileView {
     pub(super) fn identity_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let SectionState::Ready(basic) = &self.basic else {
             return match &self.basic {
-                SectionState::Error(error) => super::render::state_panel(error, cx),
+                SectionState::Error(error) => {
+                    let retry = self.on_action.is_some().then(|| {
+                        let request = self.request();
+                        let weak = cx.weak_entity();
+                        move |window: &mut gpui::Window, cx: &mut App| {
+                            let _ = weak.update(cx, |view, cx| {
+                                if view.accepts(&request) {
+                                    view.emit(ProfileActionKind::RetryBasic, window, cx);
+                                }
+                            });
+                        }
+                    });
+                    super::render::state_panel_with_retry("profile-basic-error", error, retry, cx)
+                }
                 _ => super::render::loading("Loading profile…", cx),
             };
         };
@@ -89,6 +102,40 @@ impl ProfileView {
         if let Some(company) = super::render::clean(&basic.company) {
             metadata.push(meta(IconName::House, company.to_string(), cx));
         }
+        let mut provenance_badges = Vec::new();
+        if let Some(prov) = &self.basic_provenance {
+            if prov.is_historical() {
+                let label = prov
+                    .relative_time(self.now)
+                    .map(|rel| format!("Cached · {rel}"))
+                    .unwrap_or_else(|| "Cached".to_string());
+                provenance_badges.push(
+                    div()
+                        .id("profile-basic-provenance-historical")
+                        .debug_selector(|| "profile-basic-provenance-historical".to_string())
+                        .tooltip(ui_tooltip("Historical snapshot loaded from local cache."))
+                        .child(
+                            crate::ui::badge::Badge::new(label)
+                                .tone(ely_core::data_display::Tone::Neutral),
+                        )
+                        .into_any_element(),
+                );
+            }
+            if let Some(reason) = prov.partial_reason() {
+                let reason = reason.to_string();
+                provenance_badges.push(
+                    div()
+                        .id("profile-basic-provenance-partial")
+                        .debug_selector(|| "profile-basic-provenance-partial".to_string())
+                        .tooltip(ui_tooltip(reason))
+                        .child(
+                            crate::ui::badge::Badge::new("Partial")
+                                .tone(ely_core::data_display::Tone::Warning),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
         div()
             .debug_selector(|| "profile-basic".into())
             .w_full()
@@ -115,10 +162,18 @@ impl ProfileView {
                     .gap_1()
                     .child(
                         div()
-                            .debug_selector(|| "profile-name".into())
-                            .text_size(theme.text_size(TextSize::Xl))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(display),
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .debug_selector(|| "profile-name".into())
+                                    .text_size(theme.text_size(TextSize::Xl))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(display),
+                            )
+                            .children(provenance_badges),
                     )
                     .child(
                         div()

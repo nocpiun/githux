@@ -20,14 +20,63 @@ use crate::{
 };
 
 use super::{
-    PresentationError, ProfileActionKind, ProfileView, RepositoryTarget, SectionState,
-    model::repository_presentation,
+    PresentationError, ProfileActionKind, ProfileProvenance, ProfileView, RepositoryTarget,
+    SectionState, model::repository_presentation,
 };
 
 const CELL: f32 = 12.0;
 const CELL_GAP: f32 = 3.0;
 
-fn section_heading(title: &'static str, detail: Option<String>, cx: &App) -> AnyElement {
+fn provenance_badges(
+    id_prefix: &'static str,
+    provenance: Option<&ProfileProvenance>,
+    now: std::time::SystemTime,
+) -> Vec<AnyElement> {
+    let Some(prov) = provenance else {
+        return Vec::new();
+    };
+    let mut badges = Vec::new();
+    if prov.is_historical() {
+        let label = prov
+            .relative_time(now)
+            .map(|rel| format!("Cached · {rel}"))
+            .unwrap_or_else(|| "Cached".to_string());
+        let selector = format!("{id_prefix}-provenance-historical");
+        badges.push(
+            div()
+                .id(gpui::ElementId::Name(selector.clone().into()))
+                .debug_selector(move || selector.clone())
+                .tooltip(ui_tooltip("Historical snapshot loaded from local cache."))
+                .child(
+                    crate::ui::badge::Badge::new(label).tone(ely_core::data_display::Tone::Neutral),
+                )
+                .into_any_element(),
+        );
+    }
+    if let Some(reason) = prov.partial_reason() {
+        let reason = reason.to_string();
+        let selector = format!("{id_prefix}-provenance-partial");
+        badges.push(
+            div()
+                .id(gpui::ElementId::Name(selector.clone().into()))
+                .debug_selector(move || selector.clone())
+                .tooltip(ui_tooltip(reason))
+                .child(
+                    crate::ui::badge::Badge::new("Partial")
+                        .tone(ely_core::data_display::Tone::Warning),
+                )
+                .into_any_element(),
+        );
+    }
+    badges
+}
+
+fn section_heading_with_badges(
+    title: &'static str,
+    detail: Option<String>,
+    badges: Vec<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     div()
         .flex()
@@ -48,7 +97,12 @@ fn section_heading(title: &'static str, detail: Option<String>, cx: &App) -> Any
                 .text_color(theme.colors.fg_subtle)
                 .child(detail)
         }))
+        .children(badges)
         .into_any_element()
+}
+
+fn section_heading(title: &'static str, detail: Option<String>, cx: &App) -> AnyElement {
+    section_heading_with_badges(title, detail, Vec::new(), cx)
 }
 
 fn panel(child: AnyElement, cx: &App) -> AnyElement {
@@ -67,13 +121,35 @@ fn panel(child: AnyElement, cx: &App) -> AnyElement {
 }
 
 pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
+    state_panel_with_retry(
+        "profile-section-error",
+        state,
+        None::<fn(&mut Window, &mut App)>,
+        cx,
+    )
+}
+
+pub(super) fn state_panel_with_retry(
+    id: &'static str,
+    state: &PresentationError,
+    on_retry: Option<impl Fn(&mut Window, &mut App) + 'static>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let message = state.message();
+    let mark = crate::ui::compact_status::failed(
+        format!("{id}-mark"),
+        "Section could not be loaded",
+        message,
+        on_retry,
+        Some("profile-section-error-mark"),
+        cx,
+    );
     div()
-        .id("profile-section-error")
+        .id(id)
         .debug_selector(|| "profile-section-error".to_string())
         .flex()
-        .items_start()
+        .items_center()
         .gap_2()
         .p_3()
         .rounded(theme.radius(Radius::Md))
@@ -81,11 +157,7 @@ pub(super) fn state_panel(state: &PresentationError, cx: &App) -> AnyElement {
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(theme.colors.warning)
         .tooltip(ui_tooltip(message))
-        .child(
-            Icon::new(IconName::TriangleAlert)
-                .size(IconSize::Sm)
-                .color(theme.colors.warning),
-        )
+        .child(mark)
         .child(message)
         .into_any_element()
 }
@@ -277,15 +349,28 @@ impl ProfileView {
             SectionState::Unavailable(_) => return None,
             SectionState::Loading => loading("Loading profile README…", cx),
             // A real failure keeps one compact warning mark with its reason in the tooltip and
-            // accessible name. No retry is offered because this view has no retry callback.
-            SectionState::Error(error) => crate::ui::compact_status::failed(
-                "profile-readme-error",
-                "Profile README could not be loaded",
-                error.message(),
-                None::<fn(&mut Window, &mut App)>,
-                Some("profile-readme-error"),
-                cx,
-            ),
+            // accessible name. Retry is offered when the host registered an action handler.
+            SectionState::Error(error) => {
+                let retry = self.on_action.is_some().then(|| {
+                    let request = self.request();
+                    let weak = cx.weak_entity();
+                    move |window: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |view, cx| {
+                            if view.accepts(&request) {
+                                view.emit(ProfileActionKind::RetryReadme, window, cx);
+                            }
+                        });
+                    }
+                });
+                crate::ui::compact_status::failed(
+                    "profile-readme-error",
+                    "Profile README could not be loaded",
+                    error.message(),
+                    retry,
+                    Some("profile-readme-error"),
+                    cx,
+                )
+            }
             SectionState::Ready(()) => div()
                 .debug_selector(|| "profile-readme-reader".to_string())
                 .w_full()
@@ -301,6 +386,28 @@ impl ProfileView {
             let context = reader.read(cx).context();
             format!("{} / {}", context.owner(), context.path())
         });
+        let readme_badges =
+            provenance_badges("profile-readme", self.readme_provenance.as_ref(), self.now);
+        let header_row = if identity.is_some() || !readme_badges.is_empty() {
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(identity.map(|identity| {
+                        div()
+                            .font_family(cx.theme().mono_family.clone())
+                            .text_size(cx.theme().text_size(TextSize::Xs))
+                            .text_color(cx.theme().colors.fg_muted)
+                            .child(identity)
+                    }))
+                    .children(readme_badges)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
         Some(
             div()
                 .debug_selector(|| "profile-readme-section".to_string())
@@ -313,13 +420,7 @@ impl ProfileView {
                 .rounded(cx.theme().radius(Radius::Md))
                 .border_1()
                 .border_color(cx.theme().colors.border)
-                .children(identity.map(|identity| {
-                    div()
-                        .font_family(cx.theme().mono_family.clone())
-                        .text_size(cx.theme().text_size(TextSize::Xs))
-                        .text_color(cx.theme().colors.fg_muted)
-                        .child(identity)
-                }))
+                .children(header_row)
                 .child(body)
                 .into_any_element(),
         )
@@ -329,7 +430,20 @@ impl ProfileView {
         let SectionState::Ready(pinned) = self.repositories.clone() else {
             let body = match &self.repositories {
                 SectionState::Loading => loading("Loading repository pins…", cx),
-                SectionState::Error(error) => state_panel(error, cx),
+                SectionState::Error(error) => {
+                    let retry = self.on_action.is_some().then(|| {
+                        let request = self.request();
+                        let weak = cx.weak_entity();
+                        move |window: &mut Window, cx: &mut App| {
+                            let _ = weak.update(cx, |view, cx| {
+                                if view.accepts(&request) {
+                                    view.emit(ProfileActionKind::RetryRepositories, window, cx);
+                                }
+                            });
+                        }
+                    });
+                    state_panel_with_retry("profile-repositories-error", error, retry, cx)
+                }
                 SectionState::Unavailable(message) => div()
                     .p_3()
                     .text_color(cx.theme().colors.fg_subtle)
@@ -345,6 +459,11 @@ impl ProfileView {
         };
         let presentation = repository_presentation(&pinned);
         let count = presentation.repositories.len();
+        let repo_badges = provenance_badges(
+            "profile-repositories",
+            self.repositories_provenance.as_ref(),
+            self.now,
+        );
         self.selected_repository = self.selected_repository.min(count.saturating_sub(1));
         let cards = presentation
             .repositories
@@ -386,9 +505,10 @@ impl ProfileView {
             .flex_col()
             .gap_2()
             .min_w_0()
-            .child(section_heading(
+            .child(section_heading_with_badges(
                 presentation.title,
                 Some(format!("{count}")),
+                repo_badges,
                 cx,
             ))
             .children(presentation.note.map(|note| {
@@ -606,7 +726,20 @@ impl ProfileView {
         let SectionState::Ready(calendar) = self.contributions.clone() else {
             let body = match &self.contributions {
                 SectionState::Loading => loading("Loading contributions…", cx),
-                SectionState::Error(error) => state_panel(error, cx),
+                SectionState::Error(error) => {
+                    let retry = self.on_action.is_some().then(|| {
+                        let request = self.request();
+                        let weak = cx.weak_entity();
+                        move |window: &mut Window, cx: &mut App| {
+                            let _ = weak.update(cx, |view, cx| {
+                                if view.accepts(&request) {
+                                    view.emit(ProfileActionKind::RetryContributions, window, cx);
+                                }
+                            });
+                        }
+                    });
+                    state_panel_with_retry("profile-contributions-error", error, retry, cx)
+                }
                 SectionState::Unavailable(message) => div()
                     .p_3()
                     .text_color(cx.theme().colors.fg_subtle)
@@ -623,6 +756,11 @@ impl ProfileView {
                 .child(panel(body, cx))
                 .into_any_element();
         };
+        let contrib_badges = provenance_badges(
+            "profile-contributions",
+            self.contributions_provenance.as_ref(),
+            self.now,
+        );
         let model = super::heatmap::heatmap_presentation(&self.range, &calendar);
         let flat_count = model
             .weeks
@@ -837,7 +975,8 @@ impl ProfileView {
                             .text_size(cx.theme().text_size(TextSize::Xs))
                             .text_color(cx.theme().colors.fg_muted)
                             .child(range),
-                    ),
+                    )
+                    .children(contrib_badges),
             )
             .children((!notes.is_empty()).then(|| {
                 div()

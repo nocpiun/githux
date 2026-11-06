@@ -14,8 +14,8 @@ use crate::{
 };
 
 use super::{
-    CellLevel, PresentationError, ProfileActionKind, ProfileBinding, ProfileTarget, ProfileView,
-    SectionState, render::initials, repository_presentation,
+    CellLevel, PresentationError, ProfileActionKind, ProfileBinding, ProfileProvenance,
+    ProfileTarget, ProfileView, SectionState, render::initials, repository_presentation,
 };
 
 fn target(id: u64) -> ProfileTarget {
@@ -1147,6 +1147,103 @@ fn long_content_and_long_ranges_stay_bounded(cx: &mut TestAppContext) {
         "months have their own row above days"
     );
     assert!(day.size.height < graph.size.height / 7.0);
+}
+
+#[gpui::test]
+fn historical_and_partial_provenance_badges_and_section_retries_work(cx: &mut TestAppContext) {
+    use crate::domain::cache::{CacheCompleteness, CacheMetadata};
+    let (view, cx) = open(cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = actions.clone();
+    view.update_in(cx, |view, window, cx| {
+        view.on_action(std::rc::Rc::new(move |action, _, _| {
+            sink.borrow_mut().push(action);
+        }));
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_760_000_000);
+        view.set_now(now, cx);
+        let meta_hist = CacheMetadata {
+            representation_version: 1,
+            fetched_at_ms: 1_759_999_700_000, // 5 minutes ago
+            verified_at_ms: 1_759_999_700_000,
+            completeness: CacheCompleteness::Complete,
+            etag: None,
+            last_modified: None,
+            cache_control: None,
+        };
+        let meta_partial = CacheMetadata {
+            representation_version: 1,
+            fetched_at_ms: 1_759_999_700_000,
+            verified_at_ms: 1_759_999_700_000,
+            completeness: CacheCompleteness::Partial {
+                reason: "Profile showcase incomplete".into(),
+            },
+            etag: None,
+            last_modified: None,
+            cache_control: None,
+        };
+        assert!(view.update_basic_with_provenance(
+            &request,
+            SectionState::Ready(basic("person")),
+            Some(ProfileProvenance::from_cache(true, &meta_hist)),
+            cx,
+        ));
+        assert!(view.update_repositories_with_provenance(
+            &request,
+            SectionState::Ready(ProfilePinned {
+                repos: vec![repo(1, "one")],
+                total_repos: 1,
+                ..pinned(Showcase::PinnedRepositories(vec![]))
+            }),
+            Some(ProfileProvenance::from_cache(true, &meta_partial)),
+            cx,
+        ));
+        assert!(view.update_contributions(
+            &request,
+            &range(),
+            SectionState::Error(PresentationError::NotCached),
+            cx,
+        ));
+        assert!(view.update_readme_with_provider(
+            &request,
+            SectionState::Ready(readme("person", "# Cached README")),
+            None,
+            Some(ProfileProvenance::from_cache(true, &meta_hist)),
+            window,
+            cx,
+        ));
+    });
+    cx.simulate_resize(gpui::size(px(880.0), px(700.0)));
+    frames(cx);
+
+    assert!(
+        cx.debug_bounds("profile-basic-provenance-historical")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("profile-repositories-provenance-historical")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("profile-repositories-provenance-partial")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("profile-readme-provenance-historical")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("profile-section-error-mark").is_some());
+
+    let retry_mark = cx.debug_bounds("profile-section-error-mark").unwrap();
+    cx.simulate_click(retry_mark.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        actions
+            .borrow()
+            .iter()
+            .any(|a| a.kind == ProfileActionKind::RetryContributions),
+        "clicking the failed contributions section mark emits RetryContributions"
+    );
 }
 
 fn frames(cx: &mut VisualTestContext) {
