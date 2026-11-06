@@ -10,6 +10,7 @@ use crate::domain::profile::ProfileError;
 use crate::domain::repository::RepositoryIdentity;
 use crate::domain::repository_extras::{ExtrasCompleteness, RepositoryExtrasError};
 use crate::github::RepositoryExtrasLimits;
+use crate::storage::cache::CacheAuthorization;
 use crate::ui::repository_overview::{
     OverviewAction, OverviewBinding, OverviewSection, OverviewUpdate, ReleasesData,
     RepositoryOverview, SectionState,
@@ -38,6 +39,8 @@ impl Endpoint {
 struct Reply {
     binding: OverviewBinding,
     context: RepositoryReadContext,
+    /// In-process cache invalidation token captured before this read.
+    authorization: Option<CacheAuthorization>,
     endpoint: Endpoint,
     request: u64,
     update: OverviewUpdate,
@@ -45,6 +48,7 @@ struct Reply {
 struct CountsReply {
     binding: OverviewBinding,
     context: RepositoryReadContext,
+    authorization: Option<CacheAuthorization>,
     request: u64,
     result: Result<
         (crate::domain::repository_counts::RepositoryCounts, bool),
@@ -65,6 +69,9 @@ pub(super) struct Extras {
     counts_work: Option<Work>,
     counts_inbox: Arc<Mutex<VecDeque<CountsReply>>>,
     counts_request: u64,
+    /// Token captured before the overview reads that are currently displayed, so
+    /// invalidation is detected without any storage access.
+    displayed_authorization: Option<CacheAuthorization>,
 }
 impl Extras {
     pub fn stop(&mut self) {
@@ -79,12 +86,22 @@ impl Extras {
         self.counts = None;
         self.counts_historical = false;
         self.counts_request += 1;
+        self.displayed_authorization = None;
         self.view = None;
         self.session = None;
         self.cached = None;
         self.binding = None;
         self.inbox.lock().expect("overview inbox").clear();
     }
+    /// Whether the displayed overview's own cache authorization is still current.
+    /// Lock-free atomic loads only, so the page's render/receiver checks can call
+    /// it without touching storage.
+    pub(super) fn authorization_current(&self) -> bool {
+        self.displayed_authorization
+            .as_ref()
+            .is_none_or(CacheAuthorization::is_current)
+    }
+
     fn accepts(&self, page: &RepositoryPage, binding: &OverviewBinding) -> bool {
         page.active
             && self.binding.as_ref() == Some(binding)
@@ -97,6 +114,7 @@ impl Extras {
                 Some(session.context()) == page.context.as_ref() && session.verify()
             })
             && page.cache_allowed()
+            && self.authorization_current()
     }
 }
 impl RepositoryPage {
@@ -114,7 +132,7 @@ impl RepositoryPage {
                 .auth()
                 .account
                 .clone(),
-            repository,
+            repository.clone(),
             self.generation,
         );
         let view = cx.new(|cx| RepositoryOverview::new(binding.clone(), window, cx));
@@ -177,17 +195,30 @@ impl RepositoryPage {
             .details_provenance
             .as_ref()
             .is_some_and(|prov| prov.origin == crate::data::RepositoryCacheOrigin::Snapshot);
-        self.read_counts(offline_only);
+        // One token per overview generation: captured before any of its reads and
+        // retained while the values it produces are displayed.
+        let authorization = self.current_authorization(repository.id());
+        self.extras.displayed_authorization = authorization.clone();
+        self.read_counts(offline_only, authorization.clone());
         for endpoint in [
             Endpoint::Releases,
             Endpoint::Latest,
             Endpoint::Contributors,
             Endpoint::Languages,
         ] {
-            self.read_extra(endpoint, offline_only, cx);
+            self.read_extra(endpoint, offline_only, authorization.clone(), cx);
         }
     }
-    fn read_counts(&mut self, offline_only: bool) {
+
+    /// Captures the shared cache authorization token for `repository_id`.
+    ///
+    /// In-process only: it takes the store's dedicated authorizations mutex and
+    /// never waits for SQLite or files.
+    pub(super) fn current_authorization(&self, repository_id: u64) -> Option<CacheAuthorization> {
+        let binding = self.cache_binding.as_ref()?;
+        Self::capture_authorization(binding.store(), binding.scope(), Some(repository_id))
+    }
+    fn read_counts(&mut self, offline_only: bool, authorization: Option<CacheAuthorization>) {
         let Some(session) = self.extras.session.clone() else {
             return;
         };
@@ -216,12 +247,19 @@ impl RepositoryPage {
             inbox.lock().expect("count inbox").push_back(CountsReply {
                 binding,
                 context,
+                authorization,
                 request,
                 result,
             });
         });
     }
-    fn read_extra(&mut self, endpoint: Endpoint, offline_only: bool, cx: &mut Context<Self>) {
+    fn read_extra(
+        &mut self,
+        endpoint: Endpoint,
+        offline_only: bool,
+        authorization: Option<CacheAuthorization>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(binding) = self.extras.binding.clone() else {
             return;
         };
@@ -289,6 +327,7 @@ impl RepositoryPage {
                 inbox.lock().expect("overview inbox").push_back(Reply {
                     binding,
                     context,
+                    authorization,
                     endpoint,
                     request,
                     update,
@@ -321,6 +360,7 @@ impl RepositoryPage {
             .collect();
         for reply in counts {
             if reply.request == self.extras.counts_request
+                && Self::authorization_current(&reply.authorization)
                 && self.extras.accepts(self, &reply.binding)
                 && self.context.as_ref() == Some(&reply.context)
                 && self
@@ -363,6 +403,7 @@ impl RepositoryPage {
             .collect();
         for reply in replies {
             if self.extras.requests[reply.endpoint.index()] != reply.request
+                || !Self::authorization_current(&reply.authorization)
                 || !self.extras.accepts(self, &reply.binding)
                 || self.context.as_ref() != Some(&reply.context)
                 || !self
@@ -394,14 +435,21 @@ impl RepositoryPage {
         if !self.extras.accepts(self, binding) {
             return;
         }
+        let authorization = self.extras.displayed_authorization.clone();
         match action {
             OverviewAction::Refresh { section, .. } => match section {
+                // A scoped retry re-reads the same values, so it reuses the token
+                // that already authorizes the displayed overview.
                 OverviewSection::Releases => {
-                    self.read_extra(Endpoint::Releases, false, cx);
-                    self.read_extra(Endpoint::Latest, false, cx);
+                    self.read_extra(Endpoint::Releases, false, authorization.clone(), cx);
+                    self.read_extra(Endpoint::Latest, false, authorization.clone(), cx);
                 }
-                OverviewSection::Contributors => self.read_extra(Endpoint::Contributors, false, cx),
-                OverviewSection::Languages => self.read_extra(Endpoint::Languages, false, cx),
+                OverviewSection::Contributors => {
+                    self.read_extra(Endpoint::Contributors, false, authorization.clone(), cx)
+                }
+                OverviewSection::Languages => {
+                    self.read_extra(Endpoint::Languages, false, authorization, cx)
+                }
             },
             action => {
                 let Some(view) = self.extras.view.as_ref() else {
@@ -955,6 +1003,7 @@ mod tests {
                 .push_back(CountsReply {
                     binding,
                     context,
+                    authorization: page.extras.displayed_authorization.clone(),
                     request: current - 1,
                     result: Err(crate::domain::repository_counts::CountsError::RepositoryIdentity),
                 });
@@ -987,6 +1036,7 @@ mod tests {
             page.extras.inbox.lock().unwrap().push_back(Reply {
                 binding: binding.clone(),
                 context: context.clone(),
+                authorization: page.extras.displayed_authorization.clone(),
                 endpoint: Endpoint::Languages,
                 request: request - 1,
                 update: OverviewUpdate::Languages(SectionState::Error {
@@ -1007,6 +1057,7 @@ mod tests {
             page.extras.inbox.lock().unwrap().push_back(Reply {
                 binding,
                 context,
+                authorization: None,
                 endpoint: Endpoint::Languages,
                 request,
                 update: OverviewUpdate::Languages(SectionState::Error {

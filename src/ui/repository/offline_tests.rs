@@ -972,6 +972,7 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
             .push_back(super::super::Message {
                 generation: old_generation,
                 branch_request: old_branch_request,
+                authorization: None,
                 context: page.context.clone().expect("context"),
                 body: super::super::Body::Revision {
                     branch: "main".into(),
@@ -1003,11 +1004,13 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
     release_page(&host, cx);
 }
 
-/// A gate probe that is still outstanding when the page re-activates must not
-/// leave the new generation permanently unable to probe again, and a denial must
-/// remain recoverable through activation.
+/// An explicit repository revocation invalidates the token captured before the
+/// read, so a reply that finished before the revocation cannot be applied after
+/// it — and a later successful read cannot revive that old token.
 #[gpui::test]
-fn activation_resets_gate_probe_bookkeeping_and_recovers_from_denial(cx: &mut TestAppContext) {
+fn reply_captured_before_revocation_is_rejected_afterwards_and_never_revived(
+    cx: &mut TestAppContext,
+) {
     let fixture = CachedFixture::new(Scene::Normal);
     fixture.login(1);
     let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
@@ -1015,33 +1018,111 @@ fn activation_resets_gate_probe_bookkeeping_and_recovers_from_denial(cx: &mut Te
         page.reader_status() == &ReaderStatus::Showing
     });
 
-    // Simulate an outstanding probe plus a denial, as if a stale reply had been
-    // dropped by the generation check in `apply`.
+    let store = fixture.store.as_ref().expect("cache store").clone();
+    let scope = store
+        .saved_account(crate::domain::AccountKey::new(
+            1,
+            crate::domain::HostId::github(),
+        ))
+        .expect("saved scope");
+    let snapshot = page.read_with(cx, |page, _| {
+        page.branch
+            .as_ref()
+            .expect("loaded branch")
+            .snapshot
+            .clone()
+    });
+    let context = page.read_with(cx, |page, _| page.context.clone().expect("context"));
+    let old_authorization = store.authorization(&scope, Some(42)).expect("token");
+    assert!(old_authorization.is_current());
+    let (old_generation, old_branch_request) =
+        page.read_with(cx, |page, _| (page.generation, page.branch_request));
+
+    // The reply is "already complete" but still queued: it carries the token
+    // captured before the revocation.
+    page.update_in(cx, |page, _, _| {
+        page.inbox
+            .lock()
+            .expect("inbox")
+            .push_back(super::super::Message {
+                generation: old_generation,
+                branch_request: old_branch_request,
+                authorization: Some(old_authorization.clone()),
+                context: context.clone(),
+                body: super::super::Body::Revision {
+                    branch: "main".into(),
+                    request: old_branch_request,
+                    result: Ok((snapshot.clone(), None)),
+                },
+            });
+    });
+
+    store.revoke_repository(&scope, Some(42)).expect("revoke");
+    assert!(
+        !old_authorization.is_current(),
+        "revocation invalidates the captured token"
+    );
+
+    // Applying the queued reply must not resurrect the revoked content.
+    page.update_in(cx, |page, window, cx| page.drain(window, cx));
+    page.read_with(cx, |page, _| {
+        assert!(!page.is_active(), "the page stops at the revocation");
+        assert!(page.details().is_none());
+        assert!(page.branch.is_none());
+        assert!(page.reader().is_none());
+    });
+
+    // New permission afterwards also cannot bring the old token back.
+    store
+        .permission_confirmed(store.begin_revalidation(&scope, Some(42)).unwrap())
+        .unwrap();
+    assert!(
+        !old_authorization.is_current(),
+        "a fresh permission never revives an invalidated displayed token"
+    );
+    assert!(
+        store.authorization(&scope, Some(42)).unwrap().is_current(),
+        "a newly captured token is current, so a real reload can proceed"
+    );
+    release_page(&host, cx);
+}
+
+/// Activation and refresh drop every retained authorization token, so a later
+/// revocation cannot be masked by a token captured for a previous generation.
+#[gpui::test]
+fn activation_and_refresh_reset_retained_authorizations(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(
+            page.displayed_authorizations
+                .iter()
+                .any(|slot| slot.is_some()),
+            "a displayed cache page retains its tokens"
+        );
+        assert!(page.cache_allowed());
+    });
     page.update_in(cx, |page, window, cx| {
-        page.gate_probe_in_flight = true;
-        page.gate_denied = true;
-        let stale_request = page.gate_probe_request;
+        page.refresh_repository(cx);
+        assert!(
+            page.displayed_authorizations.iter().all(Option::is_none),
+            "refresh drops the previous generation's tokens"
+        );
+        page.drain(window, cx);
+    });
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && page.cache_allowed()
+    });
+    page.update(cx, |page, cx| {
         page.activate(cx);
         assert!(
-            !page.gate_probe_in_flight,
-            "activation clears the in-flight flag"
+            page.displayed_authorizations.iter().all(Option::is_none),
+            "activation drops the previous generation's tokens"
         );
-        assert!(!page.gate_denied, "activation clears the previous denial");
-        assert!(
-            page.gate_probe_request != stale_request,
-            "activation advances the probe identity so stale replies are inert"
-        );
-        // A reply for the superseded probe must not settle the new one.
-        page.gate_probe_in_flight = true;
-        page.apply_gate(stale_request, false, cx);
-        assert!(
-            page.gate_probe_in_flight,
-            "a stale gate reply cannot clear a newer in-flight probe"
-        );
-        page.apply_gate(page.gate_probe_request, true, cx);
-        assert!(!page.gate_probe_in_flight);
-        assert!(!page.gate_denied);
-        let _ = (window, cx);
     });
     settle(&page, cx, |page| {
         page.reader_status() == &ReaderStatus::Showing
@@ -1100,4 +1181,76 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
     });
     frames(cx);
     assert!(cx.debug_bounds("repository-cached-badge").is_some());
+}
+
+/// An explicit repository revocation, with no account epoch change, must clear the
+/// already-displayed page in exactly one drain. No sleeps, no `settle` retry loop:
+/// the delivered throttle/probe implementation cannot satisfy this.
+#[gpui::test]
+fn repository_revocation_clears_the_displayed_page_in_one_drain(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    // Overview requests are also displayed through the cache binding.
+    for _ in 0..200 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        frames(cx);
+        if page.read_with(cx, |page, cx| {
+            page.overview().is_some_and(|view| {
+                let view = view.read(cx);
+                !view.releases().is_loading() && !view.contributors().is_loading()
+            })
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let epoch_before = page.read_with(cx, |page, _| {
+        page.context
+            .as_ref()
+            .expect("a captured context")
+            .auth()
+            .epoch
+    });
+
+    let store = fixture.store.as_ref().expect("cache store").clone();
+    let scope = store
+        .saved_account(crate::domain::AccountKey::new(
+            1,
+            crate::domain::HostId::github(),
+        ))
+        .expect("saved scope");
+    store.revoke_repository(&scope, Some(42)).expect("revoke");
+
+    // One drain only. No sleep, no retry loop: the page must not keep showing
+    // revoked private content while waiting for a throttled probe.
+    page.update_in(cx, |page, window, cx| page.drain(window, cx));
+    page.read_with(cx, |page, _| {
+        assert!(
+            !page.is_active(),
+            "the revoked page stops being active in the same drain"
+        );
+        assert!(page.details().is_none(), "summary is cleared");
+        assert!(page.branch.is_none(), "snapshot is cleared");
+        assert!(page.reader().is_none(), "reader content is cleared");
+        assert!(page.overview().is_none(), "overview is cleared");
+        assert!(page.error().is_some(), "revocation is explained");
+        assert_eq!(
+            page.context.as_ref().map(|context| context.auth().epoch),
+            None,
+            "the cleared page holds no authorization context"
+        );
+    });
+    assert_eq!(
+        epoch_before,
+        page.read_with(cx, |page, _| page
+            .details_provenance()
+            .map(|_| unreachable!("cleared")))
+            .unwrap_or(epoch_before),
+        "the test revoked permission without changing the account epoch"
+    );
+    release_page(&host, cx);
 }

@@ -1,6 +1,6 @@
 # 开发路线图
 
-更新：2026-11-03。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 正式 Home/Profile/统一 Repository 页面已接线，仓库 Star/Unstar 已接入；缓存存储核心、账户生命周期与仓库/页面/头像/图片适配器已合并但尚未组装进正式 Shell；应用离线阅读、最终 Settings 和其他全局页面仍需后续接入与验收。本文不承诺日期，也不把路线图建议变成新产品授权。
+更新：2026-11-06。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 正式 Home/Profile/统一 Repository 页面、Notifications 与全局 Issues/PR 已接线，仓库 Star/Unstar 已接入；缓存存储核心、账户生命周期与各适配器已合并，正式 Shell 已组装唯一应用级 `CacheStore`，Home/Profile（#72/#69）与 Repository（本批 `repository-offline`）已消费快照。最终 Settings 设计与原生整体验收仍需后续交付。本文不承诺日期，也不把路线图建议变成新产品授权。
 
 功能范围以 [产品约定](product.md#首版范围) 为准；状态边界、数据策略及交付规则分别见 [架构方案](architecture.md)、[缓存策略](cache-strategy.md)、[Agent 工作流](agent-workflow.md)。路线图只维护顺序、依赖和完成标准，不复制另一套产品规则。
 
@@ -16,7 +16,7 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 
 ## 当前证据与下一步
 
-本节依据 main `d217116`（2026-11-03，含已合并的正式页面接线、Star 写动作、缓存存储核心/生命周期/适配器与全局组件）的实际源码记录能力；具体 PR/CI/review 状态到 GitHub 核验。本批并行集成任务不因已派发而算作正式产品接线。
+本节依据 main `abae289`（2026-11-06，含已合并的正式页面接线、Star 写动作、应用级缓存组装 #68、Home/Profile 缓存消费 #72/#69 与全局组件挂载）的实际源码记录能力；具体 PR/CI/review 状态到 GitHub 核验。已派发但未合并的任务不因派发而算作正式产品接线。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
@@ -25,8 +25,8 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 | Home / Feed | [`app::pages::home`](../src/app/pages/home.rs) 正式挂载 HomeView；open Issues/PRs、关注账号的三类 Feed、自动续页和描述摘要已接入 | Read more 导航到内部 PR 标签，详情留空；Events 来源仍有 API 范围限制，不能承诺与 GitHub 网页 Feed 完全一致。见 [Home](home-view.md) |
 | Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
 | 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合；Star/Unstar 已接入真实写路径（[PR #63](https://github.com/nocpiun/githux/pull/63)） | Fork 仍只有禁用入口，没有写 API；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md) |
-| 全局组件（Settings/Notifications/Issues-PR） | 独立组件、数据适配与离线预览已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)） | 未注册进正式 Shell 路由，正式挂载由本批集成任务进行；预览不代表产品功能已上线 |
-| 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用；[cache-core](cache-core.md) 存储/授权门槛、[账户生命周期](cache-account-lifecycle.md) 绑定，以及[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器均已合并 | 正式 Shell 尚未打开应用级 `CacheStore` 或消费快照，仍不支持重启离线内容阅读。workspace 仅内存、重启 Home。缓存政策已确认，适配器存在不等于应用接线或离线阅读已交付 |
+| 全局组件（Settings/Notifications/Issues-PR） | 独立组件与数据适配已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)）；Notifications 与全局 Issues/PR 已由 [#71](https://github.com/nocpiun/githux/pull/71) 注册进正式 Shell 路由 | Settings 仍是过渡 Accounts 入口；`SettingsView` 组件已合并但未挂载，最终分类与设置项仍待独立设计 |
+| 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用；[cache-core](cache-core.md) 存储/授权门槛、[账户生命周期](cache-account-lifecycle.md) 绑定、[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器均已合并；#68 在正式启动打开唯一应用级 `CacheStore`，#72/#69 与仓库页面消费其快照 | 仓库/Home/Profile 已支持重启后读取已缓存内容并区分历史快照，但账户 workspace 仍是内存态、重启先回 Home。C1–C5 政策已确认，容量与验证间隔仍属工程测量起点；清缓存、授权失效与跨账户隔离的端到端原生验收仍待整体验证 |
 | CI 与交付流程 | PR #1/#2 起已有检查；PR #7 起 Ubuntu code-check，四平台 Debug build 与最终 `CI` 汇总保留；PR #31 增加 PR Check 门槛 | 具体 required checks 和当前 head 结果必须到 GitHub 核验；编译通过不是 Windows 以外原生产品支持，也不是 GUI 验收 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用 | 派发 skill 和完整并行调度未产品化；并行工作不能成为 main 的实现证据 |
 
@@ -34,10 +34,10 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 
 1. **正式页面基础已接线**：后续页面复用既有账户上下文、typed 导航和每会话生命周期；组合验收仍必须来自产品路由，不能由独立 examples 推断。
 2. **Settings 独立设计与验收**：过渡 Accounts 功能可继续服务开发，但最终页面不能直接沿用。先确认全局/仓库分类与首批项目，再实现本地设置持久化；local-only 提案未获批准，不是接线依赖或共享规则。
-3. **持久业务内容缓存与离线**：存储核心、账户生命周期与仓库/页面/头像/图片适配器已合并；剩余工作是正式 Shell 组装唯一 `CacheStore`、接入 Home/Profile/Repository 等消费者并选择在线/离线模式，验证失效、授权和清理。适配器与存储接口本身不提供页面离线体验。
+3. **持久业务内容缓存与离线**：存储核心、账户生命周期与适配器已合并，#68 已组装应用级 `CacheStore`，Home/Profile/Repository 已接入消费者。剩余工作是整体验证失效、授权撤权与清理、给出容量/验证间隔的实测依据，并决定在线/离线模式的产品行为；已接线不等于这些参数或模式策略已确认。
 4. **README 图片与 HTML 已接入**：Reader 图片/Flow 与 HTML 任务已合并并整合到正式 Profile/Repository 页面；保留固定版本、来源和图片请求边界，详见[阅读器](content-reader.md)。
 5. **输入、DPI 与首版整体验收**：在正式接线后的真实 Windows 窗口核验中文 IME、文本选择、键盘/焦点、触控板/滚动、多 DPI/跨屏、长内容和账户切换。各组件已有的局部原生证据保留，但不代替端到端验收。
-6. **保留首版剩余范围**：H1–H4/H7、command palette 搜索范围及最终 Settings 项目仍待逐项决定；Issue/PR 详情等已排除/留空项不借接线恢复。持久缓存、图片、全局入口和综合验收未做完前，不能宣布首版完成。
+6. **保留首版剩余范围**：H1–H4/H7、command palette 搜索范围及最终 Settings 项目仍待逐项决定；Issue/PR 详情等已排除/留空项不借接线恢复。最终 Settings 挂载与真实 Windows 端到端验收未做完前，不能宣布首版完成。
 
 已有 CI 的分支规则是否启用，以仓库实际设置为准。路线图不替负责人修改规则。负责人已于 2026-10-22 解除首次试跑的单实现者限制，并明确按依赖、文件冲突、编译资源与审查积压安排并行；这不改变同一任务同一时刻只有一个有效写入者的要求。
 
@@ -113,7 +113,7 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 
 **验收：** 两个仓库标签可以独立切换分支和文件；快速切换时旧响应不覆盖新页面；关闭一个标签不误取消其他标签共享的读取；重新启动后离线可读之前缓存的仓库内容，但不恢复旧标签集合，仍先进入 Home；无缓存、旧版本与真实空数据可区分。
 
-**当前状态：** 固定快照读取、账户作用域 session、reader 和统一 RepositoryPage 已接入正式 Shell；业务缓存存储核心已存在但消费者未接线，重启离线阅读仍未交付。完整验证边界见[正式页面接入](shell-page-integration.md)。
+**当前状态：** 固定快照读取、账户作用域 session、reader 和统一 RepositoryPage 已接入正式 Shell，并由本批 `repository-offline` 接入持久缓存：重启后可按最后已知授权读取已缓存摘要、分支、目录、README、正文与图片，历史快照与当前值分开展示。授权撤权在当前 drain 内清空页面（不依赖定时探测），图片按固定 commit 复用。完整验证边界见[正式页面接入](shell-page-integration.md)与[仓库缓存](repository-cache.md)。
 
 **首个内部自用检查点：** 此链路通过后即可试用仓库阅读，收集真实数据、输入与性能问题；它不代表已完成包含 Home、Profile 等内容的整个首版，也不自动缩减其他保留功能。
 
@@ -131,7 +131,7 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 
 Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确认只保留合并 PR、星标仓库、创建仓库三类活动、保持服务顺序，且每条卡片主语必须是当前账户关注的人（合并贡献取 PR 作者，需读 PR 详情确认），初始手动刷新，不自动轮询，也不承诺复刻网站全部 Feed；Follow 两类事件卡片暂缓。Home 查询为 `involves:` + `is:open`、无时间窗口、按 updated 降序；Profile 的公开同名根 README、pins/gist 提示、仅无 pin 才 Popular 与最近一年范围已确认。具体边界统一见[产品约定](product.md#home-与-feed-的数据范围)。
 
-**当前状态：** Home/Profile/Repository 三个产品路由已统一接入真实数据入口；Settings 仍是过渡 Accounts 页面，远程搜索、离线读取与整体验收尚未完成。
+**当前状态：** Home/Profile/Repository 三个产品路由已统一接入真实数据入口，Notifications 与全局 Issues/PR 也已注册进正式路由；Settings 仍是过渡 Accounts 页面。远程搜索、最终 Settings 与整体原生验收尚未完成。
 
 **验收：** 保留页面全部使用真实数据入口，不保留假数据冒充已接入；加载、部分失败、权限不足、旧值与离线行为遵循统一约定。远端设置若包含写入，依赖 R5 选定的写操作契约，不绕开权限与失败处理。
 

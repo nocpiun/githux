@@ -79,7 +79,7 @@ use crate::github::RepositoryLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
 use crate::network::executor::BackgroundExecutor;
 use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
-use crate::storage::cache::{CacheKey, CacheScope, CacheStore};
+use crate::storage::cache::{CacheAuthorization, CacheScope, CacheStore};
 use crate::ui::reader::{
     DocumentKind, ImageLimits, ImageProvider, LinkTarget, ReaderAction, ReaderView,
 };
@@ -93,9 +93,26 @@ pub const TREE_WIDTH: f32 = 268.0;
 /// Height of one file-tree row.
 pub const TREE_ROW_HEIGHT: f32 = 26.0;
 
-/// Minimum spacing between background cache-gate probes while the page is on
-/// screen. The gate changes only through explicit account/cache events.
-const GATE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// One cache-authorization slot per resource this page displays itself. Each
+/// slot keeps the token captured before that resource's read, so invalidating
+/// one resource (an explicit repository revocation) cannot be masked by another
+/// resource's later, still-valid token. The overview keeps its own token inside
+/// `extras.rs` and is checked there.
+const AUTH_SLOTS: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthSlot {
+    Repository = 0,
+    Branches = 1,
+    Revision = 2,
+    Content = 3,
+}
+
+impl AuthSlot {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
 
 /// The capabilities a host injects. They are the only way this page reaches
 /// GitHub; nothing here opens storage or credentials on its own.
@@ -294,11 +311,17 @@ impl Work {
     }
 }
 
-/// A background result. Every message carries the page generation and the
-/// authorization context captured when the request started.
+/// A background result. Every message carries the page generation, the
+/// authorization context captured when the request started and the shared
+/// [`CacheAuthorization`] captured before its read.
 struct Message {
     generation: u64,
     branch_request: u64,
+    /// In-process cache invalidation token captured before the read. Once a
+    /// revocation/PAT replacement/rejection invalidates it, it never becomes
+    /// valid again, so a reply that finished before that event cannot be applied
+    /// afterwards even if a later read restored access.
+    authorization: Option<CacheAuthorization>,
     context: RepositoryReadContext,
     body: Body,
 }
@@ -331,14 +354,6 @@ enum Body {
         result: Result<DirectoryTree, PageError>,
     },
     Content(ContentReply),
-    /// Result of the background cache-gate probe. Storage I/O never runs on the
-    /// UI thread; only this boolean is published back. `request` identifies the
-    /// probe so a reply from a superseded activation/refresh cannot settle a
-    /// newer one.
-    Gate {
-        request: u64,
-        allowed: bool,
-    },
 }
 
 /// One content reply, bundled so the publication check reads as one step.
@@ -409,18 +424,14 @@ pub struct RepositoryPage {
     active: bool,
     /// Set when authorization changed under a running generation.
     authorization_lost: bool,
-    /// Latest background cache-gate verdict for the bound repository. Published
-    /// by `Body::Gate`; never computed by a synchronous store read on the UI
-    /// thread.
-    gate_denied: bool,
-    /// True while one gate probe is outstanding, so render/receiver ticks cannot
-    /// start unbounded storage work.
-    gate_probe_in_flight: bool,
-    /// Monotonic probe epoch, so a reply for an older generation is discarded.
-    gate_probe_request: u64,
-    /// When the last background gate probe started, so the 30 ms receiver beat
-    /// does not turn into a 33 Hz SQLite read loop.
-    gate_probe_at: Option<std::time::Instant>,
+    /// Shared in-process invalidation tokens retained for the data currently on
+    /// screen, one per displayed resource (summary, branches, revision, reader
+    /// content, overview/counts). Checking them is a lock-free atomic load, so
+    /// render and the receiver beat never touch SQLite or the store's state
+    /// mutex. A slot is only replaced by a reply that already passed its own
+    /// carried-token check, so an older displayed value can never be
+    /// re-authorized by a newer reply's token.
+    displayed_authorizations: [Option<CacheAuthorization>; AUTH_SLOTS],
     tree_scroll: UniformListScrollHandle,
     tree_motion: crate::ui::scroll::Motion<gpui::ScrollHandle>,
     tree_bars: crate::ui::scroll::Bars,
@@ -500,10 +511,7 @@ impl RepositoryPage {
             tab: RepositoryTab::Code,
             active: false,
             authorization_lost: false,
-            gate_denied: false,
-            gate_probe_in_flight: false,
-            gate_probe_request: 0,
-            gate_probe_at: None,
+            displayed_authorizations: Default::default(),
             tree_scroll,
             tree_motion: crate::ui::scroll::Motion::new(base),
             tree_bars: crate::ui::scroll::Bars::new(),
@@ -599,8 +607,8 @@ impl RepositoryPage {
         self.selection_request = self.selection_request.wrapping_add(1);
         self.generation = self.generation.wrapping_add(1);
         // A fresh activation is a new authorization and repository binding, so
-        // any previous gate verdict/probe belongs to the old generation.
-        self.reset_gate_probe();
+        // every retained cache-authorization token belongs to the old generation.
+        self.reset_authorization();
         self.authorization_lost = false;
         // Clear every authorization-bound value *before* capturing a session:
         // acquiring one can fail (for example the active account was removed),
@@ -667,6 +675,7 @@ impl RepositoryPage {
         }
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
+        self.reset_authorization();
         self.active = false;
         self.session = None;
         self.cached_session = None;
@@ -710,7 +719,7 @@ impl RepositoryPage {
         self.reader_status = ReaderStatus::Loading;
         self.error = None;
         self.authorization_lost = false;
-        self.reset_gate_probe();
+        self.reset_authorization();
         self.cursor = None;
         self.invalidate_rows();
         self.services = services;
@@ -776,7 +785,7 @@ impl RepositoryPage {
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.branch_request = self.branch_request.wrapping_add(1);
-        self.reset_gate_probe();
+        self.reset_authorization();
         self.inbox.lock().expect("repository page inbox").clear();
         self.work = Some(Work::new());
         self.pending_content = None;
@@ -1451,124 +1460,75 @@ impl RepositoryPage {
         }
     }
 
-    /// Drops generation-bound gate-probe bookkeeping so a new activation or
-    /// refresh starts from "no verdict yet, nothing in flight". Advancing
-    /// `gate_probe_request` makes any still-outstanding reply inert.
-    fn reset_gate_probe(&mut self) {
-        self.gate_probe_request = self.gate_probe_request.wrapping_add(1);
-        self.gate_probe_in_flight = false;
-        self.gate_probe_at = None;
-        self.gate_denied = false;
+    /// Captures the shared cache authorization token for the current session and
+    /// (when known) repository.
+    ///
+    /// This takes only the store's dedicated in-memory authorizations mutex; it
+    /// never waits for SQLite/files and is safe outside the UI thread. `None`
+    /// means there is no cache binding at all (plain online page), not that
+    /// access was denied.
+    pub(super) fn capture_authorization(
+        store: &CacheStore,
+        scope: &CacheScope,
+        repository_id: Option<u64>,
+    ) -> Option<CacheAuthorization> {
+        store.authorization(scope, repository_id)
     }
 
-    /// Cheap, non-blocking gate verdict used by render/apply/acceptance checks.
+    /// Cheap, non-blocking publication/display check.
     ///
-    /// The store probe itself is blocking SQLite work, so it never runs here;
-    /// [`RepositoryPage::request_gate_probe`] schedules it on the background
-    /// executor and publishes the boolean back through `Body::Gate`.
+    /// Lock-free atomic loads only: the session verifies in memory and the
+    /// retained token reports whether any revocation, PAT replacement,
+    /// credential rejection, retirement or clear happened after it was captured.
+    /// A token never becomes valid again, so a reply queued before the event
+    /// cannot be resurrected by a later successful read.
     pub(super) fn cache_allowed(&self) -> bool {
         if self.cache_binding.is_none() {
             return true;
         }
-        self.context.is_some() && !self.gate_denied
+        if self.context.is_none() {
+            return false;
+        }
+        // No token yet means nothing cache-derived is displayed. As soon as a
+        // resource is published its token must stay current. The embedded
+        // overview keeps its own token; it is checked here too because the page
+        // renders its release/contributor/language states.
+        self.extras.authorization_current()
+            && self
+                .displayed_authorizations
+                .iter()
+                .flatten()
+                .all(CacheAuthorization::is_current)
     }
 
-    /// Schedules at most one background cache-gate probe for the current
-    /// generation and repository. Called from render and the receiver tick, so it
-    /// must not perform storage I/O itself.
-    pub(super) fn request_gate_probe(&mut self) {
-        if self.gate_probe_in_flight || self.authorization_lost || !self.active {
-            return;
-        }
-        // A bounded refresh cadence: the gate only changes through explicit
-        // account/cache events, so a couple of seconds of latency is acceptable
-        // and the storage mutex is not taken on every receiver beat.
-        if self
-            .gate_probe_at
-            .is_some_and(|at| at.elapsed() < GATE_PROBE_INTERVAL)
-        {
-            return;
-        }
-        self.gate_probe_at = Some(std::time::Instant::now());
-        let Some(expected) = self.cache_binding.clone() else {
-            return;
-        };
-        let Some(context) = self.context.clone() else {
-            return;
-        };
-        self.gate_probe_request = self.gate_probe_request.wrapping_add(1);
-        self.gate_probe_in_flight = true;
-        let inbox = self.inbox.clone();
-        let alive = self.alive.clone();
-        let generation = self.generation;
-        let branch_request = self.branch_request;
-        let repo_service = self.services.accounts.repo_service();
-        let repository_id = self.details.as_ref().map(|details| details.identity.id());
-        let message_context = context.clone();
-        let request = self.gate_probe_request;
-        let spawned = self.services.executor.handle().spawn(async move {
-            let allowed = tokio::task::spawn_blocking(move || {
-                let Some(current) = repo_service.cache(&context) else {
-                    return false;
-                };
-                if current.scope() != expected.scope() {
-                    return false;
-                }
-                let Some(repository_id) = repository_id else {
-                    // No per-repository gate yet; the account binding match is
-                    // the only available evidence and it already passed.
-                    return true;
-                };
-                let Ok(key) = CacheKey::mutable(
-                    Some(repository_id),
-                    true,
-                    "authorization-probe",
-                    "gate-v1",
-                    "githux-repository-v1",
-                    1,
-                ) else {
-                    return false;
-                };
-                !matches!(
-                    current.store().read(current.scope(), &key),
-                    Err(crate::storage::cache::CacheError::AccessDenied
-                        | crate::storage::cache::CacheError::Stale)
-                )
-            })
-            .await
-            .unwrap_or(false);
-            if *alive.borrow() {
-                inbox
-                    .lock()
-                    .expect("repository page inbox")
-                    .push_back(Message {
-                        generation,
-                        branch_request,
-                        context: message_context,
-                        body: Body::Gate { request, allowed },
-                    });
-            }
-        });
-        if spawned.is_err() {
-            self.gate_probe_in_flight = false;
+    /// Whether this exact token is still current, used at publication time.
+    pub(super) fn authorization_current(authorization: &Option<CacheAuthorization>) -> bool {
+        authorization
+            .as_ref()
+            .is_none_or(CacheAuthorization::is_current)
+    }
+
+    /// Drops every cache-authorization binding held for the current generation.
+    fn reset_authorization(&mut self) {
+        self.displayed_authorizations = Default::default();
+    }
+
+    /// Whether the resource behind `slot` is currently on screen, so a reply's
+    /// token may become the token that gates it.
+    fn slot_is_displayed(&self, slot: AuthSlot) -> bool {
+        match slot {
+            AuthSlot::Repository => self.details.is_some(),
+            AuthSlot::Branches => self.branches.is_some(),
+            AuthSlot::Revision => self.branch.is_some(),
+            AuthSlot::Content => self.reader.is_some(),
         }
     }
 
-    /// Applies a background gate verdict for the matching probe only.
-    ///
-    /// A reply from a superseded activation or refresh must neither clear the
-    /// in-flight flag of a newer probe (leaving it permanently "running") nor
-    /// publish a verdict for a repository the page no longer shows.
-    fn apply_gate(&mut self, request: u64, allowed: bool, cx: &mut Context<Self>) {
-        if request != self.gate_probe_request {
-            return;
-        }
-        self.gate_probe_in_flight = false;
-        if allowed {
-            return;
-        }
-        self.gate_denied = true;
-        self.check_authorization(cx);
+    /// Records the token that authorizes one displayed resource. Only the slot
+    /// that produced the reply is replaced; another resource's older (possibly
+    /// invalidated) token keeps gating the page.
+    fn adopt_authorization(&mut self, slot: AuthSlot, authorization: &Option<CacheAuthorization>) {
+        self.displayed_authorizations[slot.index()] = authorization.clone();
     }
 
     fn stop_work(&mut self) {
@@ -1621,9 +1581,6 @@ impl RepositoryPage {
             let mut inbox = self.inbox.lock().expect("repository page inbox");
             inbox.drain(..).collect()
         };
-        // Storage I/O stays on the background executor; only the resulting
-        // boolean is applied here.
-        self.request_gate_probe();
         self.check_authorization(cx);
         for message in messages {
             self.apply(message, window, cx);
@@ -1639,9 +1596,9 @@ impl RepositoryPage {
         if !self.active || self.authorization_lost {
             return;
         }
-        // Both checks are non-blocking: the session verifies in memory and the
-        // cache verdict is the last background probe result. Storage I/O is
-        // never performed here.
+        // Both checks are non-blocking: the session verifies in memory and every
+        // retained `CacheAuthorization` token is a lock-free atomic load. Storage
+        // I/O is never performed here.
         if self.session.as_ref().is_some_and(RepositorySession::verify) && self.cache_allowed() {
             return;
         }
@@ -1656,6 +1613,7 @@ impl RepositoryPage {
         self.authorization_lost = true;
         self.active = false;
         self.stop_work();
+        self.reset_authorization();
         self.session = None;
         self.cached_session = None;
         self.cache_binding = None;
@@ -1692,12 +1650,18 @@ impl RepositoryPage {
                 .accounts
                 .repo_service()
                 .is_current(&message.context)
-            || !self.cache_allowed()
+            || !Self::authorization_current(&message.authorization)
             || (message.branch_request != self.branch_request
-                && !matches!(&message.body, Body::Branches(_) | Body::Gate { .. }))
+                && !matches!(&message.body, Body::Branches(_)))
         {
             return;
         }
+        let slot = match &message.body {
+            Body::Repository { .. } => AuthSlot::Repository,
+            Body::Branches(_) => AuthSlot::Branches,
+            Body::Revision { .. } | Body::Root { .. } | Body::Readme { .. } => AuthSlot::Revision,
+            Body::Directory { .. } | Body::Content(_) => AuthSlot::Content,
+        };
         match message.body {
             Body::Repository {
                 result,
@@ -1726,7 +1690,15 @@ impl RepositoryPage {
                 result,
             } => self.apply_directory(branch, commit, path, result, cx),
             Body::Content(content) => self.apply_content(content, window, cx),
-            Body::Gate { request, allowed } => self.apply_gate(request, allowed, cx),
+        }
+        // Only a reply that passed its own carried-token check above may replace
+        // the displayed token, and only for the resource it produced. Other
+        // slots keep their older (possibly invalidated) tokens, so a fresh read
+        // of one resource can never re-authorize another.
+        if let Some(authorization) = &message.authorization
+            && self.slot_is_displayed(slot)
+        {
+            self.adopt_authorization(slot, &Some(authorization.clone()));
         }
     }
 
@@ -2570,6 +2542,44 @@ impl RepositoryPage {
         Some(Arc::new(service) as Arc<dyn ImageProvider>)
     }
 
+    /// The numeric repository identity the job's read belongs to, when the page
+    /// already knows it. The repository summary job resolves it, so it has none.
+    fn job_repository_id(&self, job: &Job) -> Option<u64> {
+        match job {
+            Job::Repository { .. } => None,
+            Job::Branches { identity, .. }
+            | Job::Revision { identity, .. }
+            | Job::Root {
+                snapshot:
+                    RepoSnapshot {
+                        repository: identity,
+                        ..
+                    },
+                ..
+            }
+            | Job::Readme {
+                snapshot:
+                    RepoSnapshot {
+                        repository: identity,
+                        ..
+                    },
+                ..
+            } => Some(identity.id()),
+            Job::Directory { handle, .. } => Some(handle.repository().id()),
+            Job::Content { identity, .. } => Some(identity.repository().id()),
+        }
+    }
+
+    /// The displayed resource a job's result will replace.
+    fn job_slot(job: &Job) -> AuthSlot {
+        match job {
+            Job::Repository { .. } => AuthSlot::Repository,
+            Job::Branches { .. } => AuthSlot::Branches,
+            Job::Revision { .. } | Job::Root { .. } | Job::Readme { .. } => AuthSlot::Revision,
+            Job::Directory { .. } | Job::Content { .. } => AuthSlot::Content,
+        }
+    }
+
     fn cache_hint(&self) -> Option<CacheHint> {
         let binding = self.cache_binding.as_ref()?;
         Some(CacheHint {
@@ -2589,6 +2599,14 @@ impl RepositoryPage {
             return;
         };
         let cached = self.cached_session.clone();
+        // Capture the in-process invalidation token *before* the read starts and
+        // carry it with the reply. A revocation/PAT replacement/rejection that
+        // happens while the read runs therefore invalidates the reply itself; a
+        // later successful read cannot revive it.
+        let repository_id = self.job_repository_id(&job);
+        let authorization = self.cache_binding.as_ref().and_then(|binding| {
+            Self::capture_authorization(binding.store(), binding.scope(), repository_id)
+        });
         let inbox = self.inbox.clone();
         let alive = self.alive.clone();
         let generation = self.generation;
@@ -2603,6 +2621,7 @@ impl RepositoryPage {
                     .push_back(Message {
                         generation,
                         branch_request,
+                        authorization,
                         context,
                         body,
                     });
@@ -2946,10 +2965,9 @@ pub(crate) fn format_sync_age(verified_at_ms: i64) -> String {
 
 impl Render for RepositoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Both of these are non-blocking: the gate probe is scheduled on the
-        // background executor and its boolean result is applied on a later tick,
-        // so a paint never takes the cache store mutex or runs SQLite.
-        self.request_gate_probe();
+        // Non-blocking: the session and the retained `CacheAuthorization` token
+        // are in-memory checks; a paint never takes the cache store mutex or runs
+        // SQLite.
         self.check_authorization(cx);
         let rows = self.refresh_rows();
         let view = view::render(self, rows, window, cx);

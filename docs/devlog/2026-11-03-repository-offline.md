@@ -31,6 +31,7 @@
 - **L010（fixture 支持反复操作）**：测试中的离线开关和图片分支通过包装原 `FixtureTransport` 按请求身份重复应答，未修改共享 fixture。
 - **L012（组件与整页联合验证）**：在同一 `RepositoryPage` 实例内同时验证摘要、分支、树、README 正文、源码、README 图片、overview 与 Star 按钮的离线/刷新行为。
 - **L014（可选内容与诚实状态）**：历史快照以紧凑 `Cached` 胶囊与 tooltip 表达，不堆砌长段落；未缓存目录/文件明确报告未缓存，不伪装成空目录。
+- **授权判定不要靠轮询**：把授权状态做成“后台定时探测最近结果”的布尔量，会让撤权正确性依赖探测间隔——既是延迟窗口，也可能整个漏掉（撤权与重新授权落在同一窗口内）。撤权必须由被读取数据自己携带的失效令牌判定：读取前取令牌、回复带令牌、发布前校验令牌，失效后永不复原。这条同时满足 UI 线程零存储 I/O（令牌校验只是原子 load），见 `cache-runtime` 的 `CacheAuthorization`。
 
 ## 验证记录
 
@@ -83,3 +84,50 @@ Codex 对 `a4e8433` 提出 1 项 P2，成立且可直接修复；仍无待裁决
 回归：`cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary` 构造 `Network` 摘要 + 两个不同时间的 `Snapshot` 分支/revision，断言胶囊出现、报告最旧时间且绝不等于摘要的当前时间。
 
 本轮验证（同一源码）：`cargo test --locked --test repository offline` 全通过、`--test repository` 867 通过、`--test repository_overview` 44 通过、`cargo test --locked` 主程序 1139 / home 96 / notifications 579 / profile 279 / reader 250 / reader_images 771 / repository 867 / overview 44 全通过；`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked` 均通过。
+
+## PR #73 第四轮审查修复：共享撤权令牌取代定时门禁探测（final base `abae289`）
+
+Codex 对 `a391612` 提出 1 项 P1，成立且必须修复；仍无待裁决事项，`merge_owner` 保持 worker。
+
+**撤权延迟窗口**：原实现把授权判定写成 `context.is_some() && !gate_denied`，`gate_denied` 只由 `request_gate_probe` 的后台探测填充，且两次探测之间至少间隔 2 秒、同一时刻仅一个在途。因此 `revoke_repository(scope, Some(id))` 在 AuthEpoch 不变时（明确仓库撤权不清账户代次）不会立刻反映到页面：私有内容会继续显示最长 2 秒；若撤权与重新验证都发生在同一个 2 秒窗口内，探测只看到“当前允许”，这个撤权会被完全漏掉。任何“缩短间隔”都只是缩小窗口，不能消除它。
+
+**修复**：改用 `cache-runtime`（#68，已并入 main）提供的共享 `CacheAuthorization` 令牌，删除 `request_gate_probe`/`apply_gate`/`Body::Gate`/`GATE_PROBE_INTERVAL` 以及 `gate_denied`/`gate_probe_in_flight`/`gate_probe_at`/`gate_probe_request` 四个字段。
+
+- 每次后台读取**开始前**用 `CacheStore::authorization(scope, repository)` 取一个令牌，随回复回到页面：`Message.authorization`、extras 的 `Reply.authorization` / `CountsReply.authorization`。
+- `apply` 在写入任何字段前先做 `CacheAuthorization::is_current()`：撤权前完成、撤权后才被排空的回复直接被拒，不会把内容写回，也不会因随后的重新授权而复活（令牌一旦失效不会再次有效）。
+- 页面按资源分槽保留已展示令牌 `displayed_authorizations: [Option<CacheAuthorization>; 4]`（摘要/分支/revision/内容），overview+counts 的令牌留在 `Extras::displayed_authorization`。`cache_allowed()` 只对它们做原子 load，`render` 与 30ms receiver 节拍依然零存储 I/O，也不再需要节流。
+- 只有通过自身令牌校验的回复才能替换**它自己那个槽**的令牌，因此某资源的新读取不能替另一资源（可能已失效）的内容重新授权。
+- `activate`/`rebind`/`deactivate`/`refresh_repository`/授权丢失路径都 `reset_authorization()`，丢弃旧代次令牌，避免新代次把旧代次的撤权掩盖掉。
+
+**确定性回归**（均为真实 `RepositoryPage` + `AccountService::open_with_cache` + 临时 `CacheStore`）：
+
+- `repository_revocation_clears_the_displayed_page_in_one_drain`：在线展示摘要+overview 后 `revoke_repository(&scope, Some(42))`，仅一次 `drain`（不 sleep、不 settle）即断言页面失活、`details`/`branch`/`reader`/overview 全清、错误就位、`context` 为 `None`。该测试在交付 head 上稳定失败（run `653e5a3f`，panic `the revoked page stays active in the same drain`）；把 `cache_allowed()` 临时改回恒真后再次失败（run `d2603345`），恢复修复后通过（run `af02e39b`、`3616ac00`、`d3908bdf`）。
+- `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`：捕获撤权前的真实令牌，把“已完成但仍在队列”的 revision 回复推入 inbox，撤权后单次 `drain` 必须拒绝它且页面保持清空；随后 `begin_revalidation`/`permission_confirmed` 重新授权，断言旧令牌**仍不** current（旧回复永不复活），而重新捕获的新令牌 current（真实重载可以继续）。
+- `activation_and_refresh_reset_retained_authorizations`：展示态确有保留令牌且 `cache_allowed()` 为真；`refresh_repository` 与 `activate` 后所有槽归空，再稳定回到可显示态。
+- 删除原先描述节流探测内部状态的 `activation_resets_gate_probe_bookkeeping_and_recovers_from_denial`（对应实现已不存在）。
+
+**基底变化**：本轮开始时 `feature/cache-runtime` 尚未合并，曾以 cherry-pick 方式引入令牌核心；#68 合并后该提交在 rebase 中按要求丢弃，`src/storage/` 与 main 完全一致（`CacheStore::authorization`、`CacheAuthorization`、`start_fresh_aggregate` 均来自 main）。随后 #72 Home、#69 Profile 合并，最终 rebase 到 `abae289`，本 PR 保持仓库范围独占。
+
+**文档状态修正**（本 PR 一并负责）：`docs/README.md`、`docs/roadmap.md`、`docs/cache-strategy.md`、`docs/architecture.md` 中“正式 Shell 尚未打开应用级 `CacheStore`／消费者未接线／全局页面未挂载”的过时段落改为按事实分层：已合并的应用级 `CacheStore` 组装与 Home/Profile/Repository 消费、已挂载的 Notifications 与全局 Issues/PR、仍未挂载的 `SettingsView` 最终组件、仍属建议值的容量与验证间隔、以及仍未完成的真实 Windows 原生/dogfooding 验收。`docs/repository-browser.md` 的授权段落同步改写为 carried-token 机制。
+
+本轮验证（同一源码，最终 head）：见下方"最终验证"小节，命令均为 `node scripts/verify.mjs -- cargo ...`，exit 0 与 run 日志为准。
+
+### 最终验证（final head on `abae289`）
+
+全部通过 `node scripts/verify.mjs -- cargo ...` 执行，以 runner 的 exit code 与 run 日志为准（不使用结尾管道判断 Cargo 成功）：
+
+| 检查 | runner 结果 | run id |
+| --- | --- | --- |
+| `cargo check --locked --all-targets` | SUCCESS exit 0 | `771358e1` |
+| `cargo fmt --all -- --check` | SUCCESS exit 0 | `5a96d404` |
+| `cargo clippy --locked --all-targets -- -D warnings` | SUCCESS exit 0 | `69796b85` |
+| `cargo test --locked --test repository offline` | SUCCESS exit 0，22 passed / 853 filtered | `9c2e902c` |
+| `cargo test --locked --test repository` | SUCCESS exit 0，875 passed | `5a37c92e` |
+| `cargo test --locked --test repository_overview` | SUCCESS exit 0，44 passed | `6e750fbe` |
+| `cargo test --locked`（全量） | SUCCESS exit 0 | `49368563` |
+
+全量分项：main 1224、home 98、notifications 589、profile 284、reader 250、reader_images 777、repository 875、repository_overview 44，合计 4141 通过，0 失败。
+
+失败-通过证据：撤权回归在交付 head 上失败（run `653e5a3f`）；把 `cache_allowed()` 临时改回恒真后再次失败（run `d2603345`）；恢复 carried-token 实现后通过（`af02e39b`、`3616ac00`、`d3908bdf`、`9c2e902c`）。
+
+原生边界不变：`pending` 仍需真实 Shell 窗口下的人工验收（冷启动离线打开已读仓库、断网切换目录、撤权后页面即时清空、固定 commit 图片复用）。

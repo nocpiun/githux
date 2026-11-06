@@ -222,6 +222,7 @@ fn an_older_repository_summary_cannot_roll_back_a_write_or_its_count(cx: &mut Te
         let message = super::super::Message {
             generation: page.generation,
             branch_request: page.branch_request,
+            authorization: None,
             context: page.context.clone().unwrap(),
             body: super::super::Body::Repository {
                 result: Ok((old, None)),
