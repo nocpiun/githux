@@ -35,10 +35,37 @@ mod revocation_tests;
 mod tests;
 
 const VERSION: u32 = 1;
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageReadMode {
     Online,
     Offline,
+}
+/// One logical collection generation, shared by the first page and its
+/// continuation pages.
+///
+/// Source pages are positional (`page=2`), but a first-page replacement can shift
+/// every boundary. Continuing an older, separately cached page would then silently
+/// omit or duplicate activities, so continuations are bound to the generation the
+/// displayed first page was read under. Historical reads take the generation from
+/// the stored first-page snapshot, never from the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedCollection {
+    /// Continuation of the snapshot this first-page read just produced.
+    Fresh,
+    /// Continuation of an already published collection.
+    Generation(CollectionGeneration),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionGeneration(u64);
+impl CollectionGeneration {
+    fn from_cursor(cursor: u64) -> Self {
+        Self(cursor)
+    }
+    /// Stable suffix for a page representation so a continuation cached under a
+    /// replaced first page is neither read nor mistaken for the current one.
+    pub fn suffix(self) -> String {
+        format!("-c{:016x}", self.0)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageOrigin {
@@ -64,6 +91,11 @@ pub enum PageCacheError<E> {
 struct SnapshotV1 {
     version: u32,
     exchanges: Vec<Exchange>,
+    /// Present only for a Feed first page: the generation that binds its
+    /// continuations. Older snapshots simply have none and never match a
+    /// continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collection: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -72,6 +104,7 @@ pub struct CachedPageReadSession {
     store: CacheStore,
     scope: CacheScope,
 }
+
 impl CachedPageReadSession {
     /// The caller supplies the app's store clone and saved-account scope.
     pub fn new(
@@ -155,6 +188,7 @@ impl CachedPageReadSession {
         cancel: CancellationToken,
         read: F,
         completeness: impl FnOnce(&T) -> CacheCompleteness,
+        collection: Option<CollectionGeneration>,
     ) -> Result<Scoped<PageValue<T>>, PageCacheError<E>>
     where
         F: FnOnce(PageReadSession) -> Fut,
@@ -210,6 +244,18 @@ impl CachedPageReadSession {
                         });
                     }
                 };
+                // A continuation may only replay a first-page snapshot of the
+                // generation it belongs to. Replaced or legacy first pages have a
+                // different (or missing) generation, so the continuation is a
+                // miss instead of a silently inconsistent collection.
+                if let Some(expected) = collection
+                    && dto.collection != Some(expected.0)
+                {
+                    return Ok(Scoped {
+                        context: self.context().clone(),
+                        value: PageValue::Miss(CacheMiss::NotCached),
+                    });
+                }
                 (
                     Arc::new(PageTransport::replay(dto.exchanges)),
                     Some(metadata),
@@ -295,7 +341,8 @@ impl CachedPageReadSession {
             self.guard(&cancel)?;
             let value = result.map_err(PageCacheError::Read)?.value;
             let observed = completeness(&value);
-            let mut metadata = cached.unwrap_or_else(|| metadata(stamp, observed.clone(), false));
+            let mut metadata = cached
+                .unwrap_or_else(|| metadata_with_collection(stamp, observed.clone(), collection));
             // Replay uses the caller's current Feed deduplication set. A newly
             // exposed unresolved event must never inherit Complete provenance.
             if observed != CacheCompleteness::Complete {
@@ -314,10 +361,12 @@ impl CachedPageReadSession {
                 };
                 let exchanges = transport.exchanges();
                 let stored_metadata = metadata.clone();
+                let stored_collection = collection.map(|value| value.0);
                 self.blocking(move |store, _| {
                     let bytes = serde_json::to_vec(&SnapshotV1 {
                         version: VERSION,
                         exchanges,
+                        collection: stored_collection,
                     })
                     .map_err(|_| CacheError::Corrupt)?;
                     match store.put(ticket, &bytes, stored_metadata) {
@@ -368,4 +417,34 @@ fn partial(complete: bool, reason: &str) -> CacheCompleteness {
             reason: reason.into(),
         }
     }
+}
+/// The first-page snapshot records its collection generation in the cache
+/// metadata validator. Continuations compare against it before replaying.
+fn metadata_with_collection(
+    stamp: i64,
+    completeness: CacheCompleteness,
+    collection: Option<CollectionGeneration>,
+) -> CacheMetadata {
+    let mut metadata = metadata(stamp, completeness, false);
+    metadata.etag = collection.map(|value| format!("collection:{}", value.0));
+    metadata
+}
+pub(crate) fn metadata_feed_collection(metadata: &CacheMetadata) -> Option<CollectionGeneration> {
+    metadata
+        .etag
+        .as_deref()
+        .and_then(|value| value.strip_prefix("collection:"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(CollectionGeneration::from_cursor)
+}
+/// Stable, non-secret generation for one first-page Feed snapshot. It only has to
+/// differ between two reads of the same query, never to be agreed across processes.
+pub fn new_collection_generation() -> CollectionGeneration {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    CollectionGeneration::from_cursor(stamp ^ sequence.rotate_left(17))
 }

@@ -101,11 +101,13 @@ async fn feed_older_pages_replay_filter_and_deduplicate_with_current_seen_ids() 
         .await;
     fixture.enqueue(r#"[{"id":10,"login":"friend"}]"#).await;
     let mut seen = std::collections::HashSet::new();
+    let collection = Some(crate::data::page_cache::new_collection_generation());
     let (page, _, _) = value(
         cached
             .feed_page(
                 PageReadMode::Online,
                 FeedSourceCursor { page: 2 },
+                collection,
                 &limits,
                 &following,
                 &authors,
@@ -125,6 +127,7 @@ async fn feed_older_pages_replay_filter_and_deduplicate_with_current_seen_ids() 
             .feed_page(
                 PageReadMode::Offline,
                 FeedSourceCursor { page: 2 },
+                collection,
                 &limits,
                 &following,
                 &authors,
@@ -142,6 +145,7 @@ async fn feed_older_pages_replay_filter_and_deduplicate_with_current_seen_ids() 
             .feed_page(
                 PageReadMode::Offline,
                 FeedSourceCursor { page: 3 },
+                collection,
                 &limits,
                 &following,
                 &authors,

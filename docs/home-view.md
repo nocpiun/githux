@@ -1,13 +1,13 @@
 # Home / Feed 页面视图
 
-更新：2026-10-30（第二轮）。本文记录可复用 Home/Feed 页面视图的接口、已确认默认值、失败与完整性语义，以及 host/data 职责。底层查询能力见 [Home / Feed 查询服务](home-query-service.md)；本视图不请求网络、不读取凭据、不做关注关系判断。
+更新：2026-11-04。本文记录可复用 Home/Feed 页面视图的接口、已确认默认值、失败与完整性语义，以及 host/data 职责。底层查询能力见 [Home / Feed 查询服务](home-query-service.md)；本视图不请求网络、不读取凭据、不做关注关系判断。
 
 ## 状态与范围
 
 - 已实现：`src/ui/home/**` 的双列呈现、独立状态、绑定/generation 隔离、虚拟化列表、共享滚动条与 wheel motion、键盘选择、typed 动作回调。
 - 独立预览：`examples/home.rs` 通过 `src/bin_support/home_modules.rs` 的薄 `#[path]` 装配复用真实组件，提供合成 Mixed / Loading-error / Partial / Filtered-out / Empty-unavailable / Large 场景；可选首个参数按标签或 0-based 索引选择初始场景（仅预览用）。Mixed 与 Filtered-out 都通过真实 `build_feed`；前者混合合法活动与被过滤来源，后者仅含技术噪声和未被关注的主语，验证正常最小空态。
 - 测试：`tests/home.rs` 在 GPUI 测试平台执行真实组件，测试代码位于 `src/ui/home/tests.rs`。
-- 正式集成：`app::pages::HomePage` 提供账户作用域请求、异步结果发布、分页与内部导航，见[正式页面接入](shell-page-integration.md)。Issue/PR 详情、自动轮询、用户自定义筛选与磁盘离线读取未实现。示例 fixtures 不是产品路由或运行时开关。
+- 正式集成：`app::pages::HomePage` 提供账户作用域请求、页面缓存消费、异步结果发布、分页与内部导航，见[正式页面接入](shell-page-integration.md)。正式应用打开 `CacheStore` 仍依赖 `cache-runtime`；Issue/PR 详情正文、自动轮询与用户自定义筛选未实现。示例 fixtures 不是产品路由或运行时开关。
 
 ## 已确认默认值（负责人 2026-10-28，2026-10-30 补充筛选）
 
@@ -94,6 +94,16 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 ## 正式 Shell 接入（2026-10-29）
 
 本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；Feed 的数据层负责源事件、`/user/following` 与有界 PR 作者详情读取，并在发布前完成策略过滤（`FEED_AUTHOR_LOOKUP_LIMIT = 30`、关注列表最多 1,000 账户/10 页）；`FeedOutcome` 带 `next_page` 游标，host 在 `LoadMoreFeed` 时按游标逐页追加，而不是预先读完整条（至多 300 条/30 天）时间线。两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经 `set_avatar_renderer` 只传入已解码元素；renderer 接收的是 credited subject（合并 PR 时为 PR 作者）。`FeedOutcome` 只含已通过策略的 `FeedActivity`，视图不会再自行过滤，也无法从显示字符串推断关注状态。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
+
+## 2026-11-03 离线页面缓存与历史快照呈现
+
+`HomePage` 现已消费 `data::page_cache::CachedPageReadSession`：
+- **离线回退与历史标识**：当且仅当在线网络或超时失败、且当前账户拥有合规缓存时，回退展示本地持久快照；离线未缓存首屏保持 Unavailable（不作为错误标或空活动展示）。历史快照明确保留其原有的 `fetched_at_ms`，并在栏目标题旁显示紧凑 `Saved` 图标与 tooltip 相对保存时间，在追加已缓存旧页时继续保留该标记，只有网络刷新替换整个集合后才清除。
+- **分页同源约束**：Feed 触底续读保持严格的同源集合（一次快照周期内全为网络结果或全为历史快照），全过滤空页仍自动续读下一页。若历史 Feed 某一后续页未被缓存，显示紧凑的 `Page N is not available offline` 提示并停止自动重试，绝不把不同代次或新旧混合的分页盲目拼接；同一 Feed 集合内的星标仓库描述批次独立完成，追加新页不会取消前页仍在途的描述查找，而在线刷新替换集合时会取消旧描述批次、重置去重集合与游标。
+- **授权门槛与边界**：401 凭据拒绝、请求取消和过时账户上下文绝不转为历史成功；缓存 quarantine/存储故障与账户会话有效性分开处理，当前 `PageReadSession` 仍有效时回退普通在线读取，不为恢复在线而解锁旧私有快照。切换账户、移除账户或替换 PAT 推进上下文后，已有展示副本在 `rebind`/前台检查时清空并回到 Unavailable。
+- **权限代次票据（2026-11-04）**：消费 cache-runtime 独立核心提交 `9f87f47` 的 `CacheAuthorization`（`CacheStore::authorization(scope, None)`），票据只做内存原子失效判断，不授予权限、不读磁盘。读取、追加、描述回复均携带同一票据，后台完成入队前与 UI 发布前复核；已显示 Home/Feed/描述副本在现有轻节拍 drain 检测到失效后清除，迟到结果不得复活旧内容。
+- **快照集合代次绑定（2026-11-05）**：经协调批准，在 `data::page_cache` 引入 `CollectionGeneration`，Feed 首页在线读取或离线回放时捕获该集合代次并与后续页绑定，快照元数据与 DTO 持久化代次；第一页在线替换后，离线续读旧代次后续页命中未缓存（`FeedAppendState::NotCached`），绝不拼接不同代次的分页。同代次后续页正常回放。通过确定性测试 `acceptance_replaced_first_page_never_appends_older_generation_continuation_offline`。
+- **无缓存平滑回退**：当宿主未注入 `CacheStore` 或未绑定分区时，完全保留原有的在线请求链路，行为与接口不发生回归。
 
 ## 2026-10-29 第二轮状态呈现
 

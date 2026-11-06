@@ -74,6 +74,7 @@ impl CachedPageReadSession {
             cancel,
             |session| async move { session.home(updated, limits, request_cancel).await },
             |value| partial(value.readiness.is_complete(), "Home query incomplete"),
+            None,
         )
         .await
     }
@@ -92,6 +93,7 @@ impl CachedPageReadSession {
             cancel,
             |session| async move { session.profile(login, request_cancel).await },
             |_| CacheCompleteness::Complete,
+            None,
         )
         .await
     }
@@ -123,6 +125,7 @@ impl CachedPageReadSession {
                     "Profile showcase incomplete",
                 )
             },
+            None,
         )
         .await
     }
@@ -153,6 +156,7 @@ impl CachedPageReadSession {
                     .await
             },
             |v| partial(v.errors.is_empty(), "Contribution calendar incomplete"),
+            None,
         )
         .await
     }
@@ -173,6 +177,13 @@ impl CachedPageReadSession {
             max_authors.to_string()
         ]);
         let request_cancel = cancel.clone();
+        // Every first-page read starts a collection generation. Offline replays
+        // must keep the generation stored with the snapshot, so the same cached
+        // first page and its continuations stay coherent across restarts.
+        let generation = match mode {
+            PageReadMode::Offline => None,
+            PageReadMode::Online => Some(new_collection_generation()),
+        };
         self.read(
             mode,
             None,
@@ -185,6 +196,7 @@ impl CachedPageReadSession {
                     .await
             },
             |v| partial(v.readiness.is_complete(), "Feed dependencies incomplete"),
+            generation,
         )
         .await
     }
@@ -195,6 +207,7 @@ impl CachedPageReadSession {
         &self,
         mode: PageReadMode,
         cursor: FeedSourceCursor,
+        collection: Option<CollectionGeneration>,
         limits: &FeedLimits,
         following: &FollowingLimits,
         authors: &PullRequestDetailLimits,
@@ -203,10 +216,18 @@ impl CachedPageReadSession {
         cancel: CancellationToken,
     ) -> Result<Scoped<PageValue<FeedPage>>, PageCacheError<HomeError>> {
         let parameters = serde_json::json!([cursor.page, limits.per_page]);
-        // The source representation is independent of seen IDs. Replay runs the
-        // same policy against the caller's current set; no mixed page DTO is saved.
+        // Continuations belong to the collection of the first page currently
+        // displayed by this session. Without one there is nothing safe to append.
+        if mode == PageReadMode::Offline && collection.is_none() {
+            return Ok(Scoped {
+                context: self.context().clone(),
+                value: PageValue::Miss(CacheMiss::NotCached),
+            });
+        }
+        let collection_suffix = collection.map(|c| c.suffix()).unwrap_or_default();
         let parameters = serde_json::json!([
             parameters,
+            collection_suffix,
             format!("{limits:?}"),
             format!("{following:?}"),
             format!("{authors:?}"),
@@ -239,6 +260,7 @@ impl CachedPageReadSession {
                     Ok::<_, HomeError>(value)
                 },
                 |v| partial(v.reasons.is_empty(), "Feed page incomplete"),
+                collection,
             )
             .await?;
         if matches!(value.value, PageValue::Value { .. }) {
@@ -279,6 +301,7 @@ impl CachedPageReadSession {
                     "Optional repository descriptions unavailable",
                 )
             },
+            None,
         )
         .await
     }
@@ -304,6 +327,7 @@ impl CachedPageReadSession {
                     "Release pages incomplete",
                 )
             },
+            None,
         )
         .await
     }
@@ -333,6 +357,7 @@ impl CachedPageReadSession {
                     "Contributor pages incomplete",
                 )
             },
+            None,
         )
         .await
     }
@@ -363,6 +388,7 @@ impl CachedPageReadSession {
                     "Latest release not found or inaccessible",
                 )
             },
+            None,
         )
         .await
     }
@@ -383,6 +409,7 @@ impl CachedPageReadSession {
             cancel,
             |session| async move { session.languages(repository, limits, request_cancel).await },
             |_| CacheCompleteness::Complete,
+            None,
         )
         .await
     }
@@ -410,6 +437,7 @@ impl CachedPageReadSession {
                     "Repository counts incomplete",
                 )
             },
+            None,
         )
         .await
     }
@@ -450,6 +478,7 @@ impl CachedPageReadSession {
                     "Profile root tree incomplete",
                 )
             },
+            None,
         )
         .await
     }

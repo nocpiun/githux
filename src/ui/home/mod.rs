@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 use ely_core::{
     buttons::IconButton,
     motion::Spinner,
-    primitives::IconName,
+    primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
@@ -64,6 +64,49 @@ pub struct RefreshRequest {
     pub column: Column,
     pub binding: RequestBinding,
     pub generation: u64,
+}
+
+/// Provenance of a successful read. Historical values retain their original
+/// timestamps; they are not promoted to current network results on display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageProvenance {
+    pub fetched_at_ms: i64,
+    pub verified_at_ms: i64,
+}
+
+impl PageProvenance {
+    pub fn new(fetched_at_ms: i64, verified_at_ms: i64) -> Self {
+        Self {
+            fetched_at_ms,
+            verified_at_ms,
+        }
+    }
+
+    pub fn from_metadata(metadata: &crate::domain::cache::CacheMetadata) -> Self {
+        Self::new(metadata.fetched_at_ms, metadata.verified_at_ms)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotPresentation<T> {
+    pub outcome: T,
+    pub provenance: PageProvenance,
+}
+
+impl<T> SnapshotPresentation<T> {
+    pub fn historical(outcome: T, metadata: &crate::domain::cache::CacheMetadata) -> Self {
+        Self {
+            outcome,
+            provenance: PageProvenance::from_metadata(metadata),
+        }
+    }
+
+    pub fn historical_at(outcome: T, fetched_at_ms: i64) -> Self {
+        Self {
+            outcome,
+            provenance: PageProvenance::new(fetched_at_ms, fetched_at_ms),
+        }
+    }
 }
 
 /// Stable repository identity used for navigation callbacks.
@@ -171,7 +214,7 @@ impl<T> PanelState<T> {
         *self = Self::Loading;
     }
 
-    fn refreshing(&self) -> bool {
+    pub fn refreshing(&self) -> bool {
         matches!(
             self,
             Self::Ready {
@@ -232,6 +275,9 @@ impl Default for RefreshAvailability {
 struct PanelModel<T> {
     state: PanelState<T>,
     refresh: RefreshAvailability,
+    /// `None` is a current/network observation; `Some` is an explicitly marked
+    /// historical snapshot, including its original fetch/verification times.
+    provenance: Option<PageProvenance>,
 }
 
 impl<T> PanelModel<T> {
@@ -244,6 +290,7 @@ impl<T> PanelModel<T> {
                 refreshing: false,
             },
             refresh: RefreshAvailability::default(),
+            provenance: None,
         }
     }
 
@@ -255,6 +302,7 @@ impl<T> PanelModel<T> {
             refreshing: false,
         };
         self.refresh = RefreshAvailability::default();
+        self.provenance = None;
     }
 }
 
@@ -367,6 +415,9 @@ pub enum FeedAppendState {
     Loading,
     Failed {
         /// The cursor to retry. Preserved so a refresh cannot lose continuation.
+        page: u32,
+    },
+    NotCached {
         page: u32,
     },
 }
@@ -527,6 +578,31 @@ impl HomeView {
         &self.feed_append
     }
 
+    pub fn provenance(&self, column: Column) -> Option<&PageProvenance> {
+        match column {
+            Column::Home => self.home.provenance.as_ref(),
+            Column::Feed => self.feed.provenance.as_ref(),
+        }
+    }
+
+    /// A historical page whose next source page was never cached remains
+    /// readable, but must not pretend that the timeline ended or offer a retry
+    /// which can only repeat the same cache miss.
+    pub fn feed_page_not_cached(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        page: u32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        self.feed_append = FeedAppendState::NotCached { page };
+        cx.notify();
+        true
+    }
+
     /// Enriches multiple repository descriptions at once, guarded by the active
     /// request binding and generation.
     pub fn set_repository_descriptions(
@@ -547,6 +623,12 @@ impl HomeView {
         }
         cx.notify();
         true
+    }
+
+    /// A replacement Feed read starts a new description generation too.
+    pub fn clear_repository_descriptions(&mut self, cx: &mut Context<Self>) {
+        self.repo_descriptions.clear();
+        cx.notify();
     }
 
     /// Enriches or clears a single repository description, guarded by the active
@@ -650,7 +732,34 @@ impl HomeView {
         &mut self,
         binding: &RequestBinding,
         generation: u64,
+        outcome: HomeSearchOutcome,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_home_internal(binding, generation, outcome, None, cx)
+    }
+
+    pub fn apply_home_snapshot(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        snapshot: SnapshotPresentation<HomeSearchOutcome>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_home_internal(
+            binding,
+            generation,
+            snapshot.outcome,
+            Some(snapshot.provenance),
+            cx,
+        )
+    }
+
+    fn apply_home_internal(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
         mut outcome: HomeSearchOutcome,
+        provenance: Option<PageProvenance>,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.accepts(binding, generation) {
@@ -666,6 +775,7 @@ impl HomeView {
             content: PanelContent::Ready(outcome),
             refreshing: false,
         };
+        self.home.provenance = provenance;
         self.home_view.selected = None;
         cx.notify();
         true
@@ -676,6 +786,33 @@ impl HomeView {
         binding: &RequestBinding,
         generation: u64,
         outcome: FeedOutcome,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_feed_internal(binding, generation, outcome, None, cx)
+    }
+
+    pub fn apply_feed_snapshot(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        snapshot: SnapshotPresentation<FeedOutcome>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_feed_internal(
+            binding,
+            generation,
+            snapshot.outcome,
+            Some(snapshot.provenance),
+            cx,
+        )
+    }
+
+    fn apply_feed_internal(
+        &mut self,
+        binding: &RequestBinding,
+        generation: u64,
+        outcome: FeedOutcome,
+        provenance: Option<PageProvenance>,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.accepts(binding, generation) {
@@ -695,6 +832,7 @@ impl HomeView {
             content: PanelContent::Ready(outcome),
             refreshing: false,
         };
+        self.feed.provenance = provenance;
         self.feed_view.selected = None;
         self.feed_append = FeedAppendState::Idle;
         cx.notify();
@@ -1266,6 +1404,10 @@ fn render_panel_with<T: PanelRows + 'static>(
         append_generation,
         cx,
     );
+    let historical = model
+        .provenance
+        .as_ref()
+        .map(|provenance| historical_mark(column, provenance, cx));
     let busy = model.state.is_busy();
     let disabled = !model.refresh.available || busy;
     let tooltip = if busy {
@@ -1342,6 +1484,7 @@ fn render_panel_with<T: PanelRows + 'static>(
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(title),
                 )
+                .children(historical)
                 .child(
                     div()
                         .debug_selector(move || format!("{}-refresh-slot", column_name(column)))
@@ -1606,6 +1749,56 @@ fn column_name(column: Column) -> &'static str {
     }
 }
 
+fn historical_mark(
+    column: Column,
+    provenance: &PageProvenance,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
+    let colors = cx.theme().colors.clone();
+    let at = std::time::UNIX_EPOCH + Duration::from_millis(provenance.fetched_at_ms.max(0) as u64);
+    let when = crate::ui::relative_time::relative(Some(&format_rfc3339(at)), SystemTime::now());
+    let tip = format!("Saved {when}. Network content has not replaced this snapshot.");
+    div()
+        .id(format!("{}-historical", column_name(column)))
+        .debug_selector(move || format!("{}-historical", column_name(column)))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(cx.theme().text_size(TextSize::Xs))
+        .text_color(colors.fg_subtle)
+        .tooltip(ui_tooltip(tip))
+        .child(Icon::new(IconName::Clock).size(IconSize::Xs))
+        .child("Saved")
+        .into_any_element()
+}
+
+/// Millisecond cache timestamps are converted only for the shared relative
+/// formatter. Invalid/future times retain the formatter's honest fallback.
+fn format_rfc3339(at: SystemTime) -> String {
+    let duration = at.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let seconds = duration.as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    // Howard Hinnant's civil-from-days conversion, independent of host locale.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        day_seconds / 3_600,
+        day_seconds % 3_600 / 60,
+        day_seconds % 60
+    )
+}
+
 /// Compact end-of-scroll append indicator for the Feed column. Loading is an
 /// animated icon; a failed append keeps the visible list and shows a yellow
 /// warning with click-to-retry, never a `Loading…`/`Load more` prose button.
@@ -1631,6 +1824,25 @@ fn feed_append_footer(
                 cx,
             ))
             .into_any_element(),
+        FeedAppendState::NotCached { page } => {
+            let colors = cx.theme().colors.clone();
+            div()
+                .debug_selector(|| "feed-append-not-cached".to_string())
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .py_2()
+                .text_color(colors.fg_subtle)
+                .child(
+                    Icon::new(IconName::CloudOff)
+                        .size(IconSize::Xs)
+                        .color(colors.fg_subtle),
+                )
+                .child(format!("Page {page} is not available offline."))
+                .into_any_element()
+        }
         FeedAppendState::Failed { page } => {
             let retry = {
                 let entity = cx.entity().downgrade();

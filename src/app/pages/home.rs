@@ -8,16 +8,212 @@ use tokio::sync::watch;
 
 use crate::app::accounts::AccountServices;
 use crate::app::avatar::AvatarKey;
-use crate::data::{PageReadSession, RepositoryReadContext};
+use crate::data::page_cache::{
+    CachedPageReadSession, PageCacheError, PageOrigin, PageReadMode, PageValue,
+};
+use crate::data::{PageReadSession, RepositoryReadContext, Scoped};
+use crate::domain::cache::CacheMetadata;
+use crate::domain::error::GitHubError;
 use crate::domain::home::{FeedOutcome, HomeError, HomeSearchOutcome};
 use crate::github::home::{FeedLimits, FollowingLimits, HomeSearchLimits, PullRequestDetailLimits};
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::storage::cache::CacheAuthorization;
 use crate::ui::avatar::AvatarSlot;
-use crate::ui::home::{Column, HomeAction, HomeView, RefreshAvailability, RequestBinding};
+use crate::ui::home::{
+    Column, HomeAction, HomeView, RefreshAvailability, RequestBinding, SnapshotPresentation,
+};
 use crate::workspace::TabId;
 
 use super::{NavigationSink, PageAvatars, PageNavigation};
 use crate::workspace::Route;
+
+struct CachedRead<T> {
+    value: T,
+    source: ReadSource,
+    metadata: Option<CacheMetadata>,
+}
+
+enum CachedReadFailure {
+    Network(HomeError),
+    AuthOrContext(HomeError),
+    /// Quarantine, stale leases, I/O and other cache failures say nothing about
+    /// the validity of the current account session. Retry the online read with
+    /// the ordinary session, which keeps its original 401/cancel/context checks.
+    UncachedOnline,
+}
+
+fn cache_failure(error: PageCacheError<HomeError>) -> CachedReadFailure {
+    match error {
+        PageCacheError::Read(error) if can_fall_back(&error) => CachedReadFailure::Network(error),
+        PageCacheError::Read(error) => CachedReadFailure::AuthOrContext(error),
+        PageCacheError::Context(error) => {
+            CachedReadFailure::AuthOrContext(HomeError::GitHub(error))
+        }
+        PageCacheError::Cache(_) => CachedReadFailure::UncachedOnline,
+    }
+}
+
+fn cache_miss_failure(error: PageCacheError<HomeError>) -> HomeError {
+    match error {
+        PageCacheError::Read(error) => error,
+        PageCacheError::Context(error) => HomeError::GitHub(error),
+        PageCacheError::Cache(_) => HomeError::InvalidResponse {
+            message: "The saved page could not be read.".into(),
+        },
+    }
+}
+
+fn can_fall_back(error: &HomeError) -> bool {
+    matches!(
+        error,
+        HomeError::GitHub(GitHubError::Network { .. } | GitHubError::Timeout { .. })
+    )
+}
+
+fn unpack_cached<T>(
+    scoped: Scoped<PageValue<T>>,
+    partition: &str,
+) -> Result<Option<CachedRead<T>>, PageCacheError<HomeError>> {
+    match scoped.value {
+        PageValue::Value {
+            value,
+            origin: PageOrigin::Network,
+            metadata,
+        } => {
+            let collection = crate::data::page_cache::metadata_feed_collection(&metadata);
+            Ok(Some(CachedRead {
+                value,
+                source: ReadSource::Network { collection },
+                metadata: None,
+            }))
+        }
+        PageValue::Value {
+            value,
+            origin: PageOrigin::HistoricalSnapshot,
+            metadata,
+        } => {
+            let collection = crate::data::page_cache::metadata_feed_collection(&metadata);
+            let source = ReadSource::Historical {
+                partition: partition.to_string(),
+                collection,
+            };
+            Ok(Some(CachedRead {
+                value,
+                source,
+                metadata: Some(metadata),
+            }))
+        }
+        PageValue::Miss(_) => Ok(None),
+    }
+}
+
+async fn read_home(
+    session: PageReadSession,
+    cached: Option<CachedPageReadSession>,
+    cache_partition: String,
+    cancel: CancellationToken,
+) -> Result<Option<CachedRead<HomeSearchOutcome>>, HomeError> {
+    if let Some(cached) = cached {
+        match cached
+            .home(
+                PageReadMode::Online,
+                None,
+                &HomeSearchLimits::default(),
+                cancel.clone(),
+            )
+            .await
+        {
+            Ok(value) => {
+                return unpack_cached(value, &cache_partition).map_err(cache_miss_failure);
+            }
+            Err(error) => match cache_failure(error) {
+                CachedReadFailure::Network(_) => {
+                    let offline = cached
+                        .home(
+                            PageReadMode::Offline,
+                            None,
+                            &HomeSearchLimits::default(),
+                            cancel.clone(),
+                        )
+                        .await
+                        .map_err(cache_miss_failure)?;
+                    return unpack_cached(offline, &cache_partition).map_err(cache_miss_failure);
+                }
+                CachedReadFailure::UncachedOnline => {}
+                CachedReadFailure::AuthOrContext(error) => return Err(error),
+            },
+        }
+    }
+    session
+        .home(None, &HomeSearchLimits::default(), cancel)
+        .await
+        .map(|value| {
+            Some(CachedRead {
+                value: value.value,
+                source: ReadSource::Network { collection: None },
+                metadata: None,
+            })
+        })
+}
+
+async fn read_feed(
+    session: PageReadSession,
+    cached: Option<CachedPageReadSession>,
+    cache_partition: String,
+    cancel: CancellationToken,
+) -> Result<Option<CachedRead<FeedOutcome>>, HomeError> {
+    if let Some(cached) = cached {
+        match cached
+            .feed(
+                PageReadMode::Online,
+                &FeedLimits::default(),
+                &FollowingLimits::default(),
+                &PullRequestDetailLimits::default(),
+                FEED_AUTHOR_LOOKUP_LIMIT,
+                cancel.clone(),
+            )
+            .await
+        {
+            Ok(value) => {
+                return unpack_cached(value, &cache_partition).map_err(cache_miss_failure);
+            }
+            Err(error) => match cache_failure(error) {
+                CachedReadFailure::Network(_) => {
+                    let offline = cached
+                        .feed(
+                            PageReadMode::Offline,
+                            &FeedLimits::default(),
+                            &FollowingLimits::default(),
+                            &PullRequestDetailLimits::default(),
+                            FEED_AUTHOR_LOOKUP_LIMIT,
+                            cancel.clone(),
+                        )
+                        .await
+                        .map_err(cache_miss_failure)?;
+                    return unpack_cached(offline, &cache_partition).map_err(cache_miss_failure);
+                }
+                CachedReadFailure::UncachedOnline => {}
+                CachedReadFailure::AuthOrContext(error) => return Err(error),
+            },
+        }
+    }
+    session
+        .feed(
+            &FeedLimits::default(),
+            &FollowingLimits::default(),
+            &PullRequestDetailLimits::default(),
+            FEED_AUTHOR_LOOKUP_LIMIT,
+            cancel,
+        )
+        .await
+        .map(|value| {
+            Some(CachedRead {
+                value: value.value,
+                source: ReadSource::Network { collection: None },
+                metadata: None,
+            })
+        })
+}
 
 /// Upper bound on merged pull-request detail reads per Feed refresh. A 300-event
 /// window with a handful of merges stays far below this; the cap exists so a
@@ -43,9 +239,31 @@ impl Work {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReadSource {
+    Network {
+        collection: Option<crate::data::page_cache::CollectionGeneration>,
+    },
+    /// The saved-account partition and collection generation which produced this snapshot.
+    Historical {
+        partition: String,
+        collection: Option<crate::data::page_cache::CollectionGeneration>,
+    },
+}
+
 enum ColumnResult {
-    Home(Result<HomeSearchOutcome, HomeError>),
-    Feed(Result<FeedOutcome, HomeError>),
+    Home(Result<Option<CachedRead<HomeSearchOutcome>>, HomeError>),
+    Feed(Result<Option<CachedRead<FeedOutcome>>, HomeError>),
+}
+
+enum AppendError {
+    Read(HomeError),
+    NotCached,
+}
+
+struct EnrichmentResult {
+    descriptions: std::collections::HashMap<String, Option<String>>,
+    cache_partition: Option<String>,
 }
 
 struct Reply {
@@ -53,6 +271,7 @@ struct Reply {
     column: Column,
     request: u64,
     selection: u64,
+    authorization: Option<CacheAuthorization>,
     context: RepositoryReadContext,
     result: ColumnResult,
 }
@@ -66,22 +285,34 @@ struct AppendReply {
     /// epoch and is rejected, so a refresh can never be skipped or overwritten.
     append_epoch: u64,
     selection: u64,
+    authorization: Option<CacheAuthorization>,
     context: RepositoryReadContext,
-    result: Result<(FeedOutcome, std::collections::HashSet<String>), HomeError>,
+    result: Result<(FeedOutcome, std::collections::HashSet<String>, ReadSource), AppendError>,
 }
 
 /// Asynchronous repository description enrichment for starred repositories.
+struct EnrichWork {
+    work: Work,
+    repositories: std::collections::HashSet<String>,
+}
+
 struct EnrichReply {
     generation: u64,
+    append_epoch: u64,
     selection: u64,
+    authorization: Option<CacheAuthorization>,
     context: RepositoryReadContext,
-    descriptions: std::collections::HashMap<String, Option<String>>,
+    request: u64,
+    result: Result<EnrichmentResult, HomeError>,
 }
 
 pub struct HomePage {
     tab: TabId,
     services: Option<AccountServices>,
     session: Option<PageReadSession>,
+    cached: Option<CachedPageReadSession>,
+    cache_partition: Option<String>,
+    cache_authorization: Option<CacheAuthorization>,
     selection: u64,
     binding: RequestBinding,
     generation: u64,
@@ -102,9 +333,11 @@ pub struct HomePage {
     /// Monotonic append epoch; bumped before every replacement Feed read so an
     /// in-flight append from before a refresh is rejected and cancelled.
     feed_append_epoch: u64,
+    feed_source: Option<ReadSource>,
+    feed_enrich_request: u64,
     /// Known repository descriptions, keyed by lowercase "owner/name".
     feed_repo_descriptions: std::collections::HashMap<String, Option<String>>,
-    feed_enrich_work: Option<Work>,
+    feed_enrich_work: std::collections::HashMap<u64, EnrichWork>,
     view: Entity<HomeView>,
     navigation: NavigationSink,
     _changed: Subscription,
@@ -156,6 +389,9 @@ impl HomePage {
             tab,
             services: None,
             session: None,
+            cached: None,
+            cache_partition: None,
+            cache_authorization: None,
             selection: 0,
             binding,
             generation: 0,
@@ -172,8 +408,10 @@ impl HomePage {
             feed_seen_ids: std::collections::HashSet::new(),
             feed_append: None,
             feed_append_epoch: 0,
+            feed_source: None,
+            feed_enrich_request: 0,
             feed_repo_descriptions: std::collections::HashMap::new(),
-            feed_enrich_work: None,
+            feed_enrich_work: std::collections::HashMap::new(),
             view,
             navigation,
             _changed,
@@ -221,7 +459,18 @@ impl HomePage {
         };
         match services.accounts().page_session() {
             Ok(session) if services.repositories().is_current(session.context()) => {
-                self.session = Some(session);
+                // cache-runtime owns the app-level store. This consumer only
+                // clones the binding issued for the session's current account,
+                // epoch and selection; no second database is opened here.
+                if let Some(cache) = services.repositories().cache(session.context()) {
+                    let (store, scope) = cache.into_parts();
+                    self.cache_partition = Some(scope.partition().to_string());
+                    self.cached =
+                        CachedPageReadSession::new(session.clone(), store.clone(), scope.clone())
+                            .ok();
+                    self.cache_authorization =
+                        self.cached.as_ref().and_then(|_| store.authorization(&scope, None));
+                }                self.session = Some(session);
                 self.start(Column::Home, true, cx);
                 self.start(Column::Feed, true, cx);
             }
@@ -229,6 +478,41 @@ impl HomePage {
                 "The current account is not verified or its credential is unavailable. No online results are shown.",
                 cx,
             ),
+        }
+    }
+
+    /// Cache-only invalidation removes copied bytes but leaves the verified
+    /// account session usable, so the user can recover with an online refresh.
+    fn cache_invalidated(&mut self, message: &str, cx: &mut Context<Self>) {
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        self.view.update(cx, |view, cx| {
+            for column in [Column::Home, Column::Feed] {
+                view.set_unavailable(column, &binding, generation, message, cx);
+                view.set_refresh_availability(
+                    column,
+                    &binding,
+                    generation,
+                    RefreshAvailability::available(),
+                    cx,
+                );
+            }
+        });
+    }
+
+    fn rebind_cache_binding(&mut self, session: &PageReadSession) {
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        if let Some(cache) = services.repositories().cache(session.context()) {
+            let (store, scope) = cache.into_parts();
+            self.cache_partition = Some(scope.partition().to_string());
+            self.cached =
+                CachedPageReadSession::new(session.clone(), store.clone(), scope.clone()).ok();
+            self.cache_authorization = self
+                .cached
+                .as_ref()
+                .and_then(|_| store.authorization(&scope, None));
         }
     }
 
@@ -247,6 +531,16 @@ impl HomePage {
                 );
             }
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_enabled_for_test(&self) -> bool {
+        self.cached.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn description_for_test(&self, repository: &str) -> Option<String> {
+        self.feed_repo_descriptions.get(repository)?.clone()
     }
 
     #[cfg(test)]
@@ -331,10 +625,19 @@ impl HomePage {
                 append.source.cancel();
             }
             self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
+            for (_, enrich) in self.feed_enrich_work.drain() {
+                enrich.work.source.cancel();
+            }
+            self.feed_repo_descriptions.clear();
+            self.view
+                .update(cx, |view, cx| view.clear_repository_descriptions(cx));
         }
         let Some(session) = self.session.clone() else {
             return;
         };
+        if self.cached.is_none() {
+            self.rebind_cache_binding(&session);
+        }
         let Some(services) = self.services.clone() else {
             return;
         };
@@ -370,38 +673,34 @@ impl HomePage {
         let alive = self.alive.clone();
         let selection = self.selection;
         let reply_context = context.clone();
+        let cached = self.cached.clone();
+        let authorization = self.cache_authorization.clone();
+        let cache_partition = self.cache_partition.clone().unwrap_or_default();
         let submitted = services.executor().handle().spawn(async move {
             let result = match column {
-                Column::Home => ColumnResult::Home(
-                    session
-                        .home(None, &HomeSearchLimits::default(), cancel)
-                        .await
-                        .map(|value| value.value),
-                ),
+                Column::Home => {
+                    ColumnResult::Home(read_home(session, cached, cache_partition, cancel).await)
+                }
                 // The data layer composes the raw events read, the followed-account
                 // read and the bounded merged-author lookups, then applies the
                 // product policy. Bounds keep one snapshot from fanning out: a
                 // followed list of at most 1,000 accounts and at most 30 distinct
                 // author lookups per refresh.
-                Column::Feed => ColumnResult::Feed(
-                    session
-                        .feed(
-                            &FeedLimits::default(),
-                            &FollowingLimits::default(),
-                            &PullRequestDetailLimits::default(),
-                            FEED_AUTHOR_LOOKUP_LIMIT,
-                            cancel,
-                        )
-                        .await
-                        .map(|value| value.value),
-                ),
+                Column::Feed => {
+                    ColumnResult::Feed(read_feed(session, cached, cache_partition, cancel).await)
+                }
             };
-            if *alive.borrow() {
+            if *alive.borrow()
+                && authorization
+                    .as_ref()
+                    .is_none_or(CacheAuthorization::is_current)
+            {
                 inbox.lock().expect("home inbox").push_back(Reply {
                     generation,
                     column,
                     request,
                     selection,
+                    authorization,
                     context: reply_context,
                     result,
                 });
@@ -416,6 +715,7 @@ impl HomePage {
                     request,
                     selection,
                     context,
+                    authorization: self.cache_authorization.clone(),
                     result: match column {
                         Column::Home => ColumnResult::Home(Err(HomeError::InvalidResponse {
                             message: "Background services are closing.".into(),
@@ -464,9 +764,61 @@ impl HomePage {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.context() == &reply.context)
+            && self.cache_authorization.as_ref() == reply.authorization.as_ref()
+    }
+
+    fn clear_stale_context(&mut self, cx: &mut Context<Self>) {
+        let stale = self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.verify())
+            || (self.cached.is_some() || self.cache_authorization.is_some())
+                && self.services.as_ref().is_some_and(|services| {
+                    services.accounts().active_summary().is_some_and(|summary| {
+                        matches!(
+                            summary.authorization,
+                            crate::domain::account::AuthorizationState::VerificationFailed(
+                                GitHubError::Unauthorized
+                            )
+                        )
+                    })
+                })
+            || self
+                .cache_authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current())
+            || self.cached.is_some()
+                && self.services.as_ref().is_none_or(|services| {
+                    self.session.as_ref().is_none_or(|session| {
+                        services.repositories().cache(session.context()).is_none()
+                    })
+                });
+        if stale {
+            let authorization_stale = self
+                .cache_authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current());
+            if authorization_stale && self.session.as_ref().is_some_and(|s| s.verify()) {
+                self.stop_work_without_session();
+                self.cache_invalidated(
+                    "Saved content is no longer available; refresh to read online for the current account.",
+                    cx,
+                );
+                self.cached = None;
+                self.cache_authorization = None;
+                self.cache_partition = None;
+            } else {
+                self.stop();
+                self.unavailable(
+                    "The account or authorization changed. Refresh in the current account.",
+                    cx,
+                );
+            }
+        }
     }
 
     fn drain(&mut self, cx: &mut Context<Self>) {
+        self.clear_stale_context(cx);
         let replies: Vec<_> = self.inbox.lock().expect("home inbox").drain(..).collect();
         for reply in replies {
             self.apply(reply, cx);
@@ -503,19 +855,40 @@ impl HomePage {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.context() == &append.context)
+            || self.cache_authorization.as_ref() != append.authorization.as_ref()
+            || append
+                .authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current())
         {
+            return;
+        }
+        if self.cached.is_some()
+            && self
+                .services
+                .as_ref()
+                .is_none_or(|services| services.repositories().cache(&append.context).is_none())
+        {
+            self.unavailable(
+                "Saved content is no longer available for this account or authorization.",
+                cx,
+            );
             return;
         }
         self.feed_append = None;
         let binding = self.binding.clone();
         let generation = self.generation;
         match append.result {
-            Ok((page, seen)) => {
+            Ok((page, seen, source)) => {
+                if self.feed_source != Some(source) {
+                    return;
+                }
                 self.feed_seen_ids = seen;
                 self.feed_next_page = page.next_page;
                 // Merge into the retained outcome in place, preserving the
                 // earlier snapshot's partial reasons so an append can never make
                 // a previously-withheld set look complete.
+                let mut merged_activities = Vec::new();
                 self.view.update(cx, |view, cx| {
                     if let crate::ui::home::PanelState::Ready {
                         content: crate::ui::home::PanelContent::Ready(existing),
@@ -537,12 +910,22 @@ impl HomePage {
                         if let Some(poll) = page.poll_interval_seconds {
                             merged.poll_interval_seconds = Some(poll);
                         }
+                        merged_activities = merged.activities.clone();
                         view.apply_feed_page(&binding, generation, merged, cx);
                     }
                 });
-                self.enrich_starred_repositories(&page.activities, cx);
+                self.enrich_starred_repositories(&merged_activities, cx);
             }
-            Err(_error) => {
+            Err(AppendError::NotCached) => {
+                let page = self.feed_next_page.map(|cursor| cursor.page).unwrap_or(1);
+                // Keep the original historical collection intact, but stop its
+                // automatic continuation at the exact missing page.
+                self.feed_next_page = None;
+                self.view.update(cx, |view, cx| {
+                    view.feed_page_not_cached(&binding, generation, page, cx);
+                });
+            }
+            Err(AppendError::Read(_error)) => {
                 let page = self.feed_next_page.map(|cursor| cursor.page).unwrap_or(1);
                 self.view.update(cx, |view, cx| {
                     view.feed_append_failed(&binding, generation, page, cx);
@@ -556,25 +939,137 @@ impl HomePage {
         if !self.accepts(&reply) {
             return;
         }
+        if reply.authorization.as_ref().is_some_and(|authorization| {
+            !authorization.is_current() || self.cache_authorization.as_ref() != Some(authorization)
+        }) {
+            if self.session.as_ref().is_some_and(|s| s.verify()) {
+                self.stop_work_without_session();
+                self.cache_invalidated(
+                    "Saved content is no longer available; refresh to read online for the current account.",
+                    cx,
+                );
+                self.cached = None;
+                self.cache_authorization = None;
+                self.cache_partition = None;
+            } else {
+                self.stop();
+                self.unavailable(
+                    "Saved content is no longer available for this account or authorization.",
+                    cx,
+                );
+            }
+            return;
+        }
+        let error_state = match &reply.result {
+            ColumnResult::Home(Err(error)) | ColumnResult::Feed(Err(error)) => Some(error),
+            _ => None,
+        };
+        if matches!(
+            error_state,
+            Some(HomeError::GitHub(GitHubError::Unauthorized))
+        ) {
+            // Credential rejection invalidates copied page content but does not
+            // make the captured PageReadSession itself stale. Keep the session
+            // available for explicit online recovery; never replay old bytes.
+            self.stop_work_without_session();
+            self.unavailable(
+                "GitHub rejected the credential. Revalidate or replace the PAT before reading cached content.",
+                cx,
+            );
+            return;
+        }
+        if matches!(
+            &reply.result,
+            ColumnResult::Home(Err(HomeError::GitHub(GitHubError::StaleContext)))
+                | ColumnResult::Feed(Err(HomeError::GitHub(GitHubError::StaleContext)))
+        ) && self.cached.is_some()
+        {
+            self.session = None;
+            self.cached = None;
+            self.unavailable(
+                "Saved content is no longer available for this account or authorization.",
+                cx,
+            );
+            return;
+        }
+        if matches!(
+            &reply.result,
+            ColumnResult::Home(Err(HomeError::GitHub(GitHubError::StaleContext)))
+                | ColumnResult::Feed(Err(HomeError::GitHub(GitHubError::StaleContext)))
+        ) && self.cached.is_some()
+        {
+            self.session = None;
+            self.cached = None;
+            self.unavailable(
+                "Saved content is no longer available for this account or authorization.",
+                cx,
+            );
+            return;
+        }
+        // A result that passed the cache lease checks may still arrive after a
+        // lifecycle event. Do not keep even the already-rendered historical
+        // copy when this account's cache permission is no longer available.
+        if self.cached.is_some()
+            && self
+                .services
+                .as_ref()
+                .is_none_or(|services| services.repositories().cache(&reply.context).is_none())
+        {
+            self.session = None;
+            self.cached = None;
+            self.unavailable(
+                "Saved content is no longer available for this account or authorization.",
+                cx,
+            );
+            return;
+        }
         self.work[Self::index(reply.column)] = None;
         let binding = self.binding.clone();
         let generation = self.generation;
         let column = reply.column;
         let feed_activities = match &reply.result {
-            ColumnResult::Feed(Ok(outcome)) => Some(outcome.activities.clone()),
+            ColumnResult::Feed(Ok(Some(read))) => Some(read.value.activities.clone()),
             _ => None,
         };
         self.view.update(cx, |view, cx| match reply.result {
-            ColumnResult::Home(Ok(outcome)) => {
-                view.apply_home(&binding, generation, outcome, cx);
-            }
+            ColumnResult::Home(Ok(Some(read))) => match read.source {
+                ReadSource::Network { .. } => {
+                    view.apply_home(&binding, generation, read.value, cx);
+                }
+                ReadSource::Historical { .. } => {
+                    if let Some(metadata) = read.metadata {
+                        view.apply_home_snapshot(
+                            &binding,
+                            generation,
+                            SnapshotPresentation::historical(read.value, &metadata),
+                            cx,
+                        );
+                    }
+                }
+            },
             ColumnResult::Home(Err(error)) => {
                 view.apply_error(column, &binding, generation, error, cx);
             }
-            ColumnResult::Feed(Ok(outcome)) => {
-                if let Some(seconds) = outcome.poll_interval_seconds {
+            ColumnResult::Home(Ok(None)) | ColumnResult::Feed(Ok(None)) => {
+                if column == Column::Feed {
+                    self.feed_next_page = None;
+                    self.feed_source = None;
+                }
+                view.set_unavailable(
+                    column,
+                    &binding,
+                    generation,
+                    "This page is not available offline.",
+                    cx,
+                );
+            }
+            ColumnResult::Feed(Ok(Some(read))) => {
+                let outcome = read.value;
+                if matches!(read.source, ReadSource::Network { .. })
+                    && let Some(seconds) = outcome.poll_interval_seconds
+                {
                     self.feed_ready = Some(Instant::now() + Duration::from_secs(seconds.max(1)));
-                } else {
+                } else if matches!(read.source, ReadSource::Network { .. }) {
                     self.feed_ready = None;
                 }
                 // Seed continuation from the first page: the validated next
@@ -583,11 +1078,28 @@ impl HomePage {
                 // seen set so a refresh can re-reveal previously viewed older
                 // activities that are no longer in the new first-page snapshot.
                 self.feed_next_page = outcome.next_page;
+                self.feed_source = Some(read.source.clone());
                 self.feed_seen_ids.clear();
                 for activity in &outcome.activities {
                     self.feed_seen_ids.insert(activity.event.id.clone());
                 }
-                view.apply_feed(&binding, generation, outcome, cx);
+                match read.source {
+                    ReadSource::Network { .. } => {
+                        view.apply_feed(&binding, generation, outcome, cx)
+                    }
+                    ReadSource::Historical { .. } => {
+                        if let Some(metadata) = read.metadata {
+                            view.apply_feed_snapshot(
+                                &binding,
+                                generation,
+                                SnapshotPresentation::historical(outcome, &metadata),
+                                cx,
+                            )
+                        } else {
+                            false
+                        }
+                    }
+                };
             }
             ColumnResult::Feed(Err(error)) => {
                 self.feed_ready = None;
@@ -673,9 +1185,18 @@ impl HomePage {
     }
 
     #[cfg(test)]
+    fn request_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let request = crate::ui::home::RefreshRequest {
+            column: Column::Feed,
+            binding: self.binding.clone(),
+            generation: self.generation,
+        };
+        self.action(HomeAction::LoadMoreFeed(request), window, cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn load_more_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.view
-            .update(cx, |view, cx| view.request_more_feed(window, cx));
+        self.request_more(window, cx);
     }
 
     #[cfg(test)]
@@ -717,7 +1238,11 @@ impl HomePage {
     pub(crate) fn is_ready_for_test(&self, cx: &gpui::App) -> bool {
         let view = self.view.read(cx);
         matches!(view.home_state(), crate::ui::home::PanelState::Ready { .. })
+            && !view.home_state().refreshing()
             && matches!(view.feed_state(), crate::ui::home::PanelState::Ready { .. })
+            && !view.feed_state().refreshing()
+            && self.work[0].is_none()
+            && self.work[1].is_none()
     }
 
     #[cfg(test)]
@@ -726,6 +1251,14 @@ impl HomePage {
     }
 
     fn stop(&mut self) {
+        self.stop_work_without_session();
+        self.session = None;
+        self.cached = None;
+        self.cache_partition = None;
+        self.cache_authorization = None;
+    }
+
+    fn stop_work_without_session(&mut self) {
         for work in &mut self.work {
             if let Some(work) = work.take() {
                 work.source.cancel();
@@ -734,8 +1267,8 @@ impl HomePage {
         if let Some(append) = self.feed_append.take() {
             append.source.cancel();
         }
-        if let Some(enrich) = self.feed_enrich_work.take() {
-            enrich.source.cancel();
+        for (_, enrich) in self.feed_enrich_work.drain() {
+            enrich.work.source.cancel();
         }
         self.feed_append_epoch = self.feed_append_epoch.saturating_add(1);
         self.inbox.lock().expect("home inbox").clear();
@@ -746,7 +1279,8 @@ impl HomePage {
         self.feed_next_page = None;
         self.feed_seen_ids.clear();
         self.feed_repo_descriptions.clear();
-        self.session = None;
+        self.feed_source = None;
+        self.feed_enrich_request = self.feed_enrich_request.saturating_add(1);
     }
 
     /// Starts one bounded load-more of the Feed's next older source page.
@@ -774,6 +1308,9 @@ impl HomePage {
         let Some(services) = self.services.clone() else {
             return;
         };
+        let Some(source) = self.feed_source.clone() else {
+            return;
+        };
         let context = session.context().clone();
         if !services.repositories().is_current(&context) {
             self.feed_append_failed(request.generation, next.page, cx);
@@ -793,19 +1330,91 @@ impl HomePage {
         let append_epoch = self.feed_append_epoch;
         let reply_context = context.clone();
         let mut seen = self.feed_seen_ids.clone();
+        let cached = self.cached.clone();
+        let authorization = self.cache_authorization.clone();
+        let cache_partition = self.cache_partition.clone().unwrap_or_default();
         let submitted = services.executor().handle().spawn(async move {
-            let result = session
-                .feed_page(
-                    next,
-                    &FeedLimits::default(),
-                    &FollowingLimits::default(),
-                    &PullRequestDetailLimits::default(),
-                    FEED_AUTHOR_LOOKUP_LIMIT,
-                    &mut seen,
-                    cancel,
-                )
-                .await;
-            if *alive.borrow() {
+            let result = if let Some(cached) = cached {
+                // A collection keeps its origin for its whole lifetime. Never
+                // append a historical page to a network first page (or vice versa).
+                let (mode, collection) = match &source {
+                    ReadSource::Network { collection } => (PageReadMode::Online, *collection),
+                    ReadSource::Historical { collection, .. } => {
+                        (PageReadMode::Offline, *collection)
+                    }
+                };
+                let cached_result = cached
+                    .feed_page(
+                        mode,
+                        next,
+                        collection,
+                        &FeedLimits::default(),
+                        &FollowingLimits::default(),
+                        &PullRequestDetailLimits::default(),
+                        FEED_AUTHOR_LOOKUP_LIMIT,
+                        &mut seen,
+                        cancel.clone(),
+                    )
+                    .await;
+                let result = match cached_result {
+                    Err(error) if matches!(source, ReadSource::Network { .. }) => {
+                        match cache_failure(error) {
+                            CachedReadFailure::UncachedOnline => session
+                                .feed_page(
+                                    next,
+                                    &FeedLimits::default(),
+                                    &FollowingLimits::default(),
+                                    &PullRequestDetailLimits::default(),
+                                    FEED_AUTHOR_LOOKUP_LIMIT,
+                                    &mut seen,
+                                    cancel.clone(),
+                                )
+                                .await
+                                .map_err(AppendError::Read),
+                            CachedReadFailure::Network(error) => Err(AppendError::Read(error)),
+                            CachedReadFailure::AuthOrContext(error) => {
+                                Err(AppendError::Read(error))
+                            }
+                        }
+                    }
+                    Err(error) => Err(AppendError::Read(cache_miss_failure(error))),
+                    Ok(page) => unpack_cached(page, &cache_partition)
+                        .map_err(|error| AppendError::Read(cache_miss_failure(error)))
+                        .and_then(|page| {
+                            page.ok_or(AppendError::NotCached)
+                                .map(|page| crate::data::Scoped {
+                                    context: context.clone(),
+                                    value: page.value,
+                                })
+                        }),
+                };
+                result.map(|page| (page.value.into_outcome(), seen.clone(), source))
+            } else {
+                session
+                    .feed_page(
+                        next,
+                        &FeedLimits::default(),
+                        &FollowingLimits::default(),
+                        &PullRequestDetailLimits::default(),
+                        FEED_AUTHOR_LOOKUP_LIMIT,
+                        &mut seen,
+                        cancel,
+                    )
+                    .await
+                    .map_err(AppendError::Read)
+                    .map(|page| {
+                        (
+                            page.value.into_outcome(),
+                            seen.clone(),
+                            ReadSource::Network { collection: None },
+                        )
+                    })
+            };
+            if *alive.borrow()
+                && authorization
+                    .as_ref()
+                    .is_none_or(CacheAuthorization::is_current)
+            {
                 append_inbox
                     .lock()
                     .expect("home append inbox")
@@ -813,21 +1422,9 @@ impl HomePage {
                         generation,
                         append_epoch,
                         selection,
+                        authorization,
                         context: reply_context,
-                        result: result.map(|page| {
-                            (
-                                FeedOutcome {
-                                    activities: page.value.activities,
-                                    etag: page.value.etag,
-                                    poll_interval_seconds: page.value.poll_interval_seconds,
-                                    next_page: page.value.next_page,
-                                    readiness: crate::domain::home::FeedReadiness::from_reasons(
-                                        page.value.reasons,
-                                    ),
-                                },
-                                seen,
-                            )
-                        }),
+                        result,
                     });
             }
         });
@@ -877,6 +1474,10 @@ impl HomePage {
                 if !owner.is_empty()
                     && !repo.is_empty()
                     && !self.feed_repo_descriptions.contains_key(&key)
+                    && !self
+                        .feed_enrich_work
+                        .values()
+                        .any(|work| work.repositories.contains(&key))
                     && seen.insert(key)
                 {
                     needed.push((owner.to_string(), repo.to_string()));
@@ -913,29 +1514,100 @@ impl HomePage {
 
         let work = Work::new();
         let cancel = work.token.clone();
-        self.feed_enrich_work = Some(work);
+        self.feed_enrich_request = self.feed_enrich_request.saturating_add(1);
+        let request = self.feed_enrich_request;
+        self.feed_enrich_work.insert(
+            request,
+            EnrichWork {
+                work,
+                repositories: needed
+                    .iter()
+                    .map(|(owner, name)| format!("{owner}/{name}").to_ascii_lowercase())
+                    .collect(),
+            },
+        );
+        let append_epoch = self.feed_append_epoch;
+        let mode = match self.feed_source {
+            Some(ReadSource::Network { .. }) | None => PageReadMode::Online,
+            Some(ReadSource::Historical { .. }) => PageReadMode::Offline,
+        };
+        let cached = self.cached.clone();
+        let authorization = self.cache_authorization.clone();
+        let cache_partition = self.cache_partition.clone();
 
         let enrich_inbox = self.enrich_inbox.clone();
         let alive = self.alive.clone();
         let selection = self.selection;
         let reply_context = context.clone();
 
-        let _ = services.executor().handle().spawn(async move {
-            let result = session.repository_descriptions(needed, 20, cancel).await;
+        let submitted = services.executor().handle().spawn(async move {
+            let result =
+                if let Some(cached) = cached {
+                    match cached
+                        .repository_descriptions(mode, needed.clone(), 20, cancel.clone())
+                        .await
+                    {
+                        Err(error) if matches!(mode, PageReadMode::Online) => {
+                            match cache_failure(error) {
+                                CachedReadFailure::UncachedOnline => session
+                                    .repository_descriptions(needed, 20, cancel.clone())
+                                    .await
+                                    .map(|value| EnrichmentResult {
+                                        descriptions: value.value,
+                                        cache_partition: None,
+                                    }),
+                                CachedReadFailure::Network(error) => Err(error),
+                                CachedReadFailure::AuthOrContext(error) => Err(error),
+                            }
+                        }
+                        result => result
+                            .map_err(cache_miss_failure)
+                            .and_then(|value| match value.value {
+                                PageValue::Value { value, origin, .. } => Ok(EnrichmentResult {
+                                    descriptions: value,
+                                    cache_partition: matches!(
+                                        origin,
+                                        PageOrigin::HistoricalSnapshot
+                                    )
+                                    .then_some(cache_partition)
+                                    .flatten(),
+                                }),
+                                PageValue::Miss(_) => Err(HomeError::InvalidResponse {
+                                    message: "Repository descriptions are not cached.".into(),
+                                }),
+                            }),
+                    }
+                } else {
+                    session
+                        .repository_descriptions(needed, 20, cancel)
+                        .await
+                        .map(|value| EnrichmentResult {
+                            descriptions: value.value,
+                            cache_partition: None,
+                        })
+                };
             if *alive.borrow()
-                && let Ok(scoped) = result
+                && authorization
+                    .as_ref()
+                    .is_none_or(CacheAuthorization::is_current)
             {
                 enrich_inbox
                     .lock()
                     .expect("enrich inbox")
                     .push_back(EnrichReply {
                         generation,
+                        append_epoch,
                         selection,
+                        authorization,
                         context: reply_context,
-                        descriptions: scoped.value,
+                        request,
+                        result,
                     });
             }
         });
+        if submitted.is_err() {
+            self.feed_enrich_work.remove(&request);
+        }
     }
 
     fn apply_enrichment(&mut self, reply: EnrichReply, cx: &mut Context<Self>) {
@@ -949,14 +1621,41 @@ impl HomePage {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.context() == &reply.context)
+            || reply.append_epoch != self.feed_append_epoch
+            || !self.feed_enrich_work.contains_key(&reply.request)
+            || self.cache_authorization.as_ref() != reply.authorization.as_ref()
+            || reply
+                .authorization
+                .as_ref()
+                .is_some_and(|authorization| !authorization.is_current())
         {
             return;
         }
-        self.feed_enrich_work = None;
+        if self.cached.is_some()
+            && self
+                .services
+                .as_ref()
+                .is_none_or(|services| services.repositories().cache(&reply.context).is_none())
+        {
+            self.unavailable(
+                "Saved content is no longer available for this account or authorization.",
+                cx,
+            );
+            return;
+        }
+        self.feed_enrich_work.remove(&reply.request);
+        let Ok(result) = reply.result else {
+            return;
+        };
+        if let Some(partition) = result.cache_partition
+            && self.cache_partition.as_deref() != Some(partition.as_str())
+        {
+            return;
+        }
         let binding = self.binding.clone();
         let generation = self.generation;
 
-        for (k, v) in reply.descriptions {
+        for (k, v) in result.descriptions {
             self.feed_repo_descriptions.insert(k, v);
         }
 
@@ -972,8 +1671,13 @@ impl HomePage {
     }
 }
 
+#[cfg(test)]
+#[path = "home/tests.rs"]
+mod tests;
+
 impl Render for HomePage {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.clear_stale_context(cx);
         self.view.clone()
     }
 }
