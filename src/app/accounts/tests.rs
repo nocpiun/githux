@@ -12,15 +12,19 @@ use crate::workspace::{Route, TabId};
 
 use super::wait_for_shutdown;
 use super::*;
+use crate::app::avatar::{AvatarBytesFuture, AvatarDetailedFuture, AvatarResponseMetadata};
 use crate::auth::InMemoryCredentialStore;
 use crate::data::AccountService;
+use crate::data::avatar_cache::AvatarDiskCache;
 use crate::domain::account::AuthorizationState;
 use crate::github::{GitHubClient, GitHubConfig};
+use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
 use crate::network::transport::{
-    HttpRequest, HttpResponse, MockTransport, Transport, TransportError,
+    HttpRequest, HttpResponse, MockFailure, MockTransport, Transport, TransportError,
 };
 use crate::storage::accounts::AccountDatabaseConfig;
+use crate::storage::cache::{AccessEvent, CacheConfig, CacheError, CacheKey, CacheStore};
 
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -98,6 +102,27 @@ fn open(
             executor.clone(),
         ))
         .expect("open test service");
+    (AccountRuntime::new(accounts, executor.clone()), executor)
+}
+
+/// The same test composition, but with a real business `CacheStore` injected exactly as production
+/// startup does through `open_accounts_with_cache`. Used by the avatar cache-binding tests.
+fn open_cached(
+    path: &std::path::Path,
+    store: Arc<InMemoryCredentialStore>,
+    transport: Arc<dyn Transport>,
+    cache: CacheStore,
+) -> (AccountRuntime, Arc<BackgroundExecutor>) {
+    let executor = Arc::new(BackgroundExecutor::new(4));
+    let accounts = host_runtime()
+        .block_on(AccountService::open_with_cache(
+            AccountDatabaseConfig::at(path.to_path_buf()),
+            store,
+            Arc::new(GitHubClient::new(GitHubConfig::default(), transport)),
+            executor.clone(),
+            cache,
+        ))
+        .expect("open test service with cache");
     (AccountRuntime::new(accounts, executor.clone()), executor)
 }
 
@@ -1797,10 +1822,12 @@ fn restoring_an_unchanged_account_keeps_ready_and_failed_lists(cx: &mut TestAppC
             repositories: Vec::new(),
             readiness: crate::domain::repo::ReposReadiness::Complete,
         }),
+        origin: RepositoryListOrigin::Network,
     };
     let failed = crate::app::accounts::Repositories {
         account: Some(active.clone()),
         preview: RepositoryPreview::Failed("boom".into()),
+        origin: RepositoryListOrigin::Network,
     };
     for previous in [ready, failed] {
         let restored = controller.update(cx, |accounts, _| {
@@ -1963,4 +1990,593 @@ fn partial_results_keep_rows_usable_and_offer_a_scoped_retry(cx: &mut TestAppCon
     // The controller's own refresh is reachable and starts a fresh read for the same authorization.
     controller.update(cx, |accounts, cx| accounts.refresh(cx));
     wait_idle(&controller, cx);
+}
+
+/// A deterministic avatar transport for the cache-composition tests. It implements both the plain
+/// byte source and the conditional source, so the fetcher exercises the disk-cache path with
+/// response metadata without contacting a real avatar host.
+struct CacheTestAvatarSource {
+    responses: Mutex<std::collections::HashMap<String, (u16, Vec<u8>)>>,
+    reads: AtomicUsize,
+}
+
+impl CacheTestAvatarSource {
+    fn new() -> Self {
+        Self {
+            responses: Mutex::new(std::collections::HashMap::new()),
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn serve(&self, url: &str, status: u16, body: Vec<u8>) {
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), (status, body));
+    }
+}
+
+impl AvatarBytes for CacheTestAvatarSource {
+    fn load<'a>(
+        &'a self,
+        url: &'a str,
+        _max_bytes: usize,
+        _cancel: CancellationToken,
+    ) -> AvatarBytesFuture<'a> {
+        Box::pin(async move {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .get(url)
+                .map(|(status, body)| (*status, body.clone()))
+                .ok_or(())
+        })
+    }
+}
+
+impl AvatarSource for CacheTestAvatarSource {
+    fn load_detailed<'a>(
+        &'a self,
+        url: &'a str,
+        _max_bytes: usize,
+        _etag: Option<&'a str>,
+        _last_modified: Option<&'a str>,
+        _cancel: CancellationToken,
+    ) -> AvatarDetailedFuture<'a> {
+        Box::pin(async move {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .lock()
+                .unwrap()
+                .get(url)
+                .map(|(status, body)| {
+                    (
+                        *status,
+                        AvatarResponseMetadata {
+                            etag: Some("\"etag-1\"".to_string()),
+                            last_modified: None,
+                            cache_control: Some("max-age=3600".to_string()),
+                        },
+                        body.clone(),
+                    )
+                })
+                .ok_or(())
+        })
+    }
+}
+
+/// A real 1x1 PNG so GPUI's decoder succeeds on it.
+fn cache_test_png() -> Vec<u8> {
+    vec![
+        137u8, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+        6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 248,
+        15, 0, 1, 4, 1, 0, 95, 229, 195, 75, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]
+}
+
+/// The production avatar binding: the fetcher writes through the active account's own cache scope,
+/// and switching accounts both drops the decoded in-memory cache and stops the old scope from being
+/// read or resurrected. No real avatar host or credential is contacted.
+#[gpui::test]
+fn avatar_cache_binds_to_the_active_account_and_switching_accounts_drops_the_old_scope(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let accounts_path = temp.path().join("accounts.sqlite3");
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    mock.serve_repos("alice-token", repos(1, "alice", &["a"]));
+    mock.serve_repos("bob-token", repos(2, "bob", &["b"]));
+
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(&accounts_path, store, mock.clone(), cache.clone());
+    let service = runtime.accounts.clone();
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    let avatars = Arc::new(CacheTestAvatarSource::new());
+    avatars.serve("https://avatars.test/alice.png", 200, cache_test_png());
+    controller.update(cx, |accounts, _| {
+        accounts.install_avatar_transport(avatars.clone(), Some(avatars.clone()));
+    });
+
+    // Log in alice and let the automatic repository read settle.
+    put_token(&controller, cx, "alice-token");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+
+    let alice_key = AvatarKey::new("github.com", 1, "https://avatars.test/alice.png");
+    assert!(matches!(
+        controller.update(cx, |accounts, _| accounts.avatar(alice_key.clone())),
+        AvatarState::Loading
+    ));
+    beat_until(&controller, cx, |controller, cx| {
+        matches!(
+            controller.read_with(cx, |accounts, _| accounts.avatar_state_for_test(&alice_key)),
+            Some(AvatarState::Ready(_))
+        )
+    });
+
+    // The image was fetched through the fetcher's disk cache and stored under alice's own scope.
+    {
+        let summary = service.active_summary().expect("alice is active");
+        let binding = service.cache(&summary).expect("cache binding for alice");
+        let disk = AvatarDiskCache::new(binding.store().clone(), binding.scope().clone());
+        assert!(
+            disk.read_sync(&alice_key).is_some(),
+            "alice's avatar is written to her account cache scope"
+        );
+    }
+
+    // Adding bob selects him: the avatar fetcher must rebind to bob's scope and drop alice's
+    // decoded display state and the old scope handle.
+    put_token(&controller, cx, "bob-token");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state.accounts.len() == 2 && state.active == Some(AccountKey::new(2, HostId::github()))
+    });
+    wait_idle(&controller, cx);
+
+    assert!(
+        matches!(
+            controller.read_with(cx, |accounts, _| accounts.avatar_state_for_test(&alice_key)),
+            Some(AvatarState::Unknown)
+        ),
+        "the decoded avatar cache is reset when the active account changes"
+    );
+    {
+        let summary = service.active_summary().expect("bob is active");
+        let binding = service.cache(&summary).expect("cache binding for bob");
+        let disk = AvatarDiskCache::new(binding.store().clone(), binding.scope().clone());
+        assert!(
+            disk.read_sync(&alice_key).is_none(),
+            "bob's scope does not contain alice's avatar"
+        );
+    }
+}
+
+/// The single production assembly point: a cache-open failure falls back to the ordinary online-only
+/// service instead of taking login and repository reads down with it.
+#[tokio::test]
+async fn cache_open_failure_falls_back_to_the_online_only_service() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(user(1, "alice"))).await;
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let service = super::runtime::open_accounts_with_cache(
+        AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), mock)),
+        executor.clone(),
+        Err(CacheError::PathUnavailable),
+    )
+    .await
+    .expect("the online-only service still opens when the cache cannot");
+    service
+        .login(Pat::from_str("ghp_fake"))
+        .await
+        .expect("login works without a cache");
+    let summary = service.active_summary().expect("logged in");
+    assert!(
+        service.cache(&summary).is_none(),
+        "a failed cache open yields no cache binding, not an empty one"
+    );
+}
+
+/// With a real CacheStore the same assembly point opts the service into private business caching.
+#[tokio::test]
+async fn a_cache_enabled_service_exposes_a_binding_after_login() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(user(1, "alice"))).await;
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let service = super::runtime::open_accounts_with_cache(
+        AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), mock)),
+        executor.clone(),
+        Ok(cache),
+    )
+    .await
+    .expect("the cache-enabled service opens");
+    service
+        .login(Pat::from_str("ghp_fake"))
+        .await
+        .expect("login");
+    let summary = service.active_summary().expect("logged in");
+    assert!(
+        service.cache(&summary).is_some(),
+        "a saved account with a working cache store receives a binding"
+    );
+}
+
+/// A PAT replacement quarantines private account-aggregate entries until an account-level proof is
+/// confirmed. Avatars are unauthenticated public images fetched without a credential, so their cache
+/// keys are public and must keep reading/writing across a replacement without unlocking the private
+/// aggregate gate that protects Home/Profile/Feed snapshots.
+#[tokio::test]
+async fn avatar_writes_survive_pat_replacement_but_the_private_aggregate_stays_quarantined() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let account = AccountKey::new(1, HostId::github());
+    let scope = store.saved_account(account).unwrap();
+    let disk = AvatarDiskCache::new(store.clone(), scope.clone());
+
+    let avatar = AvatarKey::new("github.com", 1, "https://avatars.test/a.png");
+    disk.put_sync(&avatar, &cache_test_png(), None, None, None)
+        .expect("initial avatar write");
+
+    // Replace the PAT: the durable gate restricts private account-aggregate entries.
+    store
+        .access_event(&scope, AccessEvent::PatReplaced)
+        .expect("PAT replacement event");
+
+    assert!(
+        disk.put_sync(&avatar, &cache_test_png(), None, None, None)
+            .is_ok(),
+        "an avatar download after PAT replacement still writes to disk"
+    );
+    assert!(disk.read_sync(&avatar).is_some());
+
+    // The private account-aggregate gate is untouched by avatars.
+    let aggregate = CacheKey::mutable(None, true, "account-feed", "page=1", "json-v1", 1).unwrap();
+    assert!(
+        store.begin_write(&scope, &aggregate).is_err(),
+        "private aggregate snapshots stay quarantined until their own proof"
+    );
+
+    // Confirming the account-level proof unlocks private aggregates, proving the avatar path did
+    // not silently do so on its own.
+    let proof = store.begin_revalidation(&scope, None).unwrap();
+    store.permission_confirmed(proof).unwrap();
+    assert!(
+        store.begin_write(&scope, &aggregate).is_ok(),
+        "an explicit account-level proof unlocks private aggregates"
+    );
+}
+
+/// A transient network failure after an online read falls back to the recorded snapshot and is
+/// published as history, never as a live complete list.
+#[gpui::test]
+fn a_network_failure_falls_back_to_the_cached_list_as_history(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+        mock.enqueue(Err(MockFailure::Network("offline".into())))
+            .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        mock.clone(),
+        cache,
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    // The automatic online read records a snapshot and is published as live.
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+            && state.repositories.origin == RepositoryListOrigin::Network
+    });
+    wait_idle(&controller, cx);
+
+    // The next read hits the network error and replays the recorded snapshot.
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+            && matches!(
+                state.repositories.origin,
+                RepositoryListOrigin::Historical { .. }
+            )
+    });
+    let state = snapshot(&controller, cx);
+    assert!(
+        state.repositories.historical_status().is_some(),
+        "the replayed list is labelled as an offline snapshot"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.repositories().len()),
+        1,
+        "the cached rows stay usable"
+    );
+    // The sidebar draws the offline snapshot line, so the cached rows do not masquerade as a live
+    // complete read.
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("repo-list-status").is_some(),
+        "the sidebar shows the offline snapshot line"
+    );
+}
+
+/// An explicit 401 is a credential rejection, not a transient outage: it must not be shown as
+/// offline history, and the old snapshot must not become current again.
+#[gpui::test]
+fn a_401_is_not_shown_as_offline_history(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+        mock.enqueue(Ok(HttpResponse {
+            status: 401,
+            headers: vec![],
+            body: "{}".into(),
+        }))
+        .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        mock.clone(),
+        cache,
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Ready(_))
+            && state.repositories.origin == RepositoryListOrigin::Network
+    });
+    wait_idle(&controller, cx);
+
+    refresh(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(&state.repositories.preview, RepositoryPreview::Failed(_))
+    });
+    let state = snapshot(&controller, cx);
+    assert_eq!(
+        state.repositories.origin,
+        RepositoryListOrigin::Network,
+        "a 401 never becomes offline history"
+    );
+    assert!(
+        state.repositories.historical_status().is_none(),
+        "a 401 must not be labelled as an offline snapshot"
+    );
+    let message = match &state.repositories.preview {
+        RepositoryPreview::Failed(message) => message.clone(),
+        other => format!("unexpected preview {other:?}"),
+    };
+    assert!(
+        message.contains("401"),
+        "the failure keeps its credential-rejection meaning, got: {message}"
+    );
+}
+
+/// The cache metadata stores milliseconds; the shared relative formatter takes RFC3339.
+#[test]
+fn epoch_milliseconds_convert_to_the_relative_formatter_input() {
+    assert_eq!(super::epoch_ms_to_rfc3339(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(
+        super::epoch_ms_to_rfc3339(1_700_000_000_123),
+        "2023-11-14T22:13:20.123Z"
+    );
+    assert_eq!(
+        super::epoch_ms_to_rfc3339(1_709_164_800_000),
+        "2024-02-29T00:00:00.000Z"
+    );
+}
+
+/// A historical snapshot reports one short offline label; a live or non-value state reports none.
+#[test]
+fn only_a_historical_ready_list_reports_an_offline_label() {
+    let account = AccountKey::new(1, HostId::github());
+    let outcome = || crate::domain::repo::ReposOutcome {
+        repositories: Vec::new(),
+        readiness: crate::domain::repo::ReposReadiness::Complete,
+    };
+    let historical = Repositories {
+        account: Some(account.clone()),
+        preview: RepositoryPreview::Ready(outcome()),
+        origin: RepositoryListOrigin::Historical {
+            verified_at_ms: 1_700_000_000_000,
+        },
+    };
+    let label = historical.historical_status().expect("historical label");
+    assert!(label.starts_with("Offline snapshot"));
+    assert!(!label.contains("Time unavailable"));
+
+    let live = Repositories {
+        account: Some(account.clone()),
+        preview: RepositoryPreview::Ready(outcome()),
+        origin: RepositoryListOrigin::Network,
+    };
+    assert!(live.historical_status().is_none());
+
+    let failed = Repositories {
+        account: Some(account),
+        preview: RepositoryPreview::Failed("boom".into()),
+        origin: RepositoryListOrigin::Network,
+    };
+    assert!(failed.historical_status().is_none());
+}
+
+/// Cache-layer failures never prove the network read failed: they retry online without caching.
+/// Only transient transport/service failures replay history; authorization, cancellation,
+/// staleness and ambiguous failures keep their own meaning.
+#[test]
+fn cache_failures_fall_back_online_while_auth_errors_keep_their_meaning() {
+    use super::{RepositoryReadFallback, repository_read_fallback};
+    use crate::data::page_cache::PageCacheError;
+
+    for error in [
+        CacheError::AccessDenied,
+        CacheError::Io,
+        CacheError::Database,
+        CacheError::Stale,
+        CacheError::Capacity,
+    ] {
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Cache(error)),
+            RepositoryReadFallback::UncachedOnline,
+            "an operational cache failure must not remove the online read"
+        );
+    }
+
+    let retry = crate::domain::error::RetryAfter {
+        kind: crate::domain::error::RateLimitKind::Primary,
+        seconds: Some(1),
+    };
+    for error in [
+        GitHubError::Network {
+            message: "offline".into(),
+        },
+        GitHubError::Timeout { seconds: 1 },
+        GitHubError::RateLimited { retry },
+        GitHubError::UnexpectedStatus { status: 503 },
+    ] {
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Read(error)),
+            RepositoryReadFallback::OfflineHistory
+        );
+    }
+
+    for error in [
+        GitHubError::Unauthorized,
+        GitHubError::Forbidden,
+        GitHubError::NotFound,
+        GitHubError::SsoRequired {
+            authorization_url: None,
+        },
+        GitHubError::Cancelled,
+        GitHubError::StaleContext,
+        GitHubError::UnexpectedStatus { status: 400 },
+    ] {
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Read(error.clone())),
+            RepositoryReadFallback::KeepError
+        );
+        assert_eq!(
+            repository_read_fallback(&PageCacheError::Context(error)),
+            RepositoryReadFallback::KeepError
+        );
+    }
+}
+
+/// Both network and historical copies need the same permission token. A revocation between the
+/// background completion and UI publication cannot be repaired by reopening a new gate.
+#[gpui::test]
+fn revocation_clears_online_rows_and_rejects_queued_replies_even_after_gate_recovery(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.script_user(user(1, "alice"));
+    mock.serve_repos("synthetic", repos(1, "alice", &["alpha"]));
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        Arc::new(InMemoryCredentialStore::new()),
+        mock,
+        cache,
+    );
+    let service = runtime.accounts.clone();
+    let (_view, controller, cx) = product_shell(cx, Some(runtime));
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        matches!(state.repositories.preview, RepositoryPreview::Ready(_))
+    });
+    wait_idle(&controller, cx);
+    let repos = service.repo_service();
+    let context = repos.session().unwrap().context().clone();
+    let binding = repos.cache(&context).unwrap();
+    let token = binding
+        .store()
+        .authorization(binding.scope(), None)
+        .unwrap();
+    let outcome = host_runtime()
+        .block_on(super::read_repositories(&repos, Default::default()))
+        .outcome
+        .unwrap();
+    binding
+        .store()
+        .revoke_repository(binding.scope(), Some(10))
+        .unwrap();
+    assert!(
+        repos.is_current(&context),
+        "repository revocation is not account logout"
+    );
+    pump(&controller, cx);
+    assert!(
+        snapshot(&controller, cx).repositories.rows().is_empty(),
+        "already displayed ONLINE rows cleared"
+    );
+    // A new online read is allowed but must not authorize the old queued reply.
+    host_runtime()
+        .block_on(super::read_repositories(&repos, Default::default()))
+        .outcome
+        .unwrap();
+    assert!(!token.is_current());
+    for origin in [
+        RepositoryListOrigin::Network,
+        RepositoryListOrigin::Historical { verified_at_ms: 1 },
+    ] {
+        controller.update(cx, |accounts, cx| {
+            accounts.generation += 1;
+            accounts.operation = Some(control());
+            accounts.current_operation = Some(Operation::Repositories);
+            let reply = Reply {
+                generation: accounts.generation,
+                operation: Operation::Repositories,
+                result: Ok(Success::Repositories),
+                publication: Some(context.clone()),
+                for_account: Some(context.auth().account.clone()),
+                recovery_pending: false,
+                repositories: Some(RepositoryReply {
+                    outcome: Ok(outcome.clone()),
+                    origin,
+                }),
+                repository_authorization: Some(token.clone()),
+            };
+            accounts.apply(reply, cx);
+        });
+        assert!(
+            snapshot(&controller, cx).repositories.rows().is_empty(),
+            "queued old reply cannot borrow the new gate"
+        );
+    }
 }

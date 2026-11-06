@@ -1,6 +1,6 @@
 # /user/repos 仓库列表持久缓存适配器
 
-状态：数据层已实现并通过确定性测试。**尚未接入正式 Shell**，不代表应用已支持离线仓库导航；由 cache-runtime 任务通过同一应用 `CacheStore` 和 `RepoService::cache(&context)` 挂载。
+状态：数据层已实现并通过确定性测试；**已由 cache-runtime 通过同一应用 `CacheStore` 和 `RepoService::cache(&context)` 接入正式侧栏**（Online 记录 + 允许的网络故障回退 Offline 历史，`Historical` 来源在侧栏标示）。组装与回退策略见 [app-cache-integration](app-cache-integration.md)。
 
 ## 入口与账户绑定
 
@@ -36,7 +36,7 @@ pub async fn list_repos_cached(
 
 - 每次读取走既有 `RepoService::read_authenticated`：加载凭据、复核账户 epoch、取得并发 permit、取消检查，只是把 transport 换成记录/回放。缓存副作用（读/begin_write/put）在 blocking worker 上持有账户 `credential_commit` 锁并再次复核 context，与 PAT/selection 提交串行化；网络请求不持锁。
 - 当前会话任一 401 通过 `RepoService::credential_rejected(&context)` 写账户拒绝 journal，再记录缓存门禁并拒绝发布，成功记录后返回 `PageCacheError::Context(GitHubError::Unauthorized)`。401 同时带 no-store 时，在推进拒权 epoch 前先尝试删除旧 slot；无论删除是否成功仍尝试记录拒权。门禁 SQL 失败时返回生命周期错误，已 clone 的 scope/lease 立即被本地 suspension 封禁；重启按 journal 重新拒绝，不因数据库恢复可写而复活旧私有快照。网络、超时、5xx、限流、模糊 403/404 不清缓存、不改授权账本。
-- PAT 替换使账户聚合 gate 隔离，旧快照、旧 lease 与更早写 ticket 均不可回填或重开。明确仓库撤权（`revoke_repository`）会删除该账户 `repository=None` 的聚合条目并推进聚合 revision：撤权前取得的写 ticket 在 put 时得到 `Stale`，离线读随后是 `Miss(NotCached)`。回放结束后再次 `lease.snapshot()` 检查，撤权/PAT 替换期间的旧值不作为存活快照返回。
+- PAT 替换先隔离并推进 epoch，新凭据目录/journal 发布后由生命周期原子丢弃旧聚合并建立新代次；旧快照/lease/writer/proof 不复活，新凭据在线列表可直接保存，断网/重启可回放新快照。明确仓库撤权（`revoke_repository`）会删除该账户 `repository=None` 的聚合条目并推进聚合 revision：撤权前取得的写 ticket 在 put 时得到 `Stale`，离线读随后是 `Miss(NotCached)`。回放结束后再次 `lease.snapshot()` 检查，撤权/PAT 替换期间的旧值不作为存活快照返回。
 
 ## 验证
 
@@ -64,3 +64,5 @@ if repos.cache(&context).is_none() {
 ```
 
 已复制到消费者的值仍须由宿主在移除/撤权时清空；本适配器不修改 UI，也不提供持续有效的展示许可。
+
+`list_repos_cached` 对在线与历史读取都捕获并校验 `CacheAuthorization`。正式侧栏还在请求前捕获自己的票据，在 UI apply 前复核并在 drain 清掉已显示的失效副本；单仓库撤权不推进 AuthEpoch 也会清旧行，新 gate 恢复不让旧 reply 混入。接口线程与消费要求见 [cache-core](cache-core.md#已显示副本的权限失效接口)。

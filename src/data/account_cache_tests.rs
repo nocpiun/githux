@@ -155,7 +155,10 @@ async fn saved_restart_replacement_revalidation_remove_and_readd_use_real_catalo
     ));
     denied(&restored, &private_key(10));
     denied(&restored, &private_key(20));
-    denied(&restored, &account_key());
+    assert!(matches!(
+        restored.store().read(restored.scope(), &account_key()),
+        Ok(CacheRead::Miss(_))
+    ));
     assert_eq!(
         value(
             &service.cache(&account_summary(&service, 2)).unwrap(),
@@ -187,7 +190,10 @@ async fn saved_restart_replacement_revalidation_remove_and_readd_use_real_catalo
         b"account one repository ten"
     );
     denied(&restored, &private_key(20));
-    denied(&restored, &account_key());
+    assert!(matches!(
+        restored.store().read(restored.scope(), &account_key()),
+        Ok(CacheRead::Miss(_))
+    ));
     service.close().await.unwrap();
 
     let service = open_cached(
@@ -1307,4 +1313,75 @@ fn scope_enumeration_is_read_only_and_validates_persisted_account_ids() {
     let cache = CacheStore::open(cache_config(&temp)).unwrap();
     let first = cache.saved_account(key(1)).unwrap();
     assert_eq!(cache.live_scopes().unwrap(), vec![first]);
+}
+
+/// Both cross-storage crash windows keep the catalog marker until the new aggregate generation
+/// commits: catalog published/reset failed, and reset committed/marker acknowledgement failed.
+#[tokio::test]
+async fn replacement_recovery_journal_survives_reset_and_acknowledgement_failures() {
+    for fail_ack in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let accounts = config(&temp);
+        let cfg = cache_config(&temp);
+        let credentials = Arc::new(InMemoryCredentialStore::new());
+        let mock = Arc::new(MockTransport::new());
+        let executor = Arc::new(BackgroundExecutor::new(4));
+        let cache = CacheStore::open(cfg.clone()).unwrap();
+        let service = open_cached(
+            accounts.clone(),
+            credentials.clone(),
+            mock.clone(),
+            executor.clone(),
+            cache.clone(),
+        )
+        .await;
+        user(&mock, 1).await;
+        service.login(Pat::from_str("old")).await.unwrap();
+        let binding = service.cache(&account_summary(&service, 1)).unwrap();
+        put(&binding, &account_key(), b"old aggregate");
+        let catalog = rusqlite::Connection::open(&accounts.path).unwrap();
+        let cache_db = rusqlite::Connection::open(cfg.root.join("cache.sqlite3")).unwrap();
+        if fail_ack {
+            catalog.execute_batch("CREATE TRIGGER fail_ack BEFORE DELETE ON cache_recovery BEGIN SELECT RAISE(ABORT,'test ack'); END;").unwrap();
+        } else {
+            cache_db.execute_batch("CREATE TRIGGER fail_reset BEFORE UPDATE ON gates BEGIN SELECT RAISE(ABORT,'test reset'); END;").unwrap();
+        }
+        user(&mock, 1).await;
+        assert!(matches!(
+            service.replace(key(1), Pat::from_str("new")).await,
+            Err(LoginError::CleanupPending(_))
+        ));
+        assert_eq!(
+            catalog
+                .query_row("SELECT kind FROM cache_recovery", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "replaced"
+        );
+        assert!(service.recovery_pending().await.unwrap());
+        assert!(service.cache(&account_summary(&service, 1)).is_none());
+        catalog
+            .execute_batch("DROP TRIGGER IF EXISTS fail_ack")
+            .unwrap();
+        cache_db
+            .execute_batch("DROP TRIGGER IF EXISTS fail_reset")
+            .unwrap();
+        drop(catalog);
+        drop(cache_db);
+        service.close().await.unwrap();
+        drop(binding);
+        drop(service);
+        drop(cache);
+        let cache = CacheStore::open(cfg).unwrap();
+        let service = open_cached(accounts, credentials, mock, executor, cache).await;
+        assert!(!service.recovery_pending().await.unwrap());
+        let b = service.cache(&account_summary(&service, 1)).unwrap();
+        assert!(matches!(
+            b.store().read(b.scope(), &account_key()),
+            Ok(CacheRead::Miss(_))
+        ));
+        put(&b, &account_key(), b"new aggregate only");
+        assert_eq!(value(&b, &account_key()), b"new aggregate only");
+        service.close().await.unwrap();
+    }
 }

@@ -10,7 +10,7 @@
 
 缓存 DTO `SnapshotV1` 保存一份有界页面读取的原始响应集合；离线仍运行真实 GitHub adapters 和原 Feed policy，不再实现一套卡片筛选、排序、作者解析或分页算法。每个交换按 method、完整 URL、固定 GraphQL query/variables、Accept/API version 匹配。外层键包括授权账户分区、当前 captured login、目标 profile login/id、查询、分页 cursor、预算及表示版本；仓库 extras/counts 另带数字 repo ID。原始响应集随完成后的 outcome 原子写入，未完成的请求不会写成完整空。
 
-所有条目按私有门槛读取，即便其中有公开字段。Home/Feed/Profile composite 使用 `repository=None` 的账户聚合 gate；一个仓库重新验证不能解锁它们。Profile README 的 repo ID 要在发现后才能知道，整个组合也留在账户聚合 gate。适配器不会自行调用 `permission_confirmed`，PAT 替换后由账户生命周期和后续组装方按明确范围提供证明。
+所有条目按私有门槛读取，即便其中有公开字段。Home/Feed/Profile composite 使用 `repository=None` 的账户聚合 gate；一个仓库重新验证不能解锁它们。Profile README 的 repo ID 要在发现后才能知道，整个组合也留在账户聚合 gate。适配器不自行调用 `permission_confirmed`。PAT 替换后由账户生命周期通过持久 journal 清除旧聚合、建立只接收新凭据新结果的代次（见[账户生命周期](cache-account-lifecycle.md)），不恢复未经重读的旧快照；当前页面在线结果可正常写入。
 
 返回 `Scoped<PageValue<T>>`，包含原 `RepositoryReadContext`。`Value` 明确给出 `Network` 或 `HistoricalSnapshot`、`fetched_at_ms`、`verified_at_ms` 及 `CacheCompleteness`。离线时间原样保留，不刷新时间、不暗称 fresh。`Miss` 与有效空的 `Value` 不同；无 README 的 `Missing`、根树不完整的 `Unavailable` 和请求失败仍分别保留。离线 snapshot 没有 TTL 自动晋升，调用者必须标识历史快照。在线结果超过缓存单条/容量预算时仍返回成功的 `Network` 观察，旧离线快照保留原时间；授权拒绝、过时 ticket 和其他存储错误继续返回错误，容量退让不能绕过授权门槛。
 
@@ -44,3 +44,7 @@
 ## 唯一后续组装点
 
 由协调者在账户 lifecycle 与仓库缓存合入后指派**唯一正式 Shell 缓存接线任务**：在现有账户服务/executor 组装处注入同一个 CacheStore 与保存账户 scope，给 Home/Profile/Repository host 选择 online/offline 模式，消费来源/旧时间/Partial/Miss，并处理页面清空和 account aggregate 重新验证。该任务拥有 `app/pages` 等正式 host 接口。本任务没有添加第二个 Shell 入口或调整首屏/自动旧页触发行为。
+
+## 在线/历史显示副本的失效票据
+
+`CachedPageReadSession::read` 请求前捕获 `CacheStore::authorization(scope, repository)` 并在网络完成/返回成功前复核。调用方仍须在请求前捕获同一资源的 `CacheAuthorization`，随 reply 交给 UI；后台完成后、UI apply 前以及已经显示期间都用原票据 `is_current()` 检查。票据是独立内存锁+原子读取，不做 UI SQLite I/O；新 gate 恢复不会复活旧 reply。资源作用域、示例及永久失效语义见 [cache-core](cache-core.md#已显示副本的权限失效接口)。Home/Feed/Profile 的在线结果同样携带票据，不仅历史结果。

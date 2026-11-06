@@ -1612,7 +1612,12 @@ impl Shell {
         match &self.account_state.repositories.preview {
             RepositoryPreview::Ready(outcome)
                 if outcome.repositories.is_empty()
-                    && outcome.readiness == crate::domain::repo::ReposReadiness::Complete => {}
+                    && outcome.readiness == crate::domain::repo::ReposReadiness::Complete
+                    && self
+                        .account_state
+                        .repositories
+                        .historical_status()
+                        .is_none() => {}
             _ => return None,
         }
         let theme = cx.theme();
@@ -1677,7 +1682,7 @@ impl Shell {
         let state = &self.account_state.repositories;
         let loading = matches!(state.preview, RepositoryPreview::Loading);
         let mut retry: Option<sidebar::SharedRun> = None;
-        let (message, warning) = match &state.preview {
+        let (mut message, mut warning) = match &state.preview {
             // A complete list says nothing extra; a partial one keeps its rows usable and also
             // offers a scoped retry, because omitted pages otherwise cannot be reached again until
             // an unrelated account operation changes the authorization.
@@ -1713,6 +1718,31 @@ impl Shell {
             // list is empty right now. The automatic load below replaces this without user input.
             RepositoryPreview::Idle(message) => (Some(message.clone()), false),
         };
+        // A replayed snapshot is not a live complete read: say so, keep any partial-completeness
+        // detail, and offer the same scoped retry so the user can re-read once back online. It is
+        // not a failure, so a complete cached list stays informational.
+        if let Some(historical) = state.historical_status() {
+            let partial = matches!(
+                &state.preview,
+                RepositoryPreview::Ready(outcome)
+                    if matches!(
+                        outcome.readiness,
+                        crate::domain::repo::ReposReadiness::Partial { .. }
+                    )
+            );
+            message = Some(match message {
+                Some(detail) => format!("{historical}. {detail}"),
+                None => historical,
+            });
+            warning = partial;
+            if retry.is_none() {
+                retry = self.accounts.clone().map(|accounts| {
+                    std::rc::Rc::new(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                        let _ = accounts.update(cx, |accounts, cx| accounts.refresh(cx));
+                    }) as std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>
+                });
+            }
+        }
         let has_line = message.is_some() || loading;
         if !has_line {
             return (None, None);

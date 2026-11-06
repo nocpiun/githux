@@ -290,12 +290,14 @@ async fn actual_in_flight_reads_observe_switch_replacement_removal_and_revocatio
             let context = repos.capture_read_context().unwrap();
             let proof = repos.begin_revalidation(&context, Some(10)).unwrap();
             repos.permission_confirmed(&context, proof).await.unwrap();
-            // A single repository proof must not open this private aggregate.
+            // A repository proof cannot resurrect discarded old aggregate data.
             assert!(matches!(
                 repos
                     .list_repos_cached(PageReadMode::Offline, Default::default())
-                    .await,
-                Err(PageCacheError::Cache(CacheError::AccessDenied))
+                    .await
+                    .unwrap()
+                    .value,
+                PageValue::Miss(_)
             ));
         }
         service.close().await.unwrap();
@@ -426,4 +428,98 @@ async fn malformed_later_page_and_sensitive_headers_are_not_persisted_verbatim()
         assert_eq!(offline.repositories, online.repositories);
         service.close().await.unwrap();
     }
+}
+
+/// Production composition with a real catalog/store restart: replacement admits only new aggregate
+/// results, never old sibling Home/Profile/Feed bytes, leases, writers, proofs or queued replies.
+#[tokio::test]
+async fn replacement_records_new_list_and_reopens_offline_without_resurrecting_old_aggregates() {
+    let h = Harness::new();
+    let service = h.open().await;
+    h.login(&service, 1).await;
+    let repos = service.repo_service();
+    h.read(&repos, 10).await;
+    let b = binding(&repos);
+    let list_key = complete_key(&repos);
+    let home_key = CacheKey::mutable(None, true, "home-old", "page=1", "test-json", 1).unwrap();
+    b.store()
+        .put(
+            b.store().begin_write(b.scope(), &home_key).unwrap(),
+            b"old home",
+            metadata(1, CacheCompleteness::Complete, false),
+        )
+        .unwrap();
+    let old_lease = match b.store().read(b.scope(), &list_key).unwrap() {
+        CacheRead::Hit(lease) => lease,
+        _ => panic!("list hit"),
+    };
+    let old_writer = b.store().begin_write(b.scope(), &list_key).unwrap();
+    let old_proof = repos
+        .begin_revalidation(&repos.capture_read_context().unwrap(), None)
+        .unwrap();
+    let old_session = repos.session().unwrap();
+    let old_authorization = b.store().authorization(b.scope(), None).unwrap();
+    user(&h.mock, 1).await;
+    service
+        .replace(key(1), Pat::from_str("valid-new-credential"))
+        .await
+        .unwrap();
+    assert!(!old_session.verify());
+    assert!(!old_authorization.is_current());
+    assert!(old_lease.snapshot().is_err());
+    assert!(matches!(
+        b.store().put(
+            old_writer,
+            b"late",
+            metadata(1, CacheCompleteness::Complete, false)
+        ),
+        Err(CacheError::Stale)
+    ));
+    assert!(matches!(
+        b.store().permission_confirmed(old_proof),
+        Err(CacheError::Stale)
+    ));
+    assert!(matches!(
+        b.store().read(b.scope(), &home_key),
+        Ok(CacheRead::Miss(_))
+    ));
+    h.read(&repos, 20).await;
+    let (fresh, _, _) = value(
+        repos
+            .list_repos_cached(PageReadMode::Offline, Default::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fresh.repositories[0].id, 20);
+    assert!(
+        !old_authorization.is_current(),
+        "new data cannot revive queued old replies"
+    );
+    service.close().await.unwrap();
+    drop(old_lease);
+    drop(b);
+    drop(old_session);
+    drop(repos);
+    drop(service);
+    let service = h.open().await;
+    assert!(service.summaries().iter().all(|s| matches!(
+        s.authorization,
+        crate::domain::account::AuthorizationState::PendingVerification
+    )));
+    let repos = service.repo_service();
+    let (fresh, origin, _) = value(
+        repos
+            .list_repos_cached(PageReadMode::Offline, Default::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fresh.repositories[0].id, 20);
+    assert_eq!(origin, PageOrigin::HistoricalSnapshot);
+    assert!(matches!(
+        binding(&repos)
+            .store()
+            .read(binding(&repos).scope(), &home_key),
+        Ok(CacheRead::Miss(_))
+    ));
+    service.close().await.unwrap();
 }

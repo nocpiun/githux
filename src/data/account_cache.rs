@@ -98,9 +98,10 @@ impl AccountCaches {
                     Ok(())
                 })
             } else {
-                self.store
-                    .saved_account(account.clone())
-                    .and_then(|scope| self.store.access_event(&scope, AccessEvent::PatReplaced))
+                self.store.saved_account(account.clone()).and_then(|scope| {
+                    self.store.access_event(&scope, AccessEvent::PatReplaced)?;
+                    self.store.start_fresh_aggregate(&scope)
+                })
             };
             if applied.is_ok() && database.cache_recovered(&account, &kind).is_ok() {
                 self.catalog.remove(&account);
@@ -601,6 +602,42 @@ pub(super) fn reject(
         None => Ok(()),
     };
     journal.and(gate)
+}
+
+/// Called with the account commit lock and catalog DB lock after replacement publication.
+/// The existing `replaced` marker was committed with the new credential reference; never acknowledge
+/// it before the cache transaction that discards the previous aggregate generation.
+pub(super) fn complete_replacement(
+    cache: &Shared,
+    account: &AccountKey,
+    database: &crate::storage::accounts::AccountDatabase,
+) -> Result<(), AccountError> {
+    let mut shared = cache.lock().expect("account cache lock");
+    let Some(cache) = shared.as_mut() else {
+        return Ok(());
+    };
+    cache.catalog.insert(account.clone(), "replaced".into());
+    let result = cache
+        .store
+        .saved_account(account.clone())
+        .and_then(|scope| {
+            cache.store.start_fresh_aggregate(&scope)?;
+            Ok(scope)
+        });
+    match result {
+        Ok(scope) if database.cache_recovered(account, "replaced").is_ok() => {
+            cache.catalog.remove(account);
+            cache.scopes.insert(account.clone(), scope);
+            Ok(())
+        }
+        _ => {
+            if let Some(scope) = cache.scopes.remove(account) {
+                let _ = cache.store.suspend(&scope);
+            }
+            cache.recovery_pending = true;
+            Err(AccountError::CleanupPending)
+        }
+    }
 }
 
 /// Only after the account transaction has published replacement credentials.
