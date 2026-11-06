@@ -72,6 +72,7 @@
 - **规则**：可交互预览按请求与资源身份应答，覆盖重复打开、返回、切换与重试；预览与行为测试共用 fixture。未建模请求明确报告开发配置错误，只有显式错误场景才返回相应产品错误。仓库预览的当前契约见 [开发预览与 fixture](docs/repository-browser.md#开发预览与-fixture)。
 - **原因**：repository example 最初用一次性响应队列 `pop_front()`，仅首屏请求有数据，耗尽后统一返回 404；正常后续点击被误报为资源或权限问题。测试与预览各用一套 transport，测试通过没有暴露预览中的缺口。
 - **证据**：[返工记录](docs/devlog/2026-10-28-repository-browser.md#本轮返工背景)及其“示例可完整、反复浏览”“预览场景与验收共用数据”；当前 [共享 fixture](src/bin_support/repository_fixture.rs) 的 `the_same_resource_can_be_read_repeatedly_and_in_any_order`、`scripted_failures_fire_once_so_a_single_retry_recovers`、`an_unmodelled_request_is_a_development_error_not_a_permission_result` 分别覆盖反复读取、一次失败后恢复和开发诊断（599），[页面行为测试](src/ui/repository/tests.rs) 覆盖嵌套目录、同文件重复打开与分支往返。预览与测试入口分别见 [example](examples/repository.rs) 和 [test](tests/repository.rs)。
+- **并发补充**：不同资源会并发读取时，响应也必须按请求身份分派；共享 FIFO 会随调度顺序把 Feed 响应交给 Home 等其他端点，导致偶发解析失败。回归应主动控制两种完成顺序，不能靠重复运行到绿或串行化产品请求掩盖问题。main `78ce277` 的 Home 测试在 CI 中出现该问题，见 [修复与确定性回归](docs/devlog/2026-11-06-home-ci-fixture.md)。
 - **范围**：有返回、重复读取、异步请求或重试的交互预览与验收工具。一次性队列可用于刻意限定顺序的测试，不能冒充可自由操作的预览数据源；合成 fixture 的实网验证边界仍按 [L002](#l002模拟验证要写清边界)。
 
 ## L011：裁切要核对实际绘制节点与设备像素边界

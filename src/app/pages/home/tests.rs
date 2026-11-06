@@ -48,6 +48,34 @@ fn events(id: &str, next_page: Option<u32>) -> crate::network::transport::HttpRe
     response
 }
 
+/// The online-only composition starts independent Home and Feed jobs. Route by
+/// request identity rather than letting those jobs compete for a shared FIFO.
+fn online_response(
+    request: &crate::network::transport::HttpRequest,
+) -> crate::network::transport::HttpResponse {
+    let url = reqwest::Url::parse(&request.url).expect("fixture request URL");
+    assert_eq!(url.host_str(), Some("api.github.com"));
+    assert_eq!(request.method, crate::network::transport::HttpMethod::Get);
+    match url.path() {
+        "/user" => response(200, r#"{"id":1,"login":"octo"}"#),
+        "/search/issues" => response(200, &home("online only")),
+        "/users/octo/received_events" => events("online", None),
+        "/user/following" => response(200, r#"[{"id":7,"login":"bob"}]"#),
+        "/repos/octo/repo" => response(
+            200,
+            &serde_json::json!({
+                "id": 10, "name": "repo", "owner": {"id": 1, "login": "octo"},
+                "visibility": "public", "private": false, "default_branch": "main",
+                "fork": false, "archived": false, "stargazers_count": 0,
+                "forks_count": 0, "open_issues_count": 0, "size": 1,
+                "description": "online description", "html_url": "https://github.com/octo/repo"
+            })
+            .to_string(),
+        ),
+        _ => panic!("unmodelled Home fixture request: {}", request.url),
+    }
+}
+
 fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
         ely_core::init_for_tests(cx);
@@ -62,6 +90,8 @@ struct DescriptionGate {
     entered: std::sync::atomic::AtomicBool,
     release: tokio::sync::Notify,
     pause_search: std::sync::atomic::AtomicBool,
+    pause_events: std::sync::atomic::AtomicBool,
+    online_responses: std::sync::atomic::AtomicBool,
     search_entered: std::sync::atomic::AtomicBool,
 }
 
@@ -94,6 +124,17 @@ impl crate::network::transport::Transport for ControlledTransport {
                     _ = self.gate.release.notified() => {},
                     _ = cancel.clone().cancelled() => return Err(crate::network::transport::TransportError::Cancelled),
                 }
+            }
+            if self.gate.pause_events.load(SeqCst)
+                && request.url.contains("/users/octo/received_events")
+            {
+                tokio::select! {
+                    _ = self.gate.release.notified() => {},
+                    _ = cancel.clone().cancelled() => return Err(crate::network::transport::TransportError::Cancelled),
+                }
+            }
+            if self.gate.online_responses.load(SeqCst) {
+                return Ok(online_response(&request));
             }
             if self.gate.enabled.load(SeqCst) && request.url.contains("/repos/octo/") {
                 let name = request.url.rsplit('/').next().unwrap();
@@ -1402,16 +1443,51 @@ fn acceptance_replaced_first_page_never_appends_older_generation_continuation_of
 
 #[gpui::test]
 fn no_cache_binding_keeps_the_original_online_path(cx: &mut TestAppContext) {
+    assert_no_cache_online_path(cx, false);
+}
+
+#[gpui::test]
+fn no_cache_binding_reads_feed_before_home(cx: &mut TestAppContext) {
+    assert_no_cache_online_path(cx, true);
+}
+
+fn assert_no_cache_online_path(cx: &mut TestAppContext, feed_first: bool) {
+    use std::sync::atomic::Ordering::SeqCst;
+
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut fixture = runtime.block_on(Fixture::new(false));
-    runtime.block_on(async {
-        fixture.mock.enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#))).await;
-        fixture.mock.enqueue(Ok(response(200, &home("online only")))).await;
-        fixture.mock.enqueue(Ok(events("online", None))).await;
-        fixture.mock.enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#))).await;
-        fixture.mock.enqueue(Ok(response(200, r#"{"id":10,"name":"repo","owner":{"id":1,"login":"octo"},"visibility":"public","private":false,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":1,"description":"online description","html_url":"https://github.com/octo/repo"}"#))).await;
-    });
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.pause_search.store(feed_first, SeqCst);
+    fixture.gate.pause_events.store(!feed_first, SeqCst);
     let (page, cx) = open_page(&mut fixture, cx);
+    // Complete one column while the other is held at its transport boundary.
+    // Both orders use the real concurrent HomePage with no cache binding.
+    for _ in 0..400 {
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        if page.read_with(cx, |page, cx| {
+            let view = page.view.read(cx);
+            if feed_first {
+                matches!(view.feed_state(), PanelState::Ready { .. })
+            } else {
+                matches!(view.home_state(), PanelState::Ready { .. })
+            }
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    page.read_with(cx, |page, cx| {
+        let view = page.view.read(cx);
+        if feed_first {
+            assert!(matches!(view.feed_state(), PanelState::Ready { .. }));
+            assert!(matches!(view.home_state(), PanelState::Loading));
+        } else {
+            assert!(matches!(view.home_state(), PanelState::Ready { .. }));
+            assert!(matches!(view.feed_state(), PanelState::Loading));
+        }
+    });
+    fixture.gate.release.notify_one();
     settle(&page, cx);
     assert_eq!(
         home_title(&page, cx).as_deref(),
