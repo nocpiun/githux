@@ -1,15 +1,16 @@
-//! Standalone inbox view/controller adapter. Official Shell mounting is owned
-//! by the coordinator. No route, browser redirect or notification write action.
+//! Standalone inbox view/controller adapter. Mounted by the Shell through `ui::notifications`;
+//! the standalone preview/example also compiles this module.
 //!
 //! Row layout follows the owner-confirmed GitHub inbox reference: a narrow
 //! left gutter (unread dot + subject icon) centred against a two-line block,
 //! repository metadata above the main title, and a relative time on the right.
 //! Read state is background + dot + weight, never a "Read"/"Unread" label.
+// Preview/test-only APIs (`set_now`, `cancel_interactions`) remain for the developer preview.
 #![allow(dead_code)]
 #[cfg(test)]
 mod tests;
 
-use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind, ThreadActionRequest};
+use crate::data::notifications::{InboxSnapshot, Notifications, RequestKind};
 use crate::domain::notification::{
     NotificationThread, SubjectKind, ThreadAction, ThreadActionState,
 };
@@ -123,8 +124,30 @@ impl NotificationsView {
         self.active = active;
         if !active {
             self.cancel_activity();
+        } else if self.resume_needed() {
+            // Leaving before the first response cancels the request and clears `busy` without
+            // setting `loaded`. Returning to the retained tab must therefore resume that initial
+            // read, or the inbox stays blank until the user presses Refresh. A successfully loaded
+            // snapshot is reused untouched, so ordinary tab switching never re-reads.
+            self.request(self.resume_kind(), cx);
         }
         cx.notify();
+    }
+
+    /// True when the retained view never completed its first read and has no request running.
+    /// A confirmed empty inbox (`loaded`, zero rows, no error) is a real result and is not resumed.
+    fn resume_needed(&self) -> bool {
+        !self.snapshot.loaded && self.snapshot.busy.is_none() && self.snapshot.error.is_none()
+    }
+
+    /// An interrupted initial read restarts as `First`; the controller rejects a duplicate first
+    /// load, so this is safe even if a race already restarted it.
+    fn resume_kind(&self) -> RequestKind {
+        if self.snapshot.loaded {
+            RequestKind::Refresh
+        } else {
+            RequestKind::First
+        }
     }
 
     pub fn cancel_interactions(&mut self, cx: &mut Context<Self>) {
@@ -718,17 +741,24 @@ impl Render for NotificationsView {
                 }
             });
         let header = div()
+            .debug_selector(|| "notifications-header".into())
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .py_2()
+            // Same heading slot as Home: the page body owns the 16px gutter, and the title row
+            // adds Home's own 8px inner inset (`home-header` px_2), so the two titles start at
+            // the same x. The rows and the empty state keep only the gutter, exactly like Home's
+            // rows — they must not inherit this title-only inset.
+            .h(px(crate::ui::page_layout::PAGE_HEADER_HEIGHT))
+            .px(px(crate::ui::page_layout::PAGE_HEADER_INSET))
             .child(
                 div()
+                    .debug_selector(|| "notifications-title".into())
                     .flex_1()
                     .min_w_0()
                     .text_size(cx.theme().text_size(TextSize::Lg))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .child("Notifications"),
             )
             .child(
@@ -857,13 +887,20 @@ impl Render for NotificationsView {
             }))
             .on_key_down(cx.listener(Self::key_down));
         div()
+            .debug_selector(|| "notifications-view".into())
             .size_full()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(colors.bg)
+            // Same content surface, gutter and top/bottom insets as Home/Settings and the global
+            // work lists: the page body owns the padding, so the title line and list edges line up
+            // across pages instead of this page adding its own px_3/py_2 rhythm.
+            .px(px(crate::ui::page_layout::PAGE_GUTTER))
+            .pt(px(crate::ui::page_layout::PAGE_TOP))
+            .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
+            .bg(colors.surface)
             .text_color(colors.fg)
             .child(visible_lifetime(cx))
             .child(header)
@@ -874,7 +911,6 @@ impl Render for NotificationsView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .px_3()
                         .children(error)
                         .when(partial, |row| {
                             row.child(
@@ -895,7 +931,7 @@ impl Render for NotificationsView {
             .child(viewport)
             .when(has_more, |element| {
                 element.child(
-                    div().flex_none().px_3().py_2().child(
+                    div().flex_none().py_2().child(
                         Button::new("notifications-more", "Load more")
                             .size(ControlSize::Sm)
                             .disabled(busy)
@@ -917,10 +953,12 @@ fn read_state_background(
     hovered: bool,
     colors: &ely_core::theme::Palette,
 ) -> gpui::Hsla {
+    // The page body is `colors.surface`, so a read row keeps that same fill and only the unread
+    // row is tinted; using `bg` here would draw a mismatched stripe over the content surface.
     let base = if unread {
         colors.info_subtle
     } else {
-        colors.bg
+        colors.surface
     };
     // Blend the interaction wash over the read-state fill, so hover/selection
     // retain the two backgrounds as well as the unread dot and title weight.

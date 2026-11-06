@@ -308,10 +308,14 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
 
     click("quarter-notifications", cx);
     assert_eq!(route(&view, cx), Route::Notifications);
+    // The real host is mounted; without an account service it reports its own unavailable state.
+    assert!(cx.debug_bounds("notifications-page-unavailable").is_some());
     click("quarter-issues", cx);
     assert_eq!(route(&view, cx), Route::Issues);
+    assert!(cx.debug_bounds("work-items-page-unavailable").is_some());
     click("quarter-pull-requests", cx);
     assert_eq!(route(&view, cx), Route::PullRequests);
+    assert!(cx.debug_bounds("work-items-page-unavailable").is_some());
 
     click("account-identity", cx);
     assert_eq!(route(&view, cx), Route::Profile);
@@ -319,11 +323,12 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
     // host reports that state instead of drawing fixture profile data.
     assert!(cx.debug_bounds("profile-page-unavailable").is_some());
 
-    // The quarter entries keep a persistent selected state for their blank destinations, as the
+    // The quarter entries keep a persistent selected state for their now-real destinations, as the
     // product requires selected-state verification. Go back to Issues first, then prove New's
     // disabled entry never changes the route.
     click("quarter-issues", cx);
     assert_eq!(route(&view, cx), Route::Issues);
+    assert!(cx.debug_bounds("work-items-page-unavailable").is_some());
 
     // New is disabled this round: pressing it changes nothing.
     click("quarter-new", cx);

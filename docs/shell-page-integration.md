@@ -1,6 +1,6 @@
-# 正式 Shell 的 Home / Profile / Repository 页面接入
+# 正式 Shell 的 Home / Profile / Repository / 全局页面接入
 
-更新：2026-11-01。状态：正式页面接线与已验收子任务已整合，最终检查与合并记录见 [PR #42](https://github.com/nocpiun/githux/pull/42)。本文记录正式 Shell 中页面 host 的挂载、生命周期、导航和验证边界；组件契约分别见 [Home](home-view.md)、[Profile](profile-view.md)、[Repository](repository-browser.md)，账户服务见[账户接入](account-ui-preview.md)与[账户目录](account-persistence.md)。
+更新：2026-11-03。状态：Home / Profile / Repository 接线见 [PR #42](https://github.com/nocpiun/githux/pull/42)，Notifications 与全局 Issues/PR 由 shell-global-pages 任务挂载。本文记录正式 Shell 中页面 host 的挂载、生命周期、导航和验证边界；组件契约分别见 [Home](home-view.md)、[Profile](profile-view.md)、[Repository](repository-browser.md)、[Settings](settings.md)、[Notifications](notifications.md)、[全局 Issues/PR](global-work-items.md)，账户服务见[账户接入](account-ui-preview.md)与[账户目录](account-persistence.md)。
 
 ## 这是正式入口，不是预览
 
@@ -12,7 +12,13 @@
 - `RepositoryPageServices`：仓库页面按既有接口接收同一账户服务与 executor。
 - `app::avatar` / `ui::avatar`：唯一头像 loader/cache 与圆形呈现，页面只接收已解码图片。
 
-没有新增 PAT、HTTP 客户端、SQLite、测试账户或页面级缓存。`examples/*` 与 fixture 仍是独立开发 target，不在产品模块树或路由中。
+没有新增 PAT、HTTP 客户端、SQLite、测试账户或页面级缓存。`examples/*` 与 fixture 仍是独立开发 target，不在产品模块树或路由中（组件源文件现在同时被产品与 preview 复用，但 preview 仍不能证明正式接线）。
+
+### 全局页面（Notifications / Issues / PR）
+
+- `Route::Notifications` 挂载 `NotificationsPage`：`AccountServices.repositories().notifications()` 建控制器，仓库链接经 `RepoService::is_current` 复核后打开应用内 `Route::Repository`。
+- `Route::Issues` / `Route::PullRequests` 挂载 `WorkItemsPage`（`WorkItemKind::Issue`/`PullRequest`），默认 Assigned+Open，仓库链接同一复核后导航。
+- 这两类页面都拥有自己的局部 viewport/`Motion`/`Bars`，与 Home/Profile/Repository 一样不走 Shell 外层 page 滚动器。`Route::PullRequest` 详情仍按产品约定留空。Settings 沿用既有 Shell 账户设置实现。
 
 ## 页面生命周期
 
@@ -76,9 +82,15 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 2026-11-01：Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签，保留仓库/编号，不走浏览器外链；其他 Issue/PR 入口未扩展。PR 详情内容、通知、搜索和所有写操作未扩展；未设计页面仍按产品约定留空。
 
+## 页面内容几何与共享行（2026-11-04 视觉返工）
+
+- `src/ui/page_layout.rs` 提供四个正式页面共用的内容几何：`PAGE_GUTTER = 16`、`PAGE_TOP = 16`、`PAGE_BOTTOM = 8`、`PAGE_HEADER_HEIGHT = 40`，与 Home 已有的 `px_4 / pt_4 / pb_2` 和 40px 列头一致。Home、Notifications 与全局 Issues/PR 都据此布局，页面 body 负责留白，标题行不再各自叠加内边距。
+- Notifications 的页面 surface 改为 `colors.surface`，与 Home/Settings/列表协调；标题使用 `TextSize::Lg` + `SEMIBOLD`。
+- Home 的 Involved 条目与全局 Issues/PR 条目改为同一 `src/ui/work_item_row.rs` 呈现（行高、标题、图标槽、圆角、选中底、元信息顺序与状态色一致），状态图标按 Open/Closed/Merged/Unknown 使用主题语义色。
+
 ## 滚动
 
-Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`/`Bars`。Shell 不会在外层再给它们包一个抢占 wheel 的页面滚动器；该外层 scrolling 现在只用于 Settings/尚未设计的空白页。页面内滚动条仍使用共享 `ui::scroll`，没有第二套几何或 fade。
+Home、Profile、Repository、Notifications 与全局 Issues/PR 都拥有自己的局部 viewport、`Motion`/`Bar`/`Bars`。Shell 不会在外层再给它们包一个抢占 wheel 的页面滚动器；该外层 scrolling 现在只用于 Settings、尚未设计的空白页（如 PR 详情）与无账户控制器时未挂载页面的回退。页面内滚动条仍使用共享 `ui::scroll`，没有第二套几何或 fade。
 
 ## 紧凑状态与布局精修（2026-10-29 第二轮反馈）
 
@@ -101,5 +113,6 @@ Home、Profile 和 Repository 都拥有自己的局部 viewport、`Motion`/`Bar`
 - 同一资源激活/重排复用同一页实例与导航状态；
 - 关闭一个仓库标签不关闭或清空另一个；
 - 重新验证推进授权 epoch 后旧页面 host 被丢弃。
+- Notifications 读取收件箱、仓库链接进入应用内 Repository、Done 走真实 DELETE 并移除行；Issues/PR 读取各自账户作用域列表且同资源复用 tab。
 
-此前真实 Windows 窗口已核对正式 binary 的 Home/Feed 数据、仓库 README/树/分支、Profile 与滚动；负责人已验收关联 UI 修复、Reader HTML、Profile README polish 和 Home Feed，并授权本任务收尾后合并。最终组合验证见 [收尾记录](devlog/2026-10-29-shell-pages.md#2026-11-01最终整合)。本次整合不补称此前未测的完整登录/切账户、IME、多 DPI/跨屏或触控板均已验收；Settings 仍是过渡页，必须单独设计交付。
+此前真实 Windows 窗口已核对正式 binary 的 Home/Feed 数据、仓库 README/树/分支、Profile 与滚动；负责人已验收关联 UI 修复、Reader HTML、Profile README polish 和 Home Feed，并授权本任务收尾后合并。最终组合验证见 [收尾记录](devlog/2026-10-29-shell-pages.md#2026-11-01最终整合)。本次整合不补称此前未测的完整登录/切账户、IME、多 DPI/跨屏或触控板均已验收；Notifications 与全局 Issues/PR 的原生窗口验收仍需负责人确认（对应 PR 保持 `pending`）。Settings 仍是过渡设置页。

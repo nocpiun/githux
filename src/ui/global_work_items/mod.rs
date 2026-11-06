@@ -1,6 +1,8 @@
 //! Reusable controller-backed global Issues / Pull Requests view.
 //! Construction/activation starts the initial read; rendering never requests.
-#![allow(dead_code)] // Shell mounting is owned by the integration task.
+// Mounted by the Shell through `ui::global_work_items`; the standalone preview also compiles it.
+// Preview/test-only APIs (`set_now`, `rebind`) remain for the developer preview.
+#![allow(dead_code)]
 pub mod controller;
 mod presentation;
 mod rows;
@@ -477,12 +479,18 @@ impl Render for WorkItemsView {
             "Pull Requests"
         };
         let header = div()
+            .debug_selector(|| "work-header".into())
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
+            // Same title slot height and inner inset as Home's column header and Notifications,
+            // so the four production pages put their heading on the same line and at the same x.
+            .h(px(crate::ui::page_layout::PAGE_HEADER_HEIGHT))
+            .px(px(crate::ui::page_layout::PAGE_HEADER_INSET))
             .child(
                 div()
+                    .debug_selector(|| "work-title".into())
                     .flex_1()
                     .min_w_0()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -566,7 +574,11 @@ impl Render for WorkItemsView {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .p_4()
+            // Same body gutter/top/bottom inset as Home, Settings and Notifications. The header
+            // row keeps the shared title height so the four production pages align at the top.
+            .px(px(crate::ui::page_layout::PAGE_GUTTER))
+            .pt(px(crate::ui::page_layout::PAGE_TOP))
+            .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
             .gap_2()
             .bg(colors.surface)
             .text_color(colors.fg)

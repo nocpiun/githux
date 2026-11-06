@@ -1288,6 +1288,89 @@ fn refresh_spinner_replaces_the_icon_in_the_same_slot(cx: &mut TestAppContext) {
     assert_eq!(before, bounds("home-refresh-slot", cx));
 }
 
+/// The Involved row is the shared work-item row: its height, rounded selection fill, coloured
+/// state icon and `#number → repository → state → time` order must be the ones the global lists
+/// render, so the two surfaces cannot drift apart again.
+#[gpui::test]
+fn home_work_item_row_is_the_shared_row_presentation(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    for dimensions in [size(px(1180.0), px(800.0)), size(px(640.0), px(620.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let row = bounds("home-item-row-0", cx);
+        assert_eq!(
+            row.size.height,
+            px(crate::ui::work_item_row::WORK_ITEM_ROW_HEIGHT),
+            "Home uses the shared work-item row height"
+        );
+        let metadata = bounds("home-metadata-0", cx);
+        let number = bounds("home-0-owner", cx);
+        let repository = bounds("home-0-repository", cx);
+        assert!(
+            metadata.top() >= bounds("home-title-0", cx).bottom(),
+            "metadata stays below the title line"
+        );
+        assert!(
+            number.left() < repository.left(),
+            "the owner link precedes the repository in the shared order"
+        );
+        assert!(
+            row.right() <= bounds("home-panel", cx).right() + px(1.0),
+            "long titles and repository names stay bounded"
+        );
+    }
+}
+
+/// The selected fill must wrap the two-line block with balanced slack, and every metadata cell
+/// must sit in the same line box. The previous row packed both lines at the top of the fixed 72px
+/// height, leaving all leftover space beneath the metadata, and let each cell measure its own
+/// font-metric line height so the mono `#number` and the UI-font owner/repo did not line up.
+#[gpui::test]
+fn home_work_item_row_balances_its_fill_and_shares_one_metadata_line(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    for dimensions in [size(px(1180.0), px(800.0)), size(px(640.0), px(620.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let row = bounds("home-item-row-0", cx);
+        let title_line = bounds("home-title-line-0", cx);
+        let metadata = bounds("home-metadata-0", cx);
+        // Balanced slack: the gap above the title equals the gap below the metadata.
+        let above = title_line.top() - row.top();
+        let below = row.bottom() - metadata.bottom();
+        assert!(
+            (above - below).abs() <= px(1.0),
+            "selected fill must be balanced around the two lines (above={above:?}, below={below:?})"
+        );
+        assert!(metadata.bottom() <= row.bottom());
+        // One shared line box for every metadata cell: the mono number and the UI-font links.
+        let number = bounds("home-0-number", cx);
+        let owner = bounds("home-0-owner", cx);
+        let repository = bounds("home-0-repository", cx);
+        let updated = bounds("home-time-0", cx);
+        for (name, cell) in [
+            ("number", number),
+            ("owner", owner),
+            ("repository", repository),
+            ("updated", updated),
+        ] {
+            assert!(
+                (cell.center().y - metadata.center().y).abs() <= px(1.0),
+                "{name} cell must be vertically centred in the shared metadata line"
+            );
+        }
+        assert!(
+            (number.center().y - owner.center().y).abs() <= px(1.0),
+            "the mono #number and the UI-font owner must share one painted line"
+        );
+        assert!(
+            number.right() <= owner.left(),
+            "#number stays before owner/repo"
+        );
+    }
+}
+
 #[gpui::test]
 fn home_icon_shares_the_title_line_and_metadata_stays_below(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);

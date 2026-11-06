@@ -5,6 +5,7 @@ use crate::github::client::{GitHubClient, GitHubConfig};
 use gpui::{Modifiers, TestAppContext, size};
 use std::cell::RefCell;
 use std::time::Duration;
+
 #[path = "../../bin_support/notifications_fixture.rs"]
 mod fixture;
 
@@ -37,6 +38,77 @@ fn setup(
         controller
     });
     (controller, executor, fixture)
+}
+
+/// Home's panel header adds an 8px inset inside the 16px page gutter (`home-header` px_2), so its
+/// title starts at gutter + 8 while its rows start at the gutter. Notifications must reproduce
+/// that split: the heading takes the same inset, but the list and the empty state keep only the
+/// gutter — moving them too would push the content edges past Home's. Checked empty and populated.
+#[gpui::test]
+fn notifications_heading_and_content_edges_match_home_in_empty_and_populated_states(
+    cx: &mut TestAppContext,
+) {
+    for scene in [fixture::Scene::Empty, fixture::Scene::Mixed] {
+        cx.update(ely_core::init_for_tests);
+        let executor = Arc::new(BackgroundExecutor::new(2));
+        let fixture = Arc::new(fixture::Fixture::new(scene));
+        let accounts = AccountService::new(
+            Arc::new(InMemoryCredentialStore::new()),
+            Arc::new(GitHubClient::new(GitHubConfig::default(), fixture.clone())),
+            executor.clone(),
+        );
+        let controller = executor.raw_handle().block_on(async {
+            accounts.login(Pat::from_str("synthetic")).await.unwrap();
+            let controller = accounts.repo_service().notifications().unwrap();
+            controller
+                .execute(controller.begin(RequestKind::First).unwrap().unwrap())
+                .await;
+            controller
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NotificationsView::new(
+                controller.clone(),
+                executor.clone(),
+                Rc::new(|_, _, _| {}),
+                window,
+                cx,
+            );
+            view.sync(cx);
+            view
+        });
+        for dimensions in [size(px(960.0), px(740.0)), size(px(360.0), px(440.0))] {
+            cx.simulate_resize(dimensions);
+            cx.run_until_parked();
+            let page = cx.debug_bounds("notifications-view").unwrap();
+            let header = cx.debug_bounds("notifications-header").unwrap();
+            let title = cx.debug_bounds("notifications-title").unwrap();
+            let rows = cx.debug_bounds("notifications-rows").unwrap();
+            // Content edges: exactly the page gutter, empty or populated.
+            assert!(
+                (rows.left() - page.left() - px(crate::ui::page_layout::PAGE_GUTTER)).abs()
+                    <= px(1.0),
+                "{scene:?}: list left edge must sit on the page gutter (rows={rows:?}, page={page:?})"
+            );
+            // The header box itself starts at the gutter; its *padding* is the inset, so the
+            // title's content box is what must land at gutter + inset, exactly like Home's.
+            assert!(
+                (header.left() - rows.left()).abs() <= px(1.0),
+                "{scene:?}: header box and list share the same outer edge (header={header:?}, rows={rows:?})"
+            );
+            let expected = page.left()
+                + px(crate::ui::page_layout::PAGE_GUTTER)
+                + px(crate::ui::page_layout::PAGE_HEADER_INSET);
+            assert!(
+                (title.left() - expected).abs() <= px(1.0),
+                "{scene:?}: title text must start at gutter + inset (title={title:?}, expected={expected:?})"
+            );
+            assert!(
+                rows.right() <= page.right() - px(crate::ui::page_layout::PAGE_GUTTER) + px(1.0),
+                "{scene:?}: list right edge must stay inside the page gutter"
+            );
+        }
+        drop(view);
+    }
 }
 
 #[gpui::test]
@@ -219,6 +291,83 @@ fn cooldown_wake_is_rearmed_after_deactivation(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.time_task.is_none()));
+}
+
+/// Leaving the page before its first response cancels the request without setting `loaded`, so
+/// returning to the retained tab must retry that read; a loaded, in-flight or failed snapshot must
+/// not be retried. The rule is a pure function of the published snapshot, so it is asserted
+/// directly: a live retry here would leave a network read in flight when the GUI test scheduler
+/// tears the window down.
+#[gpui::test]
+fn reactivating_an_interrupted_cold_inbox_resumes_the_first_read(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view =
+            NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx);
+        // Reproduce the interrupted first read: the request is cancelled, nothing is loaded.
+        view.snapshot = InboxSnapshot::default();
+        view
+    });
+    cx.run_until_parked();
+
+    view.update(cx, |view, _| {
+        assert!(
+            view.resume_needed(),
+            "an idle, never-loaded inbox must resume its initial read"
+        );
+        assert_eq!(view.resume_kind(), RequestKind::First);
+    });
+    view.update(cx, |view, _| {
+        view.snapshot.loaded = true;
+        assert!(!view.resume_needed(), "a loaded inbox is not re-read");
+        assert_eq!(view.resume_kind(), RequestKind::Refresh);
+        view.snapshot.loaded = false;
+    });
+    view.update(cx, |view, _| {
+        view.snapshot.busy = Some(RequestKind::More);
+        assert!(
+            !view.resume_needed(),
+            "an in-flight request is not duplicated"
+        );
+        view.snapshot.busy = None;
+    });
+    view.update(cx, |view, _| {
+        view.snapshot.error = Some(crate::domain::error::GitHubError::Unauthorized.into());
+        assert!(
+            !view.resume_needed(),
+            "a real failure keeps its retry control"
+        );
+        view.snapshot.error = None;
+    });
+}
+
+/// A loaded snapshot is reused across tab switches: `set_active` never re-reads it.
+#[gpui::test]
+fn reactivating_a_loaded_inbox_does_not_re_read(cx: &mut TestAppContext) {
+    let (controller, executor, fixture) = setup(cx);
+    let reads = || {
+        fixture
+            .requests()
+            .iter()
+            .filter(|request| request.method == crate::network::transport::HttpMethod::Get)
+            .count()
+    };
+    let before = reads();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view =
+            NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx);
+        view.sync(cx);
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.snapshot.loaded));
+    view.update(cx, |view, cx| {
+        view.set_active(false, cx);
+        view.set_active(true, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(reads(), before, "a loaded inbox is not re-read");
 }
 
 #[gpui::test]

@@ -1,6 +1,6 @@
 # 全局 Issues / Pull Requests
 
-本模块实现 G1–G3 已确认的只读列表与独立预览。正式 Shell 挂载由后续集成任务负责，Home 的 `involves:` 查询不变。代码入口为 `domain::work_item`、`github::work_items`、`data::work_items`、`ui::global_work_items`。
+本模块实现 G1–G3 已确认的只读列表与独立预览。正式 Shell 挂载已由 shell-global-pages 集成任务完成（`app::pages::WorkItemsPage`），Home 的 `involves:` 查询不变。代码入口为 `domain::work_item`、`github::work_items`、`data::work_items`、`ui::global_work_items`。
 
 ## 查询与单页读取
 
@@ -32,6 +32,11 @@ Assigned 不包含仅 author、mention、commenter 或 review-requested 的条�
 
 Search 最多可访问 1,000 个位置，包括非整除 page size 的最后一页；不会自动预取。updated 排序会随服务端变化移动，去重不能保证无漏项。total_count 是服务端快照元数据，不在 UI 承诺完整历史。
 
+## 共享工作条目组件（2026-11-04 返工）
+
+条目呈现由 `src/ui/work_item_row.rs` 提供，Home 的 Involved 列与全局 Issues/PR 列表消费同一实现，不再各写近似样式：
+行高固定 `WORK_ITEM_ROW_HEIGHT = 72`、标题 `TextSize::Base`/`MEDIUM` + GPUI 原生 `truncate()`、`Radius::Md` 圆角、`colors.active` 选中底、`TextSize::Xs` 元信息，图标槽竖直居中。两行内容块在固定行高内用 `justify_center` 竖直居中（`flex_col` + `gap_1` 默认会把两行顶到行首，把全部余量留在元信息下方，选中圆角底色因此下重上轻）；标题行与元信息行各自设置显式行高 `rems(字号 × 1.5)`，而不是 GPUI 默认的按字体 phi 行高——mono 的 `#number` 与 UI 字体的仓库链接不再各测各的行盒，`items_center` 居中相同行盒后才真正对齐到同一条绘制基线区域。标题行另加 `page_layout::PAGE_HEADER_INSET` 内缩，与 Home/Notifications 的列头同一 x 起点。元信息顺序统一为 `#number → 仓库名 → 状态 → 相对时间`，编号用主题 `mono_family` 且保持在最前；状态文案与图标颜色按 Open/Closed/Merged/Unknown 分别映射 `success / fg_subtle / accent / warning`，不再固定单色。组件只接收展示值与回调，两个列表各自保留数据模型、账户上下文、typed navigation 与键盘选择；Home 侧 `HomeAction` 与 `select`/`activate` 语义不变。
+
 ## Shell 接入契约
 
 ```rust,ignore
@@ -45,6 +50,8 @@ page.update(cx, |view, _| view.on_repository(callback));
 ```
 
 `RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
+
+正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`。
 
 元数据行顺序为 `#number → 仓库名 → 状态 → 相对时间`：编号使用 Google Sans Code，位于仓库名之前且只出现一次；两种列表相同。整行按文本基线对齐，并对仓库名做 1 logical px 的相对上移，以抵消数字大写高度与仓库名小写高度造成的视觉偏差（相对定位不参与布局，不改变横向位置）。长仓库名在该行内仍正确截断，不会挤掉编号、状态或时间。
 
