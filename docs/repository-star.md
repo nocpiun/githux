@@ -38,7 +38,7 @@
 
 按钮显示服务端观察到的 `Star` / `Starred`，保留 Ely 图标、复合计数 badge 与同一鼠标/Enter/Space 路径。初始读取和写处理中显示图标 spinner，忙碌时抑制重复点击，不做乐观切换。失败使用黄色 warning + tooltip；只有实际重试回调可点击，不堆长文案或 toast-only 成功。Starred 状态与计数都可访问，正文 README、树和布局不变。
 
-较早的 repository summary 携带 Star 写代次，不能回盖写后的状态或计数。Fork 使用独立且恒为 false 的能力位；`enable_mutations(true)` 只影响 Star，不会顺带启用 Fork。正式 Shell 通过同一页面组合注入服务，保留原有导航；`PageAction::StarRequested` 仅保留兼容入口，不再是实际写路径。
+较早的 repository summary 携带 Star 写代次，不能回盖写后的状态或计数。当仓库页显示离线历史缓存快照（`RepositoryCacheOrigin::Snapshot`）时，不发起初始 `GET /user/starred` 请求，Star 按钮保持禁用且点击不发请求、不乐观改数；用户通过顶部 `Refresh` 在线重验仓库摘要后才恢复状态读取与权威写操作。Fork 使用独立且恒为 false 的能力位；`enable_mutations(true)` 只影响 Star，不会顺带启用 Fork。正式 Shell 通过同一页面组合注入服务，保留原有导航；`PageAction::StarRequested` 仅保留兼容入口，不再是实际写路径。
 
 ## 离线 fixture、预览与验证
 

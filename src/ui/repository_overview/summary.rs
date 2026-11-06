@@ -120,11 +120,26 @@ impl RepositoryOverview {
             || data.is_some_and(|data| {
                 matches!(data.list.completeness, ExtrasCompleteness::Partial { .. })
             });
+        let list_historical =
+            self.releases.is_historical() || data.is_some_and(|data| data.historical);
+        let latest_historical = self
+            .latest
+            .as_ref()
+            .is_some_and(SectionState::is_historical)
+            || (self.latest.is_none() && data.is_some_and(|data| data.latest_historical));
+        let sync_label = self
+            .latest
+            .as_ref()
+            .and_then(SectionState::sync_label)
+            .or_else(|| self.releases.sync_label())
+            .or_else(|| data.and_then(|data| data.sync_label.as_deref()));
         let title = "Releases".into();
         let (release, status): (Option<&Release>, &str) = match self.latest.as_ref() {
-            Some(SectionState::Ready(value) | SectionState::Partial { value, .. }) => {
-                (value.release.as_ref(), "No latest release")
-            }
+            Some(
+                SectionState::Ready(value)
+                | SectionState::Historical { value, .. }
+                | SectionState::Partial { value, .. },
+            ) => (value.release.as_ref(), "No latest release"),
             Some(SectionState::Loading) => (None, "Loading…"),
             Some(SectionState::Error { .. }) => (None, "Latest unavailable"),
             Some(SectionState::Idle) => (None, "Not loaded"),
@@ -210,10 +225,13 @@ impl RepositoryOverview {
             } else {
                 version.into_any_element()
             });
+            // Historical snapshots are never promoted to a current verified Latest badge.
             let trusted_latest = match self.latest.as_ref() {
                 Some(SectionState::Ready(value)) => value.release.is_some(),
                 None => data.is_some_and(|data| {
-                    data.latest_error.is_none()
+                    !data.latest_historical
+                        && !data.historical
+                        && data.latest_error.is_none()
                         && data
                             .latest
                             .as_ref()
@@ -273,8 +291,30 @@ impl RepositoryOverview {
         if list_partial || self.latest.as_ref().is_some_and(SectionState::is_partial) {
             row = row.child(text("Partial", cx));
         }
+        if list_historical || latest_historical {
+            let tip = match sync_label {
+                Some(label) => {
+                    format!("Cached releases snapshot · synced {label}. Click to refresh.")
+                }
+                None => "Cached releases snapshot. Click to refresh.".to_string(),
+            };
+            row = row.child(
+                div()
+                    .id("overview-releases-cached")
+                    .debug_selector(|| "overview-releases-cached".into())
+                    .tooltip(ui_tooltip(tip))
+                    .child(Badge::new("Cached").outline()),
+            );
+            if list_failed.is_none() && latest_failed.is_none() {
+                row = row.child(self.retry(
+                    OverviewSection::Releases,
+                    "Cached snapshot · refresh when online",
+                    cx,
+                ));
+            }
+        }
         let count = data
-            .filter(|_| !list_partial)
+            .filter(|_| !list_partial && !list_historical)
             .map(|data| data.list.releases.len().to_string());
         group_with_count(
             "overview-releases",
@@ -356,6 +396,26 @@ impl RepositoryOverview {
             {
                 row = row.child(text("Partial", cx));
             }
+            if self.contributors.is_historical() {
+                let tip = match self.contributors.sync_label() {
+                    Some(label) => {
+                        format!("Cached contributors snapshot · synced {label}. Click to refresh.")
+                    }
+                    None => "Cached contributors snapshot. Click to refresh.".to_string(),
+                };
+                row = row.child(
+                    div()
+                        .id("overview-contributors-cached")
+                        .debug_selector(|| "overview-contributors-cached".into())
+                        .tooltip(ui_tooltip(tip))
+                        .child(Badge::new("Cached").outline()),
+                );
+                row = row.child(self.retry(
+                    OverviewSection::Contributors,
+                    "Cached snapshot · refresh when online",
+                    cx,
+                ));
+            }
         } else if let Some(error) = self.contributors.error() {
             row = row.child(self.retry(OverviewSection::Contributors, error, cx));
         } else if self.contributors.is_loading() {
@@ -383,6 +443,8 @@ impl RepositoryOverview {
         if segments.is_empty() {
             return div().into_any_element();
         }
+        let historical = self.languages.is_historical();
+        let sync_label = self.languages.sync_label().map(str::to_string);
         div()
             .id("overview-language-bar")
             .debug_selector(|| "overview-language-bar".into())
@@ -392,7 +454,19 @@ impl RepositoryOverview {
             .h(px(4.0))
             .overflow_hidden()
             .children(segments.into_iter().enumerate().map(|(index, segment)| {
-                let label = format!("{} {}", segment.name, format_share(segment.share));
+                let label = match (historical, sync_label.as_deref()) {
+                    (true, Some(sync)) => {
+                        format!(
+                            "{} {} · cached ({sync})",
+                            segment.name,
+                            format_share(segment.share)
+                        )
+                    }
+                    (true, None) => {
+                        format!("{} {} · cached", segment.name, format_share(segment.share))
+                    }
+                    (false, _) => format!("{} {}", segment.name, format_share(segment.share)),
+                };
                 div()
                     .id(("overview-language-segment", index))
                     .debug_selector(move || format!("overview-language-segment-{index}"))

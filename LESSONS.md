@@ -153,3 +153,10 @@
 - **原因**：账户生命周期中，门禁 SQL 失败后旧 scope clone 仍可能继续读写；只清 map 会让“已隔离/已退休”名存实亡。跨 DB 崩溃窗口下，若恢复标记与目录变更分属不同事务，重启可能把旧分区误认给新身份。
 - **证据**：2026-11-01 `cache-account-lifecycle` 用真多线程 runtime 交错验证旧 lease/writer/revalidation proof 在替换后变为 `Stale`，并以故障注入覆盖目录已删而 cache 仍 live 的对账；见[开发日志](docs/devlog/2026-11-01-cache-account-lifecycle.md)与[账户生命周期](docs/cache-account-lifecycle.md)。
 - **范围**：多存储间的一致性提交、凭据/授权隔离、可取消的旧句柄封禁。适用范围限定于确有安全语义的变更，不推广成所有跨表操作的通用事务要求。
+
+## L022：撤权判定不能靠定时探测的最近结果
+
+- **规则**：把授权状态做成“后台探测最近一次结果”的布尔量，会让撤权正确性依赖探测节奏：既存在最长一个间隔的延迟窗口，也可能整个被漏掉（撤权与重新授权落在同一间隔内时，下一次探测只看得到“当前允许”）。授权必须绑定到被读取的数据本身——读取前取失效令牌、回复携带令牌、发布前校验令牌，令牌失效后永不复原；校验只做原子 load，因此 UI 线程与渲染节拍仍然零存储 I/O。
+- **原因**：PR #73 原实现用 2 秒节流的门禁探测喂 `gate_denied`，`revoke_repository(scope, Some(id))` 更新账户代次之外只翻转仓库授权，页面因此在撤权后继续显示私有内容，`revoke + revalidate` 同窗口时永不生效。缩短间隔只是缩小窗口，不能消除漏判。
+- **证据**：确定性回归 `repository_revocation_clears_the_displayed_page_in_one_drain`（单次 drain、不睡眠即要求清空，交付 head 上失败 run `653e5a3f`，把校验改回恒真再次失败 run `d2603345`，恢复后通过 `af02e39b`）与 `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`（撤权前完成的回复不得回填，重新授权不得复活旧令牌）；见[开发日志](docs/devlog/2026-11-03-repository-offline.md)与[仓库浏览](docs/repository-browser.md)。
+- **范围**：任何“显示/发布已缓存或已授权内容”的消费方（页面、图片 provider、内嵌聚合区）。不适用于纯展示性、无授权语义的轮询状态刷新。

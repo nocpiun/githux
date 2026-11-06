@@ -14,6 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::data::repository_cache::RepositoryCacheError;
+use crate::domain::cache::CacheMiss;
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
     BranchesOutcome, Completeness, DirectoryTree, DynamicRef, IncompleteReason, ReadmeDescriptor,
@@ -94,6 +96,53 @@ impl PageError {
         }
     }
 
+    /// Classifies a repository-cache read failure while keeping uncached/corrupt
+    /// misses and cache gate denials distinct from empty results.
+    pub fn from_cache(error: &RepositoryCacheError) -> Self {
+        match error {
+            RepositoryCacheError::Online(inner) => Self::from_repository(inner),
+            RepositoryCacheError::Miss(CacheMiss::NotCached) => Self::new(
+                "This resource is not available in the local cache.",
+                Some(
+                    "Connect to the network and retry to fetch it from GitHub; no empty result is inferred."
+                        .to_string(),
+                ),
+                true,
+            ),
+            RepositoryCacheError::Miss(CacheMiss::Corrupt) => Self::new(
+                "The cached snapshot for this resource could not be verified.",
+                Some(
+                    "The local cache entry was discarded; retry while online to fetch a fresh copy."
+                        .to_string(),
+                ),
+                true,
+            ),
+            RepositoryCacheError::Miss(CacheMiss::RepresentationVersion) => Self::new(
+                "The cached snapshot uses an older representation version.",
+                Some(
+                    "Retry while online to refresh this resource; no empty result is inferred."
+                        .to_string(),
+                ),
+                true,
+            ),
+            RepositoryCacheError::AccessDenied => Self::new(
+                "Cached repository data is unavailable under current authorization.",
+                Some(
+                    "Private cache access requires online revalidation after a credential or permission change."
+                        .to_string(),
+                ),
+                true,
+            ),
+            RepositoryCacheError::Storage => Self::new(
+                "The local cache could not be read.",
+                Some(
+                    "Retry to fetch from GitHub; no empty result is inferred.".to_string(),
+                ),
+                true,
+            ),
+        }
+    }
+
     /// Classifies a repository-layer error without claiming an empty result and
     /// without over-claiming why a resource is missing.
     pub fn from_repository(error: &RepositoryError) -> Self {
@@ -135,6 +184,13 @@ impl PageError {
                 true,
             ),
         }
+    }
+
+    /// Test-only bridge so a scripted stale reply can carry the same typed
+    /// classification the page itself derives from a `GitHubError`.
+    #[cfg(test)]
+    pub(crate) fn from_github_for_test(error: GitHubError) -> Self {
+        Self::from_github(&error)
     }
 
     fn from_github(error: &GitHubError) -> Self {
@@ -252,6 +308,12 @@ impl PageError {
 impl From<RepositoryError> for PageError {
     fn from(error: RepositoryError) -> Self {
         Self::from_repository(&error)
+    }
+}
+
+impl From<RepositoryCacheError> for PageError {
+    fn from(error: RepositoryCacheError) -> Self {
+        Self::from_cache(&error)
     }
 }
 

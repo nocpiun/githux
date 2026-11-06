@@ -152,3 +152,22 @@ Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：
 修复位于 [`ui::island`](../src/ui/island.rs) 的 `RoundedClip`：它只包一个子元素、直接复用该子元素的 layout（不加 padding/尺寸/新布局盒），在子元素之后按 island 的**外**半径擦除四个 `radius × radius` 角方块中弧外的部分（用窗口背景色），再用同一半径重画 island 的 1px 边框。`Shell::island` 通过 `rounded_island(frame, outside, border)` 使用它。色条的比例、颜色、底部位置、hover/百分比 tooltip，以及文件树、README reader、滚动区域和 tab strip 的几何均未改动。
 
 边界说明：这是绘制层补偿，不是真正的几何裁切——若将来升级到支持非矩形 mask 的 GPUI，应换成真实 mask 并删除角擦除。开发预览 `cargo run --example repository` 另有一个**仅预览**的 `Corner clip: on/off` 开关，用于在同一真实窗口对比修复前后；产品始终开启。原生对照与像素边界见 [开发日志](devlog/2026-10-29-repository-language-clip.md)。
+
+
+## 持久缓存与跨重启离线阅读（2026-11-03）
+
+`RepositoryPageServices::new(accounts, executor)` 保持原有构造兼容，不新增数据库打开或凭据路径。`RepositoryPage::activate` 在捕获 `RepositorySession` 后通过 `RepoService::cache(session.context())` 获取当前账户的 `(CacheStore, CacheScope)` 绑定：
+
+- **无缓存绑定**：继续使用原有在线 `RepositorySession` 与 `PageReadSession`，行为完全不变。
+- **有缓存绑定**：构造 `CachedRepositorySession`（代码树/正文）与 `CachedPageReadSession`（overview/counts）：
+  - `src/ui/repository/locator_index.rs` 在账户聚合分区（`repository = None, private = true`）记录已确认的 `locator -> RepositoryIdentity(numeric id)` 映射；首次访问或索引缺失时先由在线会话解析 canonical 数字 ID 再走持久缓存并写回索引，跨重启离线激活时无需发请求即可定位数字仓库键。该索引受同一 C1–C5 门禁保护，明确仓库撤权使账户聚合失效时一并清除。
+  - 仓库摘要、分支列表与分支 ref 解析使用 `OnlinePreferred`，在线失败回退或断网时返回 `RepositoryCacheOrigin::Snapshot`；此时后续固定 commit 的根目录、子目录、README 发现和文件正文直接按 `OfflineOnly` 读取本地缓存，未缓存目录/文件诚实报告未缓存错误（不伪造空目录或空正文）。
+  - 页面顶栏在展示历史快照时显示 `Cached` 描边胶囊与 `Refresh` 按钮；胶囊的同步时间取**所有真正来自缓存的**摘要/分支/revision 来源中最旧的一次验证时间（`historical_verified_at_ms`），混合页面不会把新鲜摘要的“刚刚”当成缓存年龄；点击 `Refresh` 触发 `refresh_repository` 在线重验并恢复 `Network` 来源。
+  - `extras.rs` 在有缓存绑定时通过 `CachedPageReadSession` 读取 Releases、Latest release、Contributors、Languages 与 OPEN Issue/PR 计数；当页面处于离线快照模式时直接走 `PageReadMode::Offline`，避免无谓的重复失败请求。历史快照映射为 `SectionState::Historical`，Releases/Contributors 显示 `Cached` 胶囊与手动重试入口，且历史快照绝不挂 `Latest` 绿色认证徽章、不显示未验证的 release 总数胶囊；Languages 底条 tooltip 标注 `cached`。
+  - **README 图片**：`RepositoryPage` 在构建 `ReaderView` 时通过 `RepositoryImageService::with_cache` 和 `ReaderView::set_image_provider` 注入图片服务，传入可信 `RepositoryDetails` 的数字仓库 ID 与 `visibility == RepoVisibility::Private`，复用固定 commit 的解析映射与原始图片字节缓存，外链继续走无凭据 `ReqwestExternalImages`（见 [README 图片](reader-images.md)）。
+  - **授权与撤权（carried tokens）**：页面在每次后台读取**开始前**用 `CacheStore::authorization(scope, repository)` 取得一个 `CacheAuthorization` 令牌，令牌随该读取的回复一起回到页面（`Message.authorization` / extras 的 `Reply.authorization`、`CountsReply.authorization`）。`check_authorization`、`apply`、`extras.accepts` 与 `cache_allowed()` 只做 `CacheAuthorization::is_current()` 的原子 load（以及内存 session 校验），**不**在 render 或 30ms receiver 节拍里同步读取 `CacheStore`，也没有定时探测或节流窗口。`revoke_repository(scope, Some(id))` 立即翻转该仓库已发出的令牌，因此：撤权在**同一次 drain** 内就清空已展示的摘要、分支、revision、树、正文、图片 provider 与 overview；任何在撤权前完成、撤权后才被排空的旧回复都会被拒绝（`is_current()` 为假），无法把内容写回；撤权后再获授权只会签发新令牌，旧令牌永久失效。`activate`/`rebind`/`refresh_repository` 会丢弃上一代代次持有的全部令牌（`displayed_authorizations`），避免旧代次的撤权被新代次的令牌掩盖。页面按资源分槽保存令牌（摘要、分支、revision、内容；overview 在 `extras.rs` 内单独保存），任一槽失效即不再把整页视为可显示。PAT 替换隔离与凭据 401 拒绝走同一清空路径，跨重启不复活。
+  - **手动 Refresh 的旧响应隔离**：`refresh_repository` 先推进页面 `generation` 与 `branch_request` 并清空在途结果队列，再发起新的在线读取；上一次加载已排队的 revision/树/正文回复因此无法通过 `apply` 的代次检查回填页面，也不会把新一轮读取拖回 `OfflineOnly`。
+  - **历史计数不冒充最新**：当 OPEN Issue/PR 计数来自离线回退时，只记录 `counts_historical` 而非把旧数字画进 tab badge；页面没有该计数的 per-count provenance 标记，宁可隐藏也不与刚验证的数值同形呈现。
+  - **离线 Star**：页面处于历史缓存快照时跳过初始 Star 状态请求并禁用 Star 按钮，点击不发请求、不乐观改数；在线 `Refresh` 恢复后再读取状态并允许权威写操作。Fork 保持禁用。
+
+验证边界：`src/ui/repository/offline_tests.rs` 通过真实 `RepositoryPage` + `AccountService::open_with_cache` + 临时 `CacheStore` 覆盖在线预热→释放页面并重开服务→断网读取同一仓库/分支/根目录/已读子目录/README/源码/固定 commit 图片、未读目录 miss、手动 `Refresh` 恢复在线、`Refresh` 丢弃排队中的旧代次回复、换 PAT 隔离、历史计数隐藏与离线 Star 禁用。授权回归有两条确定性测试：`repository_revocation_clears_the_displayed_page_in_one_drain`（撤权后**单次** `drain` 即清空，不睡眠、不等待探测）与 `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`（撤权前完成的回复在撤权后应用必须被拒；随后重新授权不得复活旧令牌，只能签发新令牌），另有 `activation_and_refresh_reset_retained_authorizations` 覆盖代次切换丢弃令牌。应用启动时由 `cache-runtime` 统一打开并注入应用级 `CacheStore`；本页面改动仍需真实 Shell 窗口人工验收（`pending`）。

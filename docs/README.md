@@ -18,7 +18,7 @@
 | 统一仓库浏览、内嵌 overview 与正式接入接口 | [仓库浏览](repository-browser.md) |
 | Home/Feed、Profile Overview 与只读阅读器组件 | [Home 视图](home-view.md)、[Profile 视图](profile-view.md)、[内容阅读器](content-reader.md) |
 | 正式 Shell 页面挂载、生命周期与内部导航 | [正式页面接入](shell-page-integration.md) |
-| 已合并但尚未挂载的全局组件 | [Settings](settings.md)、[Notifications](notifications.md)、[全局 Issues/PR](global-work-items.md) |
+| 全局页面与 Settings 组件 | [Settings](settings.md)、[Notifications](notifications.md)、[全局 Issues/PR](global-work-items.md) |
 | 业务缓存存储、生命周期与页面/仓库/头像/图片适配器 | [缓存存储核心](cache-core.md)、[账户生命周期](cache-account-lifecycle.md)、[页面缓存](page-cache.md)、[仓库缓存](repository-cache.md)、[头像缓存](avatar-cache.md)、[README 图片缓存](reader-images.md) |
 | 仓库 Star/Unstar 写动作 | [仓库 Star](repository-star.md) |
 | 首版功能对应的 REST/GraphQL 接口、token 权限与限流边界 | [GitHub API 能力核验](github-api-capabilities.md) |
@@ -32,12 +32,12 @@
 
 ## 当前状态
 
-本节区分“已合并组件/适配器”“正式 Shell 接线”和“原生验收”；实际 PR/CI/review 状态以 GitHub 记录为准，不由本地文档推断。截止 main `d217116`（2026-11-03）。
+本节区分“已合并组件/适配器”“正式 Shell 接线”和“原生验收”；实际 PR/CI/review 状态以 GitHub 记录为准，不由本地文档推断。截止 main `abae289`（2026-11-06，含 #68 应用缓存组装、#72 Home 缓存消费、#69 Profile 缓存消费与全局页面挂载）。
 
-- **正式 Shell 已接线**：Classic PAT 账户控制器、SQLite 账户目录恢复、真实账户与 `/user/repos` 侧栏/本地 palette、自动读取、每账户独立内存 workspace、过渡 Settings › Accounts，以及 Home/三类 Feed、Profile Overview 与统一 Repository/Reader 页面。仓库 Star/Unstar 是已接线的真实写操作，Fork 仍只有禁用入口。契约见[账户目录](account-persistence.md)、[账户接入](account-ui-preview.md)、[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md)。PR #38/#42 的真实 PAT 与部分原生产品交互验收仍有明确未覆盖项，不把合入等同于所有原生验收完成。
-- **组件已合并、正式挂载未完成**：Settings Accounts（[settings.md](settings.md)）、Notifications 收件箱（[notifications.md](notifications.md)）与全局 Issues/PR 列表（[global-work-items.md](global-work-items.md)）只交付独立组件与离线预览，尚未注册进正式 Shell 路由；正式挂载由本批 shell-global-pages 集成进行，预览不代表产品功能已上线。
-- **缓存适配器已合并、应用接线未完成**：业务缓存存储核心（[cache-core.md](cache-core.md)）、账户生命周期绑定（[cache-account-lifecycle.md](cache-account-lifecycle.md)）与仓库/页面/头像/README 图片适配器（[repository-cache.md](repository-cache.md)、[page-cache.md](page-cache.md)、[avatar-cache.md](avatar-cache.md)、[reader-images.md](reader-images.md)）已合并，但正式 Shell 尚未打开应用级 `CacheStore` 或消费这些快照。**应用离线内容阅读仍未交付**；应用级组装由本批 cache-runtime 及页面消费任务进行。
-- 账户元数据、活动选择与凭据引用保存于 SQLite，PAT 在 Windows Credential Manager。缓存政策、参数和接线状态以[缓存策略](cache-strategy.md)为准，不能把存储核心或适配器存在当作正式离线阅读已实现。
+- **正式 Shell 已接线**：Classic PAT 账户控制器、SQLite 账户目录恢复、真实账户与 `/user/repos` 侧栏/本地 palette、每账户独立内存 workspace、过渡 Settings › Accounts、Notifications 收件箱、全局 Issues/PR 列表，以及 Home/三类 Feed、Profile Overview 与统一 Repository/Reader 页面。仓库 Star/Unstar 是已接线的真实写操作，Fork 仍只有禁用入口。契约见[账户目录](account-persistence.md)、[账户接入](account-ui-preview.md)、[正式页面接入](shell-page-integration.md)、[Notifications](notifications.md)、[全局 Issues/PR](global-work-items.md)与[仓库 Star](repository-star.md)。
+- **应用级缓存已组装、页面消费按任务逐个交付**：正式启动在 `app::accounts::runtime` 打开唯一 `CacheStore` 并以 `AccountService::open_with_cache` 注入；Home/Feed（#72）与 Profile（#69）已消费页面缓存，仓库页面（本批 `repository-offline`）消费仓库/页面/README 图片缓存。业务缓存存储核心（[cache-core.md](cache-core.md)）、账户生命周期绑定（[cache-account-lifecycle.md](cache-account-lifecycle.md)）与各适配器（[repository-cache.md](repository-cache.md)、[page-cache.md](page-cache.md)、[avatar-cache.md](avatar-cache.md)、[reader-images.md](reader-images.md)）已合并。缓存打开失败或账户未取得绑定时，页面保持原有在线读取路径。
+- **仍待独立交付**：最终 Settings 设计与其分类页（当前仍是过渡 Accounts 入口，正式 Settings 组件虽已实现但未挂载）。真实 Windows 原生窗口、真实 PAT 与整体 dogfooding 验收仍有明确未覆盖项：合并与离线组合测试不等于所有原生交互已验收。
+- 账户元数据、活动选择与凭据引用保存于 SQLite，PAT 在 Windows Credential Manager。缓存政策、参数和接线状态以[缓存策略](cache-strategy.md)为准；已接线不代表 `CacheStore` 容量参数、验证间隔等仍属建议的数值已定稿。
 - `githux-pr-review` 的等待脚本有离线测试，跨平台 CI 配置已建立。具体 PR 的检查、审查和合并状态以 GitHub 记录为准，不由本地测试或规范文档推断。
 - `githux-agent-dispatch` 提供 create/start/status/resume，生成独立 worktree 和任务上下文，在本机 Kero 会话中启动配置的交互 CLI。离线测试与本机 Kero 启动、输入、正常退出及同会话恢复的证据，见[验证记录](devlog/2026-11-03-agent-dispatch-kero.md)。手工 attach 不在单写入者锁保证内；多实现者并行集成仍待验证。
 

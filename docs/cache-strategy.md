@@ -1,6 +1,6 @@
 # 按数据类型设计的缓存策略
 
-更新：2026-11-03。本文细化[软件架构方案](architecture.md)的数据层。C1–C5 私有缓存政策已确认，存储基础由 [cache-core](cache-core.md) 实现；[账户生命周期](cache-account-lifecycle.md)绑定与[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器已合并，但正式 Shell 尚未打开应用级 `CacheStore` 或消费快照，不能宣称应用已支持离线阅读。各资源验证间隔仍为建议，容量默认是工程测量起点，不是保留承诺。
+更新：2026-11-06。本文细化[软件架构方案](architecture.md)的数据层。C1–C5 私有缓存政策已确认，存储基础由 [cache-core](cache-core.md) 实现；[账户生命周期](cache-account-lifecycle.md)绑定与[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器已合并，正式 Shell 自 main `abae289` 起打开唯一应用级 `CacheStore`，Home/Feed、Profile 与 Repository 页面已消费快照。各资源验证间隔仍为建议，容量默认是工程测量起点，不是保留承诺；应用级接线也不使这些建议值成为已确认承诺。
 
 ## 设计原则
 
@@ -122,7 +122,7 @@ GitHub 说明，正确携带授权且返回 `304` 的条件请求不消耗主限
 
 在统一数据入口中，为资源类型声明存储位置、验证触发、旧值展示、保留范围及关联失效规则即可，首版不需要复杂规则引擎。页面请求应用模型，不自己决定 SQL、下载或每种 API 的 TTL；缓存键与验证元数据由数据层管理。
 
-存储基础已提供独立 SQLite/对象文件、持久门槛、版本化元数据、no-store、完整性/尺寸校验、原子发布、孤儿恢复与有界 LRU，详见 [cache-core](cache-core.md)；账户生命周期绑定与仓库/页面/头像/图片适配器见各自主题文档。尚待测量：各类验证间隔、前台轮询预算、真实负载下容量与阈值、通知保留范围；尚待接入：正式 Shell 组装应用级 `CacheStore` 与页面/仓库消费者（本批 cache-runtime 与页面消费任务），以及正式页面快照展示与在线/离线模式选择。存储与适配器默认不替业务决定 TTL、Partial 覆盖或 304 协议。
+存储基础已提供独立 SQLite/对象文件、持久门槛、版本化元数据、no-store、完整性/尺寸校验、原子发布、孤儿恢复与有界 LRU，详见 [cache-core](cache-core.md)；账户生命周期绑定与仓库/页面/头像/图片适配器见各自主题文档。应用级组装已由 PR #68 合并（`app::accounts::runtime` 打开唯一 `CacheStore`，经 `AccountService::open_with_cache` 注入），Home（#72）、Profile（#69）与 Repository（本批 `repository-offline`）已作为消费者展示历史快照与离线内容。尚待测量：各类验证间隔、前台轮询预算、真实负载下容量与阈值、通知保留范围；尚待独立交付：最终 Settings 的设计与挂载、自动在线/离线模式切换策略的产品决定，以及真实 Windows 原生与 dogfooding 验收。存储与适配器默认不替业务决定 TTL、Partial 覆盖或 304 协议。
 
 后续验证至少覆盖：
 

@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-11-01。Rust + GPUI + Ely、Classic PAT 登录、多账户保存但单账户活动、离线阅读已确认。单 Cargo package 的正式 Shell 已挂载账户控制器与真实仓库侧栏，以及 Home/Feed、Profile 和 Repository 页面；生命周期见[正式页面接入](shell-page-integration.md)，认证接口见[认证与网络](auth-and-network.md)。rusqlite 账户目录与业务缓存存储核心已存在，后者尚未接入正式离线读取；政策及参数边界见[缓存策略](cache-strategy.md)。Settings 当前仍是过渡账户入口。
+更新：2026-11-06。Rust + GPUI + Ely、Classic PAT 登录、多账户保存但单账户活动、离线阅读已确认。单 Cargo package 的正式 Shell 已挂载账户控制器与真实仓库侧栏、Notifications 与全局 Issues/PR，以及 Home/Feed、Profile 和 Repository 页面；生命周期见[正式页面接入](shell-page-integration.md)，认证接口见[认证与网络](auth-and-network.md)。rusqlite 账户目录与业务缓存存储核心已存在，且自 main `abae289` 起由正式启动组装唯一应用级 `CacheStore`，Home/Profile/Repository 页面已消费其快照；政策及参数边界见[缓存策略](cache-strategy.md)。Settings 当前仍是过渡账户入口，最终 Settings 设计与其挂载仍待独立交付。
 
 ## 建议的职责划分
 
@@ -36,7 +36,7 @@ flowchart LR
 
 请求开始时固定 host、稳定账户 ID 与授权代次。返回时先校验数据上下文，再更新缓存；通知页面时再核对 `TabId` 和当前资源。切账户、关标签、切分支后，旧响应不得覆盖新视图。写入/失效推进资源代次，防止早发晚到的读取盖掉新值。关闭一个页面不取消其他订阅仍需要的请求。
 
-UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 执行器天然等于 Tokio。**已实现并验证的执行切片**：`network::BackgroundExecutor` 在独立线程上运行 Tokio current-thread runtime，`reqwest` 只在该 runtime 上执行，取消用 watch token，关闭时先拒绝新工作、宽限期内排空再取消。rusqlite 账户目录经 `spawn_blocking` 接入同一账户服务；这只证明账户元数据持久化，不证明业务内容缓存或离线阅读已经实现。实现与证据见[认证与网络](auth-and-network.md#4-网络与执行模型)和[账户目录](account-persistence.md)。
+UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 执行器天然等于 Tokio。**已实现并验证的执行切片**：`network::BackgroundExecutor` 在独立线程上运行 Tokio current-thread runtime，`reqwest` 只在该 runtime 上执行，取消用 watch token，关闭时先拒绝新工作、宽限期内排空再取消。rusqlite 账户目录经 `spawn_blocking` 接入同一账户服务；业务内容缓存沿用同一「存储只在线程外执行」的规则，页面不直接做 SQLite 读写。实现与证据见[认证与网络](auth-and-network.md#4-网络与执行模型)和[账户目录](account-persistence.md)。
 
 账户与授权的实现状态：`domain::AccountKey`（host + 数字 id）是稳定隔离身份，`login` 仅显示；`auth::AuthEpoch` 在替换 PAT 或移除账户时推进，数据层在请求前捕获 `AuthContext` 并在返回时比对，不一致返回 `StaleContext` 且丢弃结果。凭据只经 `auth::CredentialStore` 进入 Windows Credential Manager，其他平台明确不支持且无明文回退；普通账户记录只持有 `CredentialRef`。GitHub 读取已实现 `GET /user` 与 `GET /user/repos`（完整 `Link` 分页、`Complete`/`Partial` 区分、SSO 部分结果、401/403/限流/超时/取消/解析失败分类），写权限只有 `Unknown` 占位。
 
@@ -57,7 +57,7 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 
 ## 缓存和待确认事项
 
-数据类型矩阵、快照/当前值的区别见[缓存策略](cache-strategy.md)，页面不自行决定 SQL 和 TTL。账户目录已有 SQLite v1 迁移和重启恢复，见[账户目录](account-persistence.md)；业务内容的离线缓存、容量和网络调度预算仍未实现。账户移除及权限失效后的私有内容保留政策、各缓存参数仍待决定，不能用账户目录的实现替这些产品决定。
+数据类型矩阵、快照/当前值的区别见[缓存策略](cache-strategy.md)，页面不自行决定 SQL 和 TTL。账户目录已有 SQLite v1 迁移和重启恢复，见[账户目录](account-persistence.md)；业务内容的离线缓存已由 `CacheStore` 与各页面消费者接线实现，容量与网络调度预算仍待测量。账户移除及权限失效后的私有内容保留政策已由 C1–C5 确认，但各资源验证间隔与容量默认仍属工程起点，不能用已接线推定这些数值已成为承诺。
 
 ## 已建立的工程边界
 
