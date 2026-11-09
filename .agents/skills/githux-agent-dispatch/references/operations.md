@@ -39,7 +39,7 @@ create 使用显式 committed base，保留协调工作区的未提交修改；�
 
 库存命令为配置 Node + CLI 参数数组：`--offline --no-extensions --no-mcp --no-approve --list-models EXACT_ID`。从表格各列精确比较 provider 与 model（至少六列），不接受模糊包含。CLI 报错、超时或缺少匹配均停止。启动前在协调侧和监督进程各核验一次。
 
-首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --project PROJECT_ID --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
+首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。每次启动和恢复另写不可覆盖的 `.agents/task/KERO-TOKEN.md`，附上当前解析的 project ID、原 worktree 和所有辅助会话的归组规则，并作为最后一个 `@FILE` 参数与 TASK/FOLLOWUP 一起交给执行器；原 TASK、旧 follow-up 和旧 Kero 上下文不被改写。旧 worktree 的 skill 未包含新规则时，仍能从本次启动上下文得到当前约束。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --project PROJECT_ID --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
 
 resume 要求有效 session header（`type=session`、精确 `id`、原 `cwd`），已有记录路径也必须一致；缺失、重复、损坏或工作目录不同都拒绝。每份 follow-up 以独立唯一文件保留。原 TASK.md、session ID、branch、worktree 不变。配置模型变化不会被默默采用：resume 明示 `--model`，需要换 provider 时一并给 `--provider`；库存仍必须通过。requested/configured model 和每次启动历史保存；provider/model 或 group 名称不证明最终实际使用的后端模型。
 
@@ -63,6 +63,17 @@ node .agents/skills/githux-agent-dispatch/scripts/dispatch.mjs status --worktree
 
 确认本次测试或任务 CLI 已退出、无需保留终端后，才可 `kero close SESSION_ID` 关闭自己创建的会话；不使用 force，不删除 worktree，不关闭负责人正在使用的终端。若继承的是旧 CMD 会话，先在旧终端正常退出 CLI；既有状态文件仍可读取，下一次 dispatch resume 自动进入 Kero。启动失败可能已创建 Kero 会话：保留锁和回执，按下方恢复步骤核验，禁止盲目重复 new/start。
 
+## 执行过程中的辅助会话
+
+统一项目规则覆盖 Pi 主会话之外的检查、构建、测试、探针和程序运行。优先在已有任务终端调用验证 runner；如果确需独立会话，使用本次 KERO-TOKEN.md 中已核验的 project ID：
+
+```sh
+kero new --project PROJECT_ID --name TASK-check --dir TASK_WORKTREE -- node scripts/verify.mjs -- cargo check
+```
+
+不得省略 `--project` 或仅传显示名称 `githux`；`--dir` 只指定工作目录，不代替分组。使用 split 时显式指定本任务已验证的 pane，继承原会话分组，不使用 focused/default 目标。原始 `kero new` 不经过派发脚本，启动上下文属于执行约束，不能声称脚本能拦截所有 CLI 调用。
+
+已有执行者不会因为 main 上的 skill 更新而自动读到新规则；应核对 session/pane 身份后通过 `kero send` 传递具体 ID 和纠正说明，不重启或同时 resume 原会话。不要为分组问题停止业务任务、修改已有会话/项目记录，或默认删除保留证据的辅助终端。
 ## 状态所有权与单写入者
 
 状态刻意拆成两个文件，避免监督进程退出/启动的写入覆盖基层 Agent 的并发交付更新：
