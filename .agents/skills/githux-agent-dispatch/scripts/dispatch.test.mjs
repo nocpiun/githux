@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { createTask, launchTask, taskStatus, loadConfig, processTable, encodePS, terminalCommand, keroPreflight, keroCommand, visibleLaunch } from './dispatch.mjs';
+import { createTask, launchTask, taskStatus, loadConfig, processTable, encodePS, terminalCommand, keroPreflight, keroProject, keroCommand, visibleLaunch } from './dispatch.mjs';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(source, 'dispatch.mjs');
@@ -325,9 +325,9 @@ test('Kero preflight failures refuse launch before lock and never fall back to a
 
 test('Kero launch uses argument boundaries and writes its receipt without overwriting supervisor state', t => {
   const f = fixture(t), s = createTask(f.opts);
-  const payload = { node: process.execPath, script, worktree: s.worktree, task: s.task_id, token: 'receipt-test' };
+  const payload = { node: process.execPath, script, worktree: s.worktree, task: s.task_id, token: 'receipt-test', project_id: 'shared-project' };
   const args = keroCommand(payload);
-  assert.deepEqual(args.slice(0, 6), ['new', '--name', 'githux-sample-receipt-', '--dir', s.worktree, '--']);
+  assert.deepEqual(args.slice(0, 8), ['new', '--project', 'shared-project', '--name', 'githux-sample-receipt-', '--dir', s.worktree, '--']);
   assert.ok(args.includes('-NoExit'));
   assert.equal(args.at(-1), terminalCommand(payload));
   const stateFile = path.join(s.worktree, '.agents', 'task', 'dispatch-state.json');
@@ -341,6 +341,8 @@ test('Kero launch uses argument boundaries and writes its receipt without overwr
     return 'session123\n';
   });
   assert.equal(json(receiptFile).session_id, 'session123');
+  assert.equal(json(receiptFile).project_id, 'shared-project');
+  assert.throws(() => keroCommand({ ...payload, project_id: undefined }), /Missing resolved Kero project/);
   assert.equal(fs.readFileSync(stateFile, 'utf8'), stateBefore);
   assert.throws(() => visibleLaunch({ ...payload, token: 'bad-output' }, () => 'unexpected output'), /session ID/);
   assert.equal(fs.existsSync(path.join(s.worktree, '.agents', 'task', 'kero-bad-output.json')), false);
@@ -351,4 +353,41 @@ test('Kero launch uses argument boundaries and writes its receipt without overwr
   state.runtime.attempts[0].terminal.session_id = 'different-session';
   put(stateFile, state);
   assert.throws(() => taskStatus(s.worktree), /receipt differs/);
+});
+
+test('shared Kero project resolution handles duplicate names and preserves worktree isolation', t => {
+  const f = fixture(t), s = createTask(f.opts);
+  const inventory = [
+    { id: 'shared-id', name: 'githux', dir: f.repo },
+    { id: 'old-duplicate', name: 'githux', dir: f.repo },
+    { id: 'unrelated-id', name: 'githux', dir: f.parent },
+  ];
+  const execute = (exe, args) => {
+    assert.equal(exe, 'kero'); assert.deepEqual(args, ['projects', '--json']);
+    return JSON.stringify(inventory);
+  };
+  assert.equal(keroProject(f.repo, 'shared-id', execute), 'shared-id');
+  inventory.reverse();
+  assert.equal(keroProject(f.repo, 'shared-id', execute), 'shared-id');
+  assert.throws(() => keroProject(f.repo, undefined, execute), /Select one shared project/);
+  assert.throws(() => keroProject(f.repo, 'gone-id', execute), /missing or belongs/);
+  assert.throws(() => keroProject(f.repo, 'unrelated-id', execute), /missing or belongs/);
+  assert.equal(keroProject(f.repo, undefined, () => JSON.stringify([inventory[2]])), 'shared-id');
+  assert.throws(() => keroProject(f.repo, undefined, () => '[]'), /Select one shared project/);
+  for (const invalid of ['{}', '[null]', '[{"id":"bad space","dir":"relative"}]']) {
+    assert.throws(() => keroProject(f.repo, undefined, () => invalid), /Invalid Kero project/);
+  }
+  assert.throws(() => keroProject(f.repo, undefined, () => 'bad-json'), /Cannot read Kero projects/);
+  let launched = false;
+  const launch = () => { launched = true; };
+  launch.prepare = () => keroProject(f.repo, undefined, execute);
+  assert.throws(() => launchTask('start', { config: f.config, worktree: s.worktree }, launch), /Select one shared project/);
+  assert.equal(launched, false);
+  assert.equal(taskStatus(s.worktree).process_state, 'created');
+  assert.equal(fs.existsSync(path.join(s.worktree, '.agents', 'task', 'launch.lock')), false);
+  const config = json(f.config);
+  put(f.config, { ...config, kero_project_id: 'shared-id' });
+  assert.equal(loadConfig(f.config).kero_project_id, 'shared-id');
+  put(f.config, { ...config, kero_project_id: 'not an id' });
+  assert.throws(() => loadConfig(f.config), /exact Kero project ID/);
 });
