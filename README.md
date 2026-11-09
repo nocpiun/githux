@@ -6,7 +6,7 @@
 
 ## Native Shell 迁移预览（本分支）
 
-`migration/native-shell` 的第一阶段已汇总基础窗口、Runtime 与 Reader；完整业务页面尚未迁移。使用新入口查看基础控件和 Reader，默认 `cargo run` 仍是旧 GPUI 应用。预览使用固定 fixture，不访问真实账户。
+`migration/native-shell` 的第一阶段已汇总基础窗口、Runtime 与 Reader；完整业务页面尚未迁移。使用新入口查看基础控件和 Reader，默认 `cargo run` 仍是旧 GPUI 应用。预览使用固定 fixture，不访问真实账户。视觉采用 NSH 默认主题与圆角、跟随系统浅/深色，保留 Noto Sans / Noto Sans SC / Google Sans Code；不复刻 Ely 样式。
 
 ```powershell
 $env:CARGO_PROFILE_DEV_DEBUG = '0'

@@ -14,7 +14,7 @@ pub enum Icon {
 }
 
 pub fn icon(kind: Icon) -> impl IntoElement {
-    colored_icon(kind, t::MUTED)
+    colored_icon(kind, t::theme().muted_foreground)
 }
 
 fn colored_icon(kind: Icon, color: AdaptiveColor) -> impl IntoElement {
@@ -40,56 +40,65 @@ fn colored_icon(kind: Icon, color: AdaptiveColor) -> impl IntoElement {
 
 pub fn tooltip(message: impl Into<SharedString>) -> impl IntoTooltip {
     nsh_base::tooltip()
-        .bg(t::TOOLTIP_BG)
-        .rounded(px(4.0))
+        .bg(t::theme().popover)
+        .rounded(t::theme().radius)
         .px_2()
         .py_1()
-        .child(t::label(message.into()).text_size(px(12.0)))
+        .child(
+            t::label(message.into())
+                .text_size(px(12.0))
+                .text_color(t::theme().popover_foreground),
+        )
 }
 
-pub fn button(title: &'static str, action: impl Fn() + 'static) -> View {
-    view()
+pub fn button(title: &'static str, action: impl Fn() + 'static) -> impl IntoElement {
+    nsh_base::button()
         .h(px(28.0))
         .px_2()
-        .rounded(px(4.0))
+        .rounded(t::theme().radius)
         .flex_row()
         .items_center()
         .justify_center()
         .gap_2()
-        .role(AccessibilityRole::Button)
-        .label(title)
-        .focusable(true)
+        .accessibility_label(title)
         .cursor_pointer()
-        .hover(|s| s.bg(t::HOVER))
-        .focus(|s| s.bg(t::ACTIVE))
+        .hover(|s| s.bg(t::theme().accent))
+        .focus(|s| s.bg(t::theme().accent))
         .on_press(move |_: &()| action())
         .child(t::label(title))
 }
 
-pub fn icon_button(title: &'static str, glyph: Icon, action: impl Fn() + 'static) -> View {
-    view()
-        .size(px(28.0))
-        .rounded(px(4.0))
-        .items_center()
-        .justify_center()
-        .role(AccessibilityRole::Button)
-        .label(title)
-        .focusable(true)
-        .cursor_pointer()
-        .hover(|s| s.bg(t::HOVER))
-        .focus(|s| s.bg(t::ACTIVE))
-        .tooltip(tooltip(title))
-        .on_press(move |_: &()| action())
-        .child(icon(glyph))
+pub fn icon_button(
+    title: &'static str,
+    glyph: Icon,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
+    view().tooltip(tooltip(title)).child(
+        nsh_base::button()
+            .size(px(28.0))
+            .rounded(t::theme().radius)
+            .items_center()
+            .justify_center()
+            .accessibility_label(title)
+            .cursor_pointer()
+            .hover(|s| s.bg(t::theme().accent))
+            .focus(|s| s.bg(t::theme().accent))
+            .on_press(move |_: &()| action())
+            .child(icon(glyph)),
+    )
 }
 
 pub fn badge(value: impl IntoReactive<SharedString>) -> View {
     view()
         .px(px(6.0))
         .py(px(2.0))
-        .rounded(px(4.0))
-        .bg(t::ACTIVE)
-        .child(t::label(value).text_size(px(11.0)).text_color(t::MUTED))
+        .rounded(t::theme().radius)
+        .bg(t::theme().accent)
+        .child(
+            t::label(value)
+                .text_size(px(11.0))
+                .text_color(t::theme().muted_foreground),
+        )
 }
 
 /// A real failure gets a small warning and its explanation. Retry is present only with an action.
@@ -126,9 +135,13 @@ pub fn work_item_row(title: impl IntoElement, metadata: impl IntoElement, select
         .py_2()
         .gap_1()
         .justify_center()
-        .rounded(px(4.0))
+        .rounded(t::theme().radius)
         .overflow_hidden()
-        .bg(if selected { t::ACTIVE } else { t::CLEAR })
+        .bg(if selected {
+            t::theme().accent
+        } else {
+            AdaptiveColor::TRANSPARENT
+        })
         .child(title)
         .child(metadata)
 }

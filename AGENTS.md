@@ -10,6 +10,10 @@
 3. 实现与交付遵循 [Agent 工作流](docs/agent-workflow.md)；需要等待 PR 审查时使用 [githux-pr-review](.agents/skills/githux-pr-review/SKILL.md)；准备任务 worktree 或恢复可见执行会话时使用 [githux-agent-dispatch](.agents/skills/githux-agent-dispatch/SKILL.md)（实际 CLI/窗口验证边界见其 reference）。
 4. 检查当前分支、worktree 和已有改动。不要覆盖其他人的工作，不假定本地忽略目录会出现在其他 worktree 或云端。
 
+## 当前迁移分支约定
+
+在 migration/native-shell 及其迁移子任务中，负责人已确认完整 Native Shell 原生 Windows 后端、纯 Rust；视觉采用 NSH 默认主题与控件样式，不要求复刻 Ely。原功能、布局结构、字体与交互语义继续保留。该决定覆盖下方描述 main 的 GPUI/Ely 画风约束，详见 [迁移计划](docs/native-shell-migration.md)。最终效果由负责人验收，无需 Computer Use；本地迁移成果暂不合入 main。
+
 ## 项目边界
 
 - Rust + GPUI + Ely；Windows 优先，之后 macOS/Linux。保持 Ely 原型画风，UI 字体 Noto Sans、代码字体 Google Sans Code。

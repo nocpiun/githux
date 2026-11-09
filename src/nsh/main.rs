@@ -11,7 +11,6 @@ fn main() -> std::process::ExitCode {
             title: "Githux - Native Shell migration preview".into(),
             app_id: "dev.githux.native-shell".into(),
             size: (1280, 820),
-            appearance: nsh_core::platform::Appearance::Dark,
             ..Default::default()
         },
     )

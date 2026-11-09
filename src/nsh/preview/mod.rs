@@ -12,7 +12,7 @@ pub fn MigrationPreview() -> impl IntoElement {
     view()
         .size_full()
         .flex_col()
-        .bg(t::BG)
+        .bg(t::theme().background)
         .child(
             view()
                 .h(px(48.0))

@@ -28,13 +28,14 @@ pub fn Foundation() -> impl IntoElement {
             .items_center()
             .bg(move || {
                 if at.index().is_multiple_of(2) {
-                    t::SURFACE
+                    t::theme().card
                 } else {
-                    t::BG
+                    t::theme().background
                 }
             })
             .child(
-                t::code(move || SharedString::from(format!("#{number:03}"))).text_color(t::MUTED),
+                t::code(move || SharedString::from(format!("#{number:03}")))
+                    .text_color(t::theme().muted_foreground),
             )
             .child(view().flex_1().px_2().child(t::label(move || {
                 if number.is_multiple_of(5) {
@@ -45,52 +46,56 @@ pub fn Foundation() -> impl IntoElement {
             })))
     };
 
-    let toolbar = view().h(px(48.0)).px(px(t::PAGE_GUTTER)).bg(t::BG).child(
-        view()
-            .flex_1()
-            .items_center()
-            .flex_row()
-            .child(view().w(px(1.0)).window_drag(true))
-            .child(controls::button("Act", move || a1.update(|n| *n += 1)))
-            .child(controls::icon_button("Glyph", Icon::Home, move || {
-                a2.update(|n| *n += 1)
-            }))
-            .child(view().w(px(8.0)))
-            .child(
-                controls::failed(
-                    "Retry example failure",
-                    Some(Rc::new(move || a3.update(|n| *n += 1))),
+    let toolbar = view()
+        .h(px(48.0))
+        .px(px(t::PAGE_GUTTER))
+        .bg(t::theme().background)
+        .child(
+            view()
+                .flex_1()
+                .items_center()
+                .flex_row()
+                .child(view().w(px(1.0)).window_drag(true))
+                .child(controls::button("Act", move || a1.update(|n| *n += 1)))
+                .child(controls::icon_button("Glyph", Icon::Home, move || {
+                    a2.update(|n| *n += 1)
+                }))
+                .child(view().w(px(8.0)))
+                .child(
+                    controls::failed(
+                        "Retry example failure",
+                        Some(Rc::new(move || a3.update(|n| *n += 1))),
+                    )
+                    .test_id("foundation-retry"),
                 )
-                .test_id("foundation-retry"),
-            )
-            .child(view().w(px(16.0)))
-            .child(
-                view()
-                    .flex_1()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(controls::badge(move || {
-                        SharedString::from(format!("Actions: {}", actions.get()))
-                    }))
-                    .child(
-                        view()
-                            .flex_1()
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(t::BORDER)
-                            .h(px(28.0))
-                            .child(
-                                nsh_core::element::input()
-                                    .auto_correct(false)
-                                    .test_id("foundation-input"),
-                            ),
-                    ),
-            ),
-    );
+                .child(view().w(px(16.0)))
+                .child(
+                    view()
+                        .flex_1()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(controls::badge(move || {
+                            SharedString::from(format!("Actions: {}", actions.get()))
+                        }))
+                        .child(
+                            view()
+                                .flex_1()
+                                .rounded(t::theme().radius)
+                                .border_1()
+                                .border_color(t::theme().border)
+                                .h(px(28.0))
+                                .child(
+                                    nsh_core::element::input()
+                                        .auto_correct(false)
+                                        .test_id("foundation-input"),
+                                ),
+                        ),
+                ),
+        );
     view()
         .flex_1()
-        .bg(t::BG)
+        .bg(t::theme().background)
         .child(toolbar)
         .child(
             view()

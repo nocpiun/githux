@@ -5,7 +5,7 @@
 ## 已确认决定
 
 - 完整迁移到 Native Shell 的原生 Windows 后端，使用纯 Rust；不采用 GPUI 嵌入、TSX 或 QuickJS 路线。
-- 以 main `11f63e875a81feec3a3c2ccc30fec278454076c4` 的布局、字体和已确认交互为基线。十个 UI 赛马分支独立保留，未选定、不纳入本次迁移。
+- 以 main `11f63e875a81feec3a3c2ccc30fec278454076c4` 的功能、布局结构、字体和已确认交互为基线。负责人后续明确：视觉样式使用 NSH 默认主题和控件，不要求复刻 Ely；此项覆盖早期“保持 Ely 画风/色值”的迁移要求。十个 UI 赛马分支独立保留，未选定、不纳入本次迁移。
 - 最终成果汇总在 `migration/native-shell`；本轮不合入 main。临时任务分支只为隔离并行实现。
 - 保持已实现功能等价；Windows 为本轮运行与原生验收目标。现有其他桌面平台编译能力须明确记录与维护，不把 NSH 支持某平台当作 Githux 已验收，不扩展到移动/Web/TUI 产品。
 
@@ -29,7 +29,7 @@ NSH 默认 feature 可能包含 JS；纯 Rust 路线明确关闭 JS/QuickJS 相�
 
 需要迁移的是 GPUI Entity/Context、窗口与事件、页面控制器、焦点/滚动/会话 UI 状态及 Ely 控件。workspace 目前混有 GPUI FocusHandle/ScrollHandle，需把纯路由/账户会话语义与新 UI 句柄分开。
 
-保持 Noto Sans、Noto Sans SC、Google Sans Code；深色现有外观、侧栏/island/两层 Tabs、手动尺寸偏好、内部导航、圆形头像、相对时间、图标加载/错误、Home open 条件与三类 Feed、Notifications 已有动作与禁用项均不变。最终 Settings 新设计/新功能、Issue/PR 新详情内容不属于本轮。
+保持 Noto Sans、Noto Sans SC、Google Sans Code；侧栏/island/两层 Tabs 的信息结构、手动尺寸偏好、内部导航、圆形头像、相对时间、图标加载/错误、Home open 条件与三类 Feed、Notifications 已有动作与禁用项均不变。视觉采用 NSH 自带默认主题（含浅/深色，跟随系统），不覆写 Ely 调色板或固定圆角；NSH 基础控件本身无强制外观，需要的布局与交互状态直接消费默认语义 token。已确认的黄色警告等状态语义仍保留。最终 Settings 新设计/新功能、Issue/PR 新详情内容不属于本轮。
 
 Reader 是单独的兼容性关口：Markdown/GFM/已支持 HTML、跨块选择复制、链接按固定仓库 commit/path 解析、行号与只读源码、相对图片与缓存、安全来源策略、正文 padding、Profile Flow 完整高度、超长/二进制/空内容处理都须逐项覆盖。优先验证 NSH TextView/Editor 等原生能力；不能以有同名组件当成通过，也不能静默降级、自动外跳或绕过现有 ImageProvider 的授权路径。
 
@@ -65,7 +65,7 @@ Reader 是单独的兼容性关口：Markdown/GFM/已支持 HTML、跨块选择�
 - Reader 的兼容测试、独立预览和联合窗口使用同一 package / Cargo.lock / target；原独立测试 manifest 已撤除，避免探针与真实装配分叉。
 - 集成检查修复了基础 toolbar 被构造后丢弃、无法真正点击的问题，添加按钮回调、输入与页面切换回归。真实失败控件恢复为黄色 warning 图标 + tooltip + 点击重试，复用已确认设计。
 - 联合验证：`cargo test -p githux-nsh --locked --offline` 570 项库测试 + 5 项 Reader 兼容测试通过；严格 Clippy、fmt、预览二进制构建通过。依赖图无 GPUI/Ely/QuickJS。仅确认 Windows 窗口成功启动，负责人要求最终视觉效果由本人验收，协调者未做 GUI 交互或截图验收。
-- 基础字号/色值已经统一；最终 shell/island/导航布局、精确滚动条、真实 IME、多 DPI、Reader 大文档虚拟化及图片持久缓存接线仍待完成。当前不能作为完整应用替换 main。
+- 后续样式调整已移除 Ely 色值和固定圆角，Root 使用 NSH 默认主题加原字体族，控件消费默认 token，按钮使用 NSH Button；窗口使用 NSH 默认系统外观。最终 shell/island/导航布局、真实 IME、多 DPI、Reader 大文档虚拟化及图片持久缓存接线仍待完成。当前不能作为完整应用替换 main。
 
 ## 本地提交与交付
 

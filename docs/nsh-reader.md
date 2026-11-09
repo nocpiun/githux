@@ -85,7 +85,7 @@ let handle = ReaderHandle::new(document, bridge, ReaderLayout::Repository, move 
 1. **块虚拟化**：当前全量构建块，超大 Markdown 的性能缺口。不改产品/后端路线，属普通适配缺口，建议集成阶段用 NSH `virtual_list` 处理；在虚拟化前须先确认 NSH 的 `selectable` 视图对「屏外回收行」的全选/Ctrl+A 是否覆盖全部文本，否则长文跨屏选择会退化（这是需要实际核验的反例，不静默降级）。
 2. **表格单元格内图片**、**行内图片原位**：沿用既有 AST 边界（cell 内保留 alt、inline 图提为块），与 GPUI reader 一致，不在本轮另造。
 3. **`nsh-base` 默认 feature 含 `highlight`（syntect）**：纯 Rust，无 JS/QuickJS；`math` feature 未启用，`$$…$$` 显示为 TeX 或由集成层 `render_math` 接管（与 GPUI reader 的 math 呈现不同，属呈现差异）。
-4. **配色/字体**：组件 `dark_tokens()` 只设字体族；集成 Root 由 `foundation::theme::tokens()` 覆盖基线颜色，并注册全部四个 UI 字重与代码字体。真实多 DPI、中文回退与输入法验收仍需完成。
+4. **配色/字体**：组件 `dark_tokens()` 只设字体族；集成 Root 的 `foundation::theme::tokens()` 使用 NSH 自带默认主题，仅设定原字体族，并注册全部四个 UI 字重与代码字体；不覆盖 Ely 色值。真实多 DPI、中文回退与输入法验收仍需完成。
 
 ## 验证命令
 
