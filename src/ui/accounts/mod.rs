@@ -1,38 +1,14 @@
-//! Accounts / Settings view contract.
+//! Native Shell Accounts surface. Owned by nsh-accounts.
 //!
-//! `nsh-accounts` owns this module and replaces the body with the real account list,
-//! add/replace/select/revalidate forms calling the runtime commands. This contract
-//! implementation keeps the shared Shell compiling until that delivery is cherry-picked.
-use crate::app::pages::NavigationSink;
-use crate::app::runtime::RuntimeHandle;
-use crate::ui::foundation::theme as t;
-use nsh_core::prelude::*;
+//! `AccountsView` renders the account list, PAT form, busy/cancel state and recovery notice, and
+//! submits only through the shared `RuntimeHandle`. It is used for sign-in and Settings.
 
-pub struct AccountsView {
-    navigation: NavigationSink,
-    active: bool,
-}
+mod controller;
+pub mod view;
 
-impl AccountsView {
-    pub fn new(navigation: NavigationSink) -> Self {
-        Self {
-            navigation,
-            active: true,
-        }
-    }
+pub use view::{AccountAvatar, AccountAvatarProvider, AccountsView};
 
-    pub fn element(&self) -> AnyElement {
-        view()
-            .flex_1()
-            .bg(t::theme().background)
-            .p(px(t::PAGE_GUTTER))
-            .child(t::page_header("Settings"))
-            .into_element()
-    }
-
-    pub fn poll(&mut self, _runtime: &mut RuntimeHandle) {}
-
-    pub fn retire(&mut self) {
-        self.active = false;
-    }
-}
+#[cfg(test)]
+mod service_tests;
+#[cfg(test)]
+mod tests;
