@@ -1,32 +1,28 @@
-# The original package remains the runnable GPUI baseline during migration.
-# Build the independent native backend with `-p githux-nsh`.
-[workspace]
-resolver = "3"
-members = ["native/nsh"]
-default-members = ["."]
-
 [package]
 name = "githux"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
 publish = false
-description = "A GitHub desktop client built with GPUI and Ely"
+description = "A GitHub desktop client built on the Native Shell Windows backend"
 
-# Only core controls are used by the current shell. Keep macOS runtime shaders,
-# but use the application's Noto Sans / Google Sans Code instead of Ely's fonts.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "githux"
+path = "src/main.rs"
+
 [dependencies]
-ely-core = { default-features = false, git = "https://github.com/ELY-Open-Source/Ely-GPUI-Components", rev = "30c66fe1d5d23db769a6c834b771d054d7f288cf", features = ["runtime_shaders"] }
-# Ely's settings sections and rows, on the same git revision as ely-core so there is one
-# ely-core/gpui in the graph. Only the section/row layout is used; no umbrella Ely components.
-ely-settings = { default-features = false, git = "https://github.com/ELY-Open-Source/Ely-GPUI-Components", rev = "30c66fe1d5d23db769a6c834b771d054d7f288cf" }
-# Already in the graph through GPUI; declared directly so an avatar payload is fully decoded before
-# it is published, instead of only being sniffed by its signature. Only the formats avatars use.
+# Native Shell v0.4.0, pinned to the release commit. The Windows platform backend is built with
+# default features off so no QuickJS/JS runtime is linked for the pure-Rust application.
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3", default-features = false }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3", default-features = false }
+nsh-engine = { git = "https://github.com/longbridge/nsh", rev = "e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3", default-features = false }
+
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 pulldown-cmark = { version = "0.13.5", default-features = false }
 unicode-segmentation = "1"
-gpui = { package = "gpui-pre", version = "=0.3.10" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "=0.22.1"
@@ -38,17 +34,13 @@ reqwest = { version = "0.13.5", default-features = false, features = ["native-tl
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-raw-window-handle = "0.6.2"
-windows-core = "=0.62.2"
-windows-future = "=0.3.2"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_ApplicationInstallationAndServicing", "Win32_Security_Credentials", "Foundation", "Graphics", "UI"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["x11", "wayland"] }
+nsh-platform-windows = { git = "https://github.com/longbridge/nsh", rev = "e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3", default-features = false }
+# Windows Credential Manager is the only supported credential backing store.
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
-ely-core = { default-features = false, git = "https://github.com/ELY-Open-Source/Ely-GPUI-Components", rev = "30c66fe1d5d23db769a6c834b771d054d7f288cf", features = ["test-support"] }
+nsh-testing = { git = "https://github.com/longbridge/nsh", rev = "e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3", default-features = false }
 # Tests need a real multi-thread runtime to prove overlapping credential
 # replacements are serialized: a current-thread runtime cannot interleave two
 # tasks inside the critical section, so the test would pass even without a lock.

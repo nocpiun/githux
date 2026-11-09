@@ -3,7 +3,7 @@
 > **负责人最新要求（2026-11-09，覆盖下方旧阶段安排）**：直接替换原有 Ely 应用，根 package/default entry 改为 NSH，迁移原 src/ui，清除 Ely/GPUI 和 src/nsh / native/nsh 双轨结构。具体路径、并行所有权与页面契约见 [原位替换执行契约](native-shell-inplace.md)。下方第一阶段内容仅为历史记录，不是当前可验收成果；不再以 githux-nsh 预览代替应用迁移。
 
 
-更新：2026-11-09。状态：第一阶段三项成果已本地汇总；Runtime、Reader 与原生基础进入统一 `githux-nsh` package，完整页面迁移尚未开始。
+更新：2026-11-09。状态：原位替换已落地可编译的纯 Rust 默认 NSH 应用（Shell/公共控件/workspace/Runtime 契约）；5 个页面任务的真实页面实现尚未交付，整体迁移未完成。集成基线与契约见 [原位替换执行契约](native-shell-inplace.md)与 `docs/devlog/2026-11-09-native-shell-inplace.md`。
 
 ## 已确认决定
 

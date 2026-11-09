@@ -4,21 +4,19 @@
 
 首版功能取舍见 [产品约定](docs/product.md#首版范围)，后续开发顺序与验收讨论见 [开发路线图](docs/roadmap.md)。首版不做 macOS/Linux 产品适配或安装更新系统；已有跨平台 Debug CI 保留。
 
-## Native Shell 迁移预览（本分支）
+## Native Shell 原位迁移（本分支）
 
-`migration/native-shell` 的第一阶段已汇总基础窗口、Runtime 与 Reader；完整业务页面尚未迁移。使用新入口查看基础控件和 Reader，默认 `cargo run` 仍是旧 GPUI 应用。预览使用固定 fixture，不访问真实账户。视觉采用 NSH 默认主题与圆角、跟随系统浅/深色，保留 Noto Sans / Noto Sans SC / Google Sans Code；不复刻 Ely 样式。
+`migration/native-shell` 已把根 package 原位替换为纯 Rust 的 NSH 原生应用：默认 `cargo run`/`cargo build` 运行新的 NSH Shell，Cargo 不再依赖 Ely/GPUI/QuickJS。当前已落地标题栏、侧栏、会话标签条、command palette、公共控件（work item row、头像、badge、compact status、tooltip）、纯 Rust workspace sessions 与账户 Runtime；Home/Feed、Profile、Repository、Notifications/全局 Issues/PR、Accounts/Settings 的**真实页面实现**由并行页面任务交付后集成，当前为契约桩。视觉使用 NSH 默认主题，跟随系统浅/深色，保留 Noto Sans / Noto Sans SC / Google Sans Code。
 
 ```powershell
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_TEST_DEBUG = '0'
 $env:CARGO_INCREMENTAL = '0'
-node scripts/verify.mjs -- cargo build --locked -p githux-nsh --bin githux-nsh
-if ($LASTEXITCODE -eq 0) { .\target\debug\githux-nsh.exe }
+node scripts/verify.mjs -- cargo build
+if ($LASTEXITCODE -eq 0) { .\target\debug\githux.exe }
 ```
 
-已构建后直接运行 `.\target\debug\githux-nsh.exe`。窗口右上角切换 Foundation / Reader；Reader 的 Source 切换只读代码、Reset 恢复 Markdown，Retire 演示撤权清除。构建经共享 runner，窗口本身不占用编译锁。此入口使用 NSH 原生后端，字体嵌入；旧应用的 Windows App SDK 启动准备不适用于此入口。
-
-剩余兼容性缺口、后续页面迁移见 [迁移计划](docs/native-shell-migration.md)与 [Reader 契约](docs/nsh-reader.md)。
+契约、集成基线与剩余依赖见 [迁移计划](docs/native-shell-migration.md)、[原位替换执行契约](docs/native-shell-inplace.md)与 `docs/devlog/2026-11-09-native-shell-inplace.md`。
 
 ## Windows 安装与运行
 

@@ -112,7 +112,7 @@ pub const TAB_GAP: f32 = 4.0;
 
 /// Height of the band the strip's scrollbar paints in. It is reserved whether or not the scrollbar
 /// is visible, so fading it in or out never moves the tabs.
-pub const TAB_SCROLLBAR_BAND: f32 = super::scroll::THICKNESS + 2.0;
+pub const TAB_SCROLLBAR_BAND: f32 = 5.0;
 
 /// The strip's total height: the inset, the tabs, then the scrollbar band.
 pub const TAB_STRIP_HEIGHT: f32 = TAB_STRIP_INSET + TAB_HEIGHT + TAB_SCROLLBAR_BAND;
