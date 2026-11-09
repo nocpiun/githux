@@ -161,3 +161,9 @@
 - **原因**：PR #73 原实现用 2 秒节流的门禁探测喂 `gate_denied`，`revoke_repository(scope, Some(id))` 更新账户代次之外只翻转仓库授权，页面因此在撤权后继续显示私有内容，`revoke + revalidate` 同窗口时永不生效。缩短间隔只是缩小窗口，不能消除漏判。
 - **证据**：确定性回归 `repository_revocation_clears_the_displayed_page_in_one_drain`（单次 drain、不睡眠即要求清空，交付 head 上失败 run `653e5a3f`，把校验改回恒真再次失败 run `d2603345`，恢复后通过 `af02e39b`）与 `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`（撤权前完成的回复不得回填，重新授权不得复活旧令牌）；见[开发日志](docs/devlog/2026-11-03-repository-offline.md)与[仓库浏览](docs/repository-browser.md)。
 - **范围**：任何“显示/发布已缓存或已授权内容”的消费方（页面、图片 provider、内嵌聚合区）。不适用于纯展示性、无授权语义的轮询状态刷新。
+
+## L023：框架迁移必须替换默认应用路径
+
+负责人要求从 Ely 迁移到 NSH 时，新增独立 package 与 src/nsh 只证明原型能力，原应用继续依赖 Ely 不构成迁移交付。任务拆分前要锁定原入口、目标模块路径、旧依赖移除与真实页面接线的完成条件；探针只服务验证，不形成长期双轨应用，也不能用其测试通过代表正式应用已替换。
+
+证据：2026-11-09 负责人发现根 Cargo.toml 仍依赖 Ely，明确要求原位替换；旧第一阶段结构见 migration/native-shell@21d5136，新执行契约见 [Native Shell 原位替换](docs/native-shell-inplace.md)。适用于替换既有技术栈的任务，不限制明确授权的并行实验。
