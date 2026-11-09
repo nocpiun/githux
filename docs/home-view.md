@@ -145,3 +145,33 @@ Home 装配的回归包含共享 scroll/domain 用例。新增/更新覆盖 coun
 本轮实际查看 Windows 原生 PrintWindow 帧：144 DPI，宽布局 2130×1425 物理像素与窄布局 990×1000；计数/列框/分割线/右侧导航按钮消失，Home icon 对齐标题，Feed 卡片 header/inset 详情及相对时间正常。通过本任务 HWND 的消息切换 Mixed/Loading-error/Large，并取得 owner-only 与 repo-only hover underline 帧。未拿源码推断或测试平台代替视觉核验。
 
 限制：原生消息驱动不等于真人输入手感；未确认触控板、IME、多屏/DPI、原生滚轮手感或所有键盘流程。UI 未获负责人验收，PR 保持 pending；最终 exe/PID/head 记录在任务交付状态与 PR 评论。本轮另做无凭据公开 API 形状核对，见任务 devlog；未做真实 PAT 的认证 Feed 验收。正式 data/Shell 已接线，其状态不等于真实账户验收通过。
+
+## Native Shell 原位实现（2026-11-09）
+
+`src/ui/home/**` 与 `src/app/pages/home.rs` 已按 [原位替换契约](native-shell-inplace.md) 换成 NSH 实现，
+不再有 GPUI/Ely 渲染路径。源码路径与关键类型：
+
+- `src/ui/home/mod.rs`：`HomeView` 的 signal 状态与宿主 API（`bind`、`set_loading`、`apply_home(_snapshot)`、
+  `apply_feed(_snapshot)`、`apply_feed_page`、`apply_error`、`set_unavailable`、
+  `set_refresh_availability`、`feed_append_*`、`set_repository_descriptions`、`set_now`），动作类型
+  `HomeAction`/`RefreshRequest`/`OnAction`，媒体接缝 `AvatarImage`。
+- `src/ui/home/panel.rs`：元素构建（页头、刷新控件、状态、Partial 提示、Saved 标记、Home `virtual_list`、
+  Feed `scroll()` 卡片列与追加脚注）。`element()` 只读 signal，不做 I/O。
+- `src/ui/home/rows.rs`：Home 行（消费共享 `ui::work_item_row`，回调改为 `Rc<dyn Fn()>`）与 Feed 卡片
+  （署名 `activity.subject`；星标描述最多 3 行；截断 PR 正文的 Read more 走内部 PR 路由）。
+- `src/app/pages/home.rs`：生产宿主。每栏一个 `PageSlot`（Home/Feed 首屏、Feed 追加、描述富化），
+  `poll` 是唯一发布点；缓存在线→离线回退、`feed_source`/`feed_next_page`/`feed_seen_ids` 续页状态、
+  `X-Poll-Interval` 冷却、账户切换/撤权清空均已接线。
+- 近端续读使用 `watch_scroll` 的真实内容尺寸/视口，并在 `poll` 处理“首屏过滤为空”的续读（L015）。
+
+保留：两栏独立状态与失败隔离、open-only 过滤、三类 Feed 活动与关注过滤、合并 PR 署名作者、
+Partial 文案、相对时间（共享 formatter）、Saved 历史快照标记、追加失败紧凑告警 + 单击重试、
+历史快照缺页的 "Page N is not available offline."。
+
+变化（详见任务 integration-notes）：Feed 列从回收列表改为滚动视图逐卡渲染（NSH 下 `virtual_list`
+放入 `dynamic` 后未进入挂载树；数据上限有界），行级方向键选择改为指针选择 + 每链接/标题自身键盘焦点。
+头像由账户头像控制器解码后注入（`set_avatar_resolver`），页面不自行联网或另建缓存。
+
+验证：`src/app/pages/home/tests.rs`（真实账户/SQLite/`CacheStore`/脚本化 transport/`RuntimeHandle`
++ headless NSH）与 `src/ui/home/tests.rs`。二者均在独立 probe 中编译真实源码运行；边界见
+[任务开发日志](devlog/2026-11-09-nsh-home-profile.md)。

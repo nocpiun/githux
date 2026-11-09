@@ -140,3 +140,30 @@ cargo run --example profile
 ReaderView 与内部 MarkdownView 当前均 size_full，虚拟 ListState 自持 viewport/Motion；无自然高度或外部纵向流 API。按字符/行猜高度、复制 renderer 或 measure_all 不被采用。已向协调者提交 additive ReaderLayout::Flow 建议：默认 Viewport 不变，复用现有 AST/选择/链接，短正文真实排版占高、长内容保留 lazy 外部页面流，移除冗余纵向 wheel/bar。涉及共享 reader/mod.rs、markdown/document.rs 与 Reader 专属测试/文档，Profile 未越权改这些文件。
 
 负责人最新反馈为除 Overview tab 未居中外，其余当前视觉无问题。Overview 的图标与文字现作为一组在既有 112px tab 内水平居中，保留原高度、间距和下划线范围。README 仍使用现有固定 viewport；上述自然流 API 尚未实现，不把这次视觉反馈写成该能力已完成。`blocked` 仍由负责人管理，Agent 不移除。
+
+## Native Shell 原位实现（2026-11-09）
+
+`src/ui/profile/**` 与 `src/app/pages/profile.rs` 已换成 NSH 实现（`model.rs`/`heatmap.rs` 语义未改，
+`header.rs` 折叠进 `render.rs`）。源码路径与关键类型：
+
+- `src/ui/profile/view.rs`：`ProfileView` 单个 state signal + `ReaderHandle` 槽；`bind`、`request`、
+  `update_basic/repositories/contributions_with_provenance`、`set_readme_document`、
+  `set_readme_unavailable_with_provenance`、`set_readme_error`、`set_range`、`set_avatar_image`、
+  `poll_reader`、`suspend`、`drop_reader`。动作经 `OnProfileAction` 入宿主队列。
+- `src/ui/profile/render.rs`：唯一的页面滚动视图（header → Overview 标记 → README → Pinned → Contributions）
+  与各 section 的状态/失败/缺失呈现；README 用 `ReaderLayout::Flow`，缺失整段省略，真实失败一个紧凑标记。
+- `src/app/pages/profile.rs`：基本资料 → 服务器身份（`ProfileTarget` host+id、`ProfileBinding`
+  account+epoch）→ 四个 section 各自 `PageSlot`；任一已显示 section 的 ticket 失效即整体退休。
+  README Markdown 在后台 executor 解析，图片桥用本次回复捕获的 `CacheAuthorization` + `RepoService` 作能力令牌。
+- `src/app/pages/profile/reads.rs`：从已验收 GPUI 页面原样搬来的在线/缓存/离线回退读取与 `SectionOutcome`。
+
+保持不变：基本资料返回前不伪造数字身份与 canonical 路由改写；README 可选缺失静默；README 只由外层滚动、
+无嵌套滚动（L013）；卡片描述最多三行；Pinned/Popular、gist 提示、截断说明；贡献热力图未知 level 不猜；
+每个 section 独立失败与历史快照标记。
+
+媒体接缝：Shell 注入 README provider 工厂（现有 `RepositoryImageService::with_cache` + 共享外部图片客户端）
+与已解码头图；未注入时显示首字母/reader 的诚实占位，页面不建第二套网络或缓存。
+
+验证边界：`src/ui/profile/tests.rs` 以 headless NSH 覆盖 header/sections/热力图/provenance、
+README 缺失整段省略与真实失败紧凑标记；`src/app/pages/profile_acceptance_tests.rs` 等旧 GPUI 组装测试
+尚未改写（见任务 implementation-result 的剩余问题），真实账户/撤销/离线的页面级组合回归仍待补齐。
