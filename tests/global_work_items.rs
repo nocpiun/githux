@@ -10,56 +10,14 @@
 //! documented `PageView` contract lives in `src/bin_support/nsh_pages_pages.rs`).
 #![allow(dead_code, unused_imports)]
 
-#[path = "../src/auth/mod.rs"]
-mod auth;
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/data/mod.rs"]
-mod data;
-#[path = "../src/diagnostics/mod.rs"]
-mod diagnostics;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/github/mod.rs"]
-mod github;
-#[path = "../src/network/mod.rs"]
-mod network;
-#[path = "../src/storage/mod.rs"]
-mod storage;
-
-#[path = "../src/nsh/foundation/mod.rs"]
-pub mod foundation_impl;
-#[path = "../src/ui/global_work_items/mod.rs"]
-pub mod global_work_items_impl;
-#[path = "../src/ui/notifications/mod.rs"]
-pub mod notifications_impl;
-#[path = "../src/bin_support/nsh_pages_pages.rs"]
-pub mod pages_impl;
-#[path = "../src/ui/relative_time.rs"]
-pub mod relative_time_impl;
-#[path = "../src/nsh/runtime/mod.rs"]
-pub mod runtime_impl;
+pub use githux::{
+    app, auth, content, data, diagnostics, domain, github, network, storage, ui, workspace,
+};
 
 #[path = "../src/bin_support/work_items_fixture.rs"]
 mod fixture;
 #[path = "../src/bin_support/nsh_pages_harness.rs"]
 mod harness;
-
-pub mod app {
-    pub use crate::pages_impl as pages;
-    pub use crate::runtime_impl as runtime;
-}
-pub mod ui {
-    pub use crate::foundation_impl as foundation;
-    pub use crate::global_work_items_impl as global_work_items;
-    pub use crate::notifications_impl as notifications;
-    pub use crate::relative_time_impl as relative_time;
-}
-pub mod workspace {
-    pub use crate::runtime_impl::sessions::{
-        PageIdentity, RepositoryNavigation, Route, RouteKey, Session, Sessions, TabId, Workspace,
-    };
-}
 
 use std::sync::Arc;
 use std::time::Duration;

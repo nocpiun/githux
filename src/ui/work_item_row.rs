@@ -3,9 +3,12 @@
 //!
 //! Metadata order is `#number → repository → state → relative time`; the number stays first.
 
-use std::rc::Rc;
+use crate::ui::foundation::{
+    controls::{self, Icon},
+    theme as t,
+};
 use nsh_core::prelude::*;
-use crate::ui::foundation::{controls::{self, Icon}, theme as t};
+use std::rc::Rc;
 
 pub const WORK_ITEM_ROW_HEIGHT: f32 = 72.0;
 
@@ -97,7 +100,13 @@ pub struct Row {
     pub on_title_click: Option<TitleAction>,
 }
 
-fn action_link(label: String, aria: String, tooltip: Option<String>, action: RowAction, flex: bool) -> View {
+fn action_link(
+    label: String,
+    aria: String,
+    tooltip: Option<String>,
+    action: RowAction,
+    flex: bool,
+) -> View {
     let mut v = view()
         .role(AccessibilityRole::Link)
         .label(aria)
@@ -172,15 +181,11 @@ pub fn render(row: Row) -> AnyElement {
         )
         .child(title_node);
 
-    let mut metadata = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            t::code(format!("#{}", row.number))
-                .text_size(px(12.0))
-                .text_color(theme.muted_foreground),
-        );
+    let mut metadata = view().flex_row().items_center().gap_2().child(
+        t::code(format!("#{}", row.number))
+            .text_size(px(12.0))
+            .text_color(theme.muted_foreground),
+    );
 
     match row.repository {
         RepositoryLink::Whole { label, action } => {
@@ -247,12 +252,18 @@ pub fn render(row: Row) -> AnyElement {
         .justify_center()
         .rounded(theme.radius)
         .overflow_hidden()
-        .bg(if row.selected { theme.secondary } else { AdaptiveColor::TRANSPARENT })
+        .bg(if row.selected {
+            theme.secondary
+        } else {
+            AdaptiveColor::TRANSPARENT
+        })
         .test_id(&row.selectors.row)
         .label(row.aria);
 
     if let Some(on_click) = row.on_row_click {
-        container = container.cursor_pointer().on_press(move |_: &()| on_click());
+        container = container
+            .cursor_pointer()
+            .on_press(move |_: &()| on_click());
     }
 
     container.child(title_line).child(metadata).into_element()

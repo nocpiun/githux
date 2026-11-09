@@ -28,7 +28,6 @@ use crate::ui::repository_overview::{
     widgets::{badge, badge_outline, failed, loading, muted},
 };
 
-const INDENT: f32 = 14.0;
 /// Room for the disclosure chevron, so file rows line up with directory names.
 const CHEVRON_SLOT: f32 = 16.0;
 

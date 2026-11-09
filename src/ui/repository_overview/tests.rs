@@ -9,8 +9,8 @@ use super::*;
 use crate::domain::account::{AccountKey, HostId};
 use crate::domain::repository::{RepositoryIdentity, RepositoryLocator};
 use crate::domain::repository_extras::{
-    Contributor, ContributorsOutcome, ContributorsState, ExtrasCompleteness, LanguageStat,
-    LanguagesOutcome, LatestReleaseOutcome, Release, ReleasesOutcome, ResponseMetadata,
+    Contributor, ExtrasCompleteness, LanguageStat, LanguagesOutcome, LatestReleaseOutcome, Release,
+    ReleasesOutcome, ResponseMetadata,
 };
 
 fn repository() -> RepositoryIdentity {
@@ -67,16 +67,6 @@ fn latest(release: Option<Release>) -> LatestReleaseOutcome {
         repository: repository(),
         release,
         metadata: metadata(),
-    }
-}
-
-fn contributors(people: Vec<Contributor>) -> ContributorsOutcome {
-    ContributorsOutcome {
-        repository: repository(),
-        contributors: people,
-        state: ContributorsState::Content,
-        completeness: ExtrasCompleteness::Complete,
-        page_metadata: Vec::new(),
     }
 }
 

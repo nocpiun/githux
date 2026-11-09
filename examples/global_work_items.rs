@@ -5,56 +5,14 @@
 //! platform credentials.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-#[path = "../src/auth/mod.rs"]
-mod auth;
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/data/mod.rs"]
-mod data;
-#[path = "../src/diagnostics/mod.rs"]
-mod diagnostics;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/github/mod.rs"]
-mod github;
-#[path = "../src/network/mod.rs"]
-mod network;
-#[path = "../src/storage/mod.rs"]
-mod storage;
-
-#[path = "../src/nsh/foundation/mod.rs"]
-pub mod foundation;
-#[path = "../src/ui/global_work_items/mod.rs"]
-pub mod global_work_items;
-#[path = "../src/ui/notifications/mod.rs"]
-pub mod notifications;
-#[path = "../src/bin_support/nsh_pages_pages.rs"]
-pub mod pages;
-#[path = "../src/ui/relative_time.rs"]
-pub mod relative_time;
-#[path = "../src/nsh/runtime/mod.rs"]
-pub mod runtime;
+pub use githux::{
+    app, auth, content, data, diagnostics, domain, github, network, storage, ui, workspace,
+};
 
 #[path = "../src/bin_support/work_items_fixture.rs"]
 mod fixture;
 #[path = "../src/bin_support/nsh_pages_harness.rs"]
 mod harness;
-
-pub mod app {
-    pub use crate::pages;
-    pub use crate::runtime;
-}
-pub mod ui {
-    pub use crate::foundation;
-    pub use crate::global_work_items;
-    pub use crate::notifications;
-    pub use crate::relative_time;
-}
-pub mod workspace {
-    pub use crate::runtime::sessions::{
-        PageIdentity, RepositoryNavigation, Route, RouteKey, Session, Sessions, TabId, Workspace,
-    };
-}
 
 use std::sync::Arc;
 

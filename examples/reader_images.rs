@@ -27,22 +27,7 @@
 
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
-#[path = "../src/auth/mod.rs"]
-mod auth;
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/data/mod.rs"]
-mod data;
-#[path = "../src/diagnostics/mod.rs"]
-mod diagnostics;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/github/mod.rs"]
-mod github;
-#[path = "../src/network/mod.rs"]
-mod network;
-#[path = "../src/storage/mod.rs"]
-mod storage;
+pub use githux::{auth, content, data, diagnostics, domain, github, network, storage};
 
 #[path = "../src/bin_support/reader_images_modules.rs"]
 mod reader_images_modules;

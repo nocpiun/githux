@@ -16,6 +16,7 @@ pub fn account() -> AccountKey {
     AccountKey::new(1, HostId::github())
 }
 
+#[cfg(test)]
 pub fn repository() -> RepositoryIdentity {
     RepositoryIdentity {
         id: 42,
@@ -281,4 +282,26 @@ pub fn partial_languages_state() -> SectionState<LanguagesOutcome, String> {
         value: ready_languages(),
         reason: "a language count was rejected".to_string(),
     }
+}
+
+// The external example obtains the opaque identity through the public parser.
+// Test builds can construct it directly inside the library.
+#[cfg(not(test))]
+pub fn repository() -> RepositoryIdentity {
+    static IDENTITY: std::sync::OnceLock<RepositoryIdentity> = std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let transport = std::sync::Arc::new(crate::network::transport::MockTransport::new());
+            transport.enqueue(Ok(crate::network::transport::HttpResponse {
+                status: 200, headers: vec![], body: r#"{"id":42,"name":"githux","full_name":"nocpiun/githux","owner":{"id":1,"login":"nocpiun"},"visibility":"public","html_url":"https://github.com/nocpiun/githux"}"#.into(),
+            })).await;
+            crate::github::repository::fetch_repository(
+                &crate::github::client::GitHubClient::new(crate::github::client::GitHubConfig::default(), transport),
+                &crate::auth::token::Pat::from_str("synthetic-preview"),
+                &RepositoryLocator::new("nocpiun", "githux").unwrap(), &Default::default(),
+                crate::network::cancel::CancellationToken::new().0,
+            ).await.expect("synthetic repository").identity
+        })
+    }).clone()
 }

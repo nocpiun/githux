@@ -63,6 +63,8 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.app == 'true' }}
     name: Code check (fmt, check, clippy, test)
+    env:
+      RUST_TEST_THREADS: 4
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -121,18 +123,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             bin-name: githux.exe
             artifact-name: githux-x86_64-pc-windows-msvc-debug
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            bin-name: githux
-            artifact-name: githux-x86_64-unknown-linux-gnu-debug
-          - os: macos-15
-            target: aarch64-apple-darwin
-            bin-name: githux
-            artifact-name: githux-aarch64-apple-darwin-debug
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            bin-name: githux
-            artifact-name: githux-x86_64-apple-darwin-debug
     steps:
       - uses: actions/checkout@v4
 
@@ -164,13 +154,6 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Starts the runner fixture in a temporary directory: proves the Cargo runner and
-      # the preparation logic still work on a clean Windows runner before packaging.
-      - name: Test Windows runtime preparation and Cargo runner
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/tests/windows-runtime.test.ps1
-
       - name: Build executable
         run: cargo build --locked --target ${{ matrix.target }}
 
@@ -195,10 +178,6 @@ jobs:
             echo "PACKAGE_PATH=dist/${ARTIFACT_NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
 
-      - name: Add app-local Windows App SDK runtime
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/prepare-windows-runtime.ps1 -Destination "dist/${{ matrix.artifact-name }}" -Architecture x64
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

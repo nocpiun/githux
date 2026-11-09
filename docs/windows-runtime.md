@@ -1,3 +1,5 @@
+> 历史文档：本迁移分支已移除 Ely/GPUI 的 Windows App SDK 标题栏依赖和 Cargo runner。以下记录只适用于迁移前版本；当前运行方式见根 README。
+
 # Windows 运行时（开发启动）
 
 更新：2026-10-23。本文说明 `cargo run` 如何自动准备 app-local Windows App SDK 运行时，以及哪些场景仍需手动处理。UI 与按钮外观不属于本文，见 [Tall 原生标题栏](devlog/2026-10-23-tall-caption.md)。

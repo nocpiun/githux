@@ -181,7 +181,7 @@ fn ProfileHarness(props: ProfileProps) -> impl IntoElement {
 
 fn mount(readme_absent: bool) -> Headless {
     let root = Root::new::<ProfileHarness>(move || ProfileProps { readme_absent })
-    .tokens(crate::ui::foundation::theme::tokens());
+        .tokens(crate::ui::foundation::theme::tokens());
     let mut app = Headless::start(EngineConfig::new(root)).expect("headless app starts");
     app.set_viewport(nsh_core::geometry::Size::new(
         nsh_core::geometry::px(1100.0),
@@ -195,7 +195,8 @@ fn mount(readme_absent: bool) -> Headless {
 fn header_sections_and_heatmap_render_real_profile_content() {
     let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let mut app = mount(true);
-    app.wait_for("Lin Example").expect("the display name renders");
+    app.wait_for("Lin Example")
+        .expect("the display name renders");
     app.wait_for("@lin-example").expect("the login renders");
     app.wait_for("Building thoughtful tools for developers.")
         .expect("the bio renders");

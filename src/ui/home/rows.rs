@@ -6,7 +6,7 @@
 //! same typed actions.
 use super::{HomeAction, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
-use crate::ui::foundation::{self, theme as t};
+use crate::ui::foundation::theme as t;
 use crate::ui::relative_time::relative;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -17,12 +17,9 @@ use std::rc::Rc;
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Icon {
     Refresh,
-    Folder,
-    Clock,
     Star,
     Repository,
     PullRequest,
-    CloudOff,
 }
 
 fn path(kind: Icon) -> &'static str {
@@ -30,14 +27,13 @@ fn path(kind: Icon) -> &'static str {
         Icon::Refresh => {
             "<path d='M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-2l2 3M4 16l2 3a7 7 0 0 0 12-2'/>"
         }
-        Icon::Folder => "<path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/>",
-        Icon::Clock => "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
         Icon::Star => "<path d='m12 3 3 6 6 1-4.5 4 1 6-5.5-3-5.5 3 1-6L3 10l6-1z'/>",
-        Icon::Repository => "<path d='M4 4h12a2 2 0 0 1 2 2v14H6a2 2 0 0 1-2-2z'/><path d='M18 16H6'/>",
+        Icon::Repository => {
+            "<path d='M4 4h12a2 2 0 0 1 2 2v14H6a2 2 0 0 1-2-2z'/><path d='M18 16H6'/>"
+        }
         Icon::PullRequest => {
             "<circle cx='6' cy='5' r='3'/><circle cx='6' cy='19' r='3'/><circle cx='18' cy='19' r='3'/><path d='M6 8v8M18 16V9a4 4 0 0 0-4-4h-1m3-3-3 3 3 3'/>"
         }
-        Icon::CloudOff => "<path d='M3 3l18 18M6 18a4 4 0 0 1 0-8 6 6 0 0 1 9-4M18 18h-1'/>",
     }
 }
 
@@ -88,11 +84,7 @@ fn link_with(
         .overflow_hidden()
         .cursor_pointer()
         .on_press(move |_: &()| on_press())
-        .child(
-            text(label)
-                .truncate()
-                .text_color(t::theme().foreground),
-        );
+        .child(text(label).truncate().text_color(t::theme().foreground));
     if flex {
         cell = cell.flex_1();
     }
@@ -366,7 +358,11 @@ pub(super) fn feed_row(
         let repository = feed_repository(event);
         let owner_login = repository.owner.clone();
         let name = repository.name.clone();
-        let mut row = view().flex_row().items_center().min_w(px(0.0)).overflow_hidden();
+        let mut row = view()
+            .flex_row()
+            .items_center()
+            .min_w(px(0.0))
+            .overflow_hidden();
         if !owner_login.trim().is_empty() {
             let action = profile_target(None, &owner_login);
             let on_action = on_action.clone();
@@ -404,11 +400,7 @@ pub(super) fn feed_row(
         .gap_1()
         .min_w(px(0.0))
         .child(actor_link)
-        .child(
-            view()
-                .min_w(px(0.0))
-                .child(text(action_sentence(activity))),
-        );
+        .child(view().min_w(px(0.0)).child(text(action_sentence(activity))));
     let mut inset = view()
         .test_id(&format!("feed-details-{index}"))
         .flex_col()
@@ -474,12 +466,7 @@ pub(super) fn feed_row(
                 .gap_2()
                 .min_w(px(0.0))
                 .child(colored_icon(Icon::PullRequest, colors.primary))
-                .child(link(
-                    label.clone(),
-                    label.clone(),
-                    true,
-                    title_action,
-                )),
+                .child(link(label.clone(), label.clone(), true, title_action)),
         );
         if let Some(preview) = &target.body_preview
             && !preview.excerpt.trim().is_empty()
@@ -569,12 +556,14 @@ pub(super) fn feed_row(
 
 /// Details for a retained activity. No branch, ref, SHA or commit-count prose is
 /// produced; only the pull-request target of a merged contribution is described.
+#[cfg(test)]
 pub(super) struct EventDetails {
     pub title: Option<String>,
     pub status: Option<String>,
     pub merged: bool,
 }
 
+#[cfg(test)]
 pub(super) fn event_details(activity: &FeedActivity) -> EventDetails {
     let mut details = EventDetails {
         title: None,
@@ -586,15 +575,11 @@ pub(super) fn event_details(activity: &FeedActivity) -> EventDetails {
         details.title = Some(match &target.title {
             Some(title) => format!(
                 "{title}{}",
-                target
-                    .number
-                    .map_or_else(String::new, |n| format!(" #{n}"))
+                target.number.map_or_else(String::new, |n| format!(" #{n}"))
             ),
             None => format!(
                 "Pull request{}",
-                target
-                    .number
-                    .map_or_else(String::new, |n| format!(" #{n}"))
+                target.number.map_or_else(String::new, |n| format!(" #{n}"))
             ),
         });
         details.status = Some("Merged".to_string());
@@ -605,6 +590,7 @@ pub(super) fn event_details(activity: &FeedActivity) -> EventDetails {
 /// Accessibility/one-line description of a retained activity. It credits the
 /// activity subject (the pull-request author for a merge), never the actor who
 /// merely clicked merge.
+#[cfg(test)]
 pub(super) fn event_description(activity: &FeedActivity) -> String {
     let details = event_details(activity);
     let repository = feed_repository(&activity.event);
@@ -617,6 +603,7 @@ pub(super) fn event_description(activity: &FeedActivity) -> String {
 }
 
 /// Relative time for a card's exact timestamp, used by tests and hosts.
+#[cfg(test)]
 pub(super) fn relative_label(value: Option<&str>, now: std::time::SystemTime) -> String {
     relative(value, now)
 }

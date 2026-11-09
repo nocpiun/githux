@@ -12,3 +12,11 @@ pub mod platform;
 pub mod storage;
 pub mod ui;
 pub mod workspace;
+
+#[cfg(test)]
+#[path = "bin_support/repository_fixture.rs"]
+pub mod repository_fixture;
+#[cfg(test)]
+pub mod repository_modules {
+    pub use crate::repository_fixture as fixture;
+}

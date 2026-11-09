@@ -12,84 +12,10 @@
 //! The scenario list is the fixture's own; a scene the owner can inspect here is a scene the
 //! tests assert. Statements are one per line and end with the terminal state of the page.
 
-#[path = "../src/auth/mod.rs"]
-mod auth;
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/data/mod.rs"]
-mod data;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/github/mod.rs"]
-mod github;
-#[path = "../src/network/mod.rs"]
-mod network;
-#[path = "../src/storage/mod.rs"]
-mod storage;
-
-pub mod app {
-    #[path = "../../src/app/runtime/mod.rs"]
-    mod runtime_impl;
-    pub use runtime_impl as runtime;
-
-    pub mod pages {
-        use super::runtime::RuntimeHandle;
-        use crate::workspace::{RepositoryNavigation, Route, TabId};
-        use nsh_core::element::AnyElement;
-        use std::rc::Rc;
-
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub enum PageNavigation {
-            Open(Route),
-            Repository {
-                route: Route,
-                intent: RepositoryNavigation,
-            },
-            External(String),
-            CanonicalProfile { tab: TabId, login: String },
-        }
-
-        pub type NavigationSink = Rc<dyn Fn(PageNavigation)>;
-
-        pub trait PageView {
-            fn element(&self) -> AnyElement;
-            fn poll(&mut self, runtime: &RuntimeHandle);
-            fn refresh(&mut self, runtime: &RuntimeHandle);
-            fn set_active(&mut self, active: bool);
-            fn retire(&mut self);
-        }
-    }
-}
-
-pub mod workspace {
-    pub use crate::app::runtime::sessions::{
-        PageIdentity, RepositoryNavigation, Route, RouteKey, Session, Sessions, TabId, Workspace,
-    };
-}
-
-pub mod ui {
-    pub mod foundation {
-        #[path = "../../src/ui/foundation/mod.rs"]
-        mod foundation_impl;
-        pub use foundation_impl::*;
-    }
-    pub mod reader {
-        #[path = "../../src/ui/reader/mod.rs"]
-        mod reader_impl;
-        pub use reader_impl::*;
-    }
-    pub mod repository {
-        #[path = "../../src/ui/repository/mod.rs"]
-        mod repository_impl;
-        pub use repository_impl::*;
-    }
-    pub mod repository_overview {
-        #[path = "../../src/ui/repository_overview/mod.rs"]
-        mod repository_overview_impl;
-        pub use repository_overview_impl::*;
-    }
-}
-
+pub use githux::{
+    app, auth, content, data, diagnostics, domain, github, network, storage, ui, workspace,
+};
+#[allow(dead_code)]
 #[path = "../src/bin_support/repository_fixture.rs"]
 mod repository_fixture;
 use repository_fixture as fixture;
@@ -105,7 +31,9 @@ use crate::network::executor::BackgroundExecutor;
 use crate::network::transport::Transport;
 use crate::storage::accounts::AccountDatabaseConfig;
 use crate::storage::cache::{CacheConfig, CacheStore};
-use crate::ui::repository::{ReaderStatus, RepositoryController, RepositoryNavigation, RepositoryTab};
+use crate::ui::repository::{
+    ReaderStatus, RepositoryController, RepositoryNavigation, RepositoryTab,
+};
 use crate::workspace::Route;
 use fixture::{FixtureTransport, NAME, OWNER, Scene};
 
@@ -119,12 +47,13 @@ fn main() -> std::process::ExitCode {
     let mut failures = 0usize;
     for scene in Scene::ALL {
         let transport = Arc::new(FixtureTransport::new(scene));
-        let cache = CacheStore::open(CacheConfig::at(temp.path().join(format!("cache-{scene:?}"))))
-            .expect("open preview cache");
+        let cache = CacheStore::open(CacheConfig::at(
+            temp.path().join(format!("cache-{scene:?}")),
+        ))
+        .expect("open preview cache");
         // Every scene starts from clean durable state so a failure in one cannot leak into another.
-        let database = AccountDatabaseConfig::at(
-            temp.path().join(format!("accounts-{scene:?}.sqlite3")),
-        );
+        let database =
+            AccountDatabaseConfig::at(temp.path().join(format!("accounts-{scene:?}.sqlite3")));
         let credentials = Arc::new(InMemoryCredentialStore::new());
         let accounts = {
             let transport = transport.clone();
@@ -231,7 +160,10 @@ fn main() -> std::process::ExitCode {
 
 /// A scenario is terminal when it either shows a document or states why it cannot, with no
 /// request still in flight. A timeout is a wiring failure, not an empty result.
-fn wait_for_terminal(controller: &mut RepositoryController, sessions: &crate::workspace::Sessions) -> bool {
+fn wait_for_terminal(
+    controller: &mut RepositoryController,
+    sessions: &crate::workspace::Sessions,
+) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         controller.poll(sessions);

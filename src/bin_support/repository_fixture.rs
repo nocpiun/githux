@@ -1156,11 +1156,6 @@ fn guide_text(scene: Scene) -> &'static str {
     GUIDE_TEXT
 }
 
-fn feature_note(scene: Scene) -> &'static str {
-    let _ = scene;
-    FEATURE_NOTE_TEXT
-}
-
 #[derive(Clone, Copy)]
 enum EntryKind {
     Blob,

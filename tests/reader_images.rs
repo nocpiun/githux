@@ -6,22 +6,7 @@
 //! service test uses the real account/repository/blob/image path, with only the
 //! transport and external-picture boundaries replaced in memory.
 
-#[path = "../src/auth/mod.rs"]
-mod auth;
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/data/mod.rs"]
-mod data;
-#[path = "../src/diagnostics/mod.rs"]
-mod diagnostics;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/github/mod.rs"]
-mod github;
-#[path = "../src/network/mod.rs"]
-mod network;
-#[path = "../src/storage/mod.rs"]
-mod storage;
+pub use githux::{auth, content, data, diagnostics, domain, github, network, storage};
 
 #[path = "../src/bin_support/reader_images_modules.rs"]
 mod reader_images_modules;
@@ -219,7 +204,10 @@ fn suspending_keeps_ready_pictures_and_redemands_the_rest() {
     bridge.picture("images/pending.png", &context());
     bridge.poll();
     let mut requests = std::mem::take(&mut *provider.requests.lock().unwrap());
-    let (ready_request, ready_sink) = requests.remove(0);
+    let ready = requests.iter().position(|(request, _)| {
+        matches!(&request.target, ImageTarget::Repository { path, .. } if path.ends_with("images/ready.png"))
+    }).expect("the ready picture was requested");
+    let (ready_request, ready_sink) = requests.remove(ready);
     finish(&ready_sink, ready_request.scope, ready_request.key);
     bridge.poll();
     assert!(matches!(
@@ -254,8 +242,14 @@ fn the_decoded_budget_releases_the_oldest_picture_without_refetching_it() {
         bridge.picture(&format!("images/{name}.png"), &context());
     }
     bridge.poll();
-    for _ in 0..2 {
-        let (request, sink) = provider.take();
+    // Completion order determines age; the bridge's HashMap request order does not.
+    let mut requests = std::mem::take(&mut *provider.requests.lock().unwrap());
+    for name in ["first", "second"] {
+        let expected = format!("images/{name}.png");
+        let index = requests.iter().position(|(request, _)| {
+            matches!(&request.target, ImageTarget::Repository { path, .. } if path.ends_with(&expected))
+        }).expect("the named picture was requested");
+        let (request, sink) = requests.remove(index);
         finish(&sink, request.scope, request.key);
         bridge.poll();
     }

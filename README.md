@@ -1,103 +1,54 @@
 # Githux
 
-基于 Rust、GPUI 与 Ely 的 GitHub 桌面客户端，Windows 优先。正式 Shell 已接入 Classic PAT 登录、多账户与真实仓库侧栏，以及 Home/Feed、Profile Overview 和统一仓库阅读页面；保留自定义标题栏、island、本地导航搜索与每账户独立的内存标签。UI 使用 Noto Sans / Noto Sans SC，代码使用 Google Sans Code。页面生命周期与验证边界见 [正式页面接入](docs/shell-page-integration.md)。
+纯 Rust 的 GitHub 桌面客户端。本迁移分支使用 [Native Shell](https://nsh.dev/) 的 Windows 原生后端和默认主题，UI 字体为 Noto Sans / Noto Sans SC，代码字体为 Google Sans Code。
 
-首版功能取舍见 [产品约定](docs/product.md#首版范围)，后续开发顺序与验收讨论见 [开发路线图](docs/roadmap.md)。首版不做 macOS/Linux 产品适配或安装更新系统；已有跨平台 Debug CI 保留。
+## 当前迁移状态
 
-## Native Shell 原位迁移（本分支）
+`migration/native-shell` 原位替换默认应用：`src/main.rs` → `src/app` / `src/ui`。根 Cargo 不再依赖 Ely、GPUI 或 QuickJS，也没有第二套 `src/nsh` 产品入口。当前包含真实账号与仓库侧栏、Home/Feed、Profile、Repository/Reader、Notifications、全局 Issues/PRs 和 Accounts/Settings。
 
-`migration/native-shell` 已把根 package 原位替换为纯 Rust 的 NSH 原生应用：默认 `cargo run`/`cargo build` 运行新的 NSH Shell，Cargo 不再依赖 Ely/GPUI/QuickJS。当前已落地标题栏、侧栏、会话标签条、command palette、公共控件（work item row、头像、badge、compact status、tooltip）、纯 Rust workspace sessions 与账户 Runtime；Home/Feed、Profile、Repository、Notifications/全局 Issues/PR、Accounts/Settings 的**真实页面实现**由并行页面任务交付后集成，当前为契约桩。视觉使用 NSH 默认主题，跟随系统浅/深色，保留 Noto Sans / Noto Sans SC / Google Sans Code。
+这是供验收的迁移分支，尚未合入 main。页面使用现有业务、凭据和缓存服务；原型/探针通过不能替代真实根应用的组合验证。检查与未覆盖交互见 [原位迁移](docs/native-shell-inplace.md) 和 [集成记录](docs/devlog/2026-11-09-native-shell-inplace.md)。首版范围仍以 [产品约定](docs/product.md) 为准。
+
+## Windows 构建与运行
+
+需要 Rust/rustup、Visual Studio 2022 Build Tools 的 Desktop development with C++（MSVC x64、Windows SDK）。`rust-toolchain.toml` 固定 Rust 1.98.1；首次构建需要访问 crates.io 和 Native Shell Git 上游。
+
+在此 worktree 中执行：
 
 ```powershell
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_TEST_DEBUG = '0'
 $env:CARGO_INCREMENTAL = '0'
-node scripts/verify.mjs -- cargo build
+node scripts/verify.mjs -- cargo build --locked
 if ($LASTEXITCODE -eq 0) { .\target\debug\githux.exe }
 ```
 
-契约、集成基线与剩余依赖见 [迁移计划](docs/native-shell-migration.md)、[原位替换执行契约](docs/native-shell-inplace.md)与 `docs/devlog/2026-11-09-native-shell-inplace.md`。
+默认目标就是 `githux.exe`；无需启用迁移 feature 或另一个 package。输出在当前 worktree 的 `target/`，不要与其他任务共享可写 target。也可以用 `node scripts/verify.mjs -- cargo run --locked` 启动；该命令会持有共享构建锁直到应用退出，验收建议使用 build + 直接运行。
 
-## Windows 安装与运行
+本分支不再通过旧 Windows App SDK runner 下载或准备 Ely 标题栏运行时。Windows 构建使用原生 NSH；macOS/Linux 当前只验证可移植库和测试，不发布未实现的平台应用。
 
-1. 安装 [Rust/rustup](https://rustup.rs/) 与 Visual Studio 2022 Build Tools 的 **Desktop development with C++**（MSVC x64、Windows SDK）。
-2. 在本仓库运行 `rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy`。`rust-toolchain.toml` 固定版本，不需改变全局默认。
-3. 运行：
+## 页面与导航
 
-```powershell
-cargo run --locked
-```
+Classic PAT 凭据保存在系统凭据库。未登录时显示账户入口；切换账号会退役旧页面并恢复该账号的进程内标签。服务授权、异步旧响应和缓存读写的边界继续由既有服务控制。
 
-首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`；不要与其他项目/原型共享可写 target。Windows debug binary 为 `target/debug/githux.exe`。
+搜索按钮或 Ctrl+K 打开本地页面/仓库搜索；侧栏提供 Home、Settings 和仓库入口，底部头像进入 Profile。标签支持点击切换、关闭、Ctrl+W 和 Ctrl+Tab / Shift+Ctrl+Tab。刷新按钮调用当前页面刷新。搜索中可以进入 Notifications、Issues 和 Pull requests。
 
-复杂组件的开发预览使用独立 Cargo example，不进入正式产品启动路径或发行包。仓库正文阅读器运行 `cargo run --example reader`；真实账户与仓库读取接线预览运行 `cargo run --example account`。后者直接连接应用数据目录、系统凭据与 GitHub，token 只能由操作者在预览 UI 中输入；自动测试使用合成凭据与 mock。两个 example 都不随默认 release 构建或正式 artifact 发布。
+Home 只显示 open Issues/PRs；Feed 只显示关注账号合并 PR、星标仓库、创建仓库，继续加载 API 可用历史，卡片显示仓库简介与 PR 摘要。Read more 打开 Githux 内部 PR 标签，详情内容仍按既有范围留空。Profile 的可选 README 缺失时不占位。Repository 提供分支、文件树、正文/源码和图片。Notifications 的操作与缓存行为沿用已确认服务约定。
 
-`cargo run` 会自动把固定版本、经 SHA256 校验的 app-local Windows App SDK 运行时放到实际被启动的 exe 旁边：首次缺缓存时下载，之后复用本地缓存并离线运行；`--release`、显式 `--target`、自定义 `--target-dir` 以及新 worktree、`cargo clean` 后都无需手动准备。`cargo test`/`cargo bench` 等其他 Cargo 运行不经此准备。这是开发启动准备，不是系统安装，但也**不等于没有运行时依赖**：`cargo build` 不准备运行时，手动双击裸 exe 或分发给他人时仍须执行 `./scripts/prepare-windows-runtime.ps1 -Destination <exe 所在目录>`，并保留同目录 DLL、PRI、`githux-wasdk.manifest` 与 SDK 许可证，不能只复制 exe。CI 的 Windows artifact 已在打包步骤中包含这些文件。未准备运行时会回退到标准高度的 DWM 按钮。细节、缓存位置与 `--manifest-path` 等边界见 [Windows 运行时](docs/windows-runtime.md)。
+NSH headless 测试不等于 Windows 视觉验收。原生滚动/选区、IME、多 DPI、长文性能以及旧标签拖拽和焦点行为的完整对等性仍需验收；本分支不把这些写成已完成。
 
-Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
+## 检查
 
-启动进入 Home：左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果为本地导航命令与当前账户已读取的仓库：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间真实仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Notifications、Issues、PRs、New；New 暂时禁用。
-
-island 顶部是应用级标签条：点击侧栏仓库/Profile、底部入口或 palette 结果会打开或激活对应标签（同一资源复用、不重复），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换；关闭活动标签切到左邻，关闭最后一个标签后新建 Home。Home、Settings 与全局占位页按路由单例，仓库按 `owner/repo` 单例（大小写不敏感）。每个标签保留自己的页面滚动位置、焦点与仓库会话选择。标签数量不设上限：放不下时标签条自行横向滚动（滚轮 / `Shift`+滚轮 / 原生水平滚动 / 鼠标悬停时淡入的细滚动条），只影响标签条本身；新建、切换或 Tab 聚焦会把目标标签滚入视野。标签可以横向拖拽排序（按标签身份移动，不重建会话），鼠标中键在标签任意位置关闭该标签（不先激活），关闭按钮只在 hover 或活动标签上出现。标签条最右侧有一个固定的工具栏，本轮只放一个未接逻辑的禁用刷新入口。标签文本可省略，悬停显示完整名称。
-
-页面内容：Home 显示当前账户参与的 open Issues/PRs；Feed 只显示关注账号的合并 PR、星标仓库与创建仓库，滚动到底部继续读取 API 可用的历史页。仓库卡片显示简介，PR 显示描述摘要，Read more 打开 Githux 内部 PR 标签（详情内容按当前约定留空）。Repository 挂载真实分支、文件树和 Markdown/源码阅读器；Profile 展示公开资料、自然高度 README、Pinned/Popular 与贡献图。缺失的可选 README 不占位。Settings 仍是过渡账户入口；通知、全局 Issues/PRs 等未接入的页面内容继续留空。切账户恢复该账户进程内标签，重启从 Home 开始。关闭最后窗口退出应用。IME、多 DPI/跨屏与触控板仍需专项验收，macOS/Linux 保留编译 CI，尚未做产品适配。
-
-## 构建检查
-
-所有 Cargo 检查/构建/测试均通过共享 runner 执行，保留真实 exit code 与完整 stdout/stderr：
+所有 Cargo 操作使用共享 runner，记录真实 exit code 和完整日志：
 
 ```sh
 node scripts/verify.mjs -- cargo fmt --all -- --check
 node scripts/verify.mjs -- cargo check --locked --all-targets
 node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings
+node scripts/verify.mjs -- cargo test --locked -- --test-threads=4
 node scripts/verify.mjs -- cargo build --locked
-node scripts/verify.mjs -- cargo test --locked
 git diff --check
-
-# Windows 运行时准备与 Cargo runner 的离线回归测试（Windows）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/windows-runtime.test.ps1
 ```
 
-Runner 用法：`node scripts/verify.mjs [options] -- <executable> [args...]`。参数以数组形式在 `--` 后传递，不做 shell 插值。每次运行在 `.agents/task/runs/<run_id>.json` 写入原子记录（run_id、命令/参数、source identity、时序、exit code、log 路径、结果），并输出简洁摘要。Windows 下 runner 持有共享 mutex `Local\Githux-Cargo-20261029`，禁止并发重编译；非 Windows 平台自动跳过该锁。
+记录在被忽略的 `.agents/task/runs/`。页面测试使用合成凭据和 mock transport。独立组件示例只用于开发，不进入正式启动路径或发行包。
 
-常用选项：
-- `--timeout <ms>`：超时后终止子进程并标记 `timed_out`，不视为成功。
-- `--no-lock`：跳过共享构建锁（仅用于无并发风险的轻量命令）。
-- `--json`：输出完整 run record JSON。
-- `--task-dir <dir>`：指定 `.agents/task/runs/` 的父目录。
-
-[CI 配置](.github/workflows/ci.yml) 按改动范围运行：应用或构建配置改动触发 Ubuntu Rust 检查（fmt、check、clippy、test）及四平台 Debug 构建；纯文档跳过两者，Agent 脚本变更单独运行 Node 测试。Build 在 Windows x64、Ubuntu x64、macOS Apple Silicon / Intel 上原生构建，并上传 `githux-<Rust target>-debug` artifact，包含可执行文件和内置字体许可证；Linux/macOS 使用 `.tar.gz` 保留执行权限。
-
-末尾的 `CI` job 汇总所有上游结果，可在分支规则中将名称为 `CI` 的检查设为 required check。范围判断成功、所需任务均成功、其余任务按规则跳过时通过；失败或意外跳过不能放行。范围及门槛见 [代码约定](docs/code-standards.md#ci-改动范围)。各提交的实际结果见 GitHub Actions，验证边界见 [CI 开发日志](docs/devlog/2026-10-21-ci-matrix.md)。
-
-`cargo test` 有两部分证据。外壳部分使用 GPUI 测试平台渲染实际视图，覆盖启动 Home、缩放时只有仓库组让出高度、侧栏独立滚动、各入口路由与选中态、应用级标签的打开/复用/切换/关闭/上限与每标签滚动、焦点和仓库会话状态隔离、`Ctrl+W`/`Ctrl+Tab` 快捷键、搜索浮层的打开/过滤/高亮移动/Enter/Esc/组合态 Enter、焦点返回、中文与超长名称保持在列内，以及未设计页面的留空行为；测试平台不经过 Windows 原生输入分发，也不驱动真实的非客户区命中测试，因此不能替代真实窗口验收，本机窗口验收见 [外壳日志](docs/devlog/2026-10-22-shell-layout.md)，应用级标签的边界见 [标签开发日志](docs/devlog/2026-10-23-workspace-tabs.md)。
-
-服务层部分覆盖 PAT 身份验证、凭据存取、授权代次、`/user` 与 `/user/repos` 分页/部分结果、限流与超时/取消分类、后台执行器收敛。其中若干用例通过仓库内的最小 localhost HTTP/1.1 mock 服务驱动真实 `reqwest` 客户端并检查实际请求头；不访问 GitHub、不使用真实凭据，唯一真实系统集成是自清理的 Windows Credential Manager 测试项。范围、命令与未覆盖部分（真实 GitHub 联调、HTTPS、重启恢复、UI 接入）见 [认证与网络](docs/auth-and-network.md#9-验证证据)。
-
-## 依赖与字体
-
-- Rust edition 2024，工具链 1.98.1；单 Cargo package 与 binary，`Cargo.lock` 纳入版本控制。
-- `gpui-pre = 0.3.10`、`gpui-pre-platform = 0.3.10`，启用 `font-kit`；Linux 额外启用平台的 `x11` 与 `wayland` 窗口后端。
-- [Ely 上游](https://github.com/ELY-Open-Source/Ely-GPUI-Components) 固定 revision `30c66fe1d5d23db769a6c834b771d054d7f288cf`；当前外壳直接依赖 `ely-core 0.2.0`，使用 `ely_core::*`，不经过汇总所有组件的 facade，也不复制上游源码或应用本地补丁。关闭默认 `fonts`（保留上游必需的 IBM Plex Sans SVG 字体），启用 `runtime_shaders` 保持 macOS 构建方式。迁移范围、上游接口变化与保留的适配见 [迁移记录](docs/devlog/2026-10-27-ely-migration.md)。搜索浮层没有复用 Ely 的 `CommandPalette`（它在任何 Enter 上运行高亮行），改用自绘卡片并在按键绑定前拦截 Enter、检查查询框的 marked 区间；未来引入只读编辑器时仍先重现相关问题再决定补丁。
-- UI 拉丁字形为 Noto Sans，简体中文为应用自带 Noto Sans SC（私有组合字族 Githux UI，400/500/600/700）；代码为 Google Sans Code。来源、体积、许可和可复现生成见[字体清单](assets/fonts/README.md)，原生中文命中证据见[开发日志](docs/devlog/2026-10-29-ui-fonts.md)。多 DPI/IME 尚待负责人验收。
-- 网络与服务层：`reqwest = 0.13.5`（`default-features = false`，启用 `native-tls`、`http2`、`charset`、`system-proxy`）与 `tokio`（`rt`/`sync`/`time`/`macros`/`net`）；另有 `serde`/`serde_json`/`thiserror`。选型理由、取消与关闭模型见 [认证与网络](docs/auth-and-network.md#4-网络与执行模型)。
-
-## 源码目录
-
-| 路径 | 边界 |
-| --- | --- |
-| `src/main.rs` | binary 入口 |
-| `src/app/` | 应用启动、依赖组合和框架初始化 |
-| `src/ui/` | Ely 组件与视图局部状态：外壳、标题栏、侧边栏、页面、应用级标签条、搜索浮层、几何参数与布局 fixture |
-| `src/platform/` | 字体注册；未来系统凭据、IME 与 OS 集成 |
-| `src/workspace/` | 路由、会话集合与标签身份；每个会话的滚动、焦点与仓库会话状态 |
-| `src/domain/` | 预留不依赖 UI 框架的业务类型与规则 |
-| `src/auth/` | 预留账户与授权上下文 |
-| `src/data/` | 预留业务入口、缓存策略、请求合并与通知 |
-| `src/github/` | 预留 GitHub API 适配与字段转换 |
-| `src/network/` | 预留传输、超时、代理、限流与调度 |
-| `src/storage/` | 预留设置、账户引用、缓存与迁移 |
-| `src/content/` | 预留 Markdown、源码与图片预处理 |
-| `src/diagnostics/` | 预留脱敏诊断与性能证据 |
-
-预留模块仅有职责说明，没有伪服务、模型或 trait 框架。架构约束与尚未确定的技术选择见 [架构文档](docs/architecture.md)，协作入口见 [AGENTS.md](AGENTS.md)。
+贡献与文档分工见 [AGENTS.md](AGENTS.md)、[文档索引](docs/README.md)、[代码约定](docs/code-standards.md)、[工作流](docs/agent-workflow.md) 与 [LESSONS](LESSONS.md)。

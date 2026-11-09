@@ -189,7 +189,9 @@ fn HomeViewHarness() -> impl IntoElement {
     let home = home_outcome(
         items,
         HomeReadiness::Partial {
-            reasons: vec![HomePartialReason::PageFailed { message: "page 2 failed".into() }],
+            reasons: vec![HomePartialReason::PageFailed {
+                message: "page 2 failed".into(),
+            }],
         },
     );
     assert!(view.apply_home_snapshot(
@@ -200,16 +202,15 @@ fn HomeViewHarness() -> impl IntoElement {
     let mut feed = feed_outcome(
         vec![starred_activity(0), merged_activity(1)],
         FeedReadiness::Partial {
-            reasons: vec![FeedPartialReason::PageFailed { message: "page 2 failed".into() }],
+            reasons: vec![FeedPartialReason::PageFailed {
+                message: "page 2 failed".into(),
+            }],
         },
     );
     feed.activities[0].repository_description = Some("Synthetic star description".into());
     assert!(view.apply_feed(&binding(), 1, feed));
     assert!(view.feed_append_failed(&binding(), 1, 2));
-    let element = view.element(
-        &sink,
-        None,
-    );
+    let element = view.element(&sink, None);
     view_harness_shell(element)
 }
 
@@ -316,7 +317,9 @@ fn summaries_and_errors_keep_their_accepted_wording() {
     let partial = home_outcome(
         vec![home_item(0, HomeItemKind::Issue, "open")],
         HomeReadiness::Partial {
-            reasons: vec![HomePartialReason::PageFailed { message: "page 2 failed".into() }],
+            reasons: vec![HomePartialReason::PageFailed {
+                message: "page 2 failed".into(),
+            }],
         },
     );
     let notice = home_summary(&partial).notice.expect("partial notice");

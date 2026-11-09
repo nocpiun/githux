@@ -150,14 +150,6 @@ impl Fixture {
         });
     }
 
-    pub(super) fn switch_scene(&self, scene: Scene) {
-        self.transport.set_scene(scene);
-    }
-
-    pub(super) fn cache(&self) -> CacheStore {
-        self.cache.clone().expect("cached fixture")
-    }
-
     pub(super) fn controller(
         &self,
         handle: &mut RuntimeHandle,
@@ -558,7 +550,7 @@ fn a_reader_link_to_another_repository_is_reported_and_never_followed() {
     let (mut controller, sessions) = fixture.controller(&mut handle, intent());
     settle_ready(&mut controller, &sessions);
     controller.reader_action(crate::ui::reader::ReaderAction::Link(
-        crate::ui::reader::LinkTarget::Repository(crate::ui::reader::RepositoryLink {
+        crate::ui::reader::LinkTarget::Repository(crate::ui::reader::links::RepositoryLink {
             owner: "someone".into(),
             name: "elsewhere".into(),
             path: "README.md".into(),

@@ -21,15 +21,25 @@ pub use work_items::WorkItemsPage;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageNavigation {
     Open(Route),
-    Repository { route: Route, intent: RepositoryNavigation },
+    Repository {
+        route: Route,
+        intent: RepositoryNavigation,
+    },
     External(String),
-    CanonicalProfile { tab: TabId, login: String },
+    CanonicalProfile {
+        tab: TabId,
+        login: String,
+    },
 }
 
 pub type NavigationSink = Rc<dyn Fn(PageNavigation)>;
 
 pub trait PageView {
     fn element(&self) -> AnyElement;
+    /// Changes only when the host must replace a non-reactive root placeholder.
+    fn host_presentation(&self) -> Option<String> {
+        None
+    }
     fn poll(&mut self, runtime: &RuntimeHandle);
     fn refresh(&mut self, runtime: &RuntimeHandle);
     fn set_active(&mut self, active: bool);

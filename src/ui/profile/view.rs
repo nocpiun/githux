@@ -18,9 +18,7 @@ use nsh_core::prelude::*;
 
 use crate::domain::{ContributionCalendar, ContributionRange, ProfileBasic, ProfilePinned};
 use crate::ui::reader::images::ImageBridge;
-use crate::ui::reader::{
-    ReaderAction, ReaderDocument, ReaderHandle, ReaderLayout, reader,
-};
+use crate::ui::reader::{ReaderDocument, ReaderHandle, ReaderLayout, reader};
 
 use super::{
     ProfileActionKind, ProfileBinding, ProfileProvenance, ProfileRequest, ProfileTarget,
@@ -277,23 +275,18 @@ impl ProfileView {
             Arc::new(move || (guard)()),
             crate::content::images::ImageLimits::default(),
         );
-        let handle = ReaderHandle::new(
-            document,
-            bridge,
-            ReaderLayout::Flow,
-            move |action| {
-                if !action_ok.get() || action_slot.borrow().is_none() {
-                    return;
-                }
-                let action = super::ProfileAction {
-                    request: request.clone(),
-                    kind: ProfileActionKind::Readme(action),
-                };
-                if let Some(sink) = action_slot.borrow().as_ref() {
-                    sink(action);
-                }
-            },
-        );
+        let handle = ReaderHandle::new(document, bridge, ReaderLayout::Flow, move |action| {
+            if !action_ok.get() || action_slot.borrow().is_none() {
+                return;
+            }
+            let action = super::ProfileAction {
+                request: request.clone(),
+                kind: ProfileActionKind::Readme(action),
+            };
+            if let Some(sink) = action_slot.borrow().as_ref() {
+                sink(action);
+            }
+        });
         *self.reader.borrow_mut() = Some(handle);
         self.ui.update(|ui| {
             ui.readme = SectionState::Ready(());
@@ -304,11 +297,7 @@ impl ProfileView {
         true
     }
 
-    pub fn set_avatar_image(
-        &mut self,
-        request: &ProfileRequest,
-        image: Option<ImageSrc>,
-    ) -> bool {
+    pub fn set_avatar_image(&mut self, request: &ProfileRequest, image: Option<ImageSrc>) -> bool {
         if !self.accepts(request) {
             return false;
         }
@@ -437,10 +426,6 @@ impl ProfileView {
         true
     }
 
-    pub(super) fn select_day(&mut self, index: Option<usize>) {
-        self.ui.update(|ui| ui.selected_day = index);
-    }
-
     /// Element for the whole page. Pure presentation over the published signal.
     pub fn element(&self) -> AnyElement {
         super::render::page(self)
@@ -452,7 +437,9 @@ pub(super) fn heatmap_model(
     contributions: &SectionState<ContributionCalendar>,
 ) -> Option<HeatmapPresentation> {
     match contributions {
-        SectionState::Ready(calendar) => Some(super::heatmap::heatmap_presentation(range, calendar)),
+        SectionState::Ready(calendar) => {
+            Some(super::heatmap::heatmap_presentation(range, calendar))
+        }
         _ => None,
     }
 }
@@ -474,9 +461,4 @@ pub(super) fn reader_element(view: &ProfileView) -> Option<AnyElement> {
         .borrow()
         .as_ref()
         .map(|handle| reader(handle.clone()))
-}
-
-/// Forwards a reader action to the host through the page's typed sink.
-pub(super) fn reader_action_is_retirement(action: &ReaderAction) -> bool {
-    matches!(action, ReaderAction::AuthorizationRetired)
 }

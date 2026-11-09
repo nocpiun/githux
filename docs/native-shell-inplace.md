@@ -73,3 +73,10 @@ Reader 最终保持现有 NSH ReaderHandle/ReaderDocument/ResourceContext/ImageB
 每任务提交 implementation-result.md 和 integration-notes.md，写准确 commit、API、实际测试、迁移前后回归映射与剩余事项。只交付自己拥有的文件；对旧共享测试/模块的改动建议交集成作者。所有 Cargo 使用 scripts/verify.mjs，共享 mutex，dev/test debug=0，incremental=0。工作已完成后不重复跑全套、不忙等其他 agent。
 
 最终应用检查包括默认入口构建、全目标检查、实际依赖树、既有业务回归和新页面组合验证；无法保留的场景必须明确报告，不能静默删除。NSH 默认样式不等于可以舍弃真实页面功能。Windows 原生效果最终由负责人看运行结果。
+## 2026-11-09 组合集成
+
+六个任务已汇入 migration/native-shell，原路径上的真实页面替换契约桩。协调者补齐根模块和测试入口、Settings 宿主、头像/README 图片绑定、启动恢复状态与退出清理；取消旧 Windows App SDK runner 和打包步骤。Profile 与 UserProfile 使用同一资源工厂。共享服务与缓存业务测试在根库中执行，重复的 repository 测试装配仅保留一份。
+
+此状态仍是待验收的迁移分支，不是 main 发布。原生鼠标/IME/跨屏、完整键盘导航和标签拖拽、长文 Reader 选区等不能由编译或 headless 检查代替，详见本轮开发日志。
+
+宿主现在仅在账户快照、导航、头像完成、挂载结构或页面占位状态实际变化时重建，而非每 200ms 重建所有控件。`PageView::host_presentation` 默认空，仅 Profile 用它通知首次资料/错误占位切换；常规正文仍由各页面自己的信号更新。`set_active` 只在活动 tab 改变时调用，Home 的相对时间时钟也不再每个 tick 被重置。

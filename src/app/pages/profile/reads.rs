@@ -12,14 +12,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::data::page_cache::{
     CachedPageReadSession, PageCacheError, PageOrigin, PageReadMode, PageValue,
 };
-use crate::data::{PageReadSession, ProfileReadme, RepoService, RepositoryReadContext};
+use crate::data::{PageReadSession, ProfileReadme, RepositoryReadContext};
 use crate::domain::blob::BlobLimits;
 use crate::domain::cache::CacheMiss;
 use crate::domain::error::GitHubError;
 use crate::domain::profile::{
     ContributionCalendar, ContributionRange, ProfileBasic, ProfileError, ProfilePinned,
 };
-use crate::domain::repository::{RepositoryError, RepositoryIdentity};
+use crate::domain::repository::RepositoryError;
 use crate::github::RepositoryLimits;
 use crate::github::profile::ProfileLimits;
 use crate::network::cancel::CancellationToken;
@@ -84,17 +84,6 @@ pub(crate) fn is_uncached_fallback(cache_error: &CacheError) -> bool {
         // keep it typed instead of retrying as if the cache were merely unavailable.
         CacheError::Stale
     )
-}
-
-/// Test-only shorthand for capturing this read's authorization token. Production captures inside
-/// `ProfilePage::start` so a missing token can fail that section closed before the read begins.
-#[cfg(test)]
-pub(crate) async fn prepare_gate_stamp(
-    repos: &crate::data::RepoService,
-    context: &RepositoryReadContext,
-) -> Option<CacheAuthorization> {
-    let cache = repos.cache(context)?;
-    cache.store().authorization(cache.scope(), None)
 }
 
 /// Re-verify the authorization token for a historical value. Lock-free atomic check; no disk I/O.

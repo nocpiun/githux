@@ -1,17 +1,6 @@
-// Root of the standalone `reader-images` preview/test assembly.
-//
-// `examples/reader_images.rs` and `tests/reader_images.rs` declare the product
-// service modules (`auth`, `content`, `data`, `domain`, `github`, `network`,
-// `storage`) directly at their own crate root, because those modules resolve
-// `crate::…` paths internally. Declaring them here would produce a second,
-// incompatible copy of the product types.
-//
-// This file therefore only assembles the reader plus the one development
-// fixture. `fixture` refers to `crate::network`, which resolves to the entry
-// point's own crate-root declaration, exactly like `repository_modules.rs`.
+// Development picture fixture over the actual application library.
 #![allow(dead_code, unused_imports)]
 
 #[path = "reader_images_fixture.rs"]
 pub mod fixture;
-#[path = "../ui/reader/mod.rs"]
-pub mod reader;
+pub use githux::ui::reader;

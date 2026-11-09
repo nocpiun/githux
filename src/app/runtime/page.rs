@@ -26,6 +26,9 @@ impl Services {
     pub fn accounts(&self) -> &Arc<AccountService> {
         &self.backend.accounts
     }
+    pub fn executor(&self) -> Arc<crate::network::executor::BackgroundExecutor> {
+        self.backend.executor.clone()
+    }
     pub fn repositories(&self) -> RepoService {
         self.backend.accounts.repo_service()
     }

@@ -4,10 +4,7 @@ use super::summary::{
     Segment, contributor_display, contributor_is_linked, format_share, language_segments,
 };
 use super::widgets::{badge, badge_outline, empty, failed, loading, muted};
-use super::{
-    LanguagesState, LatestReleaseState, OverviewAction, OverviewBinding, OverviewSection,
-    OverviewUpdate, ReleasesData, ReleasesState, RepositoryOverview, SectionState,
-};
+use super::{OverviewAction, OverviewBinding, OverviewSection, RepositoryOverview, SectionState};
 use crate::domain::repository_extras::{
     ContributorKind, ContributorsState, ExtrasCompleteness, Release,
 };
@@ -432,25 +429,5 @@ fn chart_color(index: usize) -> AdaptiveColor {
         2 => theme.chart_3,
         3 => theme.chart_4,
         _ => theme.chart_5,
-    }
-}
-
-/// Re-exported for the repository page: the same typed update application path.
-pub fn apply(
-    state: &mut RepositoryOverview,
-    binding: &OverviewBinding,
-    update: OverviewUpdate,
-) -> bool {
-    state.apply(binding, update)
-}
-
-#[allow(dead_code)]
-fn _keep_states(_: &ReleasesState, _: &LatestReleaseState, _: &LanguagesState, _: &ReleasesData) {}
-
-/// The `refresh` action a scoped retry sends, for tests asserting the typed action.
-pub fn refresh_action(state: &RepositoryOverview, section: OverviewSection) -> OverviewAction {
-    OverviewAction::Refresh {
-        binding: state.binding().clone(),
-        section,
     }
 }

@@ -10,12 +10,12 @@ use std::time::SystemTime;
 
 use nsh_core::prelude::*;
 
-use crate::domain::{ContributionCalendar, ContributionRange, ProfileBasic, ProfilePinned};
+use crate::domain::{ContributionCalendar, ContributionRange, ProfileBasic};
 use crate::ui::foundation::{controls, theme as t};
 
 use super::view::{heatmap_model, repository_presentation_of};
 use super::{
-    ProfileActionKind, ProfileProvenance, ProfileRepo, ProfileView, PresentationError,
+    PresentationError, ProfileActionKind, ProfileProvenance, ProfileRepo, ProfileView,
     RepositoryTarget, SectionState,
 };
 
@@ -157,9 +157,7 @@ fn loading(id: &str, label: &str) -> AnyElement {
         .items_center()
         .gap_2()
         .py_1()
-        .child(
-            crate::ui::compact_status::loading(label.to_string()).into_element(),
-        )
+        .child(crate::ui::compact_status::loading(label.to_string()).into_element())
         .child(
             text(label.to_string())
                 .text_size(px(13.0))
@@ -288,9 +286,7 @@ fn ready_header(
                 .focusable(true)
                 .cursor_pointer()
                 .tooltip(controls::tooltip(url.clone()))
-                .on_press(move |_: &()| {
-                    emit(ProfileActionKind::ExternalLink { url: url.clone() })
-                })
+                .on_press(move |_: &()| emit(ProfileActionKind::ExternalLink { url: url.clone() }))
                 .child(
                     text(label)
                         .text_size(px(13.0))
@@ -350,15 +346,11 @@ fn ready_header(
                     ),
                 )
                 .children(clean(&basic.bio).map(|bio| {
-                    view()
-                        .test_id("profile-bio")
-                        .mt_1()
-                        .w_full()
-                        .child(
-                            text(bio.to_string())
-                                .text_size(px(13.0))
-                                .text_color(t::theme().muted_foreground),
-                        )
+                    view().test_id("profile-bio").mt_1().w_full().child(
+                        text(bio.to_string())
+                            .text_size(px(13.0))
+                            .text_color(t::theme().muted_foreground),
+                    )
                 }))
                 .children((!metadata.is_empty()).then(|| {
                     view()
@@ -464,15 +456,12 @@ fn section_heading(title: &str, detail: Option<String>, badges: Vec<AnyElement>)
         .gap_2()
         .w_full()
         .child(
-            view()
-                .flex_1()
-                .min_w(px(0.0))
-                .child(
-                    text(title.to_string())
-                        .text_size(px(16.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t::theme().foreground),
-                ),
+            view().flex_1().min_w(px(0.0)).child(
+                text(title.to_string())
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t::theme().foreground),
+            ),
         )
         .children(detail.map(|detail| {
             view().child(
@@ -530,7 +519,11 @@ fn repositories_section(
             .into_element();
     };
     let count = presentation.repositories.len();
-    let badges = provenance_badges("profile-repositories", ui.repositories_provenance.as_ref(), now);
+    let badges = provenance_badges(
+        "profile-repositories",
+        ui.repositories_provenance.as_ref(),
+        now,
+    );
     let cards: Vec<AnyElement> = presentation
         .repositories
         .iter()
@@ -643,9 +636,7 @@ fn repository_card(
                         .label(repository.name.clone())
                         .focusable(true)
                         .cursor_pointer()
-                        .on_press(move |_: &()| {
-                            emit(ProfileActionKind::Repository(target.clone()))
-                        })
+                        .on_press(move |_: &()| emit(ProfileActionKind::Repository(target.clone())))
                         .child(
                             text(repository.name.clone())
                                 .truncate()
@@ -654,19 +645,17 @@ fn repository_card(
                         ),
                 ),
         )
-        .children(
-            clean(&repository.description).map(|description| {
-                view()
-                    .test_id(&format!("profile-repository-description-{index}"))
-                    .min_w(px(0.0))
-                    .child(
-                        text(description.to_string())
-                            .number_of_lines(3u32)
-                            .text_size(px(12.0))
-                            .text_color(t::theme().muted_foreground),
-                    )
-            }),
-        )
+        .children(clean(&repository.description).map(|description| {
+            view()
+                .test_id(&format!("profile-repository-description-{index}"))
+                .min_w(px(0.0))
+                .child(
+                    text(description.to_string())
+                        .number_of_lines(3u32)
+                        .text_size(px(12.0))
+                        .text_color(t::theme().muted_foreground),
+                )
+        }))
         .children((!stats.is_empty()).then(|| {
             view()
                 .test_id(&format!("profile-repository-stats-{index}"))

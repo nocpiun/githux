@@ -7,15 +7,8 @@
 //! real engine; native mouse drag/Ctrl+C/IME remain owner-verified on a real
 //! Windows window (see `docs/nsh-reader.md`).
 
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "support/reader_modules.rs"]
-mod reader_modules;
-
-#[allow(unused_imports)]
-use reader_modules::reader;
+use githux::ui::reader;
+pub use githux::{content, domain};
 
 use crate::content::images::ImageLimits;
 use crate::content::{PreparedBody, UnsupportedContent};

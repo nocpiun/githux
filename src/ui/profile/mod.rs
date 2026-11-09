@@ -21,7 +21,7 @@ pub use model::{
 };
 pub use view::ProfileView;
 
-pub(crate) use crate::domain::{ContributionCalendar, ContributionRange, ProfileBasic, ProfilePinned, ProfileRepo};
+pub(crate) use crate::domain::ProfileRepo;
 
 use crate::ui::reader::ReaderAction;
 

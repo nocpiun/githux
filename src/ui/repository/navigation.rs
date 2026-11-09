@@ -186,13 +186,6 @@ impl PageError {
         }
     }
 
-    /// Test-only bridge so a scripted stale reply can carry the same typed
-    /// classification the page itself derives from a `GitHubError`.
-    #[cfg(test)]
-    pub(crate) fn from_github_for_test(error: GitHubError) -> Self {
-        Self::from_github(&error)
-    }
-
     fn from_github(error: &GitHubError) -> Self {
         match error {
             GitHubError::Unauthorized => Self::new(
@@ -533,10 +526,6 @@ pub struct TreeModel {
 }
 
 impl TreeModel {
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     pub fn set_root(&mut self, tree: DirectoryTree) {
         self.loading.remove("");
         self.failed.remove("");
@@ -559,10 +548,6 @@ impl TreeModel {
     pub fn fail_load(&mut self, path: &str, error: PageError) {
         self.loading.remove(path);
         self.failed.insert(path.to_string(), error);
-    }
-
-    pub fn clear_failure(&mut self, path: &str) {
-        self.failed.remove(path);
     }
 
     pub fn root(&self) -> Option<&DirectoryTree> {
@@ -603,11 +588,6 @@ impl TreeModel {
                 field: "tree entry",
             })?;
         tree.child_directory(index)
-    }
-
-    /// The directory handle for the root commit, used to (re)load the root.
-    pub fn root_of(&self) -> Option<&DirectoryTree> {
-        self.root.as_ref()
     }
 
     /// The tree entry and index for a regular file at `path`, so a

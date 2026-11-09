@@ -232,7 +232,7 @@ impl Work {
 /// The authorization stamp displayed next to a gated top-level [`PageSlot`] value.
 #[derive(Clone)]
 struct SectionStamp {
-    authorization: Option<CacheAuthorization>,
+    _authorization: Option<CacheAuthorization>,
 }
 
 /// One content generation's identity, so the page can retire the document it replaced.
@@ -427,8 +427,6 @@ pub struct RepositoryController {
     /// placeholders instead of opening another executor or network path.
     image_executor: Option<Arc<crate::network::executor::BackgroundExecutor>>,
     image_limits: ImageLimits,
-    clock: std::time::Instant,
-    pinned_clock: Option<u64>,
     inbox: Arc<Mutex<VecDeque<Message>>>,
     alive: Arc<AtomicBool>,
 }
@@ -500,8 +498,6 @@ impl RepositoryController {
             external_images: None,
             image_executor: None,
             image_limits: ImageLimits::default(),
-            clock: std::time::Instant::now(),
-            pinned_clock: None,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             alive: Arc::new(AtomicBool::new(true)),
         };
@@ -729,6 +725,33 @@ impl RepositoryController {
         }
     }
 
+    fn sync_avatars(&mut self, loader: &crate::app::avatar::AvatarLoader) {
+        let Some(overview) = self.extras.overview_mut() else {
+            return;
+        };
+        let binding = overview.binding().clone();
+        let contributors = overview
+            .contributors()
+            .value()
+            .map(|v| v.contributors.clone())
+            .unwrap_or_default();
+        for contributor in contributors {
+            let Some(id) = contributor.id else {
+                continue;
+            };
+            if let Some(image) = loader.image(id, contributor.avatar_url.as_deref()) {
+                overview.set_avatar_image(
+                    &binding,
+                    id,
+                    crate::ui::repository_overview::AvatarImage {
+                        source: image.source.clone(),
+                        width: 32,
+                        height: 32,
+                    },
+                );
+            }
+        }
+    }
     pub fn overview(&self) -> Option<&crate::ui::repository_overview::RepositoryOverview> {
         self.extras.overview()
     }
@@ -787,23 +810,6 @@ impl RepositoryController {
 
     pub fn reader_layout(&self) -> ReaderLayout {
         ReaderLayout::Repository
-    }
-
-    fn now_ms(&self) -> u64 {
-        if let Some(ms) = self.pinned_clock {
-            return ms;
-        }
-        self.clock.elapsed().as_millis() as u64
-    }
-
-    #[cfg(test)]
-    pub fn pin_clock(&mut self, ms: u64) {
-        self.pinned_clock = Some(ms);
-    }
-
-    #[cfg(test)]
-    pub fn unpin_clock(&mut self) {
-        self.pinned_clock = None;
     }
 
     // ---- lifecycle ----
@@ -1929,7 +1935,7 @@ impl RepositoryController {
                 if !self.summary_slot.publish(
                     ticket,
                     SectionStamp {
-                        authorization: authorization.clone(),
+                        _authorization: authorization.clone(),
                     },
                     sessions,
                 ) {
@@ -1946,7 +1952,7 @@ impl RepositoryController {
                 if !self.branches_slot.publish(
                     ticket,
                     SectionStamp {
-                        authorization: authorization.clone(),
+                        _authorization: authorization.clone(),
                     },
                     sessions,
                 ) {
@@ -1967,7 +1973,7 @@ impl RepositoryController {
                 if !self.revision_slot.publish(
                     ticket,
                     SectionStamp {
-                        authorization: authorization.clone(),
+                        _authorization: authorization.clone(),
                     },
                     sessions,
                 ) {
@@ -3224,6 +3230,7 @@ fn background_closing() -> PageError {
 /// The Native Shell page wrapper: owns the controller on the UI thread, the reactive presentation
 /// snapshot and the reader handle, and forwards typed actions to the shell.
 pub struct RepositoryPage {
+    avatars: Option<Rc<crate::app::avatar::AvatarLoader>>,
     inner: Rc<PageRuntime>,
 }
 
@@ -3362,10 +3369,10 @@ impl PageRuntime {
                     login: Some(login),
                     ..
                 },
-            ) => (self.navigation)(PageNavigation::CanonicalProfile {
-                tab: self.controller.borrow().identity().tab,
+            ) => (self.navigation)(PageNavigation::Open(crate::workspace::Route::UserProfile {
+                host: crate::domain::HostId::github(),
                 login,
-            }),
+            })),
             PageAction::Overview(crate::ui::repository_overview::OverviewAction::OpenRelease {
                 html_url: Some(url),
                 ..
@@ -3408,7 +3415,14 @@ impl RepositoryPage {
             weak: RefCell::new(weak.clone()),
         });
         PageRuntime::sync(&inner);
-        Self { inner }
+        Self {
+            inner,
+            avatars: None,
+        }
+    }
+
+    pub fn set_avatar_loader(&mut self, loader: Option<Rc<crate::app::avatar::AvatarLoader>>) {
+        self.avatars = loader;
     }
 
     /// Passes the shell's single background executor to the page's README image provider.
@@ -3456,6 +3470,9 @@ impl PageView for RepositoryPage {
         {
             let mut controller = self.inner.controller.borrow_mut();
             controller.poll(runtime.sessions());
+            if let Some(avatars) = &self.avatars {
+                controller.sync_avatars(avatars);
+            }
         }
         self.inner.sync();
         if let Some(handle) = self.inner.reader.get_untracked() {

@@ -8,11 +8,11 @@ pub const WARNING: AdaptiveColor = AdaptiveColor {
     dark: rgb(0xfbbf24).to_hsla(),
 };
 
-pub const PAGE_GUTTER: f32 = 16.0;
-pub const PAGE_TOP: f32 = 16.0;
-pub const PAGE_BOTTOM: f32 = 8.0;
-pub const PAGE_HEADER_HEIGHT: f32 = 40.0;
-pub const PAGE_HEADER_INSET: f32 = 8.0;
+pub use crate::ui::page_layout::PAGE_BOTTOM;
+pub use crate::ui::page_layout::PAGE_GUTTER;
+pub use crate::ui::page_layout::PAGE_HEADER_HEIGHT;
+pub use crate::ui::page_layout::PAGE_HEADER_INSET;
+pub use crate::ui::page_layout::PAGE_TOP;
 pub const WORK_ITEM_ROW_HEIGHT: f32 = 72.0;
 pub const SIDEBAR_WIDTH: f32 = 232.0;
 pub const ISLAND_INSET: f32 = 7.0;

@@ -513,6 +513,12 @@ pub enum MockFailure {
     Network(String),
 }
 
+impl Default for MockTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockTransport {
     pub fn new() -> Self {
         Self {

@@ -16,14 +16,15 @@ pub fn run() -> std::process::ExitCode {
     use nsh_engine::Root;
     use nsh_platform_windows::{AppOptions, AppSource, run_app};
 
-    let runtime = runtime::RuntimeHandle::start(runtime::ExitGate::default(), None);
+    let gate = runtime::ExitGate::default();
+    let runtime = runtime::RuntimeHandle::start(gate.clone(), None);
     crate::ui::install_runtime(runtime);
 
     let root = crate::platform::fonts::install(Root::of::<crate::ui::Shell>())
         .tokens(crate::ui::foundation::theme::tokens())
         .app_id("dev.githux.githux")
         .appearance(Appearance::System);
-    run_app(
+    let result = run_app(
         AppSource::Rust(root),
         AppOptions {
             title: "Githux".into(),
@@ -32,7 +33,12 @@ pub fn run() -> std::process::ExitCode {
             appearance: Appearance::System,
             ..Default::default()
         },
-    )
+    );
+    if !gate.wait(std::time::Duration::from_secs(15)) {
+        eprintln!("Background account cleanup did not finish before shutdown timeout.");
+        return std::process::ExitCode::FAILURE;
+    }
+    result
 }
 
 #[cfg(not(target_os = "windows"))]

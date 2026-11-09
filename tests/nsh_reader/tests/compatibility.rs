@@ -9,16 +9,8 @@
 //! lifecycle. Real mouse drag/Ctrl+C/IME remain owner-verified on a Windows
 //! window (`tests/nsh_reader/src/main.rs` boots the matching native probe).
 
-#[path = "../../../src/content/mod.rs"]
-mod content;
-#[path = "../../../src/domain/mod.rs"]
-mod domain;
-#[path = "../../support/reader_modules.rs"]
-mod reader_modules;
-
-#[allow(unused_imports)]
-use reader_modules as ui;
-use reader_modules::reader;
+use githux::ui::reader;
+pub use githux::{content, domain, ui};
 
 use crate::content::PreparedBody;
 use crate::reader::images::{ImageBridge, Picture};

@@ -1,10 +1,5 @@
 //! Framework-independent account bridge for Native Shell. See README.md for the UI drain contract.
 //!
-//! Status: the bridge is complete and validated offline, but the NSH display adapter that binds
-//! these snapshots to native signals is still being built by the shell/base author. Until that
-//! consumer exists, many of these entry points are called only from tests; keep the dead-code
-//! allowance local to this not-yet-wired module rather than silencing it crate-wide (L006).
-#![allow(dead_code)]
 pub mod backend;
 pub mod page;
 mod repositories;
@@ -18,27 +13,18 @@ use crate::storage::{
     accounts::StorageError,
     cache::{CacheAuthorization, CacheError},
 };
+pub use backend::{Backend, ExitGate, OpenError};
+use page::Services as ServicesInner;
+pub use page::{PageContext, PageSlot, PageTicket, Services};
+use repositories::ListReply;
+pub use repositories::{RepositoryList, RepositoryListOrigin};
+pub use sessions::{
+    PageIdentity, RepositoryNavigation, Route, RouteKey, Session, Sessions, TabId, Workspace,
+};
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-};
-// The public bridge surface for the NSH display adapter (owned by the shell/base author). Until
-// that consumer references these names they read as unused in an isolated build; the allowance is
-// scoped to the re-export lines, not the types themselves.
-#[allow(unused_imports)]
-pub use backend::{Backend, ExitGate, OpenError};
-#[allow(unused_imports)]
-use page::Services as ServicesInner;
-#[allow(unused_imports)]
-pub use page::{PageContext, PageSlot, PageTicket, Services};
-#[allow(unused_imports)]
-use repositories::ListReply;
-#[allow(unused_imports)]
-pub use repositories::{RepositoryList, RepositoryListOrigin};
-#[allow(unused_imports)]
-pub use sessions::{
-    PageIdentity, RepositoryNavigation, Route, RouteKey, Session, Sessions, TabId, Workspace,
 };
 
 #[cfg(test)]
@@ -144,6 +130,10 @@ struct Pending {
 }
 enum Message {
     Opened(Result<Backend, OpenError>),
+    Recovery {
+        revision: u64,
+        value: Result<bool, StorageError>,
+    },
     Finished {
         id: u64,
         result: Result<Success, Failure>,
@@ -278,6 +268,16 @@ impl RuntimeHandle {
         self.backend = Some(Arc::new(backend));
         self.snapshot.startup = Startup::Ready;
         self.sync();
+        let backend = self.backend.as_ref().expect("adopted backend").clone();
+        let accounts = backend.accounts.clone();
+        let inbox = self.inbox.clone();
+        let revision = self.snapshot.binding_revision;
+        let _ = backend.spawn(async move {
+            inbox.send(Message::Recovery {
+                revision,
+                value: accounts.recovery_pending().await,
+            });
+        });
         self.autoload();
     }
     fn sync(&mut self) {
@@ -339,6 +339,11 @@ impl RuntimeHandle {
                     Err(error) => self.snapshot.startup = Startup::Failed(error),
                 },
                 Message::Opened(_) => {}
+                Message::Recovery { revision, value } => {
+                    if revision == self.snapshot.binding_revision {
+                        self.snapshot.recovery_pending = value;
+                    }
+                }
                 Message::Finished {
                     id,
                     result,

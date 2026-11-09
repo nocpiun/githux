@@ -19,6 +19,8 @@ impl Pat {
         Self { inner: value }
     }
 
+    // Captures input for later server validation; parsing is deliberately infallible.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Self {
         Self::new(value.to_string())
     }

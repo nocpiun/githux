@@ -1,6 +1,6 @@
 //! Native Shell tooltip with bundled UI font.
-use nsh_core::prelude::*;
 use crate::ui::foundation::theme as t;
+use nsh_core::prelude::*;
 
 pub fn ui_tooltip(message: impl Into<SharedString>) -> impl IntoTooltip {
     nsh_base::tooltip()

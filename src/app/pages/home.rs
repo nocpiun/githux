@@ -303,7 +303,6 @@ pub struct HomePage {
     avatar: Option<AvatarImage>,
     binding: RequestBinding,
     generation: u64,
-    selection: u64,
     session: Option<PageReadSession>,
     cached: Option<CachedPageReadSession>,
     cache_partition: Option<String>,
@@ -347,11 +346,8 @@ impl HomePage {
         let tab = context.identity().tab;
         let incarnation = context.identity().incarnation;
         let selection = context.context().auth().epoch.0;
-        let binding = RequestBinding::new(format!(
-            "home:{}:{incarnation}:{}",
-            tab.get(),
-            selection
-        ));
+        let binding =
+            RequestBinding::new(format!("home:{}:{incarnation}:{}", tab.get(), selection));
         let actions: Rc<RefCell<VecDeque<HomeAction>>> = Rc::new(RefCell::new(VecDeque::new()));
         let (owner, view) = create_root(HomeView::new);
         let mut page = Self {
@@ -363,7 +359,6 @@ impl HomePage {
             avatar: None,
             binding,
             generation: incarnation,
-            selection,
             session: None,
             cached: None,
             cache_partition: None,
@@ -408,24 +403,6 @@ impl HomePage {
     /// what it is handed, so no second image stack exists here.
     pub fn set_avatar_resolver(&mut self, avatar: Option<AvatarImage>) {
         self.avatar = avatar;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_enabled_for_test(&self) -> bool {
-        self.cached.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn description_for_test(&self, repository: &str) -> Option<String> {
-        self.descriptions
-            .get(&repository.trim().to_ascii_lowercase())
-            .cloned()
-            .flatten()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn debug_reads(&self) -> ([u64; 2], bool) {
-        (self.requests, self.session.is_some())
     }
 
     fn capture_session(&mut self) {
@@ -846,8 +823,7 @@ impl HomePage {
                 if matches!(read.source, ReadSource::Network { .. })
                     && let Some(seconds) = outcome.poll_interval_seconds
                 {
-                    self.feed_ready =
-                        Some(Instant::now() + Duration::from_secs(seconds.max(1)));
+                    self.feed_ready = Some(Instant::now() + Duration::from_secs(seconds.max(1)));
                 } else if matches!(read.source, ReadSource::Network { .. }) {
                     self.feed_ready = None;
                 }
@@ -1024,7 +1000,8 @@ impl HomePage {
             {
                 continue;
             }
-            self.enrich_queue.push((owner.to_string(), repo.to_string()));
+            self.enrich_queue
+                .push((owner.to_string(), repo.to_string()));
         }
         let known: HashMap<String, String> = self
             .descriptions
@@ -1072,47 +1049,51 @@ impl HomePage {
         let inbox = self.inbox.clone();
         let services = self.context.services().clone();
         let spawned = services.spawn(async move {
-            let result = if let Some(cached) = cached {
-                match cached
-                    .repository_descriptions(mode, needed.clone(), 20, cancel.clone())
-                    .await
-                {
-                    Err(error) if matches!(mode, PageReadMode::Online) => {
-                        match cache_failure(error) {
-                            CachedReadFailure::UncachedOnline => session
-                                .repository_descriptions(needed, 20, cancel.clone())
-                                .await
-                                .map(|value| EnrichmentResult {
-                                    descriptions: value.value,
-                                    cache_partition: None,
-                                }),
-                            CachedReadFailure::Network(error) => Err(error),
-                            CachedReadFailure::AuthOrContext(error) => Err(error),
+            let result =
+                if let Some(cached) = cached {
+                    match cached
+                        .repository_descriptions(mode, needed.clone(), 20, cancel.clone())
+                        .await
+                    {
+                        Err(error) if matches!(mode, PageReadMode::Online) => {
+                            match cache_failure(error) {
+                                CachedReadFailure::UncachedOnline => session
+                                    .repository_descriptions(needed, 20, cancel.clone())
+                                    .await
+                                    .map(|value| EnrichmentResult {
+                                        descriptions: value.value,
+                                        cache_partition: None,
+                                    }),
+                                CachedReadFailure::Network(error) => Err(error),
+                                CachedReadFailure::AuthOrContext(error) => Err(error),
+                            }
                         }
-                    }
-                    result => result
-                        .map_err(cache_miss_failure)
-                        .and_then(|value| match value.value {
-                            PageValue::Value { value, origin, .. } => Ok(EnrichmentResult {
-                                descriptions: value,
-                                cache_partition: matches!(origin, PageOrigin::HistoricalSnapshot)
+                        result => result
+                            .map_err(cache_miss_failure)
+                            .and_then(|value| match value.value {
+                                PageValue::Value { value, origin, .. } => Ok(EnrichmentResult {
+                                    descriptions: value,
+                                    cache_partition: matches!(
+                                        origin,
+                                        PageOrigin::HistoricalSnapshot
+                                    )
                                     .then_some(cache_partition)
                                     .flatten(),
+                                }),
+                                PageValue::Miss(_) => Err(HomeError::InvalidResponse {
+                                    message: "Repository descriptions are not cached.".into(),
+                                }),
                             }),
-                            PageValue::Miss(_) => Err(HomeError::InvalidResponse {
-                                message: "Repository descriptions are not cached.".into(),
-                            }),
-                        }),
-                }
-            } else {
-                session
-                    .repository_descriptions(needed, 20, cancel)
-                    .await
-                    .map(|value| EnrichmentResult {
-                        descriptions: value.value,
-                        cache_partition: None,
-                    })
-            };
+                    }
+                } else {
+                    session
+                        .repository_descriptions(needed, 20, cancel)
+                        .await
+                        .map(|value| EnrichmentResult {
+                            descriptions: value.value,
+                            cache_partition: None,
+                        })
+                };
             inbox
                 .lock()
                 .expect("home inbox")
@@ -1329,30 +1310,26 @@ impl HomePage {
             {
                 self.load_more_feed();
             }
-            HomeAction::Repository(repository) => (self.navigation)(
-                PageNavigation::Open(Route::Repository {
+            HomeAction::Repository(repository) => {
+                (self.navigation)(PageNavigation::Open(Route::Repository {
                     namespace: repository.owner,
                     name: repository.name,
-                }),
-            ),
+                }))
+            }
             HomeAction::Profile(profile) => {
-                let active = self
-                    .context
-                    .services()
-                    .accounts()
-                    .active_summary();
+                let active = self.context.services().accounts().active_summary();
                 (self.navigation)(PageNavigation::Open(Route::profile(
                     profile.login,
                     active.as_ref(),
                 )))
             }
-            HomeAction::OpenPullRequest { repository, number } => (self.navigation)(
-                PageNavigation::Open(Route::PullRequest {
+            HomeAction::OpenPullRequest { repository, number } => {
+                (self.navigation)(PageNavigation::Open(Route::PullRequest {
                     namespace: repository.owner,
                     name: repository.name,
                     number,
-                }),
-            ),
+                }))
+            }
             // Other Issue/PR entry points are outside this navigation correction.
             HomeAction::ActivateWorkItem(_)
             | HomeAction::ActivateFeed(_)
@@ -1364,12 +1341,15 @@ impl HomePage {
 
 impl PageView for HomePage {
     fn element(&self) -> AnyElement {
-        self.view.element(&{
-            let actions = self.actions.clone();
-            Rc::new(move |action: HomeAction| {
-                actions.borrow_mut().push_back(action);
-            })
-        }, self.avatar.as_ref())
+        self.view.element(
+            &{
+                let actions = self.actions.clone();
+                Rc::new(move |action: HomeAction| {
+                    actions.borrow_mut().push_back(action);
+                })
+            },
+            self.avatar.as_ref(),
+        )
     }
 
     fn poll(&mut self, runtime: &RuntimeHandle) {
@@ -1383,12 +1363,7 @@ impl PageView for HomePage {
             let Some(action) = action else { break };
             self.action(action);
         }
-        let replies: Vec<Reply> = self
-            .inbox
-            .lock()
-            .expect("home inbox")
-            .drain(..)
-            .collect();
+        let replies: Vec<Reply> = self.inbox.lock().expect("home inbox").drain(..).collect();
         for reply in replies {
             self.apply(reply, sessions);
         }
@@ -1403,6 +1378,9 @@ impl PageView for HomePage {
     }
 
     fn set_active(&mut self, active: bool) {
+        if self.active == active {
+            return;
+        }
         self.active = active;
         if active {
             self.last_clock = Instant::now();

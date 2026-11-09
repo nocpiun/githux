@@ -100,12 +100,12 @@ pub(super) struct Extras {
 }
 
 impl Extras {
-    pub(super) fn overview(&self) -> Option<&RepositoryOverview> {
-        self.view.as_ref()
+    pub(super) fn overview_mut(&mut self) -> Option<&mut RepositoryOverview> {
+        self.view.as_mut()
     }
 
-    pub(super) fn binding(&self) -> Option<&OverviewBinding> {
-        self.binding.as_ref()
+    pub(super) fn overview(&self) -> Option<&RepositoryOverview> {
+        self.view.as_ref()
     }
 
     pub(super) fn displayed_authorization(&self) -> CapturedAuthorization {

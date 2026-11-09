@@ -17,7 +17,7 @@ mod rows;
 #[cfg(test)]
 mod tests;
 
-use crate::ui::foundation::{self, controls, theme as t};
+use crate::ui::foundation::{controls, theme as t};
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 use std::cell::RefCell;
@@ -183,7 +183,9 @@ pub enum PanelContent<T> {
     Error(HomeError),
     /// No current or previously supplied snapshot. This is deliberately not
     /// called "empty": offline/no-data must not become "no activity".
-    Unavailable { message: String },
+    Unavailable {
+        message: String,
+    },
 }
 
 /// State of one column. Refreshing retains previously supplied data while the
@@ -345,6 +347,12 @@ pub struct HomeView {
     sink: Rc<RefCell<Option<OnAction>>>,
 }
 
+impl Default for HomeView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HomeView {
     /// Starts an unrequested binding (no current data). The host must call
     /// [`HomeView::set_loading`] and then supply each result with the same
@@ -362,16 +370,19 @@ impl HomeView {
             now: signal(SystemTime::now()),
             selected_home: signal(None),
             selected_feed: signal(None),
-            feed_scroll: feed_scroll.clone(),
+            feed_scroll,
             sink: sink.clone(),
         };
         // Registered once in the page's owner; the handler runs at the end of each
         // commit that sees a new offset, content size or viewport.
         {
             let this = view.clone();
-            watch_scroll(move || feed_scroll.node(), move |event| {
-                this.on_feed_scrolled(event);
-            });
+            watch_scroll(
+                move || feed_scroll.node(),
+                move |event| {
+                    this.on_feed_scrolled(event);
+                },
+            );
         }
         view
     }
@@ -520,7 +531,12 @@ impl HomeView {
     /// Starts loading one column without disturbing the other. A host normally
     /// calls this before its first read; refreshing an existing snapshot can be
     /// left to the refresh action itself.
-    pub fn set_loading(&mut self, column: Column, binding: &RequestBinding, generation: u64) -> bool {
+    pub fn set_loading(
+        &mut self,
+        column: Column,
+        binding: &RequestBinding,
+        generation: u64,
+    ) -> bool {
         if !self.accepts(binding, generation) {
             return false;
         }
@@ -549,7 +565,12 @@ impl HomeView {
         generation: u64,
         snapshot: SnapshotPresentation<HomeSearchOutcome>,
     ) -> bool {
-        self.apply_home_internal(binding, generation, snapshot.outcome, Some(snapshot.provenance))
+        self.apply_home_internal(
+            binding,
+            generation,
+            snapshot.outcome,
+            Some(snapshot.provenance),
+        )
     }
 
     fn apply_home_internal(
@@ -591,7 +612,12 @@ impl HomeView {
         generation: u64,
         snapshot: SnapshotPresentation<FeedOutcome>,
     ) -> bool {
-        self.apply_feed_internal(binding, generation, snapshot.outcome, Some(snapshot.provenance))
+        self.apply_feed_internal(
+            binding,
+            generation,
+            snapshot.outcome,
+            Some(snapshot.provenance),
+        )
     }
 
     fn apply_feed_internal(

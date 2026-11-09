@@ -4,12 +4,7 @@
 //! real `src/ui/reader` module tree, so the compatibility test's headless
 //! evidence has a matching native window. It is a probe, not the product Shell.
 
-#[path = "../../../src/content/mod.rs"]
-mod content;
-#[path = "../../../src/domain/mod.rs"]
-mod domain;
-#[path = "../../../src/ui/reader/mod.rs"]
-mod reader;
+use githux::ui::reader;
 
 #[cfg(windows)]
 fn main() -> impl std::process::Termination {

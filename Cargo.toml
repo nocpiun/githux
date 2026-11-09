@@ -46,3 +46,7 @@ nsh-testing = { git = "https://github.com/longbridge/nsh", rev = "e626a8dd8f8d8b
 # tasks inside the critical section, so the test would pass even without a lock.
 # The production runtime stays current-thread.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }
+
+[[test]]
+name = "reader_compatibility"
+path = "tests/nsh_reader/tests/compatibility.rs"

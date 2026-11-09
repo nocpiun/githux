@@ -21,9 +21,7 @@ use crate::data::AccountService;
 use crate::github::{GitHubClient, GitHubConfig};
 use crate::network::cancel::CancellationToken;
 use crate::network::executor::BackgroundExecutor;
-use crate::network::transport::{
-    HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
-};
+use crate::network::transport::{HttpMethod, HttpRequest, HttpResponse, Transport, TransportError};
 use crate::storage::accounts::AccountDatabaseConfig;
 use crate::storage::cache::{CacheConfig, CacheStore};
 use crate::workspace::Route;
@@ -36,9 +34,7 @@ use super::{HomePage, NavigationSink, PageNavigation, PageView};
 static SLOT: Mutex<Option<BackendSlot>> = Mutex::new(None);
 static NAVIGATION: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static COMMANDS: Mutex<Vec<TestCommand>> = Mutex::new(Vec::new());
-static STATUS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static EMPTY_FIRST_PAGE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static EMPTY_FIRST_PAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LOCK: Mutex<()> = Mutex::new(());
 
 struct BackendSlot {
@@ -85,7 +81,9 @@ impl Transport for ScriptedTransport {
     {
         Box::pin(async move {
             if self.offline.load(std::sync::atomic::Ordering::Acquire) {
-                return Err(TransportError::Network { message: "synthetic offline".into() });
+                return Err(TransportError::Network {
+                    message: "synthetic offline".into(),
+                });
             }
             let user = *self.user.lock().expect("scripted user");
             Ok(script(&request, user))
@@ -270,7 +268,7 @@ struct Fixture {
     executor: Arc<BackgroundExecutor>,
     service: Option<AccountService>,
     database: std::path::PathBuf,
-    directory: tempfile::TempDir,
+    _directory: tempfile::TempDir,
     cache_directory: tempfile::TempDir,
     credentials: Arc<InMemoryCredentialStore>,
 }
@@ -291,7 +289,7 @@ impl Fixture {
             executor,
             service: None,
             database,
-            directory,
+            _directory: directory,
             cache_directory,
             credentials,
         };
@@ -325,9 +323,7 @@ impl Fixture {
     }
 
     async fn open(&self) -> AccountService {
-        self.try_open()
-            .await
-            .expect("the account database opens")
+        self.try_open().await.expect("the account database opens")
     }
 
     async fn login(&mut self, token: &str) {
@@ -342,34 +338,6 @@ impl Fixture {
         if !self.accounts.contains(&key) {
             self.accounts.push(key);
         }
-    }
-
-    /// Reopens the account database (a restart) and revalidates the saved active
-    /// account against the transport.
-    async fn restart(&mut self) {
-        self.service = None;
-        // The previous backend closes its account database asynchronously, so a
-        // restart waits for the single-writer lock instead of failing spuriously.
-        let mut service = None;
-        for _ in 0..80 {
-            if let Some(opened) = self.try_open().await {
-                service = Some(opened);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let service = service.expect("the account database opens after the restart");
-        if let Some(active) = service
-            .registry_handle()
-            .lock()
-            .unwrap()
-            .summaries()
-            .first()
-            .map(|summary| summary.identity.key.clone())
-        {
-            let _ = service.revalidate(active).await;
-        }
-        self.service = Some(service);
     }
 }
 
@@ -390,7 +358,10 @@ impl Driver {
                     let result = self.runtime.submit(Command::Select(account.clone()));
                     if matches!(result, Err(crate::app::runtime::SubmitError::Busy)) {
                         // A sidebar read owned the runtime slot; retry next tick.
-                        COMMANDS.lock().expect("commands").push(TestCommand::Select(account));
+                        COMMANDS
+                            .lock()
+                            .expect("commands")
+                            .push(TestCommand::Select(account));
                     }
                 }
                 TestCommand::Refresh => {
@@ -399,12 +370,7 @@ impl Driver {
             }
         }
         self.page.poll(&self.runtime);
-        let snapshot = self.runtime.snapshot();
-        STATUS.lock().expect("status").push(format!(
-            "revision {} active {:?}",
-            snapshot.binding_revision,
-            snapshot.active.as_ref().map(|key| key.id)
-        ));
+        self.runtime.snapshot();
     }
 }
 
@@ -426,40 +392,23 @@ fn HomeHarness(_props: HarnessProps) -> impl IntoElement {
         }
     });
     let epoch = signal(0u64);
-    set_interval(Duration::from_millis(120), move || epoch.update(|n| *n += 1));
-    dynamic(move || {
-        let _ = epoch.get();
-        let body = match driver.try_borrow_mut() {
-            Ok(driver) => match driver.as_ref() {
-                Some(driver) => driver.page.element(),
-                None => view()
-                    .child(text("no driver"))
-                    .into_element(),
-            },
-            Err(_) => view().into_element(),
-        };
-        view()
-            .size_full()
-            .bg(crate::ui::foundation::theme::theme().background)
-            .child(body)
-            .child(
-                view()
-                    .test_id("nav-log")
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(0.0))
-                    .child(
-                        text(NAVIGATION.lock().expect("nav log").join("|"))
-                            .text_size(px(8.0)),
-                    )
-                    .child(
-                        text(STATUS.lock().expect("status").join("; "))
-                            .text_size(px(8.0)),
-                    ),
-            )
-            .into_element()
-    })
-    .into_element()
+    set_interval(Duration::from_millis(120), move || {
+        epoch.update(|n| *n += 1)
+    });
+    // The Home root exists immediately and owns reactive children. Do not replace
+    // every press target on a timer merely to refresh the test navigation label.
+    let body = driver.borrow().as_ref().expect("driver").page.element();
+    view()
+        .size_full()
+        .bg(crate::ui::foundation::theme::theme().background)
+        .child(body)
+        .child(dynamic(move || {
+            let _ = epoch.get();
+            view()
+                .test_id("nav-log")
+                .child(text(NAVIGATION.lock().expect("navigation log").join("|")))
+        }))
+        .into_element()
 }
 
 fn build_driver() -> Option<Driver> {
@@ -500,14 +449,13 @@ fn mount(fixture: &mut Fixture, empty_first_page: bool) -> Headless {
     EMPTY_FIRST_PAGE.store(empty_first_page, std::sync::atomic::Ordering::Release);
     *NAVIGATION.lock().unwrap() = Vec::new();
     *COMMANDS.lock().unwrap() = Vec::new();
-    *STATUS.lock().unwrap() = Vec::new();
     let service = fixture.service.take().expect("fixture service");
     let backend = Backend::new(service, fixture.executor.clone(), ExitGate::default());
     *SLOT.lock().unwrap() = Some(BackendSlot {
         backend: Arc::new(backend),
     });
-    let root =
-        Root::new::<HomeHarness>(HarnessProps::default).tokens(crate::ui::foundation::theme::tokens());
+    let root = Root::new::<HomeHarness>(HarnessProps::default)
+        .tokens(crate::ui::foundation::theme::tokens());
     let mut app = Headless::start(EngineConfig::new(root)).expect("headless app starts");
     app.set_viewport(nsh_core::geometry::Size::new(
         nsh_core::geometry::px(1200.0),
@@ -571,7 +519,9 @@ fn read_more_opens_the_internal_pull_request_route() {
     app.wait_for("open alice/demo #5")
         .expect("Read more opens the internal pull-request route");
     assert!(
-        !navigation().iter().any(|entry| entry.starts_with("external")),
+        !navigation()
+            .iter()
+            .any(|entry| entry.starts_with("external")),
         "Read more must never open a browser: {:?}",
         navigation()
     );

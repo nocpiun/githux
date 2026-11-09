@@ -16,8 +16,8 @@
 
 ## 项目边界
 
-- Rust + GPUI + Ely；Windows 优先，之后 macOS/Linux。保持 Ely 原型画风，UI 字体 Noto Sans、代码字体 Google Sans Code。
-- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 GPUI + Ely 外壳、真实账户与仓库侧栏，以及正式 Home/Feed、Profile、Repository 页面。运行与检查见 [README](README.md)，页面生命周期与实际验证边界见 [正式页面接入](docs/shell-page-integration.md)；缓存核心不等于正式离线阅读，未接入页面与 Settings 最终设计仍需独立交付。
+- 本迁移分支使用 Rust + Native Shell 原生 Windows 后端，默认 NSH 样式；UI 字体 Noto Sans / Noto Sans SC、代码字体 Google Sans Code。不得恢复 Ely/GPUI 或另建并行产品入口；迁移分支暂不合入 main。
+- 当前为单 Rust Cargo package（edition 2024），工具链固定 1.98.1；已有 Native Shell 外壳、真实账户与仓库侧栏，以及正式 Home/Feed、Profile、Repository 页面。运行与检查见 [README](README.md)，页面生命周期与实际验证边界见 [正式页面接入](docs/shell-page-integration.md)；缓存核心不等于正式离线阅读，未接入页面与 Settings 最终设计仍需独立交付。
 - 普通任务由原执行者完成实现至 PR 交付；主 Agent 确认派发成功后可以结束当前轮次，按需处理裁决，不持续盯日志或重复全量审查。细则见工作流。
 - 主 Agent 协调方向、任务和例外；基层 Agents 使用本地任务上下文指定的执行工具。实现任务各用独立分支和 `D:\githux-<task>` worktree。并发限制已于 2026-10-22 解除，现按依赖、冲突和资源并行；同一任务仍只有一个有效写入者。
 - 共享事实写入受 Git 跟踪的 `docs/`。主 Agent 的私有交接记忆保存在 `.agents/` 下被 Git 忽略的专属目录；`.agents/task/` 是本任务临时状态。不得上传凭据、完整私人记忆或原始会话日志。

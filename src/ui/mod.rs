@@ -10,9 +10,16 @@ pub mod badge;
 pub mod compact_status;
 pub mod foundation;
 pub mod geometry;
+pub mod global_work_items;
+pub mod home;
+pub mod notifications;
 pub mod page_layout;
+pub mod profile;
+pub mod reader;
 pub mod relative_time;
 pub mod repository;
+pub mod repository_overview;
+pub mod settings;
 pub mod tooltip;
 pub mod work_item_row;
 
@@ -23,21 +30,23 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use nsh_core::desktop::TitleBarStyle;
+use nsh_core::element::ImageSrc;
 use nsh_core::element::desktop::set_title_bar;
 use nsh_core::prelude::*;
 
 use crate::app::pages::{
-    HomePage, NavigationSink, NotificationsPage, PageNavigation, PageView, ProfilePage, WorkItemsPage,
+    HomePage, NavigationSink, NotificationsPage, PageNavigation, PageView, ProfilePage,
+    WorkItemsPage,
 };
 use crate::app::runtime::{PageContext, RepositoryList, RuntimeHandle, Snapshot};
 use crate::domain::RepoSummary;
-use crate::ui::accounts::AccountsView;
 use crate::ui::foundation::{
     controls::{self, Icon},
     theme as t,
 };
 use crate::ui::geometry as g;
 use crate::ui::repository::RepositoryPage;
+use crate::ui::settings::SettingsView;
 use crate::workspace::{Route, TabId};
 
 /// The one application runtime, installed by `app::run` before the first frame.
@@ -51,11 +60,13 @@ struct ShellState {
     runtime: RuntimeHandle,
     snapshot: Snapshot,
     pages: HashMap<u64, Box<dyn PageView>>,
-    settings: Option<AccountsView>,
+    settings: Option<SettingsView>,
+    avatars: Option<Rc<crate::app::avatar::AvatarLoader>>,
     binding_revision: u64,
+    active_tab: Option<TabId>,
     pending: Rc<RefCell<Vec<PageNavigation>>>,
     palette_open: bool,
-    palette_query: String,
+    palette_query: Signal<String>,
     sidebar_collapsed: bool,
 }
 
@@ -67,7 +78,9 @@ impl ShellState {
 
 fn tick(state: &Rc<RefCell<ShellState>>, revision: Signal<u64>) {
     let mut st = state.borrow_mut();
-    st.snapshot = st.runtime.snapshot();
+    let snapshot = st.runtime.snapshot();
+    let mut changed = snapshot != st.snapshot;
+    st.snapshot = snapshot;
     let snapshot = st.snapshot.clone();
     {
         let sessions = st.runtime.sessions_mut();
@@ -76,6 +89,8 @@ fn tick(state: &Rc<RefCell<ShellState>>, revision: Signal<u64>) {
     }
     if snapshot.binding_revision != st.binding_revision {
         st.binding_revision = snapshot.binding_revision;
+        st.active_tab = None;
+        st.avatars = None;
         for (_, mut page) in st.pages.drain() {
             page.retire();
         }
@@ -84,15 +99,37 @@ fn tick(state: &Rc<RefCell<ShellState>>, revision: Signal<u64>) {
         }
     }
     let navs = std::mem::take(&mut *st.pending.borrow_mut());
+    changed |= !navs.is_empty();
     for nav in navs {
         apply_navigation(&mut st, nav);
     }
+    if st.avatars.is_none()
+        && let Some(services) = st.runtime.services()
+        && let Ok(context) = services.page_context(
+            st.runtime.sessions(),
+            st.runtime.sessions().active_id(),
+            None,
+        )
+    {
+        st.avatars = Some(Rc::new(crate::app::avatar::AvatarLoader::new(context)));
+    }
+    if let Some(avatars) = &st.avatars {
+        changed |= avatars.poll();
+    }
+    let mounted = (st.pages.len(), st.settings.is_some());
     ensure_active_page(&mut st);
+    changed |= mounted != (st.pages.len(), st.settings.is_some());
     let active = st.runtime.sessions().active_id();
+    let active_changed = st.active_tab != Some(active);
+    st.active_tab = Some(active);
     let mut pages = std::mem::take(&mut st.pages);
     for (id, page) in pages.iter_mut() {
-        page.set_active(*id == active.get());
+        if active_changed {
+            page.set_active(*id == active.get());
+        }
+        let before = page.host_presentation();
         page.poll(&st.runtime);
+        changed |= before != page.host_presentation();
     }
     st.pages = pages;
     let mut settings = st.settings.take();
@@ -101,7 +138,9 @@ fn tick(state: &Rc<RefCell<ShellState>>, revision: Signal<u64>) {
     }
     st.settings = settings;
     drop(st);
-    revision.update(|n| *n = n.wrapping_add(1));
+    if changed {
+        revision.update(|n| *n = n.wrapping_add(1));
+    }
 }
 
 fn apply_navigation(st: &mut ShellState, nav: PageNavigation) {
@@ -116,7 +155,9 @@ fn apply_navigation(st: &mut ShellState, nav: PageNavigation) {
             }
         }
         PageNavigation::External(url) => {
-            let _ = open_url(&url);
+            spawn(async move {
+                let _ = open_url(url).await;
+            });
         }
         PageNavigation::CanonicalProfile { tab, login } => {
             let identity = st.runtime.sessions().identity(tab);
@@ -131,16 +172,20 @@ fn apply_navigation(st: &mut ShellState, nav: PageNavigation) {
 
 fn ensure_active_page(st: &mut ShellState) {
     let tab = st.runtime.sessions().active_id();
-    if st.pages.contains_key(&tab.get()) || st.settings.is_some() {
+    if st.pages.contains_key(&tab.get()) {
         return;
     }
     let route = st.active_route();
     if route == Route::Settings {
-        st.settings = Some(accounts_view(st));
+        if st.settings.is_none() {
+            st.settings = Some(accounts_view(st));
+        }
         return;
     }
     let Some(services) = st.runtime.services() else {
-        st.settings = Some(accounts_view(st));
+        if st.settings.is_none() {
+            st.settings = Some(accounts_view(st));
+        }
         return;
     };
     let Ok(context) = services.page_context(st.runtime.sessions(), tab, None) else {
@@ -151,9 +196,13 @@ fn ensure_active_page(st: &mut ShellState) {
     }
 }
 
-fn accounts_view(st: &ShellState) -> AccountsView {
+fn accounts_view(st: &ShellState) -> SettingsView {
     let pending = st.pending.clone();
-    AccountsView::new(Rc::new(move |nav| pending.borrow_mut().push(nav)))
+    let mut view = SettingsView::new(Rc::new(move |nav| pending.borrow_mut().push(nav)));
+    if let Some(avatars) = &st.avatars {
+        view.install_avatar_provider(avatars.clone());
+    }
+    view
 }
 
 fn build_page(
@@ -165,7 +214,17 @@ fn build_page(
     let pending = st.pending.clone();
     let navigation: NavigationSink = Rc::new(move |nav| pending.borrow_mut().push(nav));
     match route {
-        Route::Home => Some(Box::new(HomePage::new(context, navigation))),
+        Route::Home => {
+            let mut page = HomePage::new(context, navigation);
+            if let Some(avatars) = st.avatars.clone() {
+                page.set_avatar_resolver(Some(Rc::new(move |actor| {
+                    avatars
+                        .image(actor.id, actor.avatar_url.as_deref())
+                        .map(|image| ImageSrc::from(image.source.clone()))
+                })));
+            }
+            Some(Box::new(page))
+        }
         Route::Profile => {
             let login = st
                 .snapshot
@@ -174,11 +233,19 @@ fn build_page(
                 .find(|a| Some(&a.identity.key) == st.snapshot.active.as_ref())
                 .map(|a| a.identity.login.clone())
                 .unwrap_or_default();
-            Some(Box::new(ProfilePage::new(context, login, navigation)))
+            Some(Box::new(profile_page(
+                context,
+                login,
+                navigation,
+                st.avatars.clone(),
+            )))
         }
-        Route::UserProfile { login, .. } => {
-            Some(Box::new(ProfilePage::new(context, login, navigation)))
-        }
+        Route::UserProfile { login, .. } => Some(Box::new(profile_page(
+            context,
+            login,
+            navigation,
+            st.avatars.clone(),
+        ))),
         Route::Repository { namespace, name } => {
             let intent = st
                 .runtime
@@ -186,13 +253,11 @@ fn build_page(
                 .session(tab)
                 .and_then(|s| s.repository.clone())
                 .unwrap_or_default();
-            Some(Box::new(RepositoryPage::new(
-                context,
-                namespace,
-                name,
-                intent,
-                navigation,
-            )))
+            let executor = context.services().executor();
+            let mut page = RepositoryPage::new(context, namespace, name, intent, navigation);
+            page.set_image_executor(executor);
+            page.set_avatar_loader(st.avatars.clone());
+            Some(Box::new(page))
         }
         Route::Notifications => Some(Box::new(NotificationsPage::new(context, navigation))),
         Route::Issues | Route::PullRequests => {
@@ -200,6 +265,39 @@ fn build_page(
         }
         Route::Settings | Route::PullRequest { .. } => Some(Box::new(EmptyPage)),
     }
+}
+
+fn profile_page(
+    context: PageContext,
+    login: String,
+    navigation: NavigationSink,
+    avatars: Option<Rc<crate::app::avatar::AvatarLoader>>,
+) -> ProfilePage {
+    let captured = context.clone();
+    let mut page = ProfilePage::new(context, login, navigation);
+    page.set_avatar_loader(avatars);
+    page.set_readme_image_provider(Some(Rc::new(move |read_context, repository| {
+        use crate::network::reader_images::ReqwestExternalImages;
+        if !captured.services().is_current() || captured.context() != read_context {
+            return None;
+        }
+        let session = captured.repository_session().ok()?;
+        let cache = captured
+            .cache()
+            .map(|binding| (binding.store().clone(), binding.scope().clone(), false));
+        Some(std::sync::Arc::new(
+            crate::data::reader_images::RepositoryImageService::with_cache(
+                session,
+                repository.clone(),
+                captured.services().executor(),
+                std::sync::Arc::new(ReqwestExternalImages::new().ok()?),
+                crate::content::images::ImageLimits::default(),
+                cache,
+            ),
+        )
+            as std::sync::Arc<dyn crate::content::images::ImageProvider>)
+    })));
+    page
 }
 
 /// A route-only page for surfaces whose content is intentionally empty in the first release.
@@ -222,6 +320,7 @@ fn navigate(
 ) -> impl Fn() + 'static {
     let state = state.clone();
     move || {
+        state.borrow_mut().palette_open = false;
         let pending = state.borrow().pending.clone();
         pending.borrow_mut().push(nav.clone());
         revision.update(|n| *n = n.wrapping_add(1));
@@ -252,16 +351,33 @@ pub fn Shell() -> impl IntoElement {
         },
         pages: HashMap::new(),
         settings: None,
+        avatars: None,
         binding_revision: u64::MAX,
+        active_tab: None,
         pending: Rc::new(RefCell::new(Vec::new())),
         palette_open: false,
-        palette_query: String::new(),
+        palette_query: signal(String::new()),
         sidebar_collapsed: false,
     }));
     let revision = signal(0u64);
+    let cleanup_state = state.clone();
+    cleanup(move || {
+        let mut st = cleanup_state.borrow_mut();
+        for page in st.pages.values_mut() {
+            page.retire();
+        }
+        st.pages.clear();
+        if let Some(mut settings) = st.settings.take() {
+            settings.retire();
+        }
+        st.avatars = None;
+        st.runtime.shutdown();
+    });
     tick(&state, revision);
     let tick_state = state.clone();
-    set_interval(Duration::from_millis(200), move || tick(&tick_state, revision));
+    set_interval(Duration::from_millis(200), move || {
+        tick(&tick_state, revision)
+    });
 
     let key_state = state.clone();
     on_key("ctrl+k", move |_| {
@@ -319,13 +435,33 @@ fn cycle_tab(state: &Rc<RefCell<ShellState>>, revision: Signal<u64>, by: isize) 
 fn titlebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement {
     dynamic(move || {
         let _ = revision.get();
-        let open = navigate(&state, revision, PageNavigation::Open(Route::Home));
+        let open = {
+            let state = state.clone();
+            move || {
+                state.borrow_mut().palette_open = true;
+                revision.update(|n| *n = n.wrapping_add(1));
+            }
+        };
+        let collapse = {
+            let state = state.clone();
+            move || {
+                let mut st = state.borrow_mut();
+                st.sidebar_collapsed = !st.sidebar_collapsed;
+                drop(st);
+                revision.update(|n| *n = n.wrapping_add(1));
+            }
+        };
         view()
             .h(px(t::TITLEBAR_HEIGHT))
             .flex_row()
             .items_center()
             .gap_2()
             .px_2()
+            .child(controls::icon_button(
+                "Toggle sidebar",
+                Icon::More,
+                collapse,
+            ))
             .child(view().flex_1().h_full().window_drag(true))
             .child(
                 view()
@@ -342,6 +478,7 @@ fn titlebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement
                     .cursor_pointer()
                     .role(AccessibilityRole::Button)
                     .label("Search")
+                    .test_id("shell-search")
                     .on_press(move |_: &()| open())
                     .child(controls::icon(Icon::Search))
                     .child(
@@ -358,6 +495,9 @@ fn sidebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
     dynamic(move || {
         let _ = revision.get();
         let st = state.borrow();
+        if st.sidebar_collapsed {
+            return view();
+        }
         let route = st.active_route();
         let mut nav_rows = view().gap(px(2.0)).px_2().pt_2();
         for (label, icon, target) in [
@@ -366,7 +506,7 @@ fn sidebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
         ] {
             let active = route == target;
             let press = navigate(&state, revision, PageNavigation::Open(target));
-            nav_rows = nav_rows.child(sidebar_row(label, icon, active, move || press()));
+            nav_rows = nav_rows.child(sidebar_row(label, icon, active, press));
         }
 
         let repository_group = match &st.snapshot.repositories {
@@ -376,7 +516,7 @@ fn sidebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
                     let target = Route::repository(repo);
                     let active = route.key() == target.key();
                     let press = navigate(&state, revision, PageNavigation::Open(target));
-                    list = list.child(repo_row(repo, active, move || press()));
+                    list = list.child(repo_row(repo, active, st.avatars.as_ref(), press));
                 }
                 list.into_element()
             }
@@ -413,11 +553,7 @@ fn sidebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
             .and_then(|key| st.snapshot.accounts.iter().find(|a| &a.identity.key == key))
             .map(|a| a.identity.login.clone())
             .unwrap_or_else(|| "Not signed in".to_string());
-        let profile_press = navigate(
-            &state,
-            revision,
-            PageNavigation::Open(Route::Profile),
-        );
+        let profile_press = navigate(&state, revision, PageNavigation::Open(Route::Profile));
         let footer = view()
             .px_2()
             .py_2()
@@ -428,12 +564,22 @@ fn sidebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
             .gap_2()
             .cursor_pointer()
             .on_press(move |_: &()| profile_press())
-            .child(controls::icon(Icon::Repo))
             .child(
-                t::label(account)
-                    .text_size(px(13.0))
-                    .flex_1(),
-            );
+                st.snapshot
+                    .accounts
+                    .iter()
+                    .find(|a| Some(&a.identity.key) == st.snapshot.active.as_ref())
+                    .map(|a| {
+                        shell_avatar(
+                            st.avatars.as_ref(),
+                            a.identity.key.id,
+                            a.identity.avatar_url.as_deref(),
+                            &a.identity.login,
+                        )
+                    })
+                    .unwrap_or_else(|| controls::icon(Icon::Repo).into_element()),
+            )
+            .child(t::label(account).text_size(px(13.0)).flex_1());
 
         view()
             .w(px(g::SIDEBAR_WIDTH))
@@ -442,21 +588,17 @@ fn sidebar(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
             .p(px(g::SIDEBAR_PADDING))
             .child(nav_rows)
             .child(
-                view()
-                    .px_2()
-                    .pt_3()
-                    .pb_1()
-                    .child(
-                        t::label(match &st.snapshot.repositories {
-                            RepositoryList::Ready { outcome, .. } => {
-                                format!("Repositories ({})", outcome.repositories.len())
-                            }
-                            _ => "Repositories".to_string(),
-                        })
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t::theme().muted_foreground),
-                    ),
+                view().px_2().pt_3().pb_1().child(
+                    t::label(match &st.snapshot.repositories {
+                        RepositoryList::Ready { outcome, .. } => {
+                            format!("Repositories ({})", outcome.repositories.len())
+                        }
+                        _ => "Repositories".to_string(),
+                    })
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t::theme().muted_foreground),
+                ),
             )
             .child(repository_group)
             .child(footer)
@@ -485,6 +627,11 @@ fn sidebar_row(
         .cursor_pointer()
         .role(AccessibilityRole::Button)
         .label(label)
+        .test_id(if label == "Settings" {
+            "shell-nav-Settings"
+        } else {
+            "shell-nav-Home"
+        })
         .bg(bg)
         .hover(|s| s.bg(t::theme().accent))
         .on_press(move |_: &()| on_press())
@@ -493,7 +640,12 @@ fn sidebar_row(
         .into_element()
 }
 
-fn repo_row(repo: &RepoSummary, active: bool, on_press: impl Fn() + 'static) -> AnyElement {
+fn repo_row(
+    repo: &RepoSummary,
+    active: bool,
+    avatars: Option<&Rc<crate::app::avatar::AvatarLoader>>,
+    on_press: impl Fn() + 'static,
+) -> AnyElement {
     let bg = if active {
         t::theme().accent
     } else {
@@ -508,6 +660,12 @@ fn repo_row(repo: &RepoSummary, active: bool, on_press: impl Fn() + 'static) -> 
         .gap_2()
         .cursor_pointer()
         .role(AccessibilityRole::Button)
+        .child(shell_avatar(
+            avatars,
+            repo.owner.id,
+            repo.owner.avatar_url.as_deref(),
+            &repo.owner.login,
+        ))
         .label(repo.full_name.clone())
         .bg(bg)
         .hover(|s| s.bg(t::theme().accent))
@@ -577,7 +735,25 @@ fn tab_strip(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElemen
             };
             strip = strip.child(tab_button(title, is_active, activate, close));
         }
-        strip
+        drop(st);
+        let refresh = {
+            let state = state.clone();
+            move || {
+                let mut st = state.borrow_mut();
+                let id = st.runtime.sessions().active_id().get();
+                if let Some(mut page) = st.pages.remove(&id) {
+                    page.refresh(&st.runtime);
+                    st.pages.insert(id, page);
+                }
+                drop(st);
+                revision.update(|n| *n = n.wrapping_add(1));
+            }
+        };
+        strip.child(view().flex_1()).child(controls::icon_button(
+            "Refresh page",
+            Icon::Refresh,
+            refresh,
+        ))
     })
     .into_element()
 }
@@ -624,17 +800,16 @@ fn page_host(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElemen
         if let Some(page) = st.pages.get(&active.get()) {
             return page.element();
         }
-        if let Some(settings) = &st.settings {
+        if let Some(settings) = &st.settings
+            && (st.active_route() == Route::Settings || st.snapshot.active.is_none())
+        {
             return settings.element();
         }
         view()
             .flex_1()
             .items_center()
             .justify_center()
-            .child(
-                t::label("No page")
-                    .text_color(t::theme().muted_foreground),
-            )
+            .child(t::label("No page").text_color(t::theme().muted_foreground))
             .into_element()
     })
     .into_element()
@@ -647,15 +822,32 @@ fn palette(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
         if !open {
             return view().into_element();
         }
+        let query = state.borrow().palette_query;
+        let needle = query.get().to_lowercase();
         let mut entries = view().flex_col().gap(px(2.0));
-        for (label, route) in [
+        let mut choices: Vec<(String, Route)> = [
             ("Home", Route::Home),
             ("Settings", Route::Settings),
             ("Profile", Route::Profile),
             ("Notifications", Route::Notifications),
             ("Issues", Route::Issues),
             ("Pull requests", Route::PullRequests),
-        ] {
+        ]
+        .into_iter()
+        .map(|(label, route)| (label.to_owned(), route))
+        .collect();
+        if let RepositoryList::Ready { outcome, .. } = &state.borrow().snapshot.repositories {
+            choices.extend(
+                outcome
+                    .repositories
+                    .iter()
+                    .map(|repo| (repo.full_name.clone(), Route::repository(repo))),
+            );
+        }
+        for (label, route) in choices
+            .into_iter()
+            .filter(|(label, _)| label.to_lowercase().contains(&needle))
+        {
             let press = navigate(&state, revision, PageNavigation::Open(route));
             entries = entries.child(
                 view()
@@ -666,7 +858,7 @@ fn palette(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
                     .items_center()
                     .cursor_pointer()
                     .role(AccessibilityRole::Button)
-                    .label(label)
+                    .label(label.clone())
                     .hover(|s| s.bg(t::theme().accent))
                     .on_press(move |_: &()| press())
                     .child(t::label(label).text_size(px(13.0))),
@@ -688,7 +880,15 @@ fn palette(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
             .items_center()
             .justify_center()
             .bg(AdaptiveColor::from(rgba(0x00000080)))
-            .on_press(move |_: &()| close())
+            .child(
+                view()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .on_press(move |_: &()| close()),
+            )
             .child(
                 view()
                     .w(px(420.0))
@@ -697,9 +897,42 @@ fn palette(state: Rc<RefCell<ShellState>>, revision: Signal<u64>) -> AnyElement 
                     .border_1()
                     .border_color(t::theme().border)
                     .bg(t::theme().popover)
-                    .child(entries),
+                    .child(
+                        nsh_core::element::input()
+                            .value(query)
+                            .auto_focus(true)
+                            .placeholder("Search pages and repositories")
+                            .test_id("shell-palette-query")
+                            .on_change(move |text: &str| query.set(text.to_owned())),
+                    )
+                    .child(scroll().max_h(px(400.0)).child(entries)),
             )
             .into_element()
     })
     .into_element()
 }
+
+fn shell_avatar(
+    loader: Option<&Rc<crate::app::avatar::AvatarLoader>>,
+    id: u64,
+    url: Option<&str>,
+    login: &str,
+) -> AnyElement {
+    let source = loader.and_then(|loader| loader.image(id, url));
+    crate::ui::avatar::avatar(crate::ui::avatar::AvatarView {
+        id: "avatar",
+        selector: "shell-avatar",
+        url: source.as_ref().map(|image| image.source.as_str()),
+        name: login,
+        slot: crate::ui::avatar::AvatarSlot::Sm,
+    })
+}
+impl Drop for ShellState {
+    fn drop(&mut self) {
+        self.avatars = None;
+        self.runtime.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod integration_tests;

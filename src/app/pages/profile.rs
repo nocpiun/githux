@@ -21,34 +21,27 @@ use nsh_core::prelude::*;
 #[path = "profile/reads.rs"]
 mod reads;
 
+use crate::app::runtime::{PageContext, PageSlot, PageTicket, RuntimeHandle, Sessions};
+use crate::content::images::ImageProvider;
+use crate::data::page_cache::CachedPageReadSession;
+use crate::data::{PageReadSession, ProfileReadme, RepositoryReadContext};
+use crate::domain::profile::{
+    ContributionCalendar, ContributionRange, ProfileBasic, ProfilePinned,
+};
+use crate::domain::repository::RepositoryIdentity;
+use crate::storage::cache::CacheAuthorization;
+use crate::ui::profile::{
+    PresentationError, ProfileAction, ProfileActionKind, ProfileBinding, ProfileProvenance,
+    ProfileTarget, ProfileView, SectionState,
+};
+use crate::ui::reader::{DocumentKind, LinkTarget, ReaderAction, ReaderDocument};
 use reads::{
     SectionOutcome, read_profile_basic, read_profile_contributions, read_profile_pinned,
     read_profile_readme,
 };
-use crate::app::runtime::{PageContext, PageSlot, PageTicket, RuntimeHandle, Sessions};
-use crate::content::images::ImageProvider;
-use crate::data::page_cache::{
-    CachedPageReadSession, PageCacheError, PageOrigin, PageReadMode, PageValue,
-};
-use crate::data::{PageReadSession, ProfileReadme, RepositoryReadContext};
-use crate::domain::cache::CacheMiss;
-use crate::domain::error::GitHubError;
-use crate::domain::profile::{
-    ContributionCalendar, ContributionRange, ProfileBasic, ProfileError, ProfilePinned,
-};
-use crate::domain::repository::{RepositoryError, RepositoryIdentity};
-use crate::github::RepositoryLimits;
-use crate::github::profile::ProfileLimits;
-use crate::network::cancel::{CancellationToken, CancellationTokenSource};
-use crate::storage::cache::{CacheAuthorization, CacheError};
-use crate::ui::profile::{
-    PresentationError, ProfileAction, ProfileActionKind, ProfileBinding, ProfileProvenance,
-    ProfileRequest, ProfileTarget, ProfileView, SectionState,
-};
-use crate::ui::reader::{DocumentKind, LinkTarget, ReaderAction, ReaderDocument};
 
 use super::{NavigationSink, PageNavigation, PageView};
-use crate::workspace::{Route, TabId};
+use crate::workspace::Route;
 
 /// The last rolling inclusive UTC year. GitHub accepts at most 366 days between
 /// endpoints; a leap-year interval therefore moves the start forward one day
@@ -129,8 +122,6 @@ enum ReadmePayload {
     /// A confirmed non-error absence: no eligible public same-name repository or
     /// no root README. The section is omitted entirely.
     Absent,
-    /// A real, actionable failure.
-    Failed(PresentationError, Option<String>),
 }
 
 enum Reply {
@@ -144,7 +135,8 @@ enum Reply {
     },
     Contributions {
         request: u64,
-        result: Result<(SectionOutcome<ContributionCalendar>, ContributionRange), PresentationError>,
+        result:
+            Result<(SectionOutcome<ContributionCalendar>, ContributionRange), PresentationError>,
     },
     Readme {
         request: u64,
@@ -167,6 +159,7 @@ pub struct ProfilePage {
     session: Option<PageReadSession>,
     cached_session: Option<CachedPageReadSession>,
     avatar_image: Option<ImageSrc>,
+    avatars: Option<Rc<crate::app::avatar::AvatarLoader>>,
     provider_factory: Option<ReadmeImageProviderFactory>,
     basic_slot: PageSlot<BasicSlot>,
     repositories_slot: PageSlot<RepositoriesSlot>,
@@ -201,6 +194,7 @@ impl ProfilePage {
             session: None,
             cached_session: None,
             avatar_image: None,
+            avatars: None,
             provider_factory: None,
             basic_slot: PageSlot::default(),
             repositories_slot: PageSlot::default(),
@@ -230,43 +224,16 @@ impl ProfilePage {
     /// Host hook for the real persistent README image provider. Without it the
     /// reader renders its honest "no image service attached" placeholders; nothing
     /// here opens a second network or cache stack.
-    pub fn set_readme_image_provider(
-        &mut self,
-        factory: Option<ReadmeImageProviderFactory>,
-    ) {
+    pub fn set_readme_image_provider(&mut self, factory: Option<ReadmeImageProviderFactory>) {
         self.provider_factory = factory;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn login_for_test(&self) -> &str {
-        &self.login
-    }
-
-    #[cfg(test)]
-    pub(crate) fn range_for_test(&self) -> &ContributionRange {
-        &self.range
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_range_for_test(&mut self, range: ContributionRange) {
-        self.range = range;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn view_for_test(&self) -> Option<&ProfileView> {
-        self.view.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn target_for_test(&self) -> Option<(crate::domain::HostId, u64)> {
-        self.view.as_ref().map(|view| {
-            let target = view.target();
-            (target.host, target.id)
-        })
     }
 
     /// Host-supplied decoded header avatar. The account avatar loader owns
     /// fetching, decoding and its disk cache; this page only draws the result.
+    pub fn set_avatar_loader(&mut self, loader: Option<Rc<crate::app::avatar::AvatarLoader>>) {
+        self.avatars = loader;
+    }
+
     pub fn set_avatar_image(&mut self, image: Option<ImageSrc>) {
         self.avatar_image = image;
     }
@@ -283,14 +250,10 @@ impl ProfilePage {
         {
             return;
         }
-        self.cached_session = self
-            .context
-            .cache()
-            .cloned()
-            .and_then(|cache| {
-                let (store, scope) = cache.into_parts();
-                CachedPageReadSession::new(session.clone(), store, scope).ok()
-            });
+        self.cached_session = self.context.cache().cloned().and_then(|cache| {
+            let (store, scope) = cache.into_parts();
+            CachedPageReadSession::new(session.clone(), store, scope).ok()
+        });
         self.session = Some(session);
     }
 
@@ -319,12 +282,7 @@ impl ProfilePage {
             return;
         };
         let context = session.context().clone();
-        if !self
-            .context
-            .services()
-            .repositories()
-            .is_current(&context)
-        {
+        if !self.context.services().repositories().is_current(&context) {
             return;
         }
         // Capture this read's authorization token *before* it runs. Both calls
@@ -344,18 +302,10 @@ impl ProfilePage {
             let request = view.request();
             match section {
                 Section::Basic => {
-                    view.update_basic_with_provenance(
-                        &request,
-                        SectionState::Loading,
-                        None,
-                    );
+                    view.update_basic_with_provenance(&request, SectionState::Loading, None);
                 }
                 Section::Repositories => {
-                    view.update_repositories_with_provenance(
-                        &request,
-                        SectionState::Loading,
-                        None,
-                    );
+                    view.update_repositories_with_provenance(&request, SectionState::Loading, None);
                 }
                 Section::Contributions => {
                     let range = self.range.clone();
@@ -457,7 +407,7 @@ impl ProfilePage {
                             .await;
                             // Parse Markdown off the UI thread; the prepared
                             // document crosses the boundary as immutable data.
-                            read.map(|outcome| prepare_readme(outcome))
+                            read.map(prepare_readme)
                         }
                         None => Err(PresentationError::InvalidData),
                     },
@@ -467,10 +417,7 @@ impl ProfilePage {
         });
         if spawned.is_err() {
             self.working[index] = false;
-            self.present_failure(
-                section,
-                PresentationError::Unavailable,
-            );
+            self.present_failure(section, PresentationError::Unavailable);
         }
     }
 
@@ -516,11 +463,7 @@ impl ProfilePage {
         }
         match action.kind {
             ProfileActionKind::Profile => {
-                let active = self
-                    .context
-                    .services()
-                    .accounts()
-                    .active_summary();
+                let active = self.context.services().accounts().active_summary();
                 (self.navigation)(PageNavigation::Open(Route::profile(
                     self.login.clone(),
                     active.as_ref(),
@@ -590,8 +533,7 @@ impl ProfilePage {
                 // is never used as a numeric identity; the Shell canonicalizes the
                 // matching TabId after this page reports it.
                 self.login = basic.login.clone();
-                let target =
-                    ProfileTarget::new(self.account_key().host.clone(), basic.id);
+                let target = ProfileTarget::new(self.account_key().host.clone(), basic.id);
                 let binding = ProfileBinding::new(self.account_key(), self.auth_epoch());
                 let view = self.ensure_view(target, binding);
                 let request = view.request();
@@ -633,11 +575,7 @@ impl ProfilePage {
         self.context.context().auth().epoch
     }
 
-    fn ensure_view(
-        &mut self,
-        target: ProfileTarget,
-        binding: ProfileBinding,
-    ) -> &mut ProfileView {
+    fn ensure_view(&mut self, target: ProfileTarget, binding: ProfileBinding) -> &mut ProfileView {
         if self.view.is_none() {
             let range = self.range.clone();
             let actions = self.actions.clone();
@@ -677,7 +615,10 @@ impl ProfilePage {
         let Some(ticket) = self.repositories_ticket.take() else {
             return;
         };
-        if !self.repositories_slot.publish(ticket, result.clone(), sessions) {
+        if !self
+            .repositories_slot
+            .publish(ticket, result.clone(), sessions)
+        {
             return;
         }
         self.shown[1] = true;
@@ -716,7 +657,10 @@ impl ProfilePage {
         let Some(ticket) = self.contributions_ticket.take() else {
             return;
         };
-        if !self.contributions_slot.publish(ticket, result.clone(), sessions) {
+        if !self
+            .contributions_slot
+            .publish(ticket, result.clone(), sessions)
+        {
             return;
         }
         self.shown[2] = true;
@@ -775,15 +719,15 @@ impl ProfilePage {
                 provenance,
                 authorization,
             }) => {
-                let provider = self.provider_factory.as_ref().and_then(|factory| {
-                    Some(factory(
-                        self.session.as_ref()?.context(),
-                        &repository,
-                    )?)
-                });
+                let provider = self
+                    .provider_factory
+                    .as_ref()
+                    .and_then(|factory| factory(self.session.as_ref()?.context(), &repository));
                 let guard = capability_guard(
                     self.context.services().repositories(),
-                    self.session.as_ref().map(|session| session.context().clone()),
+                    self.session
+                        .as_ref()
+                        .map(|session| session.context().clone()),
                     authorization,
                 );
                 view.set_readme_document(&profile_request, document, provider, guard, provenance);
@@ -794,9 +738,6 @@ impl ProfilePage {
                     "No root README.md exists in this user's public same-name repository.",
                     None,
                 );
-            }
-            Ok(ReadmePayload::Failed(error, identity)) => {
-                view.set_readme_error(&profile_request, error, identity, None);
             }
             Err(error) => {
                 if error == PresentationError::NotFound {
@@ -905,14 +846,20 @@ fn prepare_readme(outcome: SectionOutcome<ProfileReadme>) -> ReadmePayload {
             provenance,
             authorization,
         },
-        ProfileReadme::Missing { .. } | ProfileReadme::Unavailable { .. } => {
-            ReadmePayload::Absent
-        }
+        ProfileReadme::Missing { .. } | ProfileReadme::Unavailable { .. } => ReadmePayload::Absent,
         ProfileReadme::NotEligible { .. } => ReadmePayload::Absent,
     }
 }
 
 impl PageView for ProfilePage {
+    fn host_presentation(&self) -> Option<String> {
+        Some(format!(
+            "{}:{}:{:?}",
+            self.view.is_some(),
+            self.session.is_some(),
+            self.unavailable
+        ))
+    }
     fn element(&self) -> AnyElement {
         if let Some(view) = &self.view {
             return view.element();
@@ -969,7 +916,17 @@ impl PageView for ProfilePage {
                 Reply::Readme { request, result } => self.apply_readme(request, result, sessions),
             }
         }
-        if let Some(view) = self.view.as_ref() {
+        if let Some(view) = self.view.as_mut() {
+            if let Some(avatars) = &self.avatars {
+                let image = if let SectionState::Ready(basic) = view.basic() {
+                    avatars
+                        .image(basic.id, basic.avatar_url.as_deref())
+                        .map(|image| ImageSrc::from(image.source.clone()))
+                } else {
+                    None
+                };
+                view.set_avatar_image(&view.request(), image);
+            }
             view.poll_reader();
         }
         self.tick_clock();
@@ -1003,3 +960,7 @@ impl PageView for ProfilePage {
         self.cached_session = None;
     }
 }
+
+#[cfg(test)]
+#[path = "profile/acceptance.rs"]
+mod acceptance;

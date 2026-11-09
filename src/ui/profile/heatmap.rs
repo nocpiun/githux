@@ -230,10 +230,12 @@ pub fn heatmap_presentation(
 }
 
 /// Monday-first position in the first rendered week.
+#[cfg(test)]
 pub(super) fn leading_days(range: &ContributionRange) -> usize {
     (day_number(range.from()) + 3).rem_euclid(7) as usize
 }
 
+#[cfg(test)]
 pub(super) fn month_markers(range: &ContributionRange) -> Vec<(usize, String)> {
     let names = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

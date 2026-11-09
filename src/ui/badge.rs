@@ -1,6 +1,6 @@
 //! Small static pill badge using NSH primitives and shared theme.
-use nsh_core::prelude::*;
 use crate::ui::foundation::theme as t;
+use nsh_core::prelude::*;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Tone {
@@ -49,16 +49,40 @@ impl IntoElement for Badge {
     fn into_element(self) -> AnyElement {
         let theme = t::theme();
         let (bg, border, fg) = match (self.tone, self.variant) {
-            (Tone::Neutral, BadgeVariant::Filled) => (theme.secondary, theme.border, theme.secondary_foreground),
-            (Tone::Neutral, BadgeVariant::Outline) => (AdaptiveColor::TRANSPARENT, theme.border, theme.foreground),
-            (Tone::Info, BadgeVariant::Filled) => (theme.accent, theme.border, theme.accent_foreground),
-            (Tone::Info, BadgeVariant::Outline) => (AdaptiveColor::TRANSPARENT, theme.accent, theme.accent),
-            (Tone::Success, BadgeVariant::Filled) => (theme.accent, theme.border, theme.accent_foreground),
-            (Tone::Success, BadgeVariant::Outline) => (AdaptiveColor::TRANSPARENT, theme.accent, theme.accent),
-            (Tone::Warning, BadgeVariant::Filled) => (theme.destructive, theme.border, theme.background),
-            (Tone::Warning, BadgeVariant::Outline) => (AdaptiveColor::TRANSPARENT, theme.destructive, theme.destructive),
-            (Tone::Danger, BadgeVariant::Filled) => (theme.destructive, theme.border, theme.background),
-            (Tone::Danger, BadgeVariant::Outline) => (AdaptiveColor::TRANSPARENT, theme.destructive, theme.destructive),
+            (Tone::Neutral, BadgeVariant::Filled) => {
+                (theme.secondary, theme.border, theme.secondary_foreground)
+            }
+            (Tone::Neutral, BadgeVariant::Outline) => {
+                (AdaptiveColor::TRANSPARENT, theme.border, theme.foreground)
+            }
+            (Tone::Info, BadgeVariant::Filled) => {
+                (theme.accent, theme.border, theme.accent_foreground)
+            }
+            (Tone::Info, BadgeVariant::Outline) => {
+                (AdaptiveColor::TRANSPARENT, theme.accent, theme.accent)
+            }
+            (Tone::Success, BadgeVariant::Filled) => {
+                (theme.accent, theme.border, theme.accent_foreground)
+            }
+            (Tone::Success, BadgeVariant::Outline) => {
+                (AdaptiveColor::TRANSPARENT, theme.accent, theme.accent)
+            }
+            (Tone::Warning, BadgeVariant::Filled) => {
+                (theme.destructive, theme.border, theme.background)
+            }
+            (Tone::Warning, BadgeVariant::Outline) => (
+                AdaptiveColor::TRANSPARENT,
+                theme.destructive,
+                theme.destructive,
+            ),
+            (Tone::Danger, BadgeVariant::Filled) => {
+                (theme.destructive, theme.border, theme.background)
+            }
+            (Tone::Danger, BadgeVariant::Outline) => (
+                AdaptiveColor::TRANSPARENT,
+                theme.destructive,
+                theme.destructive,
+            ),
         };
         view()
             .px(px(6.0))

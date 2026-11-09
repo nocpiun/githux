@@ -7,28 +7,14 @@
 //! provenance regression is visible without a GUI. The visual preview is the Native Shell page the
 //! integrator assembles; this file is development scaffolding only.
 
-#[path = "../src/domain/mod.rs"]
-mod domain;
-
-pub mod ui {
-    pub mod foundation {
-        #[path = "../../src/ui/foundation/mod.rs"]
-        mod foundation_impl;
-        pub use foundation_impl::*;
-    }
-    pub mod repository_overview {
-        #[path = "../../src/ui/repository_overview/mod.rs"]
-        mod repository_overview_impl;
-        pub use repository_overview_impl::*;
-    }
-}
-
+pub use githux::{
+    app, auth, content, data, diagnostics, domain, github, network, storage, ui, workspace,
+};
+#[allow(dead_code)]
 #[path = "../src/ui/repository_overview/fixtures.rs"]
 mod fixtures;
 
-use ui::repository_overview::{
-    OverviewSection, OverviewUpdate, RepositoryOverview, SectionState,
-};
+use ui::repository_overview::{OverviewSection, OverviewUpdate, RepositoryOverview, SectionState};
 
 fn describe<T, P>(state: &SectionState<T, P>) -> String {
     match state {
@@ -48,19 +34,13 @@ fn main() -> std::process::ExitCode {
     let binding = fixtures::binding(1);
     let mut overview = RepositoryOverview::new(binding.clone());
     let applied = [
-        overview.apply_releases(
-            &binding,
-            SectionState::Ready(fixtures::ready_releases()),
-        ),
+        overview.apply_releases(&binding, SectionState::Ready(fixtures::ready_releases())),
         overview.apply_latest_release(&binding, SectionState::Ready(fixtures::ready_latest())),
         overview.apply_contributors(
             &binding,
             SectionState::Ready(fixtures::ready_contributors()),
         ),
-        overview.apply_languages(
-            &binding,
-            SectionState::Ready(fixtures::ready_languages()),
-        ),
+        overview.apply_languages(&binding, SectionState::Ready(fixtures::ready_languages())),
     ];
     if applied.iter().any(|applied| !applied) {
         eprintln!("a matching binding was rejected by the component");
@@ -102,7 +82,7 @@ fn main() -> std::process::ExitCode {
 
     // A scoped retry is a typed action for the host; the component never refreshes by itself.
     let action = ui::repository_overview::OverviewAction::Refresh {
-        binding,
+        binding: binding.clone(),
         section: OverviewSection::Contributors,
     };
     overview.emit(action);
@@ -113,7 +93,8 @@ fn main() -> std::process::ExitCode {
                 format!("refresh:{section:?}")
             }
             ui::repository_overview::OverviewAction::OpenRelease { .. } => "open-release".into(),
-            ui::repository_overview::OverviewAction::OpenContributor { .. } => "open-contributor".into(),
+            ui::repository_overview::OverviewAction::OpenContributor { .. } =>
+                "open-contributor".into(),
         })
     );
 

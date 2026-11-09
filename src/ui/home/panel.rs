@@ -31,9 +31,7 @@ fn feed_append_footer(
             .items_center()
             .justify_center()
             .py_2()
-            .child(
-                crate::ui::compact_status::loading("Loading older activity…").into_element(),
-            )
+            .child(crate::ui::compact_status::loading("Loading older activity…").into_element())
             .into_element(),
         FeedAppendState::NotCached { page } => view()
             .test_id("feed-append-not-cached")
@@ -150,9 +148,7 @@ fn refresh_control(
             .items_center()
             .justify_center()
             .tooltip(controls::tooltip(label))
-            .child(
-                crate::ui::compact_status::loading("Refreshing…").into_element(),
-            )
+            .child(crate::ui::compact_status::loading("Refreshing…").into_element())
             .into_element();
     }
     let on_action = on_action.clone();
@@ -266,11 +262,7 @@ fn partial_notice(column: Column, message: String) -> AnyElement {
         .p_2()
         .rounded(t::theme().radius)
         .bg(t::theme().muted)
-        .child(
-            text(message)
-                .text_size(px(12.0))
-                .text_color(t::WARNING),
-        )
+        .child(text(message).text_size(px(12.0)).text_color(t::WARNING))
         .into_element()
 }
 
@@ -511,7 +503,9 @@ impl HomeView {
                 .repository_description
                 .clone()
                 .or_else(|| descriptions.get(&repo_key).cloned());
-            let image = avatar.as_ref().and_then(|resolve| resolve(&activity.subject));
+            let image = avatar
+                .as_ref()
+                .and_then(|resolve| resolve(&activity.subject));
             rows.push(feed_row(
                 activity,
                 index,
@@ -531,13 +525,7 @@ impl HomeView {
             .min_h(px(0.0))
             .min_w(px(0.0))
             .scrollbar(true)
-            .child(
-                view()
-                    .flex_col()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .children(rows),
-            );
+            .child(view().flex_col().w_full().min_w(px(0.0)).children(rows));
         if empty {
             view()
                 .flex_1()
@@ -564,24 +552,7 @@ impl HomeView {
         }
     }
 
-    /// Emits one load-more request when the Feed has a validated older page and
-    /// no append is in flight. The in-flight state is set before the action
-    /// leaves, so repeated scroll/resize notifications cannot duplicate it.
-    fn request_more_feed(&self, on_action: OnAction) {
-        if !self.feed_can_load_more() {
-            return;
-        }
-        self.feed_append.set(FeedAppendState::Loading);
-        on_action(HomeAction::LoadMoreFeed(self.request(Column::Feed)));
-    }
-
-    fn select(&self, column: Column, index: usize) {
-        match column {
-            Column::Home => self.selected_home.set(Some(index)),
-            Column::Feed => self.selected_feed.set(Some(index)),
-        }
-    }
-
+    /// The current selected row in the requested panel.
     pub fn selected(&self, column: Column) -> Option<usize> {
         match column {
             Column::Home => self.selected_home.get_untracked(),

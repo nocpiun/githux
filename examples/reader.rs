@@ -11,12 +11,7 @@
 
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/ui/reader/mod.rs"]
-mod reader;
+use githux::ui::reader;
 
 #[cfg(windows)]
 fn main() -> impl std::process::Termination {
