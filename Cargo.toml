@@ -1,3 +1,10 @@
+# The original package remains the runnable GPUI baseline during migration.
+# Build the independent native backend with `-p githux-nsh`.
+[workspace]
+resolver = "3"
+members = ["native/nsh"]
+default-members = ["."]
+
 [package]
 name = "githux"
 version = "0.1.0"

@@ -1,6 +1,6 @@
 # Native Shell 迁移计划
 
-更新：2026-11-09。状态：路线已由负责人确认，迁移实现尚未完成。
+更新：2026-11-09。状态：路线已由负责人确认；第一阶段原生基础已实现并验证（foundation-ready），页面迁移尚未开始。
 
 ## 已确认决定
 
@@ -34,6 +34,13 @@ NSH 默认 feature 可能包含 JS；纯 Rust 路线明确关闭 JS/QuickJS 相�
 Reader 是单独的兼容性关口：Markdown/GFM/已支持 HTML、跨块选择复制、链接按固定仓库 commit/path 解析、行号与只读源码、相对图片与缓存、安全来源策略、正文 padding、Profile Flow 完整高度、超长/二进制/空内容处理都须逐项覆盖。优先验证 NSH TextView/Editor 等原生能力；不能以有同名组件当成通过，也不能静默降级、自动外跳或绕过现有 ImageProvider 的授权路径。
 
 ## 阶段与所有权
+
+第一阶段 native-shell 基础已完成（foundation-ready，本地 commit 见 `.agents/task/implementation-result.md`）：
+
+- 独立 workspace 成员 package `githux-nsh`（`native/nsh/Cargo.toml`），lib `src/nsh/`、bin `githux-nsh`；旧 GPUI 应用保留在根 package 作对照。
+- 固定 NSH v0.4.0 `e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3`，关闭 `nsh-platform-windows` 默认 `js`；依赖树无 QuickJS/GPUI/Ely。
+- 真实 Windows 原生窗口运行（标题 Githux，渲染验证），headless 探针 2 项通过。
+- 公共接口与步骤见 `.agents/task/integration-notes.md`。
 
 第一阶段立即并行三个 agent：
 
