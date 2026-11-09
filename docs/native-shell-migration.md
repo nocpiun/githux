@@ -69,7 +69,7 @@ Reader 是单独的兼容性关口：Markdown/GFM/已支持 HTML、跨块选择�
 
 ## 本地提交与交付
 
-这是独立分支的本地协作迁移，覆盖 dispatch local-only 模板的“不要 commit”缺省：允许实现者在自己的任务分支提交已验证成果以便集成；禁止 push、创建 PR、远端留言或合入 main。临时分支通过本地线性摘取/整合进入 migration/native-shell；发布/PR另按负责人后续指令。
+初期采用独立分支本地协作，允许本地提交并线性摘取到 migration/native-shell。负责人已于 2026-11-09 进一步授权：推送该汇总分支并创建指向 main 的草稿 PR，供 GitHub 查看 diff；关联 First Release 并保留 pending 验收标签。该授权覆盖初期“不 push/PR”的限制，仍不授权合入 main。后续迁移继续在此分支/PR 累积，完整实现与负责人验收完成前保持 Draft。
 
 各任务交付 .agents/task/implementation-result.md、integration-notes.md、实际 run 记录和自己主题的 devlog，delivery-state.json 记录阶段、commit、依赖与未覆盖项。阶段完成不等于整项迁移完成。无需不停轮询另一个 agent 或重复全量编译。
 
