@@ -403,6 +403,7 @@ pub struct FixtureTransport {
     armed: Mutex<Option<ArmedFailure>>,
     requests: Mutex<Vec<String>>,
     /// Development diagnostics: requests this fixture does not model.
+    offline: Mutex<bool>,
     mismatches: Mutex<VecDeque<String>>,
     /// Which synthetic identity the next `/user` answers. Tests use it to make
     /// A→B→A a real account change instead of two names for one account.
@@ -421,6 +422,7 @@ impl FixtureTransport {
             scene: Mutex::new(scene),
             armed: Mutex::new(armed_for(scene)),
             requests: Mutex::new(Vec::new()),
+            offline: Mutex::new(false),
             mismatches: Mutex::new(VecDeque::new()),
             identity: Mutex::new((7, OWNER.to_string())),
             starred: Mutex::new(BTreeMap::new()),
@@ -437,6 +439,11 @@ impl FixtureTransport {
     }
 
     /// Switches scene, clearing any half-consumed failure and the request log.
+    /// Refuses every request as a network failure, for offline/cache composition tests.
+    pub fn set_offline(&self, offline: bool) {
+        *self.offline.lock().unwrap() = offline;
+    }
+
     pub fn set_scene(&self, scene: Scene) {
         *self.scene.lock().unwrap() = scene;
         *self.armed.lock().unwrap() = armed_for(scene);
@@ -504,6 +511,11 @@ impl FixtureTransport {
         let scene = self.scene();
         let url = &request.url;
         self.record(url);
+        if *self.offline.lock().unwrap() {
+            return Err(TransportError::Network {
+                message: "the fixture transport is offline".into(),
+            });
+        }
         if split_url(url).is_some_and(|(path, _)| path == "/user/starred/octo/ledger") {
             return self.answer_star(request, scene);
         }
@@ -550,6 +562,11 @@ impl FixtureTransport {
         };
         // The preview signs in through the real `AccountService`, so the
         // fixture also answers the identity endpoint that login verifies.
+        // The runtime's repository-list autoload reads this on every account binding. The
+        // fixture itself is about one repository, so the sidebar list is simply empty.
+        if path == "/user/repos" {
+            return Ok(json_response(200, "[]"));
+        }
         if path == "/user" {
             let (id, login) = self.identity.lock().unwrap().clone();
             return Ok(json_response(

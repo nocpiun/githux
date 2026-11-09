@@ -1,173 +1,148 @@
-# 仓库浏览页面（repository-browser）
+# 仓库浏览页面（repository-browser，Native Shell）
 
-更新：2026-10-28（返工：可反复浏览的示例、行式文件树、页内 Tabs、分层错误）。R3 的可独立验证切片，位于 `src/ui/repository/**`、开发 fixture `src/bin_support/repository_fixture.rs`、独立预览 `examples/repository.rs`、测试入口 `tests/repository.rs`。它把已合并的 `data::RepositorySession` 与 `ui::reader::ReaderView` 串成一张可复用、真实数据的仓库阅读页。**尚未接入 `src/ui/mod.rs` / `src/app` / 正式 Shell**；接线是后续集成任务。
+更新：2026-11-09。状态：`src/ui/repository/**` 已原位替换为纯 Rust Native Shell 页面，使用真实
+`RepositorySession` / 缓存适配器与 NSH 共享 Reader；`RepositoryPage` 实现原位替换契约中的
+`PageView`。可视效果由负责人在集成后的 NSH 应用中验收。
 
-## 统一页面与 overview 服务组合
+历史实现（Ely/GPUI）与逐轮行为依据保留在
+[仓库浏览 v1 日志](devlog/2026-10-28-repository-browser.md)、
+[仓库 Star](devlog/2026-11-01-repository-star.md)、
+[离线阅读](devlog/2026-11-03-repository-offline.md) 与
+[本次迁移日志](devlog/2026-11-09-nsh-repository.md)。本文件只维护当前契约。
 
-负责人将 repository-browser 与 repository-overview 合并为一个任务，唯一联合验收入口是 `cargo run --locked --example repository`（PR35）。`RepositoryPage` 拥有一个真实 `Entity<RepositoryOverview>`；identity/description（右侧 Star/Fork）→ 自然高度 compact Releases/Contributors → 页内 Tabs（右侧 branch）→ Code 的真实目录树与 ReaderView → 页面底边 Languages 色条。没有第二个 header、模拟 reader 或并行验收页面。`repository_overview` example 仅保留为组件开发探针。
+## 位置与所有权
 
-仓库详情确认 canonical `RepositoryIdentity` 后，页面在现有账户服务创建 `PageReadSession`，**完整比较其 RepositoryReadContext 与该页 RepositorySession context**，包括服务实例、账户、授权 epoch 与选择代次。只有相同且仍有效才启动 releases/latest_release/contributors/languages 四个独立后台调用；不新建数据库、网络 client、登录或 PAT 路径。目录与 README 不等待它们完成。
+| 内容 | 路径 |
+| --- | --- |
+| 页面控制器、`RepositoryPage`/`PageView`、请求/发布门禁 | `src/ui/repository/mod.rs` |
+| 纯导航/树模型/失败分类（无 I/O） | `src/ui/repository/navigation.rs` |
+| 仓库 overview 组合读取（Releases/Latest/Contributors/Languages/计数） | `src/ui/repository/extras.rs` |
+| NSH 视图（摘要、页内 Tabs、文件树、Reader 列、底条） | `src/ui/repository/view.rs` |
+| 页内 Tab 枚举 | `src/ui/repository/page_tabs.rs` |
+| locator → 数字仓库 id 索引 | `src/ui/repository/locator_index.rs` |
+| Overview 状态/组件 | `src/ui/repository_overview/**` |
+| 开发/测试 fixture（唯一） | `src/bin_support/repository_fixture.rs` |
+| 数据预览 | `examples/repository.rs` |
+| 测试入口 | `tests/repository.rs`、`src/ui/repository/tests*.rs` |
 
-`extras.rs` 独立管理仓库作用域取消源、每端点请求代次和结果队列；发布前再次验证服务 context、活动页面、仓库 binding 与端点代次。成功、Partial、latest 404 与失败分别保留；一项失败只影响该组。Languages/Contributors Retry 只读取该组，Releases Retry 重读该组的 list/latest，不改变分支/文件/展开目录/reader。没有 render 请求或自动重试。
+`crate::app::runtime`、`crate::workspace`、`crate::ui::foundation`、`crate::ui::reader` 和
+`app/pages` 契约由集成作者维护；页面只消费它们。`src/bin_support/repository_modules.rs`（GPUI
+装配）与 `repository_overview_modules.rs` 属旧入口的测试装配，迁移后由集成作者决定去留；本任务
+不再依赖它们。
 
-分支切换只取消 Code 读取，**不清除或重取同仓库的 overview**。deactivate、重绑、账户/凭据失效、释放页面会取消 extras，旧成功/失败及动作一律拒绝。`PageAction::Overview(OverviewAction)` 向宿主保留 binding、release id/tag 或 contributor login/canonical URL；页面在转发前核对当前显示目标，回调延后执行并复核上下文。预览仅报告，不自动打开 URL。版本/关联头像支持单次鼠标及 Enter/Space 激活；匿名头像不可导航。头像保留宿主 decoded-image hook，未提供时诚实使用首字母，无另一路图片网络。
-
-联合场景通过同一个有界场景选择器：Overview loading（2 秒）、partial、单组 error（Languages 失败一次，内部 scoped Retry 可恢复，无常驻文案入口）、zero、long、latest unavailable（list 非空但 latest404）。共享 request-routed fixture 为同一 `octo/ledger` 提供全部真实 service 管线端点。
-
-## 页面结构
-
-沿用已确认的仓库页面结构：仓库摘要 → 横向页内内容 Tabs → Code 区域的左文件树/右阅读器。页内 Tabs 与应用级 workspace 标签是两层不同导航，不共用状态。本轮只有 **Code** 有内容，其余 Tabs（Issues、Pull requests、Releases、Settings）沿用确认的名称、样式与顺序，内容区直接留空，不添加“未实现”卡片、假设置或复制的 GitHub 功能菜单。Releases/Contributors/Languages 由内嵌的独立 overview 组件渲染；内部仍可复用，不复制其摘要实现。
-
-切出 Code 不再绘制树与正文，但保留 Code 导航意图（分支/选中路径/展开目录）；切回时若当前授权仍有效则恢复，失效则先重新验证，绝不恢复旧授权。
-
-## 正式 Shell 接入（2026-10-29）
-
-`app::pages::repository_page` 已把 `RepositoryPage` 挂到正式 workspace 的仓库路由：同一账户 `AccountService`/`BackgroundExecutor`、真实会话、既有 overview/Code/README/分支/底条均保留。普通标签切换调用新增 `suspend`，只结束滚动/阅读器手势并保留已验证内容；关闭只释放该页 host；账户或授权变化保留分支/路径/展开的导航意图，丢弃内容/固定提交/上下文后由新会话重读。Star/Fork 没有写回调，不宣称成功；contributor/release typed action 由 host 复核后进入统一导航。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
-
-## 紧凑状态呈现（2026-10-29 第二轮反馈）
-
-文件树目录行的 loading 改用 Ely spinner（tooltip 给出目录名）；目录失败与 root/branch 失败合并为一个黄色 warning 标记，tooltip 保留原因，可重试时同一标记的鼠标/Enter/Space 只发起该资源的一次重试，恢复后标记消失。树截断/不完整和 capped 改用 warning 图标 + tooltip，不再让长句占满行。真空目录 `empty`、README 缺失/不确定、错误详情面板和 Partial 仍保留文字，因为这些是数据/操作语义而非可折叠的紧凑失败。
-
-Releases/Contributors 的紧凑条也使用同一 warning/loading 呈现；latest 的确认空值是中性圆点，不是 warning。开发 fixture 新增 ReleasesFailure（只失败一次，可重试恢复），与既有一轮失败场景一致，只存在于 example/test 装配。
-
-## 构造与生命周期（正式接入契约）
-
-主机只注入已存在的能力：`Arc<AccountService>`、`Arc<BackgroundExecutor>` 与一个 `RepositoryLocator`。构造后页面默认**未激活**：
+## 工厂与生命周期（PageView）
 
 ```rust
-let services = RepositoryPageServices::new(accounts.clone(), executor.clone());
-let page = cx.new(|cx| {
-    let mut page = RepositoryPage::new(services, locator, saved_navigation, window, cx);
-    page.activate(cx);            // 每次都用全新 session，重新固定授权
-    page.on_action(Rc::new(|action, _window, cx| match action {
-        PageAction::OpenExternal(url) => cx.open_url(&url),
-        PageAction::LinkNotFollowed { .. } => {} // 页面已保证不跨库/跨 commit
-    }));
-    page
-});
+use crate::app::runtime::{PageContext, RuntimeHandle};
+use crate::app::pages::{NavigationSink, PageView};
+use crate::workspace::RepositoryNavigation;
+
+let page = ui::repository::RepositoryPage::new(context, owner, name, intent, navigation);
+// 可选：宿主把自己的唯一后台执行器交给 README 图片 provider（见下文“集成依赖”）。
+// page.set_image_executor(executor);
+
+fn element(&self) -> AnyElement;                 // NSH 组件树
+fn poll(&mut self, runtime: &RuntimeHandle);     // 壳的前台 tick/wake
+fn refresh(&mut self, runtime: &RuntimeHandle);  // 顶部显式 Refresh
+fn set_active(&mut self, active: bool);
+fn retire(&mut self);                            // 关闭 tab / 账户绑定变化
 ```
 
-| 方法 | 语义 |
-| --- | --- |
-| `activate(cx)` | 新建 `RepositorySession`、推进请求代次、清空旧数据、按保存的导航重新解析分支到固定 commit 并读取 |
-| `deactivate(cx)` | 取消在途工作、结束阅读器手势、推进代次；只保留导航意图 |
-| `rebind(services, cx)` | 换能力（例如主机恢复了另一个账户）；清空旧授权下的数据，用新 session 重读同一导航意图；**从不复活旧 `RepositorySession`** |
-| `navigation()` | 可保存的导航意图：分支名、选中路径、展开目录集合。不含 commit、仓库 id、服务实例或授权 |
-| `select_branch(name, cx)` | 切换分支并重新解析固定快照，立即丢弃旧树/内容 |
-| `select_tab(tab, cx)` | 切换页内 Tabs；离开 Code 结束阅读器手势，回到 Code 复核授权 |
-| `toggle_directory(path, cx)` | 展开/折叠目录；首次展开才发一次 tree 请求，不递归下载整个仓库 |
-| `select_file(path, cx)` / `show_readme(cx)` | 切换阅读目标 |
-| `retry_branches(cx)` / `retry(cx)` / `retry_directory(path, cx)` / `retry_reader(cx)` / `retry_readme(cx)` | 各自只重试对应资源的单次有界操作 |
+- `new` 立即在捕获的 `PageContext` 下启动第一次读取；不再有单独的 `activate`。
+  构造失败（例如非法 owner/name）时页面显示错误而不会发起请求。
+- 普通 tab 切换只调用 `suspend`（页面在 NSH 中保留已验证内容）；离开 Code 页内 Tab 不取消
+  仓库读取，只停止绘制树与正文、并卸载 Reader 元素。回到 Code 时用同一授权文档重新挂载
+  Reader（不重新读 blob）。
+- 账户切换/替换/删除或 `binding_revision` 变化由壳 `retire` 旧页并按新 `PageContext` 重建；
+  页面自身也在每次 poll 重新核对授权，不依赖壳是否已重建。
+- 导航意图（分支、选中路径、展开目录）只存在页面内；宿主可保存
+  `RepositoryController::workspace_intent()` 的 `{branch,file}`。展开集合是页面本地状态。
 
-## 导航与选中
+## 发布与授权
 
-选中由**当前阅读目标的稳定完整路径**决定（`current_path()`），不是父目录内 index，所以跨目录、跨分支都不会错选。README 的路径来自 `ReadmeDiscovery` 的 descriptor（可能在根、`docs/` 或 `.github/`），不使用伪“README”文件行，也不猜根目录。
+`PageContext` 绑定账户、`TabId`、路由 key、服务实例与读取开始前捕获的缓存撤权令牌。页面对
+四个顶层展示资源各持有一个 `PageSlot`：
 
-阅读器头部显示当前仓库相对路径；“Back to README”入口只在**存在可用 README 且当前显示的是别的文件**时出现——已经显示 README 时不重复，无 README 时不提供假入口。
+| 资源 | 页面槽位 | 失败归属 |
+| --- | --- | --- |
+| 仓库摘要 | `summary_slot` | 页面级 |
+| 分支列表 | `branches_slot` | 页面级（branch picker） |
+| 固定 commit revision | `revision_slot` | 页面级 |
+| 当前文档覆盖（content） | `content_slot` | 只替换阅读区 |
 
-文件树是清晰的行式导航：每行填满视口宽度、统一行高与左右边距；hover/选中背景覆盖整行（选中的是整行，不是文字胶囊）；键盘焦点用单独的中性描边，与 hover、选中可区分。目录有独立 chevron 槽位、目录图标与名称，文件在 chevron 槽位留空以对齐；缩进随层级统一，目录优先、同级稳定排序。单击目录行或其 chevron 都只切换一次展开状态，且不清空右侧已打开的文件；单击普通文件行打开该文件。长名称单行截断并提供完整路径 tooltip。
+每个读取在开始前 `PageSlot::begin`，回复携带该 ticket；`publish(ticket, value, sessions)`
+同时核对 ticket 代次、`PageContext::is_current(runtime.sessions())` 与被读资源上下文。目录树、
+README 发现等 revision 子资源没有独立槽位，它们的回复还要核对页面代次、分支请求代次、
+固定 commit、路径身份与 `cache_allowed()`（其中包含 revision/content 槽位保存的缓存令牌）。
 
-加载中、空目录、失败目录分别可辨：目录行自身显示 `loading…` / `empty` / `Failed`（悬停查看原因），失败行内提供**该目录的**有界 Retry，其他目录与当前正文继续可用。截断或不完整子目录显示 `Incomplete`，即使没有保留任何条目也不标成 empty。根目录失败有独立的 `Retry files`，从当前 snapshot 派生根 handle，保留已成功的 README 和资料。
+`poll` 每次都会 `clear_invalid` 已展示值：账户切换、PAT 替换、删除账户、仓库撤权或凭据拒绝
+会在**同一次 drain** 内清空摘要、分支、树、正文与 overview；已经显示的数据与新请求受同一门禁，
+不做定时探测（LESSONS L022）。旧成功/旧错误同等丢弃；同一分支 A→B→A 由单调 `branch_request`
+区分，同一路径重复打开由 `selection_request` 区分。
 
-树可键盘聚焦：上下移动可见行、左右展开/折叠或回到父节点、Home/End 到首末行、Enter 打开文件或切换目录，移动行时经列表自身滚动目标滚入视口。只有无修饰的导航键被消费，带修饰键的事件留给平台、输入法与阅读器文本选择。
+## 页面结构（NSH）
 
-## 代次与发布
+- 根：`repository-page`，`size_full`、`overflow_hidden`、NSH 默认 `background`/`foreground`；
+  语言底条是根的最后一个 `flex_none` 元素，由岛裁剪。
+- 顶部：标题（owner/name）、visibility/Archived/Fork 徽章、描述、`Cached` 描边徽章与 `Refresh`
+  按钮（仅历史快照时）、Star（真实写）与 Fork（禁用）复合入口。
+- Overview：`Releases`/`Contributors` 自然高度紧凑条（同一 `RepositoryOverview` 状态），
+  Languages 只在底部 4px 色条。
+- 页内 Tabs：Code/Issues/Pull requests/Releases/Settings（icon+label），Issues/PR 数量来自真实
+  GraphQL 计数；只有 Code 有内容，其他 Tab 留空（`repository-tab-empty`），不放假卡片。
+- Code：左 268px 文件树 + 右 Reader 列。树使用 NSH `virtual_list`（回收行、原生滚动条），
+  行高 26px、7px 内边距、目录优先稳定排序、chevron 槽位对齐文件名、整行 hit target、长名称
+  tooltip；目录 loading/empty/incomplete/failed 行内表达，failed 行只重试该目录。
+- 树键盘：树视口获得焦点时绑定无修饰 Up/Down/Left/Right/Home/End/Enter；修改键、输入框与
+  Reader 文本选择不被吞掉。
+- Reader 列：当前仓库相对路径 + `Back to README`（仅在存在 README 且显示其他文件时）；正文用
+  共享 `crate::ui::reader` 的 `ReaderHandle`/`ReaderDocument`/`ImageBridge`，
+  `ReaderLayout::Repository` 保留正文首尾内留白；仓库内相对链接在同仓库同 commit 内跳转，
+  跨仓库/跨 commit 只报告、不外跳。
+- 加载/失败/空：真实失败是黄色 warning + tooltip，可重试时同一标记可点击；确认的缺省
+  （无 README、空目录、README 不确定）各有文字/状态，不伪装成网络错误。
 
-一次浏览代次持有“一个已验证 session + 页面代次 + 分支请求身份 + 分支/commit/资源身份”。分支名本身不足以区分 A→B→A 的两次同名解析，因此每次 `begin_branch` 推进单调 `branch_request`，旧身份的 Revision 及其树/正文结果不论成功或失败都被丢弃。同一路径的多次打开还各有单调 `selection_request`，A→B→A 与同文件重复点击不会让旧正文成功/错误覆盖新结果。发布前直接复核服务 context；链接回调延后执行并携带页面、分支和选中代次，避免回调重入 reader 或使用失效链接。`activate` 在获取 session **之前**清空一切授权绑定状态，所以获取失败时不会残留上一个账户的内容。所有慢操作在既有 `BackgroundExecutor` 的 Tokio runtime 上执行，结果经受锁队列回 GPUI，在 UI 线程排出。每条结果在应用前都核对：页面代次、捕获的 `RepositoryReadContext`、分支名、固定 commit，以及阅读目标身份；过期（切账户、替换 PAT、移除账户、A→B→A、切分支、关闭/隐藏）一律丢弃，成功与错误同等对待。失活时调用 `ReaderView::cancel_interactions`（main 新增的公开接口）结束阅读器手势，不改 reader 实现。
+## 缓存与离线
 
-## 文件树加载
+`PageContext::cache()` 有绑定时页面构造 `CachedRepositorySession`/`CachedPageReadSession`，
+否则走原在线会话：
 
-`navigation::TreeModel` 惰性保存已加载目录：只有用户展开的目录才发一次 `GET /git/trees/{sha}`；`SnapshotDirectory` 始终携带仓库、commit、tree 与相对路径，展开子树从不使用分支名，也从不带 `recursive`。可见行由展开集合展平，目录优先、名字稳定排序；`MAX_TREE_ROWS`（20,000）与 `MAX_TREE_DEPTH`（64）是有界防护，超过时页面明确说明“树被截断”。树视图用真实 `uniform_list` 虚拟化，只构建可见行；滚动与条走共享 `ui::scroll`（`Motion` + `Bars` + `Bar`），阅读器滚动仍归 reader 自身，不引入第二套 scrollbar。
+- 摘要/分支/revision 使用 `OnlinePreferred`；在线失败回退快照时，后续目录/README/正文改用
+  `OfflineOnly`。未缓存资源返回 `RepositoryCacheError::Miss`，页面显示“本地缓存没有该资源”
+  （不伪造空目录/空正文），与“网络被拒绝”区分。
+- `locator_index` 在账户聚合分区记录 locator → 数字 id；跨重启离线打开时先读索引，首次访问
+  才在线解析。索引缺失/损坏/被撤权一律回到在线解析。
+- 历史快照页面：顶部 `Cached` 徽章显示**最旧**的缓存验证时间；Star 初始状态不请求、按钮禁用
+  且不乐观改数；Open Issues/PR 计数来自历史时不画 tab 数字；overview 各段显示 `Cached` 与
+  手动重试，历史 Releases 不挂 `Latest`。
+- 显式 `Refresh` 推进页面代次与分支请求代次、清空在途结果与所有保留令牌，再在线重验；旧的
+  排队回复无法回填。
+- README 图片：`RepositoryImageService::with_cache` + 固定 commit 的资源身份 + 捕获的撤权令牌
+  作为 `ImageBridge` guard；令牌失效后图片桥永久 retired，重新授权需要新的文档代次。
 
-## 错误分层
+## 集成依赖（重要）
 
-失败只表达一个资源，由页面决定它作用于哪一层：
-
-| 层级 | 结果 |
-| --- | --- |
-| 仓库详情 / 分支列表 / revision | 页面级：替换浏览区，不与“空目录”混淆 |
-| 目录 | 该行内表达 + 该目录的 Retry；其余目录与正文继续可用 |
-| blob / 文件正文 | 只替换阅读区；仓库资料、分支、树与其他内容保留 |
-| README 发现 | `No README`（完整空树证明）/ `README not confirmed`（404 不确定）/ 发现失败，各有独立状态与重试 |
-
-分支枚举失败不会覆盖保存的非默认分支；优先解析保存 ref，并提供 Retry branches 单独恢复列表。文件失败在无关目录加载完成后保持终态，直到显式 Retry 或重新选择。
-
-404 只说“该资源不存在或当前账户无法访问”，不断言一定是权限问题。401/403/SSO/限流/超时/网络/解析/截断保持各自区别。所有重试都是用户点按的单次、针对一个资源的操作，不会重新登录、重载整页或互相重置；不存在自动重试循环。
-
-已经显示中的文档不会因为无关目录加载完成而被重新请求：`resolve_selection` 在“正在显示同一路径”时直接保留，读者滚动与选区因此不会丢失。反过来，若选中的祖先目录在已加载的父目录中根本不存在（或该条目是文件），页面立即给出终态而不是无限 Loading，目录加载失败也会终止等待该目录的选中状态。
-
-## 开发预览与 fixture
-
-`src/bin_support/repository_fixture.rs` 是**预览与测试共用的唯一 fixture**，只经开发装配引用，不进入产品：
-
-- 按 method、URL path/query、分支/commit/tree/blob 身份应答，同一资源可反复读取，**与点击顺序、并发完成次序无关**，不是一次性队列。
-- Normal 场景含两条真正不同的分支（不同 commit、不同根 tree、不同 README 与 `src`），根 `README.md`、`docs/guide.md`、`docs/guides/nested/deep-note.md`、`src/main.rs`、`assets/`（二进制、空文件、超大文件）、symlink 与 submodule 行；所有展示的普通目录/文件都可操作。
-- fixture 不建模的请求返回 `599` 并打印开发侧诊断，明确要求补 fixture，**不伪装成 GitHub 权限错误**。
-- 只有明确场景才产生失败：`EmptyRepository`（409）、`ReadmeUncertain`（404 不确定）、`NoReadme`（完整空树）、`DirectoryFailure`/`FileFailure`（只失败一次，单次 Retry 可恢复）、`NoBranches`（完整空分支列表）、`TruncatedTree`（`truncated: true` + 未知类型）、`LongTree`（400 行）、`Delayed`（每次读取延迟 250ms）、`ReadmeInDocs`（首选 README 在 docs/README.md）、`RootFailure`（根目录失败一次，Retry files 恢复）。
-
-`cargo run --example repository` 在页面**之外**提供紧凑的场景下拉框、Reset 与 action 输出；这些脚手架不属于产品页面、不出现在 release binary。临时账户目录与合成凭据同样只存在于预览/测试。
+1. `RepositoryPage::set_image_executor(Arc<BackgroundExecutor>)`：README 图片 provider 复用应用
+   唯一后台执行器。未注入时页面仍读取摘要/树/正文，但图片桥如实显示 `NoProvider`，不会新建
+   第二个执行器或网络栈。
+2. `crate::app::runtime::Services` 需要现有 `PageContext`/`PageSlot`/`PageTicket`（本页已使用）。
+3. `crate::workspace` 需导出 `PageIdentity`、`Sessions`、`TabId`、`Route`、
+   `RepositoryNavigation`（`repository.rs` 的测试装配按当前 `src/nsh/runtime/sessions` 导出；
+   sessions 迁到 `src/workspace` 后由集成作者调整 `#[path]`）。
+4. Contributor 头像仍归账户头像加载器；页面当前以首字母回退呈现（overview 状态已支持
+   `AvatarImage` 注入），集成时由壳体提供 decoded image。
 
 ## 验证
 
-页面测试（`tests/repository.rs` → `src/ui/repository/tests.rs`）与预览使用同一 fixture，覆盖：正常首屏（摘要、Code Tab、真实 README、真实路径单一选中、无伪文件行）、两层嵌套目录展开/收起/再展开与只请求一次、同文件重复打开 3 次、README→源码→README、分支真实差异与切回、目录行与 chevron 单次切换且不清空正文、键盘导航不吞修改键、README 相对链接跟随与外部链接只报告、页内 Tab 切换清空/恢复 Code、目录失败/文件失败的作用域与单次重试、无 README / 不确定 / 409 / 空分支列表 / 截断树 / 长树、场景重置后恢复正常浏览、Back to README 的显示条件、慢旧请求不覆盖新选择、授权变化与 A→B→A、失活、rebind、两页独立。
+`src/ui/repository/tests.rs`（`cargo test --lib ui::repository` 于隔离 probe 中）用真实
+`AccountService` + 临时 SQLite + 真实 `CacheStore` + 请求路由 fixture 覆盖：正常首屏与真实
+README 路径、单一行选中、无伪 README 行、嵌套目录各自一次读取、同文件重复打开、README↔源码、
+分支差异与 A→B→A 旧回复丢弃、切分支不重启 overview、README 缺失/不确定/409/空分支列表/截断树、
+目录失败与单次重试、页内 Tab 恢复、账户切换清空、旧回复拒绝、跨仓库链接只报告、overview 动作
+复核、离线重启同 commit/路径/目录、未缓存 miss、手动 Refresh 恢复在线与 Star、单次 drain 撤权
+清空、撤权前回复拒绝、历史计数隐藏；另有 NSH headless 测试验证真实行/README/Star 数字渲染与页内
+Tab 空态。Star 写入、超时对账与不重放见 `star_tests.rs`。
 
-
-## 2026-10-28 四项布局修订与只读计数
-
-branch_picker 唯一实例在页内 Tabs 行最右侧，和 tab 垂直对齐，窄窗合理换行；长值截断并可悬停查看完整分支。顶部原位置为 Star/Fork 两个无数字按钮，使用 Ely icon/按钮 token；不增加 Watch 或写接口。`PageAction::StarRequested/ForkRequested { binding }` 仅是宿主动作请求，发布前核对当前完整授权/仓库 binding；无宿主回调时禁用，有回调时每次鼠标/Enter/Space 一次事件。example 输出明确标明 host entry only/no mutation；不改 Starred 状态。
-
-Issues/Pull requests 的数字来自新增 `PageReadSession::repository_counts`，复用既有 bounded GraphQL query POST / captured RepositorySession.read 授权管线，单次64KiB上限。固定 query 读取 `repository(owner,name){databaseId issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount}}`，不枚举列表、不用 Search，也不使用 REST `open_issues_count` 合计推算。databaseId 必须与 canonical RepositoryIdentity.id 相同；GraphQL errors 按 path 失效受影响字段，身份错误/未知 error path 不发布任一数值。typed CountsError 保留 GraphQL/transport 分类；成功0画0，loading/unknown/error 隐藏对应badge，无常驻错误文字。计数使用仓库级取消/请求代次，不受分支切换影响，切账户/授权失效/释放后清空，render不请求。
-
-Languages 顶部组完全移除。底条由同一个 overview 的 languages state 渲染，页面body之后 flex_none 4px，不滚随README、不盖正文/scrollbar，切页内tab仍贴底。每个实际语言单独比例色块，不合并Other、不强制最小宽度，颜色名称稳定；checked u64总和与total匹配才画，零/错误/未知时无条无文本。hover使用Ely Tooltip显示完整语言名+比例，窗口边缘由GPUI原生tooltip fitting向上布局；小于0.5%显示<1%。
-
-官方核验：GitHub GraphQL Repository/IssueConnection/PullRequestConnection 文档与 github-ospo `open-source-health-metrics.md` 独立 OPEN issue/PR count 示例（本轮无认证只读抓取），不代表真实PAT业务联调。新增测试特意令REST合计4但query为issue3/pr1；部分错误保留issue并隐藏PR、0/未知、身份错误、陈旧计数、切分支不重复query、Star/Fork无mutation及旧binding拒绝，底条tooltip在560px窗口内向上且离开消失。
-
-
-## 2026-10-28 胶囊 Badge、Latest 与紧凑行距修订
-
-仓库/overview 统一使用小型公共 `ui::badge::Badge`：`new(label)` 默认 Filled Pill，`tone(Tone)` 用 Ely 公开语义 palette，`outline()` 为描边 Pill。文字与字符串计数原样保留，0不自行隐藏、不截断99+；静态标签没有焦点、按钮或click handler，点击计数仍属于父tab。高度/字号取Ely ControlSize::Sm和TextSize::Xs，完整圆弧、最小宽度不小于高度、横向padding与居中排版避免单数字狭长。只迁移本轮仓库visibility/Archived/Fork、Issues/PR及Release数量/Latest，其余页面不改。
-
-组件仅窄改编锁定Ely普通Badge渲染（revision `30c66fe1d5d23db769a6c834b771d054d7f288cf`，`crates/ely-core/src/data_display/badge.rs`），完整MIT版权/许可保留于 `src/ui/badge.rs` 模块头。未使用私有Tone::colors、未升级/vendor/改Cargo缓存、未复制Tag/CountBadge动画系统。正式ui与两个开发装配都挂接同一文件；挂接公共primitive不表示正式Shell已挂载仓库页。
-
-Releases版本前为Ely Tag图标，链接后为Success Outline `Latest`。仅可信latest结果存在才显示：独立latest优先，未提供才取ReleasesData.latest；Loading/404/error/空值/旧binding不显示，draft/prerelease事实保留且不冒充稳定Latest。完整list观察数量在Releases标题旁以同一Neutral Filled胶囊显示，Partial/未知隐藏数量，真实完整0保留。Releases与Contributors取消flex-grow，从左按自然内容宽度紧随，组间约32px，长tag有界省略/完整tooltip，窄窗可换行。
-
-五个页内tab均为Ely icon + label + 可用count pill：Code/CircleDot/GitPullRequest/Tag/Settings；父tab仍负责整片点击及underline。文件树实际滚动viewport外留7px四边空隙，行填满扣除inset的宽度；uniform_list、wheel和共享Bar仍在同一个内视口上，未修改row-height、scroll handle/reveal或公共scroll。
-
-统一开发预览的Light/Dark按钮仅在example工具栏，产品无主题debug开关。测试覆盖latest状态成功/404/error/恢复/旧binding/draft-prerelease、完整0与Partial数量、宽窗组不被推向半屏、点击badge切tab、长树Home/End首末行保持inset且完整可见，保留所有原计数/分支/reader/底条行为。
-
-
-## README 滚动内留白与带数量动作按钮（2026-10-28）
-
-右上Star/Fork改为单一复合按钮边框/hover/focus/hit target：Ely icon +文字+公共中性Filled Badge，直接读取有效RepositoryDetails.stars/forks（Normal128/9），真实0/大整数原样，失效/未知不伪0或残留旧数。没有嵌套button或游离badge，点击数量、文字、图标都经同一鼠标/Enter/Space处理路径，一次动作一次typed请求；无宿主handler禁用，stale binding拒绝，无写API/加一/假Starred。新数量要求覆盖先前无数字按钮约定。
-
-Repository Markdown启用`MarkdownLayout::Repository`，根不保留固定上下空带，正文首尾0.75rem量级inset属于真实块测量内容，随文档滚动且计入wheel/thumb最大reach；左右各比原间距增加4px。源码/非文本状态和其他宿主默认不变。实现与GPUI padding/reach差异的原因见[reader布局契约](content-reader.md#repository-专用正文留白配置2026-10-28)。底部语言条不盖住内容inset；没有第二滚动容器或假AST条目。
-
-统一场景新增README paragraph/list/code/table end，全部走现有真实服务fixture管线，供实际wheel/thumb到底检查。自动测试分别验证每种正文末块的内容bounds到viewport底边仍有留白，不以块自身边框或末条目存在冒充。
-
-
-## 底部语言条与 island 圆角裁切（2026-10-29）
-
-Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：4px 高、按真实比例分块、不合并 Other、hover tooltip 由 GPUI 原生拟合。**但 GPUI 0.3.10 的 `ContentMask` 只有矩形边界**，"rounded + overflow_hidden" 只把圆角画在元素自己的背景与边框 quad 上，不裁子元素。所以只有色条有真实数据并贴到底边时，它会在 island 底部两个圆角处以方形越过弧线。
-
-修复位于 [`ui::island`](../src/ui/island.rs) 的 `RoundedClip`：它只包一个子元素、直接复用该子元素的 layout（不加 padding/尺寸/新布局盒），在子元素之后按 island 的**外**半径擦除四个 `radius × radius` 角方块中弧外的部分（用窗口背景色），再用同一半径重画 island 的 1px 边框。`Shell::island` 通过 `rounded_island(frame, outside, border)` 使用它。色条的比例、颜色、底部位置、hover/百分比 tooltip，以及文件树、README reader、滚动区域和 tab strip 的几何均未改动。
-
-边界说明：这是绘制层补偿，不是真正的几何裁切——若将来升级到支持非矩形 mask 的 GPUI，应换成真实 mask 并删除角擦除。开发预览 `cargo run --example repository` 另有一个**仅预览**的 `Corner clip: on/off` 开关，用于在同一真实窗口对比修复前后；产品始终开启。原生对照与像素边界见 [开发日志](devlog/2026-10-29-repository-language-clip.md)。
-
-
-## 持久缓存与跨重启离线阅读（2026-11-03）
-
-`RepositoryPageServices::new(accounts, executor)` 保持原有构造兼容，不新增数据库打开或凭据路径。`RepositoryPage::activate` 在捕获 `RepositorySession` 后通过 `RepoService::cache(session.context())` 获取当前账户的 `(CacheStore, CacheScope)` 绑定：
-
-- **无缓存绑定**：继续使用原有在线 `RepositorySession` 与 `PageReadSession`，行为完全不变。
-- **有缓存绑定**：构造 `CachedRepositorySession`（代码树/正文）与 `CachedPageReadSession`（overview/counts）：
-  - `src/ui/repository/locator_index.rs` 在账户聚合分区（`repository = None, private = true`）记录已确认的 `locator -> RepositoryIdentity(numeric id)` 映射；首次访问或索引缺失时先由在线会话解析 canonical 数字 ID 再走持久缓存并写回索引，跨重启离线激活时无需发请求即可定位数字仓库键。该索引受同一 C1–C5 门禁保护，明确仓库撤权使账户聚合失效时一并清除。
-  - 仓库摘要、分支列表与分支 ref 解析使用 `OnlinePreferred`，在线失败回退或断网时返回 `RepositoryCacheOrigin::Snapshot`；此时后续固定 commit 的根目录、子目录、README 发现和文件正文直接按 `OfflineOnly` 读取本地缓存，未缓存目录/文件诚实报告未缓存错误（不伪造空目录或空正文）。
-  - 页面顶栏在展示历史快照时显示 `Cached` 描边胶囊与 `Refresh` 按钮；胶囊的同步时间取**所有真正来自缓存的**摘要/分支/revision 来源中最旧的一次验证时间（`historical_verified_at_ms`），混合页面不会把新鲜摘要的“刚刚”当成缓存年龄；点击 `Refresh` 触发 `refresh_repository` 在线重验并恢复 `Network` 来源。
-  - `extras.rs` 在有缓存绑定时通过 `CachedPageReadSession` 读取 Releases、Latest release、Contributors、Languages 与 OPEN Issue/PR 计数；当页面处于离线快照模式时直接走 `PageReadMode::Offline`，避免无谓的重复失败请求。历史快照映射为 `SectionState::Historical`，Releases/Contributors 显示 `Cached` 胶囊与手动重试入口，且历史快照绝不挂 `Latest` 绿色认证徽章、不显示未验证的 release 总数胶囊；Languages 底条 tooltip 标注 `cached`。
-  - **README 图片**：`RepositoryPage` 在构建 `ReaderView` 时通过 `RepositoryImageService::with_cache` 和 `ReaderView::set_image_provider` 注入图片服务，传入可信 `RepositoryDetails` 的数字仓库 ID 与 `visibility == RepoVisibility::Private`，复用固定 commit 的解析映射与原始图片字节缓存，外链继续走无凭据 `ReqwestExternalImages`（见 [README 图片](reader-images.md)）。
-  - **授权与撤权（carried tokens）**：页面在每次后台读取**开始前**用 `CacheStore::authorization(scope, repository)` 取得一个 `CacheAuthorization` 令牌，令牌随该读取的回复一起回到页面（`Message.authorization` / extras 的 `Reply.authorization`、`CountsReply.authorization`）。`check_authorization`、`apply`、`extras.accepts` 与 `cache_allowed()` 只做 `CacheAuthorization::is_current()` 的原子 load（以及内存 session 校验），**不**在 render 或 30ms receiver 节拍里同步读取 `CacheStore`，也没有定时探测或节流窗口。`revoke_repository(scope, Some(id))` 立即翻转该仓库已发出的令牌，因此：撤权在**同一次 drain** 内就清空已展示的摘要、分支、revision、树、正文、图片 provider 与 overview；任何在撤权前完成、撤权后才被排空的旧回复都会被拒绝（`is_current()` 为假），无法把内容写回；撤权后再获授权只会签发新令牌，旧令牌永久失效。`activate`/`rebind`/`refresh_repository` 会丢弃上一代代次持有的全部令牌（`displayed_authorizations`），避免旧代次的撤权被新代次的令牌掩盖。页面按资源分槽保存令牌（摘要、分支、revision、内容；overview 在 `extras.rs` 内单独保存），任一槽失效即不再把整页视为可显示。PAT 替换隔离与凭据 401 拒绝走同一清空路径，跨重启不复活。
-  - **手动 Refresh 的旧响应隔离**：`refresh_repository` 先推进页面 `generation` 与 `branch_request` 并清空在途结果队列，再发起新的在线读取；上一次加载已排队的 revision/树/正文回复因此无法通过 `apply` 的代次检查回填页面，也不会把新一轮读取拖回 `OfflineOnly`。
-  - **历史计数不冒充最新**：当 OPEN Issue/PR 计数来自离线回退时，只记录 `counts_historical` 而非把旧数字画进 tab badge；页面没有该计数的 per-count provenance 标记，宁可隐藏也不与刚验证的数值同形呈现。
-  - **离线 Star**：页面处于历史缓存快照时跳过初始 Star 状态请求并禁用 Star 按钮，点击不发请求、不乐观改数；在线 `Refresh` 恢复后再读取状态并允许权威写操作。Fork 保持禁用。
-
-验证边界：`src/ui/repository/offline_tests.rs` 通过真实 `RepositoryPage` + `AccountService::open_with_cache` + 临时 `CacheStore` 覆盖在线预热→释放页面并重开服务→断网读取同一仓库/分支/根目录/已读子目录/README/源码/固定 commit 图片、未读目录 miss、手动 `Refresh` 恢复在线、`Refresh` 丢弃排队中的旧代次回复、换 PAT 隔离、历史计数隐藏与离线 Star 禁用。授权回归有两条确定性测试：`repository_revocation_clears_the_displayed_page_in_one_drain`（撤权后**单次** `drain` 即清空，不睡眠、不等待探测）与 `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`（撤权前完成的回复在撤权后应用必须被拒；随后重新授权不得复活旧令牌，只能签发新令牌），另有 `activation_and_refresh_reset_retained_authorizations` 覆盖代次切换丢弃令牌。应用启动时由 `cache-runtime` 统一打开并注入应用级 `CacheStore`；本页面改动仍需真实 Shell 窗口人工验收（`pending`）。
+边界：以上全部离线；不访问真实 GitHub、不读取真实 PAT，headless 引擎不替代真实 Windows 输入、
+IME、焦点和像素验收。`tests/repository.rs`、`examples/repository.rs` 属集成后的测试/预览装配，
+需要集成作者的 NSH 依赖与最终模块路径，本任务未在 probe 中编译它们。
