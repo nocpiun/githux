@@ -57,10 +57,11 @@ function model(value, label) {
 export function loadConfig(configFile, repo = process.cwd()) {
   const p = canonical(configFile ? optionPath(configFile, 'config path') : path.join(repo, '.agents', 'dispatch.local.json'));
   const c = readJSON(p);
-  fields(c, ['node', 'cli', 'provider', 'model', 'thinking', 'worktree_parent'], 'configuration');
+  fields(c, ['node', 'cli', 'provider', 'model', 'thinking', 'worktree_parent', 'kero_project_id'], 'configuration');
   if (c.node !== 'node' && !path.isAbsolute(text(c.node, 'node path'))) fail('node must be node or an absolute executable path');
   if (!path.isAbsolute(text(c.cli, 'CLI path'))) fail('cli must be an absolute JavaScript entry path');
   if (c.worktree_parent !== undefined && !path.isAbsolute(text(c.worktree_parent, 'worktree parent'))) fail('worktree_parent must be absolute');
+  if (c.kero_project_id !== undefined && !keroId(c.kero_project_id)) fail('kero_project_id must be an exact Kero project ID');
   c.node = c.node === 'node' ? process.execPath : canonical(c.node);
   if (!path.isAbsolute(c.node) || (process.platform === 'win32' && path.extname(c.node).toLowerCase() !== '.exe')) fail('node must be node or an absolute Node executable');
   c.cli = canonical(c.cli);
@@ -289,19 +290,35 @@ export function keroPreflight(execute = run, env = process.env) {
   catch (error) { fail(`Local Kero unavailable. Ensure kero is on PATH and Kero is running; reopen the shell after changing PATH. No terminal fallback. ${error.message}`); }
   if (!Array.isArray(sessions)) fail('Invalid Kero session inventory; no launch attempted');
 }
+export function keroProject(repo, configuredId, execute = run) {
+  let projects;
+  try { projects = JSON.parse(execute('kero', ['projects', '--json'], { stdio: ['ignore', 'pipe', 'inherit'] })); }
+  catch (error) { fail('Cannot read Kero projects; no session was created. ' + error.message); }
+  if (!Array.isArray(projects) || projects.some(p => !p || !keroId(p.id) || typeof p.dir !== 'string' || !path.isAbsolute(p.dir))) fail('Invalid Kero project inventory; no launch attempted');
+  const candidates = projects.filter(p => same(p.dir, repo));
+  if (configuredId !== undefined) {
+    const found = projects.filter(p => p.id === configuredId);
+    if (found.length !== 1 || !same(found[0].dir, repo)) fail('Configured Kero project is missing or belongs to another repository; check kero_project_id');
+    return found[0].id;
+  }
+  if (candidates.length !== 1) fail('Select one shared project for this repository using kero projects --json and set kero_project_id in dispatch.local.json; refusing directory-based grouping');
+  return candidates[0].id;
+}
 export function keroCommand(payload) {
-  return ['new', '--name', keroName(payload), '--dir', payload.worktree, '--', powershell(), '-NoLogo', '-NoProfile', '-NoExit', '-EncodedCommand', terminalCommand(payload)];
+  if (!keroId(payload.project_id)) fail('Missing resolved Kero project ID; refusing directory-based grouping');
+  return ['new', '--project', payload.project_id, '--name', keroName(payload), '--dir', payload.worktree, '--', powershell(), '-NoLogo', '-NoProfile', '-NoExit', '-EncodedCommand', terminalCommand(payload)];
 }
 export function visibleLaunch(payload, execute = run) {
   const session = execute('kero', keroCommand(payload), { stdio: ['ignore', 'pipe', 'inherit'] }).trim();
   if (!keroId(session)) fail('Kero did not return a session ID; inspect the recorded terminal name before recovery');
   // A separate receipt avoids racing supervisor updates or recreating an already released lock.
-  atomicJSON(path.join(payload.worktree, '.agents', 'task', `kero-${payload.token}.json`), { session_id: session, name: keroName(payload) });
+  atomicJSON(path.join(payload.worktree, '.agents', 'task', `kero-${payload.token}.json`), { session_id: session, name: keroName(payload), project_id: payload.project_id });
 }
 visibleLaunch.prepare = payload => {
   terminalCommand(payload); // Validate length before creating the launch lock.
   keroPreflight();
-  return { kind: 'kero', name: keroName(payload) };
+  payload.project_id = keroProject(payload.repo, payload.project_id);
+  return { kind: 'kero', name: keroName(payload), project_id: payload.project_id };
 };
 export function launchTask(mode, o, launch = visibleLaunch) {
   if (!['start', 'resume'].includes(mode)) fail('Invalid launch command');
@@ -339,7 +356,7 @@ export function launchTask(mode, o, launch = visibleLaunch) {
   } else if (o.followup) fail('--followup applies to resume only');
   checkInventory(c, t.root);
   const token = randomUUID();
-  const payload = { node: process.execPath, script: SELF, worktree: t.root, token, task: s.task_id };
+  const payload = { node: process.execPath, script: SELF, repo: s.repo, project_id: c.kero_project_id, worktree: t.root, token, task: s.task_id };
   const terminal = launch.prepare?.(payload) ?? null;
   // Exclusive lock spans terminal startup, supervisor and child lifetime. Never auto-reclaim.
   fs.mkdirSync(t.lock);

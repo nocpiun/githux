@@ -11,9 +11,12 @@
   "provider": "<exact provider>",
   "model": "<exact inventory model ID>",
   "thinking": "medium",
-  "worktree_parent": "<existing absolute parent directory>"
+  "worktree_parent": "<existing absolute parent directory>",
+  "kero_project_id": "<shared local Kero project ID>"
 }
 ```
+
+`kero_project_id` 是同一仓库共用的 Kero 分组 ID，不是显示名称。通过 `kero projects --json` 核对 `dir` 对应协调仓库根目录，选择一个现有 `githux` 分组并写入本地配置。缺省仅在该目录恰好有一个分组时自动选择；没有分组或已有多个同名/同目录分组时，在创建会话和锁之前报错，要求明确选择。不会自动新建分组，也不自动移动/关闭旧会话；固定 ID 不受侧栏排序改变影响。首次使用可先在 Kero 建立该仓库的项目分组，再记录 ID。
 
 只接受这些字段，不接受 API key、token、env、URL、自定义参数或凭据文件路径。认证由执行工具自己的既有配置提供；脚本不读写或打印其认证配置，也不修改全局设置。`node` 可为字面值 `node`（解析为运行调度器的 Node），或绝对 Node executable 路径；CLI 必须为已有 .js/.mjs/.cjs 文件。启动使用 PATH 中的 `kero` 与系统 Windows PowerShell；Kero 应已运行。PATH 刚更新时重开终端或刷新当前进程的 PATH，不写死本机安装路径，不改全局配置。worktree parent 缺省采用项目约定的盘根目录；测试和其他本地布局显式指定现有目录。
 
@@ -36,13 +39,15 @@ create 使用显式 committed base，保留协调工作区的未提交修改；�
 
 库存命令为配置 Node + CLI 参数数组：`--offline --no-extensions --no-mcp --no-approve --list-models EXACT_ID`。从表格各列精确比较 provider 与 model（至少六列），不接受模糊包含。CLI 报错、超时或缺少匹配均停止。启动前在协调侧和监督进程各核验一次。
 
-首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
+首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --project PROJECT_ID --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
 
 resume 要求有效 session header（`type=session`、精确 `id`、原 `cwd`），已有记录路径也必须一致；缺失、重复、损坏或工作目录不同都拒绝。每份 follow-up 以独立唯一文件保留。原 TASK.md、session ID、branch、worktree 不变。配置模型变化不会被默默采用：resume 明示 `--model`，需要换 provider 时一并给 `--provider`；库存仍必须通过。requested/configured model 和每次启动历史保存；provider/model 或 group 名称不证明最终实际使用的后端模型。
 
 ## 在 Kero 中定位、交接和恢复
 
 `start/resume` 先通过 `kero ls --json` 检查本机 Kero；不可用或返回无效时，在创建锁前报错。非空 `KERO_HOST` 被拒绝：本脚本的 worktree 与 PID 校验只覆盖本机，不提供远程派发。调用者无需本身运行在 Kero 内。
+
+启动前通过 `kero projects --json` 解析共享项目 ID；配置 ID 不存在或目录不属于协调仓库时拒绝启动，不回退到按 worktree 分组。终端元数据和启动回执记录 `project_id`，实际工作目录仍是任务自己的 worktree。
 
 启动返回时可能仍为 starting，先通过 dispatch status 确认 `active` 和 `terminal`。监督进程从实际 Kero 环境记录 session/pane ID；启动者将 Kero 返回的 session ID 写到独立 `kero-TOKEN.json` 回执，避免覆盖并行更新的 runtime。status 合并回执，身份不一致时拒绝继续。ID 尚未出现时，可按已记录的唯一 `terminal.name` 在 `kero ls --json` 中定位，不猜测或复用其他人的 pane。
 
