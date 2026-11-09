@@ -14,6 +14,10 @@ pub enum Icon {
 }
 
 pub fn icon(kind: Icon) -> impl IntoElement {
+    colored_icon(kind, t::MUTED)
+}
+
+fn colored_icon(kind: Icon, color: AdaptiveColor) -> impl IntoElement {
     // Lucide paths, under the repository's existing ISC notice.
     let path = match kind {
         Icon::Home => "<path d='m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z'/>",
@@ -31,7 +35,7 @@ pub fn icon(kind: Icon) -> impl IntoElement {
         }
     };
     svg(ImageSrc::svg_markup(&format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'>{path}</svg>")))
-        .size(px(16.0)).text_color(t::MUTED)
+        .size(px(16.0)).text_color(color)
 }
 
 pub fn tooltip(message: impl Into<SharedString>) -> impl IntoTooltip {
@@ -92,14 +96,25 @@ pub fn badge(value: impl IntoReactive<SharedString>) -> View {
 /// Confirmed optional absence is handled by the host by omitting this element entirely.
 pub fn failed(message: impl Into<SharedString>, retry: Option<std::rc::Rc<dyn Fn()>>) -> View {
     let message = message.into();
+    let can_retry = retry.is_some();
     view()
-        .flex_row()
+        .size(px(28.0))
         .items_center()
-        .gap_2()
+        .justify_center()
         .label(message.clone())
         .tooltip(tooltip(message))
-        .child(view().text_color(t::WARNING).child(icon(Icon::Warning)))
-        .children(retry.map(|retry| button("Retry", move || retry())))
+        .role(if can_retry {
+            AccessibilityRole::Button
+        } else {
+            AccessibilityRole::Image
+        })
+        .focusable(can_retry)
+        .on_press(move |_: &()| {
+            if let Some(retry) = &retry {
+                retry();
+            }
+        })
+        .child(colored_icon(Icon::Warning, t::WARNING))
 }
 
 /// The same two-line 72px presentation block for Home and global lists. Navigation belongs to

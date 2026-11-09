@@ -1,6 +1,6 @@
 # Native Shell 迁移计划
 
-更新：2026-11-09。状态：路线已由负责人确认；第一阶段原生基础已实现并验证（foundation-ready），页面迁移尚未开始。
+更新：2026-11-09。状态：第一阶段三项成果已本地汇总；Runtime、Reader 与原生基础进入统一 `githux-nsh` package，完整页面迁移尚未开始。
 
 ## 已确认决定
 
@@ -35,14 +35,14 @@ Reader 是单独的兼容性关口：Markdown/GFM/已支持 HTML、跨块选择�
 
 ## 阶段与所有权
 
-第一阶段 native-shell 基础已完成（foundation-ready，本地 commit 见 `.agents/task/implementation-result.md`）：
+初始基础交付（`423cae9`；下方联合预览为集成后的最新状态）：
 
 - 独立 workspace 成员 package `githux-nsh`（`native/nsh/Cargo.toml`），lib `src/nsh/`、bin `githux-nsh`；旧 GPUI 应用保留在根 package 作对照。
 - 固定 NSH v0.4.0 `e626a8dd8f8d8b277b9507cfd5ac74d0e67020f3`，关闭 `nsh-platform-windows` 默认 `js`；依赖树无 QuickJS/GPUI/Ely。
 - 真实 Windows 原生窗口运行（标题 Githux，渲染验证），headless 探针 2 项通过。
-- 公共接口与步骤见 `.agents/task/integration-notes.md`。
+- 公共接口在 `src/nsh/foundation/**`，Runtime 契约见 `src/nsh/runtime/README.md`，Reader 契约见 `docs/nsh-reader.md`。
 
-第一阶段立即并行三个 agent：
+第一阶段三个 agent 的原始分工（均已交付，本轮已正常退出并交接给协调者）：
 
 | 任务 | 分支 | 唯一写入范围 | 阶段产物 |
 | --- | --- | --- | --- |
@@ -55,6 +55,17 @@ Reader 是单独的兼容性关口：Markdown/GFM/已支持 HTML、跨块选择�
 第二阶段在公共契约与最小原生运行证据就绪后拆分 Home/Feed、Repository、Profile、Notifications/全局事项、Accounts/Settings 等任务；每个页面连同控制器与行为测试作为一个交付单元。shared work_item_row、header/gutter、theme/fonts/tooltip 仍有单一作者。各页只调用 runtime 与 reader 的已验证接口，不各自新建账户服务或 CacheStore。
 
 集成作者只集成执行者明确 ready 的本地提交；不得搬入仍在修改的工作区、自动合入 main 或把未集成页的占位算作完成。迁移中可暂时并存旧入口作为对比，最终正常启动须完全走 NSH 并清除正式构建对 Ely/GPUI 的依赖。
+
+## 第一阶段联合预览
+
+三个任务的本地成果已汇总至 `migration/native-shell`：基础 `423cae9`、Runtime 原提交 `065187f`、Reader 原提交 `7f1f669`。根 package 仍保留旧 GPUI 应用；NSH 的 `native/nsh` 使用同一套 auth/content/data/domain/github/network/storage 源码，不复制或改写账户及缓存格式。
+
+- 启动与编译命令见 [README](../README.md#native-shell-迁移预览本分支)。`githux-nsh` 窗口可切换 Foundation / Reader，字体与主题由统一 Root 提供。
+- Runtime 已纳入正式 package 编译及离线行为测试；预览不启动生产 Runtime、不访问用户账户。账户 UI 和各业务页面消费 Runtime 属于下一阶段，不能将编译通过当成正式接线。
+- Reader 的兼容测试、独立预览和联合窗口使用同一 package / Cargo.lock / target；原独立测试 manifest 已撤除，避免探针与真实装配分叉。
+- 集成检查修复了基础 toolbar 被构造后丢弃、无法真正点击的问题，添加按钮回调、输入与页面切换回归。真实失败控件恢复为黄色 warning 图标 + tooltip + 点击重试，复用已确认设计。
+- 联合验证：`cargo test -p githux-nsh --locked --offline` 570 项库测试 + 5 项 Reader 兼容测试通过；严格 Clippy、fmt、预览二进制构建通过。依赖图无 GPUI/Ely/QuickJS。仅确认 Windows 窗口成功启动，负责人要求最终视觉效果由本人验收，协调者未做 GUI 交互或截图验收。
+- 基础字号/色值已经统一；最终 shell/island/导航布局、精确滚动条、真实 IME、多 DPI、Reader 大文档虚拟化及图片持久缓存接线仍待完成。当前不能作为完整应用替换 main。
 
 ## 本地提交与交付
 

@@ -60,3 +60,25 @@ pub fn page_header(title: impl IntoReactive<SharedString>) -> View {
                 .font_weight(FontWeight::SEMIBOLD),
         )
 }
+
+/// Match the application's baseline when NSH TextView reads its semantic tokens.
+pub fn tokens() -> Tokens {
+    let mut tokens = crate::reader::dark_tokens();
+    for (name, color) in [
+        ("background", BG),
+        ("foreground", FG),
+        ("card", SURFACE),
+        ("card-foreground", FG),
+        ("muted", SURFACE),
+        ("muted-foreground", MUTED),
+        ("border", BORDER),
+        ("input", BORDER),
+        ("accent", ACTIVE),
+        ("accent-foreground", FG),
+        ("primary", FG),
+        ("primary-foreground", BG),
+    ] {
+        tokens.set_color(name, color);
+    }
+    tokens
+}

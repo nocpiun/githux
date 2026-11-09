@@ -1,6 +1,6 @@
-use githux_nsh_reader_probe::{
+use githux_nsh::{
     content::{PreparedBody, UnsupportedContent, images::*},
-    fixture,
+    preview::reader as fixture,
     reader::{
         images::{ImageBridge, Picture},
         *,

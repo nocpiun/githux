@@ -2161,11 +2161,25 @@ dependencies = [
 name = "githux-nsh"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "dirs 7.0.0",
+ "image",
  "nsh-base",
  "nsh-core",
  "nsh-engine",
  "nsh-platform-windows",
  "nsh-testing",
+ "pulldown-cmark",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "unicode-segmentation",
+ "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]

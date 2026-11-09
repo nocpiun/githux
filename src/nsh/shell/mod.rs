@@ -9,12 +9,12 @@ use std::rc::Rc;
 #[component]
 pub fn Foundation() -> impl IntoElement {
     // Counters prove closures run from input paths, not a mock controller.
-    let actions = Rc::new(std::cell::RefCell::new(0usize));
-    let a1 = actions.clone();
-    let a2 = actions.clone();
-    let a3 = actions.clone();
-    let actions_inner = actions.clone();
-    on_key("ctrl+k", move |_| *actions_inner.borrow_mut() += 1);
+    let actions = signal(0usize);
+    let a1 = actions;
+    let a2 = actions;
+    let a3 = actions;
+    let actions_inner = actions;
+    on_key("ctrl+k", move |_| actions_inner.update(|n| *n += 1));
 
     let rows = 800usize;
 
@@ -45,39 +45,53 @@ pub fn Foundation() -> impl IntoElement {
             })))
     };
 
-    view().flex_1().bg(t::BG).child(
+    let toolbar = view().h(px(48.0)).px(px(t::PAGE_GUTTER)).bg(t::BG).child(
         view()
             .flex_1()
+            .items_center()
             .flex_row()
             .child(view().w(px(1.0)).window_drag(true))
-            .child(controls::button("Act", move || *a1.borrow_mut() += 1))
+            .child(controls::button("Act", move || a1.update(|n| *n += 1)))
             .child(controls::icon_button("Glyph", Icon::Home, move || {
-                *a2.borrow_mut() += 1
+                a2.update(|n| *n += 1)
             }))
             .child(view().w(px(8.0)))
-            .child(controls::failed(
-                "title bar",
-                Some(Rc::new(move || *a3.borrow_mut() += 1)),
-            ))
+            .child(
+                controls::failed(
+                    "Retry example failure",
+                    Some(Rc::new(move || a3.update(|n| *n += 1))),
+                )
+                .test_id("foundation-retry"),
+            )
             .child(view().w(px(16.0)))
             .child(
                 view()
                     .flex_1()
+                    .flex_row()
+                    .items_center()
                     .gap_2()
-                    .child(controls::badge("Open"))
+                    .child(controls::badge(move || {
+                        SharedString::from(format!("Actions: {}", actions.get()))
+                    }))
                     .child(
                         view()
                             .flex_1()
                             .rounded(px(4.0))
                             .border_1()
                             .border_color(t::BORDER)
-                            .child(nsh_core::element::input().auto_correct(false)),
+                            .h(px(28.0))
+                            .child(
+                                nsh_core::element::input()
+                                    .auto_correct(false)
+                                    .test_id("foundation-input"),
+                            ),
                     ),
             ),
     );
     view()
         .flex_1()
         .bg(t::BG)
+        .child(toolbar)
         .child(
             view()
                 .h(px(t::PAGE_HEADER_HEIGHT))

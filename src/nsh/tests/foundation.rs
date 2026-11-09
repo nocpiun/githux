@@ -6,11 +6,23 @@ use nsh_testing::Headless;
 
 #[test]
 fn foundation_lays_out_and_reacts() {
-    let mut app =
-        Headless::start(EngineConfig::new(Root::of::<Foundation>())).expect("headless app starts");
+    let mut app = Headless::start(EngineConfig::new(crate::foundation::fonts::install(
+        Root::of::<Foundation>(),
+    )))
+    .expect("headless app starts");
     app.wait_for("Native Shell 基础")
         .expect("page header renders");
     app.wait_for("row 1").expect("virtual list row renders");
+    app.wait_for("Actions: 0").expect("toolbar actually mounts");
+    app.press("Act").expect("button works");
+    app.wait_for("Actions: 1")
+        .expect("callback updates displayed state");
+    app.press("id:foundation-retry")
+        .expect("warning retries directly");
+    app.wait_for("Actions: 2").expect("warning invokes retry");
+    assert!(!app.screen().shows("text:Retry"));
+    app.type_text("id:foundation-input", "native input")
+        .expect("input is mounted");
     // The recycled virtual list scrolled to the end keeps rendering rows.
     app.scroll("id:foundation-list", nsh_core::geometry::px(4000.0))
         .expect("virtual list scrolls");
@@ -19,12 +31,14 @@ fn foundation_lays_out_and_reacts() {
 }
 
 #[test]
-fn font_families_resolve_without_installed_fonts() {
-    let mut app =
-        Headless::start(EngineConfig::new(Root::of::<Foundation>())).expect("headless app starts");
+fn registered_root_requests_the_embedded_ui_family() {
+    let mut app = Headless::start(EngineConfig::new(crate::foundation::fonts::install(
+        Root::of::<Foundation>(),
+    )))
+    .expect("headless app starts");
     app.wait_for("Native Shell 基础")
         .expect("page header renders");
-    // Both families render through the shared root registration path.
+    // This checks the requested family using the registered root, not per-glyph fallback.
     let ui = app
         .screen()
         .span_style("text:Native Shell 基础")
@@ -33,4 +47,19 @@ fn font_families_resolve_without_installed_fonts() {
         ui.font_family.expect("family set").name().as_ref(),
         "Githux UI"
     );
+}
+
+#[test]
+fn combined_preview_switches_reader_and_foundation() {
+    let mut app = Headless::start(EngineConfig::new(crate::root())).unwrap();
+    app.wait_for("row 1").unwrap();
+    app.press("Reader").unwrap();
+    app.wait_for("reader-document").unwrap();
+    assert!(!app.screen().shows("secret-hidden"));
+    app.press("Source").unwrap();
+    app.wait_for("reader-source").unwrap();
+    app.press("Foundation").unwrap();
+    app.wait_for("Actions: 0").unwrap();
+    app.press("Act").unwrap();
+    app.wait_for("Actions: 1").unwrap();
 }

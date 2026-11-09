@@ -1,6 +1,6 @@
 # NSH Reader（原生迁移组件）
 
-更新：2026-11-09。`migration/nsh-reader` 分支，唯一写入范围 `src/nsh/reader/**` 与本任务的独立测试装配。这是 Native Shell 迁移第一阶段的 Reader 交付，供 `migration/native-shell` 集成作者摘取；**不代表 Repository/Profile 已正式接线，也不代表全迁移完成**。
+更新：2026-11-09。组件已本地集成到 `migration/native-shell`，正式装配为 workspace package `githux-nsh`，与 Runtime、基础窗口共用 Cargo.lock；**不代表 Repository/Profile 已正式接线，也不代表全迁移完成**。
 
 ## 定位与边界
 
@@ -18,7 +18,7 @@
 | `src/nsh/reader/links.rs` | 从 `src/ui/reader/links.rs` 拷贝。同一纯函数链接解析：仓库固定 commit 相对链接、外部 http(s)、锚点、危险 scheme/反斜杠/控制字符拒绝 |
 | `src/nsh/reader/images.rs` | `ImageBridge`：provider 注入、能力令牌、请求排队/去重、撤权永久退休、隐藏推进代次、迟到结果丢弃、预算 |
 | `src/nsh/reader/view.rs` | NSH 原生渲染：逐块 `TextView`、跨块共享选择、链接 Report、源码只读 `Editor`（行号）、Flow 自然高度、锚点跳转、正文 padding |
-| `tests/nsh_reader/**` | 独立 Cargo 装配（隔离 manifest，锁 NSH 版本、关闭 JS feature）。`src/fixture.rs` 是 native 预览根，`tests/compatibility.rs` 是 headless 兼容证据 |
+| `tests/nsh_reader/**` | 通过 `native/nsh/Cargo.toml` 的显式 test/bin 目标复用应用 package；预览根在 `src/nsh/preview/reader.rs`，`tests/compatibility.rs` 是 headless 兼容证据 |
 
 ## 组件接口（给集成作者）
 
@@ -85,15 +85,16 @@ let handle = ReaderHandle::new(document, bridge, ReaderLayout::Repository, move 
 1. **块虚拟化**：当前全量构建块，超大 Markdown 的性能缺口。不改产品/后端路线，属普通适配缺口，建议集成阶段用 NSH `virtual_list` 处理；在虚拟化前须先确认 NSH 的 `selectable` 视图对「屏外回收行」的全选/Ctrl+A 是否覆盖全部文本，否则长文跨屏选择会退化（这是需要实际核验的反例，不静默降级）。
 2. **表格单元格内图片**、**行内图片原位**：沿用既有 AST 边界（cell 内保留 alt、inline 图提为块），与 GPUI reader 一致，不在本轮另造。
 3. **`nsh-base` 默认 feature 含 `highlight`（syntect）**：纯 Rust，无 JS/QuickJS；`math` feature 未启用，`$$…$$` 显示为 TeX 或由集成层 `render_math` 接管（与 GPUI reader 的 math 呈现不同，属呈现差异）。
-4. **配色/字体最终值**：`dark_tokens()` 只设字体族，调色板沿用 NSH 默认（shadcn neutral）。Githux 深色外观、主题 token、Noto Sans SC 回退的最终对齐归集成作者（`native-shell`）统一，本任务不重复实现主题系统。
+4. **配色/字体**：组件 `dark_tokens()` 只设字体族；集成 Root 由 `foundation::theme::tokens()` 覆盖基线颜色，并注册全部四个 UI 字重与代码字体。真实多 DPI、中文回退与输入法验收仍需完成。
 
 ## 验证命令
 
 ```sh
-# 组件 + headless 兼容测试（隔离 manifest，走共享 runner 与独立 target）
-node scripts/verify.mjs -- cargo test --manifest-path tests/nsh_reader/Cargo.toml --test compatibility
+# 与实际预览同一个 package / lock / target 的兼容测试
+node scripts/verify.mjs -- cargo test --locked -p githux-nsh --test reader_compatibility
 # 原生预览窗口（Windows）
-node scripts/verify.mjs -- cargo run --manifest-path tests/nsh_reader/Cargo.toml --bin githux-nsh-reader-probe
+node scripts/verify.mjs -- cargo build --locked -p githux-nsh --bin githux-nsh-reader-probe
+.\target\debug\githux-nsh-reader-probe.exe
 ```
 
-全部 Cargo 经 `node scripts/verify.mjs -- cargo …`，共用 Windows mutex `Local\Githux-Cargo-20261029`，独立 `CARGO_TARGET_DIR=target/nsh-reader`，命令环境 `CARGO_PROFILE_DEV_DEBUG=0`、`CARGO_PROFILE_TEST_DEBUG=0`、`CARGO_INCREMENTAL=0`。
+全部 Cargo 经 `node scripts/verify.mjs -- cargo …`，共用 Windows mutex `Local\Githux-Cargo-20261029`，本 worktree 的 `target/`，命令环境 `CARGO_PROFILE_DEV_DEBUG=0`、`CARGO_PROFILE_TEST_DEBUG=0`、`CARGO_INCREMENTAL=0`。

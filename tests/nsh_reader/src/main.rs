@@ -2,12 +2,10 @@
 fn main() -> impl std::process::Termination {
     use nsh_platform_windows as platform;
     platform::set_ui_sets(vec![nsh_base::registry()]);
-    let ui = include_bytes!("../../../assets/fonts/githux-ui/GithuxUI-Regular.ttf");
-    let mono = include_bytes!("../../../assets/fonts/google-sans-code/GoogleSansCode.ttf");
-    let root = platform::Root::of::<githux_nsh_reader_probe::fixture::Preview>()
-        .font(ui.to_vec())
-        .font(mono.to_vec())
-        .tokens(githux_nsh_reader_probe::reader::dark_tokens());
+    let root = githux_nsh::foundation::fonts::install(platform::Root::of::<
+        githux_nsh::preview::reader::Preview,
+    >())
+    .tokens(githux_nsh::foundation::theme::tokens());
     platform::run_app(
         platform::AppSource::Rust(root),
         platform::AppOptions {

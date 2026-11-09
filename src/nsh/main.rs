@@ -4,10 +4,11 @@
 #[cfg(target_os = "windows")]
 fn main() -> std::process::ExitCode {
     use nsh_platform_windows::{AppOptions, AppSource, run_app};
+    nsh_platform_windows::set_ui_sets(vec![nsh_base::registry()]);
     run_app(
         AppSource::Rust(githux_nsh::root()),
         AppOptions {
-            title: "Githux".into(),
+            title: "Githux - Native Shell migration preview".into(),
             app_id: "dev.githux.native-shell".into(),
             size: (1280, 820),
             appearance: nsh_core::platform::Appearance::Dark,
