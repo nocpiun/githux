@@ -67,7 +67,7 @@ function fixture(t) {
     children.push(record);
     return record;
   }
-  launch.prepare = payload => ({ kind: 'kero', name: `githux-${payload.task}-${payload.token.slice(0, 8)}` });
+  launch.prepare = payload => ({ kind: 'kero', project_id: 'fixture-project-one', name: `githux-${payload.task}-${payload.token.slice(0, 8)}` });
   return { root, repo, parent, settings, config, spec, opts, children, launch };
 }
 
@@ -167,7 +167,14 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.equal(call.cwd, s.worktree);
   assert.ok(call.args.includes('--approve'));
   assert.ok(!call.args.includes('--print'));
-  assert.equal(call.args.at(-1), `@${taskFile}`);
+  assert.equal(call.args.at(-2), '@' + taskFile);
+  const firstContextPath = call.args.at(-1).slice(1);
+  assert.equal(path.dirname(firstContextPath), dir);
+  const firstContext = fs.readFileSync(firstContextPath, 'utf8');
+  assert.match(firstContext, /Shared project ID: fixture-project-one/);
+  assert.match(firstContext, /checks, builds, tests, probes and application runs/);
+  assert.ok(firstContext.includes('--dir "' + s.worktree + '"'));
+  assert.match(firstContext, /kero new --project fixture-project-one/);
   assert.equal(call.args[call.args.indexOf('--model') + 1], 'group/exact&%!');
   fs.writeFileSync(path.join(s.session_dir, 'exit-gate'), 'exit');
   assert.equal((await f.children[0].done).code, 0);
@@ -198,6 +205,7 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.equal(unexpectedLaunch, false);
   assert.equal(fs.existsSync(path.join(dir, 'launch.lock')), false);
   assert.equal(json(stateFile).runtime.attempts.length, 1);
+  f.launch.prepare = payload => ({ kind: 'kero', project_id: 'fixture-project-two', name: `githux-${payload.task}-${payload.token.slice(0, 8)}` });
   launchTask('resume', { config: f.config, worktree: s.worktree, followup, model: 'new/model', provider: 'alternate' }, f.launch);
   await until(() => fs.readFileSync(invocation, 'utf8').trim().split('\n').length === 2);
   const calls = fs.readFileSync(invocation, 'utf8').trim().split('\n').map(JSON.parse);
@@ -205,7 +213,12 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.ok(calls[1].args.includes('--session'));
   assert.ok(!calls[1].args.includes('--session-id'));
   assert.equal(fs.readFileSync(taskFile, 'utf8'), original);
-  assert.equal(fs.readFileSync(calls[1].args.at(-1).slice(1), 'utf8'), fs.readFileSync(followup, 'utf8'));
+  assert.equal(fs.readFileSync(calls[1].args.at(-2).slice(1), 'utf8'), fs.readFileSync(followup, 'utf8'));
+  const resumedContextPath = calls[1].args.at(-1).slice(1);
+  assert.notEqual(resumedContextPath, firstContextPath);
+  assert.equal(fs.readFileSync(firstContextPath, 'utf8'), firstContext);
+  assert.match(fs.readFileSync(resumedContextPath, 'utf8'), /kero new --project fixture-project-two/);
+  assert.doesNotMatch(fs.readFileSync(resumedContextPath, 'utf8'), /fixture-project-one/);
   fs.writeFileSync(path.join(s.session_dir, 'exit-gate'), 'exit');
   assert.equal((await f.children[1].done).code, 0);
   exited = taskStatus(s.worktree);

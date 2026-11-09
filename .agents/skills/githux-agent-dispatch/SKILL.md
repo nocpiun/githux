@@ -16,7 +16,7 @@ metadata:
 3. 写 UTF-8 任务规格文件，至少包含 `# Goal`、`# Scope`、`# Acceptance`、`# Relevant docs`（也接受目标、范围、验收、相关文档）。写清依赖、共享接口、不做内容和检查。只传必要任务上下文，不复制私人记忆。
    规格应简短聚焦：目标、硬性产品约束、真实反例、所有权/依赖、验收证据和完成条件。链接共享规则而非复制。外部 API 假设需当前一手文档和代表性真实响应形状，测试保持确定性/离线。
 4. 普通实现任务使用 `--delivery pr`，让原执行者完成 PR 闭环；实验、诊断或明确本地验收才用 `local-only`。`create` 显式指定已提交 base、新分支、task ID、规格文件、`local-only` 或 `pr`。首版配套任务显式加 `--first-release true`；其他任务不继承 milestone。create 不启动执行工具。
-5. 核对输出的 worktree、branch、base SHA 和 `.agents/task/TASK.md`，再 `start`。每次 start/resume 都新建独立 Kero 会话，但同一仓库的所有任务统一放入同一个 `githux` 项目分组：用固定 project ID 传给 `kero new --project`，worktree 仍由 `--dir` 独立指定，不按任务目录自动创建分组。负责人可在 Kero 中直接阅读、输入和接管配置的 CLI；脚本用继承的终端运行交互会话，没有 print/RPC 模式。用 status 返回的 `terminal.session_id/pane_id` 定位本任务；实际验证证据与边界见 reference。
+5. 核对输出的 worktree、branch、base SHA 和 `.agents/task/TASK.md`，再 `start`。每次 start/resume 都新建独立 Kero 会话，但同一仓库的所有任务统一放入同一个 `githux` 项目分组：用固定 project ID 传给 `kero new --project`，worktree 仍由 `--dir` 独立指定，不按任务目录自动创建分组。该规则也覆盖执行者自行创建的检查、构建、测试、探针和程序运行会话；优先复用当前终端，确需新会话时仍须传相同 project ID。每次 start/resume 自动附带独立 `KERO-<token>.md`，把实际 ID 和辅助会话规则传给执行者，不依赖旧 worktree 的 skill 已更新。负责人可在 Kero 中直接阅读、输入和接管配置的 CLI；脚本用继承的终端运行交互会话，没有 print/RPC 模式。用 status 返回的 `terminal.session_id/pane_id` 定位本任务；实际验证证据与边界见 reference。
 
    确认实际启动成功后，主 Agent 可以结束当前轮次，交代任务/终端位置；不持续读取日志或重复执行检查。后续由负责人手动提醒完成或裁决事项。继续阅读完整过程和交互在可见终端进行。
 

@@ -160,7 +160,7 @@ export function createTask(o) {
       schema_version: 1, task_id: id, arbitration_ever_required: false, merge_owner: 'worker', pr_url: null,
       progress: { task: 'pending', note: 'Process state does not establish task completion.' }, updated_at: now(),
     };
-    const handoff = `# Dispatch handoff: ${id}\n\nWorktree: ${target}\nBranch: ${o.branch}\nCommitted base: ${sha}\nSession ID: ${sessionId}\nDelivery: ${o.delivery}\nFirst release milestone: ${state.milestone ?? 'not assigned'}\n\nRead AGENTS.md, docs/README.md, docs/code-standards.md and LESSONS.md from this committed worktree; then the relevant docs below.\nFollow [shared workflow](../../docs/agent-workflow.md), including latest-head CI/review, arbitration history, squash and default commit message rules. For PR review use [githux-pr-review](../skills/githux-pr-review/SKILL.md). Paths in this handoff resolve from .agents/task/TASK.md.\n\n## Verification runner\nUse the shared local verification command for all Cargo checks/tests/builds/fmt/clippy:\n\`\`\`sh\nnode scripts/verify.mjs [options] -- cargo <args...>\n\`\`\`\n- Pass arguments as an array after \`--\`; never interpolate into a shell string.\n- Each run writes an atomic JSON record under \`.agents/task/runs/<run_id>.json\` with exit code, log path, source identity, timing, and result.\n- The runner holds the shared Windows mutex \`Local\\Githux-Cargo-20261029\` while running; do not start a second heavy build concurrently.\n- Read failed logs directly instead of recompiling merely to change grep expressions.\n- After final checks pass, rerun only if there is an actual change, failure, or unresolved concern; record why.\n\n${o.delivery === 'local-only' ? 'Implement and validate locally, write .agents/task/implementation-result.md, then stop generation while keeping the interactive terminal available. Do not commit, push or create a PR.' : 'Implement, validate, document and deliver through the explicitly scoped PR workflow. Preserve arbitration history in delivery-state.json and PR records; milestone #1 is required only when assigned above.'}\nDispatch performs no GitHub mutation. Task progress/PR/arbitration metadata belongs only in delivery-state.json (worker-owned); runtime belongs in dispatch-state.json (supervisor-owned). Never reset arbitration_ever_required or merge_owner on resume.\n\n---\n\n${spec}\n`;
+    const handoff = `# Dispatch handoff: ${id}\n\nWorktree: ${target}\nBranch: ${o.branch}\nCommitted base: ${sha}\nSession ID: ${sessionId}\nDelivery: ${o.delivery}\nFirst release milestone: ${state.milestone ?? 'not assigned'}\n\nRead AGENTS.md, docs/README.md, docs/code-standards.md and LESSONS.md from this committed worktree; then the relevant docs below.\nFollow [shared workflow](../../docs/agent-workflow.md), including latest-head CI/review, arbitration history, squash and default commit message rules. For PR review use [githux-pr-review](../skills/githux-pr-review/SKILL.md). Paths in this handoff resolve from .agents/task/TASK.md.\n\n## Kero session grouping\nAll helper sessions (checks, builds, tests, probes and app runs) must share the same project as this task. The dispatcher supplies a fresh KERO-<token>.md context with the exact project ID on each start/resume. Read it even if this worktree has an older skill. Prefer the existing terminal; never run bare kero new or use the display name instead of the ID.\n\n## Verification runner\nUse the shared local verification command for all Cargo checks/tests/builds/fmt/clippy:\n\`\`\`sh\nnode scripts/verify.mjs [options] -- cargo <args...>\n\`\`\`\n- Pass arguments as an array after \`--\`; never interpolate into a shell string.\n- Each run writes an atomic JSON record under \`.agents/task/runs/<run_id>.json\` with exit code, log path, source identity, timing, and result.\n- The runner holds the shared Windows mutex \`Local\\Githux-Cargo-20261029\` while running; do not start a second heavy build concurrently.\n- Read failed logs directly instead of recompiling merely to change grep expressions.\n- After final checks pass, rerun only if there is an actual change, failure, or unresolved concern; record why.\n\n${o.delivery === 'local-only' ? 'Implement and validate locally, write .agents/task/implementation-result.md, then stop generation while keeping the interactive terminal available. Do not commit, push or create a PR.' : 'Implement, validate, document and deliver through the explicitly scoped PR workflow. Preserve arbitration history in delivery-state.json and PR records; milestone #1 is required only when assigned above.'}\nDispatch performs no GitHub mutation. Task progress/PR/arbitration metadata belongs only in delivery-state.json (worker-owned); runtime belongs in dispatch-state.json (supervisor-owned). Never reset arbitration_ever_required or merge_owner on resume.\n\n---\n\n${spec}\n`;
     fs.writeFileSync(path.join(dir, 'TASK.md'), handoff, { flag: 'wx', encoding: 'utf8' });
     fs.writeFileSync(path.join(dir, 'dispatch-state.json'), `${JSON.stringify(state, null, 2)}\n`, { flag: 'wx' });
     fs.writeFileSync(path.join(dir, 'delivery-state.json'), `${JSON.stringify(delivery, null, 2)}\n`, { flag: 'wx' });
@@ -304,6 +304,28 @@ export function keroProject(repo, configuredId, execute = run) {
   if (candidates.length !== 1) fail('Select one shared project for this repository using kero projects --json and set kero_project_id in dispatch.local.json; refusing directory-based grouping');
   return candidates[0].id;
 }
+export function keroLaunchContext(payload) {
+  if (!keroId(payload.project_id)) fail('Missing Kero project ID for executor context');
+  return [
+    '# Current Kero session context',
+    '',
+    'This coordinator-supplied context applies even when the task worktree contains an older dispatch skill.',
+    'Shared project ID: ' + payload.project_id,
+    'Task worktree: ' + payload.worktree,
+    '',
+    'All Kero sessions for this task belong to this ONE project, including helper checks, builds, tests, probes and application runs, not just Pi agents.',
+    'Prefer running checks in the existing task terminal with scripts/verify.mjs; do not create a new session for every Cargo command.',
+    'If a separate helper is needed, use the exact --project ID and retain the task worktree in --dir:',
+    '',
+    'kero new --project ' + payload.project_id + ' --name <purpose> --dir "' + payload.worktree + '" -- <command> <args>',
+    '',
+    'Never omit --project or select the ambiguous display name githux. --dir controls the working directory, not the shared grouping.',
+    'A split must target your verified existing pane explicitly so it inherits the same project; never target a focused/default user pane.',
+    'Validate the project through kero projects --json if needed; a missing project is not permission to create another group.',
+    'Do not edit project records, restart the daemon, or close/move unrelated sessions. This context grants no extra command, agent or task scope.',
+    '',
+  ].join('\n');
+}
 export function keroCommand(payload) {
   if (!keroId(payload.project_id)) fail('Missing resolved Kero project ID; refusing directory-based grouping');
   return ['new', '--project', payload.project_id, '--name', keroName(payload), '--dir', payload.worktree, '--', powershell(), '-NoLogo', '-NoProfile', '-NoExit', '-EncodedCommand', terminalCommand(payload)];
@@ -358,13 +380,16 @@ export function launchTask(mode, o, launch = visibleLaunch) {
   const token = randomUUID();
   const payload = { node: process.execPath, script: SELF, repo: s.repo, project_id: c.kero_project_id, worktree: t.root, token, task: s.task_id };
   const terminal = launch.prepare?.(payload) ?? null;
+  const context = terminal?.kind === 'kero' ? keroLaunchContext({ ...payload, project_id: terminal.project_id }) : null;
   // Exclusive lock spans terminal startup, supervisor and child lifetime. Never auto-reclaim.
   fs.mkdirSync(t.lock);
   try {
     const launcher = identity(process.pid);
+    const contextPath = context === null ? null : path.join(t.dir, `KERO-${token}.md`);
+    if (contextPath) fs.writeFileSync(contextPath, context, { flag: 'wx', encoding: 'utf8' });
     const followupPath = followup === null ? null : path.join(t.dir, `FOLLOWUP-${token}.md`);
     if (followupPath) fs.writeFileSync(followupPath, followup, { flag: 'wx', encoding: 'utf8' });
-    atomicJSON(path.join(t.lock, 'launch.json'), { token, mode, config: c, requested_model: c.model, session, followup: followupPath, launcher, created_at: now() });
+    atomicJSON(path.join(t.lock, 'launch.json'), { token, mode, config: c, requested_model: c.model, session, followup: followupPath, context: contextPath, launcher, created_at: now() });
     update(t.root, latest => {
       latest.runtime.phase = 'starting';
       latest.runtime.starting_at = now();
@@ -408,6 +433,7 @@ export async function supervise(worktree, token, { allowNonTTY = false } = {}) {
   const args = [c.cli, '--offline', '--approve', '--no-extensions', '--no-mcp', '--provider', c.provider, '--model', c.model, '--thinking', c.thinking, '--session-dir', current.session_dir];
   args.push(...(meta.mode === 'resume' ? ['--session', meta.session] : ['--session-id', current.session_id]));
   args.push(`@${meta.followup ?? path.join(t.dir, 'TASK.md')}`);
+  if (meta.context) args.push(`@${meta.context}`);
   update(t.root, s => {
     s.provider = c.provider; s.requested_model = meta.requested_model; s.configured_model = c.model; s.thinking = c.thinking;
     s.model_history.push({ at: now(), mode: meta.mode, provider: c.provider, requested_model: meta.requested_model, configured_model: c.model, backend_model: 'unverified' });
