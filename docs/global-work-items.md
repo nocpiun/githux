@@ -2,6 +2,15 @@
 
 本模块实现 G1–G3 已确认的只读列表与独立预览。正式 Shell 挂载已由 shell-global-pages 集成任务完成（`app::pages::WorkItemsPage`），Home 的 `involves:` 查询不变。代码入口为 `domain::work_item`、`github::work_items`、`data::work_items`、`ui::global_work_items`。
 
+## Native Shell 原位替换（2026-11-09）
+
+按负责人 2026-11-09 指示（`docs/native-shell-inplace.md`），本页面原位迁移为纯 Rust Native Shell 架构：
+- 控制器仍位于 `src/ui/global_work_items/controller.rs`，视图与呈现位于 `src/ui/global_work_items/mod.rs`，宿主位于 `src/app/pages/work_items.rs`，遵循 `PageView` 生命周期契约。
+- 视图内部通过 UI 线程事件队列与状态驱动，用户点击筛选/刷新/加载更多产生 `Intent`，`poll` 调用在 UI 线程分发异步工作至既有 BackgroundExecutor，回复通过 `Controller::finish` 门禁后再经 `PageSlot<Displayed>` 与运行时 `Sessions` 校验发布。
+- 账户切换/换 PAT/移除或撤权时，单次 drain 清理已展示旧行，旧回复不可复活，`set_active(false)` 与 `retire()` 停止在途请求。
+- 渲染零 I/O，时钟用 NSH 轻量定时任务驱动，失活/retire 停止。
+- 视觉采用 NSH 默认主题与控件样式，保留 72px 共享行高、两行布局、相对时间与筛选语义。
+
 ## 查询与单页读取
 
 `WorkItemSession` 从 `RepoService::work_item_session()` 捕获权威活动账户 login 和原有 `RepositoryReadContext`。UI 只能选择 `WorkItemKind::{Issue, PullRequest}`、`Relation::{Assigned, Created}`、`StateFilter::{Open, Closed, All}`。
@@ -16,7 +25,7 @@
 | Closed | `is:closed`，PR 同时包括 merged 和未合并关闭 |
 | All | 不加状态限定符 |
 
-请求统一使用 `sort=updated&order=desc`，默认每页 50，单调用恰好请求一页。首次创建视图自动加载；之后只在筛选、显式刷新或 Load more 时请求。render 不发请求，没有周期轮询、数据库缓存或远程写操作。
+请求统一使用 `sort=updated&order=desc`，默认每页 50，单调用恰好请求一页。首次创建视图自动加载；之后只在筛选、显式刷新或 Load more 时请求。渲染不发请求，没有周期轮询、数据库缓存或远程写操作。
 
 Assigned 不包含仅 author、mention、commenter 或 review-requested 的条目。Created 使用 author；两者均不使用 Home 的 involves 语义。PR state 以 `pull_request.merged_at` 区分 Merged/Closed：非空时间为 Merged、明确 null 为 Closed；字段缺失或未知 state 单独表示 Unknown。
 
@@ -32,42 +41,32 @@ Assigned 不包含仅 author、mention、commenter 或 review-requested 的条�
 
 Search 最多可访问 1,000 个位置，包括非整除 page size 的最后一页；不会自动预取。updated 排序会随服务端变化移动，去重不能保证无漏项。total_count 是服务端快照元数据，不在 UI 承诺完整历史。
 
-## 共享工作条目组件（2026-11-04 返工）
+## 共享工作条目组件
 
-条目呈现由 `src/ui/work_item_row.rs` 提供，Home 的 Involved 列与全局 Issues/PR 列表消费同一实现，不再各写近似样式：
-行高固定 `WORK_ITEM_ROW_HEIGHT = 72`、标题 `TextSize::Base`/`MEDIUM` + GPUI 原生 `truncate()`、`Radius::Md` 圆角、`colors.active` 选中底、`TextSize::Xs` 元信息，图标槽竖直居中。两行内容块在固定行高内用 `justify_center` 竖直居中（`flex_col` + `gap_1` 默认会把两行顶到行首，把全部余量留在元信息下方，选中圆角底色因此下重上轻）；标题行与元信息行各自设置显式行高 `rems(字号 × 1.5)`，而不是 GPUI 默认的按字体 phi 行高——mono 的 `#number` 与 UI 字体的仓库链接不再各测各的行盒，`items_center` 居中相同行盒后才真正对齐到同一条绘制基线区域。标题行另加 `page_layout::PAGE_HEADER_INSET` 内缩，与 Home/Notifications 的列头同一 x 起点。元信息顺序统一为 `#number → 仓库名 → 状态 → 相对时间`，编号用主题 `mono_family` 且保持在最前；状态文案与图标颜色按 Open/Closed/Merged/Unknown 分别映射 `success / fg_subtle / accent / warning`，不再固定单色。组件只接收展示值与回调，两个列表各自保留数据模型、账户上下文、typed navigation 与键盘选择；Home 侧 `HomeAction` 与 `select`/`activate` 语义不变。
+条目呈现遵循与 Home 的 Involved 列共享的 `src/ui/work_item_row.rs` 约定。在 NSH 迁移中，Home 的共享行由集成作者统一移植为 `src/ui/foundation/controls::work_item_row`，本列表复用该共享行：72px 固定行高、图标槽、选中底、元信息顺序 `#number → 仓库名 → 状态 → 相对时间`、状态色按 Open/Closed/Merged/Unknown 分别映射，均保持一致。本列表只提供展示值与回调，自身保留数据模型、账户上下文、typed navigation 与键盘选择，不重复近似实现。
 
 ## Shell 接入契约
 
 ```rust,ignore
-let page = cx.new(|cx| WorkItemsView::new(
-    accounts.repo_service(), executor.clone(), WorkItemKind::Issue, window, cx,
-))?;
-page.update(cx, |view, _| view.on_repository(callback));
-// 保留标签离开前台：set_active(false, cx)
-// 重新进入：set_active(true, cx)
-// 活动账户/授权变化：rebind(cx)，失败时同样清除旧行。
+let page = WorkItemsView::new(context, WorkItemKind::Issue, on_repository);
+// 保留标签离开前台：page.set_active(false)
+// 重新进入：page.set_active(true)
+// 活动账户/授权变化：由宿主以新的 PageContext 重建页面
 ```
 
-`RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
+`WorkRepository { host, owner, name }` 只由仓库名链接触发；Search 不提供数字 repository id，因此不伪造 id。宿主验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
 
-正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`。
+正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发复核后转 `Route::Repository`。
 
-元数据行顺序为 `#number → 仓库名 → 状态 → 相对时间`：编号使用 Google Sans Code，位于仓库名之前且只出现一次；两种列表相同。整行按文本基线对齐，并对仓库名做 1 logical px 的相对上移，以抵消数字大写高度与仓库名小写高度造成的视觉偏差（相对定位不参与布局，不改变横向位置）。长仓库名在该行内仍正确截断，不会挤掉编号、状态或时间。
+时间显示：主行只显示相对年龄（`Just now`、`3 minutes ago`、`2 hours ago`、`Yesterday`、`4 days ago`），不再显示 `Updated` 前缀或 ISO 日期；精确 RFC3339 值只保留在 tooltip 与无障碍说明。解析与格式化复用共享 `relative_time`。页面可见且有行时，本地 wall clock 低频更新以刷新相对文本；窗口失活、隐藏、切离前台或视图释放时停止计时，不产生 GitHub 刷新或后台轮询。
 
-时间显示：主行只显示相对年龄（`Just now`、`3 minutes ago`、`2 hours ago`、`Yesterday`、`4 days ago`），不再显示 `Updated` 前缀或 ISO 日期；精确 RFC3339 值只保留在 tooltip 与无障碍说明。解析与格式化复用 `src/ui/home/time.rs` 的同一纯函数（本模块以 `#[path]` 引用该源文件，不复制 parser），因此 offset、小数秒、无效和未来值得到与 Home 一致的诚实结果。页面可见且有行时，本地 wall clock 每 30 秒更新一次以刷新相对文本；窗口失活、隐藏、切离前台或视图释放时停止计时，不产生 GitHub 刷新或后台轮询。这是过渡消费者接点，Notifications 的共享 helper 落地后由协调者统一为单一公共模块。
-
-标题和行没有详情动作、浏览器跳转或替代仓库跳转，也不建立空详情路由。列表 Up/Down/Home/End 改变选择并 reveal；仓库名是独立 Tab/Enter 键盘入口，刷新、筛选和 Load more 使用 Ely 控件。每个视图使用有界 GPUI ListState、共享 Bars/Motion 和 FocusHandle，按可见行渲染；追加不重置滚动，失活/窗口 activation 变化清理 motion/drag。
-
-**已修复：** 早先原生长标题越界问题已定位为 Ely `Ellipsis` 隐藏全文污染 `ListState` intrinsic width 加旧 viewport 兜底，现改为 GPUI 原生 `truncate()` 且行由列表实际可用宽度约束；DPI 感知原生帧与 460px 受限 pane 回归均通过。交付 PR 仍保持 `pending`，等待负责人本轮相对时间改动的原生验收。
+标题和行没有详情动作、浏览器跳转或替代仓库跳转，也不建立空详情路由。列表 Up/Down/Home/End 改变选择并 reveal；仓库名是独立键盘/点击入口，刷新、筛选和 Load more 使用原生控件。
 
 ## 开发预览与验证边界
 
-运行 `node scripts/verify.mjs -- cargo build --locked --example global_work_items` 后打开 `target/debug/examples/global_work_items.exe`。预览真实使用 AccountService → WorkItemSession → Search adapter → Controller → 真实行，只有 transport、临时账户目录及合成 PAT 是 fixture。页面上方开发工具条切 Issues/PR 和场景，产品本身仅有两个筛选。fixture 按请求身份应答，重复刷新、切换及重试不耗尽响应队列；未建模请求为 599 开发错误。
+运行 `node scripts/verify.mjs -- cargo run --locked --example global_work_items`（`--pr` 切 Pull Requests）。预览真实使用 AccountService → WorkItemSession → Search adapter → Controller → 真实行，只有 transport、临时账户目录及合成 PAT 是 fixture。场景包括 Mixed（跨页重复 id）、Initial failure、Append failure、Empty、Partial、Long、Delayed。fixture 按请求身份应答，重复刷新、切换及重试不耗尽响应队列；未建模请求为 599 开发错误。
 
-场景包括 Mixed（三页且跨页重复 id）、Initial failure（一次 503 后重试成功）、Append failure（第二页一次失败）、Empty、Partial（incomplete + SSO）、Long（超过 1,000）、Delayed（Assigned 延迟，Created 快速；快速切筛选验证旧响应丢弃）。PR Closed/All 展示 merged 和 unmerged。预览回调只显示仓库目标，不需要另一页面实现。
-
-测试放在适配器/data 模块及 example 编译的视图模块中，没有新增复制整套应用的 tests target。视图测试需要显式执行 `node scripts/verify.mjs -- cargo test --locked --example global_work_items ui::global_work_items`；普通 cargo test 不执行 example 内测试。原生输入、真人手感和正式 Shell 接线不能由 GPUI 测试或 fixture 推导。最终命令、原生证据和验收边界见本任务开发日志。
+离线回归测试位于 `tests/global_work_items.rs`，通过 `.agents/task/probe` 独立装配，运行 `node scripts/verify.mjs -- cargo test --manifest-path .agents/task/probe/Cargo.toml --test global_work_items`。
 
 ## 官方来源与公开响应核验
 
