@@ -49,11 +49,11 @@ impl ProfileView {
                 .debug_selector(|| "profile-website".into())
                 .role(gpui::Role::Link)
                 .aria_label(format!("Open website {label}"))
-                .flex_none()
                 .flex()
                 .items_center()
                 .gap_1p5()
                 .min_w_0()
+                .max_w_full()
                 .cursor_pointer()
                 .focusable()
                 .tab_stop(true)
@@ -79,7 +79,13 @@ impl ProfileView {
                         .size(IconSize::Xs)
                         .color(theme.colors.fg_muted),
                 )
-                .child(div().hover(|s| s.underline()).child(label))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .hover(|s| s.underline())
+                        .child(label),
+                )
                 .tooltip(ui_tooltip(url.clone()))
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if view.accepts(&request) {
@@ -227,7 +233,7 @@ fn meta(icon: IconName, text: String, cx: &App) -> AnyElement {
                 .size(IconSize::Xs)
                 .color(cx.theme().colors.fg_muted),
         )
-        .child(text)
+        .child(div().min_w_0().truncate().child(text))
         .into_any_element()
 }
 

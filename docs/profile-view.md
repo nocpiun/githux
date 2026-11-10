@@ -136,7 +136,7 @@ cargo run --example profile
 ## 2026-11-10 页面背景表面与链接命中区修复
 
 - **Profile 页面背景对齐 Workspace Tab Bar / 页面表面**：`ProfileView::render` 根节点及 section 错误面板从 `colors.bg` 改为使用语义 `colors.surface`，与 Workspace Tab 条、Island 表面以及 Home/Repository/Notifications 页面保持一致。头像上方的间隙带、Overview 标记、各 section（含空/缺失 README、加载中与错误状态）在所有支持的主题下与 Tab 栏底色无缝衔接。卡片、选区和各状态标记的对比度完整保留。
-- **文本链接命中区收敛至文本范围**：个人资料的 Website 文本链接移除 `max_w_full()`，添加 `flex_none()` 与 `Role::Link`，防止链接在 flex 列布局中横向扩展占用空白区域导致空白处误点。
+- **文本链接命中区收敛至文本范围**：个人资料的 Website 文本链接保持 `max_w_full()` 与 `min_w_0()` 边界约束，文本标签添加 `min_w_0().truncate()`，添加 `Role::Link`，防止链接在 flex 列布局中横向扩展占用整行空白区域导致空白处误点，并在极窄视口或超长 URL 时保持行内截断不超出 header 边界。
 - **页面内容完整可见无异常截断**：页面保留 `PAGE_BOTTOM = 8` / `py_4` 内部滚动留白，热力图最末周/单元格完整在 viewport 滚动范围内，不被底部边界截断。
 
 

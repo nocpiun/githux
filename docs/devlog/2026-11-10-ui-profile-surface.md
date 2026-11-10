@@ -9,7 +9,7 @@
    - 修复：将 `src/ui/profile/render.rs` 中的根背景色及 section 错误面板背景色从 `cx.theme().colors.bg` 改为 `cx.theme().colors.surface`，使 Profile 在浅色/深色主题及各种状态下与 Tab 栏无缝融合。
 2. **相关 Issue 2（文本链接命中区域）**：
    - 审计：`src/ui/profile/header.rs` 中的 website link 原使用了 `max_w_full()` 且位于 flex-col 容器中，容易在特定测量下延伸至整行空白区域，导致点击空白也会触发链接。
-   - 修复：移除 `max_w_full()`，添加 `flex_none()` 和 `Role::Link`，并保持 `gap_1p5()` 和图标 + 文本包裹，确保 hit area 仅覆盖文本与图标本身。增加回归测试验证点击链接右侧空白处不触发导航动作。
+   - 修复：保留 `max_w_full()` 与 `min_w_0()`，文本标签添加 `min_w_0().truncate()`，添加 `Role::Link`，并保持 `gap_1p5()` 和图标 + 文本包裹，确保 hit area 仅覆盖文本与图标本身，并在超长 URL/超窄容器下自然截断不溢出。增加回归测试验证点击链接右侧空白处不触发导航动作，以及超长链接截断在 header 容器内。
 3. **相关 Issue 7（Profile 裁剪检查）**：
    - 审计：检查 Profile 首尾元素在滚动容器中的可见性。顶部头像及资料在初始状态完全可见无遮挡，底部贡献日历在滚动到底部时最末周与单元格完整可见（`bottom <= 560.0`），无异常裁剪或超出边界。
 

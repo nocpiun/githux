@@ -792,6 +792,37 @@ fn public_metadata_stays_inside_the_minimum_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn long_metadata_and_website_wrap_and_truncate_inside_bounds(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let request = view.read_with(cx, |view, _| view.request());
+    let mut custom_basic = basic("person");
+    custom_basic.website_url = Some(
+        "https://very-long-subdomain-that-exceeds-the-width-of-a-narrow-window.example.com/a/very/long/path/name"
+            .into(),
+    );
+    custom_basic.location = Some(
+        "An extremely long location description that should also be safely bounded within the header column"
+            .into(),
+    );
+    view.update_in(cx, |view, _, cx| {
+        assert!(view.update_basic(&request, SectionState::Ready(custom_basic), cx));
+    });
+    cx.simulate_resize(gpui::size(px(600.0), px(560.0)));
+    frames(cx);
+    let header = cx.debug_bounds("profile-basic").unwrap();
+    let website = cx.debug_bounds("profile-website").unwrap();
+    let metadata = cx.debug_bounds("profile-public-metadata").unwrap();
+    assert!(
+        website.right() <= header.right() + px(1.0),
+        "long website link {website:?} must stay within header bounds {header:?}"
+    );
+    assert!(
+        metadata.right() <= header.right() + px(1.0),
+        "metadata row {metadata:?} must stay within header bounds {header:?}"
+    );
+}
+
+#[gpui::test]
 fn header_links_and_account_rebind_do_not_infer_authorization(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     publish_ready(&view, cx);
