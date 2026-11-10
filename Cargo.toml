@@ -16,6 +16,9 @@ ely-settings = { default-features = false, git = "https://github.com/ELY-Open-So
 # Already in the graph through GPUI; declared directly so an avatar payload is fully decoded before
 # it is published, instead of only being sniffed by its signature. Only the formats avatars use.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Already in the graph through GPUI; used for bounded static SVG rasterization in the Markdown
+# reader without adding an unmatched rasterizer version.
+resvg = { version = "0.46.0", default-features = false, features = ["text", "raster-images"] }
 pulldown-cmark = { version = "0.13.5", default-features = false }
 unicode-segmentation = "1"
 gpui = { package = "gpui-pre", version = "=0.3.10" }

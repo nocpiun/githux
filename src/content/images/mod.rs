@@ -10,11 +10,14 @@
 //!
 //! * Every picture is bounded before it can allocate: the encoded response is
 //!   capped while it streams, the header is read first, and the full decode
-//!   runs under [`image::Limits`] so an oversized or malformed payload is
-//!   rejected instead of becoming a broken-image state.
-//! * Only PNG, JPEG, WebP and GIF are accepted, matching the formats the
-//!   existing `image` dependency is built with. SVG is reported as
-//!   [`ImageFailure::Unsupported`] rather than executed or silently accepted.
+//!   runs under [`image::Limits`] (or bounded SVG tree/pixmap caps for static
+//!   SVGs) so an oversized or malformed payload is rejected instead of becoming
+//!   a broken-image state.
+//! * PNG, JPEG, WebP and GIF pass through as validated raster bytes; static
+//!   SVGs are rasterized to PNG bytes with external references and scripting
+//!   disabled, while unsupported SVG features (`<foreignObject>`, `<script>`,
+//!   SMIL animation, etc.) and unknown formats are reported as
+//!   [`ImageFailure::Unsupported`].
 //! * The reader owns the document-generation check; a provider owns the
 //!   account/authorization check. A completion carries the generation it was
 //!   requested under so a stale result can never be published into a newer

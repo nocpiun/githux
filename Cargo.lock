@@ -2002,6 +2002,7 @@ dependencies = [
  "pulldown-cmark",
  "raw-window-handle",
  "reqwest",
+ "resvg",
  "rusqlite",
  "serde",
  "serde_json",

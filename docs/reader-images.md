@@ -96,17 +96,23 @@ let reader = cx.new(|cx| {
 | 参数 | 默认 | 拒绝点 |
 | --- | --- | --- |
 | `max_response_bytes` | 5 MiB | 接收时（blob JSON/外部流式）与解码前双重检查，超限 `TooLarge`，不先缓冲 |
-| `max_decoded_bytes` | 32 MiB | 解码前按 `width*height*4` 预算，另作为 `image::Limits::max_alloc` |
-| `max_pixels` | 8,000,000 | 先读 header 得到尺寸，超过即 `TooManyPixels`，在危险分配之前 |
+| `max_decoded_bytes` | 32 MiB | 解码前按 `width*height*4` 预算，另作为 `image::Limits::max_alloc`（SVG 同时约束光栅化 pixmap 尺寸；编码后的 PNG 输出字节也受 `max_response_bytes` 约束） |
+| `max_pixels` | 8,000,000 | 先读 header 或 SVG `width`/`height`/`viewBox` 得到尺寸，超过即 `TooManyPixels`，在危险分配之前 |
 | `max_dimension` | 8192 | 同上，单边上限，同时设置 decoder 严格维度上限 |
-| `total_timeout` | 20 s | 一次完整加载的**总**截止时间：覆盖提交/每一级目录/blob 多个请求、外链重定向与 body，以及解码；超时 `Timeout` |
+| `total_timeout` | 20 s | 一次完整加载的**总**截止时间：覆盖提交/每一级目录/blob 多个请求、外链重定向与 body，以及解码/光栅化；超时 `Timeout` |
 | `max_concurrent` | 3 | 每个 provider 同时执行的加载数，semaphore 限制 |
 | `max_in_flight` | 12 | reader 已交给 provider 但未完成的请求上限；其余按可见顺序排队 |
 | `max_ready_images` | 32 | 每个 reader 当前文档保留的已解码图片数，超出按最老释放 |
 | `max_ready_bytes` | 64 MiB | 按 `w*h*4` 估计的保留预算，超出同样释放 |
 | `max_redirects` | 5 | 外链重定向上限 |
 
-拒绝发生在危险分配之前：`decode_image` 先嗅探格式，再只读 header 的尺寸，预算检查通过后才在 `image::Limits` 下完整解码验证。畸形、截断、签名正确但内容损坏都报 `Malformed`；PNG/JPEG/WebP/GIF 由固定 `image` 依赖支持。**SVG 明确 Unsupported**：当前依赖不做有界安全光栅化，不执行 raw SVG、不新增组件库、不静默改依赖；`is_svg_like` 用于区分「不支持」与「损坏」。
+拒绝发生在危险分配之前：`decode_image` 先嗅探栅格格式，再只读 header 的尺寸，预算检查通过后才在 `image::Limits` 下完整解码验证；PNG/JPEG/WebP/GIF 由固定 `image` 依赖支持。对 SVG/XML 负载，由 `is_svg_like` 识别后走有界静态 SVG 光栅化：
+
+- 使用工作区已锁定的 `resvg` / `usvg 0.46.0`（关闭 `system-fonts` 与 `memmap-fonts`，仅启用 `text` 与 `raster-images`），并将应用内置的 `Githux UI`（Noto Sans + Noto Sans SC）与 `Google Sans Code` 注入私有 `fontdb`，不扫描系统字体、不读取磁盘字体或资源文件。
+- 禁用 XML DTD（`allow_dtd: false`，阻止实体展开炸弹）、限制 XML 节点数（`50,000`）与树深度（`256`）、禁用 `<image>` 外链文件/网络解析（`resources_dir = None`，`resolve_string` 恒返回 `None`，仅允许有界内嵌栅格 data URI，禁用嵌套 SVG data URI）。
+- 显式拒绝 `<script>`、事件属性（`on*`）、`<foreignObject>`、`@import` 样式与 SMIL 动画元素（`<animate>`/`<animateTransform>`/`<animateMotion>`/`<set>`），返回 `ImageFailure::Unsupported`；畸形 XML、零尺寸或缺少固有尺寸/`viewBox` 的 SVG 返回 `ImageFailure::Malformed`。
+- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算，并按最大 2x（受像素/尺寸上限钳制）光栅化、反预乘后编码为 PNG，以 `DecodedImage { format: ImageFormat::Png, width, height, bytes }` 返回（保留 SVG 固有 / `viewBox` 宽高，无需 UI 增加 `Svg` 分支）。
+- 外部 HTTPS 请求 `Accept` 头包含 `image/svg+xml`（`image/png,image/jpeg,image/webp,image/gif,image/svg+xml,*/*;q=0.8`），不附加凭据或代理。
 
 GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按帧播放，reduced motion 下显示首帧。本模块不为动画另开线程或缓存。
 
@@ -129,9 +135,9 @@ GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按
 
 - **表格单元格内的图片不加载**：AST 在 cell 中没有块列表可挂图片，现有行为是保留 alt 文本在单元格内（见 `ast.rs` 的 `in_cell` 分支）。这不属于「已覆盖表格图片」。
 - 段落中的 inline 图片被提取为段落后的图片块；不是文字行内原位置。
-- SVG、AVIF、BMP、TIFF、ICO 等不在支持范围（Unsupported）；不执行任何图片内脚本或外部资源。
-- 不做磁盘缓存、离线图片、跨账户/跨实例的持久授权复用；不把 badge 当永久固定。
-- 尚未接入正式 Shell：`src/ui/repository/mod.rs`、profile、Home 仍使用旧 Reader API，无 provider 时行为与以前一致（显示诚实占位）。
+- 静态 SVG 经有界光栅化支持（典型徽章、统计卡片、Star History 折线图与常见文本/渐变/滤镜/裁剪）；**`<foreignObject>`、`<script>`、`on*` 事件、SMIL 动画、`@import` 样式、XML DTD/实体展开、外部 `<image href="https://...">` / 本地路径、WOFF/TTF `@font-face` 自定义网络字体**均不支持或按边界拦截/不抓取；AVIF、BMP、TIFF、ICO 仍为 `Unsupported`。
+- 注意区别**公开样本响应可达性**与**离线解码验证**：本轮已实地核查公开徽章与 Star History SVG 响应形态（见 `docs/devlog/2026-11-10-reader-svg.md`；`github-readme-stats` 公开端点当时返回部署暂停文本而非 SVG），但所有自动化回归均基于确定性本地 SVG fixture，不依赖外部网络。
+- 不做跨账户/跨实例的持久授权复用；动态 badge 仍遵循 HTTP 缓存新鲜度与重验证规则。
 - 真实 Windows 窗口的原生验收（DPI、动画、IME、真实输入分发）以预览观察和后续负责人验收为准，测试平台不能替代。
 
 ## 持久缓存适配与后续正式接线契约
