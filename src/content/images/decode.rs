@@ -292,7 +292,7 @@ fn decode_svg(bytes: &[u8], limits: &ImageLimits) -> Result<DecodedImage, ImageF
 
     validate_svg_xml(&doc)?;
 
-    let mut options = svg_usvg_options();
+    let mut options = svg_usvg_options(limits);
     options.fontdb = svg_fontdb();
 
     let tree = usvg::Tree::from_xmltree(&doc, &options).map_err(map_usvg_error)?;
@@ -411,23 +411,13 @@ fn count_svg_nesting_depth(bytes: &[u8]) -> usize {
             in_tag = false;
             if !is_declaration {
                 let self_closing = i > 0 && bytes[i - 1] == b'/';
-                let tag_str = String::from_utf8_lossy(&tag_name).to_ascii_lowercase();
-                let is_void = matches!(
-                    tag_str.as_str(),
-                    "circle"
-                        | "ellipse"
-                        | "line"
-                        | "path"
-                        | "polygon"
-                        | "polyline"
-                        | "rect"
-                        | "stop"
-                        | "image"
-                        | "use"
-                );
                 if is_closing {
                     depth = depth.saturating_sub(1);
-                } else if !self_closing && !is_void {
+                } else if !self_closing {
+                    // XML has no implicit void elements: `<rect>` is an opening
+                    // tag unless it is written as `<rect/>`. Counting every
+                    // non-self-closing element is what bounds the recursive
+                    // roxmltree tokenizer that runs before `validate_svg_xml`.
                     depth += 1;
                     max_depth = max_depth.max(depth);
                 }
@@ -534,27 +524,47 @@ fn validate_svg_xml(doc: &usvg::roxmltree::Document<'_>) -> Result<(), ImageFail
     Ok(())
 }
 
-fn svg_usvg_options() -> usvg::Options<'static> {
+fn svg_usvg_options(limits: &ImageLimits) -> usvg::Options<'static> {
+    let embedded_limits = limits.clone();
     let mut options = usvg::Options {
         // Never read files from disk or follow non-data hrefs inside `<image>`.
         resources_dir: None,
         image_href_resolver: usvg::ImageHrefResolver {
-            resolve_data: Box::new(|mime, data, opt| {
+            resolve_data: Box::new(move |mime, data, _opt| {
                 if data.len() > MAX_SVG_EMBEDDED_DATA_BYTES {
                     return None;
                 }
-                // Allow embedded raster data URLs only; block nested SVG data URLs
-                // so embedded SVG payloads cannot bypass top-level validation.
-                match mime {
-                    "image/jpg" | "image/jpeg" => Some(usvg::ImageKind::JPEG(data)),
-                    "image/png" => Some(usvg::ImageKind::PNG(data)),
-                    "image/gif" => Some(usvg::ImageKind::GIF(data)),
-                    "image/webp" => Some(usvg::ImageKind::WEBP(data)),
-                    _ => {
-                        let _ = opt;
-                        None
-                    }
+                // `usvg` only wraps these bytes; `resvg` decodes them later with
+                // no limits of its own. Validate the header against the same
+                // dimension/pixel/allocation budget before agreeing to embed it,
+                // so a highly compressed giant raster cannot allocate far past
+                // the document budget during rendering.
+                let format = match mime {
+                    "image/jpg" | "image/jpeg" => image::ImageFormat::Jpeg,
+                    "image/png" => image::ImageFormat::Png,
+                    "image/gif" => image::ImageFormat::Gif,
+                    "image/webp" => image::ImageFormat::WebP,
+                    // Nested SVG data URLs are blocked so they cannot bypass the
+                    // top-level XML/feature validation.
+                    _ => return None,
+                };
+                let (width, height) = embedded_raster_size(data.as_slice(), format)?;
+                if width > embedded_limits.max_dimension || height > embedded_limits.max_dimension {
+                    return None;
                 }
+                let pixels = u64::from(width).saturating_mul(u64::from(height));
+                if pixels > embedded_limits.max_pixels
+                    || pixels.saturating_mul(4) > embedded_limits.max_decoded_bytes as u64
+                {
+                    return None;
+                }
+                Some(match format {
+                    image::ImageFormat::Jpeg => usvg::ImageKind::JPEG(data),
+                    image::ImageFormat::Png => usvg::ImageKind::PNG(data),
+                    image::ImageFormat::Gif => usvg::ImageKind::GIF(data),
+                    image::ImageFormat::WebP => usvg::ImageKind::WEBP(data),
+                    _ => return None,
+                })
             }),
             resolve_string: Box::new(|_, _| None),
         },
@@ -611,6 +621,15 @@ fn svg_usvg_options() -> usvg::Options<'static> {
         }),
     };
     options
+}
+
+/// Header-only size of an embedded raster data URI. `into_dimensions` reads
+/// just enough of the payload to report the grid, so the budget check happens
+/// before `resvg` allocates the decoded buffer.
+fn embedded_raster_size(data: &[u8], format: image::ImageFormat) -> Option<(u32, u32)> {
+    let reader = image::ImageReader::with_format(Cursor::new(data), format);
+    let (width, height) = reader.into_dimensions().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 fn compute_svg_render_size(intrinsic_w: f32, intrinsic_h: f32, limits: &ImageLimits) -> (u32, u32) {

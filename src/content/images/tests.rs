@@ -24,6 +24,29 @@ fn png(width: u32, height: u32) -> Vec<u8> {
     encoded(image::ImageFormat::Png, width, height)
 }
 
+/// A real 2x2 PNG whose IHDR declares a different canvas, with a recomputed
+/// CRC, so the header can carry an enormous size at almost no payload cost.
+fn png_with_declared_canvas(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = png(2, 2);
+    bytes[16..20].copy_from_slice(&width.to_be_bytes());
+    bytes[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = crc32(&bytes[12..29]);
+    bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+    bytes
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 #[test]
 fn formats_are_detected_from_content_not_extension() {
     assert_eq!(detect_format(&png(2, 2)), Some(ImageFormat::Png));
@@ -266,6 +289,53 @@ fn svg_oversized_dimensions_pixels_and_node_counts_are_bounded() {
     deeply_nested.push_str("</svg>");
     assert_eq!(
         decode_image(deeply_nested.into_bytes(), &limits),
+        Err(ImageFailure::Malformed)
+    );
+}
+
+#[test]
+fn svg_embedded_raster_pixels_are_bounded_before_resvg_decodes_them() {
+    let limits = ImageLimits::default();
+    // A tiny PNG body that declares a 9000x9000 canvas: over the single-edge,
+    // pixel and decoded-byte budgets. `usvg` would accept these bytes and let
+    // `resvg` allocate the full buffer, so the resolver must reject the header.
+    let huge = png_with_declared_canvas(9_000, 9_000);
+    let encoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&huge)
+    };
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+            <rect width="64" height="64" fill="#eeeeee"/>
+            <image x="0" y="0" width="64" height="64" href="data:image/png;base64,{encoded}"/>
+        </svg>"##
+    );
+    let decoded = decode_image(svg.into_bytes(), &limits).expect("svg still renders");
+    let rendered = image::load_from_memory(&decoded.bytes)
+        .expect("valid png")
+        .to_rgba8();
+    assert!(
+        rendered
+            .pixels()
+            .all(|p| p[0] == 238 && p[1] == 238 && p[2] == 238),
+        "an embedded raster over the budget is skipped, never decoded"
+    );
+}
+
+#[test]
+fn svg_xml_nesting_counts_every_non_self_closing_element() {
+    let limits = ImageLimits::default();
+    // XML has no implicit void elements, so 300 nested `<rect>` openings are a
+    // real depth-300 tree. The pre-scan must reject it before the recursive
+    // tokenizer can exhaust the blocking worker's stack.
+    let mut nested =
+        String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    for _ in 0..300 {
+        nested.push_str(r#"<rect width="1" height="1">"#);
+    }
+    nested.push_str("</svg>");
+    assert_eq!(
+        decode_image(nested.into_bytes(), &limits),
         Err(ImageFailure::Malformed)
     );
 }

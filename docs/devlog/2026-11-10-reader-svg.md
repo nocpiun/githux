@@ -44,8 +44,8 @@
 
 | 命令 | 结果 | 运行记录 |
 | --- | --- | --- |
-| `cargo test --locked --test reader_images` | 通过，782 passed | `cb02cf16-95d7-4d03-9524-f5ab969696fa` |
-| `cargo test --locked`（全部测试目标） | 通过：1230 / 98 / 594 / 288 / 254 / 782 / 880 / 44，0 failed | `e742c5f5-074b-44a6-90c8-cfc368a47f52` |
+| `cargo test --locked --test reader_images` | 通过，785 passed（最终代码） | `9b0b60fa-5fbb-4f11-8fb2-e0033df4efd4` 内同一二进制 |
+| `cargo test --locked`（全部测试目标，最终代码） | 通过：1233 / 98 / 597 / 291 / 257 / 785 / 883 / 44，0 failed | `9b0b60fa-5fbb-4f11-8fb2-e0033df4efd4` |
 | `cargo fmt --all -- --check` | 通过 | `5b557d86-bdcd-44e7-a8bc-313e1893b5cf` |
 | `cargo clippy --locked --all-targets -- -D warnings` | 通过，零警告 | `d8e035d4-bfee-40e4-b66c-7ee67576c2ec` |
 | `cargo check --locked --all-targets` | 通过 | `86595c65-1aac-4c75-aea2-67da6e8a8e46` |
@@ -64,12 +64,21 @@
 
 同时把 `fixed_revision_images_persist_across_reopened_store_and_service` 与新增缓存测试的重开逻辑改为等待后台写入释放缓存锁（`Fixture::reopen_cache_store`），修复全量并行测试下 `CacheStore` 重开偶发 `InUse` 的既有竞态。
 
+两次全量运行中出现与本改动无关的抖动：`app::pages::home::tests::authentication_failure_cancellation_and_uncached_pages_are_not_historical_success`（`e742c5f5` 同一套件通过，单独重跑通过，随后全量再次全绿）与 `network::transport::bounded_tests::chunked_and_no_length_stop_before_eof_on_success_and_errors`（`926780ed`，本机同时出现 GitHub TLS 握手失败与 loopback 请求 `error sending request`；单独重跑通过，最终全量 `9b0b60fa` 全绿）。按 L002 记录为负载/网络环境相关的既有测试抖动，不声称已修复也不归因于本任务。
+
 ## 审查修复轮次
 
 第一轮 Codex 审查（head `35ed2fa4`，review 5838968518）提出 2 条 P2，均核实成立：
 
 1. **超采样 PNG 未按实际像素网格计费**：`DecodedImage::decoded_bytes()` 原来只用逻辑 `width`/`height`，而 2x 光栅化后的 PNG 像素是 4 倍，reader 的保留预算/淘汰会低估内存。现在 `decoded_bytes()` 对 `ImageFormat::Png` 读取 PNG IHDR 的实际宽高再计算 `w*h*4`（普通 PNG 的两者相等），并新增断言「徽章 SVG 的 decoded_bytes 等于实际 PNG 网格大小且大于逻辑尺寸」。`DecodedImage` 字段未变，UI 仍用 `width`/`height` 做比例布局。
 2. **非 ASCII 属性名切片 panic**：事件属性检查原来用 `name.len() >= 2 && name[..2].eq_ignore_ascii_case("on")`，遇到合法多字节属性名（如 `中`）会在非字符边界 panic，生产路径会被转成 `Network`。现在改用 `name.as_bytes()` 检查前两个字节，并新增回归 `svg_non_ascii_attribute_names_do_not_panic_the_decoder`。
+
+第二轮 Codex 审查（head `91d24b8e`，review 5839212482）提出 2 条 P1，均核实成立：
+
+1. **深度预扫描把图形元素当成隐式 void**：原实现把 `rect`/`path`/`image` 等当作自闭合跳过计数，但 XML 没有隐式 void 元素。`<rect>` 连续嵌套 300 层时预扫描只报 1 层，进入 roxmltree 的递归 tokenizer 后仍可能栈溢出。现在只豁免真正的 `/>` 自闭合写法；新增 `svg_xml_nesting_counts_every_non_self_closing_element`（300 层 `<rect>` 在解析前返回 `Malformed`）。
+2. **内嵌栅格只限制压缩字节、未限制解码像素**：`<image href="data:image/png;base64,...">` 的 2 MiB 编码上限拦不住高压缩的超大画布（如 8192×8192 解码后 256 MiB），而 `usvg` 只包装字节、由 `resvg` 在渲染时才解码。现在 `svg_usvg_options(limits)` 在 `resolve_data` 中用 `image::ImageReader::into_dimensions()` 只读文件头，按 `max_dimension` / `max_pixels` / `max_decoded_bytes` 校验后才交给 `usvg`；超限的内嵌图被跳过。新增 `svg_embedded_raster_pixels_are_bounded_before_resvg_decodes_them`（9000×9000 声明画布 + 极小 payload 只渲染背景色）。
+
+第一轮修复的校验（PNG 实际像素网格计费、非 ASCII 属性名不切片 panic）在本轮继续通过。
 
 ## 运行与限制
 
