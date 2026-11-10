@@ -1368,6 +1368,12 @@ fn home_work_item_row_balances_its_fill_and_shares_one_metadata_line(cx: &mut Te
             number.right() <= owner.left(),
             "#number stays before owner/repo"
         );
+        let repo_box = bounds("home-0-repository", cx);
+        let updated_box = bounds("home-time-0", cx);
+        assert!(
+            repo_box.right() < updated_box.left(),
+            "repository link bounds do not stretch across empty space to the updated time"
+        );
     }
 }
 
@@ -1936,6 +1942,109 @@ fn read_more_link_can_be_keyboard_activated(cx: &mut TestAppContext) {
             number: 40,
         }
     );
+}
+
+#[gpui::test]
+fn clicking_blank_space_after_repository_does_not_trigger_navigation(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let actions = action_sink(&view, cx);
+
+    // Get bounds of the home item row, the repository link, and the metadata container.
+    let repo_bounds = bounds("home-0-repository", cx);
+    let metadata_bounds = bounds("home-metadata-0", cx);
+
+    // Verify there is blank space between the end of the repository link and the updated time / right side of metadata
+    assert!(repo_bounds.right() + px(50.0) < metadata_bounds.right());
+
+    // Click in the empty space to the right of the repo link (e.g. repo.right() + 30px)
+    let blank_point = point(repo_bounds.right() + px(30.0), repo_bounds.center().y);
+    cx.simulate_click(blank_point, Modifiers::none());
+    cx.run_until_parked();
+
+    // No navigation action should have fired from clicking the blank space!
+    assert!(
+        actions.borrow().is_empty(),
+        "clicking blank space after repo link must not fire repository navigation: {:?}",
+        actions.borrow()
+    );
+
+    // Clicking directly on the repository link DOES fire navigation
+    click("home-0-repository", cx);
+    assert_eq!(actions.borrow().len(), 1);
+    assert!(matches!(&actions.borrow()[0], HomeAction::Repository(_)));
+
+    // Same audit for Feed repository link:
+    // Feed 0 has repo links
+    let feed_repo_bounds = bounds("feed-0-repository", cx);
+    let feed_card_bounds = bounds("feed-card-0", cx);
+    assert!(feed_repo_bounds.right() < feed_card_bounds.right());
+    let feed_blank_point = point(
+        feed_repo_bounds.right() + px(30.0),
+        feed_repo_bounds.center().y,
+    );
+    actions.borrow_mut().clear();
+    cx.simulate_click(feed_blank_point, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        actions.borrow().is_empty(),
+        "clicking blank space after feed repo link must not fire repository navigation: {:?}",
+        actions.borrow()
+    );
+
+    click("feed-0-repository", cx);
+    assert_eq!(actions.borrow().len(), 1);
+    assert!(matches!(&actions.borrow()[0], HomeAction::Repository(_)));
+}
+
+#[gpui::test]
+fn work_item_metadata_supports_compact_display_and_chinese_english_truncation(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = open(cx);
+    let mut item_0 = home_item(0, HomeItemKind::PullRequest);
+    item_0.number = 594;
+    item_0.title = "opanel-mc / opanel metadata test".into();
+    item_0.repository.owner = "opanel-mc".into();
+    item_0.repository.name = "opanel".into();
+
+    let mut item_1 = home_item(1, HomeItemKind::Issue);
+    item_1.number = 999;
+    item_1.title = "中文测试混合条目".into();
+    item_1.repository.owner = "开源社区组织".into();
+    item_1.repository.name = "核心基础库-core".into();
+
+    let outcome = home_outcome(vec![item_0, item_1], HomeReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_home(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+
+    // Verify metadata layout: #number leading, owner, repository vertically aligned and compact
+    let number_0 = bounds("home-0-number", cx);
+    let owner_0 = bounds("home-0-owner", cx);
+    let repo_0 = bounds("home-0-repository", cx);
+    assert!(number_0.right() < owner_0.left());
+    assert!(owner_0.right() < repo_0.left());
+    // Vertical alignment
+    assert!((number_0.center().y - owner_0.center().y).abs() <= px(1.0));
+    assert!((owner_0.center().y - repo_0.center().y).abs() <= px(1.0));
+
+    // Chinese/English mixed item
+    let number_1 = bounds("home-1-number", cx);
+    let owner_1 = bounds("home-1-owner", cx);
+    let repo_1 = bounds("home-1-repository", cx);
+    assert!(number_1.right() < owner_1.left());
+    assert!(owner_1.right() < repo_1.left());
+    assert!((number_1.center().y - owner_1.center().y).abs() <= px(1.0));
+    assert!((owner_1.center().y - repo_1.center().y).abs() <= px(1.0));
+
+    // In a narrow layout, items stay bounded and don't overflow
+    cx.simulate_resize(size(px(320.0), px(400.0)));
+    cx.run_until_parked();
+    let panel = bounds("home-panel", cx);
+    let row_0 = bounds("home-item-row-0", cx);
+    assert!(row_0.right() <= panel.right() + px(1.0));
 }
 
 #[test]

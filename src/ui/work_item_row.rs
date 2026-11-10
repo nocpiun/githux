@@ -161,20 +161,27 @@ fn action_link(cell: LinkCell, action: RowAction, cx: &App) -> AnyElement {
             cx.stop_propagation();
             action(window, cx);
         });
-    if flex {
-        element = element.flex_1();
-    }
     if let Some(debug) = debug {
         element = element.debug_selector(move || debug);
     }
     if let Some(tooltip) = tooltip {
         element = element.tooltip(crate::ui::tooltip::ui_tooltip(tooltip));
     }
-    element
+    element = element
         // Native truncation, not Ely `Ellipsis`: same reason as the title (L017).
         .truncate()
-        .child(label)
-        .into_any_element()
+        .child(label);
+
+    if flex {
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .child(element)
+            .into_any_element()
+    } else {
+        element.into_any_element()
+    }
 }
 
 pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
@@ -296,8 +303,14 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             name,
             name_action,
         } => {
+            let mut repo_cell = div()
+                .flex()
+                .items_center()
+                .gap_0p5()
+                .min_w_0()
+                .overflow_hidden();
             if !owner.trim().is_empty() {
-                metadata = metadata
+                repo_cell = repo_cell
                     .child(action_link(
                         LinkCell {
                             id: selectors
@@ -315,7 +328,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                     ))
                     .child(div().flex_none().child("/"));
             }
-            metadata = metadata.child(action_link(
+            repo_cell = repo_cell.child(action_link(
                 LinkCell {
                     id: selectors
                         .repository
@@ -330,6 +343,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                 name_action,
                 cx,
             ));
+            metadata = metadata.child(div().flex_1().min_w_0().overflow_hidden().child(repo_cell));
         }
     }
     metadata = metadata.child(

@@ -73,7 +73,12 @@ fn repository_links(
     prefix: &str,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
-    let mut row = div().flex().items_center().min_w_0().overflow_hidden();
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .min_w_0()
+        .overflow_hidden();
     if !repo.owner.trim().is_empty() {
         row = row
             .child(link(
