@@ -133,7 +133,12 @@ cargo run --example profile
 
 覆盖见 `src/ui/profile/tests.rs` 与 `heatmap.rs`：binding/account/target 变化与旧更新、部分 GraphQL 数据/错误、缺失基本字段、pin 顺序、gist-only/mixed/truncated/unclassified、真实空与 denied、Reader 链接、typed repository action、闰年/跨年、zero/missing/unknown levels、键盘/鼠标 day detail、长 README/元数据与有界横向范围。实际完整检查与本机窗口边界见 [开发日志](devlog/2026-10-28-profile-view.md)。
 
-## 本轮设计基线与共享 API 阻塞
+## 2026-11-10 页面背景表面与链接命中区修复
+
+- **Profile 页面背景对齐 Workspace Tab Bar / 页面表面**：`ProfileView::render` 根节点及 section 错误面板从 `colors.bg` 改为使用语义 `colors.surface`，与 Workspace Tab 条、Island 表面以及 Home/Repository/Notifications 页面保持一致。头像上方的间隙带、Overview 标记、各 section（含空/缺失 README、加载中与错误状态）在所有支持的主题下与 Tab 栏底色无缝衔接。卡片、选区和各状态标记的对比度完整保留。
+- **文本链接命中区收敛至文本范围**：个人资料的 Website 文本链接移除 `max_w_full()`，添加 `flex_none()` 与 `Role::Link`，防止链接在 flex 列布局中横向扩展占用空白区域导致空白处误点。
+- **页面内容完整可见无异常截断**：页面保留 `PAGE_BOTTOM = 8` / `py_4` 内部滚动留白，热力图最末周/单元格完整在 viewport 滚动范围内，不被底部边界截断。
+
 
 本轮实际读取负责人指定的原始 04-profile.png，比较内容区的横向资料头、Overview 层级、短 README、两列四卡片及贡献图空间关系；原图仅在忽略目录，不上传。保留 Ely token/字体，不复制旧 Shell/侧栏/颜色，不恢复其他 tabs、Activity 或写操作。
 

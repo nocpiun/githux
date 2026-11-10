@@ -492,6 +492,12 @@ The final sentence is still inside the document.
         "outer scrolling reaches Pinned repositories: {repositories:?}"
     );
     assert!(cx.debug_bounds("profile-contribution-day-0").is_some());
+    // All contribution cells are reachable and not clipped
+    let last_day = cx.debug_bounds("profile-contribution-day-3").unwrap();
+    assert!(
+        last_day.bottom() <= px(560.0),
+        "last contribution cell remains visible/reachable when scrolled to bottom: {last_day:?}"
+    );
 }
 
 #[gpui::test]
@@ -792,6 +798,22 @@ fn header_links_and_account_rebind_do_not_infer_authorization(cx: &mut TestAppCo
     cx.simulate_resize(gpui::size(px(880.0), px(560.0)));
     frames(cx);
     let website = cx.debug_bounds("profile-website").unwrap();
+    let header = cx.debug_bounds("profile-basic").unwrap();
+    // Website link must not stretch to cover blank flex space in the column
+    assert!(
+        website.right() < header.right() - px(50.0),
+        "website hit area must not span full container width: {website:?} vs {header:?}"
+    );
+    // Clicking past the link hit area must not trigger external navigation
+    cx.simulate_click(
+        point(website.right() + px(20.0), website.center().y),
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |view, _| view.last_action().is_none()),
+        "clicking blank space past website link must not emit an action"
+    );
     cx.simulate_click(website.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     assert!(matches!(
