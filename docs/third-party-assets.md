@@ -23,13 +23,13 @@ cargo metadata --locked --offline --format-version 1
 
 ## 1. 字体
 
-`src/platform/fonts.rs` 嵌入四个应用私有 UI 字面（Githux UI）与原 Google Sans Code。UI 衍生字面保留 Noto Sans v2.015 的全部 2,965 字符映射，补入 Noto Sans SC 2.004-H2 的 30,361 映射；400/500/600/700 均使用源字体对应权重，主字族改名以避免与上游/系统字体混淆。官方固定来源、每个文件体积/哈希与可复现生成过程统一维护于 [字体清单](../assets/fonts/README.md)，生成脚本为 [build-ui-fonts.py](../scripts/build-ui-fonts.py)。
+`src/platform/fonts.rs` 嵌入四个应用私有 UI 字面（Githux UI）与原 Google Sans Code。UI 衍生字面全部来自 Noto Sans SC 2.004-H2 的 30,890 映射（覆盖中文汉字、全套拉丁字母、数字及 CJK 标点）；400/500/600/700 均使用源字体对应权重，主字族改名以避免与上游/系统字体混淆。官方固定来源、每个文件体积/哈希与可复现生成过程统一维护于 [字体清单](../assets/fonts/README.md)，生成脚本为 [build-ui-fonts.py](../scripts/build-ui-fonts.py)。
 
-- 四份 UI 字面共 43,707,220 B（41.68 MiB），替换旧 Latin-only 的 1,866,600 B。仅包含这两个 Noto 来源，没有引入其他语言字体集。
-- Noto Sans 与 Noto Sans SC 均为 SIL OFL 1.1；随包携带 `assets/fonts/githux-ui/OFL-NotoSans.txt`、`OFL-NotoSansSC.txt`。SC 来源原声明含 Reserved Font Name `Source`，衍生字体使用 `Githux UI` 名称。两份来源的版权和许可文本保留，未改写。
+- 四份 UI 字面共 41,855,896 B（39.92 MiB）。仅包含该 Noto Sans SC 官方来源，没有引入其他语言字体集。
+- Noto Sans SC 为 SIL OFL 1.1；随包携带 `assets/fonts/githux-ui/OFL-NotoSansSC.txt`。SC 来源原声明含 Reserved Font Name `Source`，衍生字体使用 `Githux UI` 名称。版权和许可文本保留，未改写。
 - Google Sans Code v7.001 原文件 268,264 B，SHA-256 `74642762fae66d5883077794a763e1086394b8cb72f2623e456e06359dc5c64b`；字体与许可均未改。
-- CI artifact 打包步骤同时携带两份 UI 来源 OFL 及 Google Sans Code OFL。许可文本不嵌入 binary，单独分发时仍必须随附。
-- Windows GPUI 0.3.10 的显式 fallback 查询只使用系统字体集合。合成字面让中文直接命中应用内注册字体，不依赖系统安装；逐映射轮廓/advance 比对和原生 shaping 证据见[字体开发日志](devlog/2026-10-29-ui-fonts.md)。
+- CI artifact 打包步骤同时携带 UI 来源 OFL 及 Google Sans Code OFL。许可文本不嵌入 binary，单独分发时仍必须随附。
+- Windows GPUI 0.3.10 的显式 fallback 查询只使用系统字体集合。将 Noto Sans SC 作为全量 UI 字体让英文与中文直接命中应用内注册字体，不依赖系统安装；逐映射轮廓/advance 比对和原生 shaping 证据见[字体开发日志](devlog/2026-10-29-ui-fonts.md)。
 
 ### 上游 Ely 附带的字体（非本仓库文件）
 
@@ -171,7 +171,7 @@ grep -c '^\[\[package\]\]' Cargo.lock
 
 当前没有任何安装包/发布产物。未来打包/分发时，至少需要随附：
 
-1. UI 两份来源 OFL（`assets/fonts/githux-ui/OFL-NotoSans.txt`、`OFL-NotoSansSC.txt`）及 `assets/fonts/google-sans-code/OFL.txt`。
+1. UI 来源 OFL（`assets/fonts/githux-ui/OFL-NotoSansSC.txt`）及 `assets/fonts/google-sans-code/OFL.txt`。
 2. IBM Plex Sans 的 OFL：`assets/licenses/ibm-plex-sans-ofl.txt`（binary 内也有一份 asset，但打包仍应显式随附）。
 3. Ely MIT：`assets/licenses/ely-mit.txt`（覆盖 `ely-core`/`ely-settings`/`ely-canvas` 与提取的 Markdown 派生代码）。
 4. Lucide 图标 ISC + Feather MIT：`assets/licenses/lucide-icons-isc.txt`。
