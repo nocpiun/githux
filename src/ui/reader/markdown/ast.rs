@@ -15,6 +15,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+use super::super::images;
 use super::html::{self, Element, Node};
 
 /// How a stretch of inline text prints.
@@ -106,6 +107,9 @@ pub enum Block {
     Image {
         alt: String,
         url: String,
+        /// HTML `width`/`height` hints, if the author wrote an `<img>` tag
+        /// with them. Markdown images leave this empty.
+        hints: images::ImageHints,
     },
     /// Raw HTML kept for compatibility with callers that still match on it.
     ///
@@ -311,7 +315,11 @@ impl Building {
                 Open::Image { url, .. } => {
                     let start = start.min(end);
                     let alt = self.inline.text[start..end].to_string();
-                    self.notes.push(Block::Image { alt, url });
+                    self.notes.push(Block::Image {
+                        alt,
+                        url,
+                        hints: images::ImageHints::default(),
+                    });
                     if self.in_cell {
                         // A cell has no block list for notes, and images are
                         // never loaded: the description is the only readable
@@ -1243,7 +1251,24 @@ fn push_html_image(element: &Element, out: &mut Vec<Block>) {
     out.push(Block::Image {
         alt: alt.to_string(),
         url: url.to_string(),
+        hints: html_image_hints(element),
     });
+}
+
+/// The `width`/`height` an `<img>` tag asks for, as CSS pixel hints. A value
+/// that is not a positive integer is ignored, matching how a browser treats a
+/// malformed dimension; percentages and units are intentionally unsupported.
+fn html_image_hints(element: &Element) -> images::ImageHints {
+    let parse = |name: &str| {
+        element
+            .attr(name)
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|value| *value > 0)
+    };
+    images::ImageHints {
+        width: parse("width"),
+        height: parse("height"),
+    }
 }
 
 fn push_html_code(element: &Element, out: &mut Vec<Block>) {
@@ -1478,6 +1503,7 @@ fn append_html_element(
                 notes.push(Block::Image {
                     alt: alt.to_string(),
                     url: url.to_string(),
+                    hints: html_image_hints(element),
                 });
             }
         }
@@ -1674,7 +1700,7 @@ mod tests {
     fn pictures_keep_only_alt_text_and_never_load() {
         let doc = parse("![alt 图](file://attacker/share/a.png)\n\ntext");
         assert!(
-            matches!(&doc.blocks[0], Block::Image { alt, url } if alt == "alt 图" && url.contains("file:"))
+            matches!(&doc.blocks[0], Block::Image { alt, url, .. } if alt == "alt 图" && url.contains("file:"))
         );
         assert!(matches!(&doc.blocks[1], Block::Paragraph(p) if p.text == "text"));
     }

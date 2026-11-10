@@ -410,6 +410,8 @@ fn healthy_readme() -> String {
          ![logo]({LOGO_URL})\n\n\
          A picture whose bytes arrive late:\n\n\
          ![slow](images/slow.png)\n\n\
+         An HTML badge with an explicit size:\n\n\
+         <img src=\"images/diagram.png\" width=\"64\" height=\"36\" alt=\"badge\">\n\n\
          Trailing prose keeps the document from ending on a picture.\n",
         README_PATH_DIR = "docs",
     )
