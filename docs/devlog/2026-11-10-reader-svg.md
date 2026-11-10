@@ -44,8 +44,8 @@
 
 | 命令 | 结果 | 运行记录 |
 | --- | --- | --- |
-| `cargo test --locked --test reader_images` | 通过，785 passed（最终代码） | `9b0b60fa-5fbb-4f11-8fb2-e0033df4efd4` 内同一二进制 |
-| `cargo test --locked`（全部测试目标，最终代码） | 通过：1233 / 98 / 597 / 291 / 257 / 785 / 883 / 44，0 failed | `9b0b60fa-5fbb-4f11-8fb2-e0033df4efd4` |
+| `cargo test --locked --test reader_images` | 通过，786 passed（最终代码） | `0bf680e2-33d6-428f-a108-417e84e79338` 内同一二进制 |
+| `cargo test --locked`（全部测试目标，最终代码） | 通过：1234 / 98 / 598 / 292 / 258 / 786 / 884 / 44，0 failed | `0bf680e2-33d6-428f-a108-417e84e79338` |
 | `cargo fmt --all -- --check` | 通过 | `5b557d86-bdcd-44e7-a8bc-313e1893b5cf` |
 | `cargo clippy --locked --all-targets -- -D warnings` | 通过，零警告 | `d8e035d4-bfee-40e4-b66c-7ee67576c2ec` |
 | `cargo check --locked --all-targets` | 通过 | `86595c65-1aac-4c75-aea2-67da6e8a8e46` |
@@ -79,6 +79,10 @@
 2. **内嵌栅格只限制压缩字节、未限制解码像素**：`<image href="data:image/png;base64,...">` 的 2 MiB 编码上限拦不住高压缩的超大画布（如 8192×8192 解码后 256 MiB），而 `usvg` 只包装字节、由 `resvg` 在渲染时才解码。现在 `svg_usvg_options(limits)` 在 `resolve_data` 中用 `image::ImageReader::into_dimensions()` 只读文件头，按 `max_dimension` / `max_pixels` / `max_decoded_bytes` 校验后才交给 `usvg`；超限的内嵌图被跳过。新增 `svg_embedded_raster_pixels_are_bounded_before_resvg_decodes_them`（9000×9000 声明画布 + 极小 payload 只渲染背景色）。
 
 第一轮修复的校验（PNG 实际像素网格计费、非 ASCII 属性名不切片 panic）在本轮继续通过。
+
+第三轮 Codex 审查（head `827a2e4`，review 5839445655）提出 1 条 P1，核实成立：
+
+1. **深度预扫描不识别引号内的 `>`**：`<g a="/>">` 的 `/` 与 `>` 都在属性值里，但简单扫描把它当自闭合，20,000 层嵌套仍然只报 1 层并进入递归 XML 解析器。现在 `count_svg_nesting_depth` 是一个小型非递归扫描器：跳过 `<!-- -->`、`<![CDATA[ ]]>`、`<? ?>` 和 `<!DOCTYPE ...>`（含内部子集括号与引号），在开始标签内跟踪 `'`/`"` 引号状态，只在引号外把 `>` 当标签结束、并要求结束前最后一个非空白字节是 `/` 才判自闭合。新增 `svg_depth_preflight_ignores_tag_like_text_in_quotes_comments_and_cdata`：300 层 `<g a="/>">` 在解析前 `Malformed`，而注释/CDATA/引号中包含 `<g>`、`>`、`/>` 的合法小文档正常渲染。
 
 ## 运行与限制
 

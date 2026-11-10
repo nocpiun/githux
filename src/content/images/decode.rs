@@ -385,49 +385,125 @@ fn decode_svg(bytes: &[u8], limits: &ImageLimits) -> Result<DecodedImage, ImageF
 }
 
 fn count_svg_nesting_depth(bytes: &[u8]) -> usize {
+    let len = bytes.len();
     let mut depth: usize = 0;
     let mut max_depth: usize = 0;
-    let mut in_tag = false;
-    let mut is_closing = false;
-    let mut is_declaration = false;
-    let mut tag_name = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'<' {
-            in_tag = true;
-            is_closing = false;
-            is_declaration = false;
-            tag_name.clear();
-            if i + 1 < bytes.len() {
-                if bytes[i + 1] == b'/' {
-                    is_closing = true;
-                    i += 1;
-                } else if bytes[i + 1] == b'!' || bytes[i + 1] == b'?' {
-                    is_declaration = true;
+
+    while i < len {
+        while i < len && bytes[i] != b'<' {
+            i += 1;
+        }
+        if i >= len {
+            break;
+        }
+
+        // Comments, CDATA and processing instructions can contain `<`, `>` and
+        // quotes that are not markup delimiters; skip them as a unit.
+        if bytes[i..].starts_with(b"<!--") {
+            i = find_after(bytes, i + 4, b"-->").unwrap_or(len);
+            continue;
+        }
+        if bytes[i..].starts_with(b"<![CDATA[") {
+            i = find_after(bytes, i + 9, b"]]>").unwrap_or(len);
+            continue;
+        }
+        if bytes[i..].starts_with(b"<?") {
+            i = find_after(bytes, i + 2, b"?>").unwrap_or(len);
+            continue;
+        }
+        if bytes[i..].starts_with(b"<!") {
+            // `<!DOCTYPE ...>` may carry an internal subset with nested `<...>`
+            // declarations, quoted strings and brackets. DTDs are rejected by
+            // the parser anyway; the scanner only has to skip them safely.
+            let mut j = i + 2;
+            let mut bracket_depth = 0usize;
+            let mut quote: Option<u8> = None;
+            while j < len {
+                let byte = bytes[j];
+                match quote {
+                    Some(active) if byte == active => quote = None,
+                    Some(_) => {}
+                    None => match byte {
+                        b'"' | b'\'' => quote = Some(byte),
+                        b'[' => bracket_depth += 1,
+                        b']' => bracket_depth = bracket_depth.saturating_sub(1),
+                        b'>' if bracket_depth == 0 => {
+                            j += 1;
+                            break;
+                        }
+                        _ => {}
+                    },
                 }
+                j += 1;
             }
-        } else if b == b'>' && in_tag {
-            in_tag = false;
-            if !is_declaration {
-                let self_closing = i > 0 && bytes[i - 1] == b'/';
-                if is_closing {
-                    depth = depth.saturating_sub(1);
-                } else if !self_closing {
-                    // XML has no implicit void elements: `<rect>` is an opening
-                    // tag unless it is written as `<rect/>`. Counting every
-                    // non-self-closing element is what bounds the recursive
-                    // roxmltree tokenizer that runs before `validate_svg_xml`.
-                    depth += 1;
-                    max_depth = max_depth.max(depth);
+            i = j;
+            continue;
+        }
+
+        if bytes.get(i + 1) == Some(&b'/') {
+            depth = depth.saturating_sub(1);
+            i = skip_tag(bytes, i + 2);
+            continue;
+        }
+
+        let (next, self_closing) = scan_start_tag(bytes, i + 1);
+        if !self_closing {
+            depth += 1;
+            max_depth = max_depth.max(depth);
+        }
+        i = next;
+    }
+
+    max_depth
+}
+
+/// Returns the byte index just past `needle` at or after `from`.
+fn find_after(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    if from >= bytes.len() || needle.is_empty() {
+        return None;
+    }
+    bytes[from..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| from + offset + needle.len())
+}
+
+/// Skips the remainder of an end tag. Quoting cannot appear in a well-formed
+/// end tag, so the first `>` ends it.
+fn skip_tag(bytes: &[u8], from: usize) -> usize {
+    bytes[from..]
+        .iter()
+        .position(|byte| *byte == b'>')
+        .map(|offset| from + offset + 1)
+        .unwrap_or(bytes.len())
+}
+
+/// Scans a start tag starting at its name, honouring quoted attribute values.
+/// Returns the index just past the closing `>` and whether the tag was written
+/// as `<.../>`. A `/>` inside a quoted value is not a self-closing marker.
+fn scan_start_tag(bytes: &[u8], from: usize) -> (usize, bool) {
+    let len = bytes.len();
+    let mut i = from;
+    let mut quote: Option<u8> = None;
+    let mut last_significant = 0u8;
+    while i < len {
+        let byte = bytes[i];
+        match quote {
+            Some(active) if byte == active => quote = None,
+            Some(_) => {}
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'>' => {
+                    return (i + 1, last_significant == b'/');
                 }
-            }
-        } else if in_tag && !b.is_ascii_whitespace() && b != b'/' && tag_name.len() < 32 {
-            tag_name.push(b);
+                b' ' | b'\t' | b'\r' | b'\n' => {}
+                _ => last_significant = byte,
+            },
         }
         i += 1;
     }
-    max_depth
+    (len, false)
 }
 
 /// Whether the root `<svg>` declares an intrinsic size we can preserve:

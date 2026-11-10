@@ -294,6 +294,36 @@ fn svg_oversized_dimensions_pixels_and_node_counts_are_bounded() {
 }
 
 #[test]
+fn svg_depth_preflight_ignores_tag_like_text_in_quotes_comments_and_cdata() {
+    let limits = ImageLimits::default();
+
+    // A quoted attribute value containing `/>` must not make the element look
+    // self-closing: 300 of these are a real depth-300 tree and have to be
+    // rejected before the recursive XML parser runs.
+    let mut nested =
+        String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    for _ in 0..300 {
+        nested.push_str(r#"<g a="/>">"#);
+    }
+    nested.push_str("</svg>");
+    assert_eq!(
+        decode_image(nested.into_bytes(), &limits),
+        Err(ImageFailure::Malformed)
+    );
+
+    // The same delimiters in comments, CDATA and quoted values are ordinary
+    // text and must not confuse the preflight or reject a valid document.
+    let valid = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+        <!-- <g><g><g> -->
+        <![CDATA[ <g> not markup ]]>
+        <text data-note="a > b and /> here" x="2" y="20" font-size="10">ok</text>
+        <g data-compare='1 > 0'><rect width="10" height="10"/></g>
+    </svg>"##;
+    let decoded = decode_image(valid.as_bytes().to_vec(), &limits).expect("valid SVG renders");
+    assert_eq!((decoded.width, decoded.height), (40, 40));
+}
+
+#[test]
 fn svg_embedded_raster_pixels_are_bounded_before_resvg_decodes_them() {
     let limits = ImageLimits::default();
     // A tiny PNG body that declares a 9000x9000 canvas: over the single-edge,

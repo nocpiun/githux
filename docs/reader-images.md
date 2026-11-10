@@ -110,7 +110,7 @@ let reader = cx.new(|cx| {
 
 - 使用工作区已锁定的 `resvg` / `usvg 0.46.0`（关闭 `system-fonts` 与 `memmap-fonts`，仅启用 `text` 与 `raster-images`），并将应用内置的 `Githux UI`（Noto Sans + Noto Sans SC）与 `Google Sans Code` 注入私有 `fontdb`，不扫描系统字体、不读取磁盘字体或资源文件。
 - 内嵌 `<image>` 的 `data:` 光栅只在编码字节 ≤ 2 MiB 且其文件头尺寸通过同一 `max_dimension` / `max_pixels` / `max_decoded_bytes` 预算时才被接受；`usvg` 本身不限制其后解码内存，因此不能只靠压缩字节上限。
-- 禁用 XML DTD（`allow_dtd: false`，阻止实体展开炸弹）、限制 XML 节点数（`50,000`），并在调用递归 XML 解析器之前用有界扫描拒绝超过 `256` 层的嵌套（XML 没有隐式 void 元素：`<rect>` 只有写成 `<rect/>` 才算自闭合），避免深度树在解析阶段栈溢出；同时禁用 `<image>` 外链文件/网络解析（`resources_dir = None`，`resolve_string` 恒返回 `None`，仅允许有界内嵌栅格 data URI，禁用嵌套 SVG data URI）。
+- 禁用 XML DTD（`allow_dtd: false`，阻止实体展开炸弹）、限制 XML 节点数（`50,000`），并在调用递归 XML 解析器之前用有界扫描拒绝超过 `256` 层的嵌套（XML 没有隐式 void 元素：`<rect>` 只有写成 `<rect/>` 才算自闭合；扫描会跳过注释、CDATA、处理指令与 DOCTYPE，并尊重引号内的属性值，因此 `a="/>">` 之类的值不会被误判为自闭合），避免深度树在解析阶段栈溢出；同时禁用 `<image>` 外链文件/网络解析（`resources_dir = None`，`resolve_string` 恒返回 `None`，仅允许有界内嵌栅格 data URI，禁用嵌套 SVG data URI）。
 - 显式拒绝 `<script>`、事件属性（`on*`）、`<foreignObject>`、`@import` 样式与 SMIL 动画元素（`<animate>`/`<animateTransform>`/`<animateMotion>`/`<set>`），返回 `ImageFailure::Unsupported`；畸形 XML、零尺寸或缺少固有尺寸/`viewBox` 的 SVG 返回 `ImageFailure::Malformed`。
 - 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算，并按最大 2x（受像素/尺寸上限钳制）光栅化、反预乘后编码为 PNG，以 `DecodedImage { format: ImageFormat::Png, width, height, bytes }` 返回（保留 SVG 固有 / `viewBox` 宽高，无需 UI 增加 `Svg` 分支）。`DecodedImage::decoded_bytes()` 读取 PNG 实际像素网格计费（读 IHDR 宽高），因此超采样后的 SVG 不会因为只按逻辑尺寸计费而绕过每文档保留预算。
 - 外部 HTTPS 请求 `Accept` 头包含 `image/svg+xml`（`image/png,image/jpeg,image/webp,image/gif,image/svg+xml,*/*;q=0.8`），不附加凭据或代理。
