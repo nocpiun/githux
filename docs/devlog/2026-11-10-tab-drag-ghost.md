@@ -13,6 +13,7 @@
 - 拖起 tab 的 `on_drag` 回调里 `window.defer` 后 `cx.set_active_drag_cursor_style(CursorStyle::Arrow, window)`：拖拽光标在整个手势期间保持默认箭头，手势结束随 GPUI 的 `active_drag` 清除。源 tab 保留 `cursor_pointer`（按下前仍是手指），所以无需把 `Arrow` 写进源元素的 `cursor` 样式。
 - `TabDrag` payload 增加 `title`/`icon` 快照：ghost 显示按下时刻的标签与图标，不随拖拽中途的路由标题变化而变。
 - `Shell::finish_tab_drag`（Escape/取消、失焦、关闭、渲染循环发现平台拖拽结束）在 `tab_drag.take()` 之外调用 `cx.stop_active_drag(window)`，让 Escape 取消或失焦时 GPUI 的平台拖拽（及其 ghost）也被结束，避免残留 ghost。这是本次修复的真实缺陷：旧实现只清 shell 状态，GPUI 的 `active_drag` 仍活到鼠标释放，导致取消后 ghost 残留。
+- `Shell::close_tab` 关闭被拖拽的 tab 时（如 Ctrl+W）也调用 `cx.stop_active_drag(window)`：关闭路径原本直接清 `self.tab_drag`，不结束平台拖拽，ghost 会继续跟随一个已被删除的 tab。
 - 源 tab 仍用 `.when(dragging, |tab| tab.opacity(0.45))` 保留为源占位，drop marker 逻辑、落点算术、边缘自动滚动、owner guard 与关闭/激活行为全部未改动。
 
 ## 验证
@@ -22,8 +23,8 @@
 - `cargo check --locked --all-targets`：通过。
 - `cargo clippy --locked --all-targets -- -D warnings`：通过。
 - `cargo fmt --all -- --check`：通过。
-- `cargo test --locked --bin githux drag`：42 项全部通过，含既有 tab 拖拽/排序/取消/边缘滚动回归与新增 `a_drag_shows_a_ghost_that_follows_the_grab_offset_and_clears`。
-- 新增回归断言：拖拽前无 ghost；拖拽中 ghost 尺寸等于 `TAB_WIDTH × TAB_HEIGHT`、指针保持在 ghost 内、指针移动 40px 时 ghost 同步移动 40px（固定抓取偏移）；drop 到最后一个 tab 之后顺序变为 `[home, b, a]` 且 ghost 消失；Escape 取消（真实 `CancelTabDrag` action）后 ghost 消失、顺序不变。
+- `cargo test --locked --bin githux`：1227 项全部通过，含既有 tab 拖拽/排序/取消/边缘滚动回归与新增 `a_drag_shows_a_ghost_that_follows_the_grab_offset_and_clears`、`closing_a_dragged_tab_clears_the_ghost`。
+- 新增回归断言：拖拽前无 ghost；拖拽中 ghost 尺寸等于 `TAB_WIDTH × TAB_HEIGHT`、指针保持在 ghost 内、指针移动 40px 时 ghost 同步移动 40px（固定抓取偏移）；drop 到最后一个 tab 之后顺序变为 `[home, b, a]` 且 ghost 消失；Escape 取消（真实 `CancelTabDrag` action）后 ghost 消失、顺序不变；关闭被拖拽的 tab 后 ghost 立即消失、顺序不残留旧索引。
 
 未覆盖/边界（不宣称已做视觉验收）：GPUI 测试平台不驱动 Windows 原生光标字形、真实指针抓取/手感与窗口失焦下的平台拖拽结束；这些属于负责人手动验收范围。光标为“默认箭头”的断言依据是 GPUI 0.3.10 源码：drag 光标样式取自拖起元素的 `mouse_cursor` 并由 `Window::draw` 在 drag 视图绘制时写入窗口；本实现通过 `set_active_drag_cursor_style(Arrow)` 显式覆盖，手势结束后 `stop_active_drag`/mouse-up 路径会清空。
 

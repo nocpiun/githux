@@ -2493,6 +2493,54 @@ fn a_drag_shows_a_ghost_that_follows_the_grab_offset_and_clears(cx: &mut TestApp
     );
 }
 
+/// Closing the tab underneath a live drag ends both the shell drag and GPUI's platform drag, so
+/// the lifted preview cannot keep following a pointer whose tab no longer exists.
+#[gpui::test]
+fn closing_a_dragged_tab_clears_the_ghost(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    let start = bounds("tab-1", cx);
+    let grab = start.center();
+    cx.simulate_mouse_move(grab, None, Modifiers::none());
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let target = gpui::point(grab.x + px(80.0), grab.y);
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(grab.x + (target.x - grab.x) * step as f32 / 8.0, target.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), Some(a));
+    assert!(cx.debug_bounds("tab-drag-ghost").is_some());
+
+    // Close the carried tab through the real path, as Ctrl+W would.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.close_tab(a, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "closing the dragged tab clears the ghost immediately"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b],
+        "the close wins and no stale index moves another tab"
+    );
+}
+
 /// A press on the close button or a middle click never starts a reorder.
 #[gpui::test]
 fn close_and_middle_click_do_not_start_a_drag(cx: &mut TestAppContext) {

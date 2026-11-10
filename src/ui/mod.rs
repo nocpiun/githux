@@ -1180,9 +1180,11 @@ impl Shell {
         }
         self.tab_motion.cancel();
         // A drag of the tab that just closed is over: keeping it would let a stale slot move
-        // whichever tab now sits at that index.
+        // whichever tab now sits at that index, and the platform drag would keep drawing its
+        // lifted preview under the pointer.
         if self.tab_drag.as_ref().is_some_and(|drag| drag.id == id) {
             self.tab_drag = None;
+            cx.stop_active_drag(window);
             self.tab_bars
                 .hold(false, self.tab_now_ms(), cx.reduce_motion());
             #[cfg(test)]
