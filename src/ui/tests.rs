@@ -2377,6 +2377,122 @@ fn dragging_with_the_mouse_starts_from_a_real_press_and_moves(cx: &mut TestAppCo
     );
 }
 
+/// A real drag paints a lifted preview that follows the pointer with a fixed grab offset and
+/// disappears on drop and on cancellation. The preview is GPUI's drag view, so the test platform
+/// lays it out at the pointer exactly like production; it only cannot prove the native cursor
+/// glyph or that a still-following ghost looks right to the eye.
+#[gpui::test]
+fn a_drag_shows_a_ghost_that_follows_the_grab_offset_and_clears(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "no ghost exists before a drag starts"
+    );
+
+    // Press near the tab's left edge, then drag right by a known amount.
+    let start = bounds("tab-1", cx);
+    let grab = gpui::point(start.left() + px(10.0), start.center().y);
+    cx.simulate_mouse_move(grab, None, Modifiers::none());
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let row = bounds("tab-scroll", cx);
+    let target = gpui::point(grab.x + px(140.0), row.center().y);
+    for step in 1..=10 {
+        cx.simulate_mouse_move(
+            gpui::point(grab.x + (target.x - grab.x) * step as f32 / 10.0, target.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        Some(a),
+        "the press started a reorder"
+    );
+
+    let ghost = bounds("tab-drag-ghost", cx);
+    assert_eq!(ghost.size.width, px(super::geometry::TAB_WIDTH));
+    assert_eq!(ghost.size.height, px(super::geometry::TAB_HEIGHT));
+    // The press started inside the tab, so the lifted preview keeps the pointer inside itself
+    // instead of centering under it or lagging past the tab's far edge.
+    assert!(
+        ghost.left() <= target.x + px(1.0) && ghost.right() >= target.x - px(1.0),
+        "the pointer stays inside the ghost horizontally: {:?} at {:?}",
+        ghost,
+        target
+    );
+    let offset = ghost.left() - target.x;
+
+    // Moving the pointer by a known amount moves the ghost by exactly the same amount: the grab
+    // offset stays fixed, which is what "follows the pointer" means.
+    let follow = gpui::point(target.x + px(40.0), target.y);
+    cx.simulate_mouse_move(follow, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let followed = bounds("tab-drag-ghost", cx);
+    assert!(
+        (followed.left() - follow.x - offset).abs() <= px(1.0),
+        "the ghost travels one-for-one with the pointer: {:?} after {:?}",
+        followed,
+        follow
+    );
+
+    // Release past the last tab: the preview stops painting and the carried tab lands at the end.
+    let drop = gpui::point(row.right() - px(8.0), row.center().y);
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(follow.x + (drop.x - follow.x) * step as f32 / 8.0, drop.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(drop, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b, a],
+        "dropping past the last tab moves the carried tab to the end"
+    );
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "the ghost is gone after the drop"
+    );
+
+    // A second drag that is cancelled (released without moving anything) also clears the ghost.
+    let start = bounds("tab-1", cx);
+    let grab = start.center();
+    cx.simulate_mouse_move(grab, None, Modifiers::none());
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let target = gpui::point(grab.x + px(80.0), grab.y);
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(grab.x + (target.x - grab.x) * step as f32 / 8.0, target.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("tab-drag-ghost").is_some());
+    cx.dispatch_action(super::CancelTabDrag);
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "cancelling the drag clears the ghost"
+    );
+}
+
 /// A press on the close button or a middle click never starts a reorder.
 #[gpui::test]
 fn close_and_middle_click_do_not_start_a_drag(cx: &mut TestAppContext) {

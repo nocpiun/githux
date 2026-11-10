@@ -2626,8 +2626,12 @@ impl Shell {
     /// Ends a drag without moving anything: the original order and the active session stay as they
     /// were. Also the path for Escape, a lost window focus and a drop outside a valid target.
     fn finish_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
         let dragging = self.tab_drag.take().is_some();
+        // Cancelling through Escape (or a lost window focus) must also stop the platform drag, so
+        // its lifted preview cannot linger after the shell has already forgotten the drag.
+        if cx.has_active_drag() {
+            cx.stop_active_drag(window);
+        }
         // Released even when no tab drag was recorded any more, so a stale hold can never keep the
         // bar on after a close, a lost activation or a drop outside.
         let held = self
