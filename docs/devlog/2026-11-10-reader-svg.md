@@ -64,6 +64,13 @@
 
 同时把 `fixed_revision_images_persist_across_reopened_store_and_service` 与新增缓存测试的重开逻辑改为等待后台写入释放缓存锁（`Fixture::reopen_cache_store`），修复全量并行测试下 `CacheStore` 重开偶发 `InUse` 的既有竞态。
 
+## 审查修复轮次
+
+第一轮 Codex 审查（head `35ed2fa4`，review 5838968518）提出 2 条 P2，均核实成立：
+
+1. **超采样 PNG 未按实际像素网格计费**：`DecodedImage::decoded_bytes()` 原来只用逻辑 `width`/`height`，而 2x 光栅化后的 PNG 像素是 4 倍，reader 的保留预算/淘汰会低估内存。现在 `decoded_bytes()` 对 `ImageFormat::Png` 读取 PNG IHDR 的实际宽高再计算 `w*h*4`（普通 PNG 的两者相等），并新增断言「徽章 SVG 的 decoded_bytes 等于实际 PNG 网格大小且大于逻辑尺寸」。`DecodedImage` 字段未变，UI 仍用 `width`/`height` 做比例布局。
+2. **非 ASCII 属性名切片 panic**：事件属性检查原来用 `name.len() >= 2 && name[..2].eq_ignore_ascii_case("on")`，遇到合法多字节属性名（如 `中`）会在非字符边界 panic，生产路径会被转成 `Network`。现在改用 `name.as_bytes()` 检查前两个字节，并新增回归 `svg_non_ascii_attribute_names_do_not_panic_the_decoder`。
+
 ## 运行与限制
 
 - 构建产物：`target/debug/githux.exe`（`cargo build --locked`）。预览入口沿用 `cargo run --example reader_images`，但本任务未修改预览 fixture（归 `reader-image-layout`），因此预览仍只展示原有 PNG 场景；SVG 的生产路径证据来自数据层/provider 回归，不是外部网络可达性证明。

@@ -111,7 +111,7 @@ let reader = cx.new(|cx| {
 - 使用工作区已锁定的 `resvg` / `usvg 0.46.0`（关闭 `system-fonts` 与 `memmap-fonts`，仅启用 `text` 与 `raster-images`），并将应用内置的 `Githux UI`（Noto Sans + Noto Sans SC）与 `Google Sans Code` 注入私有 `fontdb`，不扫描系统字体、不读取磁盘字体或资源文件。
 - 禁用 XML DTD（`allow_dtd: false`，阻止实体展开炸弹）、限制 XML 节点数（`50,000`）与树深度（`256`）、禁用 `<image>` 外链文件/网络解析（`resources_dir = None`，`resolve_string` 恒返回 `None`，仅允许有界内嵌栅格 data URI，禁用嵌套 SVG data URI）。
 - 显式拒绝 `<script>`、事件属性（`on*`）、`<foreignObject>`、`@import` 样式与 SMIL 动画元素（`<animate>`/`<animateTransform>`/`<animateMotion>`/`<set>`），返回 `ImageFailure::Unsupported`；畸形 XML、零尺寸或缺少固有尺寸/`viewBox` 的 SVG 返回 `ImageFailure::Malformed`。
-- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算，并按最大 2x（受像素/尺寸上限钳制）光栅化、反预乘后编码为 PNG，以 `DecodedImage { format: ImageFormat::Png, width, height, bytes }` 返回（保留 SVG 固有 / `viewBox` 宽高，无需 UI 增加 `Svg` 分支）。
+- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算，并按最大 2x（受像素/尺寸上限钳制）光栅化、反预乘后编码为 PNG，以 `DecodedImage { format: ImageFormat::Png, width, height, bytes }` 返回（保留 SVG 固有 / `viewBox` 宽高，无需 UI 增加 `Svg` 分支）。`DecodedImage::decoded_bytes()` 读取 PNG 实际像素网格计费（读 IHDR 宽高），因此超采样后的 SVG 不会因为只按逻辑尺寸计费而绕过每文档保留预算。
 - 外部 HTTPS 请求 `Accept` 头包含 `image/svg+xml`（`image/png,image/jpeg,image/webp,image/gif,image/svg+xml,*/*;q=0.8`），不附加凭据或代理。
 
 GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按帧播放，reduced motion 下显示首帧。本模块不为动画另开线程或缓存。

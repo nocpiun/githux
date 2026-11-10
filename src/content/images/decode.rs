@@ -92,11 +92,32 @@ pub struct DecodedImage {
 
 impl DecodedImage {
     /// Decoded memory this picture represents, used for the reader's budget.
+    ///
+    /// Raster payloads report their own pixel grid. A rasterized SVG keeps its
+    /// logical/intrinsic `width`/`height` for layout, but its PNG bytes may be
+    /// supersampled to a larger pixel grid; GPUI decodes that grid, so the
+    /// budget must charge the raster size rather than the logical one.
     pub fn decoded_bytes(&self) -> usize {
-        (self.width as usize)
-            .saturating_mul(self.height as usize)
+        let (width, height) = match self.format {
+            ImageFormat::Png => png_pixel_size(&self.bytes).unwrap_or((self.width, self.height)),
+            ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Gif => (self.width, self.height),
+        };
+        (width as usize)
+            .saturating_mul(height as usize)
             .saturating_mul(4)
     }
+}
+
+/// Reads the pixel grid out of a PNG IHDR, so a supersampled raster is charged
+/// for the pixels a decoder actually allocates. Returns `None` for a payload
+/// that is not a complete PNG header.
+fn png_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 /// Sniffs the format from the leading bytes rather than a header or extension.
@@ -480,7 +501,14 @@ fn validate_svg_xml(doc: &usvg::roxmltree::Document<'_>) -> Result<(), ImageFail
             }
             for attr in node.attributes() {
                 let name = attr.name();
-                if name.len() >= 2 && name[..2].eq_ignore_ascii_case("on") {
+                // Boundary-safe prefix check: XML attribute names may contain
+                // multi-byte characters, so slicing `name[..2]` could panic on
+                // a valid document instead of simply ignoring the attribute.
+                let name_bytes = name.as_bytes();
+                if name_bytes.len() >= 2
+                    && name_bytes[0].eq_ignore_ascii_case(&b'o')
+                    && name_bytes[1].eq_ignore_ascii_case(&b'n')
+                {
                     return Err(ImageFailure::Unsupported);
                 }
                 if local.eq_ignore_ascii_case("style")

@@ -104,6 +104,15 @@ fn static_svg_badge_stats_card_and_chart_rasterize_to_png_with_dimensions() {
     assert_eq!((decoded_badge.width, decoded_badge.height), (88, 20));
     let badge_png = image::load_from_memory(&decoded_badge.bytes).expect("valid png");
     assert!(badge_png.width() >= 88 && badge_png.height() >= 20);
+    // The PNG is supersampled, so the reader budget must charge its real grid
+    // rather than only the logical layout size.
+    assert!(
+        decoded_badge.decoded_bytes()
+            == (badge_png.width() as usize) * (badge_png.height() as usize) * 4,
+        "decoded budget follows the raster grid: {}",
+        decoded_badge.decoded_bytes()
+    );
+    assert!(decoded_badge.decoded_bytes() > 88 * 20 * 4);
     // Verify non-empty rendered pixels (both left gray and right green badge fills).
     let badge_rgba = badge_png.to_rgba8();
     assert!(badge_rgba.pixels().any(|p| p[3] > 0 && p[1] > p[0]));
@@ -300,6 +309,19 @@ fn svg_external_file_and_network_references_cannot_read_local_files_or_fetch_net
         matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
         "SVG decoding must never open any network connection"
     );
+}
+
+#[test]
+fn svg_non_ascii_attribute_names_do_not_panic_the_decoder() {
+    let limits = ImageLimits::default();
+    // A valid XML name can contain multi-byte characters. The event-attribute
+    // guard must inspect bytes safely instead of slicing `name[..2]`.
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">\
+        <rect width=\"20\" height=\"20\" fill=\"#123456\" 中=\"x\"/>\
+    </svg>";
+    let decoded = decode_image(svg.as_bytes().to_vec(), &limits).expect("valid SVG renders");
+    assert_eq!((decoded.width, decoded.height), (20, 20));
+    assert!(image::load_from_memory(&decoded.bytes).is_ok());
 }
 
 #[test]
