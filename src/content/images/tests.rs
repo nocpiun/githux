@@ -294,6 +294,31 @@ fn svg_oversized_dimensions_pixels_and_node_counts_are_bounded() {
 }
 
 #[test]
+fn svg_dimensions_just_below_the_pixel_budget_still_render() {
+    let limits = ImageLimits::default();
+    // 2001x2000 fits the default 8,000,000-pixel budget, but a naive 2x
+    // supersample would round to 8,000,412 pixels and reject a supported SVG.
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="2001" height="2000">
+        <rect width="2001" height="2000" fill="#336699"/>
+    </svg>"##;
+    let decoded = decode_image(svg.as_bytes().to_vec(), &limits).expect("fits the budget");
+    assert_eq!((decoded.width, decoded.height), (2001, 2000));
+    let raster = image::load_from_memory(&decoded.bytes).expect("valid png");
+    let pixels = u64::from(raster.width()) * u64::from(raster.height());
+    assert!(
+        pixels <= limits.max_pixels,
+        "supersampled raster must stay inside the pixel cap: {}x{}",
+        raster.width(),
+        raster.height()
+    );
+    assert_eq!(
+        decoded.decoded_bytes(),
+        (raster.width() as usize) * (raster.height() as usize) * 4
+    );
+    assert!(decoded.decoded_bytes() <= limits.max_decoded_bytes);
+}
+
+#[test]
 fn svg_depth_preflight_ignores_tag_like_text_in_quotes_comments_and_cdata() {
     let limits = ImageLimits::default();
 

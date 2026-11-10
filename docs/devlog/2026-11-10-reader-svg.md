@@ -44,12 +44,12 @@
 
 | 命令 | 结果 | 运行记录 |
 | --- | --- | --- |
-| `cargo test --locked --test reader_images` | 通过，786 passed（最终代码） | `0bf680e2-33d6-428f-a108-417e84e79338` 内同一二进制 |
-| `cargo test --locked`（全部测试目标，最终代码） | 通过：1234 / 98 / 598 / 292 / 258 / 786 / 884 / 44，0 failed | `0bf680e2-33d6-428f-a108-417e84e79338` |
-| `cargo fmt --all -- --check` | 通过 | `5b557d86-bdcd-44e7-a8bc-313e1893b5cf` |
-| `cargo clippy --locked --all-targets -- -D warnings` | 通过，零警告 | `d8e035d4-bfee-40e4-b66c-7ee67576c2ec` |
+| `cargo test --locked --test reader_images` | 通过，787 passed（最终代码） | `50ca666a-9a31-435d-88d7-c6aa9171561f` 内同一二进制 |
+| `cargo test --locked`（全部测试目标，最终代码） | 通过：1235 / 98 / 599 / 293 / 259 / 787 / 885 / 44，0 failed | `50ca666a-9a31-435d-88d7-c6aa9171561f` |
+| `cargo fmt --all -- --check` | 通过 | `201b9629-5aeb-4290-8984-86185de02de5` |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过，零警告 | `e7736998-19ce-4748-b49b-36f56b07a26e` |
 | `cargo check --locked --all-targets` | 通过 | `86595c65-1aac-4c75-aea2-67da6e8a8e46` |
-| `cargo build --locked` | 通过，产物 `target/debug/githux.exe` | `f19b19cd-21ed-4906-81c1-19bcfc4563ff` |
+| `cargo build --locked` | 通过，产物 `target/debug/githux.exe` | `d06b9928-5928-4b5f-90f1-4ca088294376` |
 
 新增/更新的回归测试：
 
@@ -83,6 +83,10 @@
 第三轮 Codex 审查（head `827a2e4`，review 5839445655）提出 1 条 P1，核实成立：
 
 1. **深度预扫描不识别引号内的 `>`**：`<g a="/>">` 的 `/` 与 `>` 都在属性值里，但简单扫描把它当自闭合，20,000 层嵌套仍然只报 1 层并进入递归 XML 解析器。现在 `count_svg_nesting_depth` 是一个小型非递归扫描器：跳过 `<!-- -->`、`<![CDATA[ ]]>`、`<? ?>` 和 `<!DOCTYPE ...>`（含内部子集括号与引号），在开始标签内跟踪 `'`/`"` 引号状态，只在引号外把 `>` 当标签结束、并要求结束前最后一个非空白字节是 `/` 才判自闭合。新增 `svg_depth_preflight_ignores_tag_like_text_in_quotes_comments_and_cdata`：300 层 `<g a="/>">` 在解析前 `Malformed`，而注释/CDATA/引号中包含 `<g>`、`>`、`/>` 的合法小文档正常渲染。
+
+第四轮 Codex 审查（head `b217590e`，review 5839774180）提出 1 条 P2，核实成立：
+
+1. **超采样取整可能越过像素预算**：`2001×2000` 的合法 SVG 本身低于 8,000,000 像素，但按 `sqrt(cap/(w*h))` 缩放后四舍五入得到 `2829×2828 = 8,000,412`，被随后的检查判为 `TooLarge`，等于可选的超采样拒绝了本可支持的图片。现在先向下取整，若乘积仍超限则按比例缩小并做有界递减，保证 `render_w*render_h <= min(max_pixels, max_decoded_bytes/4)`。新增 `svg_dimensions_just_below_the_pixel_budget_still_render`（2001×2000 正常解码，实际 PNG 网格不超过像素/字节预算，`decoded_bytes` 与网格一致）。
 
 ## 运行与限制
 

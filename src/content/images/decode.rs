@@ -712,19 +712,43 @@ fn compute_svg_render_size(intrinsic_w: f32, intrinsic_h: f32, limits: &ImageLim
     let max_dim = limits.max_dimension.max(1) as f32;
     let max_pixels = limits.max_pixels.max(1) as f32;
     let max_bytes_pixels = (limits.max_decoded_bytes / 4).max(1) as f32;
-    let effective_pixel_cap = max_pixels.min(max_bytes_pixels);
+    let effective_pixel_cap = (max_pixels.min(max_bytes_pixels) as f64).max(1.0);
 
     let max_scale_w = max_dim / intrinsic_w;
     let max_scale_h = max_dim / intrinsic_h;
-    let max_scale_pixels = (effective_pixel_cap / (intrinsic_w * intrinsic_h)).sqrt();
+    let max_scale_pixels =
+        (effective_pixel_cap / (intrinsic_w as f64 * intrinsic_h as f64)).sqrt() as f32;
     let scale = SVG_SUPERSAMPLE
         .min(max_scale_w)
         .min(max_scale_h)
         .min(max_scale_pixels)
         .max(1.0);
 
-    let render_w = ((intrinsic_w * scale).round() as u32).clamp(1, limits.max_dimension.max(1));
-    let render_h = ((intrinsic_h * scale).round() as u32).clamp(1, limits.max_dimension.max(1));
+    let max_side = limits.max_dimension.max(1);
+    let mut render_w = ((intrinsic_w * scale).floor() as u32).clamp(1, max_side);
+    let mut render_h = ((intrinsic_h * scale).floor() as u32).clamp(1, max_side);
+
+    // Rounding down each side is not enough: `sqrt(cap / (w*h))` can leave the
+    // truncated product one row/column over the cap (e.g. 2001x2000 at 2x).
+    // Shrink proportionally, then finish with a bounded decrement so optional
+    // supersampling never rejects an SVG whose intrinsic size fits the budget.
+    let product = u64::from(render_w) * u64::from(render_h);
+    if product as f64 > effective_pixel_cap {
+        let ratio = (effective_pixel_cap / product as f64).sqrt();
+        render_w = ((render_w as f64 * ratio).floor() as u32).clamp(1, max_side);
+        render_h = ((render_h as f64 * ratio).floor() as u32).clamp(1, max_side);
+    }
+    let mut guard = 0u32;
+    while u64::from(render_w) * u64::from(render_h) > effective_pixel_cap as u64 && guard < 8192 {
+        if render_w >= render_h && render_w > 1 {
+            render_w -= 1;
+        } else if render_h > 1 {
+            render_h -= 1;
+        } else {
+            break;
+        }
+        guard += 1;
+    }
     (render_w, render_h)
 }
 
