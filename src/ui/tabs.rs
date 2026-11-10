@@ -84,7 +84,9 @@ pub(super) struct TabDrag {
 /// The lifted tab's preview, drawn by GPUI at `pointer - cursor_offset` on every frame of an
 /// active drag. It never takes the pointer, never starts or accepts a drag, and has no tooltip or
 /// hover affordances, so its only effect is paint: the strip's own drop/reorder logic keeps
-/// running underneath it, and once the drag ends it stops being drawn.
+/// running underneath it, and once the drag ends it stops being drawn. Like the tooltip roots in
+/// [`crate::ui::tooltip`], it is prepainted outside the shell's `FocusScope`, so it carries the
+/// theme's UI family itself instead of falling back to the system face.
 struct TabGhost {
     title: String,
     icon: IconName,
@@ -100,9 +102,11 @@ impl Render for TabGhost {
         let colors = &theme.colors;
         let radius = theme.radius(Radius::Md);
         let text = theme.text_size(TextSize::Sm);
+        let font_family = theme.font_family.clone();
         let title = self.title.clone();
         div()
             .debug_selector(|| "tab-drag-ghost".to_string())
+            .font_family(font_family)
             .flex()
             .flex_none()
             .items_center()
