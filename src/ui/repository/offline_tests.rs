@@ -76,6 +76,8 @@ pub(super) struct OfflineTransport {
     /// True while held requests may continue; arming a hold resets it so a request starting after
     /// the release cannot miss the wake-up.
     release: tokio::sync::watch::Sender<bool>,
+    /// Test-only: the default branch the repository summary reports, to model a moved default.
+    default_branch: Mutex<Option<String>>,
 }
 
 impl OfflineTransport {
@@ -86,7 +88,12 @@ impl OfflineTransport {
             readme_image: Mutex::new(false),
             held: std::sync::atomic::AtomicBool::new(false),
             release: tokio::sync::watch::channel(true).0,
+            default_branch: Mutex::new(None),
         }
+    }
+
+    pub(super) fn set_default_branch(&self, branch: Option<&str>) {
+        *self.default_branch.lock().unwrap() = branch.map(str::to_string);
     }
 
     pub(super) fn hold(&self, held: bool) {
@@ -121,6 +128,34 @@ impl OfflineTransport {
     }
 
     fn custom_answer(&self, request: &HttpRequest) -> Option<HttpResponse> {
+        if let Some(branch) = self.default_branch.lock().unwrap().clone()
+            && request.method == crate::network::transport::HttpMethod::Get
+            && request.url.ends_with(&format!("/repos/{OWNER}/{NAME}"))
+        {
+            return Some(json_response(
+                200,
+                &serde_json::json!({
+                    "id": 42,
+                    "name": NAME,
+                    "owner": { "id": 7, "login": OWNER },
+                    "description": "A tiny double-entry ledger, kept small enough to browse.",
+                    "visibility": "private",
+                    "private": true,
+                    "default_branch": branch,
+                    "fork": false,
+                    "archived": false,
+                    "stargazers_count": 128,
+                    "forks_count": 9,
+                    "open_issues_count": 4,
+                    "subscribers_count": 12,
+                    "size": 64,
+                    "html_url": "https://example.invalid/octo/ledger",
+                    "clone_url": "https://example.invalid/octo/ledger.git",
+                    "pushed_at": "2026-10-20T10:00:00Z"
+                })
+                .to_string(),
+            ));
+        }
         if !*self.readme_image.lock().unwrap() {
             return None;
         }
@@ -601,6 +636,42 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
         );
         assert_eq!(page.current_path(), Some("README.md"));
     });
+}
+
+/// Regression (review finding): when the repository's default branch moved, the cache-first bundle
+/// may display the old default. The online summary must then re-run the product branch choice
+/// instead of re-resolving the cached branch forever.
+#[gpui::test]
+fn a_moved_default_branch_replaces_the_cached_default(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert_eq!(page.selected_branch(), Some("main"));
+    });
+
+    // The moved default is only visible to the online summary.
+    fixture
+        .transport
+        .set_default_branch(Some("feature/docs-polish"));
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        !page.is_showing_cached_snapshot()
+            && page.selected_branch() == Some("feature/docs-polish")
+            && page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(
+        reader_text(&page, cx).contains("docs polish"),
+        "the new default branch's README is displayed"
+    );
 }
 
 /// Regression (review finding): a saved *nested* file selection must reopen from the cache-first

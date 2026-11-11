@@ -119,6 +119,14 @@ Codex 对 `6e69090` 提出 1 项 P2（上一轮修复暴露的相邻问题），
 
 同时把三个测试夹具的“hold/release”从 `Notify::notify_waiters` 改为 `watch<bool>`：请求可能先读到 hold 标志、在 release 之后才注册等待者，`notify_waiters` 会漏掉它；`watch` 的当前值不会漏。
 
+## PR #85 第四轮审查修复
+
+Codex 对 `49a57ef` 提出 1 项 P2，成立且可直接修复；仍无待裁决事项。
+
+**P2 默认分支迁移后仍解析缓存的旧默认**：无保存分支时，bundle 选了快照里的 default，并把它写进了 `intent.branch`；在线摘要若报告了新的默认分支，重验只会重新解析旧分支（该分支被删还会直接失败）。修复：`apply_snapshot` 不再把快照的隐式选择写入导航意图；重验时对最新 `details.default_branch` 重新执行 `branch_choice`——同分支时按原身份重解析（保留 tree/reader），不同则 `begin_branch` 重新解析新默认。回归 `a_moved_default_branch_replaces_the_cached_default`（撤销修复后失败，恢复后通过）。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

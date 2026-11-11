@@ -1796,7 +1796,9 @@ impl RepositoryPage {
             self.branches_provenance = Some(provenance);
         }
         if let (Some(branch), Some((snapshot, provenance))) = (branch, snapshot) {
-            self.intent.branch = Some(branch.clone());
+            // The bundle's branch is only what the snapshot displayed. It is deliberately not written
+            // into the navigation intent: when no branch was saved, the online summary may report a
+            // different default and the intent must stay free to follow it.
             self.snapshot_preliminary = true;
             let mut tree = TreeModel::default();
             if let Some(root) = root {
@@ -1925,17 +1927,41 @@ impl RepositoryPage {
             // forever. The previously displayed commit stays on screen until that reply arrives.
             if self.snapshot_preliminary && network_verified {
                 self.snapshot_preliminary = false;
-                if let Some(name) = self.branch.as_ref().map(|branch| branch.name.clone()) {
-                    // The revalidation keeps the resolution identity: the displayed branch, its
-                    // reader and their callbacks stay valid for the same branch. A newer
-                    // `begin_branch` still supersedes this reply through the usual request check.
-                    self.intent.branch = Some(name.clone());
-                    self.spawn_job(Job::Revision {
-                        branch: name,
-                        request: self.branch_request,
-                        identity: details.identity,
-                        mode: RepositoryCacheMode::OnlinePreferred,
-                    });
+                // Re-run the product branch choice against the freshly observed default: the snapshot
+                // may have displayed an old default (or a branch that no longer exists).
+                let chosen = outcome.as_ref().and_then(|outcome| {
+                    match branch_choice(
+                        outcome,
+                        details.default_branch.as_ref(),
+                        self.intent.branch.as_deref(),
+                    ) {
+                        BranchChoice::Selected(branch) => Some(branch.as_str().to_string()),
+                        BranchChoice::None { .. } => None,
+                    }
+                });
+                let displayed = self.branch.as_ref().map(|branch| branch.name.clone());
+                match (chosen, displayed) {
+                    // Same branch: keep the displayed commit, tree and reader (and their identities,
+                    // so the reader's callbacks stay valid) while it revalidates.
+                    (Some(chosen), Some(displayed)) if chosen == displayed => {
+                        self.intent.branch = Some(displayed);
+                        self.spawn_job(Job::Revision {
+                            branch: chosen,
+                            request: self.branch_request,
+                            identity: details.identity,
+                            mode: RepositoryCacheMode::OnlinePreferred,
+                        });
+                    }
+                    // A different default than the snapshot showed: resolve it from scratch.
+                    (Some(chosen), _) => {
+                        self.branch = None;
+                        self.reader = None;
+                        self.readme_path = None;
+                        self.reader_status = ReaderStatus::Loading;
+                        self.invalidate_rows();
+                        self.begin_branch(chosen, cx);
+                    }
+                    (None, _) => {}
                 }
             }
             cx.notify();
