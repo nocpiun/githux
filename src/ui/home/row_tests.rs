@@ -77,6 +77,11 @@ fn check_rendered_rows(
     long.title = "中文 English 标题与很长的工作条目标题 ".repeat(10);
     long.repository.owner = "organization-with-a-long-name".into();
     long.repository.name = "中文-English-long-repository-name-".repeat(8);
+    let mut panel_item = home_item(2, HomeItemKind::PullRequest);
+    panel_item.number = 594;
+    panel_item.title = "Panel support".into();
+    panel_item.repository.owner = "opanel-mc".into();
+    panel_item.repository.name = "opanel".into();
     let mut feed = merged_activity(0, author(901, "contributor"));
     feed.pull_request.as_mut().unwrap().body_preview = Some(BodyPreview {
         excerpt: "Preview…".into(),
@@ -86,7 +91,7 @@ fn check_rendered_rows(
         assert!(v.apply_home(
             &binding(),
             1,
-            home_outcome(vec![item, long], HomeReadiness::Complete),
+            home_outcome(vec![item, long, panel_item], HomeReadiness::Complete),
             cx
         ));
         assert!(v.apply_feed(
@@ -111,6 +116,19 @@ fn check_rendered_rows(
             let slash = bounds("home-item-row-0-separator", cx);
             let repo = bounds("home-0-repository", cx);
             let state = bounds("home-item-row-0-state", cx);
+            if width >= 640.0 {
+                let panel_owner = bounds("home-2-owner", cx);
+                let measured_owner = cx.update(|window, cx| {
+                    let label = "opanel-mc";
+                    let run = gpui::TextRun {
+                        len: label.len(),
+                        font: gpui::Font {family: cx.theme().font_family.clone(), ..Default::default()},
+                        ..Default::default()
+                    };
+                    window.text_system().layout_line(label, cx.theme().text_size(TextSize::Xs).to_pixels(window.rem_size()), &[run], None).width
+                });
+                assert!((panel_owner.size.width-measured_owner).abs() <= px(1.0), "normal opanel owner truncated in wide layout: {:?} vs {measured_owner:?}", panel_owner.size.width);
+            }
             // Check the actual selected item, not a constant or justify_center style.
             assert!(
                 row.size.height <= px(56.0),

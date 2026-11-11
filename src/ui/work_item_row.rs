@@ -258,7 +258,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
     // A title is a link only when the caller actually supplied an activation. Global Issues/PR
     // deliberately have no detail navigation, so their titles must stay plain text: giving them
     // a Link role, pointer cursor and a Tab stop would promise keyboard/screen-reader users an
-    // action that does nothing. Geometry (flex_1/min_w_0/weight/truncate) is shared either way.
+    // action that does nothing. Both variants use the same bounded flex slot, weight and truncation.
     let title = if let Some(action) = row.on_title_click {
         div()
             .id(SharedString::from(selectors.title.clone()))
@@ -362,7 +362,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             name,
             name_action,
         } => {
-            let mut repo_cell = div().flex().items_center().min_w_0().overflow_hidden();
+            // Resolve the owner's percentage cap against available metadata space,
+            // not the group's intrinsic owner/repo width (which truncates normal
+            // owner-longer-than-repo pairs even in a wide row).
+            let mut repo_cell = div().flex().items_center().flex_1().min_w_0().overflow_hidden();
             if !owner.trim().is_empty() {
                 repo_cell = repo_cell
                     .child(action_link(
