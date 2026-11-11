@@ -52,6 +52,7 @@ fn events(id: &str, next_page: Option<u32>) -> crate::network::transport::HttpRe
 /// request identity rather than letting those jobs compete for a shared FIFO.
 fn online_response(
     request: &crate::network::transport::HttpRequest,
+    refreshed: bool,
 ) -> crate::network::transport::HttpResponse {
     let url = reqwest::Url::parse(&request.url).expect("fixture request URL");
     assert_eq!(url.host_str(), Some("api.github.com"));
@@ -62,7 +63,14 @@ fn online_response(
             200,
             r#"[{"id":10,"name":"repo","owner":{"id":1,"login":"octo"},"visibility":"public","private":false,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":1,"html_url":"https://github.com/octo/repo"}]"#,
         ),
-        "/search/issues" => response(200, &home("online only")),
+        "/search/issues" => response(
+            200,
+            &home(if refreshed {
+                "online refreshed"
+            } else {
+                "online only"
+            }),
+        ),
         "/users/octo/received_events" => events("online", None),
         "/user/following" => response(200, r#"[{"id":7,"login":"bob"}]"#),
         "/repos/octo/repo" => response(
@@ -96,6 +104,9 @@ struct DescriptionGate {
     pause_search: std::sync::atomic::AtomicBool,
     pause_events: std::sync::atomic::AtomicBool,
     online_responses: std::sync::atomic::AtomicBool,
+    /// Test-only: makes the modelled online Home result differ from the first round so a second
+    /// refresh is observably a new value.
+    refreshed: std::sync::atomic::AtomicBool,
     search_entered: std::sync::atomic::AtomicBool,
 }
 
@@ -138,7 +149,7 @@ impl crate::network::transport::Transport for ControlledTransport {
                 }
             }
             if self.gate.online_responses.load(SeqCst) {
-                return Ok(online_response(&request));
+                return Ok(online_response(&request, self.gate.refreshed.load(SeqCst)));
             }
             if self.gate.enabled.load(SeqCst) && request.url.contains("/repos/octo/") {
                 let name = request.url.rsplit('/').next().unwrap();
@@ -1703,6 +1714,41 @@ fn a_late_cached_reply_never_rolls_back_a_newer_network_value(cx: &mut TestAppCo
     page.read_with(cx, |page, cx| {
         assert!(page.view.read(cx).provenance(Column::Home).is_none());
     });
+}
+
+/// Regression (review finding): two successful network reads both carry the same ordering mark, so a
+/// later refresh must still reach the view. Suppressing it would freeze Home on the first online
+/// result until the page is rebound.
+#[gpui::test]
+fn a_second_network_refresh_replaces_the_first_network_result(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    fixture.gate.online_responses.store(true, SeqCst);
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("online only"));
+
+    // A second online read with different content, still from the network.
+    fixture.gate.refreshed.store(true, SeqCst);
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.refresh_for_test(Column::Home, window, cx)
+    });
+    for _ in 0..600 {
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.update(|window, _| window.refresh());
+        if home_title(&page, cx).as_deref() == Some("online refreshed") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        home_title(&page, cx).as_deref(),
+        Some("online refreshed"),
+        "a later network result must replace the previous network result"
+    );
 }
 
 /// A network failure after the snapshot painted keeps the readable cached content with its honest

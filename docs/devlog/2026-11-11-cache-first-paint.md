@@ -92,6 +92,16 @@
 
 最终命令与结果：见交付评论/PR（`cargo fmt --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked`）。
 
+## PR #85 第一轮审查修复
+
+Codex 对 `9665f19` 提出 1 项 P1 与 2 项 P2，均成立且可直接修复；无待裁决事项，`merge_owner` 保持 coordinator（本任务按派发不自行合并）。
+
+1. **P1 后续网络刷新被误去重**：`publish_mark` 把所有网络结果都映射为 `PublishMark::Network`，因此第二次成功的 Home 刷新与屏上标记相等，被 `same_as_shown` 跳过、不再 `apply_home`，新条目要到页面重绑才出现。修复：去重只针对**历史快照**（`PublishMark::Historical` + 相同 `fetched_at_ms`），网络结果一律照常应用。回归 `a_second_network_refresh_replaces_the_first_network_result`（撤销修复后失败，恢复后通过）。
+2. **P2 同 commit 重验漏补快照缺失资源**：快照 bundle 可能只有 revision 而没有根树/README 发现/正文，此时 `apply_revision` 的“同 commit 保留”捷径直接返回，缺失部分永远停在 loading。修复：捷径中按缺失项补发 `Job::Root`/`Job::Readme`（`OnlinePreferred`）。回归 `a_same_commit_revalidation_fetches_the_resources_the_snapshot_lacked`（禁用补发后失败）。
+3. **P2 保留 reader 的回调身份被重验打断**：缓存 README 的 reader 回调捕获创建时的 `branch_request`/`selection_request`；重新解析该分支时自增 `branch_request` 会让保留下来的 reader 所有链接动作被静默丢弃。修复：重验沿用原 `branch_request`（`begin_branch` 等真正的换分支仍会推进并淘汰旧回复）。回归 `the_retained_cached_reader_keeps_its_page_identity_after_revalidation`。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（主程序 1249、其余目标全部）通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

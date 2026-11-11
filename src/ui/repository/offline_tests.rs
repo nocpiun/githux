@@ -588,6 +588,97 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
     });
 }
 
+/// Regression (review finding): a revalidation that resolves the same commit keeps the cached tree
+/// and README, but anything the snapshot never had must still be fetched. Otherwise a partial cached
+/// bundle would leave the tree or reader loading forever.
+#[gpui::test]
+fn a_same_commit_revalidation_fetches_the_resources_the_snapshot_lacked(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+
+    // Simulate a snapshot that carried only the revision: no root tree, no README discovery and no
+    // document. Re-resolving the same ref has to fill them.
+    page.update_in(cx, |page, window, cx| {
+        let identity = page.details.as_ref().expect("details").identity.clone();
+        let name = page
+            .branch
+            .as_ref()
+            .expect("a displayed branch")
+            .name
+            .clone();
+        let request = page.branch_request;
+        let state = page.branch.as_mut().unwrap();
+        state.tree = super::super::navigation::TreeModel::default();
+        state.readme = super::super::ReadmeState::Unknown;
+        page.reader = None;
+        page.reader_status = ReaderStatus::Loading;
+        page.spawn_job(super::super::Job::Revision {
+            branch: name,
+            request,
+            identity,
+            mode: crate::data::RepositoryCacheMode::OnlinePreferred,
+        });
+        page.drain(window, cx);
+    });
+    settle(&page, cx, |page| {
+        page.tree("").is_some()
+            && page.readme_path().is_some()
+            && page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(!page.is_showing_cached_snapshot());
+        assert_eq!(page.current_path(), Some("README.md"));
+    });
+}
+
+/// Regression (review finding): the reader created from the cached snapshot keeps working when the
+/// same-commit revalidation retains it. Its callbacks are guarded by the page's `branch_request` and
+/// `selection_request`, so a revalidation must not advance those identities while keeping the reader.
+#[gpui::test]
+fn the_retained_cached_reader_keeps_its_page_identity_after_revalidation(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+    let (cached_reader, cached_branch_request, cached_selection_request) =
+        page.read_with(cx, |page, _| {
+            (
+                page.reader().cloned().expect("a reader"),
+                page.branch_request,
+                page.selection_request,
+            )
+        });
+
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| !page.is_showing_cached_snapshot());
+    page.read_with(cx, |page, _| {
+        assert!(
+            page.reader()
+                .is_some_and(|reader| reader.entity_id() == cached_reader.entity_id()),
+            "the same-commit revalidation keeps the displayed reader"
+        );
+        assert_eq!(
+            page.branch_request, cached_branch_request,
+            "the revalidated branch keeps the identity the retained reader's callbacks captured"
+        );
+        assert_eq!(page.selection_request, cached_selection_request);
+        assert_eq!(page.reader_status(), &ReaderStatus::Showing);
+    });
+    release_page(&host, cx);
+}
+
 /// A cache-first reply that arrives after the online chain already published must not roll the page
 /// back to the saved snapshot.
 #[gpui::test]

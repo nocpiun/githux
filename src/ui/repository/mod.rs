@@ -1910,7 +1910,9 @@ impl RepositoryPage {
             if self.snapshot_preliminary && network_verified {
                 self.snapshot_preliminary = false;
                 if let Some(name) = self.branch.as_ref().map(|branch| branch.name.clone()) {
-                    self.branch_request = self.branch_request.wrapping_add(1);
+                    // The revalidation keeps the resolution identity: the displayed branch, its
+                    // reader and their callbacks stay valid for the same branch. A newer
+                    // `begin_branch` still supersedes this reply through the usual request check.
                     self.intent.branch = Some(name.clone());
                     self.spawn_job(Job::Revision {
                         branch: name,
@@ -1985,11 +1987,40 @@ impl RepositoryPage {
                     state.name == branch && state.commit() == snapshot.commit()
                 }) =>
             {
+                // A cache-first bundle can display the revision while the tree, README discovery or
+                // the document itself was never cached. The commit is unchanged, so the already
+                // loaded parts stay, but anything still missing has to be fetched now.
+                let missing = self.branch.as_ref().map(|state| {
+                    (
+                        state.tree.root().is_none(),
+                        matches!(
+                            state.readme,
+                            ReadmeState::Unknown | ReadmeState::Uncertain | ReadmeState::Failed(_)
+                        ),
+                    )
+                });
                 if let Some(state) = self.branch.as_mut() {
-                    state.snapshot = snapshot;
+                    state.snapshot = snapshot.clone();
                     state.snapshot_provenance = provenance;
                 }
                 self.error = None;
+                if let Some((missing_root, missing_readme)) = missing {
+                    let mode = RepositoryCacheMode::OnlinePreferred;
+                    if missing_root {
+                        self.spawn_job(Job::Root {
+                            branch: branch.clone(),
+                            snapshot: snapshot.clone(),
+                            mode,
+                        });
+                    }
+                    if missing_readme {
+                        self.spawn_job(Job::Readme {
+                            branch: branch.clone(),
+                            snapshot,
+                            mode,
+                        });
+                    }
+                }
                 cx.notify();
                 return;
             }

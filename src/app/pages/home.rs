@@ -1171,9 +1171,13 @@ impl HomePage {
             ColumnResult::Home(result) => publish_mark(result),
             ColumnResult::Feed(result) => publish_mark(result),
         };
+        // Only an identical *persisted snapshot* is deduplicated. Two network results always carry
+        // the same ordering mark (`Network`), so they must never be compared by mark: a later
+        // successful refresh has to reach the view even when the previous value also came from the
+        // network.
         let same_as_shown = match &mark {
-            Some(mark) => &self.published[index] == mark,
-            None => false,
+            Some(mark @ PublishMark::Historical { .. }) => &self.published[index] == mark,
+            _ => false,
         };
         if reply.preliminary {
             let Some(PublishMark::Historical { partition, .. }) = &mark else {
@@ -1197,29 +1201,15 @@ impl HomePage {
             ColumnResult::Feed(Ok(Some(read))) => Some(read.value.activities.clone()),
             _ => None,
         };
-        // Re-applying the identical snapshot would reset the list's scroll position and keyboard
-        // selection for no new information, so the already displayed copy is kept as is. The Feed
-        // still needs its end-of-scroll append state normalized: a cached first paint can leave the
-        // view mid-append while the online read owns the column.
+        // Re-applying the identical persisted snapshot would reset the list's scroll position and
+        // keyboard selection for no new information, so the already displayed copy is kept as is.
+        // The Feed still needs its end-of-scroll append state normalized: a cached first paint can
+        // leave the view mid-append while the online read owns the column.
         if same_as_shown {
             if reply.preliminary {
                 return;
             }
             if let ColumnResult::Feed(Ok(Some(read))) = reply.result {
-                // Identical content, but the server may still have moved the continuation cursor.
-                // Keep the list (and its scroll anchor) and refresh only the bookkeeping.
-                if matches!(read.source, ReadSource::Network { .. }) {
-                    self.feed_ready = read
-                        .value
-                        .poll_interval_seconds
-                        .map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
-                }
-                self.feed_next_page = read.value.next_page;
-                self.feed_source = Some(read.source.clone());
-                self.feed_seen_ids.clear();
-                for activity in &read.value.activities {
-                    self.feed_seen_ids.insert(activity.event.id.clone());
-                }
                 let binding = self.binding.clone();
                 let generation = self.generation;
                 self.view.update(cx, |view, cx| {
