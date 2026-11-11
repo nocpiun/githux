@@ -119,7 +119,7 @@ GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按
 - 行内图片与嵌套块（引用/列表/脚注）中的 `Block::Image` 走同一状态与占位逻辑；段落中夹在文字里的图片在解析阶段仍被提取为紧随段落的图片块（沿用既有 AST 行为），**不在一行文字中间原位置绘制**。
 - **表格单元格图片**：AST 在 cell 内没有块列表，图片不能像段落图片那样移到块后。单元格改为记录 `CellImage`（alt、URL、`width`/`height` 提示和 alt 在 cell 文本中的字节范围），`cell_parts` 把单元格拆成「文本段 / 图片」的阅读顺序；`DocText` 与渲染器遍历同一份拆分，因此一个 cell 可能登记多个单元而复制文本仍是原来的 cell 文本（alt 保留原位）。
   - 渲染复用同一 `ImageBoard`/`images::image_element` 状态与预算：仓库相对路径仍按固定 commit 解析，外链走同一条无凭据通路；未注入 provider 时同样诚实占位。
-  - 图片在自己的 cell 内按 `width/height` 比例缩放：`w_full` 受 cell 内容宽约束并 `max_w(intrinsic)`，所以窄 cell 缩小、宽 cell 不限幅放大，单元格高度随比例增长。
+  - 图片在自己的 cell 内按 `width/height` 比例缩放：`w_full` 受 cell 内容宽约束并 `max_w(intrinsic)`，所以窄 cell 缩小、宽 cell 不限幅放大，单元格高度随比例增长；图片比 cell 窄时按列对齐落在内左/居中/内右。
   - 图片落地同样对该顶层块（表格行所在的虚拟化块）重测，不改变滚动锚点；图片绘制区域登记为该单元的真实命中目标，从图片起手的拖选从图片所在 cell 开始，而不是从文档起点。
   - `[![alt](img)](link)` 的归属链接在解析时记录在 `CellImage::link`（空 alt 图片不能靠字节包含关系区分相邻链接），点击图片会像点击那段文字一样报告 `ReaderAction::Link`，而拖选经过图片会取消这次点击。
   - 占位/失败/无 provider 的可见呈现仍由共享 presenter 决定；表格代码只传入该图片的 alt，不另造 placeholder。待 reader-svg 的通用 pending 呈现改动合入后，表格图片自动跟随「pending 不显示占位框与 alt」的规则。

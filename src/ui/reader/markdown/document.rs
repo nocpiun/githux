@@ -1389,15 +1389,27 @@ impl MarkdownView {
                         // keeps the description while the cell paints pixels.
                         let unit = self.next_unit(ix, units);
                         let link = image.link.clone();
-                        let picture =
+                        let (picture, display_width) =
                             self.cell_picture(ix, image, format!("{key}-picture-{at}"), picture);
                         let mut frame = div()
                             .w_full()
                             .min_w_0()
                             .flex()
                             .when(align == TextAlign::Center, |row| row.justify_center())
-                            .when(align == TextAlign::Right, |row| row.justify_end())
-                            .child(picture);
+                            .when(align == TextAlign::Right, |row| row.justify_end());
+                        // The shared presenter's wrapper is full width, so
+                        // justify alone cannot move a narrow picture. Bound the
+                        // row to the picture's displayed width (the presenter
+                        // still sizes and clips the frame itself) so column
+                        // alignment applies to the pixels.
+                        frame = frame.child(match display_width {
+                            Some(width) => div()
+                                .w(gpui::px(width))
+                                .max_w_full()
+                                .child(picture)
+                                .into_any_element(),
+                            None => picture,
+                        });
                         if !presentation {
                             // The painted picture is the hit target for its own
                             // document unit, so a selection drag starts here
@@ -1465,13 +1477,15 @@ impl MarkdownView {
     ///
     /// It draws through the same picture presenter as every other picture, so
     /// the pending/failed/ready states are the reader's, not a table-only copy.
+    /// The returned width is the size the presenter gives a landed picture, so
+    /// the cell can bound the alignment row to the pixels.
     fn cell_picture(
         &self,
         ix: usize,
         picture: &CellImage,
         key: String,
         style: images::PictureStyle<'_>,
-    ) -> AnyElement {
+    ) -> (AnyElement, Option<f32>) {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(&picture.url, context) {
                 Ok(target) => board.borrow_mut().want(ix, target),
@@ -1479,23 +1493,27 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
+        let display_width = ready_picture_width(&state, picture.hints);
         // A landed picture is the cell's content, and the surrounding row may
         // already be its caption; its description stays in the copy model and
         // in every not-yet/never-loaded state, where it is the only readable
         // thing. The shared presenter still decides how those states look.
-        let alt = if state.is_ready() {
+        let alt = if display_width.is_some() {
             ""
         } else {
             picture.alt.as_str()
         };
-        images::image_element(
-            gpui::ElementId::Name(format!("reader-{key}").into()),
-            format!("markdown-{key}-note"),
-            alt,
-            &state,
-            picture.hints,
-            style,
-            format!("markdown-{key}-frame"),
+        (
+            images::image_element(
+                gpui::ElementId::Name(format!("reader-{key}").into()),
+                format!("markdown-{key}-note"),
+                alt,
+                &state,
+                picture.hints,
+                style,
+                format!("markdown-{key}-frame"),
+            ),
+            display_width,
         )
     }
 
@@ -1573,6 +1591,33 @@ impl MarkdownView {
 
 /// Split only over-large containers into several virtualized blocks. A list
 /// keeps its own numbering by carrying the original first number and index.
+/// The displayed width of a landed cell picture.
+///
+/// Mirrors the shared presenter's rule (intrinsic width, or a smaller HTML
+/// `width`/`height` hint, never upscaled) so a cell can bound its alignment row
+/// to the actual pixels. The presenter remains the owner of the real frame
+/// size and aspect ratio; this is only the upper bound for alignment.
+fn ready_picture_width(state: &ImageState, hints: ImageHints) -> Option<f32> {
+    let ImageState::Ready(_, width, height) = state else {
+        return None;
+    };
+    let intrinsic_width = *width as f32;
+    let intrinsic_height = (*height as f32).max(1.0);
+    let ratio = intrinsic_width / intrinsic_height;
+    let requested_width = hints
+        .width
+        .map(|w| (w as f32).min(intrinsic_width).max(1.0));
+    let requested_height = hints
+        .height
+        .map(|h| (h as f32).min(intrinsic_height).max(1.0));
+    Some(match (requested_width, requested_height) {
+        (Some(width), Some(_)) => width,
+        (Some(width), None) => width,
+        (None, Some(height)) => height * ratio,
+        (None, None) => intrinsic_width,
+    })
+}
+
 /// The text alignment a table column asks for.
 fn table_align(aligns: &[Align], column: usize) -> TextAlign {
     match aligns.get(column) {

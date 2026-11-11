@@ -36,6 +36,12 @@
 - 首轮审查修复后再跑全量（run `23225418`）：1253 passed，唯一失败是既有抖动的 `app::pages::home::tests::online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page`（`left: ["first"]` vs `right: ["first","second"]`），单独重跑通过；另一次更早全量运行（`1019eb86`）只有 `app::pages::home::tests::authentication_failure_cancellation_and_uncached_pages_are_not_historical_success`（`state=Loading`）失败，同样单独重跑通过。两者都在 `app/pages`（cache-first-paint 区域），不在本任务改动范围，按 L002 记为既有负载敏感抖动；最终 head 的完整检查以 PR CI 为准。
 - 审查修复后新增/更新的测试（图片命中目标、链接归属、拖选范围、空 alt 链接、无 provider、复制、同 cell 文字链接）逐个针对性运行通过。
 
+## 第二轮审查修复（同一 PR，head `8738cbb` 的反馈）
+
+- **混合标记语法的链接归属**：`CellImage::link` 只在同一种语法栈里查找，`[<img>](guide.md)`（Markdown 链接包 HTML 图片）和 `<a href>![Shot](shot.png)</a>`（HTML 链接包 Markdown 图片）会丢掉链接。现在 Markdown 图片关闭时同时检查 Markdown `open` 与 HTML `opens`；HTML `<img>` 走 `push_html` 时把当前仍打开的 Markdown 链接传给新记录的 cell 图片（HTML `<a>` 更内层时优先）。新增 `a_cell_picture_keeps_its_link_across_markup_syntaxes`。
+- **列对齐落到真实图片框**：共享 presenter 的 Ready 外层是 `w_full`，只有 `justify_*` 无法移动窄图。`cell_picture` 返回 presenter 的显示宽度（intrinsic 或更小的 HTML 提示，绝不放大），cell 把对齐行约束到该宽度再应用列对齐；frame 的真实尺寸/比例仍由 presenter 负责，PR82 把外层改成本征宽度后同样成立。新增 `a_narrow_cell_picture_follows_the_column_alignment`，断言左/中/右列图片分别贴内左、居中、贴内右。
+- 修复后重新通过 `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked --bin githux -- ui::reader`、`cargo test --locked --test reader`。全量 `cargo test --locked`（run `151a83bb`）为 1255 passed、1 failed：唯一失败是 `app::pages::profile::tests::partial_pins_and_calendar_and_section_miss_preserve_distinct_states`（`profile page did not reach expected state`），单独重跑通过；与前面两次 home 抖动同属 `app/pages`（cache-first-paint 区域）的既有负载敏感抖动，按 L002 记录，最终以 PR CI 的全量结果为准。
+
 新增回归：
 
 - `ast::tests`：`a_markdown_table_cell_keeps_its_picture_at_the_alt_text`、`pictures_and_text_keep_their_cell_order`、`a_cell_picture_records_its_own_enclosing_link`（空 alt 图片保留自己的链接而不是相邻链接）、`an_html_picture_in_a_cell_keeps_its_size_hints`、`an_html_table_cell_picture_uses_the_same_inline_model`、`a_picture_without_alt_text_still_marks_its_place_in_a_cell`，并扩展 `an_image_in_a_table_cell_keeps_its_alt_text`。

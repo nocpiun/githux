@@ -348,6 +348,10 @@ impl Building {
         let text = self.inline.text.len();
         let notes = self.notes.len();
         let opens = self.html.len();
+        let pictures = self.inline.cell_images.len();
+        // An HTML `<img>` inside a Markdown link still belongs to that link:
+        // the Markdown span lives in `open`, not in the HTML opening stack.
+        let markdown_link = self.enclosing_markdown_link();
         if let Some((name, mut depth)) = self.suppressed.clone() {
             if !html::is_raw_text(&name) && self.suppressed_raw.is_none() {
                 for node in &nodes {
@@ -403,9 +407,24 @@ impl Building {
                 }
             }
         }
+        if let Some(link) = markdown_link {
+            for image in &mut self.inline.cell_images[pictures..] {
+                if image.link.is_none() {
+                    image.link = Some(link.clone());
+                }
+            }
+        }
         // A comment or dropped element glues the surrounding text runs.
         self.html_gap =
             self.inline.text.len() == text && self.notes.len() == notes && self.html.len() == opens;
+    }
+
+    /// The innermost Markdown link still open around this point, if any.
+    fn enclosing_markdown_link(&self) -> Option<String> {
+        self.open.iter().rev().find_map(|(_, open)| match open {
+            Open::Link(url) => Some(url.clone()),
+            _ => None,
+        })
     }
 
     fn consume_hidden_end(&mut self, name: &str) -> bool {
@@ -438,9 +457,13 @@ impl Building {
                         // the spot the renderer draws the picture, and the text
                         // itself stays for copying and for the surrounding
                         // words' order.
-                        let link = self.open.iter().rev().find_map(|(_, open)| match open {
-                            Open::Link(url) => Some(url.clone()),
-                            _ => None,
+                        // The picture may be wrapped by a Markdown link or by
+                        // an HTML `<a>` that is still open.
+                        let link = self.enclosing_markdown_link().or_else(|| {
+                            self.html.iter().rev().find_map(|open| match &open.kind {
+                                HtmlKind::Link(url) => Some(url.clone()),
+                                HtmlKind::Style(_) => None,
+                            })
                         });
                         self.inline.cell_images.push(CellImage {
                             alt,
@@ -2026,6 +2049,32 @@ mod tests {
 | [Guide](guide.md) ![](shot.png) |",
         );
         assert!(unlinked.cell_images[0].link.is_none(), "{unlinked:?}");
+    }
+
+    #[test]
+    fn a_cell_picture_keeps_its_link_across_markup_syntaxes() {
+        // Markdown link wrapping an HTML <img>.
+        let md_outer = table_cell(
+            "| a |
+|---|
+| [<img src=\"shot.png\" alt=\"Shot\">](guide.md) |",
+        );
+        assert_eq!(
+            md_outer.cell_images[0].link.as_deref(),
+            Some("guide.md"),
+            "{md_outer:?}"
+        );
+        // HTML <a> wrapping a Markdown image.
+        let html_outer = table_cell(
+            "| a |
+|---|
+| <a href=\"guide.md\">![Shot](shot.png)</a> |",
+        );
+        assert_eq!(
+            html_outer.cell_images[0].link.as_deref(),
+            Some("guide.md"),
+            "{html_outer:?}"
+        );
     }
 
     #[test]

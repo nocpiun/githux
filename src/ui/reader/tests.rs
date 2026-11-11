@@ -3067,6 +3067,63 @@ fn an_empty_alt_cell_picture_opens_its_own_link_not_the_neighbouring_one(cx: &mu
 }
 
 #[gpui::test]
+fn a_narrow_cell_picture_follows_the_column_alignment(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| Left | Center | Right |
+|:---|:---:|---:|
+| ![L](left.png) | ![C](center.png) | ![R](right.png) |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[
+        ("left.png", 96, 96),
+        ("center.png", 96, 96),
+        ("right.png", 96, 96),
+    ]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let cell = |cx: &mut VisualTestContext, column: usize| {
+        cx.debug_bounds(&*Box::leak(
+            format!("markdown-cell-0-1-{column}").into_boxed_str(),
+        ))
+        .expect("the aligned cell is laid out")
+    };
+    let frame = |cx: &mut VisualTestContext, column: usize| {
+        cx.debug_bounds(&*Box::leak(
+            format!("markdown-cell-0-1-{column}-picture-0-frame").into_boxed_str(),
+        ))
+        .expect("the aligned picture is laid out")
+    };
+    let left_cell = cell(cx, 0);
+    let left = frame(cx, 0);
+    assert!(
+        (left.left() - (left_cell.left() + px(12.0))).abs() <= px(2.0),
+        "a left column keeps the picture at its start: {left:?} vs {left_cell:?}"
+    );
+    let center_cell = cell(cx, 1);
+    let center = frame(cx, 1);
+    assert!(
+        (center.center().x - center_cell.center().x).abs() <= px(2.0),
+        "a centered column centers a narrow picture: {center:?} vs {center_cell:?}"
+    );
+    let right_cell = cell(cx, 2);
+    let right = frame(cx, 2);
+    assert!(
+        (right.right() - (right_cell.right() - px(12.0))).abs() <= px(2.0),
+        "a right column ends the picture at the cell's inner right edge: {right:?} vs {right_cell:?}"
+    );
+}
+
+#[gpui::test]
 fn an_html_table_cell_picture_uses_the_same_image_lifecycle(cx: &mut TestAppContext) {
     let (reader, cx) = open(
         cx,
