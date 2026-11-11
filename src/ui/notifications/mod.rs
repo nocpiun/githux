@@ -903,9 +903,8 @@ impl Render for NotificationsView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            // Same content surface, gutter and top/bottom insets as Home/Settings and the global
-            // work lists: the page body owns the padding, so the title line and list edges line up
-            // across pages instead of this page adding its own px_3/py_2 rhythm.
+            // Preserve horizontal/title alignment, but let scrolling content reach
+            // the bottom edge instead of reserving a fixed blank strip there.
             .px(px(crate::ui::page_layout::PAGE_GUTTER))
             .pt(px(crate::ui::page_layout::PAGE_TOP))
             .pb(px(crate::ui::page_layout::PAGE_BOTTOM))

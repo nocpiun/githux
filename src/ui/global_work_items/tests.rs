@@ -262,6 +262,11 @@ fn load(view: &Entity<WorkItemsView>, cx: &mut VisualTestContext, mode: RequestM
 #[gpui::test]
 fn list_edges_and_scrollbar_lane_survive_narrow_resize(cx: &mut TestAppContext) {
     let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    // Exercise the content edge with no visible pagination footer.
+    view.update(cx, |view, cx| {
+        view.controller.next = None;
+        cx.notify();
+    });
     for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(550.0))] {
         cx.simulate_resize(dimensions);
         cx.update(|window, cx| {
@@ -282,6 +287,10 @@ fn list_edges_and_scrollbar_lane_survive_narrow_resize(cx: &mut TestAppContext) 
         cx.run_until_parked();
         let viewport = view.read_with(cx, |view, _| view.list.viewport_bounds());
         let first = cx.debug_bounds("work-item-10000").unwrap();
+        let page = cx.debug_bounds("global-work-items").unwrap();
+        let fixed_header = cx.debug_bounds("work-fixed-header").unwrap();
+        assert!((viewport.top() - fixed_header.bottom()).abs() < px(0.01));
+        assert!((viewport.bottom() - page.bottom()).abs() < px(0.01));
         assert_eq!(first.top(), viewport.top());
         assert!(first.bottom() <= viewport.bottom());
         let hit = cx.debug_bounds("work-scrollbar-thumb").unwrap();

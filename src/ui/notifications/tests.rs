@@ -118,6 +118,10 @@ fn notification_edge_rows_and_background_stay_outside_scrollbar_lane(cx: &mut Te
         NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx)
     });
     cx.update(|window, _| window.activate_window());
+    view.update(cx, |view, cx| {
+        view.snapshot.has_more = false;
+        cx.notify();
+    });
     for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(550.0))] {
         cx.simulate_resize(dimensions);
         cx.update(|window, cx| {
@@ -138,6 +142,8 @@ fn notification_edge_rows_and_background_stay_outside_scrollbar_lane(cx: &mut Te
         cx.run_until_parked();
         let viewport = view.read_with(cx, |view, _| view.list.viewport_bounds());
         let first = cx.debug_bounds("notification-row-0").unwrap();
+        let page = cx.debug_bounds("notifications-view").unwrap();
+        assert!((viewport.bottom() - page.bottom()).abs() < px(0.01));
         assert_eq!(first.top(), viewport.top());
         assert!(first.bottom() <= viewport.bottom());
         let hit = cx.debug_bounds("notifications-y-thumb").unwrap();

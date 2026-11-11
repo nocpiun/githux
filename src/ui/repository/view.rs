@@ -830,8 +830,9 @@ fn tree_column(
                 }))
                 .overflow_hidden()
                 .child(
-                    // Row whitespace belongs to the content, not to the scrollbar's anchor.
-                    div().size_full().p(px(7.0)).child(
+                    // Only horizontal alignment is inset. Vertical inset would permanently
+                    // clip partially scrolled rows below the header and above the pane edge.
+                    div().size_full().px(px(7.0)).child(
                         div()
                             .relative()
                             .size_full()
@@ -847,8 +848,8 @@ fn tree_column(
                     div()
                         .debug_selector(|| "repository-tree-bar-region".into())
                         .absolute()
-                        .top(px(7.0))
-                        .bottom(px(7.0))
+                        .top_0()
+                        .bottom_0()
                         .left_0()
                         .right_0()
                         .child(bar),

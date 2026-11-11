@@ -71,7 +71,7 @@
 
 前轮文件树测量选错基准：`repository-tree-scroll-viewport` 位于 `.p(7)` 内，所以其“2 物理 px”并不表示到 Files/Reader 分隔线只有 2px；实际 gap 为内容 padding 7 + overlay 1.5 = 8.5 逻辑 px。此前日志/PR 中将其称为 pane 尾侧距离的结论作废，保留为测量错误的历史证据。
 
-文件树现在把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是无 padding 的 pane 内容区，内部列表单独保留四侧 7px padding；`repository-tree-bar-region` 横向覆盖该 pane，纵向仍留上下 7px，以维持 track 与真实滚动 viewport 同高。Bar 使用 `overlay(2.5, 8.0)`，可见线在列表右侧留白内，8px 命中条留在 pane 内；没有负 margin，没有删除选中行四侧留白。测量基准是外层 Files/Reader 边框的内边缘，不是列表 viewport。144 DPI 原生 Shell 帧中边框从 x=773 开始，可见 thumb 覆盖 x=765..768，外缘 x=769，到边框留 4 物理 px（约 2.67 逻辑 px；配置 2.5）。顶部/中间/底部和宽窗均复核；实际证据与限制见本任务日志。Sidebar/Profile 的内容 padding 位于 scroll 内容内，Bar 是外层的直接兄弟，没有文件树这层额外缩进。
+该轮曾把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是无 padding 的 pane，内部列表保留四侧 7px，bar region 也保留上下 7px。**此次负责人拒收后，纵向 7px 策略作废**：它在中间滚动位置形成永久遮挡带，旧首尾/拖动检查不能证明原始问题解决。横向结论保留：`overlay(2.5, 8.0)` 锚定 pane 右缘，内容保留左右 7px，不能把内容 inset 再算到可见条的尾侧距离里。此前 144 DPI 帧中边框 x=773、可见 thumb x=765..768 的记录只支持这一横向距离结论。当前纵向 viewport 与 track 必须共用 pane 顶/底边，详见下节。
 
 ## 列表 viewport 与尾侧通道（2026-11-11）
 
@@ -79,7 +79,22 @@ Home/Feed、全局 Issues/PR 与 Notifications 的纵向列表为滚动条保留
 
 调用方用无 padding 的独立内容 wrapper 限定真实 List 宽高，Bar 与 wheel 仍锚定外层区域。不要直接给 GPUI `List` 添加横向 padding 预留通道：该版本 List 测量行时使用整个 bounds 宽度，不能靠 padding 让行背景避开条。滚动范围、reveal 与 Feed 分页继续读取原生 handle，不另减一次 padding 或构造第二份 offset。
 
-文件树保留四侧 7px 留白与 pane 右缘 2.5px 的可见条，上下 bar region 与真实列表同高。树行的 26px 改为最小高度，由原生 uniform list 测量完整单行文字的实际高度；字体放大时，文字盒不应越过首行/viewport 上沿。新增回归同时对照外层 pane、内容 viewport 和原生 handle bounds，并核验首行零偏移、末行最大偏移、字体缩放及键盘 Home/End。字号很大且窗口很矮时，页头可能用完可用高度；零高度 viewport 不代表 padding 裁切，也不能要求此时显示完整首行。正常滚动中露出的半行不视作 padding 裁切故障。
+文件树仅保留左右 7px 对齐；纵向 native viewport 和 bar region 直接接续固定 header/实际告警区下沿，并延伸至 pane 底边。树行的 26px 最小高度与原生 uniform list 测量策略继续保留；这项字体修复不替代中间偏移遮挡验证。
+
+### 纵向 clip 的归属（原始反馈 7 返工）
+
+GPUI `List` 的 prepaint/paint 以真实 list bounds 建立 `ContentMask`，`uniform_list` 同样以自身 bounds 裁切。共享 `ScrollTarget` 正确返回这些 bounds；错误在 host 把固定空白留在 native viewport **之外**，并用这些缩小的 bounds 验证自己。改 offset 或增大行高不能消除它。
+
+| 表面 | 原固定遮挡带 | 当前 native viewport / paint clip |
+| --- | --- | --- |
+| Home/Feed | header 下 8px gap、Partial 提示后 8px margin；外层底部 8px padding | header/实际提示区下沿至面板底边；有实际追加状态控件时截止于控件上沿 |
+| Files | pane 内上下各 7px | pane 顶边至底边，左右仍为 7px |
+| 全局 Issues/PR | 固定区之后的 flex gap、空 status 节点及页底 8px | header/filter/非空状态构成固定区，列表直接接续；有分页控件时截止于控件上沿 |
+| Notifications | 页底 8px | 固定 header/实际状态区至页底或分页控件上沿 |
+
+固定 header、工具条和实际分页状态可以占用空间；纯首尾呼吸留白如需保留，应属于会随内容移动的部分，不能在预期 viewport 内永久截出一条带。此版不新增首尾 spacer，不修改行内外观。也不能直接用 `List` 样式的纵向 padding 代替内容 spacer：固定版本在每个 logical anchor 的 item origin 上都加 `padding.top`，不能假定它具有普通 Div scroll 内容 padding 的语义。
+
+中间偏移回归通过连续真实 wheel 建立位置，检查渲染场景中行背景 quad 的**继承 content mask**，以及紧邻 header/面板边缘、位于行中部的半像素探针是否被实际可见矩形覆盖；同时在原空白带发送 wheel，核对列内只消费一次。普通/放大字体、宽/窄布局和显示缩放均参与验证。树正常半行裁切仍限于真实边界；0 高度 pane 不可要求容纳完整一行。首尾 reveal、thumb 与 Feed append 仍独立保留，不能代替这些中间位置证据。
 
 回归包括 Home/Feed 独立列表的短/长内容、宽/窄布局、首尾 reveal、通道拖动与隐藏时宽度稳定，以及真实 Shell/page host 的组合路径；最终执行结果和原生验收边界见 [本轮日志](devlog/2026-11-10-ui-scroll-geometry.md)。
 

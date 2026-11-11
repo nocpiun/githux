@@ -7,7 +7,7 @@
 //! - `PAGE_GUTTER` matches Home's `px_4` body padding, so titles and list edges line up across
 //!   Home, Notifications, Issues and Pull Requests.
 //! - `PAGE_TOP` matches Home's `pt_4`.
-//! - `PAGE_BOTTOM` matches Home's `pb_2`; the list itself owns the remaining scroll slack.
+//! - `PAGE_BOTTOM` is zero: scrolling rows reach the pane edge; footer controls own their space.
 //! - `PAGE_HEADER_HEIGHT` matches Home's column header row and is the height Notifications uses for
 //!   its title line.
 //!
@@ -26,8 +26,8 @@ pub(crate) const PAGE_HEADER_INSET: f32 = 8.0;
 /// Space above a page's first row of content.
 pub(crate) const PAGE_TOP: f32 = 16.0;
 
-/// Space below the last row of content before the island edge.
-pub(crate) const PAGE_BOTTOM: f32 = 8.0;
+/// Fixed page-bottom inset. Zero prevents an opaque band outside the native list clip.
+pub(crate) const PAGE_BOTTOM: f32 = 0.0;
 
 /// Title row height, shared with Home's column header so headings sit on one line.
 pub(crate) const PAGE_HEADER_HEIGHT: f32 = 40.0;

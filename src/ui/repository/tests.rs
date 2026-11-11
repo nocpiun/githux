@@ -1810,7 +1810,7 @@ fn uncertain_readme_retry_only_restarts_discovery(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestAppContext) {
+fn inset_tree_reveals_last_row_and_keeps_horizontal_alignment(cx: &mut TestAppContext) {
     let fixture = Fixture::new(Scene::LongTree);
     fixture.login(1);
     let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
@@ -1828,7 +1828,8 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
                 page.read_with(cx, |p, _| p.tree_base_handle().offset())
             )
         });
-    assert!(first.origin.x > outer.origin.x && first.origin.y > outer.origin.y);
+    assert!(first.origin.x > outer.origin.x);
+    assert!((first.top() - outer.top()).abs() < px(0.01));
     assert!(first.right() < outer.right());
     cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
     cx.simulate_mouse_move(outer.center(), None, Modifiers::none());
@@ -1875,11 +1876,109 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
     let last = cx
         .debug_bounds("repository-row-file-0399.txt")
         .expect("End reveals last row");
-    assert!(last.bottom() < outer.bottom());
+    assert!(last.bottom() <= outer.bottom() + px(0.01));
     assert!(last.origin.y >= outer.origin.y);
     cx.simulate_keystrokes("home");
     frames(cx);
     assert!(cx.debug_bounds("repository-row-file-0000.txt").is_some());
+}
+
+fn intermediate_tree_paint_edge(cx: &mut TestAppContext, top: bool) {
+    let fixture = Fixture::new(Scene::LongTree);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| page.tree("").is_some());
+    for (width, font_scale, display_scale) in [
+        (1180.0, 1.0, 1.0),
+        (560.0, 1.0, 1.0),
+        (1180.0, 1.5, 1.5),
+        (560.0, 1.5, 1.5),
+    ] {
+        cx.simulate_scale_factor_change(display_scale);
+        cx.update(|_, cx| {
+            ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale);
+        });
+        cx.simulate_resize(gpui::size(px(width), px(1400.0)));
+        page.update(cx, |page, cx| {
+            page.tree_motion.cancel();
+            page.tree_base_handle()
+                .set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+        frames(cx);
+        let first = cx.debug_bounds("repository-row-file-0000.txt").unwrap();
+        page.update(cx, |page, cx| {
+            page.selection = Selection::File("file-0010.txt".into());
+            page.tree_base_handle()
+                .set_offset(gpui::point(px(0.0), -(first.size.height * 10.0 + px(13.0))));
+            cx.notify();
+        });
+        frames(cx);
+        let pane = cx.debug_bounds("repository-tree-viewport").unwrap();
+        let header = cx.debug_bounds("repository-tree-header").unwrap();
+        assert!(
+            (pane.top() - header.bottom()).abs() < px(0.01),
+            "header and pane share an edge, allowing only float conversion error"
+        );
+        let native = page.read_with(cx, |page, _| page.tree_base_handle().bounds());
+        let index = if top {
+            10
+        } else {
+            (10..400)
+                .find(|index| {
+                    cx.debug_bounds(Box::leak(
+                        format!("repository-row-file-{index:04}.txt").into_boxed_str(),
+                    ))
+                    .is_some_and(|row| {
+                        row.top() < native.bottom() && row.bottom() >= native.bottom()
+                    })
+                })
+                .expect("a row crosses the intermediate viewport bottom")
+        };
+        let selector: &'static str =
+            Box::leak(format!("repository-row-file-{index:04}.txt").into_boxed_str());
+        let edge = if top { header.bottom() } else { pane.bottom() };
+        if !top {
+            let row = cx.debug_bounds(selector).unwrap();
+            page.update(cx, |page, cx| {
+                page.selection = Selection::File(format!("file-{index:04}.txt"));
+                let handle = page.tree_base_handle();
+                handle.set_offset(handle.offset() + gpui::point(px(0.0), edge - row.center().y));
+                cx.notify();
+            });
+            frames(cx);
+        }
+        let row = cx.debug_bounds(selector).unwrap();
+        assert!(
+            row.top() < edge && row.bottom() > edge,
+            "the selected row must cross the real pane boundary"
+        );
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let quad = window.painted_quads().into_iter().find(|quad| {
+                quad.bounds == row.scale(scale) && !quad.background.is_transparent()
+            }).expect("selected tree row submits its background");
+            let visible = quad.bounds.intersect(&quad.content_mask.bounds);
+            let probe = gpui::Bounds::new(
+                gpui::point(row.center().x - px(1.0), edge + if top { px(0.25) } else { px(-0.75) }),
+                gpui::size(px(2.0), px(0.5)),
+            ).scale(scale);
+            assert!(visible.contains(&probe.origin) && visible.contains(&probe.bottom_right()),
+                "fixed padding occludes scrolling content: row={:?}, clip={:?}, visible={visible:?}, probe={probe:?}",
+                quad.bounds, quad.content_mask.bounds);
+        });
+    }
+}
+
+#[gpui::test]
+fn intermediate_tree_paint_reaches_fixed_header(cx: &mut TestAppContext) {
+    intermediate_tree_paint_edge(cx, true);
+}
+
+#[gpui::test]
+fn intermediate_tree_paint_reaches_pane_bottom(cx: &mut TestAppContext) {
+    intermediate_tree_paint_edge(cx, false);
 }
 
 #[gpui::test]
@@ -1910,10 +2009,10 @@ fn tree_viewport_insets_and_complete_edge_rows_survive_resize_and_scale(cx: &mut
                     native, viewport,
                     "clipping and scroll extent use the same viewport"
                 );
-                assert_eq!(viewport.top() - outer.top(), px(7.0));
+                assert!((viewport.top() - outer.top()).abs() < px(0.01));
                 assert_eq!(
                     outer.bottom() - viewport.bottom(),
-                    px(7.0),
+                    px(0.0),
                     "pane={outer:?}, viewport={viewport:?}, display scale={scale}, font scale={font_scale}, width={width}",
                 );
                 let paths = page.read_with(cx, |page, _| {

@@ -99,6 +99,200 @@ fn bounds(cx: &mut VisualTestContext, name: String) -> gpui::Bounds<Pixels> {
     cx.debug_bounds(Box::leak(name.into_boxed_str())).unwrap()
 }
 
+// Inspect the scene actually submitted to the renderer, including its inherited clip.
+// The probe sits in the middle of a solid row, away from rounded corners and borders.
+fn assert_edge_painted(
+    cx: &mut VisualTestContext,
+    row: gpui::Bounds<Pixels>,
+    edge: Pixels,
+    top: bool,
+) {
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quad = window.painted_quads().into_iter().find(|quad| {
+            quad.bounds == row.scale(scale) && !quad.background.is_transparent()
+        }).expect("the edge row must submit a background quad");
+        let visible = quad.bounds.intersect(&quad.content_mask.bounds);
+        let probe = gpui::Bounds::new(
+            point(row.center().x - px(1.0), edge + if top { px(0.25) } else { px(-0.75) }),
+            size(px(2.0), px(0.5)),
+        ).scale(scale);
+        assert!(visible.contains(&probe.origin) && visible.contains(&probe.bottom_right()),
+            "opaque inset band at intended edge: row={:?}, clip={:?}, visible={visible:?}, probe={probe:?}",
+            quad.bounds, quad.content_mask.bounds);
+    });
+}
+
+fn intermediate_home_feed_edge(cx: &mut TestAppContext, top: bool, partial: bool) {
+    let (view, cx) = open(cx);
+    for (width, height, font_scale, display_scale) in [
+        (1180.0, 1000.0, 1.0, 1.0),
+        (640.0, 1400.0, 1.0, 1.0),
+        (1180.0, 1400.0, 1.5, 1.5),
+        (640.0, 1800.0, 1.5, 1.5),
+    ] {
+        cx.simulate_scale_factor_change(display_scale);
+        cx.update(|_, cx| {
+            ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale);
+        });
+        cx.simulate_resize(size(px(width), px(height)));
+        populate(&view, 80, cx);
+        if partial {
+            view.update(cx, |view, cx| {
+                let binding = view.binding.clone();
+                let mut home = view.home.state.data().unwrap().clone();
+                home.readiness = HomeReadiness::Partial {
+                    reasons: vec![HomePartialReason::ResultLimit],
+                };
+                view.apply_home(&binding, 1, home, cx);
+                let mut feed = view.feed.state.data().unwrap().clone();
+                feed.readiness = FeedReadiness::Partial {
+                    reasons: vec![FeedPartialReason::PageLimit],
+                };
+                view.apply_feed(&binding, 1, feed, cx);
+            });
+            frames(cx);
+        }
+        for (column, name, row_name, paint_name) in [
+            (Column::Home, "home", "home-item-row", "home-item-row"),
+            (Column::Feed, "feed", "feed-event-row", "feed-card"),
+        ] {
+            view.update(cx, |view, cx| {
+                let panel = view.panel_mut(column);
+                panel.motion.cancel();
+                panel.pending_reveal = None;
+                panel.selected = None;
+                panel.scroll.scroll_to(gpui::ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.0),
+                });
+                cx.notify();
+            });
+            frames(cx);
+            // Advance through real input so unmeasured list estimates cannot clamp a jump.
+            let position = bounds(cx, format!("{name}-rows")).center();
+            cx.simulate_mouse_move(position, None, Modifiers::none());
+            for _ in 0..80 {
+                cx.simulate_event(gpui::ScrollEvent {
+                    position,
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-17.0))),
+                    modifiers: Modifiers::none(),
+                    touch_phase: Default::default(),
+                    source: gpui::ScrollSource::Pointer,
+                });
+                frames(cx);
+                let anchor = view.read_with(cx, |view, _| match column {
+                    Column::Home => view.home_view.scroll.logical_scroll_top(),
+                    Column::Feed => view.feed_view.scroll.logical_scroll_top(),
+                });
+                if anchor.item_ix >= 2 && anchor.offset_in_item >= px(12.0) {
+                    break;
+                }
+            }
+            let anchor = view.read_with(cx, |view, _| match column {
+                Column::Home => view.home_view.scroll.logical_scroll_top(),
+                Column::Feed => view.feed_view.scroll.logical_scroll_top(),
+            });
+            assert!(
+                anchor.item_ix >= 2 && anchor.offset_in_item >= px(12.0),
+                "real input establishes an intermediate offset: {anchor:?}"
+            );
+            view.update(cx, |view, cx| {
+                view.panel_mut(column).selected = Some(anchor.item_ix);
+                cx.notify();
+            });
+            frames(cx);
+            let root = bounds(cx, "home-view".into());
+            let panel = bounds(cx, format!("{name}-panel"));
+            let header = bounds(cx, format!("{name}-header"));
+            let side_by_side =
+                bounds(cx, "home-header".into()).top() == bounds(cx, "feed-header".into()).top();
+            let edge = if top {
+                if partial {
+                    bounds(cx, format!("{name}-partial")).bottom()
+                } else {
+                    header.bottom()
+                }
+            } else if side_by_side || column == Column::Feed {
+                root.bottom()
+            } else {
+                panel.bottom()
+            };
+            let index = if top {
+                anchor.item_ix
+            } else {
+                let native = view.read_with(cx, |view, _| match column {
+                    Column::Home => view.home_view.scroll.viewport_bounds(),
+                    Column::Feed => view.feed_view.scroll.viewport_bounds(),
+                });
+                (anchor.item_ix..80)
+                    .find(|index| {
+                        cx.debug_bounds(Box::leak(format!("{row_name}-{index}").into_boxed_str()))
+                            .is_some_and(|row| {
+                                row.top() < native.bottom() && row.bottom() >= native.bottom()
+                            })
+                    })
+                    .expect("an intermediate row crosses the viewport bottom")
+            };
+            if !top {
+                let row = bounds(cx, format!("{paint_name}-{index}"));
+                view.update(cx, |view, cx| {
+                    let panel = view.panel_mut(column);
+                    panel.selected = Some(index);
+                    let offset =
+                        scroll::ScrollTarget::offset(&panel.scroll).y + edge - row.center().y;
+                    scroll::ScrollTarget::set_axis_offset(
+                        &panel.scroll,
+                        gpui::Axis::Vertical,
+                        offset,
+                    );
+                    cx.notify();
+                });
+                frames(cx);
+            }
+            let row = bounds(cx, format!("{paint_name}-{index}"));
+            assert!(
+                row.top() < edge && row.bottom() > edge,
+                "the probe must be inside a partially scrolled row: {row:?} edge={edge:?}"
+            );
+            assert_edge_painted(cx, row, edge, top);
+            // Input in the former blank band must reach this column exactly once.
+            let position = point(row.center().x, edge + if top { px(0.5) } else { px(-0.5) });
+            cx.simulate_mouse_move(position, None, Modifiers::none());
+            frames(cx);
+            let before = view.read_with(cx, |view, _| view.offset(column).y);
+            cx.simulate_event(gpui::ScrollEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-9.0))),
+                modifiers: Modifiers::none(),
+                touch_phase: Default::default(),
+                source: gpui::ScrollSource::Pointer,
+            });
+            frames(cx);
+            let after = view.read_with(cx, |view, _| view.offset(column).y);
+            assert!(
+                (after - before + px(9.0)).abs() < px(1.0),
+                "edge input must scroll the real list once"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn intermediate_home_feed_paint_reaches_fixed_header(cx: &mut TestAppContext) {
+    intermediate_home_feed_edge(cx, true, false);
+}
+
+#[gpui::test]
+fn intermediate_home_feed_paint_reaches_panel_bottom(cx: &mut TestAppContext) {
+    intermediate_home_feed_edge(cx, false, false);
+}
+
+#[gpui::test]
+fn intermediate_home_feed_paint_reaches_partial_notice(cx: &mut TestAppContext) {
+    intermediate_home_feed_edge(cx, true, true);
+}
+
 #[gpui::test]
 fn first_and_last_rows_fit_the_real_viewport_at_both_layout_widths(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);

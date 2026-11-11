@@ -176,7 +176,15 @@ fn production_scroll_viewports_keep_headers_first_rows_and_keyboard_reveal_insid
         cx.debug_bounds("home-empty"),
         transport.1.lock().unwrap()
     );
-    for dimensions in [size(px(1180.0), px(800.0)), size(px(880.0), px(700.0))] {
+    for (dimensions, font_scale) in [
+        (size(px(1180.0), px(800.0)), 1.0),
+        (size(px(880.0), px(1000.0)), 1.0),
+        (size(px(1180.0), px(1200.0)), 1.25),
+        (size(px(880.0), px(1400.0)), 1.25),
+    ] {
+        cx.update(|_, cx| {
+            ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale)
+        });
         cx.simulate_resize(dimensions);
         frames(cx);
         let page = bounds(cx, "island-page");
@@ -196,7 +204,8 @@ fn production_scroll_viewports_keep_headers_first_rows_and_keyboard_reveal_insid
                 first.top() >= rows.top() && first.bottom() <= rows.bottom(),
                 "{name}: first={first:?} rows={rows:?}"
             );
-            assert!(rows.bottom() <= page.bottom());
+            assert!((rows.top() - header.bottom()).abs() < px(0.01));
+            assert!((rows.bottom() - page.bottom()).abs() < px(0.01));
             let focus_point = gpui::point(rows.right() - px(0.5), rows.top() + px(2.0));
             cx.simulate_click(focus_point, gpui::Modifiers::none());
             cx.simulate_keystrokes("end");
@@ -213,6 +222,50 @@ fn production_scroll_viewports_keep_headers_first_rows_and_keyboard_reveal_insid
                 last.top() >= rows.top() - px(1.0) && last.bottom() <= rows.bottom() + px(1.0),
                 "{name}: last={last:?} rows={rows:?}"
             );
+            cx.simulate_keystrokes("home");
+            frames(cx);
+            // Real mounted host: select a measured row, then partially scroll it across
+            // the fixed header boundary. Its actual paint must not lose another band.
+            cx.simulate_keystrokes("down");
+            cx.simulate_keystrokes("down");
+            frames(cx);
+            cx.simulate_mouse_move(rows.center(), None, gpui::Modifiers::none());
+            cx.simulate_event(gpui::ScrollEvent {
+                position: rows.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-17.0))),
+                modifiers: gpui::Modifiers::none(),
+                touch_phase: Default::default(),
+                source: gpui::ScrollSource::Pointer,
+            });
+            frames(cx);
+            let row = bounds(
+                cx,
+                if name == "home" {
+                    "home-item-row-2"
+                } else {
+                    "feed-card-2"
+                },
+            );
+            assert!(row.top() < header.bottom() && row.bottom() > header.bottom());
+            cx.update(|window, _| {
+                let scale = window.scale_factor();
+                let quad = window
+                    .painted_quads()
+                    .into_iter()
+                    .find(|quad| {
+                        quad.bounds == row.scale(scale) && !quad.background.is_transparent()
+                    })
+                    .expect("mounted edge row is painted");
+                let visible = quad.bounds.intersect(&quad.content_mask.bounds);
+                let probe = gpui::point(row.center().x, header.bottom() + px(0.5));
+                let probe = gpui::Bounds::new(probe, size(px(0.0), px(0.0)))
+                    .scale(scale)
+                    .origin;
+                assert!(
+                    visible.contains(&probe),
+                    "mounted page clip leaves an invisible band: {visible:?} {probe:?}"
+                );
+            });
             cx.simulate_keystrokes("home");
             frames(cx);
             cx.update(|window, cx| window.focus_next(cx));

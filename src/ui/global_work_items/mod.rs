@@ -531,6 +531,19 @@ impl Render for WorkItemsView {
                     ),
             );
         }
+        let fixed_header = div()
+            .debug_selector(|| "work-fixed-header".into())
+            .flex_none()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap_2()
+            .child(header)
+            .child(controls)
+            .when(
+                current && (self.controller.error.is_some() || !self.controller.partial.is_empty()),
+                |header| header.child(status),
+            );
         let body = if !current {
             div().flex_1().child("Account changed").into_any_element()
         } else if self.controller.is_empty() {
@@ -574,19 +587,16 @@ impl Render for WorkItemsView {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            // Same body gutter/top/bottom inset as Home, Settings and Notifications. The header
-            // row keeps the shared title height so the four production pages align at the top.
+            // Keep heading/control spacing inside the fixed header. The native list
+            // reaches the page bottom without a permanently masked padding band.
             .px(px(crate::ui::page_layout::PAGE_GUTTER))
             .pt(px(crate::ui::page_layout::PAGE_TOP))
             .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
-            .gap_2()
             .bg(colors.surface)
             .text_color(colors.fg)
             .text_size(cx.theme().text_size(TextSize::Sm))
             .relative()
-            .child(header)
-            .child(controls)
-            .child(status)
+            .child(fixed_header)
             .child(body)
             .child(lease)
             .when(more, |view| {
