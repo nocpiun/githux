@@ -638,6 +638,79 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
     });
 }
 
+/// Regression (review finding): a failed branch enumeration after the online summary succeeded must
+/// still revalidate the displayed snapshot from the saved intent or the observed default, instead of
+/// leaving the page historical forever.
+#[gpui::test]
+fn a_failed_branch_enumeration_still_revalidates_the_cached_revision(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // The online summary succeeds, but branch enumeration fails with no usable fallback.
+    page.update_in(cx, |page, window, cx| {
+        let context = page.context.clone().expect("context");
+        let generation = page.generation;
+        let branch_request = page.branch_request;
+        let details = page.details.clone().expect("a displayed summary");
+        page.inbox
+            .lock()
+            .expect("repository page inbox")
+            .push_back(super::super::Message {
+                generation,
+                branch_request,
+                authorization: None,
+                context: context.clone(),
+                preliminary: false,
+                body: super::super::Body::Repository {
+                    result: Ok((
+                        details,
+                        Some(crate::data::RepositoryCacheProvenance {
+                            origin: RepositoryCacheOrigin::Network,
+                            fetched_at_ms: 1,
+                            verified_at_ms: 1,
+                            completeness: crate::domain::cache::CacheCompleteness::Complete,
+                        }),
+                    )),
+                    star_write_generation: page.star_write_generation,
+                },
+            });
+        page.inbox
+            .lock()
+            .expect("repository page inbox")
+            .push_back(super::super::Message {
+                generation,
+                branch_request,
+                authorization: None,
+                context,
+                preliminary: false,
+                body: super::super::Body::Branches(Err(super::super::PageError::new(
+                    "branch enumeration failed",
+                    Some("synthetic".into()),
+                    true,
+                ))),
+            });
+        page.drain(window, cx);
+    });
+
+    // Releasing the network lets the revalidation resolve the same ref and replace the snapshot.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        !page.is_showing_cached_snapshot() && page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.selected_branch(), Some("main"));
+    });
+}
+
 /// Regression (review finding): when the repository's default branch moved, the cache-first bundle
 /// may display the old default. The online summary must then re-run the product branch choice
 /// instead of re-resolving the cached branch forever.

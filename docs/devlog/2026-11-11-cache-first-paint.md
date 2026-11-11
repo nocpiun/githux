@@ -127,6 +127,16 @@ Codex 对 `49a57ef` 提出 1 项 P2，成立且可直接修复；仍无待裁决
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
 
+## PR #85 第五轮审查修复
+
+Codex 对 `05e416b` 提出 1 项 P2，成立且可直接修复；仍无待裁决事项。
+
+**P2 分支枚举失败时不再重验已显示快照**：bundle 已上屏且在线摘要成功后，若分支枚举失败且没有可用缓存回退，旧实现得到 `chosen=None` 同时清掉 `snapshot_preliminary`，于是既不重验已显示 commit，后续成功重试也不会重验。修复：枚举失败时用保存意图或刚观察到的 `default_branch` 作为可解析 ref；两者都没有时保留 `snapshot_preliminary`，让后续成功重试仍能触发重验。回归 `a_failed_branch_enumeration_still_revalidates_the_cached_revision`（恢复旧语义后失败）。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
+
+**已知与本任务无关的既有偶发**：全量 `cargo test --locked` 期间 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 偶发在重开 `CacheStore` 时得到 `InUse`（该用例用 50ms sleep 等异步写入）。本任务未修改 `src/data/reader_images*`，定向重跑与主程序目标均通过；记录为既有顺序/资源偶发，不归因本任务。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

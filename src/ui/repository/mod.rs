@@ -1926,43 +1926,56 @@ impl RepositoryPage {
             // chain must still re-resolve it, or the page would keep its historical tree and reader
             // forever. The previously displayed commit stays on screen until that reply arrives.
             if self.snapshot_preliminary && network_verified {
-                self.snapshot_preliminary = false;
                 // Re-run the product branch choice against the freshly observed default: the snapshot
-                // may have displayed an old default (or a branch that no longer exists).
-                let chosen = outcome.as_ref().and_then(|outcome| {
-                    match branch_choice(
-                        outcome,
-                        details.default_branch.as_ref(),
-                        self.intent.branch.as_deref(),
-                    ) {
-                        BranchChoice::Selected(branch) => Some(branch.as_str().to_string()),
-                        BranchChoice::None { .. } => None,
+                // may have displayed an old default (or a branch that no longer exists). A failed
+                // branch enumeration is not a reason to give up — the saved intent or the observed
+                // default is still a valid ref to revalidate.
+                let chosen = match outcome.as_ref() {
+                    Some(outcome) => {
+                        match branch_choice(
+                            outcome,
+                            details.default_branch.as_ref(),
+                            self.intent.branch.as_deref(),
+                        ) {
+                            BranchChoice::Selected(branch) => Some(branch.as_str().to_string()),
+                            BranchChoice::None { .. } => None,
+                        }
                     }
-                });
-                let displayed = self.branch.as_ref().map(|branch| branch.name.clone());
-                match (chosen, displayed) {
-                    // Same branch: keep the displayed commit, tree and reader (and their identities,
-                    // so the reader's callbacks stay valid) while it revalidates.
-                    (Some(chosen), Some(displayed)) if chosen == displayed => {
-                        self.intent.branch = Some(displayed);
-                        self.spawn_job(Job::Revision {
-                            branch: chosen,
-                            request: self.branch_request,
-                            identity: details.identity,
-                            mode: RepositoryCacheMode::OnlinePreferred,
-                        });
+                    None => self.intent.branch.clone().or_else(|| {
+                        details
+                            .default_branch
+                            .as_ref()
+                            .map(|reference| reference.as_str().to_string())
+                    }),
+                };
+                if let Some(chosen) = chosen {
+                    self.snapshot_preliminary = false;
+                    let displayed = self.branch.as_ref().map(|branch| branch.name.clone());
+                    match displayed {
+                        // Same branch: keep the displayed commit, tree and reader (and their
+                        // identities, so the reader's callbacks stay valid) while it revalidates.
+                        Some(displayed) if chosen == displayed => {
+                            self.intent.branch = Some(displayed);
+                            self.spawn_job(Job::Revision {
+                                branch: chosen,
+                                request: self.branch_request,
+                                identity: details.identity,
+                                mode: RepositoryCacheMode::OnlinePreferred,
+                            });
+                        }
+                        // A different default than the snapshot showed: resolve it from scratch.
+                        _ => {
+                            self.branch = None;
+                            self.reader = None;
+                            self.readme_path = None;
+                            self.reader_status = ReaderStatus::Loading;
+                            self.invalidate_rows();
+                            self.begin_branch(chosen, cx);
+                        }
                     }
-                    // A different default than the snapshot showed: resolve it from scratch.
-                    (Some(chosen), _) => {
-                        self.branch = None;
-                        self.reader = None;
-                        self.readme_path = None;
-                        self.reader_status = ReaderStatus::Loading;
-                        self.invalidate_rows();
-                        self.begin_branch(chosen, cx);
-                    }
-                    (None, _) => {}
                 }
+                // Nothing identifiable to resolve yet: keep the marker so a later successful branch
+                // list retry still revalidates the displayed snapshot.
             }
             cx.notify();
             return;
