@@ -3,6 +3,32 @@
 - 任务 ID `reader-svg`，同一分支 `fix/reader-svg`、同一 [PR #82](https://github.com/nocpiun/githux/pull/82)。初始 base `0c619070be103048f9aa033f2f57520372cbebb2`；2026-11-11 返工已整合 main `f9e31a07ad3c5352eebd803592d420d624dc2bf1` 的已验收字体、Profile、图片布局、tabs 与行链接；未引入未合并的 #84 viewport padding 方案，不修改页面宿主或缓存首屏任务的文件。不合并 PR，`merge_owner=coordinator`。
 - 状态：**2026-11-11 负责人否决初次静态交付，返工中**。此前 clean Codex/CI 和有效 PNG 不能证明实际 Profile 内容正确，也不构成人工验收。以下初次静态实现与检查为历史记录；当前行为契约以 [README 图片](../reader-images.md) 为准。
 
+## 2026-11-11 再次品质返工：同字节参考、设备密度与静默加载
+
+负责人反馈 opanel-mc/opanel Star History 几何/标签失真、Profile 卡片仍模糊，并要求所有 pending 图片不占位。继续原会话、分支和 PR；表格图片另属 `reader-table-images`，本轮不修改其 AST、DocText、Table 分支/测试，也不修改页面宿主或 viewport geometry。最新旧 head 审查 `5859062688` 的两条 P2（显式 transform none 与 dashoffset px）合并处理；负责人尚未验收，合并归协调者。
+
+同一响应比较：从 README 的实际 Star History URL 取得 65,171 B SVG，SHA-256 `2af50869a89d82f9858924efb1c621ba0d6eac9cf712718b619d099064ccd95f`，只保存在本地调查目录；用相同字节生成 Chromium 1×/1.5×/2×/3× 参考。查询含 token 的 URL 未进入提交/文档。原图确有手绘噪声，未拉直作者几何。具体偏差有二：内嵌 xkcd WOFF1 原本被忽略；resvg 0.46.0 调用方已经转换 displacement scale，底层又乘一次，使源 scale 5 实际成为 25，负值符号也丢失。密度探针随后复现 1.5× 下 SourceGraphic 与位移图因滤镜区域取整相差一像素、触发库的等尺寸断言；采样改为遍历真实输出、使用每个输入自己的 stride/bounds，越界透明且不增添工作面。原创小数几何与超出四画布裁切的最小滤镜分别覆盖两条边界。首轮字体/滤镜修补后，同尺寸 RGB 平均绝对差由 8.2807 降至 3.9266；这是中间 1× 对照，不替代最终密度探针或人工验收。roast 内两张 PNG 的实际网格为 96×96、32×32，作者盒分别 32×32、13×13；SVG 文字/线条可重新光栅化，但超出这些内嵌位图原生像素的细节不能凭空恢复。
+
+根 Cargo patch 使 GPUI 和 Reader 共用 `vendor/resvg` 精确发布包，仅修改 displacement 的比例/网格采样算术并带修改声明，保留原 metadata/示例/双许可全文及 PATCH.md。字体从受限 data URL 加入私有内存 fontdb，WOFF1 有界逐表解包/校验、保留 CSS family alias，单输入 1 MiB、根与内嵌共用解包 4 MiB。拒绝原始和 WOFF flavor 伪装的字体集合，SFNT 表/名称数量与名称字符串累计工作独立限制，防止小字节头描述巨大解析/分配工作；无系统扫描、文件或网络字体读取。提交的字体仅为现有 Google Sans Code 的改名 OFL 测试子集，公开原图/字体不提交。
+
+新增兼容 `ImageProvider::start_with_options`，默认委托旧 start，ImageRequest 与宿主接口不变。Reader 初始化/绘制取设备比例，生产 provider 后台解码使用真实比例：入场帧目标为设备像素密度，最终图额外 2× 超采样，作者逻辑宽高不变。最终图、保留帧、滤镜工作面共同受预算钳制；不足时先降低时间采样数并保持稳定帧网格，极端情况下才最终静态 fallback。更高密度保留旧图至后台完成，不重播入场，准确替换保留成本；低密度重用清晰网格，PNG/GIF 不无效重载。真实失败（含 session 失效）保留诊断并释放旧成本。rem 只缩放文字；未来若有整体图片 zoom，须显式传入有效比例。高 DPI 大图/滤镜可能仍低于目标网格，这是实现预算边界。
+
+合法图片未请求/排队/Loading 时零高度，无盒、alt 标签或 140px 面板；真实失败/拒绝仍显示原因。构建块先登记需求，再从 flex 图片行去掉 pending 子项，避免零宽子项仍制造 gap；全 pending 块归零。调度不依赖图片本身正面积，Ready 的可见交集只用于开始动画；完成后复用虚拟项重测/锚点或 Flow 高度通知，alt 继续存在于复制文本。原有保留队列去重已存在，密度升级复用它而非计成第二张图片。
+
+本轮最终验证：完整图片组串行 `f4a448a7-087a-4fdd-8deb-080c6fd21e07` **832 通过**（1 个 opt-in 忽略）；Repository/overview `a1ac2807-6e04-4962-98c2-34a57d8b9537` **922 / 44 通过**。随后发现的滤镜网格边界/WOFF flavor 修正由 `fbcfab9f-dfb6-42e3-be0d-dfd5e00ef444` **16 项品质回归通过**；最终 all-target clippy `4842e13e-b224-4b51-bcb6-59431bd638c6`、正式 app/example build `8fcfd73b-78c1-4e18-a7e9-2ae5c0cc0663`、fmt check `5f90f4fc-3386-417e-9c0c-e8bea14bc504` 和公开探针 `0a05483a-2c26-4b31-b55e-e8746bf9a609` 全部通过。较早全套前六组 1280 / 103 / 626 / 330 / 295 / 830 通过；两次并行测试分别命中未修改的 loopback framing/chunked 用例 `error sending request`，隔离与后续串行组内复测通过，保留失败记录而未调整网络实现。新回归覆盖 data 字体实际选字/解包与解析工作上限、正负位移、transform none/translateX 与 px dashoffset、1–4× 物理网格/最终成本、DPI 旧 scope/保留替换/失败、PNG/GIF 不重载、pending 行间空隙，以及虚拟/Flow 延迟完成和纯图片零尺寸调度。
+
+最终公开探针仍使用相同本地响应，Stats 的 467×195 逻辑盒不变：
+
+| 设备比例 | 入场网格 | 保留最终网格 | 入场样本 | 保留 BGRA 总字节 |
+| --- | --- | --- | --- | --- |
+| 1× | 467×195 | 934×390 | 27 | 11,292,060 |
+| 1.5× | 700×292 | 1401×585 | 27 | 25,353,540 |
+| 2× | 934×390 | 1868×780 | 15 | 27,683,760 |
+
+roast 最终网格依次 880×400 / 1320×600 / 1760×800，逻辑盒仍 440×200。Star History 的全画布滤镜受工作面预算限制，最终网格依次 1295×863 / 1275×850 / 1377×918；2× 下低于参考物理大小，这是记录在案的实现预算限制。完整浏览器截图尺寸上的 RGB MAE 约由 8.28–8.34 降到 5.13–5.33，上文首轮数值来自较早的 1× 调查；本轮明确按完整浏览器截图尺寸比较，两组数字不混用为验收门槛。参考卡片显式采用 dark color-scheme，匹配 Reader 当前采用的源基础配色；条件 CSS、浏览器字体合成和抗锯齿仍可能不同。三张 browser/旧/新对照与指标 JSON 留在本地质量目录，公开素材不提交。
+
+当前原生 PrintWindow 录像仍是本次品质返工之前的历史证据。本轮 headless Chromium 对照、测试平台生命周期与解码探针均不构成真实账户 Profile/手动输入验收。当前实现与预算详见 [README 图片](../reader-images.md)；必须获得新 head CI/review，仍不合并。
+
 ## 2026-11-11 负责人反馈后的集成返工
 
 负责人提供了真实 Profile README 与三份公开 SVG 响应，先读取本地证据再实现，没有把原始响应或用户 Profile 复制进 Git fixture：

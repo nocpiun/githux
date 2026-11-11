@@ -1371,7 +1371,7 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
     assert!(image::load_from_memory(&badge.bytes).is_ok());
 
     let stats_sink = ImageSink::new();
-    service.start(
+    service.start_with_options(
         ImageRequest {
             scope: test_scope(1),
             key: ImageKey::new("stats-svg"),
@@ -1380,6 +1380,7 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
             },
         },
         stats_sink.clone(),
+        ImageRenderOptions::for_device_scale(1.5),
     );
     let stats = next_completion(&stats_sink)
         .await
@@ -1393,16 +1394,24 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
             .as_ref()
             .is_some_and(|a| a.duration_ms == 1350)
     );
+    let final_pixels = image::load_from_memory(&stats.bytes).unwrap().to_rgba8();
     assert_eq!(
-        image::load_from_memory(&stats.bytes)
-            .unwrap()
-            .to_rgba8()
-            .get_pixel(12, 72)
-            .0,
+        final_pixels.dimensions(),
+        (720, 300),
+        "provider retains a supersampled final grid"
+    );
+    assert_eq!(
+        final_pixels.get_pixel(36, 216).0,
         [0, 255, 255, 255],
         "provider returns visible final row values"
     );
 
+    let first = &stats.animation.as_ref().unwrap().frames[0].pixels;
+    assert_eq!(
+        (first.width, first.height),
+        (360, 150),
+        "provider receives physical display options"
+    );
     let chart_sink = ImageSink::new();
     service.start(
         ImageRequest {
@@ -1451,7 +1460,7 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
         .expect("cached svg offline");
     assert_eq!((chart_offline.width, chart_offline.height), (800, 533));
     let stats_offline_sink = ImageSink::new();
-    service2.start(
+    service2.start_with_options(
         ImageRequest {
             scope: test_scope(2),
             key: ImageKey::new("stats-svg-offline"),
@@ -1460,13 +1469,22 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
             },
         },
         stats_offline_sink.clone(),
+        ImageRenderOptions::for_device_scale(2.0),
     );
     let stats_offline = next_completion(&stats_offline_sink)
         .await
         .result
         .expect("cached animation re-evaluates offline");
     assert!(stats_offline.animation.is_some());
-    assert_eq!(stats_offline.bytes, stats.bytes);
+    let offline_pixels = image::load_from_memory(&stats_offline.bytes)
+        .unwrap()
+        .to_rgba8();
+    assert_eq!(
+        offline_pixels.dimensions(),
+        (960, 400),
+        "raw cached SVG rerasterizes at the new density offline"
+    );
+    assert_eq!(offline_pixels.get_pixel(48, 288).0, [0, 255, 255, 255]);
     assert_eq!(
         offline_external.reads.lock().unwrap().len(),
         external_reads,

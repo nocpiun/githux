@@ -11,7 +11,7 @@
 //! independent memory. The reader keeps a bounded number of decoded pictures;
 //! older ones are released rather than accumulated.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use gpui::{
@@ -20,14 +20,11 @@ use gpui::{
 };
 
 use crate::content::images::{
-    ImageCompletion, ImageFailure, ImageFormat, ImageKey, ImageLimits, ImageRequest, ImageScope,
-    ImageSink, ImageTarget,
+    ImageCompletion, ImageFailure, ImageFormat, ImageKey, ImageLimits, ImageRenderOptions,
+    ImageRequest, ImageScope, ImageSink, ImageTarget,
 };
 
 use super::{LinkTarget, ResourceContext, links};
-
-/// Vertical space reserved while a picture loads or has failed.
-const PLACEHOLDER_HEIGHT: f32 = 140.0;
 
 /// Dimensions an author asked for through HTML `width`/`height` attributes, in
 /// CSS pixels. `None` means "use the picture's intrinsic size".
@@ -95,6 +92,10 @@ struct Playback {
 pub(crate) struct ImageBoard {
     animations: HashMap<ImageKey, Playback>,
     limits: ImageLimits,
+    render_options: ImageRenderOptions,
+    completed_options: HashMap<ImageKey, ImageRenderOptions>,
+    attempted_options: HashMap<ImageKey, ImageRenderOptions>,
+    density_dependent: HashSet<ImageKey>,
     /// This reader's own identity, so a shared provider never mixes two
     /// readers' work even when their document generations coincide.
     reader: u64,
@@ -120,6 +121,10 @@ impl ImageBoard {
         Self {
             animations: HashMap::new(),
             limits,
+            render_options: ImageRenderOptions::default(),
+            completed_options: HashMap::new(),
+            attempted_options: HashMap::new(),
+            density_dependent: HashSet::new(),
             reader: crate::content::images::next_reader_id(),
             generation: 0,
             attached: false,
@@ -204,6 +209,17 @@ impl ImageBoard {
         }
     }
 
+    pub(super) fn render_options(&self) -> ImageRenderOptions {
+        self.render_options
+    }
+    pub(super) fn set_render_options(&mut self, options: ImageRenderOptions) {
+        self.render_options = options;
+    }
+    pub(crate) fn is_loading(&self, key: &ImageKey) -> bool {
+        matches!(self.states.get(key), Some(ImageState::Loading))
+            || (!self.attached && !self.states.contains_key(key))
+    }
+
     pub(super) fn sink(&self) -> ImageSink {
         self.sink.clone()
     }
@@ -232,6 +248,9 @@ impl ImageBoard {
     pub(super) fn begin(&mut self, generation: u64) {
         self.generation = generation;
         self.states.clear();
+        self.completed_options.clear();
+        self.attempted_options.clear();
+        self.density_dependent.clear();
         self.animations.clear();
         self.ready_order.clear();
         self.ready_bytes = 0;
@@ -272,12 +291,33 @@ impl ImageBoard {
             blocks.push(block);
         }
         if let Some(state) = self.states.get(&key) {
-            return state.clone();
+            let state = state.clone();
+            if self.attached
+                && state.is_ready()
+                && self.density_dependent.contains(&key)
+                && self
+                    .attempted_options
+                    .get(&key)
+                    .is_none_or(|known| *known < self.render_options)
+            {
+                self.attempted_options
+                    .insert(key.clone(), self.render_options);
+                self.pending.push_back(ImageRequest {
+                    scope: self.scope(),
+                    key,
+                    target,
+                });
+            }
+            return state;
         }
         if !self.attached {
-            return ImageState::Unavailable;
+            // A valid source may precede provider attachment. Keep its pending
+            // visuals collapsed without registering work that cannot run yet.
+            return ImageState::Loading;
         }
         self.states.insert(key.clone(), ImageState::Loading);
+        self.attempted_options
+            .insert(key.clone(), self.render_options);
         self.pending.push_back(ImageRequest {
             scope: self.scope(),
             key,
@@ -314,6 +354,7 @@ impl ImageBoard {
         self.in_flight = 0;
         self.blocks.clear();
         self.states.retain(|_, state| state.is_ready());
+        self.attempted_options = self.completed_options.clone();
         self.ready_order.retain(|key| self.states.contains_key(key));
     }
 
@@ -340,16 +381,32 @@ impl ImageBoard {
         }
         self.in_flight = self.in_flight.saturating_sub(1);
         let key = completion.key;
+        if self.states.get(&key).is_some_and(ImageState::is_ready) {
+            self.finish_animation(&key);
+        }
         let Some(state) = self.states.get_mut(&key) else {
             // The source was dropped by a document/attachment change.
             return Vec::new();
         };
+        let upgrading = state.is_ready();
         match completion.result {
             Ok(decoded) => {
                 let format = gpui_format(decoded.format);
-                let bytes = decoded.decoded_bytes();
+                let mut bytes = decoded.decoded_bytes();
+                // Input rasters retain their header dimensions. Only a scaled
+                // SVG grid or finite frame bank can benefit from rerasterizing;
+                // do not refetch PNGs or restart GIF playback on a DPI change.
+                let native = (decoded.width as usize)
+                    .saturating_mul(decoded.height as usize)
+                    .saturating_mul(4);
+                if decoded.animation.is_some() || bytes > native {
+                    self.density_dependent.insert(key.clone());
+                } else {
+                    self.density_dependent.remove(&key);
+                }
                 let mut displayed;
                 if let Some(animation) = decoded.animation {
+                    let final_cost = animation.final_pixels.bgra.len();
                     let image = decoded_pixels_source(animation.final_pixels);
                     displayed = image.clone();
                     let frames = animation
@@ -357,7 +414,10 @@ impl ImageBoard {
                         .into_iter()
                         .map(|f| (f.at_ms, decoded_pixels_source(f.pixels)))
                         .collect::<Vec<_>>();
-                    if let Some((_, first)) = frames.first() {
+                    if upgrading {
+                        bytes = final_cost;
+                    }
+                    if let Some((_, first)) = frames.first().filter(|_| !upgrading) {
                         displayed = first.clone();
                         self.animations.insert(
                             key.clone(),
@@ -367,7 +427,7 @@ impl ImageBoard {
                                 last_visible: None,
                                 duration_ms: animation.duration_ms,
                                 frame: 0,
-                                extra_bytes: bytes.saturating_sub(bytes / (frames.len() + 1)),
+                                extra_bytes: bytes.saturating_sub(final_cost),
                                 frames,
                                 final_image: image,
                             },
@@ -378,12 +438,24 @@ impl ImageBoard {
                         ImageSource::Image(Arc::new(Image::from_bytes(format, decoded.bytes)));
                 }
                 *state = ImageState::Ready(displayed, decoded.width, decoded.height);
+                self.completed_options
+                    .insert(key.clone(), self.render_options);
+                self.ready_bytes = self
+                    .ready_bytes
+                    .saturating_sub(self.ready_costs.get(&key).copied().unwrap_or_default());
                 self.ready_costs.insert(key.clone(), bytes);
                 self.ready_bytes = self.ready_bytes.saturating_add(bytes);
                 self.ready_order.retain(|known| known != &key);
                 self.ready_order.push_back(key.clone());
             }
-            Err(failure) => *state = ImageState::Failed(failure),
+            Err(failure) => {
+                *state = ImageState::Failed(failure);
+                self.ready_bytes = self
+                    .ready_bytes
+                    .saturating_sub(self.ready_costs.remove(&key).unwrap_or_default());
+                self.ready_order.retain(|entry| entry != &key);
+                self.completed_options.remove(&key);
+            }
         }
         self.blocks.get(&key).cloned().unwrap_or_default()
     }
@@ -600,32 +672,12 @@ pub(super) fn image_element(
                 .child(frame.child(picture))
                 .into_any_element()
         }
-        ImageState::Loading => {
-            let text = if alt.is_empty() {
-                "Loading picture…".to_string()
-            } else {
-                format!("{alt} — loading picture…")
-            };
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(PLACEHOLDER_HEIGHT))
-                        .rounded(radius)
-                        .bg(colors.sunken)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(gpui::px(sm))
-                        .text_color(colors.fg_subtle)
-                        .child("…"),
-                )
-                .child(note(text))
-                .into_any_element()
-        }
+        ImageState::Loading => div()
+            .debug_selector(move || selector.clone())
+            .w(px(0.0))
+            .h(px(0.0))
+            .overflow_hidden()
+            .into_any_element(),
         ImageState::Unavailable => note(if alt.is_empty() {
             "Picture not loaded — no image service is attached.".to_string()
         } else {

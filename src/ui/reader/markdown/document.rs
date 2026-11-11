@@ -1048,13 +1048,17 @@ impl MarkdownView {
         // Flow mode uses the same real first/last block inset; the host scrolls
         // it, so the document does not need list-level padding tricks.
         let vertical = window.rem_size() * 0.75;
+        let pending_images = self.only_pending_images(block);
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
             .when(centered, |block| {
                 block.w_full().flex().flex_col().items_center()
             })
             .px_3()
-            .py_1()
+            .when(!pending_images, |block| block.py_1())
+            .when(pending_images, |block| {
+                block.h(gpui::px(0.0)).overflow_hidden()
+            })
             // Include real content insets in first/last block measurements.
             // ListState's scrollbar reach excludes list-level padding, so using
             // list.py here would let Motion/thumb clamp away the bottom inset.
@@ -1373,33 +1377,71 @@ impl MarkdownView {
                 |row| row.justify_center(),
             )
             .gap_1()
-            .children(pictures.iter().enumerate().map(|(at, (alt, url, hints))| {
-                if !alt.is_empty() {
-                    let _ = self.next_unit(ix, units);
-                }
-                // Different pictures in one paragraph must keep independent element IDs.
-                div()
-                    .debug_selector(move || format!("markdown-inline-picture-{ix}-{at}"))
-                    .id(gpui::ElementId::Name(
-                        format!("picture-row-{ix}-{at}").into(),
-                    ))
-                    .child(self.picture_unit(
-                        ix,
-                        alt,
-                        url,
-                        *hints,
-                        images::PictureStyle {
-                            colors,
-                            small_text: size,
-                            radius,
-                        },
-                    ))
-            }))
+            .children(
+                pictures
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, (alt, url, hints))| {
+                        if !alt.is_empty() {
+                            let _ = self.next_unit(ix, units);
+                        }
+                        // Different pictures in one paragraph must keep independent element IDs.
+                        let picture = self.picture_unit(
+                            ix,
+                            alt,
+                            url,
+                            *hints,
+                            images::PictureStyle {
+                                colors,
+                                small_text: size,
+                                radius,
+                            },
+                        );
+                        if self.pending_image(url) {
+                            return None;
+                        }
+                        Some(
+                            div()
+                                .debug_selector(move || {
+                                    format!("markdown-inline-picture-{ix}-{at}")
+                                })
+                                .id(gpui::ElementId::Name(
+                                    format!("picture-row-{ix}-{at}").into(),
+                                ))
+                                .child(picture),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
-    /// One picture block: the resolved state of its source, or the honest
-    /// reason it cannot be shown. The alt text stays visible in every state.
+    fn pending_image(&self, url: &str) -> bool {
+        self.image_board
+            .as_ref()
+            .zip(self.resource_context.as_ref())
+            .is_some_and(|(board, context)| {
+                images::resolve_target(url, context)
+                    .ok()
+                    .is_some_and(|target| board.borrow().is_loading(&target.key()))
+            })
+    }
+
+    fn only_pending_images(&self, block: &Block) -> bool {
+        let loading = |url: &str| self.pending_image(url);
+        match block {
+            Block::Image { url, .. } => loading(url),
+            Block::ImageRow(pictures) => {
+                !pictures.is_empty() && pictures.iter().all(|(_, url, _)| loading(url))
+            }
+            Block::Centered(body) => {
+                !body.is_empty() && body.iter().all(|block| self.only_pending_images(block))
+            }
+            _ => false,
+        }
+    }
+
+    /// One picture block: pending demand is visually collapsed; failures retain
+    /// diagnostics, and successful pixels retain their author dimensions.
     fn picture_unit(
         &self,
         ix: usize,

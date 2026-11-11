@@ -55,8 +55,27 @@ pub(super) fn pixels(tree: &usvg::Tree, width: u32, height: u32, embedded: u64) 
             .sum::<u64>();
         // Filter result graphs keep intermediate images. Charge four surfaces
         // per primitive plus working copies; clip/mask surfaces are extra.
+        // The bounded two-primitive displacement chain holds the source layer,
+        // SourceGraphic copy, noise result, noise working copy and output. The
+        // document canvas is charged separately below. Keep the conservative
+        // generic estimate for every other filter graph.
+        let displacement_chain = group.filters().len() == 1
+            && {
+                let primitives = group.filters()[0].primitives();
+                primitives.len() == 2
+                    && matches!(primitives[0].kind(), usvg::filter::Kind::Turbulence(_))
+                    && match primitives[1].kind() {
+                        usvg::filter::Kind::DisplacementMap(map) => {
+                            matches!(map.input1(), usvg::filter::Input::SourceGraphic)
+                                && matches!(map.input2(),usvg::filter::Input::Reference(name) if name == primitives[0].result())
+                        }
+                        _ => false,
+                    }
+            };
         let factor = if group.filters().is_empty() {
             1
+        } else if displacement_chain {
+            5
         } else {
             8 + primitives.saturating_mul(4)
         } + if group.clip_path().is_some() { 3 } else { 0 }

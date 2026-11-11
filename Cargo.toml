@@ -22,6 +22,8 @@ resvg = { version = "0.46.0", default-features = false, features = ["text", "ras
 # Use the same CSS selector and SVG value parsers as usvg for bounded declarative timelines.
 simplecss = "=0.2.2"
 svgtypes = "=0.16.1"
+# Decode bounded embedded WOFF1 tables with the already locked inflater.
+flate2 = "=1.1.10"
 pulldown-cmark = { version = "0.13.5", default-features = false }
 unicode-segmentation = "1"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
@@ -35,6 +37,10 @@ dirs = "=7.0.0"
 uuid = { version = "=1.28.0", features = ["v4"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+
+[patch.crates-io]
+# 0.46.0 applies feDisplacementMap scale twice; keep one shared renderer version.
+resvg = { path = "vendor/resvg" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6.2"

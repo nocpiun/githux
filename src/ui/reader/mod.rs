@@ -41,7 +41,7 @@ mod tests;
 #[allow(unused_imports)]
 pub use crate::content::images::{
     DecodedImage, ImageCompletion, ImageFailure, ImageFormat, ImageKey, ImageLimits, ImageProvider,
-    ImageRefusal, ImageRequest, ImageScope, ImageSink, ImageTarget,
+    ImageRefusal, ImageRenderOptions, ImageRequest, ImageScope, ImageSink, ImageTarget,
 };
 pub use links::LinkTarget;
 pub use source::SourceView;
@@ -331,9 +331,13 @@ impl ReaderView {
             pending_markdown: pending,
             bars: crate::ui::scroll::Bars::new(),
             scroll_clock: ScrollClock::new(),
-            images: std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(
-                image_limits.clone(),
-            ))),
+            images: std::rc::Rc::new(std::cell::RefCell::new({
+                let mut board = images::ImageBoard::new(image_limits.clone());
+                board.set_render_options(ImageRenderOptions::for_device_scale(
+                    window.scale_factor(),
+                ));
+                board
+            })),
             image_provider: None,
             image_pump: None,
             pump_running: false,
@@ -475,7 +479,9 @@ impl ReaderView {
         self.stop_image_pump();
         self.image_limits = limits.clone();
         let attached = self.image_provider.is_some();
+        let density = self.images.borrow().render_options();
         self.images = std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(limits)));
+        self.images.borrow_mut().set_render_options(density);
         self.images.borrow_mut().set_attached(attached);
         self.image_generation = self.image_generation.wrapping_add(1);
         let generation = self.image_generation;
@@ -860,13 +866,17 @@ impl ReaderView {
         let Some(provider) = self.image_provider.clone() else {
             return;
         };
-        let (requests, sink) = {
+        let (requests, sink, options) = {
             let mut board = self.images.borrow_mut();
             let max = board.limits().max_in_flight.max(1);
-            (board.take_pending(max), board.sink())
+            (
+                board.take_pending(max),
+                board.sink(),
+                board.render_options(),
+            )
         };
         for request in requests {
-            provider.start(request, sink.clone());
+            provider.start_with_options(request, sink.clone(), options);
         }
         let released = self.images.borrow_mut().evict();
         if !released.is_empty() {
@@ -926,6 +936,18 @@ impl ReaderView {
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let density = ImageRenderOptions::for_device_scale(window.scale_factor());
+        if self.images.borrow().render_options() != density {
+            let scope = self.images.borrow().scope();
+            if let Some(provider) = &self.image_provider {
+                provider.cancel(scope);
+            }
+            self.stop_image_pump();
+            self.image_generation = self.image_generation.wrapping_add(1);
+            let mut board = self.images.borrow_mut();
+            board.advance(self.image_generation);
+            board.set_render_options(density);
+        }
         let lifetime = scroll_lifetime(cx, Self::cancel_scroll);
         // A frame that first meets a picture queues it on the board; this only
         // restarts the pump a hidden window or a replaced provider stopped. No

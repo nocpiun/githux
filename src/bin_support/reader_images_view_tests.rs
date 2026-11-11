@@ -20,6 +20,9 @@ use gpui::{
 use crate::fixture::{BANNER_URL, COMMIT, LOGO_URL, OVERSIZE_URL, Pipeline, Scene};
 use crate::reader::{ImageKey, ImageTarget, ReaderView};
 
+#[path = "reader_images_quality_view_tests.rs"]
+mod quality;
+
 pub(super) fn setup(cx: &mut TestAppContext) {
     cx.update(ely_core::init_for_tests);
     cx.update(|cx| {
@@ -338,7 +341,7 @@ fn switching_documents_discards_a_picture_that_is_still_in_flight(cx: &mut TestA
 }
 
 #[gpui::test]
-fn a_reader_without_a_provider_keeps_an_honest_placeholder(cx: &mut TestAppContext) {
+fn a_reader_before_provider_attachment_keeps_pending_pictures_collapsed(cx: &mut TestAppContext) {
     setup(cx);
     let pipeline = Pipeline::new(Scene::Healthy);
     let opened = pipeline.open(Scene::Healthy, Scene::limits(Scene::Healthy));
@@ -357,9 +360,16 @@ fn a_reader_without_a_provider_keeps_an_honest_placeholder(cx: &mut TestAppConte
             .is_none(),
         "without a provider nothing is requested"
     );
-    // The placeholder is still drawn and says so.
     let painted = painted_picture_blocks(&reader, cx);
-    assert!(!painted.is_empty(), "the placeholder blocks still draw");
+    for index in painted {
+        let selector: &'static str =
+            Box::leak(format!("markdown-picture-note-{index}").into_boxed_str());
+        assert_eq!(
+            cx.debug_bounds(selector).unwrap().size.height,
+            px(0.0),
+            "unrequested valid images have no panel or label"
+        );
+    }
     assert!(cx.debug_bounds("reader-markdown").is_some());
 }
 

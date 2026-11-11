@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::content::images::{
     DecodedImage, ImageCompletion, ImageFailure, ImageLimits, ImageProvider, ImageRefusal,
-    ImageRequest, ImageScope, ImageSink, ImageTarget, decode_image_checked,
+    ImageRenderOptions, ImageRequest, ImageScope, ImageSink, ImageTarget,
+    decode_image_with_options_checked,
 };
 use crate::data::RepositorySession;
 use crate::data::reader_image_cache::{ExternalFreshness, ReaderImageCache, now_ms};
@@ -247,6 +248,7 @@ impl RepositoryImageService {
         &self,
         request: &ImageRequest,
         cancel: CancellationToken,
+        render_options: ImageRenderOptions,
     ) -> Result<DecodedImage, ImageFailure> {
         // One deadline for the whole load, including decode. A repository
         // picture is several requests (commit, each directory, blob) whose own
@@ -280,7 +282,7 @@ impl RepositoryImageService {
         let decode_cancel = cancel.clone();
         let decode_deadline = deadline.into_std();
         let decode = tokio::task::spawn_blocking(move || {
-            decode_image_checked(bytes, &limits, &|| {
+            decode_image_with_options_checked(bytes, &limits, render_options, &|| {
                 if decode_cancel.is_cancelled() {
                     Err(ImageFailure::Cancelled)
                 } else if std::time::Instant::now() >= decode_deadline {
@@ -737,6 +739,15 @@ impl RepositoryImageService {
 
 impl ImageProvider for RepositoryImageService {
     fn start(&self, request: ImageRequest, sink: ImageSink) {
+        self.start_with_options(request, sink, ImageRenderOptions::default());
+    }
+
+    fn start_with_options(
+        &self,
+        request: ImageRequest,
+        sink: ImageSink,
+        options: ImageRenderOptions,
+    ) {
         let (token, _source) = {
             let mut work = self.inner.work.lock().expect("image work lock");
             work.entry(request.scope)
@@ -750,7 +761,7 @@ impl ImageProvider for RepositoryImageService {
         let failure_key = key.clone();
         let spawned = self.inner.executor.handle().spawn(async move {
             let _permit = this.inner.permits.clone().acquire_owned().await;
-            let result = this.load(&request, token.clone()).await;
+            let result = this.load(&request, token.clone(), options).await;
             if token.is_cancelled() {
                 return;
             }

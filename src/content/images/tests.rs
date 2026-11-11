@@ -2,6 +2,18 @@
 
 use super::*;
 
+// These regressions inspect authored coordinates. Physical grid allocation and
+// density are asserted separately in quality_tests.
+fn logical_pixels(decoded: &DecodedImage, bytes: &[u8]) -> image::RgbaImage {
+    let pixels = image::load_from_memory(bytes).unwrap().to_rgba8();
+    image::imageops::resize(
+        &pixels,
+        decoded.width,
+        decoded.height,
+        image::imageops::FilterType::Nearest,
+    )
+}
+
 fn scope(generation: u64) -> ImageScope {
     ImageScope {
         reader: 1,
@@ -628,7 +640,7 @@ fn declarative_stats_frames_reveal_delayed_contents_and_retain_final_values() {
                 .unwrap()
                 .bytes
         };
-        image::load_from_memory(bytes).unwrap().to_rgba8()
+        logical_pixels(&decoded, bytes)
     };
     let start = frame_at(0);
     let middle = frame_at(600);
@@ -717,36 +729,66 @@ fn public_svg_probe() {
     let out = std::path::PathBuf::from(
         std::env::var_os("GITHUX_SVG_PROBE_OUTPUT").expect("output directory"),
     );
-    std::fs::create_dir_all(&out).unwrap();
-    for name in ["stats", "badge", "roast", "history"] {
-        if name == "history" && !dir.join("sample-history.svg").exists() {
-            continue;
-        }
-        let svg = std::fs::read(dir.join(format!("sample-{name}.svg"))).unwrap();
-        let decoded = decode_image(svg, &ImageLimits::default()).unwrap();
-        std::fs::write(out.join(format!("{name}-final.png")), &decoded.bytes).unwrap();
-        if name == "stats" {
-            let animation = decoded
-                .animation
-                .as_ref()
-                .expect("owner's stats sample must animate");
-            for ms in [0, 600, 1200] {
-                let frame = animation
-                    .frames
-                    .iter()
-                    .rev()
-                    .find(|f| f.at_ms <= ms)
-                    .unwrap();
-                std::fs::write(out.join(format!("stats-{ms}.png")), &frame.bytes).unwrap();
+    let scales = std::env::var("GITHUX_SVG_PROBE_DEVICE_SCALE")
+        .unwrap_or_else(|_| "1".into())
+        .split(',')
+        .map(|n| n.parse::<f32>().expect("device scale"))
+        .collect::<Vec<_>>();
+    let multiple = scales.len() > 1;
+    for device_scale in scales {
+        let out = if multiple {
+            out.join(format!("dpr-{device_scale}"))
+        } else {
+            out.clone()
+        };
+        std::fs::create_dir_all(&out).unwrap();
+        for name in ["stats", "badge", "roast", "history"] {
+            if name == "history" && !dir.join("sample-history.svg").exists() {
+                continue;
             }
+            let svg = std::fs::read(dir.join(format!("sample-{name}.svg"))).unwrap();
+            let decoded = decode_image_with_options_checked(
+                svg,
+                &ImageLimits::default(),
+                ImageRenderOptions::for_device_scale(device_scale),
+                &|| Ok(()),
+            )
+            .unwrap();
+            let physical = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+            println!(
+                "{name}: density={device_scale} final-grid={}x{} entry-grid={:?}",
+                physical.width(),
+                physical.height(),
+                decoded
+                    .animation
+                    .as_ref()
+                    .and_then(|a| a.frames.first())
+                    .map(|f| (f.pixels.width, f.pixels.height))
+            );
+            std::fs::write(out.join(format!("{name}-final.png")), &decoded.bytes).unwrap();
+            if name == "stats" {
+                let animation = decoded
+                    .animation
+                    .as_ref()
+                    .expect("owner's stats sample must animate");
+                for ms in [0, 600, 1200] {
+                    let frame = animation
+                        .frames
+                        .iter()
+                        .rev()
+                        .find(|f| f.at_ms <= ms)
+                        .unwrap();
+                    std::fs::write(out.join(format!("stats-{ms}.png")), &frame.bytes).unwrap();
+                }
+            }
+            println!(
+                "{name}: {}x{}, animation={} decoded-bytes={}",
+                decoded.width,
+                decoded.height,
+                decoded.animation.as_ref().map_or(0, |a| a.frames.len()),
+                decoded.decoded_bytes()
+            );
         }
-        println!(
-            "{name}: {}x{}, animation={} decoded-bytes={}",
-            decoded.width,
-            decoded.height,
-            decoded.animation.as_ref().map_or(0, |a| a.frames.len()),
-            decoded.decoded_bytes()
-        );
     }
 }
 
@@ -755,7 +797,7 @@ fn keyframe_variables_resolve_per_animated_node_with_inherited_values_and_fallba
     let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10"><style>.fade{opacity:0;animation:fade .2s linear forwards}@keyframes fade{from{opacity:var(--start,0)}to{opacity:var(--visible,1)}}</style><rect class="fade" width="10" height="10" fill="#f00"/><g style="--visible:.5"><rect class="fade" x="20" width="10" height="10" fill="#00f"/></g></svg>"##;
     let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
     let animation = image.animation.as_ref().expect("finite entry animation");
-    let pixels = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_rgba8();
+    let pixels = |bytes: &[u8]| logical_pixels(&image, bytes);
     let first = pixels(&animation.frames[0].bytes);
     assert_eq!(
         (first.get_pixel(5, 5).0[3], first.get_pixel(25, 5).0[3]),
@@ -810,7 +852,7 @@ fn transform_animation_without_fill_restores_the_presentation_transform() {
     let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="8"><style>rect{animation:move .2s .1s linear}@keyframes move{from{transform:translate(0 0)}to{transform:translate(10 0)}}</style><rect width="5" height="8" fill="red" transform="translate(20 0)"/></svg>"#;
     let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
     let animation = image.animation.as_ref().unwrap();
-    let pixels = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_rgba8();
+    let pixels = |bytes: &[u8]| logical_pixels(&image, bytes);
     let first = pixels(&animation.frames[0].bytes);
     assert_eq!(
         (first.get_pixel(22, 4).0[3], first.get_pixel(2, 4).0[3]),
@@ -849,7 +891,7 @@ fn single_stop_keyframes_use_underlying_opacity_at_missing_endpoints() {
         .animation
         .as_ref()
         .expect("single explicit stops animate");
-    let pixels = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_rgba8();
+    let pixels = |bytes: &[u8]| logical_pixels(&image, bytes);
     let first = pixels(&animation.frames[0].bytes);
     assert_eq!(
         (first.get_pixel(5, 5).0[3], first.get_pixel(25, 5).0[3]),
@@ -895,7 +937,7 @@ fn percentage_opacity_keyframes_reveal_fill_stroke_and_group_content() {
         ),
         (&image.bytes, 255),
     ] {
-        let pixels = image::load_from_memory(bytes).unwrap().to_rgba8();
+        let pixels = logical_pixels(&image, bytes);
         for x in [5, 20, 35] {
             assert_eq!(pixels.get_pixel(x, 5).0[3], expected);
         }
@@ -906,7 +948,7 @@ fn percentage_opacity_keyframes_reveal_fill_stroke_and_group_content() {
 fn inherited_custom_properties_keep_the_ancestor_computed_value() {
     let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="10" style="--base:red;--ink:var(--base);--alpha:.5;--visible:var(--alpha)"><style>#c{opacity:0;animation:show .2s linear forwards}@keyframes show{from{opacity:0}to{opacity:var(--visible)}}</style><rect width="10" height="10" style="--base:blue;fill:var(--ink)"/><rect x="15" width="10" height="10" style="--base:blue;--ink:var(--base);fill:var(--ink)"/><rect id="c" x="30" width="10" height="10" style="--alpha:1;fill:var(--ink)"/></svg>"#;
     let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
-    let pixels = image::load_from_memory(&image.bytes).unwrap().to_rgba8();
+    let pixels = logical_pixels(&image, &image.bytes);
     assert_eq!(
         pixels.get_pixel(5, 5).0,
         [255, 0, 0, 255],
@@ -1059,11 +1101,7 @@ fn css_fill_modes_preserve_underlying_hidden_and_important_presentation() {
                 .unwrap()
                 .bytes
         };
-        image::load_from_memory(bytes)
-            .unwrap()
-            .to_rgba8()
-            .get_pixel(x, 10)
-            .0[0]
+        logical_pixels(&decoded, bytes).get_pixel(x, 10).0[0]
     };
     assert!(
         (60..=65).contains(&pixel(0, 10)),

@@ -36,6 +36,12 @@ Lucide icons, bundled by `ely-core` and embedded via `include_bytes!`.
 - `src/ui/reader/markdown/` is derived from Ely's `ely-documents` reader at
   revision `30c66fe1d5d23db769a6c834b771d054d7f288cf` (MIT). See
   [docs/content-reader-markdown-patch.md](docs/content-reader-markdown-patch.md).
+- `vendor/resvg/` is the crates.io resvg 0.46.0 source with local
+  displacement scale and clipped-grid corrections. Both original MIT/Apache texts are retained;
+  [PATCH.md](vendor/resvg/PATCH.md) describes the modification.
+- `src/content/images/fixtures/embedded-font.woff` is a test-only renamed subset
+  of Google Sans Code (SIL OFL 1.1); see its adjacent README and the existing
+  [Google Sans Code OFL](assets/fonts/google-sans-code/OFL.txt).
 - Ely (MIT) full text: [assets/licenses/ely-mit.txt](assets/licenses/ely-mit.txt).
 
 ## Compiled dependencies
@@ -54,6 +60,7 @@ Lucide icons, bundled by `ely-core` and embedded via `include_bytes!`.
 | usvg | 0.46.0 | Apache-2.0 OR MIT | Copyright 2017 the Resvg Authors — [MIT](assets/licenses/usvg-0.46.0-license-mit.txt), [Apache-2.0](assets/licenses/usvg-0.46.0-license-apache.txt) |
 | tiny-skia | 0.11.4 | BSD-3-Clause | Copyright (c) 2011 Google Inc.; Copyright (c) 2020 Yevhenii Reizner — [full text](assets/licenses/tiny-skia-0.11.4-license.txt) |
 | simplecss, svgtypes | 0.2.2 / 0.16.1 | Apache-2.0 OR MIT | Already present through usvg; crate `LICENSE-MIT` / `LICENSE-APACHE` |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 | Already locked through image; now used directly for bounded WOFF1 decompression — crate license files |
 | reqwest | 0.13.5 | MIT OR Apache-2.0 | crate license files |
 | base64 | 0.22.1 | MIT OR Apache-2.0 | Copyright (c) 2015 Alice Maz (MIT) |
 | dirs | 7.0.0 | MIT OR Apache-2.0 | Copyright (c) 2018-2019 dirs-rs contributors (MIT) |

@@ -17,7 +17,7 @@ use image::ImageEncoder;
 use resvg::tiny_skia;
 use resvg::usvg::{self, fontdb};
 
-use super::{ImageFailure, ImageLimits};
+use super::{ImageFailure, ImageLimits, ImageRenderOptions};
 
 /// Maximum XML element nodes accepted in a single SVG document before rejecting
 /// as oversized/malformed, well below `usvg`'s internal 1,000,000 node ceiling.
@@ -26,9 +26,6 @@ const MAX_SVG_XML_NODES: usize = 50_000;
 const MAX_SVG_XML_DEPTH: usize = 256;
 /// Maximum size in bytes for any embedded raster/data URI `<image>` inside SVG.
 const MAX_SVG_EMBEDDED_DATA_BYTES: usize = 2 * 1024 * 1024;
-/// Maximum width/height rendered in device pixels for SVG rasterization before
-/// applying `limits.max_dimension`.
-const SVG_SUPERSAMPLE: f32 = 2.0;
 
 const SVG_UI_FONT_REGULAR: &[u8] =
     include_bytes!("../../../assets/fonts/githux-ui/GithuxUI-Regular.ttf");
@@ -133,7 +130,13 @@ impl DecodedImage {
         (width as usize)
             .saturating_mul(height as usize)
             .saturating_mul(4)
-            .saturating_mul(self.animation.as_ref().map_or(1, |a| a.frames.len() + 1))
+            .saturating_add(self.animation.as_ref().map_or(0, |animation| {
+                animation
+                    .frames
+                    .iter()
+                    .map(|frame| frame.pixels.bgra.len())
+                    .fold(0usize, usize::saturating_add)
+            }))
     }
 }
 
@@ -228,6 +231,15 @@ pub fn decode_image_checked(
     limits: &ImageLimits,
     check: &dyn Fn() -> Result<(), ImageFailure>,
 ) -> Result<DecodedImage, ImageFailure> {
+    decode_image_with_options_checked(bytes, limits, ImageRenderOptions::default(), check)
+}
+
+pub fn decode_image_with_options_checked(
+    bytes: Vec<u8>,
+    limits: &ImageLimits,
+    options: ImageRenderOptions,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
+) -> Result<DecodedImage, ImageFailure> {
     check()?;
     if bytes.is_empty() {
         return Err(ImageFailure::Malformed);
@@ -241,7 +253,7 @@ pub fn decode_image_checked(
         return decode_raster(bytes, format, limits);
     }
     if is_svg_like(&bytes) {
-        return decode_svg(&bytes, limits, check);
+        return decode_svg(&bytes, limits, options, check);
     }
     Err(ImageFailure::Unsupported)
 }
@@ -322,61 +334,111 @@ fn decode_raster(
 fn decode_svg(
     bytes: &[u8],
     limits: &ImageLimits,
+    options: ImageRenderOptions,
     check: &dyn Fn() -> Result<(), ImageFailure>,
 ) -> Result<DecodedImage, ImageFailure> {
     let text = validated_svg(bytes)?;
     let doc = parse_svg(text)?;
+    let font_budget = Arc::new(std::sync::Mutex::new((
+        0usize,
+        0u64,
+        doc.descendants().count(),
+        0usize,
+    )));
+    let fonts = super::fonts::with_embedded(&doc, svg_fontdb(), &font_budget)?;
+    let font_bytes = font_budget.lock().map_err(|_| ImageFailure::Malformed)?.3;
     let timeline = super::timeline::Timeline::new(&doc, check)?;
     let animated = timeline.duration_ms > 0.0;
     let final_xml = timeline.sample(text, timeline.duration_ms);
     let RenderedSvg {
         image: mut result,
         pixels: final_pixels,
-    } = decode_svg_static(final_xml.as_bytes(), limits, animated)?;
+    } = decode_svg_static(
+        final_xml.as_bytes(),
+        limits,
+        options.final_scale(),
+        animated.then_some(limits.max_decoded_bytes / 4),
+        fonts.clone(),
+        font_bytes,
+    )?;
     check()?;
     if animated && timeline.duration_ms <= super::timeline::MAX_DURATION_MS {
         let duration_ms = timeline.duration_ms.ceil() as u32;
-        let count = (duration_ms.div_ceil(50) as usize).min(100);
-        let frame_cost = result.decoded_bytes();
-        // Budget the complete retained sequence, including the final frame.
-        // Oversized timelines use the explicit static final fallback.
-        if frame_cost.saturating_mul(count + 1) <= limits.max_decoded_bytes {
-            let mut frames = Vec::new();
+        let desired_count = (duration_ms.div_ceil(50) as usize).min(100);
+        let final_cost = final_pixels.bgra.len();
+        let frame_cost = ((result.width as f64 * f64::from(options.device_scale())).ceil()
+            as usize)
+            .saturating_mul(
+                (result.height as f64 * f64::from(options.device_scale())).ceil() as usize,
+            )
+            .saturating_mul(4)
+            .max(4);
+        let remaining = limits
+            .max_decoded_bytes
+            .min((limits.max_pixels as usize).saturating_mul(4))
+            .saturating_sub(final_cost);
+        let mut count = desired_count.min((remaining / frame_cost).saturating_sub(2));
+        // Keep physical resolution stable across entry frames. If scratch space
+        // cannot coexist with the retained bank, retry with fewer temporal samples.
+        while count >= 2 {
+            let mut frames: Vec<DecodedFrame> = Vec::new();
             let mut encoded = result.bytes.len();
+            let mut retained = final_cost;
+            let mut retry = false;
+            let mut grid = None;
             for ix in 0..count {
                 check()?;
                 let at_ms = (ix as u32 * duration_ms) / count as u32;
                 let xml = timeline.sample(text, f64::from(at_ms));
                 let mut frame_limits = limits.clone();
-                // Previous raw frames coexist with this frame's scratch space.
-                let retained = frame_cost.saturating_mul(ix + 1);
                 frame_limits.max_decoded_bytes = limits.max_decoded_bytes.saturating_sub(retained);
                 frame_limits.max_pixels = limits.max_pixels.saturating_sub((retained / 4) as u64);
-                let frame = match decode_svg_static(xml.as_bytes(), &frame_limits, true) {
+                let frame = match decode_svg_static(
+                    xml.as_bytes(),
+                    &frame_limits,
+                    options.device_scale(),
+                    None,
+                    fonts.clone(),
+                    font_bytes,
+                ) {
                     Ok(frame) => frame,
                     Err(ImageFailure::TooLarge { .. } | ImageFailure::TooManyPixels { .. }) => {
-                        return Ok(result);
+                        retry = true;
+                        break;
                     }
                     Err(error) => return Err(error),
                 };
+                let size = (frame.pixels.width, frame.pixels.height);
+                if grid.is_some_and(|previous| previous != size) {
+                    retry = true;
+                    break;
+                }
+                grid = Some(size);
                 if (frame.image.width, frame.image.height) != (result.width, result.height) {
                     return Err(ImageFailure::Malformed);
                 }
                 encoded = encoded.saturating_add(frame.image.bytes.len());
                 if encoded > limits.max_response_bytes {
-                    return Ok(result);
+                    retry = true;
+                    break;
                 }
+                retained = retained.saturating_add(frame.pixels.bgra.len());
                 frames.push(DecodedFrame {
                     at_ms,
                     bytes: frame.image.bytes,
                     pixels: frame.pixels,
                 });
             }
-            result.animation = Some(DecodedAnimation {
-                duration_ms,
-                frames,
-                final_pixels,
-            });
+            if !retry {
+                result.animation = Some(DecodedAnimation {
+                    duration_ms,
+                    frames,
+                    final_pixels,
+                });
+                break;
+            }
+            drop(frames);
+            count /= 2;
         }
     }
     check()?;
@@ -418,7 +480,10 @@ fn parse_svg(text: &str) -> Result<usvg::roxmltree::Document<'_>, ImageFailure> 
 fn decode_svg_static(
     bytes: &[u8],
     limits: &ImageLimits,
-    native_scale: bool,
+    render_scale: f32,
+    raster_cap: Option<usize>,
+    fonts: Arc<fontdb::Database>,
+    font_bytes: usize,
 ) -> Result<RenderedSvg, ImageFailure> {
     if count_svg_nesting_depth(bytes) > MAX_SVG_XML_DEPTH {
         return Err(ImageFailure::Malformed);
@@ -455,9 +520,10 @@ fn decode_svg_static(
         0usize,
         0u64,
         doc.descendants().count(),
+        font_bytes,
     )));
     let mut options = svg_options_with_budget(limits, 0, resources.clone());
-    options.fontdb = svg_fontdb();
+    options.fontdb = fonts;
 
     let root_opacity = super::timeline::root_opacity(&doc);
     let unscaled = (root_opacity < 1.0).then(|| super::timeline::without_root_opacity(text, &doc));
@@ -503,17 +569,27 @@ fn decode_svg_static(
         });
     }
 
-    let (mut render_w, mut render_h) = if native_scale {
-        (width, height)
-    } else {
-        compute_svg_render_size(intrinsic_w, intrinsic_h, limits)
-    };
+    let mut grid_limits = limits.clone();
+    if let Some(cap) = raster_cap {
+        grid_limits.max_decoded_bytes = grid_limits
+            .max_decoded_bytes
+            .min(cap.max((pixels as usize).saturating_mul(4)));
+    }
+    let (mut render_w, mut render_h) =
+        compute_svg_render_size(intrinsic_w, intrinsic_h, &grid_limits, render_scale);
     let embedded_pixels = resources.lock().map_err(|_| ImageFailure::Malformed)?.1;
     let scratch_cap = limits.max_pixels.min((limits.max_decoded_bytes / 4) as u64);
-    if !native_scale
-        && super::workspace::pixels(&tree, render_w, render_h, embedded_pixels) > scratch_cap
-    {
-        (render_w, render_h) = (width, height);
+    let mut scale = render_scale;
+    for _ in 0..32 {
+        if super::workspace::pixels(&tree, render_w, render_h, embedded_pixels) <= scratch_cap {
+            break;
+        }
+        if scale <= 1.0 {
+            break;
+        }
+        scale = (scale * 0.9).max(1.0);
+        (render_w, render_h) =
+            compute_svg_render_size(intrinsic_w, intrinsic_h, &grid_limits, scale);
     }
     if super::workspace::pixels(&tree, render_w, render_h, embedded_pixels) > scratch_cap {
         return Err(ImageFailure::TooLarge {
@@ -851,7 +927,7 @@ fn embedded_root_opacity(tree: usvg::Tree, opacity: f32) -> Option<usvg::Tree> {
 fn svg_options_with_budget(
     limits: &ImageLimits,
     depth: usize,
-    budget: Arc<std::sync::Mutex<(usize, u64, usize)>>,
+    budget: Arc<std::sync::Mutex<(usize, u64, usize, usize)>>,
 ) -> usvg::Options<'static> {
     let embedded_limits = limits.clone();
     let mut options = usvg::Options {
@@ -879,11 +955,13 @@ fn svg_options_with_budget(
                             return None;
                         }
                     }
+                    let embedded_fonts =
+                        super::fonts::with_embedded(&doc, svg_fontdb(), &budget).ok()?;
                     let timeline = super::timeline::Timeline::new(&doc, &|| Ok(())).ok()?;
                     let xml = timeline.sample(text, timeline.duration_ms);
                     let mut nested =
                         svg_options_with_budget(&embedded_limits, depth + 1, budget.clone());
-                    nested.fontdb = svg_fontdb();
+                    nested.fontdb = embedded_fonts;
                     let normalized = parse_svg(&xml).ok()?;
                     let opacity = super::timeline::root_opacity(&normalized);
                     if opacity == 0.0 {
@@ -1064,7 +1142,12 @@ fn embedded_raster_size(data: &[u8], format: image::ImageFormat) -> Option<(u32,
     (width > 0 && height > 0).then_some((width, height))
 }
 
-fn compute_svg_render_size(intrinsic_w: f32, intrinsic_h: f32, limits: &ImageLimits) -> (u32, u32) {
+fn compute_svg_render_size(
+    intrinsic_w: f32,
+    intrinsic_h: f32,
+    limits: &ImageLimits,
+    requested_scale: f32,
+) -> (u32, u32) {
     let max_dim = limits.max_dimension.max(1) as f32;
     let max_pixels = limits.max_pixels.max(1) as f32;
     let max_bytes_pixels = (limits.max_decoded_bytes / 4).max(1) as f32;
@@ -1074,7 +1157,7 @@ fn compute_svg_render_size(intrinsic_w: f32, intrinsic_h: f32, limits: &ImageLim
     let max_scale_h = max_dim / intrinsic_h;
     let max_scale_pixels =
         (effective_pixel_cap / (intrinsic_w as f64 * intrinsic_h as f64)).sqrt() as f32;
-    let scale = SVG_SUPERSAMPLE
+    let scale = requested_scale
         .min(max_scale_w)
         .min(max_scale_h)
         .min(max_scale_pixels)

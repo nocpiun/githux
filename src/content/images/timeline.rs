@@ -280,6 +280,37 @@ pub(super) fn without_root_opacity(xml: &str, doc: &Document<'_>) -> String {
     result
 }
 
+pub(super) fn font_faces(doc: &Document<'_>) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for node in doc.descendants().filter(|node| node.has_tag_name("style")) {
+        let css = strip_comments(node.text().unwrap_or_default());
+        for (header, body) in blocks(&css) {
+            if header.trim().eq_ignore_ascii_case("@font-face") {
+                let declarations = declarations(body);
+                if let (Some(family), Some(source)) =
+                    (declarations.get("font-family"), declarations.get("src"))
+                {
+                    if family.len() > 128 || result.len() >= 8 {
+                        continue;
+                    }
+                    if let Some(url) = source.trim().strip_prefix("url(").and_then(|source| {
+                        source
+                            .split_once(')')
+                            .map(|(url, _)| url.trim().trim_matches(['\"', '\'']))
+                    }) && url.starts_with("data:")
+                    {
+                        result.push((
+                            family.trim().trim_matches(['\"', '\'']).to_string(),
+                            url.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 fn declarations(css: &str) -> Properties {
     css_declarations(css)
         .into_iter()
@@ -920,7 +951,7 @@ impl Timeline {
                 let origin = props.remove("transform-origin").unwrap_or_default();
                 let origin = origin.replace("px", "");
                 let parts = origin.split_whitespace().collect::<Vec<_>>();
-                let value = value.replace("px", "").replace("deg", "");
+                let value = transform_value(&value);
                 if parts.len() == 2
                     && let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
                 {
@@ -960,14 +991,36 @@ fn escape(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
 }
+fn transform_value(value: &str) -> String {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return "matrix(1 0 0 1 0 0)".into();
+    }
+    let clean = value.replace("px", "").replace("deg", "");
+    let mut rest = clean.trim();
+    let mut result = String::new();
+    while let Some(open) = rest.find('(') {
+        let Some(close) = rest[open + 1..].find(')').map(|n| open + 1 + n) else {
+            return clean;
+        };
+        let name = rest[..open].trim();
+        let args = &rest[open + 1..close];
+        let part = match name {
+            "translateX" => format!("translate({args} 0)"),
+            "translateY" => format!("translate(0 {args})"),
+            "scaleX" => format!("scale({args} 1)"),
+            "scaleY" => format!("scale(1 {args})"),
+            _ => format!("{name}({args})"),
+        };
+        result.push_str(&part);
+        result.push(' ');
+        rest = rest[close + 1..].trim_start();
+    }
+    if rest.is_empty() { result } else { clean }
+}
+
 fn interpolate(key: &str, a: &str, b: &str, p: f64) -> Option<String> {
     if key == "transform" {
-        let parse = |s: &str| {
-            s.replace("px", "")
-                .replace("deg", "")
-                .parse::<svgtypes::Transform>()
-                .ok()
-        };
+        let parse = |s: &str| transform_value(s).parse::<svgtypes::Transform>().ok();
         let a = parse(a)?;
         let b = parse(b)?;
         let mix = |a, b| a + (b - a) * p;
@@ -995,7 +1048,12 @@ fn interpolate(key: &str, a: &str, b: &str, p: f64) -> Option<String> {
                 .map(|value| value / 100.0)
                 .or_else(|| value.parse::<f64>().ok())
         } else {
-            value.parse::<f64>().ok()
+            value
+                .trim()
+                .strip_suffix("px")
+                .unwrap_or(value.trim())
+                .parse::<f64>()
+                .ok()
         }?;
         number.is_finite().then(|| {
             if key == "stroke-dashoffset" {

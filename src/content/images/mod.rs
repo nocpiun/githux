@@ -26,13 +26,16 @@
 //!   have independent state, independent cancellation and independent memory.
 
 mod decode;
+mod fonts;
+mod render_options;
+pub use render_options::ImageRenderOptions;
 mod timeline;
 mod workspace;
 
 #[allow(unused_imports)]
 pub use decode::{
     DecodedAnimation, DecodedFrame, DecodedImage, DecodedPixels, ImageFormat, decode_image,
-    decode_image_checked, detect_format, is_svg_like,
+    decode_image_checked, decode_image_with_options_checked, detect_format, is_svg_like,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -292,11 +295,24 @@ pub trait ImageProvider: Send + Sync + 'static {
     /// Implementations must not block the calling thread.
     fn start(&self, request: ImageRequest, sink: ImageSink);
 
+    /// Supplies physical display density without changing request identity or
+    /// logical author dimensions. Existing/custom providers remain compatible.
+    fn start_with_options(
+        &self,
+        request: ImageRequest,
+        sink: ImageSink,
+        _options: ImageRenderOptions,
+    ) {
+        self.start(request, sink);
+    }
+
     /// Cancels every load started under `scope` (one reader's document
     /// generation). Safe to call repeatedly, and it must not affect any other
     /// scope, including the same generation number in another reader.
     fn cancel(&self, scope: ImageScope);
 }
 
+#[cfg(test)]
+mod quality_tests;
 #[cfg(test)]
 mod tests;

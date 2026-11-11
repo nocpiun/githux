@@ -14,7 +14,7 @@
 | Markdown 块接入 | [`src/ui/reader/markdown/document.rs`](../src/ui/reader/markdown/document.rs) | `Block::Image` 的解析目标解析、状态查询，以及图片尺寸确定后的块重测 |
 | 预览与测试装配 | [`src/bin_support/reader_images_modules.rs`](../src/bin_support/reader_images_modules.rs)、[`src/bin_support/reader_images_fixture.rs`](../src/bin_support/reader_images_fixture.rs)、[`src/bin_support/reader_images_view_tests.rs`](../src/bin_support/reader_images_view_tests.rs)、`examples/reader_images.rs`、`tests/reader_images.rs` | 真实流水线的确定性预览和验收测试，非产品二进制的一部分 |
 
-Reader 原构造器、`show`、`set_markdown_layout`、`SourceView`、`ReaderAction`/链接回调、`ResourceContext` 与 2 MiB 正文边界保持不变。没有传 provider 的 Reader 仍然可以显示所有文档，只是每张图片显示诚实的占位，不会假报「已加载」。
+Reader 原构造器、`show`、`set_markdown_layout`、`SourceView`、`ReaderAction`/链接回调、`ResourceContext` 与 2 MiB 正文边界保持不变。没有传 provider 的 Reader 仍然可以显示所有文档；合法但尚未请求的图片保持零高度，provider 附着后仍可调度，不会假报「已加载」。
 
 ## 调用契约
 
@@ -43,11 +43,12 @@ let reader = cx.new(|cx| {
 });
 ```
 
-- **不传 provider**：`ReaderView` 的默认图片板未附着，任何 `Block::Image` 显示 `alt — picture not loaded (no image service is attached)`；不会发起任何请求，也不会报告加载成功。
+- **不传 provider**：合法图片处于未请求状态，零高度、不绘制 alt/占位；不会登记无法执行的在途工作。缺少资源上下文、真实失败与拒绝仍保留诊断；alt 继续进入复制文本。
 - **传 `None` 或换 provider**：`set_image_provider` 先取消旧 scope 的在途工作，再清空未完成的请求；已完成的图片保留，但旧代次的完成不会发布。
 - **每个 reader 一份 provider**：接口允许共享，但推荐一份文档代次一份 provider。`ImageScope { reader, generation }` 让两个 reader 即使 generation 数字相同也不会互相取消或接收对方的完成；`RepositoryImageService` 的快照/目录缓存只在它自己的实例内，SHA 相同不是跨账户的授权依据。
 - **更换文档/账户/选择**：与现有 reader 规则一致，推荐换实体（或至少调 `show`）。`show` 推进图片代次、取消在途、清空旧图片与旧错误。账户失效时宿主在 `cancel_interactions` 的同时移除 reader；图片服务自己的 `verify()` 复核 session，旧授权下的字节不会变成当前文档的图片。
 - **隐藏窗口**：`observe_window_visibility` 取消当前 scope 的在途工作、保留已完成的图片；恢复可见时下一帧按需重新请求。
+- **显示密度**：`ImageProvider::start_with_options(request, sink, ImageRenderOptions)` 默认委托旧 `start`，现有 provider/`ImageRequest`/页面接口继续兼容；生产 `RepositoryImageService` 将 options 传入后台解码。Reader 初始化和每次绘制读取 `Window::scale_factor()`，有限有效比例归一到 1–4。已保留超采样网格或有限帧组的 SVG 在更高密度时取消旧 scope 并保留 Ready 图，按原始来源后台重建；原始栅格的网格不随 options 变化，不因密度刷新重载 PNG 或重启 GIF。完成后替换成本，不重播已展示的时间线；失败仍显示诊断并释放旧图。降回较低密度复用已有清晰网格。持久缓存仍存原始响应；原有新鲜度、授权、取消与 `no-store` 规则照常复核。
 - **解码与绘制**：解码在 provider 的后台线程完成，UI render 不做网络、不做解码、不做阻塞 I/O。普通静态图片以 `gpui::Image`（原始已验证字节）绘制；有限 SVG 时间线的 BGRA8 缓冲由后台预备并移交给单帧 `RenderImage`，按保留预算计费，收尾只保留最终帧。
 
 ## 地址解析与边界
@@ -112,8 +113,16 @@ let reader = cx.new(|cx| {
 - 内嵌 `<image>` 只允许 `data:`。SVG logos 经过与顶层相同的 XML/主动内容校验，最多四层资源解析；内嵌 SVG 自身的时间线只取最终值，不另开子资源播放器；节点总额 50,000、输入数据总额 2 MiB，光栅资源先检查真实文件头尺寸，并累计像素及解码/绘制缓冲成本。GIF 先在 `image::Limits` 下解码首帧并转为 PNG，防止首帧网格大于逻辑屏幕头时绕过预算。超限或无效内嵌资源跳过，外层可独立呈现的内容保留。
 - 禁用 XML DTD（`allow_dtd: false`，阻止实体展开炸弹）、限制 XML 节点数（`50,000`），并在调用递归 XML 解析器之前用有界扫描拒绝超过 `256` 层的嵌套（XML 没有隐式 void 元素：`<rect>` 只有写成 `<rect/>` 才算自闭合；扫描会跳过注释、CDATA、处理指令与 DOCTYPE，并尊重引号内的属性值，因此 `a="/>">` 之类的值不会被误判为自闭合），避免深度树在解析阶段栈溢出；同时禁用 `<image>` 外链文件/网络解析（`resources_dir = None`，`resolve_string` 恒返回 `None`，仅允许上述有界内嵌 data URI）。
 - 显式拒绝 `<script>`、事件属性（`on*`）、`<foreignObject>`、`@import` 样式与 SMIL 动画元素（`<animate>`/`<animateTransform>`/`<animateMotion>`/`<set>`），返回 `ImageFailure::Unsupported`；畸形 XML、零尺寸或缺少固有尺寸/`viewBox` 的 SVG 返回 `ImageFailure::Malformed`。
-- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算，并按最大 2x（受像素/尺寸上限钳制）光栅化、反预乘后编码为 PNG，以 `DecodedImage` 的既有四个字段（`format: ImageFormat::Png`、`width`、`height`、`bytes`）返回最终 PNG（保留 SVG 固有 / `viewBox` 宽高，不增加 `Svg` 格式变体）；可选 `animation` 元数据携带有限 PNG 帧、已解码 BGRA8 像素及时间戳，UI 不在每帧启动异步 PNG 解码。`DecodedImage::decoded_bytes()` 按 PNG 实际网格与保留帧数计费，淘汰时也按同一实际成本扣除。
+- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算。SVG 最终图目标为设备比例的 2 倍，入场帧目标为设备比例本身；受像素/单边/绘制工作面上限逐步钳制。输出仍是 `format: ImageFormat::Png`，`width`/`height` 保留作者逻辑尺寸，`bytes` 是真实高分辨率 PNG，`animation` 携带有限帧、预解码 BGRA8 与时间戳；不通过放大旧像素模拟密度。`DecodedImage::decoded_bytes()` 分别累计最终网格和每帧实际 BGRA 长度，结束、替换与淘汰使用同一真实成本。
 - 外部 HTTPS 请求 `Accept` 头包含 `image/svg+xml`（`image/png,image/jpeg,image/webp,image/gif,image/svg+xml,*/*;q=0.8`），不附加凭据或代理。
+
+## 字体、滤镜与物理分辨率（2026-11-11 品质返工）
+
+Star History 的手绘噪声保留。根 `[patch.crates-io]` 统一使用 `vendor/resvg` 的 0.46.0，修复 displacement 在调用方已转换 scale 后再次相乘的问题，并按各输入自己的网格/stride 采样，越界透明，避免小数滤镜区域或画布裁切让输入相差一像素时断言崩溃。负值符号与物理坐标缩放也保留；说明见该目录 `PATCH.md`。原 SVG 几何不改写。滤镜工作面仍计费，只有 SourceGraphic→Turbulence→Displacement 的受限两 primitive 图使用逐面计算的五个工作缓冲，其余图保持保守估算。
+
+私有内存 fontdb 除内置字体外，允许最多八个 data `@font-face`：单字体输入 ≤1 MiB，顶层与内嵌资源共用 4 MiB 解包后预算；单字面的目录/名称记录各 ≤256，名称字符串累计工作量 ≤64 KiB，拒绝可独立膨胀 face 数的字体集合。WOFF1 逐表有界 zlib 解压、校验表 checksum 并重建 SFNT，保留 CSS family alias。TTF/OTF 使用同一预算，不扫描系统、不解析网络/文件字体。WOFF2、字体集合与浏览器条件字体不在范围。最小测试字体为已有 Google Sans Code 的 OFL 子集，来源/哈希见 fixture README；公开 xkcd 字体与 Profile 响应不提交。
+
+1×–4× 回归分别检查逻辑尺寸不变、真实帧网格和最终网格、预算及稳定播放；窗口密度变化回归检查 scope 失效、保留旧图和成本替换。当前应用的 rem 变化只缩放文字，不改变作者 px 图片尺寸；没有另一个整体 UI zoom API。若以后引入会放大图片的 zoom，宿主须把有效设备比例乘以该放大量传入 options，不能只拉伸现有位图。高 DPI 极大卡片或全画布滤镜仍可能被预算限制到低于目标网格；这是实现预算边界，不等于作者源本身低清晰度。原生视觉与真实账户页面仍需负责人验收。
 
 ## 有界声明式 SVG 时间线
 
@@ -121,9 +130,9 @@ let reader = cx.new(|cx| {
 
 - 支持标准 `@keyframes` 的 `from` / `to` / 百分比停点；缺少 0% / 100% 时按该元素的基础属性补齐，单独的 `to` / `from` 同样可播放，不同属性按各自的停点插值。支持单条一次性 `animation` shorthand 或 name/duration/delay/timing-function/fill-mode longhand，毫秒/秒（包括负 delay）、`none` / `forwards` / `backwards` / `both`、linear/ease/ease-in/ease-out/ease-in-out。
 - 支持显式单色根背景（将颜色 `background` shorthand 规范为 resvg 接受的 `background-color`），使白纸图表的黑色标签保持对比；没有声明背景的图片仍透明。顶层 SVG 的 opacity/display 在完整表面上应用一次；进入库前中和已记录的前景根 opacity，避免重复相乘。内嵌 SVG 用受限内部矢量 image 包装保留整体根透明度、分数固有尺寸与比例，新增节点和隔离层仍受既有预算约束。隐藏根的背景不泄漏，静态隐藏子元素不被改成可见。
-- 插值属性为 opacity、fill-opacity、stroke-opacity（数字和百分比均支持）、stroke-dashoffset 和仿射 transform；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留；普通 presentation transform 作为基础值保留，动画延迟前及 none fill 收尾后恢复。静态隐藏和 `!important` 属性保持其优先级。受支持的 cascade 计算后写入节点，并移除原样式表，避免 usvg 对同一声明再次 cascade、覆盖采样值或根可见性。
-- 播放最多五秒、最多 100 个采样帧（约 20 fps），动画使用固有网格以限制内存，所有帧与最终 PNG 共享 `max_response_bytes` / `max_decoded_bytes` 总额。支持的时间线过长或帧总额超限时保留计算后的最终 PNG；这是静态 fallback，不作为动画验收证据。
-- 评估的 CSS ≤ 128 KiB，选择器/节点比较 ≤ 2,000,000，规则/变量/停点展开各受 2 MiB 预算约束。变量向同一个有界输出追加，按剩余额度在申请/拼接前检查长度，不先构造指数增长的中间字符串；每次时间线构建共享 100,000 次展开步骤上限，空值也计费，每 128 步复核取消/截止时间，遍历节点时同样复核。未加载的 `@font-face` / 条件规则不进入评估预算；不读取网络/文件字体。多条动画、重复/无限播放、reverse/alternate/alternate-reverse 方向（包括 shorthand）、其他动画属性及浏览器条件 CSS 不属于本次支持范围，保持基础呈现，不声称完整 CSS 浏览器兼容。
+- 插值属性为 opacity、fill-opacity、stroke-opacity（数字和百分比均支持）、stroke-dashoffset（数值或 px）和仿射 transform（含 none identity、translate/translateX/translateY、scale/scaleX/scaleY）；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留；普通 presentation transform 作为基础值保留，动画延迟前及 none fill 收尾后恢复。静态隐藏和 `!important` 属性保持其优先级。受支持的 cascade 计算后写入节点，并移除原样式表，避免 usvg 对同一声明再次 cascade、覆盖采样值或根可见性。
+- 播放最多五秒、最多 100 个采样帧（目标约 20 fps）。先为最终图保留至多四分之一解码预算（至少满足固有网格），再按设备密度估算可保留帧数；临时工作面、编码或网格一致性不满足时减半时间采样数，保留稳定空间网格。普通卡片保持动画，高 DPI/大图会减少帧数；低至两个入场样本仍不能满足预算、或时间线超过五秒时才保留计算后的最终 PNG。所有帧与最终图仍共享编码/解码/像素总额，静态 fallback 不作为动画验收证据。
+- 评估的 CSS ≤ 128 KiB，选择器/节点比较 ≤ 2,000,000，规则/变量/停点展开各受 2 MiB 预算约束。变量向同一个有界输出追加，按剩余额度在申请/拼接前检查长度，不先构造指数增长的中间字符串；每次时间线构建共享 100,000 次展开步骤上限，空值也计费，每 128 步复核取消/截止时间，遍历节点时同样复核。条件规则不进入评估预算；`@font-face` 只支持下述有界 data 字体，不读取网络/文件字体。多条动画、重复/无限播放、reverse/alternate/alternate-reverse 方向（包括 shorthand）、其他动画属性及浏览器条件 CSS 不属于本次支持范围，保持基础呈现，不声称完整 CSS 浏览器兼容。
 - `workspace.rs` 在绘制前估算 resvg 的画布、内嵌图片、隔离层和滤镜工作面；超采样不满足预算时退回固有网格，再超限则拒绝。会分配未受 resvg 画布约束的 pattern tiles 暂不支持。
 - Provider 在每帧准备之间检查取消与总截止时间；账户/session 发布复核及 `no-store` 路径保持原有约束。持久缓存仍存原始响应，不存由当前账户以外继承的动画授权。
 
@@ -135,8 +144,9 @@ GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会
 ## 显示、尺寸与滚动
 
 - 保留 #81 的固有/作者请求尺寸、列宽适配和透明成功路径：不放大、不强加背景或圆角；图片绝对定位在其实际比例盒内。小徽章的外盒按图片本身宽度参与行布局，高图保持原有尺寸语义，不恢复旧的 640px / 比例钳制。
-- Ready 图片不强制显示 alt 图注；alt 保留在文档文本/失败信息中。Loading/Failed/Refused/无 provider 的状态仍给出与该资源相关的信息。
-- 未知尺寸（加载中/失败/拒绝）预留 140px 占位高度；图片完成后对该顶层块调用真实 `ListState::remeasure_items`，以**锚定当前滚动位置**的方式重测，不重排版整篇文档，不插入假 AST 项，不把文末 inset 挤出测量范围，不因图片落地产生全文档高频重绘。在 `MarkdownLayout::Flow`（自然高度）下改为请求一次重绘并由 `on_layout_changed` 通知宿主，宿主的页面容器随之增长。
+- Ready 图片不强制显示 alt 图注；alt 保留在文档文本/失败信息中。合法图片的未请求、排队、Loading 状态不显示盒、alt 标签或预留面板；Failed/Refused 与确实无法解析的资源仍给出诊断。
+- 请求需求在构建可见块时登记，随后从纯图片 flex 行中移除 pending 子项，避免零宽子项仍产生 gap；全 pending 的图片块高度归零。调度依赖 Reader 的既有布局/pump，不能依赖图片自身的正面积可见交集；后者只控制 Ready 动画开始计时。
+- 不再为 pending 状态预留 140px；图片完成后对该顶层块调用真实 `ListState::remeasure_items`，以**锚定当前滚动位置**的方式重测，不重排版整篇文档，不插入假 AST 项，不把文末 inset 挤出测量范围，不因图片落地产生全文档高频重绘。在 `MarkdownLayout::Flow`（自然高度）下改为请求一次重绘并由 `on_layout_changed` 通知宿主，宿主的页面容器随之增长。
 - 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。表格内图片仍受 AST 限制（见下）。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
 - 同一纯图片段落（包括软换行间隔的链接徽章）保留为可换行的 `ImageRow`，空行另起段落；极长图片段落按最多 64 张图片切成有界组，跨片段居中 wrapper 最多保留 256 层。居中容器中的段落/图片行使用占满可用列宽的作用域，保留普通标题与正文的字号/间距，渲染前仍按原段落拆成独立虚拟项，不让整篇 Profile 成为一个无界行。混合文字和图片的段落仍将图片提取到文字后，未声称支持文字行盒中原位置嵌图。
 
@@ -151,7 +161,7 @@ GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会
 
 - **表格单元格内的图片不加载**：AST 在 cell 中没有块列表可挂图片，现有行为是保留 alt 文本在单元格内（见 `ast.rs` 的 `in_cell` 分支）。这不属于「已覆盖表格图片」。
 - 段落中的 inline 图片被提取为段落后的图片块；不是文字行内原位置。
-- 静态 SVG 经有界光栅化支持（典型徽章、统计卡片、Star History 折线图与常见文本/渐变/滤镜/裁剪）；**`<foreignObject>`、`<script>`、`on*` 事件、SMIL 动画、`@import` 样式、XML DTD/实体展开、外部 `<image href="https://...">` / 本地路径、WOFF/TTF `@font-face` 自定义网络字体**均不支持或按边界拦截/不抓取；AVIF、BMP、TIFF、ICO 仍为 `Unsupported`。
+- 静态 SVG 经有界光栅化支持（典型徽章、统计卡片、Star History 折线图与常见文本/渐变/滤镜/裁剪）；**`<foreignObject>`、`<script>`、`on*` 事件、SMIL 动画、`@import` 样式、XML DTD/实体展开、外部 `<image href="https://...">` / 本地路径、外部网络/文件字体、WOFF2 与字体集合**均不支持或按边界拦截/不抓取；AVIF、BMP、TIFF、ICO 仍为 `Unsupported`。
 - 注意区别**公开样本响应可达性**与**离线解码验证**：本轮已实地核查公开徽章与 Star History SVG 响应形态（见 `docs/devlog/2026-11-10-reader-svg.md`；`github-readme-stats` 公开端点当时返回部署暂停文本而非 SVG），但所有自动化回归均基于确定性本地 SVG fixture，不依赖外部网络。
 - 不做跨账户/跨实例的持久授权复用；动态 badge 仍遵循 HTTP 缓存新鲜度与重验证规则。
 - 真实 Windows 窗口的原生验收（DPI、动画、IME、真实输入分发）以预览观察和后续负责人验收为准，测试平台不能替代。

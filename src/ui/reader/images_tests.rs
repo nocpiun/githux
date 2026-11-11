@@ -59,13 +59,10 @@ fn a_source_is_requested_once_and_starts_in_the_loading_state() {
 }
 
 #[test]
-fn without_a_provider_a_source_is_unavailable_and_never_requested() {
+fn without_a_provider_a_source_is_silently_pending_and_never_requested() {
     let mut board = ImageBoard::new(ImageLimits::default());
     board.begin(1);
-    assert_eq!(
-        board.want(0, target("docs/a.png")).label(),
-        "no image service attached"
-    );
+    assert_eq!(board.want(0, target("docs/a.png")).label(), "loading");
     assert!(!board.has_pending());
     assert!(!board.work_outstanding());
     assert_eq!(board.known_states(), 0);
@@ -499,7 +496,9 @@ fn finite_svg_playback_releases_frames_on_finish_suspend_and_document_switch() {
     assert!(board.ready_bytes < retained);
     match board.state(&key).unwrap() {
         ImageState::Ready(ImageSource::Render(image), ..) => {
-            let offset = (72 * 240 + 12) * 4;
+            let width = image.size(0).width.0 as usize;
+            let scale = width / 240;
+            let offset = (72 * scale * width + 12 * scale) * 4;
             assert_eq!(
                 &image.as_bytes(0).unwrap()[offset..offset + 4],
                 &[255, 255, 0, 255],
@@ -548,6 +547,98 @@ fn reduced_motion_and_offscreen_svg_settle_to_the_final_image() {
 }
 
 #[test]
+fn quality_density_changes_do_not_reload_native_rasters() {
+    let mut board = board();
+    let target = target("docs/ready.png");
+    let key = target.key();
+    board.want(0, target.clone());
+    board.take_pending(1);
+    let mut completion = ready_for(&board, 4, 4);
+    completion.key = key.clone();
+    board.apply(completion);
+    board.advance(2);
+    board.set_render_options(ImageRenderOptions::for_device_scale(2.0));
+    assert!(board.want(0, target).is_ready());
+    assert!(
+        !board.work_outstanding(),
+        "a new display cannot add pixels to an original raster"
+    );
+}
+
+#[test]
+fn quality_density_upgrade_replaces_cost_without_restarting_animation_or_counting_twice() {
+    let mut board = ImageBoard::new(ImageLimits {
+        max_ready_images: 1,
+        ..Default::default()
+    });
+    board.set_attached(true);
+    board.begin(1);
+    let target = target("stats.svg");
+    let key = target.key();
+    board.want(0, target.clone());
+    board.take_pending(1);
+    board.apply(animated_completion(&board, key.clone()));
+    let old_scope = board.scope();
+    let stale = animated_completion(&board, key.clone());
+    board.advance(2);
+    board.set_render_options(ImageRenderOptions::for_device_scale(1.5));
+    assert!(board.want(0, target.clone()).is_ready());
+    assert_eq!(board.take_pending(1).len(), 1);
+    assert!(board.apply(stale).is_empty());
+    assert_ne!(board.scope(), old_scope);
+    let decoded = crate::content::images::decode_image_with_options_checked(
+        include_bytes!("../../content/images/fixtures/entry-stats.svg").to_vec(),
+        &ImageLimits::default(),
+        board.render_options(),
+        &|| Ok(()),
+    )
+    .unwrap();
+    let final_cost = decoded.animation.as_ref().unwrap().final_pixels.bgra.len();
+    board.apply(ImageCompletion {
+        scope: board.scope(),
+        key: key.clone(),
+        result: Ok(decoded),
+    });
+    assert!(
+        board.state(&key).unwrap().is_ready(),
+        "one upgraded source is still one retained image"
+    );
+    assert!(
+        board.animations.is_empty(),
+        "screen changes keep the settled state"
+    );
+    assert_eq!(
+        board.ready_bytes, final_cost,
+        "release all intermediate buffers and replace the previous final cost"
+    );
+    assert_eq!(board.ready_order.len(), 1);
+    board.set_render_options(ImageRenderOptions::default());
+    board.want(0, target.clone());
+    assert!(
+        !board.work_outstanding(),
+        "a lower-density screen reuses the crisp final image"
+    );
+    board.advance(3);
+    board.set_render_options(ImageRenderOptions::for_device_scale(2.0));
+    board.want(0, target);
+    board.take_pending(1);
+    board.apply(ImageCompletion {
+        scope: board.scope(),
+        key: key.clone(),
+        result: Err(ImageFailure::StaleContext),
+    });
+    assert!(
+        matches!(
+            board.state(&key),
+            Some(ImageState::Failed(ImageFailure::StaleContext))
+        ),
+        "density refresh must not mask an authorization/session failure"
+    );
+    assert_eq!(board.ready_bytes, 0);
+    assert!(board.ready_order.is_empty());
+}
+
+#[test]
 fn detaching_the_provider_settles_and_releases_active_svg_frames() {
     let mut board = board();
     let target = target("stats.svg");
@@ -563,7 +654,9 @@ fn detaching_the_provider_settles_and_releases_active_svg_frames() {
     let ImageState::Ready(ImageSource::Render(image), ..) = board.state(&key).unwrap() else {
         panic!("final decoded frame retained");
     };
-    let offset = (72 * 240 + 12) * 4;
+    let width = image.size(0).width.0 as usize;
+    let scale = width / 240;
+    let offset = (72 * scale * width + 12 * scale) * 4;
     assert_eq!(
         &image.as_bytes(0).unwrap()[offset..offset + 4],
         &[255, 255, 0, 255]
