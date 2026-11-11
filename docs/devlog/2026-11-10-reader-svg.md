@@ -43,6 +43,12 @@ roast 最终网格依次 880×400 / 1320×600 / 1760×800，逻辑盒仍 440×20
 
 本轮验证：完整图片组 `89fe63c0-3933-42db-b82b-72511112c566` **839 通过、0 失败、1 opt-in 忽略**；品质回归 `a1e6b38e-c992-4b3d-9ff4-6122d9736adc` **21 通过**。all-target clippy `7ec872a3-d8a1-4669-846c-34a6b2ae7589`、app/example build `b051492b-77d9-402a-85ea-24cd6a6630ca`、公开密度探针 `05e59165-0a8b-4d25-9c28-278cdf8b6b21` 与 fmt check `97d10aab-318e-414f-bc1e-52a1f8b930ac` 均通过。21 张公开 PNG 与前一轮逐字节相同；随后新 head 重审，不据旧 head CI/review 放行。
 
+### 品质审查：根伪类 specificity
+
+`8448eb1` 审查 `5862255535` 的 P2 `4540685483` 有效：把 `:root` 改成虚拟类型选择器降低了优先级，`:root{opacity:1} svg{opacity:0}` 会错误隐藏整图。现仅改写 selector header 中真正的 root 伪类 token，使用同等 specificity 的虚拟属性匹配；支持 compound `svg:root` 和大小写，不改 quoted attribute、escape 或 declaration payload。回归检查类型/class/id/important/source-order 竞争、根外不匹配、后代优先级及含 `:root` 的 gradient URL。
+
+本轮根选择器验证：完整图片组 `dc65d5cb-0937-4840-a2a0-66e4ea22c73b` **841 通过、0 失败、1 opt-in 忽略**；品质回归 `bd65eb60-ddb2-4ae2-aa7c-1ff5e2b05d55` **23 通过**。all-target clippy `3bfbb443-c337-48a2-be28-9975d665742b`、app/example build `c4d5a231-bcd6-4a0e-a56a-105534a4e027`、公开密度探针 `e9b82fc5-0f70-4f4a-aac4-a728fcdcb0d0` 与 fmt check `2c199493-09e7-40fb-b340-a6af99503a15` 全部通过。21 张公开 PNG 与前一轮逐字节相同；发布新 head 后重新 CI/review，人工 Profile 验收仍待负责人。
+
 ## 2026-11-11 负责人反馈后的集成返工
 
 负责人提供了真实 Profile README 与三份公开 SVG 响应，先读取本地证据再实现，没有把原始响应或用户 Profile 复制进 Git fixture：

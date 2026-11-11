@@ -125,6 +125,45 @@ fn quality_nested_vectors_charge_the_destination_canvas_at_every_level() {
 }
 
 #[test]
+fn quality_root_pseudo_class_keeps_specificity_and_compound_matching() {
+    for (css, alpha) in [
+        (":root{opacity:1}svg{opacity:0}", 255),
+        ("svg{opacity:0}:root{opacity:1}", 255),
+        ("svg:root{opacity:1}svg{opacity:0}", 255),
+        (":ROOT{opacity:1}svg{opacity:0}", 255),
+        (":root{opacity:1}.theme{opacity:0}", 0),
+        (".theme{opacity:0}:root{opacity:1}", 255),
+        ("#doc{opacity:0}:root{opacity:1}", 0),
+        (":root{opacity:1!important}svg{opacity:0}", 255),
+        ("svg{opacity:0!important}:root{opacity:1}", 0),
+        ("svg[data-label=\":root\"]{opacity:1}svg{opacity:0}", 255),
+        ("rect:root{opacity:0}", 255),
+    ] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" id="doc" class="theme" data-label=":root" width="10" height="10"><style>{css}</style><rect width="10" height="10" fill="red"/></svg>"#
+        );
+        let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0[3],
+            alpha,
+            "{css}"
+        );
+    }
+}
+
+#[test]
+fn quality_root_rewrite_preserves_declaration_payloads_and_descendant_priority() {
+    let svg=br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><linearGradient id=":root"><stop stop-color="red"/></linearGradient></defs><style>:root rect{fill:url(#:root)}rect{fill:blue}</style><rect width="10" height="10"/></svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    assert_eq!(
+        pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0,
+        [255, 0, 0, 255]
+    );
+}
+
+#[test]
 fn quality_animation_shorthand_components_obey_order_specificity_and_importance() {
     for (sheet, inline, alpha) in [
         (

@@ -37,13 +37,12 @@ impl Element for CssNode<'_, '_> {
         self.0.prev_sibling_element().map(Self)
     }
     fn has_local_name(&self, name: &str) -> bool {
-        if name == "__githux_root" {
-            self.0.parent_element().is_none()
-        } else {
-            self.0.tag_name().name() == name
-        }
+        self.0.tag_name().name() == name
     }
     fn attribute_matches(&self, name: &str, op: AttributeOperator<'_>) -> bool {
+        if name == "__githux_root" && matches!(op, AttributeOperator::Exists) {
+            return self.0.parent_element().is_none();
+        }
         self.0.attribute(name).is_some_and(|v| op.matches(v))
     }
     fn pseudo_class_matches(&self, class: PseudoClass<'_>) -> bool {
@@ -114,6 +113,68 @@ fn blocks(css: &str) -> Vec<(&str, &str)> {
     }
     out
 }
+// An attribute selector has the same specificity as :root. Rewrite only
+// pseudo-class tokens in selector headers, leaving quoted values, escapes and
+// declaration payloads untouched. Compound svg:root selectors remain valid.
+fn root_selector(selector: &str) -> String {
+    let bytes = selector.as_bytes();
+    let mut out = String::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote = 0;
+    let mut brackets = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if matches!(c, b'\'' | b'\"') {
+            quote = c;
+        } else if c == b'[' {
+            brackets += 1;
+        } else if c == b']' {
+            brackets = brackets.saturating_sub(1);
+        } else if brackets == 0
+            && c == b':'
+            && (i == 0 || bytes[i - 1] != b':')
+            && bytes
+                .get(i..i + 5)
+                .is_some_and(|v| v.eq_ignore_ascii_case(b":root"))
+            && bytes.get(i + 5).is_none_or(|v| {
+                !v.is_ascii_alphanumeric() && !matches!(*v, b'_' | b'-' | b'\\') && v.is_ascii()
+            })
+        {
+            out.push_str(&selector[start..i]);
+            out.push_str("[__githux_root]");
+            i += 5;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&selector[start..]);
+    out
+}
+fn root_rules(css: &str) -> String {
+    let mut out = String::new();
+    for (header, body) in blocks(css) {
+        out.push_str(&if header.starts_with('@') {
+            header.to_string()
+        } else {
+            root_selector(header)
+        });
+        out.push('{');
+        out.push_str(body);
+        out.push('}');
+    }
+    out
+}
+
 struct Declaration {
     name: String,
     value: String,
@@ -674,7 +735,7 @@ impl Timeline {
                 keys.insert(name.trim().to_string(), merged);
             }
         }
-        let css = css.replace(":root", "__githux_root");
+        let css = root_rules(&css);
         let mut rules = Vec::new();
         let mut rule_bytes = 0usize;
         for (selectors, body) in blocks(&css) {
