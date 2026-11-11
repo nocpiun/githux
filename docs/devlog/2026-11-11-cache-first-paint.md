@@ -145,6 +145,14 @@ Codex 对 `6b6a8d5` 提出 1 项 P2，成立且可直接修复；仍无待裁决
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（主程序与各目标通过；`data::reader_images` 既有偶发另记）、`cargo build --locked` 全部通过。
 
+## PR #85 第七轮审查修复
+
+Codex 对 `f549e23` 提出 1 项 P2，成立且可直接修复；仍无待裁决事项。
+
+**P2 缓存分支回退会抑制 revision 重验**：`network_verified` 只看本次分支枚举的 provenance；当摘要在线成功、分支枚举瞬时失败并回退到缓存（Snapshot provenance）时，该判断为假，已显示的 revision 不再重验。修复：把 `details_provenance` 的 Network 结果也计入（摘要在线成功即证明网络可达），仅分支列表保持历史标记。回归 `a_cached_branch_fallback_still_revalidates_the_shown_revision`（移除该条件后失败；同时测试夹具新增 `fail_branches` 开关模拟枚举瞬时失败）。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

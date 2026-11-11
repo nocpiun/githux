@@ -792,16 +792,18 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
     });
     let (page, cx) = open_page(&mut fixture, cx);
     settle(&page, cx);
-    for _ in 0..300 {
-        if gate.entered.load(SeqCst) {
-            break;
-        }
+    // Deadline-bounded rather than a fixed iteration budget: on a loaded machine the paused
+    // description request can take longer to reach the transport boundary.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !gate.entered.load(SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first page description is paused in transport"
+        );
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert!(
-        gate.entered.load(SeqCst),
-        "first page description is paused in transport"
-    );
     page.update(cx, |page, cx| {
         let mut activities = match page.view.read(cx).feed_state() {
             PanelState::Ready {

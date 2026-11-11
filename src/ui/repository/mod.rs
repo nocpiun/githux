@@ -1913,10 +1913,15 @@ impl RepositoryPage {
         };
         self.branches_error = error;
         // A summary or branch list this pass read from the network proves the network is reachable,
-        // so a still-cached revision is revalidated instead of staying offline-only.
+        // so a still-cached revision is revalidated instead of staying offline-only. The branch list
+        // may itself have fallen back to a cached picker while the summary was verified online.
         let network_verified = provenance
             .as_ref()
-            .is_none_or(|value| value.origin == RepositoryCacheOrigin::Network);
+            .is_none_or(|value| value.origin == RepositoryCacheOrigin::Network)
+            || self
+                .details_provenance
+                .as_ref()
+                .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
         self.branches_provenance = provenance;
         self.branches = outcome.clone();
         if self.branch.is_some() {

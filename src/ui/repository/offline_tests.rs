@@ -78,6 +78,8 @@ pub(super) struct OfflineTransport {
     release: tokio::sync::watch::Sender<bool>,
     /// Test-only: the default branch the repository summary reports, to model a moved default.
     default_branch: Mutex<Option<String>>,
+    /// Test-only: fail the branch enumeration so the cached picker is replayed instead.
+    fail_branches: std::sync::atomic::AtomicBool,
 }
 
 impl OfflineTransport {
@@ -89,7 +91,13 @@ impl OfflineTransport {
             held: std::sync::atomic::AtomicBool::new(false),
             release: tokio::sync::watch::channel(true).0,
             default_branch: Mutex::new(None),
+            fail_branches: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(super) fn fail_branches(&self, fail: bool) {
+        self.fail_branches
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(super) fn set_default_branch(&self, branch: Option<&str>) {
@@ -287,6 +295,15 @@ impl Transport for OfflineTransport {
                         return Err(TransportError::Cancelled);
                     }
                 }
+            }
+            if self.fail_branches.load(std::sync::atomic::Ordering::SeqCst)
+                && request.url.contains("/branches")
+            {
+                return Ok(json_response(
+                    500,
+                    &serde_json::json!({"message": "synthetic branch enumeration failure"})
+                        .to_string(),
+                ));
             }
             if let Some(custom) = self.custom_answer(&request) {
                 return Ok(custom);
@@ -635,6 +652,41 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
             Some(MAIN_COMMIT.to_string())
         );
         assert_eq!(page.current_path(), Some("README.md"));
+    });
+}
+
+/// Regression (review finding): a cached branch list (network fallback) must not suppress the
+/// revision revalidation when the summary itself was verified online.
+#[gpui::test]
+fn a_cached_branch_fallback_still_revalidates_the_shown_revision(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // The online summary succeeds; branch enumeration fails and replays the cached picker. The
+    // displayed revision must still be re-resolved, so only the picker stays historical.
+    fixture.transport.fail_branches(true);
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        page.revision_provenance()
+            .is_some_and(|provenance| provenance.origin == RepositoryCacheOrigin::Network)
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.selected_branch(), Some("main"));
+        assert_eq!(page.reader_status(), &ReaderStatus::Showing);
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Network)
+        );
     });
 }
 
