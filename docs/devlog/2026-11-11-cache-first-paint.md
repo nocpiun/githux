@@ -153,6 +153,14 @@ Codex 对 `f549e23` 提出 1 项 P2，成立且可直接修复；仍无待裁决
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
 
+## PR #85 第八轮审查修复
+
+Codex 对 `d16ac05` 提出 1 项 P2，成立且可直接修复；仍无待裁决事项。
+
+**P2 canonical login 改名后未重启 README discovery**：Profile README 来自与登录同名的公开仓库，缓存 Basic 先用旧 login 启动了 README；在线 Basic 报告新 canonical login 时，已完成的 README 区块不会被替换、在途槽位也不会重启，于是页面继续显示（或因 404 永久省略）旧 `old/old` README。修复：`changed_login` 时取消在途 README work、推进其 request 身份、把该区块置回 Loading 并重新读取（新请求使用新 login 的仓库），旧回复由 request 身份拒绝。回归 `a_canonical_login_rename_restarts_the_cached_readme_read`（移除重启后失败；测试夹具的 `/users/<login>` 现在返回可配置的 canonical login 以复现改名）。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

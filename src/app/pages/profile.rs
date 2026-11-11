@@ -1284,6 +1284,23 @@ impl ProfilePage {
                     });
                     self.sync_avatar(basic.clone(), cx);
                 }
+                if changed_login {
+                    // The README comes from the public repository whose name is the profile login, so
+                    // a canonical rename changes which repository that is. A cached Basic may
+                    // already have started (or finished) discovery against the old name: reject that
+                    // request and read the new one.
+                    if let Some(work) = self.work[Section::Readme.index()].take() {
+                        work.source.cancel();
+                    }
+                    self.requests[Section::Readme.index()] =
+                        self.requests[Section::Readme.index()].saturating_add(1);
+                    if let Some(view) = self.view.clone() {
+                        let request = self.request.clone().expect("view request");
+                        view.update(cx, |view, cx| {
+                            view.update_readme(&request, SectionState::Loading, window, cx);
+                        });
+                    }
+                }
                 // Every sibling section that still has no content is read now; one that is already
                 // displayed keeps its value until its own online read replaces it.
                 for section in [
@@ -1291,7 +1308,11 @@ impl ProfilePage {
                     Section::Contributions,
                     Section::Readme,
                 ] {
-                    if self.section_is_empty(section, cx) {
+                    // The README is login-dependent, so a canonical rename restarts it even when it
+                    // already had content.
+                    if (section == Section::Readme && changed_login)
+                        || self.section_is_empty(section, cx)
+                    {
                         self.start(section, cx);
                     }
                 }
@@ -2409,7 +2430,8 @@ mod tests {
                         200,
                         serde_json::json!({
                             "id": 1,
-                            "login": "alice",
+                            // The fixture can report a renamed canonical login (same numeric id).
+                            "login": self.user_login.lock().unwrap().clone(),
                             "name": "Alice Example",
                             "bio": "Systems programmer",
                             "avatar_url": null,
@@ -2841,7 +2863,9 @@ mod tests {
     ) {
         // A wall-clock deadline rather than a fixed iteration count: the shared test binary runs
         // many suites in parallel, so background reads and image decoding can be starved for a while.
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        // Deadline-bounded rather than a fixed number of frames: the shared test binary runs many
+        // GPUI suites in parallel, so progress can stall for a while. The assertions are unchanged.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             pump_page(harness, cx);
             if check(cx) {
@@ -2868,6 +2892,7 @@ mod tests {
                     .map(Option::is_some)
                     .collect::<Vec<_>>()),
             );
+
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -3019,6 +3044,48 @@ mod tests {
         assert_eq!(
             harness.page.read_with(cx, |page, _| page.login.to_string()),
             "alice"
+        );
+    }
+
+    /// Regression (review finding): the README comes from the public repository named after the
+    /// login, so a canonical rename must restart README discovery. Otherwise the cached Basic would
+    /// leave the page showing (or omitting) the old `old/old` README.
+    #[gpui::test]
+    fn a_canonical_login_rename_restarts_the_cached_readme_read(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness_with_login(cx, true, "alice");
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    let view = view.read(cx);
+                    matches!(view.basic(), SectionState::Ready(_))
+                        && matches!(view.readme_state(), SectionState::Ready(()))
+                }) && page.work.iter().all(Option::is_none)
+            })
+        });
+        let reads_before = harness.transport.reads.lock().unwrap().len();
+
+        // Same numeric account, new canonical login: the cached Basic still says "alice".
+        harness.transport.set_user(1, "alicia");
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, _| {
+                page.login == "alicia" && page.work[Section::Readme.index()].is_none()
+            }) && harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    !matches!(view.read(cx).readme_state(), SectionState::Loading)
+                })
+            })
+        });
+
+        let reads = harness.transport.reads.lock().unwrap().clone();
+        assert!(
+            reads[reads_before..]
+                .iter()
+                .any(|url| url.to_ascii_lowercase().contains("/repos/alicia/alicia")),
+            "README discovery must run again for the new same-name repository: {reads:?}"
         );
     }
 
