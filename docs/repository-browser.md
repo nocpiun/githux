@@ -154,6 +154,14 @@ Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：
 边界说明：这是绘制层补偿，不是真正的几何裁切——若将来升级到支持非矩形 mask 的 GPUI，应换成真实 mask 并删除角擦除。开发预览 `cargo run --example repository` 另有一个**仅预览**的 `Corner clip: on/off` 开关，用于在同一真实窗口对比修复前后；产品始终开启。原生对照与像素边界见 [开发日志](devlog/2026-10-29-repository-language-clip.md)。
 
 
+## Cache-first 入口呈现（2026-11-11）
+
+- `RepositoryPage::activate`/`refresh_repository` 除既有在线链外再启动一个 `Job::Snapshot`：用 `RepositoryCacheMode::OfflineOnly` 经 locator index 读完整快照（摘要 → 分支 → ref revision → 根树 → README discovery → 初始正文），作为**单个** `Body::Snapshot` 发布，header/tree/README 因此永远指向同一 fixed commit。
+- 该消息带 `preliminary` 标记，只在页面仍为空（`details.is_none()`）时应用；摘要/分支/revision 保留 `Snapshot` provenance（既有 `Cached` 胶囊与 `Refresh`），固定对象沿用既有缓存语义。extras 以同一次快照读取，缓存未命中的 section 保持 Loading 而非报“未缓存”。
+- 在线链完全不变并在同一 generation 内继续：网络摘要证明可达后分支列表改用在线模式；若屏上 revision 仍是快照，则以同一 `branch_request` 重新在线解析该 ref。**同一 commit 时保留已加载的 tree/README/reader（含滚动位置）**，仅在 commit 变化时整体替换，因此不会把缓存 A 标成网络验证的 B。
+- 迟到的缓存消息不会覆盖在线结果（`preliminary && details.is_some()` 直接丢弃）。
+- 已知限制：快照只还原根树与初始文档；保存的展开子目录由在线链在后续读取补齐。
+
 ## 持久缓存与跨重启离线阅读（2026-11-03）
 
 `RepositoryPageServices::new(accounts, executor)` 保持原有构造兼容，不新增数据库打开或凭据路径。`RepositoryPage::activate` 在捕获 `RepositorySession` 后通过 `RepoService::cache(session.context())` 获取当前账户的 `(CacheStore, CacheScope)` 绑定：

@@ -70,6 +70,10 @@ pub(super) struct OfflineTransport {
     pub(super) inner: Arc<FixtureTransport>,
     offline: Mutex<bool>,
     readme_image: Mutex<bool>,
+    /// Test-only: hold every repository read at the transport boundary so a cache-first paint can be
+    /// observed while the online chain is still pending.
+    held: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
 }
 
 impl OfflineTransport {
@@ -78,7 +82,17 @@ impl OfflineTransport {
             inner: Arc::new(FixtureTransport::new(scene)),
             offline: Mutex::new(false),
             readme_image: Mutex::new(false),
+            held: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
         }
+    }
+
+    pub(super) fn hold(&self, held: bool) {
+        self.held.store(held, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn release_all(&self) {
+        self.release.notify_waiters();
     }
 
     pub(super) fn set_offline(&self, offline: bool) {
@@ -213,6 +227,16 @@ impl Transport for OfflineTransport {
                 return Err(TransportError::Network {
                     message: "offline fixture: connection refused".into(),
                 });
+            }
+            if self.held.load(std::sync::atomic::Ordering::SeqCst)
+                && !request.url.ends_with("/user")
+            {
+                tokio::select! {
+                    _ = self.release.notified() => {}
+                    _ = cancel.clone().cancelled() => {
+                        return Err(TransportError::Cancelled);
+                    }
+                }
             }
             if let Some(custom) = self.custom_answer(&request) {
                 return Ok(custom);
@@ -493,6 +517,129 @@ fn warm_up(cx: &mut TestAppContext, fixture: &CachedFixture) -> usize {
         release_page(&host, cx);
     }
     fixture.transport.recorded().len()
+}
+
+/// Cache-first repository entry: after a restart the persisted page (summary, tree, README and its
+/// extras) paints while the online chain is still held at the transport boundary, and the network
+/// result then replaces it without a manual Refresh.
+#[gpui::test]
+fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    // The bundle paints from disk only: nothing can have answered over the held transport.
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.tree("").is_some()
+            && page.tree("src").is_none()
+    });
+    page.read_with(cx, |page, cx| {
+        assert!(
+            page.is_showing_cached_snapshot(),
+            "the painted page must be labelled as a saved snapshot"
+        );
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Snapshot)
+        );
+        assert_eq!(
+            page.current_path(),
+            Some("README.md"),
+            "the README from the snapshot is on screen"
+        );
+        let reader = page.reader().expect("a reader is showing").read(cx);
+        let text = if let Some(doc) = reader.markdown() {
+            doc.read(cx).document_text().to_string()
+        } else {
+            String::new()
+        };
+        assert!(
+            text.contains("Ledger"),
+            "the cached README content is rendered: {text}"
+        );
+    });
+
+    // Release the network: the online chain revalidates the same ref and replaces the provenance.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Network),
+            "the online summary replaced the snapshot"
+        );
+        assert_eq!(
+            page.fixed_commit()
+                .map(|commit| commit.as_str().to_string()),
+            Some(MAIN_COMMIT.to_string())
+        );
+        assert_eq!(page.current_path(), Some("README.md"));
+    });
+}
+
+/// A cache-first reply that arrives after the online chain already published must not roll the page
+/// back to the saved snapshot.
+#[gpui::test]
+fn a_late_cached_repository_reply_never_rolls_back_the_network_page(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+    let online_details = page.read_with(cx, |page, _| page.details().cloned().unwrap());
+
+    // Replay the summary a slow cache read would produce, marked as a preliminary observation.
+    page.update_in(cx, |page, window, cx| {
+        let context = page.context.clone().expect("context");
+        let generation = page.generation;
+        let branch_request = page.branch_request;
+        page.inbox
+            .lock()
+            .expect("repository page inbox")
+            .push_back(super::super::Message {
+                generation,
+                branch_request,
+                authorization: None,
+                context,
+                preliminary: true,
+                body: super::super::Body::Repository {
+                    result: Ok((
+                        online_details.clone(),
+                        Some(crate::data::RepositoryCacheProvenance {
+                            origin: RepositoryCacheOrigin::Snapshot,
+                            fetched_at_ms: f64::MIN as i64,
+                            verified_at_ms: 1,
+                            completeness: crate::domain::cache::CacheCompleteness::Complete,
+                        }),
+                    )),
+                    star_write_generation: page.star_write_generation,
+                },
+            });
+        page.drain(window, cx);
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Network),
+            "a late cache completion must not replace newer network content"
+        );
+        assert!(!page.is_showing_cached_snapshot());
+    });
 }
 
 /// The ordered product scenario: online warm-up, restart, offline reading of
@@ -974,6 +1121,7 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
                 branch_request: old_branch_request,
                 authorization: None,
                 context: page.context.clone().expect("context"),
+                preliminary: false,
                 body: super::super::Body::Revision {
                     branch: "main".into(),
                     request: old_branch_request,
@@ -1049,6 +1197,7 @@ fn reply_captured_before_revocation_is_rejected_afterwards_and_never_revived(
                 branch_request: old_branch_request,
                 authorization: Some(old_authorization.clone()),
                 context: context.clone(),
+                preliminary: false,
                 body: super::super::Body::Revision {
                     branch: "main".into(),
                     request: old_branch_request,

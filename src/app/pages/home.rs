@@ -107,6 +107,54 @@ fn unpack_cached<T>(
     }
 }
 
+/// Reads the last persisted snapshot for one column without contacting the network.
+///
+/// This is the cache-first half of a Home/Feed read: it runs concurrently with the ordinary online
+/// read and, when it finds a readable authorized snapshot, publishes that content immediately so the
+/// user does not wait for a slow request to fail first. A miss, corruption, stale authorization or
+/// any operational cache fault yields `None`, which keeps the ordinary online path unchanged and
+/// never fabricates an empty result.
+async fn read_cached_first(
+    column: Column,
+    cached: Option<CachedPageReadSession>,
+    cache_partition: String,
+    cancel: CancellationToken,
+) -> Option<ColumnResult> {
+    let cached = cached?;
+    match column {
+        Column::Home => {
+            let offline = cached
+                .home(
+                    PageReadMode::Offline,
+                    None,
+                    &HomeSearchLimits::default(),
+                    cancel,
+                )
+                .await
+                .ok()?;
+            let read = unpack_cached(offline, &cache_partition).ok()??;
+            matches!(read.source, ReadSource::Historical { .. })
+                .then_some(ColumnResult::Home(Ok(Some(read))))
+        }
+        Column::Feed => {
+            let offline = cached
+                .feed(
+                    PageReadMode::Offline,
+                    &FeedLimits::default(),
+                    &FollowingLimits::default(),
+                    &PullRequestDetailLimits::default(),
+                    FEED_AUTHOR_LOOKUP_LIMIT,
+                    cancel,
+                )
+                .await
+                .ok()?;
+            let read = unpack_cached(offline, &cache_partition).ok()??;
+            matches!(read.source, ReadSource::Historical { .. })
+                .then_some(ColumnResult::Feed(Ok(Some(read))))
+        }
+    }
+}
+
 async fn read_home(
     session: PageReadSession,
     cached: Option<CachedPageReadSession>,
@@ -251,6 +299,36 @@ enum ReadSource {
     },
 }
 
+/// What one column currently shows, so display ordering stays unambiguous.
+///
+/// A persisted snapshot may paint while the online read is still pending, but it may never roll back
+/// a value this generation already received from the network, and the same snapshot is published at
+/// most once (republishing it would reset the list's scroll position and selection).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PublishMark {
+    /// Nothing this generation has published yet (a first load, or content already cleared).
+    Empty,
+    /// The value on screen came from the persistent snapshot for this account partition.
+    Historical {
+        partition: String,
+        fetched_at_ms: i64,
+    },
+    /// A value from the network is displayed; older cache reads must not replace it.
+    Network,
+}
+
+/// The ordering mark one result would publish, or `None` when it publishes no content.
+fn publish_mark<T>(result: &Result<Option<CachedRead<T>>, HomeError>) -> Option<PublishMark> {
+    let read = result.as_ref().ok()?.as_ref()?;
+    Some(match &read.source {
+        ReadSource::Network { .. } => PublishMark::Network,
+        ReadSource::Historical { partition, .. } => PublishMark::Historical {
+            partition: partition.clone(),
+            fetched_at_ms: read.metadata.as_ref().map_or(0, |m| m.fetched_at_ms),
+        },
+    })
+}
+
 enum ColumnResult {
     Home(Result<Option<CachedRead<HomeSearchOutcome>>, HomeError>),
     Feed(Result<Option<CachedRead<FeedOutcome>>, HomeError>),
@@ -273,6 +351,10 @@ struct Reply {
     selection: u64,
     authorization: Option<CacheAuthorization>,
     context: RepositoryReadContext,
+    /// A cache-first observation published while the online read is still pending. It never
+    /// finalizes the column: the same request's final reply still owns the work slot, the
+    /// refresh affordance and the Feed continuation state.
+    preliminary: bool,
     result: ColumnResult,
 }
 
@@ -338,6 +420,8 @@ pub struct HomePage {
     /// Known repository descriptions, keyed by lowercase "owner/name".
     feed_repo_descriptions: std::collections::HashMap<String, Option<String>>,
     feed_enrich_work: std::collections::HashMap<u64, EnrichWork>,
+    /// Display ordering mark per column, scoped to the current binding/generation/request.
+    published: [PublishMark; 2],
     view: Entity<HomeView>,
     navigation: NavigationSink,
     _changed: Subscription,
@@ -412,6 +496,7 @@ impl HomePage {
             feed_enrich_request: 0,
             feed_repo_descriptions: std::collections::HashMap::new(),
             feed_enrich_work: std::collections::HashMap::new(),
+            published: [PublishMark::Empty, PublishMark::Empty],
             view,
             navigation,
             _changed,
@@ -445,6 +530,7 @@ impl HomePage {
         self.feed_next_page = None;
         self.feed_seen_ids.clear();
         self.feed_repo_descriptions.clear();
+        self.published = [PublishMark::Empty, PublishMark::Empty];
         let binding = self.binding.clone();
         let generation = self.generation;
         self.view.update(cx, |view, cx| {
@@ -676,35 +762,86 @@ impl HomePage {
         let cached = self.cached.clone();
         let authorization = self.cache_authorization.clone();
         let cache_partition = self.cache_partition.clone().unwrap_or_default();
+        // Only an empty column can be filled by a cached snapshot: a refresh of something already on
+        // screen keeps that content (and its scroll/selection) until the online read replaces it, so
+        // it neither needs nor may use a second cache read.
+        let cache_first = (self.published[index] == PublishMark::Empty)
+            .then(|| self.cached.clone())
+            .flatten();
+        let cache_first_partition = cache_partition.clone();
+        let cache_first_authorization = authorization.clone();
+        let cache_first_inbox = inbox.clone();
+        let cache_first_alive = alive.clone();
+        let cache_first_context = reply_context.clone();
+        let cache_first_cancel = cancel.clone();
+        let network_inbox = inbox;
+        let network_alive = alive;
         let submitted = services.executor().handle().spawn(async move {
-            let result = match column {
-                Column::Home => {
-                    ColumnResult::Home(read_home(session, cached, cache_partition, cancel).await)
-                }
-                // The data layer composes the raw events read, the followed-account
-                // read and the bounded merged-author lookups, then applies the
-                // product policy. Bounds keep one snapshot from fanning out: a
-                // followed list of at most 1,000 accounts and at most 30 distinct
-                // author lookups per refresh.
-                Column::Feed => {
-                    ColumnResult::Feed(read_feed(session, cached, cache_partition, cancel).await)
+            // Cache I/O starts alongside the online read, never in front of it and never instead of
+            // it: a pending request is not gated on filling or decoding the cache, and a slow disk
+            // cannot delay the network start. Both halves share the column's cancellation token;
+            // the foreground host decides publication order.
+            let cache_half = async move {
+                let found = read_cached_first(
+                    column,
+                    cache_first,
+                    cache_first_partition,
+                    cache_first_cancel,
+                )
+                .await;
+                if let Some(result) = found
+                    && *cache_first_alive.borrow()
+                    && cache_first_authorization
+                        .as_ref()
+                        .is_none_or(CacheAuthorization::is_current)
+                {
+                    cache_first_inbox
+                        .lock()
+                        .expect("home inbox")
+                        .push_back(Reply {
+                            generation,
+                            column,
+                            request,
+                            selection,
+                            authorization: cache_first_authorization,
+                            context: cache_first_context,
+                            preliminary: true,
+                            result,
+                        });
                 }
             };
-            if *alive.borrow()
-                && authorization
-                    .as_ref()
-                    .is_none_or(CacheAuthorization::is_current)
-            {
-                inbox.lock().expect("home inbox").push_back(Reply {
-                    generation,
-                    column,
-                    request,
-                    selection,
-                    authorization,
-                    context: reply_context,
-                    result,
-                });
-            }
+            let network_half = async move {
+                let result = match column {
+                    Column::Home => ColumnResult::Home(
+                        read_home(session, cached, cache_partition, cancel).await,
+                    ),
+                    // The data layer composes the raw events read, the followed-account
+                    // read and the bounded merged-author lookups, then applies the
+                    // product policy. Bounds keep one snapshot from fanning out: a
+                    // followed list of at most 1,000 accounts and at most 30 distinct
+                    // author lookups per refresh.
+                    Column::Feed => ColumnResult::Feed(
+                        read_feed(session, cached, cache_partition, cancel).await,
+                    ),
+                };
+                if *network_alive.borrow()
+                    && authorization
+                        .as_ref()
+                        .is_none_or(CacheAuthorization::is_current)
+                {
+                    network_inbox.lock().expect("home inbox").push_back(Reply {
+                        generation,
+                        column,
+                        request,
+                        selection,
+                        authorization,
+                        context: reply_context,
+                        preliminary: false,
+                        result,
+                    });
+                }
+            };
+            tokio::join!(cache_half, network_half);
         });
         if submitted.is_err() {
             self.work[index] = None;
@@ -716,6 +853,7 @@ impl HomePage {
                     selection,
                     context,
                     authorization: self.cache_authorization.clone(),
+                    preliminary: false,
                     result: match column {
                         Column::Home => ColumnResult::Home(Err(HomeError::InvalidResponse {
                             message: "Background services are closing.".into(),
@@ -1023,7 +1161,35 @@ impl HomePage {
             );
             return;
         }
-        self.work[Self::index(reply.column)] = None;
+        // Display ordering. A preliminary (cache-first) value may paint only while this
+        // generation/request has not already published a network value or this very persisted
+        // snapshot, and it never finalizes the column: the ordinary online read still owns the work
+        // slot, the refresh affordance and the Feed poll cooldown. A final reply is always applied,
+        // including when the network only succeeded after failing first.
+        let index = Self::index(reply.column);
+        let mark = match &reply.result {
+            ColumnResult::Home(result) => publish_mark(result),
+            ColumnResult::Feed(result) => publish_mark(result),
+        };
+        let same_as_shown = match &mark {
+            Some(mark) => &self.published[index] == mark,
+            None => false,
+        };
+        if reply.preliminary {
+            let Some(PublishMark::Historical { partition, .. }) = &mark else {
+                return;
+            };
+            if self.cache_partition.as_deref() != Some(partition.as_str()) {
+                return;
+            }
+            // Never roll back a newer network value, and never republish the same snapshot.
+            if same_as_shown || matches!(self.published[index], PublishMark::Network) {
+                return;
+            }
+        } else {
+            self.work[index] = None;
+        }
+        self.published[index] = mark.unwrap_or(PublishMark::Empty);
         let binding = self.binding.clone();
         let generation = self.generation;
         let column = reply.column;
@@ -1031,6 +1197,38 @@ impl HomePage {
             ColumnResult::Feed(Ok(Some(read))) => Some(read.value.activities.clone()),
             _ => None,
         };
+        // Re-applying the identical snapshot would reset the list's scroll position and keyboard
+        // selection for no new information, so the already displayed copy is kept as is. The Feed
+        // still needs its end-of-scroll append state normalized: a cached first paint can leave the
+        // view mid-append while the online read owns the column.
+        if same_as_shown {
+            if reply.preliminary {
+                return;
+            }
+            if let ColumnResult::Feed(Ok(Some(read))) = reply.result {
+                // Identical content, but the server may still have moved the continuation cursor.
+                // Keep the list (and its scroll anchor) and refresh only the bookkeeping.
+                if matches!(read.source, ReadSource::Network { .. }) {
+                    self.feed_ready = read
+                        .value
+                        .poll_interval_seconds
+                        .map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
+                }
+                self.feed_next_page = read.value.next_page;
+                self.feed_source = Some(read.source.clone());
+                self.feed_seen_ids.clear();
+                for activity in &read.value.activities {
+                    self.feed_seen_ids.insert(activity.event.id.clone());
+                }
+                let binding = self.binding.clone();
+                let generation = self.generation;
+                self.view.update(cx, |view, cx| {
+                    view.apply_feed_page(&binding, generation, read.value, cx);
+                });
+            }
+            self.finish_read(reply.column, cx);
+            return;
+        }
         self.view.update(cx, |view, cx| match reply.result {
             ColumnResult::Home(Ok(Some(read))) => match read.source {
                 ReadSource::Network { .. } => {
@@ -1109,6 +1307,18 @@ impl HomePage {
         if let Some(activities) = feed_activities {
             self.enrich_starred_repositories(&activities, cx);
         }
+        if reply.preliminary {
+            cx.notify();
+            return;
+        }
+        self.finish_read(column, cx);
+    }
+
+    /// Ends a column's read: restores the refresh affordance (including the Feed poll cooldown)
+    /// without touching either snapshot.
+    fn finish_read(&mut self, column: Column, cx: &mut Context<Self>) {
+        let binding = self.binding.clone();
+        let generation = self.generation;
         let reason = match column {
             Column::Feed => self.feed_ready.and_then(|ready| {
                 ready.checked_duration_since(Instant::now()).map(|remaining| {
@@ -1274,6 +1484,7 @@ impl HomePage {
         self.inbox.lock().expect("home inbox").clear();
         self.append_inbox.lock().expect("home append inbox").clear();
         self.enrich_inbox.lock().expect("home enrich inbox").clear();
+        self.published = [PublishMark::Empty, PublishMark::Empty];
         self.feed_cooldown_task = None;
         self.feed_ready = None;
         self.feed_next_page = None;

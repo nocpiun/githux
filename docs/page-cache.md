@@ -16,6 +16,10 @@
 
 完整与 Partial 使用不同 slot。离线优先上次 Complete，没有 Complete 时才使用 Partial；因此新 Partial 不覆盖更完整的旧时间。Partial 内保留已取得响应、Link/cursor 及失败类别，重放仍产生真实的缺失页/作者/GraphQL errors，下一次在线读无条件重试。首屏与旧页分别保存，不能推导“完整历史”；列表跨刷新代次的拼接仍归现有 host 管理。Feed 的去重集合仅在读取成功及最终检查后回写，失败不能推进 cursor 或污染 seen IDs。
 
+## 本地回放与网络并发
+
+`PageReadMode::Offline` 回放不发 HTTP 请求，因此在 `read` 的 Offline 分支用 `PageReadSession::with_local_page_client`（底层 `RepositorySession::local`），跳过 `BackgroundExecutor` 的有界网络 permit；凭据加载、账户 epoch/context、取消、持久 gate/lease 检查完全保留。否则在网络槽位被挂起的重验占满时，缓存首帧会排在同一网络配额后面，失去“先显示缓存”的意义。
+
 ## HTTP 与授权边界
 
 当前采用**无条件整次验证**，不发送持久验证器；每个 REST 原始响应仍保留 ETag/Last-Modified/Cache-Control。聚合无单一 validator，GraphQL 不造 ETag。意外 304 只允许一次无条件重取，若仍 304 则返回原 adapter 错误，绝不生成空 body。未来条件优化必须逐表示验证，不能用 Feed 第一页 ETag 代表 following/author 及旧页。

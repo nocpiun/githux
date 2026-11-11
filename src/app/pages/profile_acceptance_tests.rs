@@ -63,6 +63,7 @@ fn acceptance_queued_historical_profile_is_rejected_after_revocation(cx: &mut Te
             section: Section::Basic, generation: page.generation,
             request: page.requests[Section::Basic.index()], selection: page.selection,
             context: session.context().clone(), login: page.login.clone(),
+            preliminary: false,
             result: SectionResult::Basic(Ok(outcome)),
         };
         page.apply(reply, window, cx);

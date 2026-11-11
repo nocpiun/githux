@@ -102,6 +102,21 @@ impl PageReadSession {
         }
     }
 
+    /// The same substitution for a client whose transport answers from the persistent cache.
+    /// Such a read sends no request, so it also stops competing for a bounded network permit;
+    /// credential, epoch, context and cancellation checks are unchanged.
+    pub(super) fn with_local_page_client(
+        &self,
+        client: std::sync::Arc<crate::github::client::GitHubClient>,
+    ) -> Self {
+        Self {
+            repository: self.repository.clone().local(),
+            client,
+            login: self.login.clone(),
+            credential_commit: self.credential_commit.clone(),
+        }
+    }
+
     /// Called only from the cache blocking worker. Serialize the final context
     /// check and cache effect with existing account replacement/selection commits.
     pub(super) fn cache_access<T>(&self, work: impl FnOnce() -> T) -> Result<T, GitHubError> {

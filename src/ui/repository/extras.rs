@@ -118,12 +118,56 @@ impl Extras {
     }
 }
 impl RepositoryPage {
+    /// Starts (or refreshes) the embedded overview.
+    ///
+    /// `preliminary` marks reads driven by the cache-first bundle: they use the persisted snapshot
+    /// and must not publish "not cached" errors, because the online chain is still going to answer
+    /// those sections. A section that is genuinely unavailable offline still reports it once the
+    /// online result has arrived and settled.
     pub(super) fn start_overview(
         &mut self,
         repository: RepositoryIdentity,
+        preliminary: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The page can be painted twice for one generation now: first from the persisted snapshot,
+        // then from the network. Re-creating the overview for the same repository and generation
+        // would throw away the cached release/contributor/language values that are already on
+        // screen, so an existing binding is kept and only its reads are re-issued.
+        if self.extras.view.is_some()
+            && self
+                .extras
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.repository == repository)
+            && self.extras.binding.as_ref().is_some_and(|binding| {
+                binding.generation == self.generation && self.extras.accepts(self, binding)
+            })
+        {
+            let offline_only = self
+                .details_provenance
+                .as_ref()
+                .is_some_and(|prov| prov.origin == crate::data::RepositoryCacheOrigin::Snapshot);
+            let authorization = self.current_authorization(repository.id());
+            self.extras.displayed_authorization = authorization.clone();
+            self.read_counts(offline_only, authorization.clone());
+            for endpoint in [
+                Endpoint::Releases,
+                Endpoint::Latest,
+                Endpoint::Contributors,
+                Endpoint::Languages,
+            ] {
+                self.read_extra(
+                    endpoint,
+                    offline_only,
+                    preliminary,
+                    authorization.clone(),
+                    cx,
+                );
+            }
+            return;
+        }
         self.extras.stop();
         let binding = OverviewBinding::new(
             self.context
@@ -206,7 +250,13 @@ impl RepositoryPage {
             Endpoint::Contributors,
             Endpoint::Languages,
         ] {
-            self.read_extra(endpoint, offline_only, authorization.clone(), cx);
+            self.read_extra(
+                endpoint,
+                offline_only,
+                preliminary,
+                authorization.clone(),
+                cx,
+            );
         }
     }
 
@@ -257,6 +307,7 @@ impl RepositoryPage {
         &mut self,
         endpoint: Endpoint,
         offline_only: bool,
+        preliminary: bool,
         authorization: Option<CacheAuthorization>,
         cx: &mut Context<Self>,
     ) {
@@ -275,15 +326,35 @@ impl RepositoryPage {
         let work = Work::new();
         let cancel = work.token();
         self.extras.work[index] = Some(work);
-        let loading = match endpoint {
-            Endpoint::Releases => OverviewUpdate::Releases(SectionState::Loading),
-            Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Loading),
-            Endpoint::Contributors => OverviewUpdate::Contributors(SectionState::Loading),
-            Endpoint::Languages => OverviewUpdate::Languages(SectionState::Loading),
-        };
-        self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
-            view.apply(&binding, loading, cx);
-        });
+        // A section already showing a cached value keeps it while the online re-read runs: turning
+        // it back into a spinner would hide readable content for no reason. A truly empty section
+        // still shows the loading state.
+        if !matches!(
+            self.extras
+                .view
+                .as_ref()
+                .map(|view| view.read(cx))
+                .map(|view| match endpoint {
+                    Endpoint::Releases => view.releases().value().is_some(),
+                    Endpoint::Latest => view
+                        .latest_release()
+                        .and_then(SectionState::value)
+                        .is_some(),
+                    Endpoint::Contributors => view.contributors().value().is_some(),
+                    Endpoint::Languages => view.languages().value().is_some(),
+                }),
+            Some(true)
+        ) {
+            let loading = match endpoint {
+                Endpoint::Releases => OverviewUpdate::Releases(SectionState::Loading),
+                Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Loading),
+                Endpoint::Contributors => OverviewUpdate::Contributors(SectionState::Loading),
+                Endpoint::Languages => OverviewUpdate::Languages(SectionState::Loading),
+            };
+            self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
+                view.apply(&binding, loading, cx);
+            });
+        }
         let session = self.extras.session.clone().unwrap();
         let cached = self.extras.cached.clone();
         let context = session.context().clone();
@@ -300,6 +371,7 @@ impl RepositoryPage {
                         &repository,
                         &limits,
                         offline_only,
+                        preliminary,
                         cancel,
                     )
                     .await
@@ -441,14 +513,18 @@ impl RepositoryPage {
                 // A scoped retry re-reads the same values, so it reuses the token
                 // that already authorizes the displayed overview.
                 OverviewSection::Releases => {
-                    self.read_extra(Endpoint::Releases, false, authorization.clone(), cx);
-                    self.read_extra(Endpoint::Latest, false, authorization.clone(), cx);
+                    self.read_extra(Endpoint::Releases, false, false, authorization.clone(), cx);
+                    self.read_extra(Endpoint::Latest, false, false, authorization.clone(), cx);
                 }
-                OverviewSection::Contributors => {
-                    self.read_extra(Endpoint::Contributors, false, authorization.clone(), cx)
-                }
+                OverviewSection::Contributors => self.read_extra(
+                    Endpoint::Contributors,
+                    false,
+                    false,
+                    authorization.clone(),
+                    cx,
+                ),
                 OverviewSection::Languages => {
-                    self.read_extra(Endpoint::Languages, false, authorization, cx)
+                    self.read_extra(Endpoint::Languages, false, false, authorization, cx)
                 }
             },
             action => {
@@ -626,8 +702,21 @@ async fn read_cached_extra(
     repository: &RepositoryIdentity,
     limits: &RepositoryExtrasLimits,
     offline_only: bool,
+    preliminary: bool,
     cancel: crate::network::cancel::CancellationToken,
 ) -> OverviewUpdate {
+    // A cache-first pass only shows what the snapshot actually holds. A section it cannot answer
+    // stays in its loading state instead of claiming the data is unavailable, because the online
+    // chain is still going to answer it.
+    fn unanswered<T, P>(preliminary: bool) -> SectionState<T, P> {
+        if preliminary {
+            SectionState::Loading
+        } else {
+            SectionState::Error {
+                message: "This section is not available in the local cache.".into(),
+            }
+        }
+    }
     if offline_only {
         return match endpoint {
             Endpoint::Releases => OverviewUpdate::Releases(
@@ -639,9 +728,7 @@ async fn read_cached_extra(
                         PageValue::Value {
                             value, metadata, ..
                         } => releases_state(value, PageOrigin::HistoricalSnapshot, &metadata),
-                        PageValue::Miss(_) => SectionState::Error {
-                            message: "Releases are not available in the local cache.".into(),
-                        },
+                        PageValue::Miss(_) => unanswered(preliminary),
                     },
                     Err(error) => SectionState::Error {
                         message: format!("{error:?}"),
@@ -657,9 +744,7 @@ async fn read_cached_extra(
                         PageValue::Value {
                             value, metadata, ..
                         } => latest_state(value, PageOrigin::HistoricalSnapshot, &metadata),
-                        PageValue::Miss(_) => SectionState::Error {
-                            message: "Latest release is not available in the local cache.".into(),
-                        },
+                        PageValue::Miss(_) => unanswered(preliminary),
                     },
                     Err(error) => SectionState::Error {
                         message: format!("{error:?}"),
@@ -675,9 +760,7 @@ async fn read_cached_extra(
                         PageValue::Value {
                             value, metadata, ..
                         } => contributors_state(value, PageOrigin::HistoricalSnapshot, &metadata),
-                        PageValue::Miss(_) => SectionState::Error {
-                            message: "Contributors are not available in the local cache.".into(),
-                        },
+                        PageValue::Miss(_) => unanswered(preliminary),
                     },
                     Err(error) => SectionState::Error {
                         message: format!("{error:?}"),
@@ -693,9 +776,7 @@ async fn read_cached_extra(
                         PageValue::Value {
                             value, metadata, ..
                         } => languages_state(value, PageOrigin::HistoricalSnapshot, &metadata),
-                        PageValue::Miss(_) => SectionState::Error {
-                            message: "Languages are not available in the local cache.".into(),
-                        },
+                        PageValue::Miss(_) => unanswered(preliminary),
                     },
                     Err(error) => SectionState::Error {
                         message: format!("{error:?}"),

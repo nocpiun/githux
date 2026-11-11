@@ -136,6 +136,10 @@ struct Reply {
     recovery_pending: bool,
     repositories: Option<RepositoryReply>,
     repository_authorization: Option<CacheAuthorization>,
+    /// A cache-first observation published while the online repository read is still pending. It
+    /// never ends the operation: the same operation's final reply still owns the loading state,
+    /// the input lock and the automatic-load marker.
+    preliminary: bool,
 }
 
 /// The result of one repository-list read and where it came from. A historical fallback is a
@@ -887,6 +891,10 @@ impl Accounts {
         if self.generation != reply.generation || self.operation.is_none() {
             return;
         }
+        if reply.preliminary {
+            self.apply_preliminary(reply, cx);
+            return;
+        }
         self.operation = None;
         self.current_operation = None;
         self.input
@@ -1063,6 +1071,48 @@ impl Accounts {
         cx.notify();
     }
 
+    /// Publishes a replayed repository snapshot while the online read is still running.
+    ///
+    /// The operation stays in flight: nothing here ends it, unlocks the PAT input or records a
+    /// different automatic-load key. Only a readable authorized snapshot from this same account is
+    /// shown, and only once: a list already on screen (a retry, an earlier snapshot of this same
+    /// read, or a network result that arrived first) keeps its content and origin untouched.
+    fn apply_preliminary(&mut self, reply: Reply, cx: &mut Context<Self>) {
+        let Some(RepositoryReply {
+            outcome: Ok(outcome),
+            origin: origin @ RepositoryListOrigin::Historical { .. },
+        }) = reply.repositories
+        else {
+            return;
+        };
+        if reply.for_account != self.snapshot.active {
+            return;
+        }
+        if reply
+            .repository_authorization
+            .as_ref()
+            .is_some_and(|authorization| !authorization.is_current())
+        {
+            return;
+        }
+        // A live list, a previous snapshot or a failure that is still on screen is not replaced by a
+        // replayed snapshot: the online reply for this read owns the final state.
+        if !matches!(
+            self.snapshot.repositories.preview,
+            RepositoryPreview::Loading
+        ) {
+            return;
+        }
+        self.snapshot.repositories = Repositories {
+            account: reply.for_account,
+            preview: RepositoryPreview::Ready(outcome),
+            origin,
+        };
+        self.repository_authorization = reply.repository_authorization;
+        self.repository_context = reply.publication;
+        cx.notify();
+    }
+
     /// The repository list to show after a non-repository mutation settled and the authorization
     /// did not change (for example revalidating a different account, or a rejected PAT).
     ///
@@ -1163,6 +1213,54 @@ impl Accounts {
             .and_then(|context| runtime.accounts.repo_service().cache(context))
             .and_then(|binding| binding.store().authorization(binding.scope(), None));
         let settled = settled_signal(self.inbox.clone(), self.alive.clone(), generation);
+        // Cache-first companion for the repository list. It is a separate tracked job so the online
+        // `/user/repos` read starts immediately: a pending request is never gated on cache I/O, and a
+        // slow disk cannot delay it. It publishes only when an authorized persisted snapshot exists,
+        // and the foreground decides whether it may be shown.
+        if operation == Operation::Repositories
+            && let Some(context) = publication.as_ref()
+        {
+            let repos = runtime.accounts.repo_service();
+            let preliminary_inbox = self.inbox.clone();
+            let preliminary_alive = self.alive.clone();
+            let preliminary_token = control.token.clone();
+            let preliminary_context = context.clone();
+            let preliminary_authorization = repository_authorization.clone();
+            let preliminary_account = for_account.clone();
+            let preliminary_settled = settled_signal(
+                preliminary_inbox.clone(),
+                preliminary_alive.clone(),
+                generation,
+            );
+            // The preliminary job has no separate cancellation of its own: it shares the operation's
+            // token and is aborted with the runtime on shutdown.
+            let (_, preliminary_source) = CancellationToken::new();
+            let _ = runtime.spawn(preliminary_source, preliminary_settled, async move {
+                let found = read_cached_repositories(&repos, preliminary_token.clone()).await;
+                if let Some(repositories) = found
+                    && *preliminary_alive.borrow()
+                    && preliminary_authorization
+                        .as_ref()
+                        .is_none_or(CacheAuthorization::is_current)
+                {
+                    enqueue(
+                        &preliminary_inbox,
+                        &preliminary_alive,
+                        Message::Operation(Box::new(Reply {
+                            generation,
+                            operation: Operation::Repositories,
+                            result: Ok(Success::Repositories),
+                            publication: Some(preliminary_context),
+                            for_account: preliminary_account.clone(),
+                            recovery_pending: false,
+                            repositories: Some(repositories),
+                            repository_authorization: preliminary_authorization,
+                            preliminary: true,
+                        })),
+                    );
+                }
+            });
+        }
         let spawned = runtime.spawn(control.source, settled, async move {
             let (result, repositories) = match operation {
                 Operation::Select(id) => (
@@ -1208,6 +1306,7 @@ impl Accounts {
                     recovery_pending: false,
                     repositories,
                     repository_authorization,
+                    preliminary: false,
                 },
             )
             .await;
@@ -1314,6 +1413,7 @@ impl Accounts {
                     recovery_pending: false,
                     repositories: None,
                     repository_authorization: None,
+                    preliminary: false,
                 },
             )
             .await;
@@ -1622,6 +1722,37 @@ fn error_text(error: &GitHubError) -> String {
         GitHubError::StaleContext => "The account or authorization changed while this request was running; its result was discarded.".into(),
         GitHubError::CredentialStore { .. } => "The platform credential is missing or unavailable. Revalidate or replace the PAT; this is not an empty repository set.".into(),
         other => format!("GitHub read failed: {other}"),
+    }
+}
+
+/// Reads the last persisted `/user/repos` snapshot without contacting the network.
+///
+/// This is the cache-first half of the sidebar read: it runs alongside the ordinary online read and
+/// publishes the previously displayed repository set immediately, so startup does not wait for a
+/// slow or failing `/user/repos` request before anything appears. Only a readable authorized
+/// snapshot counts; a miss, corruption, stale authorization or operational cache fault yields `None`
+/// and leaves the ordinary read in charge. The historical origin is preserved so the sidebar labels
+/// it as a replayed snapshot rather than a live complete list.
+async fn read_cached_repositories(
+    repos: &crate::data::RepoService,
+    cancel: CancellationToken,
+) -> Option<RepositoryReply> {
+    let scoped = repos
+        .list_repos_cached(PageReadMode::Offline, cancel)
+        .await
+        .ok()?;
+    match scoped.value {
+        PageValue::Value {
+            value,
+            origin: PageOrigin::HistoricalSnapshot,
+            metadata,
+        } => Some(RepositoryReply {
+            outcome: Ok(value),
+            origin: RepositoryListOrigin::Historical {
+                verified_at_ms: metadata.verified_at_ms,
+            },
+        }),
+        PageValue::Value { .. } | PageValue::Miss(_) => None,
     }
 }
 

@@ -58,6 +58,10 @@ fn online_response(
     assert_eq!(request.method, crate::network::transport::HttpMethod::Get);
     match url.path() {
         "/user" => response(200, r#"{"id":1,"login":"octo"}"#),
+        "/user/repos" => response(
+            200,
+            r#"[{"id":10,"name":"repo","owner":{"id":1,"login":"octo"},"visibility":"public","private":false,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":1,"html_url":"https://github.com/octo/repo"}]"#,
+        ),
         "/search/issues" => response(200, &home("online only")),
         "/users/octo/received_events" => events("online", None),
         "/user/following" => response(200, r#"[{"id":7,"login":"bob"}]"#),
@@ -463,6 +467,30 @@ fn settle(page: &Entity<HomePage>, cx: &mut VisualTestContext) {
     panic!("HomePage did not settle: home={home:?}, feed={feed:?}");
 }
 
+/// Drives the page's drain until `done` holds or a generous deadline passes, so a test waits for a
+/// specific state instead of racing a fixed iteration budget on a loaded machine.
+fn drive_until(
+    page: &Entity<HomePage>,
+    cx: &mut VisualTestContext,
+    mut done: impl FnMut(&Entity<HomePage>, &mut VisualTestContext) -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
+        if done(page, cx) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Home page did not reach the expected state: home={:?} feed={:?}",
+            page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone()),
+            page.read_with(cx, |page, cx| page.view.read(cx).feed_state().clone()),
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn home_title(page: &Entity<HomePage>, cx: &VisualTestContext) -> Option<String> {
     page.read_with(cx, |page, cx| match page.view.read(cx).home_state() {
         PanelState::Ready {
@@ -621,11 +649,17 @@ fn authentication_failure_cancellation_and_uncached_pages_are_not_historical_suc
         fixture.mock.enqueue(Ok(response(401, "{}"))).await;
     });
     let (page, cx) = open_page(&mut fixture, cx);
-    for _ in 0..300 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drive_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, cx| {
+            matches!(
+                page.view.read(cx).home_state(),
+                PanelState::Ready {
+                    content: PanelContent::Unavailable { .. },
+                    ..
+                }
+            )
+        })
+    });
     assert_eq!(home_title(&page, cx), None);
     assert!(
         page.read_with(cx, |page, cx| matches!(
@@ -670,11 +704,17 @@ fn authentication_failure_cancellation_and_uncached_pages_are_not_historical_suc
             work.source.cancel();
         }
     });
-    for _ in 0..200 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drive_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, cx| {
+            matches!(
+                page.view.read(cx).home_state(),
+                PanelState::Ready {
+                    content: PanelContent::Error(HomeError::GitHub(GitHubError::Cancelled)),
+                    ..
+                }
+            )
+        })
+    });
     assert_eq!(
         home_title(&page, cx),
         None,
@@ -1497,4 +1537,292 @@ fn assert_no_cache_online_path(cx: &mut TestAppContext, feed_first: bool) {
     );
     assert_eq!(feed_ids(&page, cx), ["online"]);
     assert!(!page.read_with(cx, |page, _| page.cached_enabled_for_test()));
+}
+
+/// Cache-first Home/Feed: a readable persisted snapshot paints before the online read finishes, and
+/// then the network result replaces it. Both columns are held at their transport boundary, so the
+/// displayed activity can only have come from the snapshot.
+#[gpui::test]
+fn cached_home_and_feed_paint_before_the_network_read_finishes_then_are_replaced(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    // Genuinely reopen the account service and the store: the paint may only come from disk.
+    let credentials = fixture.credentials.clone();
+    let service = fixture.service.take().unwrap();
+    let executor = fixture.executor.clone();
+    runtime.block_on(async move {
+        let _ = service.close().await;
+        drop(executor);
+    });
+    let accounts_directory =
+        std::mem::replace(&mut fixture.directory, tempfile::tempdir().unwrap());
+    let cache_directory =
+        std::mem::replace(&mut fixture.cache_directory, tempfile::tempdir().unwrap());
+    drop(fixture);
+    let store = CacheStore::open(CacheConfig::at(cache_directory.path().to_path_buf())).unwrap();
+    let mut fixture = runtime.block_on(Fixture::at(
+        accounts_directory,
+        cache_directory,
+        Some(store),
+        credentials,
+    ));
+    // Both network reads are held before their response, so neither can complete yet.
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.pause_search.store(true, SeqCst);
+    fixture.gate.pause_events.store(true, SeqCst);
+    let (page, cx) = open_page(&mut fixture, cx);
+
+    // Drain only the snapshot half: content must appear with the online read still pending.
+    let mut painted = false;
+    for _ in 0..600 {
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.update(|window, _| window.refresh());
+        let (title, ids) = (home_title(&page, cx), feed_ids(&page, cx));
+        if title.as_deref() == Some("cached home") && ids == ["first"] {
+            painted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        painted,
+        "the persisted snapshot must paint while the online reads are still pending: home={:?} feed={:?}",
+        page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone()),
+        page.read_with(cx, |page, cx| page.view.read(cx).feed_state().clone()),
+    );
+    page.read_with(cx, |page, cx| {
+        assert!(
+            page.view.read(cx).provenance(Column::Home).is_some(),
+            "a snapshot on screen must be marked as saved, not fresh"
+        );
+        assert!(page.view.read(cx).provenance(Column::Feed).is_some());
+        assert!(
+            page.work[0].is_some() && page.work[1].is_some(),
+            "the online reads still own their columns"
+        );
+    });
+
+    // Release the network: the fresh result replaces the snapshot in both columns.
+    fixture.gate.release.notify_waiters();
+    settle(&page, cx);
+    assert_eq!(
+        home_title(&page, cx).as_deref(),
+        Some("online only"),
+        "state={:?}",
+        page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone())
+    );
+    assert_eq!(feed_ids(&page, cx), ["online"]);
+    page.read_with(cx, |page, cx| {
+        assert!(page.view.read(cx).provenance(Column::Home).is_none());
+        assert!(page.view.read(cx).provenance(Column::Feed).is_none());
+    });
+}
+
+/// Cache-first ordering: a cache reply that arrives after the network already published must never
+/// roll the column back, even when both belong to the same request.
+#[gpui::test]
+fn a_late_cached_reply_never_rolls_back_a_newer_network_value(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    fixture
+        .gate
+        .online_responses
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // Build the very snapshot a slow cache read would have produced for this request, before the
+    // page consumes the fixture's service handle.
+    let (cached_value, cached_metadata, partition) = runtime.block_on(async {
+        let store = fixture.store();
+        let scope = store.saved_account(fixture.account.clone()).unwrap();
+        let partition = scope.partition().to_string();
+        let session = CachedPageReadSession::new(
+            fixture.service.as_ref().unwrap().page_session().unwrap(),
+            store,
+            scope,
+        )
+        .unwrap();
+        let cached = session
+            .home(
+                PageReadMode::Offline,
+                None,
+                &HomeSearchLimits::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        match cached.value {
+            PageValue::Value {
+                value,
+                metadata,
+                origin,
+            } => {
+                assert_eq!(origin, PageOrigin::HistoricalSnapshot);
+                (value, metadata, partition)
+            }
+            PageValue::Miss(reason) => panic!("the warmed snapshot must be readable: {reason:?}"),
+        }
+    });
+    let read = CachedRead {
+        value: cached_value,
+        source: ReadSource::Historical {
+            partition,
+            collection: None,
+        },
+        metadata: Some(cached_metadata),
+    };
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("online only"));
+    assert_eq!(feed_ids(&page, cx), ["online"]);
+    page.update(cx, |page, cx| {
+        let context = page.session.as_ref().unwrap().context().clone();
+        let request = page.requests[0];
+        page.inbox.lock().expect("home inbox").push_back(Reply {
+            generation: page.generation,
+            column: Column::Home,
+            request,
+            selection: page.selection,
+            authorization: page.cache_authorization.clone(),
+            context,
+            preliminary: true,
+            result: ColumnResult::Home(Ok(Some(read))),
+        });
+        page.drain_for_test(cx);
+    });
+    assert_eq!(
+        home_title(&page, cx).as_deref(),
+        Some("online only"),
+        "a late cache completion must not replace newer network content"
+    );
+    page.read_with(cx, |page, cx| {
+        assert!(page.view.read(cx).provenance(Column::Home).is_none());
+    });
+}
+
+/// A network failure after the snapshot painted keeps the readable cached content with its honest
+/// saved marker instead of turning into an empty or failed column.
+#[gpui::test]
+fn network_failure_after_the_cached_paint_keeps_the_readable_snapshot(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    runtime.block_on(async {
+        fixture.network_error().await;
+        fixture.network_error().await;
+    });
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(
+        home_title(&page, cx).as_deref(),
+        Some("cached home"),
+        "state={:?}",
+        page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone())
+    );
+    assert_eq!(feed_ids(&page, cx), ["first"]);
+    page.read_with(cx, |page, cx| {
+        assert!(page.view.read(cx).provenance(Column::Home).is_some());
+        assert!(page.view.read(cx).provenance(Column::Feed).is_some());
+        assert!(page.work[0].is_none() && page.work[1].is_none());
+    });
+}
+
+/// A cache miss preserves ordinary online loading: nothing is published from the cache half and the
+/// column only becomes Ready when the network answers.
+#[gpui::test]
+fn a_cache_miss_keeps_the_ordinary_online_loading_path(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.pause_search.store(true, SeqCst);
+    fixture.gate.pause_events.store(true, SeqCst);
+    let (page, cx) = open_page(&mut fixture, cx);
+    // Give the cache half ample opportunity to publish something it does not have.
+    for _ in 0..120 {
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.update(|window, _| window.refresh());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    page.read_with(cx, |page, cx| {
+        assert!(matches!(
+            page.view.read(cx).home_state(),
+            PanelState::Loading
+        ));
+        assert!(matches!(
+            page.view.read(cx).feed_state(),
+            PanelState::Loading
+        ));
+    });
+    fixture.gate.release.notify_waiters();
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("online only"));
+    assert_eq!(feed_ids(&page, cx), ["online"]);
+}
+
+/// A corrupt snapshot is not a successful empty page: the cache half stays silent and the online
+/// read still fills the columns.
+#[gpui::test]
+fn a_corrupt_snapshot_does_not_fabricate_an_empty_page(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    // Replace the stored Home representation with bytes that cannot be decoded.
+    runtime.block_on(async {
+        let store = fixture.store();
+        let scope = store.saved_account(fixture.account.clone()).unwrap();
+        let config = GitHubConfig::default();
+        let key = crate::storage::cache::CacheKey::mutable(
+            None,
+            true,
+            "home-open-involves",
+            &serde_json::json!({
+                "login": "octo",
+                "parameters": ["None", format!("{:?}", HomeSearchLimits::default())],
+                "base": config.base_url,
+                "accept": config.accept,
+                "api": config.api_version,
+                "partial": false,
+            })
+            .to_string(),
+            "page-response-set-v1",
+            1,
+        )
+        .unwrap();
+        let ticket = store.begin_write(&scope, &key).unwrap();
+        store
+            .put(
+                ticket,
+                b"{not a snapshot",
+                crate::domain::cache::CacheMetadata {
+                    representation_version: 1,
+                    fetched_at_ms: 1,
+                    verified_at_ms: 1,
+                    completeness: crate::domain::cache::CacheCompleteness::Complete,
+                    etag: None,
+                    last_modified: None,
+                    cache_control: None,
+                },
+            )
+            .unwrap();
+    });
+    fixture
+        .gate
+        .online_responses
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(home_title(&page, cx).as_deref(), Some("online only"));
+    assert_eq!(feed_ids(&page, cx), ["online"]);
+    page.read_with(cx, |page, cx| {
+        assert!(page.view.read(cx).provenance(Column::Home).is_none());
+        assert!(page.view.read(cx).provenance(Column::Feed).is_none());
+    });
 }

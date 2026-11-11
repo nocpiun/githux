@@ -107,6 +107,78 @@ fn open(
 
 /// The same test composition, but with a real business `CacheStore` injected exactly as production
 /// startup does through `open_accounts_with_cache`. Used by the avatar cache-binding tests.
+/// Holds `/user/repos` at the transport boundary so a cache-first paint can be observed while the
+/// online read is still pending. Every other request passes straight through to the mock.
+struct HeldRepositoryTransport {
+    inner: Arc<MockTransport>,
+    hold_repositories: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl HeldRepositoryTransport {
+    fn new(inner: Arc<MockTransport>) -> Self {
+        Self {
+            inner,
+            hold_repositories: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn hold(&self, held: bool) {
+        self.hold_repositories
+            .store(held, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn release_all(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+impl Transport for HeldRepositoryTransport {
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let response = self.execute(request, cancel).await?;
+            if response.body.len() > max_body_bytes {
+                return Err(TransportError::ResponseTooLarge {
+                    limit: max_body_bytes,
+                });
+            }
+            Ok(response)
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if self
+                .hold_repositories
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && request.url.contains("/user/repos")
+            {
+                tokio::select! {
+                    _ = self.release.notified() => {}
+                    _ = cancel.clone().cancelled() => {
+                        return Err(TransportError::Cancelled);
+                    }
+                }
+            }
+            self.inner.execute(request, cancel).await
+        })
+    }
+}
+
 fn open_cached(
     path: &std::path::Path,
     store: Arc<InMemoryCredentialStore>,
@@ -2325,6 +2397,77 @@ fn a_network_failure_falls_back_to_the_cached_list_as_history(cx: &mut TestAppCo
     );
 }
 
+/// Cache-first sidebar: a recorded list is published immediately while the online `/user/repos` read
+/// is still pending, and the live result then replaces it.
+#[gpui::test]
+fn a_cached_repository_list_paints_before_the_online_read_finishes_then_is_replaced(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let transport = Arc::new(HeldRepositoryTransport::new(mock.clone()));
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+        // The next `/user/repos` answer belongs to the held revalidation.
+        mock.enqueue(Ok(repos(1, "alice", &["alpha", "beta"])))
+            .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        transport.clone(),
+        cache,
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state.repositories.origin == RepositoryListOrigin::Network
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+    });
+    wait_idle(&controller, cx);
+
+    // Hold the network and refresh: the recorded list must appear while the read is in flight.
+    transport.hold(true);
+    refresh(&controller, cx);
+    assert!(
+        beat_until(&controller, cx, |controller, cx| {
+            controller.read_with(cx, |accounts, _| {
+                accounts.busy()
+                    && matches!(
+                        accounts.snapshot().repositories.origin,
+                        RepositoryListOrigin::Historical { .. }
+                    )
+                    && matches!(
+                        &accounts.snapshot().repositories.preview,
+                        RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1
+                    )
+            })
+        }),
+        "the cached list must paint while the online read is still pending"
+    );
+
+    // Releasing the network replaces it with the live, complete list.
+    transport.hold(false);
+    transport.release_all();
+    wait_for(&controller, cx, |state| {
+        state.repositories.origin == RepositoryListOrigin::Network
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2)
+    });
+    assert!(
+        snapshot(&controller, cx)
+            .repositories
+            .historical_status()
+            .is_none(),
+        "a live list carries no offline snapshot line"
+    );
+}
+
 /// An explicit 401 is a credential rejection, not a transient outage: it must not be shown as
 /// offline history, and the old snapshot must not become current again.
 #[gpui::test]
@@ -2571,6 +2714,7 @@ fn revocation_clears_online_rows_and_rejects_queued_replies_even_after_gate_reco
                     origin,
                 }),
                 repository_authorization: Some(token.clone()),
+                preliminary: false,
             };
             accounts.apply(reply, cx);
         });
