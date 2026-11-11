@@ -50,6 +50,10 @@ Lucide icons, bundled by `ely-core` and embedded via `include_bytes!`.
 | tokio | 1.54.1 | MIT | Copyright (c) Tokio Contributors (crate `LICENSE`) |
 | serde, serde_json | 1.0.229 / 1.0.154 | MIT OR Apache-2.0 | crate `LICENSE-MIT` / `LICENSE-APACHE` |
 | image | 0.25.10 | MIT OR Apache-2.0 | crate license files |
+| resvg | 0.46.0 | Apache-2.0 OR MIT | Copyright 2017 the Resvg Authors — [MIT](assets/licenses/resvg-0.46.0-license-mit.txt), [Apache-2.0](assets/licenses/resvg-0.46.0-license-apache.txt) |
+| usvg | 0.46.0 | Apache-2.0 OR MIT | Copyright 2017 the Resvg Authors — [MIT](assets/licenses/usvg-0.46.0-license-mit.txt), [Apache-2.0](assets/licenses/usvg-0.46.0-license-apache.txt) |
+| tiny-skia | 0.11.4 | BSD-3-Clause | Copyright (c) 2011 Google Inc.; Copyright (c) 2020 Yevhenii Reizner — [full text](assets/licenses/tiny-skia-0.11.4-license.txt) |
+| simplecss, svgtypes | 0.2.2 / 0.16.1 | Apache-2.0 OR MIT | Already present through usvg; crate `LICENSE-MIT` / `LICENSE-APACHE` |
 | reqwest | 0.13.5 | MIT OR Apache-2.0 | crate license files |
 | base64 | 0.22.1 | MIT OR Apache-2.0 | Copyright (c) 2015 Alice Maz (MIT) |
 | dirs | 7.0.0 | MIT OR Apache-2.0 | Copyright (c) 2018-2019 dirs-rs contributors (MIT) |
@@ -88,9 +92,12 @@ pinned NuGet packages, and that script already copies each package's
    `assets/licenses/pulldown-cmark-mit.txt`, plus the license files of the
    remaining direct dependencies (and a resolved choice for dual-licensed
    crates).
-6. `assets/licenses/sqlite-public-domain.txt` (informational).
-7. Each Windows App SDK package's `license.txt` (copied by the runtime script).
-8. This file.
+6. The `resvg-0.46.0-license-*`, `usvg-0.46.0-license-*` and
+   `tiny-skia-0.11.4-license.txt` files in `assets/licenses/` (retain both
+   alternatives until the distribution license choice is recorded).
+7. `assets/licenses/sqlite-public-domain.txt` (informational).
+8. Each Windows App SDK package's `license.txt` (copied by the runtime script).
+9. This file.
 
 No installer or release artifact exists yet; this task does not complete release
 acceptance.

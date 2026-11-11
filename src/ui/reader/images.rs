@@ -71,7 +71,19 @@ impl ImageState {
 
 /// The shared per-reader picture state. `ReaderView` owns it and hands a clone
 /// to each `MarkdownView` it builds.
+struct Playback {
+    started: Option<std::time::Instant>,
+    accepted: std::time::Instant,
+    last_visible: Option<std::time::Instant>,
+    duration_ms: u32,
+    frames: Vec<(u32,Arc<Image>)>,
+    final_image: Arc<Image>,
+    frame: usize,
+    extra_bytes: usize,
+}
+
 pub(crate) struct ImageBoard {
+    animations: HashMap<ImageKey, Playback>,
     limits: ImageLimits,
     /// This reader's own identity, so a shared provider never mixes two
     /// readers' work even when their document generations coincide.
@@ -81,6 +93,7 @@ pub(crate) struct ImageBoard {
     states: HashMap<ImageKey, ImageState>,
     ready_order: VecDeque<ImageKey>,
     ready_bytes: usize,
+    ready_costs: HashMap<ImageKey,usize>,
     pending: VecDeque<ImageRequest>,
     /// Requests handed to the provider that have not completed or been
     /// cancelled. Their completions arrive through the sink.
@@ -95,6 +108,7 @@ pub(crate) struct ImageBoard {
 impl ImageBoard {
     pub(super) fn new(limits: ImageLimits) -> Self {
         Self {
+            animations: HashMap::new(),
             limits,
             reader: crate::content::images::next_reader_id(),
             generation: 0,
@@ -102,12 +116,51 @@ impl ImageBoard {
             states: HashMap::new(),
             ready_order: VecDeque::new(),
             ready_bytes: 0,
+            ready_costs: HashMap::new(),
             pending: VecDeque::new(),
             in_flight: 0,
             blocks: HashMap::new(),
             sink: ImageSink::new(),
         }
     }
+
+    pub(super) fn painted(&mut self, key: &ImageKey) {
+        if let Some(playback) = self.animations.get_mut(key) {
+            let now = std::time::Instant::now();
+            playback.started.get_or_insert(now);
+            playback.last_visible = Some(now);
+        }
+    }
+
+    pub(super) fn animate(&mut self, reduced_motion: bool) -> bool {
+        let now = std::time::Instant::now();
+        let mut finished = Vec::new(); let mut changed = false;
+        for (key,playback) in &mut self.animations {
+            if reduced_motion { finished.push(key.clone()); continue; }
+            let Some(started) = playback.started else {
+                    if now.duration_since(playback.accepted).as_millis() >= 150 { finished.push(key.clone()); }
+                    continue;
+                };
+                if playback.last_visible.is_none_or(|at| now.duration_since(at).as_millis() >= 150) { finished.push(key.clone()); continue; }
+                let elapsed = now.duration_since(started).as_millis() as u32;
+            if reduced_motion || elapsed >= playback.duration_ms { finished.push(key.clone()); continue; }
+            let index = playback.frames.partition_point(|(at,_)| *at <= elapsed).saturating_sub(1);
+            if playback.frame != index {
+                playback.frame = index;
+                if let Some(ImageState::Ready(image,..)) = self.states.get_mut(key) { *image = playback.frames[index].1.clone(); changed = true; }
+            }
+        }
+        for key in finished { self.finish_animation(&key); changed = true; }
+        changed
+    }
+    fn finish_animation(&mut self, key: &ImageKey) {
+        if let Some(playback) = self.animations.remove(key) {
+            if let Some(ImageState::Ready(image,..)) = self.states.get_mut(key) { *image = playback.final_image; }
+            self.ready_bytes = self.ready_bytes.saturating_sub(playback.extra_bytes);
+            if let Some(cost) = self.ready_costs.get_mut(key) { *cost = cost.saturating_sub(playback.extra_bytes); }
+        }
+    }
+    fn finish_animations(&mut self) { for key in self.animations.keys().cloned().collect::<Vec<_>>() { self.finish_animation(&key); } }
 
     pub(super) fn sink(&self) -> ImageSink {
         self.sink.clone()
@@ -129,6 +182,7 @@ impl ImageBoard {
     /// completion of the previous generation is rejected.
     pub(super) fn advance(&mut self, generation: u64) {
         self.generation = generation;
+        self.finish_animations();
         self.forget_unfinished();
     }
 
@@ -136,8 +190,10 @@ impl ImageBoard {
     pub(super) fn begin(&mut self, generation: u64) {
         self.generation = generation;
         self.states.clear();
+        self.animations.clear();
         self.ready_order.clear();
         self.ready_bytes = 0;
+        self.ready_costs.clear();
         self.pending.clear();
         self.in_flight = 0;
         self.blocks.clear();
@@ -157,6 +213,7 @@ impl ImageBoard {
     /// Drops unfinished loads and requests while keeping finished pictures, so
     /// a hidden window stops networking without forgetting what is drawn.
     pub(super) fn suspend(&mut self) {
+        self.finish_animations();
         self.forget_unfinished();
     }
 
@@ -220,7 +277,7 @@ impl ImageBoard {
     /// Whether anything is queued or outstanding. The pump stops when this is
     /// false, so a settled document runs no background timer.
     pub(super) fn work_outstanding(&self) -> bool {
-        self.in_flight > 0 || !self.pending.is_empty()
+        self.in_flight > 0 || !self.pending.is_empty() || !self.animations.is_empty()
     }
 
     pub(super) fn clear_pending(&mut self) {
@@ -249,7 +306,16 @@ impl ImageBoard {
                 let format = gpui_format(decoded.format);
                 let bytes = decoded.decoded_bytes();
                 let image = Arc::new(Image::from_bytes(format, decoded.bytes));
-                *state = ImageState::Ready(image, decoded.width, decoded.height);
+                let mut displayed = image.clone();
+                if let Some(animation) = decoded.animation {
+                    let frames = animation.frames.into_iter().map(|f| (f.at_ms,Arc::new(Image::from_bytes(format,f.bytes)))).collect::<Vec<_>>();
+                    if let Some((_,first)) = frames.first() {
+                        displayed = first.clone();
+                        self.animations.insert(key.clone(),Playback { started: None, accepted: std::time::Instant::now(), last_visible: None, duration_ms: animation.duration_ms, frame: 0, extra_bytes: bytes.saturating_sub(bytes/(frames.len()+1)), frames, final_image: image });
+                    }
+                }
+                *state = ImageState::Ready(displayed, decoded.width, decoded.height);
+                self.ready_costs.insert(key.clone(), bytes);
                 self.ready_bytes = self.ready_bytes.saturating_add(bytes);
                 self.ready_order.retain(|known| known != &key);
                 self.ready_order.push_back(key.clone());
@@ -273,10 +339,9 @@ impl ImageBoard {
             let Some(state) = self.states.get_mut(&key) else {
                 continue;
             };
-            if let ImageState::Ready(_, width, height) = state {
-                let bytes = (*width as usize)
-                    .saturating_mul(*height as usize)
-                    .saturating_mul(4);
+            if let ImageState::Ready(..) = state {
+                let bytes = self.ready_costs.remove(&key).unwrap_or_default();
+                self.animations.remove(&key);
                 self.ready_bytes = self.ready_bytes.saturating_sub(bytes);
                 *state = ImageState::Released;
                 if let Some(blocks) = self.blocks.get(&key) {
@@ -411,15 +476,6 @@ pub(super) fn image_element(
             .text_color(colors.fg_muted)
             .child(text)
     };
-    let caption = |alt: &str| {
-        let alt = alt.to_string();
-        (!alt.is_empty()).then(|| {
-            div()
-                .text_size(gpui::px(sm))
-                .text_color(colors.fg_subtle)
-                .child(alt)
-        })
-    };
     match state {
         ImageState::Ready(image, width, height) => {
             // The picture's box keeps the file's own aspect ratio and is
@@ -436,11 +492,9 @@ pub(super) fn image_element(
             let mut frame = div()
                 .debug_selector(move || frame_selector.clone())
                 .relative()
-                .w_full()
-                .max_w(px(max_width))
-                .overflow_hidden()
-                .rounded(radius)
-                .bg(colors.sunken);
+                .w(px(max_width))
+                .max_w_full()
+                .overflow_hidden();
             frame.style().aspect_ratio = Some(ratio);
             let picture = img(ImageSource::Image(image.clone()))
                 .id(id)
@@ -452,13 +506,9 @@ pub(super) fn image_element(
             // its alt text as a caption in the same column.
             div()
                 .debug_selector(move || selector.clone())
-                .w_full()
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap_1()
+                .max_w_full()
+                .flex_none()
                 .child(frame.child(picture))
-                .children(caption(alt))
                 .into_any_element()
         }
         ImageState::Loading => {

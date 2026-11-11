@@ -605,3 +605,44 @@ fn the_sink_keeps_completions_until_drained() {
     );
     assert!(sink.drain().is_empty());
 }
+
+
+#[test]
+fn declarative_stats_frames_reveal_delayed_contents_and_retain_final_values() {
+    let decoded = decode_image(include_bytes!("fixtures/entry-stats.svg").to_vec(), &ImageLimits::default()).unwrap();
+    let animation = decoded.animation.as_ref().expect("real finite timeline");
+    assert_eq!((decoded.width,decoded.height),(240,100));
+    assert_eq!(animation.duration_ms,1350);
+    let frame_at = |ms:u32| {
+        let bytes = if ms >= animation.duration_ms { &decoded.bytes } else { &animation.frames.iter().rev().find(|f| f.at_ms <= ms).unwrap().bytes };
+        image::load_from_memory(bytes).unwrap().to_rgba8()
+    };
+    let start = frame_at(0); let middle = frame_at(600); let final_frame = frame_at(1350);
+    assert_eq!(start.dimensions(),final_frame.dimensions());
+    assert_eq!(start.get_pixel(12,32).0,[13,17,23,255]);
+    let green = middle.get_pixel(12,32).0[1];
+    assert!(green > 50 && green < 250, "row has intermediate opacity: {green}");
+    assert_eq!(middle.get_pixel(12,72).0,[13,17,23,255],"last delayed row remains hidden");
+    assert_eq!(final_frame.get_pixel(12,32).0,[0,255,0,255]);
+    assert_eq!(final_frame.get_pixel(12,72).0,[0,255,255,255]);
+    assert_eq!(final_frame.get_pixel(105,35).0,[13,17,23,255],"unanimated hidden geometry stays hidden");
+    assert_eq!(start.get_pixel(195,55).0,[13,17,23,255],"rank starts at zero scale");
+    assert_eq!(final_frame.get_pixel(195,55).0,[255,119,0,255],"rank reaches final scale/translation");
+    let text_pixels = final_frame.enumerate_pixels().filter(|(x,y,p)| *x > 28 && *x < 130 && *y > 65 && p.0[1] > 100).count();
+    assert!(text_pixels > 50,"actual final row text is visible ({text_pixels} pixels)");
+    assert!(decoded.decoded_bytes() <= ImageLimits::default().max_decoded_bytes);
+}
+
+#[test]
+fn svg_custom_properties_and_nested_data_logo_render_actual_details() {
+    use base64::Engine;
+    let logo = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#fff" d="M2 2h20v20H2z M6 6v12h12V6z" fill-rule="evenodd"/></svg>"##;
+    let data = base64::engine::general_purpose::STANDARD.encode(logo);
+    let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><style>:root{{--accent:#a97cf5;--background:#0a0a0b}} text{{fill:var(--accent,#123456)}}</style><rect width="80" height="20" fill="var(--background,#111111)"/><path d="M30 2h10v16H30z" fill="var(--accent,#123456)"/><image x="2" y="2" width="16" height="16" href="data:image/svg+xml;base64,{data}"/><text x="45" y="14" font-size="10">Lv.80</text></svg>"##);
+    let decoded = decode_image(svg.into_bytes(),&ImageLimits::default()).unwrap();
+    let png = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    assert_eq!(png.get_pixel(6,6).0,[255,255,255,255],"nested logo outline");
+    assert_eq!(png.get_pixel(18,18).0,[10,10,11,255],"logo hole keeps transparency");
+    assert_eq!(png.get_pixel(65,10).0,[169,124,245,255],"CSS variable fills card geometry");
+    assert!(png.enumerate_pixels().filter(|(x,_,p)| *x > 90 && p.0[0] > 80).count() > 20,"card text is painted");
+}

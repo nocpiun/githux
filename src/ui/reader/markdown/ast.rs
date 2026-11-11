@@ -103,6 +103,8 @@ pub enum Block {
         tex: String,
     },
     /// A picture: never loaded. Its alt text is shown as a note.
+    ImageRow(Vec<(String, String)>),
+    Centered(Vec<Block>),
     Image {
         alt: String,
         url: String,
@@ -396,6 +398,7 @@ pub fn parse(markdown: &str) -> Document {
     let mut hidden_blocks: Vec<(TagEnd, usize)> = Vec::new();
     // Every Markdown span remembers whether it started in a dropped region.
     // Its end must use that ownership even if suppression has since changed.
+    let mut html_centers: Vec<usize> = Vec::new();
     let mut inline_visibility = Vec::new();
 
     fn finish_inline(
@@ -446,12 +449,17 @@ pub fn parse(markdown: &str) -> Document {
             Some(Container::List { current, .. }) => current,
             _ => return,
         };
+        let images_only = inline.is_empty() && heading.is_none();
         if let Some(level) = heading {
             out.push(Block::Heading(level, inline));
         } else if !inline.is_empty() {
             out.push(Block::Paragraph(inline));
         }
-        out.extend(notes);
+        if notes.len() > 1 && images_only {
+            out.push(Block::ImageRow(notes.into_iter().filter_map(|b| match b { Block::Image{alt,url} => Some((alt,url)), _ => None }).collect()));
+        } else {
+            out.extend(notes);
+        }
     }
 
     for event in Parser::new_ext(markdown, options) {
@@ -920,6 +928,14 @@ pub fn parse(markdown: &str) -> Document {
                 // multiline comment or attribute can contain a tag that looks
                 // like a dropped opening but is still markup context.
                 let text = std::mem::take(&mut html_buffer);
+                let elements = html::parse(&text);
+                let opening_center = elements.iter().any(|n| matches!(n, Node::Element(e) if e.name == "div" && e.attr("align").is_some_and(|v| v.eq_ignore_ascii_case("center")) && !e.closed));
+                if opening_center { html_centers.push(output_len(&stack)); }
+                if text.trim().eq_ignore_ascii_case("</div>") && let Some(start) = html_centers.pop() {
+                    let out = match stack.last_mut() { Some(Container::Blocks{out,..}) => Some(out), Some(Container::List{current,..}) => Some(current), _ => None };
+                    if let Some(out) = out && start < out.len() { let body = out.drain(start..).collect(); out.push(Block::Centered(body)); }
+                    continue;
+                }
                 if let Some((name, depth)) = dropped.clone() {
                     let span = html::scan_dropped_span(&text, &name, depth, &mut dropped_raw);
                     if let Some(start) = span.tail_start {
@@ -1836,5 +1852,35 @@ mod quote_heading_test {
             .expect("heading");
         assert_eq!(heading.text, "Guide");
         assert_eq!(heading.links, vec![(0..5, "guide.md".to_string())]);
+    }
+}
+
+
+#[cfg(test)]
+mod profile_media_regressions {
+    use super::*;
+    #[test]
+    fn center_container_keeps_image_paragraphs_grouped_and_blank_lines_separate_rows() {
+        let read = parse("<div align=\"center\">
+
+# Heading
+
+![Card](card.svg)
+
+[![A](a.svg)](https://a.invalid)
+[![B](b.svg)](https://b.invalid)
+
+![C](c.svg) ![D](d.svg)
+
+</div>
+
+## Links");
+        let Block::Centered(body) = &read.blocks[0] else { panic!("{:?}",read.blocks); };
+        assert!(matches!(&body[0],Block::Heading(1,_)));
+        assert!(matches!(&body[1],Block::Image{url,..} if url == "card.svg"));
+        assert!(matches!(&body[2],Block::ImageRow(images) if images.len() == 2 && images[0].1 == "a.svg" && images[1].1 == "b.svg"));
+        assert!(matches!(&body[3],Block::ImageRow(images) if images.len() == 2 && images[0].1 == "c.svg"));
+        assert_eq!(body.len(),4,"no comment/alt-only/whitespace paragraphs");
+        assert!(matches!(&read.blocks[1],Block::Heading(2,_)),"center scope closes before Links");
     }
 }

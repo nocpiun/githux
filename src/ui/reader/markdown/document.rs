@@ -966,6 +966,8 @@ impl MarkdownView {
                 .text_size(gpui::px(sm))
                 .child(tex.clone())
                 .into_any_element(),
+            Block::ImageRow(pictures) => self.picture_row(ix,pictures,&colors,xs,radius),
+            Block::Centered(blocks) => div().w_full().flex().flex_col().items_center().gap_2().children(blocks.iter().enumerate().map(|(at,block)| self.nested(ix,&unit_cursor,("center",format!("{ix}-{at}")),block,nested_style))).into_any_element(),
             Block::Image { alt, url } => self.picture_unit(ix, alt, url, &colors, xs, radius),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
@@ -1260,6 +1262,8 @@ impl MarkdownView {
                     .child(view)
                     .into_any_element()
             }
+            Block::ImageRow(pictures) => self.picture_row(ix,pictures,colors,body,radius),
+            Block::Centered(blocks) => div().w_full().flex().flex_col().items_center().gap_2().children(blocks.iter().enumerate().map(|(at,block)| self.nested(ix,units,("center",format!("{ix}-{at}")),block,style))).into_any_element(),
             Block::Image { alt, url } => self.picture_unit(ix, alt, url, colors, body, radius),
             other => div()
                 .text_size(gpui::px(body))
@@ -1277,6 +1281,13 @@ impl MarkdownView {
 }
 
 impl MarkdownView {
+    fn picture_row(&self, ix: usize, pictures: &[(String,String)], colors: &ely_core::theme::Palette, size: f32, radius: gpui::Rems) -> AnyElement {
+        div().debug_selector(move || format!("markdown-picture-row-{ix}")).flex().flex_wrap().items_center().gap_1().children(pictures.iter().enumerate().map(|(at,(alt,url))| {
+            // Different pictures in one paragraph must keep independent element IDs.
+            div().id(gpui::ElementId::Name(format!("picture-row-{ix}-{at}").into())).child(self.picture_unit(ix,alt,url,colors,size,radius))
+        })).into_any_element()
+    }
+
     /// One picture block: the resolved state of its source, or the honest
     /// reason it cannot be shown. The alt text stays visible in every state.
     fn picture_unit(
@@ -1295,7 +1306,8 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
-        images::image_element(
+        let visibility = self.image_board.clone().zip(self.resource_context.as_ref().and_then(|context| images::resolve_target(url,context).ok()).map(|target| target.key()));
+        let picture = images::image_element(
             gpui::ElementId::Name(format!("reader-picture-{ix}").into()),
             images::image_selector(ix),
             alt,
@@ -1306,7 +1318,13 @@ impl MarkdownView {
                 radius,
             },
             images::frame_selector(ix),
-        )
+        );
+        div().max_w_full().child(picture).on_children_prepainted(move |bounds,window,_| {
+            if let Some((board,key)) = &visibility && bounds.iter().any(|bounds| {
+                let visible = window.content_mask().bounds.intersect(bounds);
+                visible.size.width > gpui::px(0.0) && visible.size.height > gpui::px(0.0)
+            }) { board.borrow_mut().painted(key); }
+        }).into_any_element()
     }
 
     /// A paragraph drawn from one unit of the document model.
@@ -1331,7 +1349,8 @@ impl MarkdownView {
             .entry(index)
             .or_insert_with(|| Rc::new(RefCell::new(LocalLayout::default())))
             .clone();
-        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout)
+        let centered = self.parsed.blocks.iter().enumerate().any(|(ix,block)| matches!(block,Block::Centered(_)) && self.parsed.doctext.unit_index(ix,0).is_some_and(|start| index >= start && self.parsed.doctext.unit_index(ix+1,0).is_none_or(|end| index < end)));
+        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout).align(if centered { TextAlign::Center } else { TextAlign::Left })
     }
 
     /// The next unit of block `ix`: its global unit index and document range.

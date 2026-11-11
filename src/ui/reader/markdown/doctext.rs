@@ -231,6 +231,8 @@ impl DocText {
             Block::Math { tex, .. } => {
                 self.push(tex, Vec::new());
             }
+            Block::Centered(body) => self.blocks(body),
+            Block::ImageRow(images) => { for (alt,_) in images { if !alt.is_empty() { self.push(alt, Vec::new()); } } }
             Block::Image { alt, .. } => {
                 if !alt.is_empty() {
                     self.push(alt, Vec::new());

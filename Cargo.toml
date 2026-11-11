@@ -19,6 +19,9 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Already in the graph through GPUI; used for bounded static SVG rasterization in the Markdown
 # reader without adding an unmatched rasterizer version.
 resvg = { version = "0.46.0", default-features = false, features = ["text", "raster-images"] }
+# Use the same CSS selector and SVG value parsers as usvg for bounded declarative timelines.
+simplecss = "=0.2.2"
+svgtypes = "=0.16.1"
 pulldown-cmark = { version = "0.13.5", default-features = false }
 unicode-segmentation = "1"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
