@@ -97,6 +97,13 @@ pub struct CellImage {
     pub hints: images::ImageHints,
     /// Bytes of the owning cell's `Inline::text` that hold the alt text.
     pub alt_range: Range<usize>,
+    /// The link the picture itself is wrapped in, if the author wrote
+    /// `[![alt](img)](href)`.
+    ///
+    /// Kept on the picture instead of inferred from `Inline::links` ranges:
+    /// an empty-alt picture has a zero-length byte range, so it cannot tell an
+    /// enclosing link from a neighbouring link that merely touches that offset.
+    pub link: Option<String>,
 }
 
 /// One piece of a table cell, in reading order.
@@ -431,11 +438,16 @@ impl Building {
                         // the spot the renderer draws the picture, and the text
                         // itself stays for copying and for the surrounding
                         // words' order.
+                        let link = self.open.iter().rev().find_map(|(_, open)| match open {
+                            Open::Link(url) => Some(url.clone()),
+                            _ => None,
+                        });
                         self.inline.cell_images.push(CellImage {
                             alt,
                             url,
                             hints: images::ImageHints::default(),
                             alt_range: start..start.max(end),
+                            link,
                         });
                         // Formatting and links that began inside the description
                         // belong to it; dropping them cannot style the picture or
@@ -1640,11 +1652,16 @@ fn append_html_element(
                 let start = inline.text.len();
                 push_html_text(inline, alt);
                 let alt = inline.text[start..].to_string();
+                let link = opens.iter().rev().find_map(|open| match &open.kind {
+                    HtmlKind::Link(url) => Some(url.clone()),
+                    HtmlKind::Style(_) => None,
+                });
                 inline.cell_images.push(CellImage {
                     alt,
                     url: url.to_string(),
                     hints: html_image_hints(element),
                     alt_range: start..inline.text.len(),
+                    link,
                 });
             } else {
                 notes.push(Block::Image {
@@ -1988,6 +2005,27 @@ mod tests {
         assert_eq!(head[0].cell_images[0].url, "a.png");
         assert_eq!(head[1].text, "plain");
         assert!(head[1].cell_images.is_empty(), "{:?}", head[1]);
+    }
+
+    #[test]
+    fn a_cell_picture_records_its_own_enclosing_link() {
+        let cell = table_cell(
+            "| a |
+|---|
+| [Guide](guide.md)[![](shot.png)](shot.md) |",
+        );
+        assert_eq!(cell.cell_images.len(), 1, "{cell:?}");
+        assert_eq!(
+            cell.cell_images[0].link.as_deref(),
+            Some("shot.md"),
+            "the empty-alt picture keeps its own link, not the neighbouring one: {cell:?}"
+        );
+        let unlinked = table_cell(
+            "| a |
+|---|
+| [Guide](guide.md) ![](shot.png) |",
+        );
+        assert!(unlinked.cell_images[0].link.is_none(), "{unlinked:?}");
     }
 
     #[test]

@@ -2980,6 +2980,93 @@ fn a_text_link_beside_a_cell_picture_still_opens(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn dragging_from_a_cell_picture_selects_from_the_picture_not_the_document_start(
+    cx: &mut TestAppContext,
+) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "Before the table.
+
+| shot | note |
+|---|---|
+| ![Shot](shot.png) text after | plain |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("shot.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let frame = cx
+        .debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+        .expect("the cell picture frame is laid out");
+    let after = inline_snapshot(cx, " text after");
+    drag(
+        cx,
+        &[
+            frame.center(),
+            point(
+                after.pieces[0].text_bounds.right(),
+                after.pieces[0].text_bounds.center().y,
+            ),
+        ],
+    );
+    frames(cx);
+    let selected = selected(&reader, cx);
+    assert!(
+        selected.contains("text after"),
+        "the drag selects the text after the picture: {selected:?}"
+    );
+    assert!(
+        !selected.contains("Before the table"),
+        "a drag that started on the picture must not select from document offset 0: {selected:?}"
+    );
+}
+
+#[gpui::test]
+fn an_empty_alt_cell_picture_opens_its_own_link_not_the_neighbouring_one(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot |
+|---|
+| [Guide](guide.md)[![](shot.png)](https://example.com/shot) |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("shot.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    // A text piece precedes the empty-alt picture, so it is the second cell
+    // piece and its picture key carries that part index.
+    let frame = cx
+        .debug_bounds("markdown-cell-0-1-0-picture-1-frame")
+        .expect("the empty-alt picture frame is laid out");
+    cx.simulate_click(frame.center(), Modifiers::none());
+    cx.run_until_parked();
+    match reader.read_with(cx, |reader, _| reader.last_action().cloned()) {
+        Some(ReaderAction::Link(LinkTarget::External { url })) => {
+            assert_eq!(url, "https://example.com/shot");
+        }
+        other => panic!("expected the picture's own link, got {other:?}"),
+    }
+}
+
+#[gpui::test]
 fn an_html_table_cell_picture_uses_the_same_image_lifecycle(cx: &mut TestAppContext) {
     let (reader, cx) = open(
         cx,

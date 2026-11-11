@@ -69,6 +69,16 @@ struct Hit {
     start: usize,
 }
 
+/// One painted table-cell picture hit target.
+///
+/// Its pixels stand in for the cell's alt text, so a press or drag over it
+/// belongs to that picture's document unit instead of being blank space.
+struct PictureHit {
+    bounds: Bounds<Pixels>,
+    range: std::ops::Range<usize>,
+    link: Option<String>,
+}
+
 /// A link pressed in the document; the owner resolves it.
 pub type OnLink = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>;
 
@@ -109,10 +119,11 @@ pub struct MarkdownView {
     dragging: bool,
     /// A link pressed on the last press, opened only on a click without drag.
     pressed_link: Option<String>,
-    /// A picture link pressed inside a table cell. It shares the click
-    /// semantics of a text link: any drag clears it, so selecting text that
-    /// crosses a picture never opens the page by accident.
-    picture_link: Rc<RefCell<Option<String>>>,
+    /// Painted bounds of visible table-cell pictures, by their document unit
+    /// index, with the unit's document range and the link wrapping the picture.
+    /// A picture has no shaped glyphs, so without this a press on it would look
+    /// like blank space and a drag would start from offset 0.
+    picture_hits: Rc<RefCell<std::collections::HashMap<usize, PictureHit>>>,
     /// Top-level block the press landed in, so a drag maps hits in order.
     anchor_block: Option<usize>,
     /// Real layouts of visible paragraphs, keyed by their unit index in the
@@ -162,7 +173,7 @@ impl MarkdownView {
             head: 0,
             dragging: false,
             pressed_link: None,
-            picture_link: Default::default(),
+            picture_hits: Default::default(),
             anchor_block: None,
             paragraphs: Default::default(),
             paragraph_ranges: Default::default(),
@@ -175,10 +186,7 @@ impl MarkdownView {
         // Losing focus ends the gesture: a later move must not keep extending
         // an old selection.
         let focus = view.focus.clone();
-        view._focus_loss = Some(cx.on_blur(&focus, window, |view, _, cx| {
-            view.picture_link.borrow_mut().take();
-            view.end_drag(cx)
-        }));
+        view._focus_loss = Some(cx.on_blur(&focus, window, |view, _, cx| view.end_drag(cx)));
         // The list owns its offset; the overlay scrollbar lives outside it and
         // needs a frame whenever the list scrolls.
         let this = cx.entity().downgrade();
@@ -362,6 +370,7 @@ impl MarkdownView {
         self.paragraphs.borrow_mut().clear();
         self.paragraph_ranges.borrow_mut().clear();
         self.block_bounds.borrow_mut().clear();
+        self.picture_hits.borrow_mut().clear();
         let old = self.parsed.blocks.len();
         let new = read.blocks.len();
         if old == 0 && new > 0 {
@@ -415,12 +424,7 @@ impl MarkdownView {
 
     /// Drops the selection and any drag, without touching scroll position.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        let picture = self.picture_link.borrow_mut().take();
-        if self.anchor != self.head
-            || self.dragging
-            || self.pressed_link.is_some()
-            || picture.is_some()
-        {
+        if self.anchor != self.head || self.dragging || self.pressed_link.is_some() {
             self.anchor = 0;
             self.head = 0;
             self.dragging = false;
@@ -432,7 +436,6 @@ impl MarkdownView {
     /// Ends transient gestures while preserving the completed selection for later copy.
     pub(crate) fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
         self.pressed_link = None;
-        self.picture_link.borrow_mut().take();
         self.end_drag(cx);
     }
 
@@ -463,7 +466,6 @@ impl MarkdownView {
         self.head = at;
         self.dragging = true;
         self.pressed_link = link;
-        self.picture_link.borrow_mut().take();
         cx.notify();
     }
 
@@ -473,7 +475,6 @@ impl MarkdownView {
         // it later returns to the press position: a link must not open.
         if self.dragging {
             self.pressed_link = None;
-            self.picture_link.borrow_mut().take();
         }
         if self.dragging && self.head != at {
             self.head = at;
@@ -492,11 +493,9 @@ impl MarkdownView {
     /// Opens the link recorded by the press, if the gesture stayed a click.
     fn click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.anchor != self.head {
-            self.picture_link.borrow_mut().take();
             return;
         }
-        let picture = self.picture_link.borrow_mut().take();
-        if let Some(url) = self.pressed_link.take().or(picture)
+        if let Some(url) = self.pressed_link.take()
             && let Some(on_link) = &self.on_link
         {
             on_link(&url, window, cx);
@@ -574,6 +573,37 @@ impl MarkdownView {
                     .glyph_at(position)
                     .and_then(|glyph| self.parsed.doctext.link_at(doc.start + glyph));
                 best = Some((at, at, link));
+            }
+        }
+        // A table-cell picture has no shaped glyphs, so its unit has no
+        // paragraph layout. Its painted box is the hit target: without it a
+        // drag starting on the picture would look like blank space and select
+        // from the beginning of the document.
+        {
+            let pictures = self.picture_hits.borrow();
+            let forward = self.head >= self.anchor;
+            for hit in pictures.values() {
+                if !hit.bounds.contains(&position) {
+                    continue;
+                }
+                let at = if forward {
+                    hit.range.end
+                } else {
+                    hit.range.start
+                };
+                let replace = match &best {
+                    None => true,
+                    Some((known, _, _)) => {
+                        if forward {
+                            at > *known
+                        } else {
+                            at < *known
+                        }
+                    }
+                };
+                if replace {
+                    best = Some((at, at, hit.link.clone()));
+                }
             }
         }
         best.map(|(_, at, link)| Hit {
@@ -1357,46 +1387,41 @@ impl MarkdownView {
                         // order, so the cursor advances once per piece either
                         // way; a picture's unit is its alt text, so copying
                         // keeps the description while the cell paints pixels.
-                        let _ = self.next_unit(ix, units);
-                        // `[![alt](img)](link)` keeps the link around the alt
-                        // bytes, which are exactly the picture's place, so the
-                        // pixels stay the clickable target the text was.
-                        let link = (!presentation)
-                            .then(|| {
-                                cell.links.iter().find(|(range, _)| {
-                                    range.start <= image.alt_range.start
-                                        && range.end >= image.alt_range.end
-                                })
-                            })
-                            .flatten()
-                            .map(|(_, url)| url.clone());
+                        let unit = self.next_unit(ix, units);
+                        let link = image.link.clone();
                         let picture =
                             self.cell_picture(ix, image, format!("{key}-picture-{at}"), picture);
-                        let frame = div()
+                        let mut frame = div()
                             .w_full()
                             .min_w_0()
                             .flex()
                             .when(align == TextAlign::Center, |row| row.justify_center())
                             .when(align == TextAlign::Right, |row| row.justify_end())
                             .child(picture);
-                        content = content.child(match link {
-                            Some(url) => {
-                                // The press only records the URL; the document's
-                                // own click handling opens it, so a drag that
-                                // crosses the picture cannot navigate away.
-                                let pressed = self.picture_link.clone();
-                                frame
-                                    .id(gpui::ElementId::Name(
-                                        format!("reader-{key}-link-{at}").into(),
-                                    ))
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
-                                        *pressed.borrow_mut() = Some(url.clone());
-                                    })
-                                    .into_any_element()
-                            }
-                            None => frame.into_any_element(),
-                        });
+                        if !presentation {
+                            // The painted picture is the hit target for its own
+                            // document unit, so a selection drag starts here
+                            // instead of at document offset 0.
+                            let hits = self.picture_hits.clone();
+                            let range = unit.1.clone();
+                            let link = link.clone();
+                            frame = frame.on_children_prepainted(move |bounds, _, _| {
+                                if let Some(bounds) = bounds.first().copied() {
+                                    hits.borrow_mut().insert(
+                                        unit.0,
+                                        PictureHit {
+                                            bounds,
+                                            range: range.clone(),
+                                            link: link.clone(),
+                                        },
+                                    );
+                                }
+                            });
+                        }
+                        if link.is_some() {
+                            frame = frame.cursor(gpui::CursorStyle::PointingHand);
+                        }
+                        content = content.child(frame.into_any_element());
                     }
                     None => {
                         // One unit per text run, in the same order `DocText`
@@ -1602,6 +1627,7 @@ impl MarkdownView {
     fn render_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let horizontal = window.rem_size() * 0.5;
         self.visible_units.borrow_mut().clear();
+        self.picture_hits.borrow_mut().clear();
         let blocks = self.parsed.blocks.len();
         let mut column = div().flex().flex_col().w_full().min_w_0();
         for ix in 0..blocks {
@@ -1666,12 +1692,7 @@ impl MarkdownView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    // Released outside the reading area: a pending picture link
-                    // must not survive into the next gesture.
-                    view.picture_link.borrow_mut().take();
-                    view.end_drag(cx)
-                }),
+                cx.listener(|view, _, _, cx| view.end_drag(cx)),
             )
             .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;
@@ -1704,8 +1725,10 @@ impl Render for MarkdownView {
             } else {
                 gpui::px(0.0)
             };
-        // A new frame: only paragraphs laid out below are hit-testable.
+        // A new frame: only paragraphs and pictures laid out below are
+        // hit-testable.
         self.visible_units.borrow_mut().clear();
+        self.picture_hits.borrow_mut().clear();
         let list = list(
             self.list.clone(),
             cx.processor(|view: &mut Self, ix: usize, window: &mut Window, cx| {
@@ -1784,12 +1807,7 @@ impl Render for MarkdownView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    // Released outside the reading area: a pending picture link
-                    // must not survive into the next gesture.
-                    view.picture_link.borrow_mut().take();
-                    view.end_drag(cx)
-                }),
+                cx.listener(|view, _, _, cx| view.end_drag(cx)),
             )
             .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;
