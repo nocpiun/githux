@@ -1339,12 +1339,14 @@ fn home_work_item_row_balances_its_fill_and_shares_one_metadata_line(cx: &mut Te
         let row = bounds("home-item-row-0", cx);
         let title_line = bounds("home-title-line-0", cx);
         let metadata = bounds("home-metadata-0", cx);
-        // Balanced slack: the gap above the title equals the gap below the metadata.
+        // The bundled UI face's ink sits low in its line box. The shared row applies a
+        // 1px optical lift, so the lower line-box inset is 2px larger; native raster
+        // regression checks the actual painted balance independently.
         let above = title_line.top() - row.top();
         let below = row.bottom() - metadata.bottom();
         assert!(
-            (above - below).abs() <= px(1.0),
-            "selected fill must be balanced around the two lines (above={above:?}, below={below:?})"
+            (above + px(2.0) - below).abs() <= px(1.0),
+            "line boxes must retain the optical lift (above={above:?}, below={below:?})"
         );
         assert!(metadata.bottom() <= row.bottom());
         // One shared line box for every metadata cell: the mono number and the UI-font links.

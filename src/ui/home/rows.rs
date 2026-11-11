@@ -2,7 +2,6 @@
 use super::{Column, HomeAction, HomeView, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
 use crate::ui::relative_time::relative;
-use crate::ui::tooltip::ui_tooltip;
 use crate::ui::work_item_row::{text_target, text_tooltip};
 use ely_core::{
     data_display::Avatar,
@@ -79,11 +78,7 @@ fn repository_links(
     prefix: &str,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
-    let mut row = div()
-        .flex()
-        .items_center()
-        .min_w_0()
-        .overflow_hidden();
+    let mut row = div().flex().items_center().min_w_0().overflow_hidden();
     if !repo.owner.trim().is_empty() {
         row = row
             .child(link(
@@ -116,14 +111,18 @@ fn timestamp(value: Option<&str>, name: String, now: SystemTime, cx: &App) -> An
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Time not supplied")
         .to_string();
+    let tooltip_selector = format!("{name}-tooltip");
     let debug = name.clone();
     div()
         .id(name)
         .debug_selector(move || debug.clone())
         .min_w_0()
+        .max_w_full()
+        .self_start()
+        .truncate()
         .text_size(cx.theme().text_size(TextSize::Xs))
         .text_color(cx.theme().colors.fg_subtle)
-        .tooltip(ui_tooltip(full))
+        .tooltip(text_tooltip(full, tooltip_selector))
         .child(label)
         .into_any_element()
 }
@@ -160,7 +159,12 @@ fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>
         .tooltip(text_tooltip(label.clone(), tooltip_selector))
         .truncate()
         .child(label);
-    div().flex().flex_1().min_w_0().child(text_target(target, hover_id)).into_any_element()
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .child(text_target(target, hover_id))
+        .into_any_element()
 }
 
 pub(super) fn home_row(

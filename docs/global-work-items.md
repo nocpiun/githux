@@ -35,7 +35,7 @@ Search 最多可访问 1,000 个位置，包括非整除 page size 的最后一�
 ## 共享工作条目组件（2026-11-04 返工）
 
 条目呈现由 `src/ui/work_item_row.rs` 提供，Home 的 Involved 列与全局 Issues/PR 列表消费同一实现，不再各写近似样式：
-行高固定 `WORK_ITEM_ROW_HEIGHT = 56`（2026-11-11 返工由 72 收紧），水平 padding 8px，两行间距 3px；背景与虚拟列表实际 item 使用同一边界。标题 `TextSize::Base`/`MEDIUM`、元信息 `TextSize::Xs`，均原生截断；`Radius::Md` 圆角、`colors.active` 选中底、状态图标颜色保持共享。两行显式行高 `rems(字号 × 1.5)`，metadata 的编号起点与标题文字左沿对齐（避开图标槽和 gap）。行盒留白和 bundled font 的实际 glyph raster 墨迹边界分别核验，不能仅凭 `justify_center` 宣称视觉平衡。
+行高固定 `WORK_ITEM_ROW_HEIGHT = 56`（2026-11-11 返工由 72 收紧），水平 padding 8px，两行间距 3px；背景与虚拟列表实际 item 使用同一边界。标题 `TextSize::Base`/`MEDIUM`、元信息 `TextSize::Xs`，均原生截断；`Radius::Md` 圆角、`colors.active` 选中底、状态图标颜色保持共享。两行显式行高 `rems(字号 × 1.5)`，metadata 的编号起点与标题文字左沿对齐（避开图标槽和 gap）。Noto Sans SC 墨迹相对行盒偏低，内容块整体上提 1 logical px（顶部 padding 7、底部 9），不是逐个字体/文字补相对偏移。行盒留白和 bundled font 的实际 glyph raster 墨迹边界分别核验，不能仅凭 `justify_center` 宣称视觉平衡。
 
 元信息顺序为 `#number → 仓库名 → 状态 → 相对时间`，编号用主题 `mono_family`；Home 的 owner 与 repo 独立导航、斜杠两侧不加布局 gap。只有非交互横向 flex slot 占据余宽，短链接按 intrinsic 文本宽度排版，长链接按显示范围截断；链接 hover、tooltip、pointer、click 不覆盖 trailing blank。标题 tooltip 同样按文字范围，无动作标题不增加 Link role 或 Tab stop。全局列表保留整行选择，仓库文字单独导航并停止冒泡。两端继续持有各自的数据模型、账户上下文和 typed navigation。
 

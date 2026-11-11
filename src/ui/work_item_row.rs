@@ -143,14 +143,22 @@ struct LinkCell {
 /// observer changes no geometry or event handling and is absent from release builds.
 pub(crate) fn text_target<E: StatefulInteractiveElement>(target: E, _id: String) -> E {
     #[cfg(test)]
-    return target.on_hover(move |hovered, _, cx| {
-        if cx.has_global::<TextHover>() {
-            let state = cx.global_mut::<TextHover>();
-            if *hovered { state.0.insert(_id.clone()); } else { state.0.remove(&_id); }
-        }
-    });
+    {
+        target.on_hover(move |hovered, _, cx| {
+            if cx.has_global::<TextHover>() {
+                let state = cx.global_mut::<TextHover>();
+                if *hovered {
+                    state.0.insert(_id.clone());
+                } else {
+                    state.0.remove(&_id);
+                }
+            }
+        })
+    }
     #[cfg(not(test))]
-    target
+    {
+        target
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +206,10 @@ fn action_link(cell: LinkCell, action: RowAction, cx: &App) -> AnyElement {
         .truncate()
         .child(label);
 
+    if !flex {
+        // The owner must not consume the entire repository slot on a narrow list.
+        element = element.max_w(gpui::relative(0.45));
+    }
     let element = text_target(element, hover_id);
     if flex {
         div()
@@ -221,7 +233,10 @@ pub(crate) fn text_tooltip(
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     ely_core::primitives::Tooltip::rich(move |_, cx| {
         crate::ui::tooltip::ui_tooltip_content(text.clone(), cx)
-            .debug_selector({ let selector = selector.clone(); move || selector })
+            .debug_selector({
+                let selector = selector.clone();
+                move || selector
+            })
             .into_any_element()
     })
 }
@@ -261,7 +276,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                 window.prevent_default()
             })
-            .tooltip(text_tooltip(row.title_tooltip.clone(), format!("{}-tooltip", selectors.title)))
+            .tooltip(text_tooltip(
+                row.title_tooltip.clone(),
+                format!("{}-tooltip", selectors.title),
+            ))
             .debug_selector({
                 let debug = selectors.title.clone();
                 move || debug.clone()
@@ -278,7 +296,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             .min_w_0()
             .font_weight(gpui::FontWeight::MEDIUM)
             .truncate()
-            .tooltip(text_tooltip(row.title_tooltip.clone(), format!("{}-tooltip", selectors.title)))
+            .tooltip(text_tooltip(
+                row.title_tooltip.clone(),
+                format!("{}-tooltip", selectors.title),
+            ))
             .debug_selector({
                 let debug = selectors.title.clone();
                 move || debug.clone()
@@ -341,11 +362,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             name,
             name_action,
         } => {
-            let mut repo_cell = div()
-                .flex()
-                .items_center()
-                .min_w_0()
-                .overflow_hidden();
+            let mut repo_cell = div().flex().items_center().min_w_0().overflow_hidden();
             if !owner.trim().is_empty() {
                 repo_cell = repo_cell
                     .child(action_link(
@@ -363,10 +380,15 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                         owner_action,
                         cx,
                     ))
-                    .child(div().flex_none().debug_selector({
-                        let debug = format!("{}-separator", selectors.row);
-                        move || debug
-                    }).child("/"));
+                    .child(
+                        div()
+                            .flex_none()
+                            .debug_selector({
+                                let debug = format!("{}-separator", selectors.row);
+                                move || debug
+                            })
+                            .child("/"),
+                    );
             }
             repo_cell = repo_cell.child(action_link(
                 LinkCell {
@@ -383,7 +405,14 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                 name_action,
                 cx,
             ));
-            metadata = metadata.child(div().flex().flex_1().min_w_0().overflow_hidden().child(repo_cell));
+            metadata = metadata.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(repo_cell),
+            );
         }
     }
     metadata = metadata.child(
@@ -399,7 +428,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .id(SharedString::from(format!("{}-updated", selectors.row)))
         .min_w_0()
         .overflow_hidden()
-        .tooltip(text_tooltip(row.updated_tooltip.clone(), format!("{}-updated-tooltip", selectors.row)))
+        .tooltip(text_tooltip(
+            row.updated_tooltip.clone(),
+            format!("{}-updated-tooltip", selectors.row),
+        ))
         .aria_label(format!("Updated {}", row.updated_tooltip))
         .truncate()
         .child(row.updated_label);
@@ -426,7 +458,14 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             }
             icon_slot
         })
-        .child(div().flex().flex_1().min_w_0().overflow_hidden().child(title));
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(title),
+        );
     if let Some(debug) = selectors.title_line.clone() {
         title_line = title_line.debug_selector(move || debug);
     }
@@ -439,7 +478,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .w_full()
         .h(px(WORK_ITEM_ROW_HEIGHT))
         .px_2()
-        .py_2()
+        // Noto Sans SC's painted ink sits below the middle of its line box. One logical
+        // pixel of optical lift balances the raster extents; both lines and targets move together.
+        .pt(px(7.0))
+        .pb(px(9.0))
         .flex()
         .flex_col()
         .justify_center()
