@@ -117,7 +117,7 @@ let reader = cx.new(|cx| {
 
 ## 有界声明式 SVG 时间线
 
-`resvg` 本身不执行 CSS 时间线。`content/images/timeline.rs` 在后台对 XML 节点匹配受支持的 CSS 规则，解析自定义属性及 `var()` fallback，计算每个时刻的属性，再交给 resvg 光栅化；它不执行脚本，也不通过修改所有 `opacity=0` 来显示内容。
+`resvg` 本身不执行 CSS 时间线。`content/images/timeline.rs` 在后台对 XML 节点匹配受支持的 CSS 规则，解析自定义属性及 `var()` fallback（基础属性和 keyframe stop 都使用各动画节点的继承变量环境），计算每个时刻的属性，再交给 resvg 光栅化；它不执行脚本，也不通过修改所有 `opacity=0` 来显示内容。
 
 - 支持标准 `@keyframes` 的 `from` / `to` / 百分比停点，单条一次性 `animation` shorthand 或 name/duration/delay/timing-function/fill-mode longhand，毫秒/秒（包括负 delay）、`none` / `forwards` / `backwards` / `both`、linear/ease/ease-in/ease-out/ease-in-out。
 - 支持显式单色根背景（将颜色 `background` shorthand 规范为 resvg 接受的 `background-color`），使白纸图表的黑色标签保持对比；没有声明背景的图片仍透明。顶层 SVG 的 opacity/display 在完整表面上应用，隐藏根的背景不泄漏，静态隐藏子元素不被改成可见。

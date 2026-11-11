@@ -242,6 +242,28 @@ fn resolve_vars(value: &str, vars: &Properties, depth: usize) -> Option<String> 
         depth + 1,
     )
 }
+fn resolve_properties(
+    properties: Properties,
+    vars: &Properties,
+    expanded: &mut usize,
+) -> Result<Properties, super::ImageFailure> {
+    let mut resolved = Properties::new();
+    for (key, value) in properties {
+        if let Some(value) = resolve_vars(&value, vars, 0) {
+            *expanded = expanded
+                .saturating_add(key.len())
+                .saturating_add(value.len());
+            if *expanded > 2 * 1024 * 1024 {
+                return Err(super::ImageFailure::TooLarge {
+                    limit: 2 * 1024 * 1024,
+                });
+            }
+            resolved.insert(key, value);
+        }
+    }
+    Ok(resolved)
+}
+
 fn strip_comments(css: &str) -> String {
     let b = css.as_bytes();
     let mut out = String::new();
@@ -420,11 +442,8 @@ impl Timeline {
                 });
             }
             inherited.insert(node.id(), vars.clone());
-            props = props
-                .into_iter()
-                .filter(|(k, _)| !k.starts_with("--"))
-                .filter_map(|(k, v)| resolve_vars(&v, &vars, 0).map(|v| (k, v)))
-                .collect();
+            props.retain(|key, _| !key.starts_with("--"));
+            props = resolve_properties(props, &vars, &mut expanded_bytes)?;
             // The SVG root's background is a box paint, not a visible child
             // that may override inherited visibility.
             if node.parent_element().is_none()
@@ -436,7 +455,10 @@ impl Timeline {
                     Some("hidden" | "collapse")
                 )
             {
-                props.insert("background-color".into(), "transparent!important".into());
+                let value = "transparent!important";
+                expanded_bytes =
+                    expanded_bytes.saturating_add("background-color".len() + value.len());
+                props.insert("background-color".into(), value.into());
             }
             let mut tracks = Vec::new();
             let animation = props
@@ -510,6 +532,11 @@ impl Timeline {
                         let mut stops = keys[*name].clone();
                         for (_, values) in &mut stops {
                             values.retain(|key, _| !important.contains_key(key));
+                            *values = resolve_properties(
+                                std::mem::take(values),
+                                &vars,
+                                &mut expanded_bytes,
+                            )?;
                         }
                         if stops.len() >= 2 {
                             tracks.push(Track {
@@ -526,16 +553,6 @@ impl Timeline {
                 }
             }
             props.retain(|k, _| !k.starts_with("animation"));
-            expanded_bytes = expanded_bytes
-                .saturating_add(props.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>())
-                .saturating_add(
-                    tracks
-                        .iter()
-                        .flat_map(|t| &t.stops)
-                        .flat_map(|(_, p)| p.iter())
-                        .map(|(k, v)| k.len() + v.len())
-                        .sum::<usize>(),
-                );
             if expanded_bytes > 2 * 1024 * 1024 {
                 return Err(super::ImageFailure::TooLarge {
                     limit: 2 * 1024 * 1024,

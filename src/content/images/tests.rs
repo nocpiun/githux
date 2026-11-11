@@ -751,6 +751,40 @@ fn public_svg_probe() {
 }
 
 #[test]
+fn keyframe_variables_resolve_per_animated_node_with_inherited_values_and_fallbacks() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10"><style>.fade{opacity:0;animation:fade .2s linear forwards}@keyframes fade{from{opacity:var(--start,0)}to{opacity:var(--visible,1)}}</style><rect class="fade" width="10" height="10" fill="#f00"/><g style="--visible:.5"><rect class="fade" x="20" width="10" height="10" fill="#00f"/></g></svg>"##;
+    let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = image.animation.as_ref().expect("finite entry animation");
+    let pixels = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_rgba8();
+    let first = pixels(&animation.frames[0].bytes);
+    assert_eq!(
+        (first.get_pixel(5, 5).0[3], first.get_pixel(25, 5).0[3]),
+        (0, 0)
+    );
+    let middle = pixels(
+        &animation
+            .frames
+            .iter()
+            .find(|f| f.at_ms == 100)
+            .unwrap()
+            .bytes,
+    );
+    assert_eq!(
+        (middle.get_pixel(5, 5).0[3], middle.get_pixel(25, 5).0[3]),
+        (128, 64)
+    );
+    let final_pixels = pixels(&image.bytes);
+    assert_eq!(
+        (
+            final_pixels.get_pixel(5, 5).0[3],
+            final_pixels.get_pixel(25, 5).0[3]
+        ),
+        (255, 128),
+        "fallback and inherited endpoints must both reveal their content"
+    );
+}
+
+#[test]
 fn finite_svg_rendering_observes_cancellation_between_frames() {
     let calls = std::cell::Cell::new(0);
     let result = decode_image_checked(
