@@ -925,6 +925,93 @@ fn inherited_custom_properties_keep_the_ancestor_computed_value() {
 }
 
 #[test]
+fn unsupported_shorthand_directions_keep_the_underlying_static_presentation() {
+    for direction in ["reverse", "alternate", "alternate-reverse", "ReVeRsE"] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>rect{{opacity:1;animation:hide .2s {direction} forwards}}@keyframes hide{{from{{opacity:1}}to{{opacity:0}}}}</style><rect width="10" height="10" fill="red"/></svg>"#
+        );
+        let image = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        assert!(
+            image.animation.is_none(),
+            "unsupported direction {direction} must not play as normal"
+        );
+        assert_eq!(
+            image::load_from_memory(&image.bytes)
+                .unwrap()
+                .to_rgba8()
+                .get_pixel(5, 5)
+                .0,
+            [255, 0, 0, 255]
+        );
+    }
+}
+
+#[test]
+fn embedded_svg_fractional_root_opacity_composites_the_whole_vector_resource() {
+    use base64::Engine;
+    let source=br#"<svg xmlns="http://www.w3.org/2000/svg" width="10.5" height="6.5" opacity=".5"><rect width="8" height="6.5" fill="red"/><rect x="3" width="7.5" height="6.5" fill="blue"/></svg>"#;
+    let top = decode_image(source.to_vec(), &ImageLimits::default()).unwrap();
+    assert_eq!(
+        image::load_from_memory(&top.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(4, 4)
+            .0,
+        [255, 0, 0, 128],
+        "top-level foreground opacity also applies exactly once"
+    );
+    let data = base64::engine::general_purpose::STANDARD.encode(source);
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><image width="10.5" height="6.5" href="data:image/svg+xml;base64,{data}"/></svg>"#
+    );
+    let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    assert_eq!(pixels.get_pixel(4, 4).0, [255, 0, 0, 128]);
+    assert_eq!(
+        pixels.get_pixel(10, 4).0,
+        [0, 0, 255, 128],
+        "opacity applies after overlapping paths composite, rather than to each path"
+    );
+    assert_eq!(
+        pixels.get_pixel(20, 4).0,
+        [0, 0, 255, 128],
+        "fractional intrinsic dimensions retain their aspect ratio"
+    );
+    assert_eq!(pixels.get_pixel(25, 4).0, [0, 0, 0, 0]);
+    let nested=base64::engine::general_purpose::STANDARD.encode(format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10.5" height="6.5" opacity="50%"><image width="10.5" height="6.5" href="data:image/svg+xml;base64,{data}"/></svg>"#));
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><image width="10.5" height="6.5" href="data:image/svg+xml;base64,{nested}"/></svg>"#
+    );
+    let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+    assert_eq!(
+        image::load_from_memory(&decoded.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(10, 4)
+            .0,
+        [0, 0, 255, 64],
+        "nested root opacities multiply"
+    );
+}
+
+#[test]
+fn fractional_root_opacity_preserves_explicit_child_inheritance() {
+    use base64::Engine;
+    let source=br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" opacity=".5"><rect width="4" height="10" fill="red" opacity="inherit"/><rect x="6" width="4" height="10" fill="blue" style="opacity:inherit"/></svg>"#;
+    let top = decode_image(source.to_vec(), &ImageLimits::default()).unwrap();
+    let data = base64::engine::general_purpose::STANDARD.encode(source);
+    let outer = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="data:image/svg+xml;base64,{data}"/></svg>"#
+    );
+    let nested = decode_image(outer.into_bytes(), &ImageLimits::default()).unwrap();
+    for decoded in [top, nested] {
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(pixels.get_pixel(2, 2).0, [255, 0, 0, 64]);
+        assert_eq!(pixels.get_pixel(14, 2).0, [0, 0, 255, 64]);
+    }
+}
+
+#[test]
 fn finite_svg_rendering_observes_cancellation_between_frames() {
     let calls = std::cell::Cell::new(0);
     let result = decode_image_checked(

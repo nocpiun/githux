@@ -459,7 +459,11 @@ fn decode_svg_static(
     let mut options = svg_options_with_budget(limits, 0, resources.clone());
     options.fontdb = svg_fontdb();
 
-    let tree = usvg::Tree::from_xmltree(&doc, &options).map_err(map_usvg_error)?;
+    let root_opacity = super::timeline::root_opacity(&doc);
+    let unscaled = (root_opacity < 1.0).then(|| super::timeline::without_root_opacity(text, &doc));
+    let unscaled_doc = unscaled.as_deref().map(parse_svg).transpose()?;
+    let tree = usvg::Tree::from_xmltree(unscaled_doc.as_ref().unwrap_or(&doc), &options)
+        .map_err(map_usvg_error)?;
     if !tree.patterns().is_empty() {
         return Err(ImageFailure::Unsupported);
     }
@@ -543,7 +547,6 @@ fn decode_svg_static(
         render_w as f32 / intrinsic_w,
         render_h as f32 / intrinsic_h,
     );
-    let root_opacity = super::timeline::root_opacity(&doc);
     if root_opacity > 0.0 {
         resvg::render(&tree, transform, &mut pixmap.as_mut());
     }
@@ -813,6 +816,38 @@ fn validate_svg_xml(doc: &usvg::roxmltree::Document<'_>) -> Result<(), ImageFail
     Ok(())
 }
 
+fn embedded_root_opacity(tree: usvg::Tree, opacity: f32) -> Option<usvg::Tree> {
+    if opacity == 1.0 {
+        return Some(tree);
+    }
+    // Keep the validated vector tree and its exact intrinsic size. A generated
+    // image node composites the normalized root background and foreground once.
+    // The one-use resolver serves only this already parsed tree, with no I/O.
+    let size = tree.size();
+    let xml = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}"><image width="{}" height="{}" opacity="{opacity}" href="data:image/svg+xml;base64,PHN2Zy8+"/></svg>"#,
+        size.width(),
+        size.height(),
+        size.width(),
+        size.height()
+    );
+    let source = std::sync::Mutex::new(Some(tree));
+    let options = usvg::Options {
+        resources_dir: None,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(move |mime, data, _| {
+                if mime != "image/svg+xml" || data.as_slice() != b"<svg/>" {
+                    return None;
+                }
+                Some(usvg::ImageKind::SVG(source.lock().ok()?.take()?))
+            }),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    usvg::Tree::from_str(&xml, &options).ok()
+}
+
 fn svg_options_with_budget(
     limits: &ImageLimits,
     depth: usize,
@@ -850,10 +885,18 @@ fn svg_options_with_budget(
                         svg_options_with_budget(&embedded_limits, depth + 1, budget.clone());
                     nested.fontdb = svg_fontdb();
                     let normalized = parse_svg(&xml).ok()?;
-                    if super::timeline::root_opacity(&normalized) == 0.0 {
+                    let opacity = super::timeline::root_opacity(&normalized);
+                    if opacity == 0.0 {
                         return None;
                     }
-                    let tree = usvg::Tree::from_xmltree(&normalized, &nested).ok()?;
+                    let unscaled = (opacity < 1.0)
+                        .then(|| super::timeline::without_root_opacity(&xml, &normalized));
+                    let unscaled_doc = unscaled.as_deref().map(parse_svg).transpose().ok()?;
+                    let tree = usvg::Tree::from_xmltree(
+                        unscaled_doc.as_ref().unwrap_or(&normalized),
+                        &nested,
+                    )
+                    .ok()?;
                     if !tree.patterns().is_empty() {
                         return None;
                     }
@@ -873,6 +916,14 @@ fn svg_options_with_budget(
                         return None;
                     }
                     used.1 = next;
+                    if opacity < 1.0 {
+                        used.2 = used.2.checked_add(4)?;
+                        if used.2 > MAX_SVG_XML_NODES {
+                            return None;
+                        }
+                    }
+                    drop(used);
+                    let tree = embedded_root_opacity(tree, opacity)?;
                     return Some(usvg::ImageKind::SVG(tree));
                 }
                 // `usvg` only wraps these bytes; `resvg` decodes them later with

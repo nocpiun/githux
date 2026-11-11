@@ -19,7 +19,7 @@
 3. 内嵌 SVG 同样验证 XML、主动内容与外部资源边界；递归、节点、字节、累计解码成本都有上限。GIF 先受限解码到 PNG，防止 frame 网格与逻辑头不一致。绘制前检查 canvas/隔离组/滤镜 scratch surfaces，避免小画布叠大量 opacity 层绕过分配预算；超采样可退回固有网格。未能约束 tile 分配的 SVG patterns 暂不接受。
 4. Reader 只选择单个、已解码 BGRA8 的 `RenderImage`，复用既有 pump；中间帧不重测尺寸。第一次 Windows 启动序列的原生捕获发现，逐帧切换 PNG `Image` 会让 GPUI 每次异步解码，产生整张卡片短暂消失的闪烁；因此像素在 provider 中一并准备，UI 只封装现成 buffer，包括最终帧，不在每拍重新解码。已保留帧与当前 scratch 工作面共同扣减解码预算。实际可见绘制开始时间线，完成、reduced motion、暂停/离屏后转为最终 PNG 并释放其余帧。替换文档/账户不保留旧帧。
 5. `ImageRow` 保留纯图片段落的软换行；空行另起段落。`Centered` 在绘制前仍按段落拆成独立虚拟项，标题和文档 unit 的顶层索引随之重建；复用普通标题/正文 renderer，Ready 不再强制 alt caption。原生外层滚动容器复核暴露了 flex 块宽度随内容收缩、导致居中失效的问题，显式占满列宽后修复，并把回归改成真实外层 scroll host 结构。#81 的透明、native/requested sizing 与缩小适配保留。
-6. Star History 的真实响应声明根 `background:#fff`；resvg 接受 `background-color` 而不接受这条 shorthand，原来黑色标签会落在透明背景上。颜色 shorthand 规范化后使用库本身的背景绘制；普通透明图不补背景。usvg 又直接转换根的 children、忽略根 opacity/display，因此在最终表面上应用声明值；根 visibility 隐藏时不绘制根背景。回归覆盖黑色文字对比、静态隐藏子节点、根 opacity/display/visibility、半透明白纸与重要背景声明，未强行把 opacity=0 改成 1。
+6. Star History 的真实响应声明根 `background:#fff`；resvg 接受 `background-color` 而不接受这条 shorthand，原来黑色标签会落在透明背景上。颜色 shorthand 规范化后使用库本身的背景绘制；普通透明图不补背景。根背景与前景由库分别处理；需先记录声明的根 opacity/display，在库输入中中和前景根 opacity，再对包含背景的最终表面应用一次整体声明值，避免前景透明度重复相乘；根 visibility 隐藏时不绘制根背景。回归覆盖黑色文字对比、静态隐藏子节点、根 opacity/display/visibility、半透明白纸与重要背景声明，未强行把 opacity=0 改成 1。
 7. 接手并补齐 resvg/usvg/tiny-skia 许可文本、哈希与 notices；保留 #78 的 Noto Sans SC 字体 notices。simplecss/svgtypes 复用 usvg 的既有锁定版本。
 
 已完成的本地调查（不等于原生验收）：公开三份响应经过当前解码器的 probe，Stats 为 467×195、27 个采样帧 + 最终帧、10,199,280 decoded bytes；600ms 只有首个延迟行部分出现，最终全部行/值与 rank 可见；roast 为 440×200，CJK 文案、雷达、头像均可见；badge 为 83×20，JS logo 可见。另将 README 的其余徽章无凭据读取为本地响应集合，供 21 个真实图片 URL 的离线原生组合检查，未提交用户素材。
@@ -28,11 +28,11 @@
 
 | 检查 | 结果 | runner run |
 | --- | --- | --- |
-| `cargo test --locked --test reader_images` | 815 passed，0 failed，1 个公开样本 probe 默认 ignored | `251985e8-316c-4bac-b36b-ddb23a85fac0` |
-| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `a38ce584-9852-4882-8a5d-bb3f33a8af56` |
-| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `064040d8-0f82-469a-aaa6-df1a6428c65d` |
-| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，图中文字/图标可见 | `d201022c-a709-4059-be16-aba683f8c4b3` |
-| `cargo fmt --all -- --check` | 通过 | `1d62b081-237d-47fb-910a-b094a111a49b` |
+| `cargo test --locked --test reader_images` | 818 passed，0 failed，1 个公开样本 probe 默认 ignored | `c6caa267-e73b-4bae-82e1-3c5d8f86b0b3` |
+| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `3da38593-fe1c-44cd-a8f3-29ff6c93bd15` |
+| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `198b5215-b24a-464e-801b-509f7f57f2cb` |
+| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，七张 PNG 与接续前逐字节相同 | `b2599582-e77a-44a3-a14d-8cfbaf26d068` |
+| `cargo fmt --all -- --check` | 通过 | `bfb26496-7cd3-4c92-b8bc-fe97577e06ae` |
 
 中途在 main `54c8afbc` 集成点运行的全套 `cargo test --locked` 也通过：1255 / 98 / 607 / 310 / 275 / 806 / 901 / 44（run `7d23115a-30c6-4d16-8b11-9ea012c5a5a7`）。它早于最后的 Flow 宿主宽度/根样式修复与 #83 同步，不冒充最终提交的全套检查；最终提交仍须获得新的 CI 与 Codex 审查。
 
@@ -56,6 +56,8 @@
 第三轮 head `84ae25bd` 的 review `5856517624` 提出 P1 `4536113431` 与 P2 `4536113441`，同样核实成立：空变量十倍递归并不产生输出，字节限额不能约束 CPU；现对整次时间线构建共享 100,000 步工作限额，空值计费、每 128 步检查取消/截止时间，节点遍历也检查。回归证明零输出展开耗尽工作限额，并能在限额耗尽前取消。仅有 `to` / `from` 的 keyframes 则从元素基础 CSS/presentation 值补齐缺失端点，继承属性按祖先基础值查找，并按各属性自己的停点插值；回归验证开始/中间/最终 alpha `(0,255)` / `(128,153)` / `(255,51)`。本轮 813 项 Reader 测试通过；随后按 clippy 建议把取模判定改成等价 `is_multiple_of` 并通过最终全目标 clippy、构建、probe 与格式检查。公开七张 PNG 仍逐字节相同，原生序列再次从最终构建采集。
 
 第四轮 head `611f04c8` 的 review `5856997279` 提出两条 P2（`4536496340`、`4536496346`），核实并修复：opacity/fill-opacity/stroke-opacity 百分比端点先归一化为 0–1 再插值；局部自定义属性在声明元素的完整变量环境中先计算，子元素继承计算值，不能用自己的变量覆盖反向重绑定祖先表达式。回归覆盖三种百分比透明度的初始/中间/最终 alpha，以及祖先红色派生变量、子级蓝色覆盖/本地重新声明、动画继承 `.5` 端点的区别。最终 815 项 Reader 测试及上表全部检查通过；七张公开 PNG 仍相同，并以当前构建刷新 60 帧原生序列。
+
+第五轮 head `3bb24f51` 的 review `5857437716` 提出 P2 `4536852898`（shorthand 方向）与 `4536852909`（内嵌根半透明），均核实成立。按 2026-11-11 clean-continuation 检查点保留原 Pi 会话/分支/worktree，未因重复协调消息重做实现。方向 tokens 中 reverse/alternate/alternate-reverse 使用与 longhand 一致的静态回退；内嵌分数透明度通过仅服务已验证 Tree 的一次性内部 resolver、矢量 image 包装整体合成，保留分数固有尺寸，新增节点/隔离层仍计入预算。像素回归发现库前景已有根 opacity、根背景却在不同路径处理，因此先记录声明并中和库输入前景的根 opacity，再对整体应用一次；同时保留直接子元素显式 `opacity:inherit` 的原计算值，避免二次相乘或继承丢失。测试覆盖重叠路径、两层透明度相乘、顶层/内嵌一致性、分数尺寸及显式继承。本轮不新增桌面验收；原生捕获的构建/边界仍按上文原始记录，公开样本另作回归比对。最终 818 项 Reader 测试与上表检查通过。首次测试曾出现无关的 `length_is_only_a_hint_and_malformed_framing_cannot_bypass_bound` loopback `error sending request`；隔离重跑 `e63e48b0`、随后整组 `aca3d0d4` 和最终 `c6caa267` 均通过，按 L002 保留环境抖动记录，未修改网络模块。
 
 ## 初次静态交付的改动与决定（历史）
 

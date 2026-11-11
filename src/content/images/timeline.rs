@@ -183,8 +183,8 @@ fn css_declarations(css: &str) -> Vec<Declaration> {
         })
         .collect()
 }
-/// usvg converts the outer SVG's children directly, omitting its non-inherited
-/// opacity/display. Apply those to the completed surface, including its paper.
+/// Capture outer surface effects; foreground root opacity is neutralized before
+/// usvg conversion so it can composite once together with the root background.
 pub(super) fn root_opacity(doc: &Document<'_>) -> f32 {
     let root = doc.root_element();
     let props = declarations(root.attribute("style").unwrap_or_default());
@@ -210,6 +210,74 @@ pub(super) fn root_opacity(doc: &Document<'_>) -> f32 {
         .filter(|v| v.is_finite())
         .unwrap_or(1.0)
         .clamp(0.0, 1.0)
+}
+
+pub(super) fn without_root_opacity(xml: &str, doc: &Document<'_>) -> String {
+    let root = doc.root_element();
+    let mut edits = Vec::new();
+    for attr in root.attributes() {
+        if attr.name() == "opacity" {
+            edits.push((attr.range(), String::new()));
+        }
+        if attr.name() == "style" {
+            let style = css_declarations(attr.value())
+                .into_iter()
+                .filter(|d| d.name != "opacity")
+                .map(|d| {
+                    format!(
+                        "{}:{}{};",
+                        d.name,
+                        d.value,
+                        if d.important { "!important" } else { "" }
+                    )
+                })
+                .collect::<String>();
+            edits.push((attr.range(), format!("style=\"{}\"", escape(&style))));
+        }
+    }
+    // Preserve explicit inheritance from the original root before neutralizing
+    // that root for whole-surface compositing. Opacity normally does not inherit.
+    let inherited_opacity = root_opacity(doc).to_string();
+    for child in root.children().filter(Node::is_element) {
+        for attr in child.attributes() {
+            if attr.name() == "opacity" && attr.value().eq_ignore_ascii_case("inherit") {
+                edits.push((attr.range(), format!("opacity=\"{inherited_opacity}\"")));
+            }
+            if attr.name() == "style" {
+                let mut declarations = css_declarations(attr.value());
+                if declarations
+                    .iter()
+                    .any(|d| d.name == "opacity" && d.value.eq_ignore_ascii_case("inherit"))
+                {
+                    for declaration in &mut declarations {
+                        if declaration.name == "opacity"
+                            && declaration.value.eq_ignore_ascii_case("inherit")
+                        {
+                            declaration.value = inherited_opacity.clone();
+                        }
+                    }
+                    let style = declarations
+                        .into_iter()
+                        .map(|d| {
+                            format!(
+                                "{}:{}{};",
+                                d.name,
+                                d.value,
+                                if d.important { "!important" } else { "" }
+                            )
+                        })
+                        .collect::<String>();
+                    edits.push((attr.range(), format!("style=\"{}\"", escape(&style))));
+                }
+            }
+        }
+    }
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut result = xml.to_string();
+    for (range, value) in edits {
+        result.replace_range(range, &value);
+    }
+    result
 }
 
 fn declarations(css: &str) -> Properties {
@@ -605,7 +673,12 @@ impl Timeline {
                     .is_none_or(|v| v == "1")
                     && props
                         .get("animation-direction")
-                        .is_none_or(|v| v == "normal")
+                        .is_none_or(|v| v.eq_ignore_ascii_case("normal"))
+                    && !tokens.iter().any(|token| {
+                        ["reverse", "alternate", "alternate-reverse"]
+                            .iter()
+                            .any(|direction| token.eq_ignore_ascii_case(direction))
+                    })
                     && tokens
                         .iter()
                         .all(|v| v.parse::<f64>().is_err() || *v == "1");
