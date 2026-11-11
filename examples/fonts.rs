@@ -1,4 +1,4 @@
-//! Native acceptance for the production Shell's bundled Noto Sans + Noto Sans SC UI glyphs.
+//! Native acceptance for the production Shell's bundled Noto Sans SC UI glyphs.
 //!
 //! `cargo run --locked --example fonts` opens the real Shell/account/page/reader composition
 //! over a temporary database, in-memory synthetic credential, and deterministic transport.
