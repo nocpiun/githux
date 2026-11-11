@@ -2047,6 +2047,17 @@ impl RepositoryPage {
                     state.name == branch && state.commit() == snapshot.commit()
                 }) =>
             {
+                // A displayed revision that still carries snapshot provenance came from the
+                // cache-first bundle, so its tree and reader may hold errors produced by
+                // `OfflineOnly` reads that this online verification can now retry.
+                let cache_painted = self.branch.as_ref().is_some_and(|state| {
+                    state
+                        .snapshot_provenance
+                        .as_ref()
+                        .is_some_and(|provenance| {
+                            provenance.origin == RepositoryCacheOrigin::Snapshot
+                        })
+                });
                 // A cache-first bundle can display the revision while the tree, README discovery or
                 // the document itself was never cached. The commit is unchanged, so the already
                 // loaded parts stay, but anything still missing has to be fetched now.
@@ -2064,6 +2075,21 @@ impl RepositoryPage {
                     state.snapshot_provenance = provenance;
                 }
                 self.error = None;
+                if cache_painted {
+                    // Failures produced while the preliminary snapshot was showing came from
+                    // `OfflineOnly` reads. The commit is now verified online, so those paths are
+                    // retried instead of keeping a "not cached" error on screen.
+                    if let Some(state) = self.branch.as_mut() {
+                        state.tree.clear_failures();
+                    }
+                    if matches!(
+                        self.reader_status,
+                        ReaderStatus::ContentFailed(_) | ReaderStatus::SelectionUnavailable { .. }
+                    ) {
+                        self.reader = None;
+                        self.reader_status = ReaderStatus::Loading;
+                    }
+                }
                 if let Some((missing_root, missing_readme)) = missing {
                     let mode = RepositoryCacheMode::OnlinePreferred;
                     if missing_root {

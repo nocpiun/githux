@@ -565,6 +565,14 @@ impl TreeModel {
         self.failed.remove(path);
     }
 
+    /// Clears every recorded directory failure so the same paths are requested again.
+    ///
+    /// Used when a cache-only first pass reported "not cached" for a directory that the now
+    /// verified online revision can read.
+    pub fn clear_failures(&mut self) {
+        self.failed.clear();
+    }
+
     pub fn root(&self) -> Option<&DirectoryTree> {
         self.root.as_ref()
     }

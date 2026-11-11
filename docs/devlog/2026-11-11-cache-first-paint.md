@@ -172,6 +172,15 @@ Codex 对 `8549fa2` 提出 2 项 P2，均成立且可直接修复；仍无待裁
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
 
+## PR #85 第十轮审查修复
+
+Codex 对 `b6a3c11` 提出 1 项 P1 与 1 项 P2，均成立；仍无待裁决事项。
+
+1. **P1 去重快照会截断已追加的离线 Feed**：离线加载续页后再次刷新（仍离线）时，回放的第一页与已显示标记相同，走捷径把第一页交给 `apply_feed_page`，而该 API 只扩不缩虚拟列表，保留行会索引到新内容之外并 panic，同时绕过 `feed_next_page`/`feed_seen_ids` 重置。修复：只有当已显示条目数不大于本快照时才做追加态归一，否则保留同一缓存代际的合并集合不动。回归 `refreshing_an_offline_feed_keeps_its_cached_continuation_pages`（去掉守卫后 panic）。
+2. **P2 缓存阶段失败在复核后不重试**：预览快照阶段打开的未缓存目录/文件被记为目录失败或 `ContentFailed`，同 commit 复核成功后 `load_expanded` 跳过失败目录、`resolve_selection` 对 `ContentFailed` 直接返回，错误一直留在屏上。修复：捷径里若已显示修订仍带 snapshot provenance，就清空目录失败并重置 `ContentFailed`/`SelectionUnavailable` 为 Loading 后重试。回归 `a_cache_miss_directory_recovers_after_same_commit_revalidation`（关闭清理后失败）。
+
+注意：不能用 `snapshot_preliminary` 判断该 переход——`apply_branches` 在派发复核任务时已提前清除该标记，因而改用已显示修订的 provenance 判断。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

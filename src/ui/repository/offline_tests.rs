@@ -698,6 +698,33 @@ fn a_saved_file_resolves_when_only_readme_discovery_was_missing(cx: &mut TestApp
     });
 }
 
+/// Regression (review finding): a directory that the preliminary offline pass reported as "not
+/// cached" must be retried once the same commit is verified online.
+#[gpui::test]
+fn a_cache_miss_directory_recovers_after_same_commit_revalidation(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // Expanding an uncached directory while offline-only records a cache miss.
+    page.update(cx, |page, cx| page.toggle_directory("docs", cx));
+    settle(&page, cx, |page| page.tree_failure("docs").is_some());
+    assert!(page.read_with(cx, |page, _| page.tree("docs").is_none()));
+
+    // Revalidation resolves the same commit; the retryable miss must not stick.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| page.tree("docs").is_some());
+    assert!(page.read_with(cx, |page, _| page.tree_failure("docs").is_none()));
+}
+
 /// Regression (review finding): a cached branch list (network fallback) must not suppress the
 /// revision revalidation when the summary itself was verified online.
 #[gpui::test]

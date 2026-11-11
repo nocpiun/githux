@@ -1753,6 +1753,59 @@ fn a_second_network_refresh_replaces_the_first_network_result(cx: &mut TestAppCo
     );
 }
 
+/// Regression (review finding): a deduplicated snapshot must never shrink an already continued
+/// Feed. `apply_feed_page` only grows the virtual list, so replacing a longer cached collection with
+/// its first page would leave rows pointing past the new content.
+#[gpui::test]
+fn refreshing_an_offline_feed_keeps_its_cached_continuation_pages(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(true));
+    runtime.block_on(fixture.warm());
+    runtime.block_on(async {
+        fixture.network_error().await;
+        fixture.network_error().await;
+    });
+    let (page, cx) = open_page(&mut fixture, cx);
+    settle(&page, cx);
+    assert_eq!(feed_ids(&page, cx), ["first"]);
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.load_more_for_test(window, cx)
+    });
+    for _ in 0..400 {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        if feed_ids(&page, cx) == ["first", "second"] {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(feed_ids(&page, cx), ["first", "second"]);
+
+    // Refresh while still offline: the replay is the same first-page snapshot, which must not
+    // replace the continued collection with a shorter one.
+    runtime.block_on(async {
+        fixture.network_error().await;
+    });
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.refresh_for_test(Column::Feed, window, cx)
+    });
+    for _ in 0..400 {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        if page.read_with(cx, |page, _| page.work[1].is_none()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        feed_ids(&page, cx),
+        ["first", "second"],
+        "a deduplicated first page must not drop cached continuation rows"
+    );
+}
+
 /// A network failure after the snapshot painted keeps the readable cached content with its honest
 /// saved marker instead of turning into an empty or failed column.
 #[gpui::test]

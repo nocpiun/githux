@@ -1210,11 +1210,27 @@ impl HomePage {
                 return;
             }
             if let ColumnResult::Feed(Ok(Some(read))) = reply.result {
-                let binding = self.binding.clone();
-                let generation = self.generation;
-                self.view.update(cx, |view, cx| {
-                    view.apply_feed_page(&binding, generation, read.value, cx);
-                });
+                // Only normalize the append state when the retained list is not longer than this
+                // snapshot. `apply_feed_page` grows the virtual list and never removes rows, so
+                // replacing a longer (already continued) collection with this first page would
+                // leave rows pointing past the new content. In that case the merged collection of
+                // the same cached generation is kept as is.
+                let retained = self.view.read(cx).feed_state().clone();
+                let retained_len = match retained {
+                    crate::ui::home::PanelState::Ready {
+                        content: crate::ui::home::PanelContent::Ready(outcome),
+                        ..
+                    } => outcome.activities.len(),
+                    _ => 0,
+                };
+                let incoming_len = read.value.activities.len();
+                if retained_len <= incoming_len {
+                    let binding = self.binding.clone();
+                    let generation = self.generation;
+                    self.view.update(cx, |view, cx| {
+                        view.apply_feed_page(&binding, generation, read.value, cx);
+                    });
+                }
             }
             self.finish_read(reply.column, cx);
             return;
