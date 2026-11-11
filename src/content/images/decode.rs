@@ -326,7 +326,7 @@ fn decode_svg(
 ) -> Result<DecodedImage, ImageFailure> {
     let text = validated_svg(bytes)?;
     let doc = parse_svg(text)?;
-    let timeline = super::timeline::Timeline::new(&doc)?;
+    let timeline = super::timeline::Timeline::new(&doc, check)?;
     let animated = timeline.duration_ms > 0.0;
     let final_xml = timeline.sample(text, timeline.duration_ms);
     let RenderedSvg {
@@ -844,7 +844,7 @@ fn svg_options_with_budget(
                             return None;
                         }
                     }
-                    let timeline = super::timeline::Timeline::new(&doc).ok()?;
+                    let timeline = super::timeline::Timeline::new(&doc, &|| Ok(())).ok()?;
                     let xml = timeline.sample(text, timeline.duration_ms);
                     let mut nested =
                         svg_options_with_budget(&embedded_limits, depth + 1, budget.clone());

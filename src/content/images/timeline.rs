@@ -5,6 +5,25 @@ use simplecss::{AttributeOperator, Element, PseudoClass};
 use std::collections::BTreeMap;
 
 const MAX_TRACKS: usize = 128;
+const MAX_EXPANSION_STEPS: usize = 100_000;
+struct ExpansionWork<'a> {
+    remaining: usize,
+    check: &'a dyn Fn() -> Result<(), super::ImageFailure>,
+}
+impl ExpansionWork<'_> {
+    fn step(&mut self) -> Result<(), super::ImageFailure> {
+        if self.remaining == 0 {
+            return Err(super::ImageFailure::TooLarge {
+                limit: MAX_EXPANSION_STEPS,
+            });
+        }
+        self.remaining -= 1;
+        if self.remaining.is_multiple_of(128) {
+            (self.check)()?;
+        }
+        Ok(())
+    }
+}
 pub(super) const MAX_DURATION_MS: f64 = 5_000.0;
 type Properties = BTreeMap<String, String>;
 
@@ -214,7 +233,9 @@ fn expand_vars_into(
     depth: usize,
     out: &mut String,
     limit: usize,
+    work: &mut ExpansionWork<'_>,
 ) -> Result<bool, super::ImageFailure> {
+    work.step()?;
     if depth > 16 {
         return Ok(false);
     }
@@ -233,6 +254,7 @@ fn expand_vars_into(
     };
     let mut rest = value;
     while let Some(start) = rest.find("var(") {
+        work.step()?;
         append(out, &rest[..start])?;
         let mut level = 1;
         let mut end = None;
@@ -256,7 +278,7 @@ fn expand_vars_into(
         let Some(replacement) = vars.get(name.trim()).map(String::as_str).or(fallback) else {
             return Ok(false);
         };
-        if !expand_vars_into(replacement, vars, depth + 1, out, limit)? {
+        if !expand_vars_into(replacement, vars, depth + 1, out, limit, work)? {
             return Ok(false);
         }
         rest = &rest[end + 1..];
@@ -268,14 +290,16 @@ fn resolve_vars(
     value: &str,
     vars: &Properties,
     limit: usize,
+    work: &mut ExpansionWork<'_>,
 ) -> Result<Option<String>, super::ImageFailure> {
     let mut out = String::new();
-    Ok(expand_vars_into(value, vars, 0, &mut out, limit)?.then_some(out))
+    Ok(expand_vars_into(value, vars, 0, &mut out, limit, work)?.then_some(out))
 }
 fn resolve_properties(
     properties: Properties,
     vars: &Properties,
     expanded: &mut usize,
+    work: &mut ExpansionWork<'_>,
 ) -> Result<Properties, super::ImageFailure> {
     let mut resolved = Properties::new();
     for (key, value) in properties {
@@ -285,7 +309,7 @@ fn resolve_properties(
             .ok_or(super::ImageFailure::TooLarge {
                 limit: 2 * 1024 * 1024,
             })?;
-        if let Some(value) = resolve_vars(&value, vars, limit)? {
+        if let Some(value) = resolve_vars(&value, vars, limit, work)? {
             *expanded = expanded
                 .saturating_add(key.len())
                 .saturating_add(value.len());
@@ -298,6 +322,51 @@ fn resolve_properties(
         }
     }
     Ok(resolved)
+}
+
+fn underlying_value(
+    node: Node<'_, '_>,
+    props: &Properties,
+    key: &str,
+    nodes: &[NodeStyle],
+    indices: &std::collections::HashMap<resvg::usvg::roxmltree::NodeId, usize>,
+    work: &mut ExpansionWork<'_>,
+) -> Result<String, super::ImageFailure> {
+    let default = match key {
+        "transform" => "matrix(1 0 0 1 0 0)",
+        "stroke-dashoffset" => "0",
+        _ => "1",
+    };
+    let normalize = |value: &str| {
+        if value == "initial" || (key == "transform" && value == "none") {
+            default.to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let local = props
+        .get(key)
+        .map(String::as_str)
+        .or_else(|| node.attribute(key));
+    if let Some(value) = local.filter(|v| !matches!(*v, "inherit" | "unset")) {
+        return Ok(normalize(value));
+    }
+    if local == Some("inherit")
+        || matches!(key, "fill-opacity" | "stroke-opacity" | "stroke-dashoffset")
+    {
+        for ancestor in node.ancestors().skip(1).filter(Node::is_element) {
+            work.step()?;
+            let value = indices
+                .get(&ancestor.id())
+                .and_then(|index| nodes[*index].properties.get(key))
+                .map(String::as_str)
+                .or_else(|| ancestor.attribute(key));
+            if let Some(value) = value.filter(|v| !matches!(*v, "inherit" | "unset")) {
+                return Ok(normalize(value));
+            }
+        }
+    }
+    Ok(default.into())
 }
 
 fn strip_comments(css: &str) -> String {
@@ -334,7 +403,15 @@ fn strip_comments(css: &str) -> String {
     out
 }
 impl Timeline {
-    pub fn new(doc: &Document<'_>) -> Result<Self, super::ImageFailure> {
+    pub fn new(
+        doc: &Document<'_>,
+        check: &dyn Fn() -> Result<(), super::ImageFailure>,
+    ) -> Result<Self, super::ImageFailure> {
+        check()?;
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check,
+        };
         let all_css = strip_comments(
             &doc.descendants()
                 .filter(|n| n.has_tag_name("style"))
@@ -426,9 +503,11 @@ impl Timeline {
         let mut expanded_bytes = 0usize;
         let mut inherited = std::collections::HashMap::<_, Properties>::new();
         let mut nodes = Vec::new();
+        let mut node_indices = std::collections::HashMap::new();
         let mut duration_ms: f64 = 0.0;
         let mut tracks_count = 0;
         for node in doc.descendants().filter(Node::is_element) {
+            check()?;
             if node.ancestors().any(|n| n.has_tag_name("style")) {
                 continue;
             }
@@ -481,7 +560,7 @@ impl Timeline {
             }
             inherited.insert(node.id(), vars.clone());
             props.retain(|key, _| !key.starts_with("--"));
-            props = resolve_properties(props, &vars, &mut expanded_bytes)?;
+            props = resolve_properties(props, &vars, &mut expanded_bytes, &mut work)?;
             // The SVG root's background is a box paint, not a visible child
             // that may override inherited visibility.
             if node.parent_element().is_none()
@@ -569,13 +648,83 @@ impl Timeline {
                             });
                         let mut stops = keys[*name].clone();
                         for (_, values) in &mut stops {
-                            values.retain(|key, _| !important.contains_key(key));
+                            values.retain(|key, _| {
+                                !important.contains_key(key)
+                                    && matches!(
+                                        key.as_str(),
+                                        "opacity"
+                                            | "fill-opacity"
+                                            | "stroke-opacity"
+                                            | "stroke-dashoffset"
+                                            | "transform"
+                                    )
+                            });
                             *values = resolve_properties(
                                 std::mem::take(values),
                                 &vars,
                                 &mut expanded_bytes,
+                                &mut work,
                             )?;
                         }
+                        let animated_keys = stops
+                            .iter()
+                            .flat_map(|(_, values)| values.keys())
+                            .filter(|key| {
+                                matches!(
+                                    key.as_str(),
+                                    "opacity"
+                                        | "fill-opacity"
+                                        | "stroke-opacity"
+                                        | "stroke-dashoffset"
+                                        | "transform"
+                                )
+                            })
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let mut base = Properties::new();
+                        for key in animated_keys {
+                            base.insert(
+                                key.clone(),
+                                underlying_value(
+                                    node,
+                                    &props,
+                                    &key,
+                                    &nodes,
+                                    &node_indices,
+                                    &mut work,
+                                )?,
+                            );
+                        }
+                        // Missing boundary values use the computed underlying
+                        // presentation, including single `to` / `from` rules.
+                        for endpoint in [0.0, 1.0] {
+                            if let Some((_, values)) =
+                                stops.iter_mut().find(|(at, _)| *at == endpoint)
+                            {
+                                let missing = base
+                                    .iter()
+                                    .filter(|(key, _)| !values.contains_key(*key))
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect();
+                                values.extend(resolve_properties(
+                                    missing,
+                                    &vars,
+                                    &mut expanded_bytes,
+                                    &mut work,
+                                )?);
+                            } else if !base.is_empty() {
+                                stops.push((
+                                    endpoint,
+                                    resolve_properties(
+                                        base.clone(),
+                                        &vars,
+                                        &mut expanded_bytes,
+                                        &mut work,
+                                    )?,
+                                ));
+                            }
+                        }
+                        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
                         if stops.len() >= 2 {
                             tracks.push(Track {
                                 delay,
@@ -609,6 +758,7 @@ impl Timeline {
                     })
                     .map(|a| a.range())
                     .collect();
+                node_indices.insert(node.id(), nodes.len());
                 nodes.push(NodeStyle {
                     at: node.range().start
                         + 1
@@ -659,16 +809,27 @@ impl Timeline {
                 } else {
                     (elapsed / track.duration).clamp(0.0, 1.0)
                 };
-                let pair = track
+                for key in track
                     .stops
-                    .windows(2)
-                    .find(|s| progress <= s[1].0)
-                    .unwrap_or(&track.stops[track.stops.len() - 2..]);
-                let p = ((progress - pair[0].0) / (pair[1].0 - pair[0].0)).clamp(0.0, 1.0);
-                let p = ease(p, &track.easing);
-                for (key, a) in &pair[0].1 {
-                    if let Some(b) = pair[1].1.get(key)
-                        && let Some(value) = interpolate(key, a, b, p)
+                    .iter()
+                    .flat_map(|(_, values)| values.keys())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    let stops = track
+                        .stops
+                        .iter()
+                        .filter_map(|(at, values)| values.get(key).map(|value| (*at, value)))
+                        .collect::<Vec<_>>();
+                    if stops.len() < 2 {
+                        continue;
+                    }
+                    let pair = stops
+                        .windows(2)
+                        .find(|s| progress <= s[1].0)
+                        .unwrap_or(&stops[stops.len() - 2..]);
+                    let p = ((progress - pair[0].0) / (pair[1].0 - pair[0].0)).clamp(0.0, 1.0);
+                    if let Some(value) =
+                        interpolate(key, pair[0].1, pair[1].1, ease(p, &track.easing))
                     {
                         props.insert(key.clone(), value);
                     }
@@ -776,6 +937,43 @@ fn ease(x: f64, name: &str) -> f64 {
 mod tests {
     use super::*;
     #[test]
+    fn empty_variable_expansions_exhaust_a_shared_work_budget_and_observe_cancellation() {
+        let mut vars = Properties::from([("--v0".into(), String::new())]);
+        for i in 1..=10 {
+            vars.insert(format!("--v{i}"), format!("var(--v{})", i - 1).repeat(10));
+        }
+        let mut output = String::new();
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check: &|| Ok(()),
+        };
+        assert!(matches!(
+            expand_vars_into("var(--v10)", &vars, 0, &mut output, 8192, &mut work),
+            Err(super::super::ImageFailure::TooLarge { .. })
+        ));
+        assert!(output.is_empty());
+        assert_eq!(work.remaining, 0);
+        let checks = std::cell::Cell::new(0);
+        let check = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Err(super::super::ImageFailure::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check: &check,
+        };
+        assert!(matches!(
+            expand_vars_into("var(--v10)", &vars, 0, &mut output, 8192, &mut work),
+            Err(super::super::ImageFailure::Cancelled)
+        ));
+        assert_eq!(checks.get(), 3);
+        assert!(work.remaining > 0);
+    }
+    #[test]
     fn variable_expansion_never_builds_an_oversized_intermediate_string() {
         let mut vars = Properties::from([("--v0".into(), "a".repeat(4096))]);
         for i in 1..=5 {
@@ -785,8 +983,12 @@ mod tests {
             );
         }
         let mut output = String::new();
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check: &|| Ok(()),
+        };
         assert!(matches!(
-            expand_vars_into("var(--v5)", &vars, 0, &mut output, 8192),
+            expand_vars_into("var(--v5)", &vars, 0, &mut output, 8192, &mut work),
             Err(super::super::ImageFailure::TooLarge { .. })
         ));
         assert_eq!(output.len(), 8192);

@@ -842,6 +842,42 @@ fn transform_animation_without_fill_restores_the_presentation_transform() {
 }
 
 #[test]
+fn single_stop_keyframes_use_underlying_opacity_at_missing_endpoints() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10"><style>#a{opacity:0;animation:show .2s linear forwards}#b{animation:leave .2s linear forwards}@keyframes show{to{opacity:1}}@keyframes leave{from{opacity:1}}</style><rect id="a" width="10" height="10" fill="red"/><rect id="b" x="20" width="10" height="10" fill="blue" opacity=".2"/></svg>"#;
+    let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = image
+        .animation
+        .as_ref()
+        .expect("single explicit stops animate");
+    let pixels = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_rgba8();
+    let first = pixels(&animation.frames[0].bytes);
+    assert_eq!(
+        (first.get_pixel(5, 5).0[3], first.get_pixel(25, 5).0[3]),
+        (0, 255)
+    );
+    let middle = pixels(
+        &animation
+            .frames
+            .iter()
+            .find(|f| f.at_ms == 100)
+            .unwrap()
+            .bytes,
+    );
+    assert_eq!(
+        (middle.get_pixel(5, 5).0[3], middle.get_pixel(25, 5).0[3]),
+        (128, 153)
+    );
+    let final_pixels = pixels(&image.bytes);
+    assert_eq!(
+        (
+            final_pixels.get_pixel(5, 5).0[3],
+            final_pixels.get_pixel(25, 5).0[3]
+        ),
+        (255, 51)
+    );
+}
+
+#[test]
 fn finite_svg_rendering_observes_cancellation_between_frames() {
     let calls = std::cell::Cell::new(0);
     let result = decode_image_checked(
