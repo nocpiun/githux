@@ -1881,3 +1881,75 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
     frames(cx);
     assert!(cx.debug_bounds("repository-row-file-0000.txt").is_some());
 }
+
+#[gpui::test]
+fn tree_viewport_insets_and_complete_edge_rows_survive_resize_and_scale(cx: &mut TestAppContext) {
+    for scene in [Scene::Normal, Scene::LongTree] {
+        let fixture = Fixture::new(scene);
+        fixture.login(1);
+        let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+        activate(&page, cx);
+        settle(&page, cx, |page| page.tree("").is_some());
+        for (scale, font_scale, height) in
+            [(1.0, 1.0, 720.0), (1.5, 1.0, 720.0), (1.0, 2.0, 1100.0)]
+        {
+            cx.update(|window, cx| {
+                window.set_scale_factor(scale);
+                ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale);
+            });
+            for width in [1180.0, 560.0] {
+                // Large text needs room for the wrapped repository header as well as rows.
+                cx.simulate_resize(gpui::size(px(width), px(height)));
+                page.update_in(cx, |page, window, cx| window.focus(&page.tree_focus, cx));
+                cx.simulate_keystrokes("home");
+                frames(cx);
+                let outer = cx.debug_bounds("repository-tree-viewport").unwrap();
+                let viewport = cx.debug_bounds("repository-tree-scroll-viewport").unwrap();
+                let native = page.read_with(cx, |page, _| page.tree_base_handle().bounds());
+                assert_eq!(
+                    native, viewport,
+                    "clipping and scroll extent use the same viewport"
+                );
+                assert_eq!(viewport.top() - outer.top(), px(7.0));
+                assert_eq!(
+                    outer.bottom() - viewport.bottom(),
+                    px(7.0),
+                    "pane={outer:?}, viewport={viewport:?}, display scale={scale}, font scale={font_scale}, width={width}",
+                );
+                let paths = page.read_with(cx, |page, _| {
+                    (
+                        page.rows().first().unwrap().path.clone(),
+                        page.rows().last().unwrap().path.clone(),
+                    )
+                });
+                let first = cx
+                    .debug_bounds(Box::leak(
+                        format!("repository-row-{}", paths.0).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert_eq!(first.top(), viewport.top());
+                let label = cx
+                    .debug_bounds(Box::leak(
+                        format!("repository-row-label-{}", paths.0).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert!(
+                    label.top() >= first.top() && label.bottom() <= first.bottom(),
+                    "first row text box fits below its header: {label:?} {first:?}"
+                );
+                assert!(first.bottom() <= viewport.bottom());
+                cx.simulate_keystrokes("end");
+                frames(cx);
+                let last = cx
+                    .debug_bounds(Box::leak(
+                        format!("repository-row-{}", paths.1).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert!(
+                    last.top() >= viewport.top() && last.bottom() <= viewport.bottom(),
+                    "last={last:?}, viewport={viewport:?}"
+                );
+            }
+        }
+    }
+}

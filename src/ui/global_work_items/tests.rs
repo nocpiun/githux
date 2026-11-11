@@ -260,6 +260,45 @@ fn load(view: &Entity<WorkItemsView>, cx: &mut VisualTestContext, mode: RequestM
     cx.run_until_parked();
 }
 #[gpui::test]
+fn list_edges_and_scrollbar_lane_survive_narrow_resize(cx: &mut TestAppContext) {
+    let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(550.0))] {
+        cx.simulate_resize(dimensions);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus.focus(window, cx);
+                cx.notify();
+            })
+        });
+        cx.simulate_keystrokes("home");
+        for _ in 0..3 {
+            cx.update(|w, _| w.refresh());
+            cx.run_until_parked();
+        }
+        view.update(cx, |view, cx| {
+            view.bars.snap(true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let viewport = view.read_with(cx, |view, _| view.list.viewport_bounds());
+        let first = cx.debug_bounds("work-item-10000").unwrap();
+        assert_eq!(first.top(), viewport.top());
+        assert!(first.bottom() <= viewport.bottom());
+        let hit = cx.debug_bounds("work-scrollbar-thumb").unwrap();
+        let line = cx.debug_bounds("work-scrollbar-line").unwrap();
+        assert!(first.right() <= hit.left());
+        assert!(line.left() - first.right() <= px(4.0));
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        let last_id = view.read_with(cx, |view, _| view.controller.rows.last().unwrap().id);
+        let last = cx
+            .debug_bounds(Box::leak(format!("work-item-{last_id}").into_boxed_str()))
+            .unwrap();
+        assert!(last.top() >= viewport.top() && last.bottom() <= viewport.bottom());
+    }
+}
+
+#[gpui::test]
 fn real_rows_repository_callback_and_unconnected_title(cx: &mut TestAppContext) {
     let (_fixture, view, cx) = open(cx, Scene::Mixed);
     cx.simulate_resize(size(px(900.0), px(650.0)));

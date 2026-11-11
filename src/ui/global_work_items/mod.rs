@@ -635,7 +635,7 @@ impl WorkItemsView {
                 name: "work-scrollbar",
                 axis: gpui::Axis::Vertical,
             },
-            placement: scroll::Placement::overlay(4.0, 8.0),
+            placement: scroll::Placement::overlay(1.5, scroll::LIST_BAR_LANE),
             style: scroll::Style::DEFAULT,
             opacity,
             on_drag,
@@ -650,7 +650,17 @@ impl WorkItemsView {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .child(list)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .right(px(scroll::LIST_BAR_LANE))
+                    .overflow_hidden()
+                    .debug_selector(|| "work-list-viewport".into())
+                    .child(list),
+            )
             .child(scroll::wheel_overlay_with(
                 "work-wheel",
                 scroll::WheelAxes::Vertical,

@@ -73,6 +73,16 @@
 
 文件树现在把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是无 padding 的 pane 内容区，内部列表单独保留四侧 7px padding；`repository-tree-bar-region` 横向覆盖该 pane，纵向仍留上下 7px，以维持 track 与真实滚动 viewport 同高。Bar 使用 `overlay(2.5, 8.0)`，可见线在列表右侧留白内，8px 命中条留在 pane 内；没有负 margin，没有删除选中行四侧留白。测量基准是外层 Files/Reader 边框的内边缘，不是列表 viewport。144 DPI 原生 Shell 帧中边框从 x=773 开始，可见 thumb 覆盖 x=765..768，外缘 x=769，到边框留 4 物理 px（约 2.67 逻辑 px；配置 2.5）。顶部/中间/底部和宽窗均复核；实际证据与限制见本任务日志。Sidebar/Profile 的内容 padding 位于 scroll 内容内，Bar 是外层的直接兄弟，没有文件树这层额外缩进。
 
+## 列表 viewport 与尾侧通道（2026-11-11）
+
+Home/Feed、全局 Issues/PR 与 Notifications 的纵向列表为滚动条保留独立的 **8 logical px** 尾侧通道（`scroll::LIST_BAR_LANE`）。列表的真实布局宽度在通道之前结束，行的选中/未读背景和链接也在此前结束；不是在全宽行上盖一条背景色。`overlay(1.5, 8)` 的 3px 线与行边缘相距 3.5px，线到区域外缘为 1.5px，完整命中区位于通道内。通道在条隐藏时继续保留，避免淡入淡出导致换行和虚拟列表高度变化。
+
+调用方用无 padding 的独立内容 wrapper 限定真实 List 宽高，Bar 与 wheel 仍锚定外层区域。不要直接给 GPUI `List` 添加横向 padding 预留通道：该版本 List 测量行时使用整个 bounds 宽度，不能靠 padding 让行背景避开条。滚动范围、reveal 与 Feed 分页继续读取原生 handle，不另减一次 padding 或构造第二份 offset。
+
+文件树保留四侧 7px 留白与 pane 右缘 2.5px 的可见条，上下 bar region 与真实列表同高。树行的 26px 改为最小高度，由原生 uniform list 测量完整单行文字的实际高度；字体放大时，文字盒不应越过首行/viewport 上沿。新增回归同时对照外层 pane、内容 viewport 和原生 handle bounds，并核验首行零偏移、末行最大偏移、字体缩放及键盘 Home/End。字号很大且窗口很矮时，页头可能用完可用高度；零高度 viewport 不代表 padding 裁切，也不能要求此时显示完整首行。正常滚动中露出的半行不视作 padding 裁切故障。
+
+回归包括 Home/Feed 独立列表的短/长内容、宽/窄布局、首尾 reveal、通道拖动与隐藏时宽度稳定，以及真实 Shell/page host 的组合路径；最终执行结果和原生验收边界见 [本轮日志](devlog/2026-11-10-ui-scroll-geometry.md)。
+
 ## 状态归属
 
 - 每个区域各自持有一个 `Bars`（渐变、已知的 thumb drag 轴）和一个真实的滚动目标句柄。没有全局单例、没有跨区域共享的 hover/drag。

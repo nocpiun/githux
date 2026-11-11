@@ -13,6 +13,8 @@ mod presentation;
 mod rows;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod viewport_tests;
 
 use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;
@@ -1923,7 +1925,7 @@ fn list_rows<T: PanelRows + 'static>(
             },
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(1.5, 8.0),
+        placement: scroll::Placement::overlay(1.5, scroll::LIST_BAR_LANE),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,
@@ -1941,7 +1943,17 @@ fn list_rows<T: PanelRows + 'static>(
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
-        .child(list)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .right(px(scroll::LIST_BAR_LANE))
+                .overflow_hidden()
+                .debug_selector(move || format!("{}-list-viewport", column_name(column)))
+                .child(list),
+        )
         .when(column == Column::Feed, |container| {
             let owner = cx.entity().downgrade();
             container.child(

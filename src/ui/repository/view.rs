@@ -954,6 +954,7 @@ fn tree_row(
     let name = row.name.clone();
     let tooltip_path = row.path.clone();
     let debug_path = row.path.clone();
+    let label_path = row.path.clone();
     let depth = row.depth;
     let kind = row.kind;
     let state = row.state.clone();
@@ -1080,7 +1081,9 @@ fn tree_row(
         .gap_1p5()
         .flex_none()
         .w_full()
-        .h(px(TREE_ROW_HEIGHT))
+        // Let the uniform list measure a full text line at the current font scale.
+        // A fixed 26px height clips the first label against the viewport mask.
+        .min_h(px(TREE_ROW_HEIGHT))
         .pl(px(6.0 + INDENT * depth as f32))
         .pr_2()
         .rounded(radius)
@@ -1096,6 +1099,7 @@ fn tree_row(
         .child(Icon::new(icon).size(IconSize::Xs).color(icon_color))
         .child(
             div()
+                .debug_selector(move || format!("repository-row-label-{label_path}"))
                 .min_w_0()
                 .flex_1()
                 .overflow_hidden()

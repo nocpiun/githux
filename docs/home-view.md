@@ -83,7 +83,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 ## 滚动与键盘
 
-## 滚动与键盘
+- 两栏的行 viewport 在尾侧 8px 独立 scrollbar 通道前结束，行背景不会伸到条下面；3px 可见线与行边缘相距 3.5px，外侧留 1.5px。隐藏条不回收通道，保证卡片换行、列表测量和分页位置稳定。几何与命中语义统一见 [列表 viewport 与尾侧通道](scrolling.md#列表-viewport-与尾侧通道2026-11-11)。专属回归在 `src/ui/home/viewport_tests.rs`，正式 Shell 组合回归在 `tests/scroll_viewports.rs`。
 
 - 每栏使用真实 GPUI `ListState`、共享 `scroll::Bar`/`Bars` 与 `scroll::Motion<ListState>`，只渲染可见行。Home 保持固定行高，Feed 自然测量可变卡片高度；不调用 measure_all，不新建滚动几何。键盘远跳使用原生 logical item anchor，在 Motion tick 后应用，避免旧范围 clamp 覆盖末项 reveal。
 - **Feed 自动追加**：最后三张卡片之一进入可见区时提前发一次 `LoadMoreFeed`；空页和不足三张卡片的首屏自动继续。使用已测量行的位置与原生逻辑滚动锚点，不把虚拟列表未知高度当成内容耗尽；每帧布局后也核验一次，首屏无需等待额外 hover/时钟通知。每账户/代次同一时刻至多一次在途追加，渲染、resize、重复滚动回调与刷新都不能重复请求。追加用 `ListState::splice` 在原列表尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中用紧凑动画图标，失败保留现有内容并显示黄色告警图标 + 点击重试，真正耗尽（服务端无 next 链接）后停止请求。

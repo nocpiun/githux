@@ -36,6 +36,11 @@ use gpui::{
 /// Visible thickness of the line, in logical pixels.
 pub const THICKNESS: f32 = 3.0;
 
+/// Reserved trailing lane for vertical lists: the 8px thumb hit area stays
+/// outside row backgrounds. With overlay(1.5, 8), the visible line is 3.5px
+/// from the row edge. Keep this lane even while the bar fades to avoid reflow.
+pub const LIST_BAR_LANE: f32 = 8.0;
+
 /// How long a bar takes to fade in or out, in milliseconds.
 pub const FADE_MS: u64 = 140;
 

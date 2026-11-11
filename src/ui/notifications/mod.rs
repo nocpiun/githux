@@ -839,7 +839,7 @@ impl Render for NotificationsView {
                 name: "notifications-y",
                 axis: Axis::Vertical,
             },
-            placement: scroll::Placement::overlay(4.0, 8.0),
+            placement: scroll::Placement::overlay(1.5, scroll::LIST_BAR_LANE),
             style: scroll::Style::DEFAULT,
             opacity,
             on_drag,
@@ -867,7 +867,16 @@ impl Render for NotificationsView {
             } else if no_rows {
                 div().into_any_element()
             } else {
-                list.into_any_element()
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .right(px(scroll::LIST_BAR_LANE))
+                    .overflow_hidden()
+                    .debug_selector(|| "notifications-list-viewport".into())
+                    .child(list)
+                    .into_any_element()
             })
             .child(scroll::wheel_overlay_with(
                 "notifications-wheel",

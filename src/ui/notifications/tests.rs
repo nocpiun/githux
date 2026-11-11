@@ -112,6 +112,47 @@ fn notifications_heading_and_content_edges_match_home_in_empty_and_populated_sta
 }
 
 #[gpui::test]
+fn notification_edge_rows_and_background_stay_outside_scrollbar_lane(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx)
+    });
+    cx.update(|window, _| window.activate_window());
+    for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(550.0))] {
+        cx.simulate_resize(dimensions);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus.focus(window, cx);
+                cx.notify();
+            })
+        });
+        cx.simulate_keystrokes("home");
+        for _ in 0..3 {
+            cx.update(|w, _| w.refresh());
+            cx.run_until_parked();
+        }
+        view.update(cx, |view, cx| {
+            view.bars.snap(true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let viewport = view.read_with(cx, |view, _| view.list.viewport_bounds());
+        let first = cx.debug_bounds("notification-row-0").unwrap();
+        assert_eq!(first.top(), viewport.top());
+        assert!(first.bottom() <= viewport.bottom());
+        let hit = cx.debug_bounds("notifications-y-thumb").unwrap();
+        assert!(
+            first.right() <= hit.left(),
+            "unread and selected backgrounds end before the hit lane"
+        );
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        let last = cx.debug_bounds("notification-row-13").unwrap();
+        assert!(last.top() >= viewport.top() && last.bottom() <= viewport.bottom());
+    }
+}
+
+#[gpui::test]
 fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext) {
     let (controller, executor, fixture) = setup(cx);
     let expected = controller.snapshot().items[0].repository.clone();
