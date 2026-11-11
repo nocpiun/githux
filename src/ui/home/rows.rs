@@ -2,12 +2,11 @@
 use super::{Column, HomeAction, HomeView, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
 use crate::ui::relative_time::relative;
-use crate::ui::tooltip::ui_tooltip;
+use crate::ui::work_item_row::{text_target, text_tooltip};
 use ely_core::{
     data_display::Avatar,
     primitives::{FocusRing, Icon, IconName},
     theme::{ActiveTheme, AvatarSize, IconSize, Radius, TextSize},
-    typography::Ellipsis,
 };
 use gpui::{AnyElement, App, Context, FontWeight, IntoElement, div, prelude::*};
 use std::rc::Rc;
@@ -18,11 +17,14 @@ pub(super) const HOME_ROW_HEIGHT: f32 = crate::ui::work_item_row::WORK_ITEM_ROW_
 fn link(name: String, label: String, action: HomeAction, cx: &mut Context<HomeView>) -> AnyElement {
     let weak = cx.entity().downgrade();
     let debug = name.clone();
-    div()
+    let hover_id = name.clone();
+    let tooltip_selector = format!("{name}-tooltip");
+    let target = div()
         .id(name)
         .debug_selector(move || debug.clone())
         .role(gpui::Role::Link)
         .aria_label(label.clone())
+        .tooltip(text_tooltip(label.clone(), tooltip_selector))
         .tab_index(0)
         .min_w_0()
         .overflow_hidden()
@@ -37,21 +39,24 @@ fn link(name: String, label: String, action: HomeAction, cx: &mut Context<HomeVi
             let action = action.clone();
             let _ = weak.update(cx, |view, cx| view.emit(action, window, cx));
         })
-        .child(Ellipsis::new(label))
-        .into_any_element()
+        .truncate()
+        .child(label);
+    text_target(target, hover_id).into_any_element()
 }
 
 fn read_more_link(name: String, action: HomeAction, cx: &mut Context<HomeView>) -> AnyElement {
     let weak = cx.entity().downgrade();
     let debug = name.clone();
+    let hover_id = name.clone();
     let colors = cx.theme().colors.clone();
-    div()
+    let target = div()
         .id(name)
         .debug_selector(move || debug.clone())
         .role(gpui::Role::Link)
         .aria_label("Open pull request in Githux")
         .tab_index(0)
         .flex_none()
+        .self_start()
         .cursor_pointer()
         .focus_ring(cx)
         .text_color(colors.accent)
@@ -64,8 +69,8 @@ fn read_more_link(name: String, action: HomeAction, cx: &mut Context<HomeView>) 
             let action = action.clone();
             let _ = weak.update(cx, |view, cx| view.emit(action, window, cx));
         })
-        .child("Read more")
-        .into_any_element()
+        .child("Read more");
+    text_target(target, hover_id).into_any_element()
 }
 
 fn repository_links(
@@ -106,28 +111,33 @@ fn timestamp(value: Option<&str>, name: String, now: SystemTime, cx: &App) -> An
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Time not supplied")
         .to_string();
+    let tooltip_selector = format!("{name}-tooltip");
     let debug = name.clone();
     div()
         .id(name)
         .debug_selector(move || debug.clone())
         .min_w_0()
+        .max_w_full()
+        .self_start()
+        .truncate()
         .text_size(cx.theme().text_size(TextSize::Xs))
         .text_color(cx.theme().colors.fg_subtle)
-        .tooltip(ui_tooltip(full))
+        .tooltip(text_tooltip(full, tooltip_selector))
         .child(label)
         .into_any_element()
 }
 
 fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>) -> AnyElement {
     let name = format!("{}-title-{index}", super::column_name(column));
+    let hover_id = name.clone();
+    let tooltip_selector = format!("{name}-tooltip");
     let weak = cx.entity().downgrade();
-    div()
+    let target = div()
         .id(name.clone())
         .debug_selector(move || name.clone())
         .role(gpui::Role::Link)
         .aria_label(label.clone())
         .tab_index(0)
-        .flex_1()
         .min_w_0()
         .cursor_pointer()
         .focus_ring(cx)
@@ -146,8 +156,14 @@ fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>
                 view.activate(column, index, window, cx);
             });
         })
-        .tooltip(ui_tooltip(label.clone()))
-        .child(Ellipsis::new(label))
+        .tooltip(text_tooltip(label.clone(), tooltip_selector))
+        .truncate()
+        .child(label);
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .child(text_target(target, hover_id))
         .into_any_element()
 }
 

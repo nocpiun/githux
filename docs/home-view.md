@@ -70,7 +70,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 - 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。
 - 单栏最多同时呈现 loading、empty、error、unavailable 或 Ready 中的一种；Partial 仍保留已取条目并显示原因提示。
-- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。owner/name 分段导航，更新时间为相对时间，标题和长名称有界截断。
+- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。与全局 Issues/PR 共用 `work_item_row`：56 logical px 行高、8px 水平内边距、两行间距 3px，metadata 的编号起点与标题文字左沿对齐。owner/name 无额外布局空隙地组成 `owner/repo`，各自独立导航；owner 的宽度上限按可用 metadata 空间计算，为窄栏名称保留空间，同时避免因 owner/name 长度比例而提前截断正常 owner；更新时间为相对时间。链接与 tooltip 的交互节点只占实际显示文字宽度，非交互的横向 flex slot 吸收余宽；长标题/名称在可用宽度内原生截断。整行原本的选择/激活行为由调用方保留。
 - Feed 是紧凑的活动卡片：avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
   - **星标仓库**：在仓库链接下方展示仓库真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
   - **合并 PR**：展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮。
@@ -89,7 +89,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - **Feed 自动追加**：最后三张卡片之一进入可见区时提前发一次 `LoadMoreFeed`；空页和不足三张卡片的首屏自动继续。使用已测量行的位置与原生逻辑滚动锚点，不把虚拟列表未知高度当成内容耗尽；每帧布局后也核验一次，首屏无需等待额外 hover/时钟通知。每账户/代次同一时刻至多一次在途追加，渲染、resize、重复滚动回调与刷新都不能重复请求。追加用 `ListState::splice` 在原列表尾部增长，保留滚动锚点与键盘选择；重复/重叠页按源事件 id 去重。加载中用紧凑动画图标，失败保留现有内容并显示黄色告警图标 + 点击重试，真正耗尽（服务端无 next 链接）后停止请求。
 - 捕获阶段 `wheel_overlay` 每区域只消费一次，测试验证一次精确滚轮只改变目标栏且偏移恰好等于输入。
 - 每栏是独立 Tab stop。列表根聚焦时 Up/Down/Home/End 移动选择，Enter/Space 激活所选 Home 条目或 Feed 事件；各内容链接也是独立键盘入口，键盘激活不抢回列表焦点。
-- 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。每个链接阻止冒泡，不发生卡片/列表二次激活。
+- 移除右侧 Repository/actor 按钮。owner/name 各自 pointer + hover underline，斜杠普通文本且两侧无布局 gap；actor/avatar 打开 canonical login Profile，Issue/PR 标题激活对应 item/event。Feed 的 actor/repository/PR title 和 Read more 同样只由可见文字区域响应，纵向卡片不能把文字链接拉伸到整行。每个链接阻止冒泡，不发生卡片/列表二次激活。
 
 ## 正式 Shell 接入（2026-10-29）
 
