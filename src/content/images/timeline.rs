@@ -2,7 +2,7 @@
 //! Unsupported animation values leave the underlying presentation intact.
 use resvg::usvg::roxmltree::{Document, Node};
 use simplecss::{AttributeOperator, Element, PseudoClass};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_TRACKS: usize = 128;
 const MAX_EXPANSION_STEPS: usize = 100_000;
@@ -183,6 +183,98 @@ fn css_declarations(css: &str) -> Vec<Declaration> {
         })
         .collect()
 }
+const ANIMATION_COMPONENTS: [&str; 8] = [
+    "animation-name",
+    "animation-duration",
+    "animation-delay",
+    "animation-timing-function",
+    "animation-fill-mode",
+    "animation-iteration-count",
+    "animation-direction",
+    "animation-play-state",
+];
+
+// Keep the raw shorthand until custom properties resolve on the element. Its
+// components still participate independently in source order and importance.
+fn cascade_declaration(
+    d: &Declaration,
+    props: &mut Properties,
+    shorthands: &mut BTreeSet<String>,
+) -> Result<(), super::ImageFailure> {
+    if d.name == "animation" {
+        if d.value.len().saturating_mul(ANIMATION_COMPONENTS.len()) > 2 * 1024 * 1024 {
+            return Err(super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            });
+        }
+        for key in ANIMATION_COMPONENTS {
+            props.insert(key.into(), d.value.clone());
+            shorthands.insert(key.into());
+        }
+    } else {
+        props.insert(d.name.clone(), d.value.clone());
+        shorthands.remove(&d.name);
+    }
+    Ok(())
+}
+fn animation_components(value: &str) -> Properties {
+    let mut props = Properties::from([
+        ("animation-name".into(), "none".into()),
+        ("animation-duration".into(), "0s".into()),
+        ("animation-delay".into(), "0s".into()),
+        ("animation-timing-function".into(), "ease".into()),
+        ("animation-fill-mode".into(), "none".into()),
+        ("animation-iteration-count".into(), "1".into()),
+        ("animation-direction".into(), "normal".into()),
+        ("animation-play-state".into(), "running".into()),
+    ]);
+    if value.contains(',') {
+        for key in ANIMATION_COMPONENTS {
+            props.insert(key.into(), value.into());
+        }
+        return props;
+    }
+    let mut times = 0;
+    for token in value.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let key = if milliseconds(&lower).is_some() {
+            times += 1;
+            if times == 1 {
+                "animation-duration"
+            } else {
+                "animation-delay"
+            }
+        } else if matches!(
+            lower.as_str(),
+            "linear" | "ease" | "ease-in" | "ease-out" | "ease-in-out"
+        ) {
+            "animation-timing-function"
+        } else if matches!(lower.as_str(), "forwards" | "backwards" | "both" | "none") {
+            "animation-fill-mode"
+        } else if matches!(
+            lower.as_str(),
+            "normal" | "reverse" | "alternate" | "alternate-reverse"
+        ) {
+            "animation-direction"
+        } else if matches!(lower.as_str(), "running" | "paused") {
+            "animation-play-state"
+        } else if lower == "infinite" || token.parse::<f64>().is_ok() {
+            "animation-iteration-count"
+        } else {
+            "animation-name"
+        };
+        props.insert(
+            key.into(),
+            if key == "animation-name" {
+                token.into()
+            } else {
+                lower
+            },
+        );
+    }
+    props
+}
+
 /// Capture outer surface effects; foreground root opacity is neutralized before
 /// usvg conversion so it can composite once together with the root background.
 pub(super) fn root_opacity(doc: &Document<'_>) -> f32 {
@@ -564,12 +656,22 @@ impl Timeline {
                                     limit: 2 * 1024 * 1024,
                                 });
                             }
-                            stops.push((pos, declarations(body)));
+                            stops.push((if pos == 0.0 { 0.0 } else { pos }, declarations(body)));
                         }
                     }
                 }
                 stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-                keys.insert(name.trim().to_string(), stops);
+                let mut merged: Vec<(f64, Properties)> = Vec::new();
+                for (at, values) in stops {
+                    if let Some((last, properties)) = merged.last_mut()
+                        && *last == at
+                    {
+                        properties.extend(values);
+                    } else {
+                        merged.push((at, values));
+                    }
+                }
+                keys.insert(name.trim().to_string(), merged);
             }
         }
         let css = css.replace(":root", "__githux_root");
@@ -612,6 +714,8 @@ impl Timeline {
             }
             let mut props = Properties::new();
             let mut important = Properties::new();
+            let mut shorthands = BTreeSet::new();
+            let mut important_shorthands = BTreeSet::new();
             for attr in node.attributes() {
                 if attr.name() == "transform"
                     || (attr.name() != "style" && attr.value().contains("var("))
@@ -623,9 +727,9 @@ impl Timeline {
                 if selector.matches(&CssNode(node)) {
                     for d in declarations {
                         if d.important {
-                            important.insert(d.name.to_string(), d.value.to_string());
+                            cascade_declaration(d, &mut important, &mut important_shorthands)?;
                         } else {
-                            props.insert(d.name.to_string(), d.value.to_string());
+                            cascade_declaration(d, &mut props, &mut shorthands)?;
                         }
                     }
                 }
@@ -633,9 +737,16 @@ impl Timeline {
             for d in css_declarations(&strip_comments(node.attribute("style").unwrap_or_default()))
             {
                 if d.important {
-                    important.insert(d.name.to_string(), d.value.to_string());
+                    cascade_declaration(&d, &mut important, &mut important_shorthands)?;
                 } else {
-                    props.insert(d.name.to_string(), d.value.to_string());
+                    cascade_declaration(&d, &mut props, &mut shorthands)?;
+                }
+            }
+            for key in important.keys() {
+                if important_shorthands.contains(key) {
+                    shorthands.insert(key.clone());
+                } else {
+                    shorthands.remove(key);
                 }
             }
             props.extend(important.clone());
@@ -668,6 +779,14 @@ impl Timeline {
             inherited.insert(node.id(), vars.clone());
             props.retain(|key, _| !key.starts_with("--"));
             props = resolve_properties(props, &vars, &mut expanded_bytes, &mut work)?;
+            for key in shorthands {
+                if let Some(raw) = props.get(&key) {
+                    let components = animation_components(raw);
+                    if let Some(value) = components.get(&key) {
+                        props.insert(key, value.clone());
+                    }
+                }
+            }
             // The SVG root's background is a box paint, not a visible child
             // that may override inherited visibility.
             if node.parent_element().is_none()
@@ -685,80 +804,37 @@ impl Timeline {
                 props.insert("background-color".into(), value.into());
             }
             let mut tracks = Vec::new();
-            let animation = props
-                .get("animation")
-                .or_else(|| props.get("animation-name"));
+            let animation = props.get("animation-name");
             if tracks_count < MAX_TRACKS
-                && let Some(shorthand) = animation
+                && let Some(name) = animation
             {
-                // Finite, single-iteration entry animations. Unsupported iteration/direction
-                // and multiple tracks retain their static underlying presentation.
-                let tokens = shorthand.split_whitespace().collect::<Vec<_>>();
-                let name = tokens.iter().find(|v| keys.contains_key(**v));
-                let times = tokens
-                    .iter()
-                    .filter_map(|v| milliseconds(v))
-                    .collect::<Vec<_>>();
+                // Only the winning cascaded longhands select this finite track.
                 let iterations_ok = props
                     .get("animation-iteration-count")
-                    .is_none_or(|v| v == "1")
+                    .is_none_or(|v| v.parse::<f64>().ok() == Some(1.0))
                     && props
                         .get("animation-direction")
                         .is_none_or(|v| v.eq_ignore_ascii_case("normal"))
-                    && !tokens.iter().any(|token| {
-                        ["reverse", "alternate", "alternate-reverse"]
-                            .iter()
-                            .any(|direction| token.eq_ignore_ascii_case(direction))
-                    })
-                    && tokens
-                        .iter()
-                        .all(|v| v.parse::<f64>().is_err() || *v == "1");
-                if !shorthand.contains(',')
-                    && !tokens.contains(&"infinite")
-                    && iterations_ok
-                    && let Some(name) = name
-                {
+                    && props
+                        .get("animation-play-state")
+                        .is_none_or(|v| v.eq_ignore_ascii_case("running"));
+                if !name.contains(',') && iterations_ok && keys.contains_key(name) {
                     let duration = props
                         .get("animation-duration")
                         .and_then(|v| milliseconds(v))
-                        .or(times.first().copied())
                         .unwrap_or(0.0);
                     let delay = props
                         .get("animation-delay")
                         .and_then(|v| milliseconds(v))
-                        .or(times.get(1).copied())
                         .unwrap_or(0.0);
                     if duration >= 0.0 && (duration + delay).is_finite() {
                         let fill = props
                             .get("animation-fill-mode")
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                tokens
-                                    .iter()
-                                    .find(|v| matches!(**v, "forwards" | "backwards" | "both"))
-                                    .unwrap_or(&"none")
-                                    .to_string()
-                            });
+                            .map_or_else(|| "none".into(), |v| v.to_ascii_lowercase());
                         let easing = props
                             .get("animation-timing-function")
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                tokens
-                                    .iter()
-                                    .find(|v| {
-                                        matches!(
-                                            **v,
-                                            "linear"
-                                                | "ease"
-                                                | "ease-in"
-                                                | "ease-out"
-                                                | "ease-in-out"
-                                        )
-                                    })
-                                    .unwrap_or(&"ease")
-                                    .to_string()
-                            });
-                        let mut stops = keys[*name].clone();
+                            .map_or_else(|| "ease".into(), |v| v.to_ascii_lowercase());
+                        let mut stops = keys[name].clone();
                         for (_, values) in &mut stops {
                             values.retain(|key, _| {
                                 !important.contains_key(key)

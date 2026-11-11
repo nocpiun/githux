@@ -37,6 +37,12 @@ roast 最终网格依次 880×400 / 1320×600 / 1760×800，逻辑盒仍 440×20
 
 审查修正验证：`733abb1d-baf2-414b-a892-37b4dab86354` 完整图片组串行 **836 通过、0 失败、1 opt-in 忽略**；`c6722e4a-f0db-4716-a56c-f8f027ab64ce` **18 项品质回归通过**。all-target clippy `b77eb91a-df96-4411-9144-ba89caeab3a9`、app/example build `61707be8-a017-4e87-ba3f-61e8bd04660c`、公开密度探针 `72d3b1b2-b4dd-450b-9c1c-7e88266b74b7` 与 fmt check `dc322052-6c65-4b81-8528-5b69dc1b46b4` 全部通过。1×/1.5×/2× 共 21 张公开探针 PNG 与 `9ec716c` 品质实现字节相同，预算修正没有改变已观察样本的像素。随后发布的 head 仍须重新获得 CI/review，负责人验收未完成。
 
+### 品质审查：动画组件级联与重复 offset
+
+`6c1c1b3` 审查 `5861847433` 的 P2 `4540344965` / `4540344974` 均有效：旧实现把 animation shorthand 优先于最终 animation-name，也会让重复 100% 的第一段遮住后续覆盖。现将 shorthand 组件分别纳入声明顺序、specificity、important 级联，保留原始值直到节点变量环境计算后再提取组件，并恢复省略 longhand 的默认值；组件副本有分配前预算。相同 keyframe offset 先按源码顺序逐属性合并，负零与零规范为同一停点，保留同 offset 未被覆盖的其他属性。回归检查最终/中间可见像素、shorthand/longhand 顺序、规则优先级、important、变量、方向/次数覆盖和默认值重置。
+
+本轮验证：完整图片组 `89fe63c0-3933-42db-b82b-72511112c566` **839 通过、0 失败、1 opt-in 忽略**；品质回归 `a1e6b38e-c992-4b3d-9ff4-6122d9736adc` **21 通过**。all-target clippy `7ec872a3-d8a1-4669-846c-34a6b2ae7589`、app/example build `b051492b-77d9-402a-85ea-24cd6a6630ca`、公开密度探针 `05e59165-0a8b-4d25-9c28-278cdf8b6b21` 与 fmt check `97d10aab-318e-414f-bc1e-52a1f8b930ac` 均通过。21 张公开 PNG 与前一轮逐字节相同；随后新 head 重审，不据旧 head CI/review 放行。
+
 ## 2026-11-11 负责人反馈后的集成返工
 
 负责人提供了真实 Profile README 与三份公开 SVG 响应，先读取本地证据再实现，没有把原始响应或用户 Profile 复制进 Git fixture：

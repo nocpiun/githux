@@ -125,6 +125,134 @@ fn quality_nested_vectors_charge_the_destination_canvas_at_every_level() {
 }
 
 #[test]
+fn quality_animation_shorthand_components_obey_order_specificity_and_importance() {
+    for (sheet, inline, alpha) in [
+        (
+            "",
+            "animation:hide .2s linear forwards;animation-name:show",
+            255,
+        ),
+        (
+            "",
+            "animation-name:show;animation:hide .2s linear forwards",
+            0,
+        ),
+        (
+            "#entry{animation-name:show}.entry{animation:hide .2s linear forwards}",
+            "",
+            255,
+        ),
+        (
+            "",
+            "animation:hide .2s linear forwards!important;animation-name:show",
+            0,
+        ),
+        (
+            "",
+            "animation-name:show!important;animation:hide .2s linear forwards",
+            255,
+        ),
+        (
+            "",
+            "animation:hide .2s linear forwards!important;animation-name:show!important",
+            255,
+        ),
+        (
+            "",
+            "--entry:hide .2s linear forwards;animation:var(--entry);animation-name:show",
+            255,
+        ),
+        (
+            "",
+            "animation:show .2s linear forwards;animation-fill-mode:none",
+            0,
+        ),
+        (
+            "",
+            "animation-fill-mode:none;animation:show .2s linear forwards",
+            255,
+        ),
+        (
+            "",
+            "animation:show .2s linear reverse forwards;animation-direction:normal",
+            255,
+        ),
+        (
+            "",
+            "animation:show .2s linear 2 forwards;animation-iteration-count:1",
+            255,
+        ),
+        (
+            "",
+            "animation-duration:.2s;animation:show forwards;animation-name:show",
+            255,
+        ),
+    ] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>{sheet}@keyframes hide{{from{{opacity:0}}to{{opacity:0}}}}@keyframes show{{from{{opacity:0}}to{{opacity:1}}}}</style><rect id="entry" class="entry" style="opacity:0;{inline}" width="10" height="10" fill="red"/></svg>"#
+        );
+        let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0[3],
+            alpha,
+            "{sheet} / {inline}"
+        );
+        if inline.starts_with("animation-duration") {
+            assert!(
+                decoded.animation.is_none(),
+                "a later shorthand resets omitted duration to zero"
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_shorthand_component_copies_are_bounded_before_allocation() {
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" style="animation:{}"/></svg>"#,
+        "x".repeat(300_000)
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { limit: 2_097_152 })
+    ));
+}
+
+#[test]
+fn quality_duplicate_keyframe_offsets_merge_properties_in_source_order() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>rect{opacity:0;animation:show .2s linear forwards}@keyframes show{from{opacity:1;fill-opacity:1}-0%{opacity:0}50%{opacity:.1}50%{fill-opacity:.5;opacity:.8}to{opacity:0;fill-opacity:.8}100%{opacity:1}}</style><rect width="10" height="10" fill="red"/></svg>"#;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = decoded.animation.as_ref().unwrap();
+    let alpha = |bytes: &[u8]| {
+        let p = image::load_from_memory(bytes).unwrap().to_rgba8();
+        p.get_pixel(p.width() / 2, p.height() / 2).0[3]
+    };
+    assert_eq!(
+        alpha(&animation.frames[0].bytes),
+        0,
+        "equivalent zero offsets retain source order"
+    );
+    assert_eq!(
+        alpha(
+            &animation
+                .frames
+                .iter()
+                .find(|frame| frame.at_ms == 100)
+                .unwrap()
+                .bytes
+        ),
+        102,
+        "later same-offset declarations override only their properties"
+    );
+    assert_eq!(
+        alpha(&decoded.bytes),
+        204,
+        "100% overrides to while preserving its other properties"
+    );
+}
+
+#[test]
 fn quality_embedded_woff_alias_renders_the_supplied_glyphs() {
     let data = base64::engine::general_purpose::STANDARD
         .encode(include_bytes!("fixtures/embedded-font.woff"));
