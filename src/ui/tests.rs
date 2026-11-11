@@ -8,7 +8,7 @@
 //! or native IME delivery; those remain pending manual checks and are recorded as such.
 
 use gpui::{
-    Bounds, KeyUpEvent, Keystroke, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
+    AppContext, Bounds, KeyUpEvent, Keystroke, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
     ScrollSource, TestAppContext, VisualContext, VisualTestContext, px, size,
 };
 
@@ -2375,6 +2375,264 @@ fn dragging_with_the_mouse_starts_from_a_real_press_and_moves(cx: &mut TestAppCo
         3,
         "nothing was closed or duplicated"
     );
+}
+
+/// A real drag paints a lifted preview that follows the pointer with a fixed grab offset and
+/// disappears on drop and on cancellation. The preview is GPUI's drag view, so the test platform
+/// lays it out at the pointer exactly like production; it only cannot prove the native cursor
+/// glyph or that a still-following ghost looks right to the eye.
+#[gpui::test]
+fn a_drag_shows_a_ghost_that_follows_the_grab_offset_and_clears(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "no ghost exists before a drag starts"
+    );
+
+    // Press near the tab's left edge, then drag right by a known amount.
+    let start = bounds("tab-1", cx);
+    let grab = gpui::point(start.left() + px(10.0), start.center().y);
+    cx.simulate_mouse_move(grab, None, Modifiers::none());
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let row = bounds("tab-scroll", cx);
+    let target = gpui::point(grab.x + px(140.0), row.center().y);
+    for step in 1..=10 {
+        cx.simulate_mouse_move(
+            gpui::point(grab.x + (target.x - grab.x) * step as f32 / 10.0, target.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_drag_id()),
+        Some(a),
+        "the press started a reorder"
+    );
+
+    let ghost = bounds("tab-drag-ghost", cx);
+    assert_eq!(ghost.size.width, px(super::geometry::TAB_WIDTH));
+    assert_eq!(ghost.size.height, px(super::geometry::TAB_HEIGHT));
+    // The press started inside the tab, so the lifted preview keeps the pointer inside itself
+    // instead of centering under it or lagging past the tab's far edge.
+    assert!(
+        ghost.left() <= target.x + px(1.0) && ghost.right() >= target.x - px(1.0),
+        "the pointer stays inside the ghost horizontally: {:?} at {:?}",
+        ghost,
+        target
+    );
+    let offset = ghost.left() - target.x;
+
+    // Moving the pointer by a known amount moves the ghost by exactly the same amount: the grab
+    // offset stays fixed, which is what "follows the pointer" means.
+    let follow = gpui::point(target.x + px(40.0), target.y);
+    cx.simulate_mouse_move(follow, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let followed = bounds("tab-drag-ghost", cx);
+    assert!(
+        (followed.left() - follow.x - offset).abs() <= px(1.0),
+        "the ghost travels one-for-one with the pointer: {:?} after {:?}",
+        followed,
+        follow
+    );
+
+    // Release past the last tab: the preview stops painting and the carried tab lands at the end.
+    let drop = gpui::point(row.right() - px(8.0), row.center().y);
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(follow.x + (drop.x - follow.x) * step as f32 / 8.0, drop.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(drop, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b, a],
+        "dropping past the last tab moves the carried tab to the end"
+    );
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "the ghost is gone after the drop"
+    );
+
+    // A second drag that is cancelled (released without moving anything) also clears the ghost.
+    let start = bounds("tab-1", cx);
+    let grab = start.center();
+    cx.simulate_mouse_move(grab, None, Modifiers::none());
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let target = gpui::point(grab.x + px(80.0), grab.y);
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(grab.x + (target.x - grab.x) * step as f32 / 8.0, target.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("tab-drag-ghost").is_some());
+    cx.dispatch_action(super::CancelTabDrag);
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "cancelling the drag clears the ghost"
+    );
+}
+
+/// Closing the tab underneath a live drag ends both the shell drag and GPUI's platform drag, so
+/// the lifted preview cannot keep following a pointer whose tab no longer exists.
+#[gpui::test]
+fn closing_a_dragged_tab_clears_the_ghost(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_resize(size(px(1200.0), px(820.0)));
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    let a = view.read_with(cx, |shell, _| shell.active_tab_id());
+    click("repo-row-1", cx);
+    let b = view.read_with(cx, |shell, _| shell.active_tab_id());
+    let home = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+
+    let start = bounds("tab-1", cx);
+    let grab = start.center();
+    cx.simulate_mouse_move(grab, None, Modifiers::none());
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let target = gpui::point(grab.x + px(80.0), grab.y);
+    for step in 1..=8 {
+        cx.simulate_mouse_move(
+            gpui::point(grab.x + (target.x - grab.x) * step as f32 / 8.0, target.y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), Some(a));
+    assert!(cx.debug_bounds("tab-drag-ghost").is_some());
+
+    // Close the carried tab through the real path, as Ctrl+W would.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.close_tab(a, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert!(
+        cx.debug_bounds("tab-drag-ghost").is_none(),
+        "closing the dragged tab clears the ghost immediately"
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.tab_ids()),
+        vec![home, b],
+        "the close wins and no stale index moves another tab"
+    );
+}
+
+/// Controller publication must retire the old account's actual GPUI payload, not just Shell's
+/// reorder state. The input path creates the real ghost; account notify drives the production
+/// observer -> sync_accounts -> workspace switch path without a mouse release or Escape.
+#[gpui::test]
+fn account_publication_clears_the_live_tab_ghost(cx: &mut TestAppContext) {
+    setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let accounts = cx.new(|cx| crate::app::accounts::Accounts::new(None, window, cx));
+        cx.set_global(crate::app::AccountsHandle(accounts));
+        Shell::new(window, cx)
+    });
+    let controller = cx.read(crate::app::AccountsHandle::get).unwrap();
+    let publish = |account, cx: &mut VisualTestContext| {
+        controller.update(cx, |accounts, cx| {
+            let repositories = accounts.snapshot().repositories.clone();
+            accounts.set_active_and_previous_for_test(account, repositories);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    let account_a = AccountKey::new(101, HostId::github());
+    let account_b = AccountKey::new(202, HostId::github());
+    publish(account_a.clone(), cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Repository {
+                namespace: "old-account".into(),
+                name: "private-tab".into(),
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let old_ids = view.read_with(cx, |shell, _| shell.tab_ids());
+    let grab = bounds("tab-1", cx).center();
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        grab + gpui::point(px(12.0), px(0.0)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tab-drag-ghost").is_some());
+    assert!(cx.read(|cx| cx.has_active_drag()));
+    let retired = view.read_with(cx, |shell, _| {
+        shell
+            .tab_drag
+            .as_ref()
+            .unwrap()
+            .platform_alive
+            .clone()
+            .unwrap()
+    });
+
+    publish(account_b, cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_drag_id()), None);
+    assert!(!cx.read(|cx| cx.has_active_drag()));
+    assert_eq!(cx.read(|cx| cx.active_drag_cursor_style()), None);
+    assert!(cx.debug_bounds("tab-drag-ghost").is_none());
+    assert_eq!(route(&view, cx), Route::Home);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_count()), 1);
+    assert!(view.read_with(cx, |shell, _| {
+        shell.tab_ids().iter().all(|id| !old_ids.contains(id))
+    }));
+    // Returning to A preserves its sessions without reviving the retired ghost.
+    publish(account_a, cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.tab_ids()), old_ids);
+    assert!(!cx.read(|cx| cx.has_active_drag()));
+    assert!(cx.debug_bounds("tab-drag-ghost").is_none());
+    assert!(!retired.get(), "GPUI dropped the retired payload");
+
+    // Cleanup carrying the old lifetime may arrive after another gesture starts. It must not
+    // stop that gesture even though GPUI has an active drag again.
+    let grab = bounds("tab-1", cx).center();
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        grab + gpui::point(px(12.0), px(0.0)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.has_active_drag()));
+    cx.update(|window, cx| {
+        super::tabs::cancel_platform_drag(retired, window.window_handle(), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.has_active_drag()));
+    assert!(cx.debug_bounds("tab-drag-ghost").is_some());
+    cx.dispatch_action(super::CancelTabDrag);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| cx.has_active_drag()));
 }
 
 /// A press on the close button or a middle click never starts a reorder.
