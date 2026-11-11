@@ -36,7 +36,7 @@ Windows 专项用 `TestAppContext::build_with_text_system` 注入平台原生字
 
 迭代证据：`ab139e38` 在原字体下真实 raster 余量 13.54/9.73px；接入 #78 全量 SC 后 `e6e0b822` 检出 13.17/9.20px。两次都被新增墨迹平衡断言拒绝，随后增加 1px optical lift；未通过修改阈值把失败改为通过。第一次 `6526afe5` 的无限余量暴露 Windows headless 使用假字体系统，已改为 windowed platform 的 DirectWrite text system；无实际 alpha 墨迹时测试失败。
 
-## 最终本地检查与交接边界
+## 首次候选本地检查（22fbed2 前）
 
 集成基线为 main `8cad76b`，包含负责人已验收并合入的 #78 字体、#79 Profile、#81 图片布局。2026-11-11 本轮交付前再次 fetch 时 #80 仍为 OPEN（head `98b890e9c5bfbe591f3c63131227d98966156f27`），尚不能从 main 接入；不从 sibling worktree/未合并分支取代码。若 #80 随后合入，最终集成需按新基线补组合验证。
 
@@ -50,6 +50,21 @@ Windows 专项用 `TestAppContext::build_with_text_system` 注入平台原生字
 - 本轮只在实际修改、迭代失败或基线改变时重跑对应检查，没有为了日志检索重编译。
 
 启动：在本 worktree 执行 `scripts\\run-githux.cmd target\\debug\\githux.exe`。本轮未以真实账户启动应用，未取得原生窗口截图或真人输入验收；原生字体 shaping/raster + GPUI 模拟事件通过，不等于负责人视觉验收通过。PR #83 保留负责人 `blocked`，准备验收后添加 `pending`，不合并。最新 head 的 CI/Codex 收据与最终状态留在 PR 及私有 delivery-state，不为补记结果制造额外提交。
+
+## 最终组合验证（#80 与正常 owner 宽度）
+
+`#594 opanel-mc/opanel` 的独立文本测宽回归暴露另一个首轮缺口：宽布局下 owner 原生完整宽度 55.22px，但目标被压到 44px；fake text system 为 59.4px 对 48px。两项测试均在修复前实际失败（`8bb31228`）。原因是 45% 上限解析到仓库组自身的自然宽度。仓库组改为填满可用 metadata 空间；内部 owner/name 文字目标仍不 grow，空白 hover/tooltip/click 回归保持有效。正常 owner 宽度断言覆盖 1180/880/640 与 1/1.5/2x；320px 保留必要截断与 repository 可达性验证。
+
+此前候选 `22fbed2` 的 Codex 为 clean，但 Linux CI run `42971964824` 失败于 `app::pages::home::tests::online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page`（`src/app/pages/home/tests.rs:529`）：预期 `["first"]`，实际 `["first", "second"]`，其他 1227 项主程序测试通过。可能与短 Feed 的自动续读及 fixture 时序有关，尚未确认；已在 PR 评论 `6789036608` 报告并保存跨 owner 线索，没有改 app-page 断言或 viewport/prefetch 代码。
+
+随后从 main 正式接入 `54c8afb`（#80 标签拖动），至此 #78/#79/#80/#81 均已包含。由于生产布局实际修复和接受基线改变，按共享 runner 重新做组合验证，未从 sibling 分支取代码：
+
+- `cargo test --locked --bin githux`，`aac242e2`：**1236 passed**，含原生字体、宽窄/DPI、完整 hover/tooltip、#594 与 #1136 样本、#80 新回归；上述缓存测试也在本地通过，不代表远端失败已解除。
+- `cargo clippy --locked --all-targets -- -D warnings`，`d7391ef9`：SUCCESS。
+- `cargo build --locked --bin githux`，`ede9aeca`：SUCCESS。
+- `cargo fmt --all -- --check`，`bedc988c`：SUCCESS。
+
+未启动真实账户原生应用，视觉验收仍属于负责人；实际产物/启动方式见上节。最终 push 后明确请求新 head 审查并等待 CI；收据留 PR 与 delivery-state，保留 `blocked`/`pending`，不合并。
 
 ## 可复用教训候选（供协调者汇总）
 

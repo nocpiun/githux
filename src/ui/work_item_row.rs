@@ -365,7 +365,12 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             // Resolve the owner's percentage cap against available metadata space,
             // not the group's intrinsic owner/repo width (which truncates normal
             // owner-longer-than-repo pairs even in a wide row).
-            let mut repo_cell = div().flex().items_center().flex_1().min_w_0().overflow_hidden();
+            let mut repo_cell = div()
+                .flex()
+                .items_center()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden();
             if !owner.trim().is_empty() {
                 repo_cell = repo_cell
                     .child(action_link(

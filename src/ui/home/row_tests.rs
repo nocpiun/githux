@@ -122,12 +122,29 @@ fn check_rendered_rows(
                     let label = "opanel-mc";
                     let run = gpui::TextRun {
                         len: label.len(),
-                        font: gpui::Font {family: cx.theme().font_family.clone(), ..Default::default()},
+                        font: gpui::Font {
+                            family: cx.theme().font_family.clone(),
+                            ..Default::default()
+                        },
                         ..Default::default()
                     };
-                    window.text_system().layout_line(label, cx.theme().text_size(TextSize::Xs).to_pixels(window.rem_size()), &[run], None).width
+                    window
+                        .text_system()
+                        .layout_line(
+                            label,
+                            cx.theme()
+                                .text_size(TextSize::Xs)
+                                .to_pixels(window.rem_size()),
+                            &[run],
+                            None,
+                        )
+                        .width
                 });
-                assert!((panel_owner.size.width-measured_owner).abs() <= px(1.0), "normal opanel owner truncated in wide layout: {:?} vs {measured_owner:?}", panel_owner.size.width);
+                assert!(
+                    (panel_owner.size.width - measured_owner).abs() <= px(1.0),
+                    "normal opanel owner truncated in wide layout: {:?} vs {measured_owner:?}",
+                    panel_owner.size.width
+                );
             }
             // Check the actual selected item, not a constant or justify_center style.
             assert!(
