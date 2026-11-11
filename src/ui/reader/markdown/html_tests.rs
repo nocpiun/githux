@@ -113,6 +113,18 @@ fn find_paragraph(blocks: &[Block], needle: &str) -> Inline {
         .unwrap_or_else(|| panic!("no paragraph containing {needle:?} in {blocks:?}"))
 }
 
+fn semantic_blocks(blocks: &[Block]) -> Vec<&Block> {
+    let mut out = Vec::new();
+    for block in blocks {
+        if let Block::Centered(body) = block {
+            out.extend(semantic_blocks(body));
+        } else {
+            out.push(block);
+        }
+    }
+    out
+}
+
 fn copied(blocks: &[Block]) -> String {
     DocText::build(blocks).text().to_string()
 }
@@ -155,9 +167,8 @@ fn containers_emphasis_links_and_pictures_keep_their_semantics() {
     assert!(text.styles.contains(&(37..49, Style::Code)), "{text:?}");
     assert_eq!(text.links, vec![(54..66, "guide.md#setup".to_string())]);
 
-    let picture = doc
-        .blocks
-        .iter()
+    let picture = semantic_blocks(&doc.blocks)
+        .into_iter()
         .find_map(|block| match block {
             Block::Image { alt, url, .. } => Some((alt.clone(), url.clone())),
             _ => None,
@@ -179,9 +190,8 @@ fn containers_emphasis_links_and_pictures_keep_their_semantics() {
 #[test]
 fn html_tables_map_onto_the_markdown_table_block() {
     let doc = parse(fixtures::HTML);
-    let (aligns, head, rows) = doc
-        .blocks
-        .iter()
+    let (aligns, head, rows) = semantic_blocks(&doc.blocks)
+        .into_iter()
         .find_map(|block| match block {
             Block::Table {
                 aligns, head, rows, ..

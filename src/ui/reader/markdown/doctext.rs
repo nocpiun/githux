@@ -25,6 +25,8 @@ static EMPTY: Inline = Inline {
 /// One selectable unit: paragraph, heading, table cell, code block or maths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit {
+    /// Owning top-level block, including presentation-only centered wrappers.
+    pub block: usize,
     /// Its range in the document text.
     pub at: Range<usize>,
     /// Its own text, in bytes.
@@ -159,6 +161,7 @@ impl DocText {
         let at = start..self.text.len();
         let index = self.units.len();
         self.units.push(Unit {
+            block: self.block_ix,
             at: at.clone(),
             len: text.len(),
             separator,
@@ -232,7 +235,13 @@ impl DocText {
                 self.push(tex, Vec::new());
             }
             Block::Centered(body) => self.blocks(body),
-            Block::ImageRow(images) => { for (alt,_,_) in images { if !alt.is_empty() { self.push(alt, Vec::new()); } } }
+            Block::ImageRow(images) => {
+                for (alt, _, _) in images {
+                    if !alt.is_empty() {
+                        self.push(alt, Vec::new());
+                    }
+                }
+            }
             Block::Image { alt, .. } => {
                 if !alt.is_empty() {
                     self.push(alt, Vec::new());

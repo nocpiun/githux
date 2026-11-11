@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::content::images::{
     DecodedImage, ImageCompletion, ImageFailure, ImageLimits, ImageProvider, ImageRefusal,
-    ImageRequest, ImageScope, ImageSink, ImageTarget, decode_image,
+    ImageRequest, ImageScope, ImageSink, ImageTarget, decode_image_checked,
 };
 use crate::data::RepositorySession;
 use crate::data::reader_image_cache::{ExternalFreshness, ReaderImageCache, now_ms};
@@ -277,7 +277,19 @@ impl RepositoryImageService {
             return Err(ImageFailure::StaleContext);
         }
         let limits = self.inner.limits.clone();
-        let decode = tokio::task::spawn_blocking(move || decode_image(bytes, &limits));
+        let decode_cancel = cancel.clone();
+        let decode_deadline = deadline.into_std();
+        let decode = tokio::task::spawn_blocking(move || {
+            decode_image_checked(bytes, &limits, &|| {
+                if decode_cancel.is_cancelled() {
+                    Err(ImageFailure::Cancelled)
+                } else if std::time::Instant::now() >= decode_deadline {
+                    Err(ImageFailure::Timeout)
+                } else {
+                    Ok(())
+                }
+            })
+        });
         let decoded = tokio::select! {
             biased;
             _ = cancel.clone().cancelled() => return Err(ImageFailure::Cancelled),

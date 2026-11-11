@@ -96,11 +96,26 @@ pub struct DecodedImage {
 pub struct DecodedFrame {
     pub at_ms: u32,
     pub bytes: Vec<u8>,
+    pub pixels: DecodedPixels,
+}
+
+/// Already decoded BGRA8 pixels, ready for a single-frame GPU image. Preparing
+/// them in the provider avoids a fresh asynchronous PNG decode on every beat.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecodedPixels {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+struct RenderedSvg {
+    image: DecodedImage,
+    pixels: DecodedPixels,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct DecodedAnimation {
     pub duration_ms: u32,
     pub frames: Vec<DecodedFrame>,
+    pub final_pixels: DecodedPixels,
 }
 
 impl DecodedImage {
@@ -162,10 +177,28 @@ pub fn is_svg_like(bytes: &[u8]) -> bool {
             None | Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n')
         );
     }
-    if trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<!DOCTYPE") {
+    let tag = trimmed.strip_prefix(b"<").unwrap_or_default();
+    let end = tag
+        .iter()
+        .position(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+        .unwrap_or(tag.len());
+    if tag[..end].ends_with(b":svg") {
+        return true;
+    }
+    if trimmed.starts_with(b"<?xml")
+        || trimmed.starts_with(b"<!DOCTYPE")
+        || trimmed.starts_with(b"<!--")
+    {
         let scan_len = trimmed.len().min(4096);
         let prefix = &trimmed[..scan_len];
-        return contains_ascii_ci(prefix, b"<svg");
+        return contains_ascii_ci(prefix, b"<svg")
+            || prefix.split(|b| *b == b'<').any(|tag| {
+                let end = tag
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+                    .unwrap_or(tag.len());
+                tag[..end].ends_with(b":svg")
+            });
     }
     false
 }
@@ -185,6 +218,17 @@ fn contains_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
 /// allocating a pixel buffer, rasterized to PNG bytes, and returned as
 /// [`ImageFormat::Png`] with intrinsic/viewBox dimensions preserved.
 pub fn decode_image(bytes: Vec<u8>, limits: &ImageLimits) -> Result<DecodedImage, ImageFailure> {
+    decode_image_checked(bytes, limits, &|| Ok(()))
+}
+
+/// Cooperative checkpoints between finite SVG frames; the host supplies its
+/// own cancellation/deadline check without coupling this module to networking.
+pub fn decode_image_checked(
+    bytes: Vec<u8>,
+    limits: &ImageLimits,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
+) -> Result<DecodedImage, ImageFailure> {
+    check()?;
     if bytes.is_empty() {
         return Err(ImageFailure::Malformed);
     }
@@ -197,7 +241,7 @@ pub fn decode_image(bytes: Vec<u8>, limits: &ImageLimits) -> Result<DecodedImage
         return decode_raster(bytes, format, limits);
     }
     if is_svg_like(&bytes) {
-        return decode_svg(&bytes, limits);
+        return decode_svg(&bytes, limits, check);
     }
     Err(ImageFailure::Unsupported)
 }
@@ -275,53 +319,107 @@ fn decode_raster(
     })
 }
 
-fn decode_svg(bytes: &[u8], limits: &ImageLimits) -> Result<DecodedImage, ImageFailure> {
+fn decode_svg(
+    bytes: &[u8],
+    limits: &ImageLimits,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
+) -> Result<DecodedImage, ImageFailure> {
     let text = validated_svg(bytes)?;
     let doc = parse_svg(text)?;
-    let timeline = super::timeline::Timeline::new(&doc);
+    let timeline = super::timeline::Timeline::new(&doc)?;
     let animated = timeline.duration_ms > 0.0;
     let final_xml = timeline.sample(text, timeline.duration_ms);
-    let mut result = decode_svg_static(final_xml.as_bytes(), limits, animated)?;
-    if animated {
+    let RenderedSvg {
+        image: mut result,
+        pixels: final_pixels,
+    } = decode_svg_static(final_xml.as_bytes(), limits, animated)?;
+    check()?;
+    if animated && timeline.duration_ms <= super::timeline::MAX_DURATION_MS {
         let duration_ms = timeline.duration_ms.ceil() as u32;
         let count = (duration_ms.div_ceil(50) as usize).min(100);
         let frame_cost = result.decoded_bytes();
         // Budget the complete retained sequence, including the final frame.
         // Oversized timelines use the explicit static final fallback.
         if frame_cost.saturating_mul(count + 1) <= limits.max_decoded_bytes {
-            let mut frames = Vec::new(); let mut encoded = result.bytes.len();
+            let mut frames = Vec::new();
+            let mut encoded = result.bytes.len();
             for ix in 0..count {
+                check()?;
                 let at_ms = (ix as u32 * duration_ms) / count as u32;
                 let xml = timeline.sample(text, f64::from(at_ms));
-                let frame = decode_svg_static(xml.as_bytes(), limits, true)?;
-                if (frame.width, frame.height) != (result.width,result.height) { return Err(ImageFailure::Malformed); }
-                encoded = encoded.saturating_add(frame.bytes.len());
-                if encoded > limits.max_response_bytes { return Ok(result); }
-                frames.push(DecodedFrame { at_ms, bytes: frame.bytes });
+                let mut frame_limits = limits.clone();
+                // Previous raw frames coexist with this frame's scratch space.
+                let retained = frame_cost.saturating_mul(ix + 1);
+                frame_limits.max_decoded_bytes = limits.max_decoded_bytes.saturating_sub(retained);
+                frame_limits.max_pixels = limits.max_pixels.saturating_sub((retained / 4) as u64);
+                let frame = match decode_svg_static(xml.as_bytes(), &frame_limits, true) {
+                    Ok(frame) => frame,
+                    Err(ImageFailure::TooLarge { .. } | ImageFailure::TooManyPixels { .. }) => {
+                        return Ok(result);
+                    }
+                    Err(error) => return Err(error),
+                };
+                if (frame.image.width, frame.image.height) != (result.width, result.height) {
+                    return Err(ImageFailure::Malformed);
+                }
+                encoded = encoded.saturating_add(frame.image.bytes.len());
+                if encoded > limits.max_response_bytes {
+                    return Ok(result);
+                }
+                frames.push(DecodedFrame {
+                    at_ms,
+                    bytes: frame.image.bytes,
+                    pixels: frame.pixels,
+                });
             }
-            result.animation = Some(DecodedAnimation { duration_ms, frames });
+            result.animation = Some(DecodedAnimation {
+                duration_ms,
+                frames,
+                final_pixels,
+            });
         }
     }
+    check()?;
     Ok(result)
 }
 fn validated_svg(bytes: &[u8]) -> Result<&str, ImageFailure> {
-    if count_svg_nesting_depth(bytes) > MAX_SVG_XML_DEPTH { return Err(ImageFailure::Malformed); }
+    if count_svg_nesting_depth(bytes) > MAX_SVG_XML_DEPTH {
+        return Err(ImageFailure::Malformed);
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| ImageFailure::Malformed)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let doc = parse_svg(text)?;
-    if !svg_declares_intrinsic_size(&doc.root_element()) { return Err(ImageFailure::Malformed); }
+    if !svg_declares_intrinsic_size(&doc.root_element()) {
+        return Err(ImageFailure::Malformed);
+    }
     validate_svg_xml(&doc)?;
     Ok(text)
 }
 fn parse_svg(text: &str) -> Result<usvg::roxmltree::Document<'_>, ImageFailure> {
-    usvg::roxmltree::Document::parse_with_options(text, usvg::roxmltree::ParsingOptions {
-        allow_dtd: false, nodes_limit: MAX_SVG_XML_NODES as u32, ..Default::default()
-    }).map_err(|err| if matches!(err, usvg::roxmltree::Error::NodesLimitReached) {
-        ImageFailure::TooLarge { limit: MAX_SVG_XML_NODES }
-    } else { ImageFailure::Malformed })
+    usvg::roxmltree::Document::parse_with_options(
+        text,
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: MAX_SVG_XML_NODES as u32,
+            ..Default::default()
+        },
+    )
+    .map_err(|err| {
+        if matches!(err, usvg::roxmltree::Error::NodesLimitReached) {
+            ImageFailure::TooLarge {
+                limit: MAX_SVG_XML_NODES,
+            }
+        } else {
+            ImageFailure::Malformed
+        }
+    })
 }
 
-fn decode_svg_static(bytes: &[u8], limits: &ImageLimits, native_scale: bool) -> Result<DecodedImage, ImageFailure> {
+fn decode_svg_static(
+    bytes: &[u8],
+    limits: &ImageLimits,
+    native_scale: bool,
+) -> Result<RenderedSvg, ImageFailure> {
     if count_svg_nesting_depth(bytes) > MAX_SVG_XML_DEPTH {
         return Err(ImageFailure::Malformed);
     }
@@ -353,10 +451,18 @@ fn decode_svg_static(bytes: &[u8], limits: &ImageLimits, native_scale: bool) -> 
 
     validate_svg_xml(&doc)?;
 
-    let mut options = svg_usvg_options(limits);
+    let resources = Arc::new(std::sync::Mutex::new((
+        0usize,
+        0u64,
+        doc.descendants().count(),
+    )));
+    let mut options = svg_options_with_budget(limits, 0, resources.clone());
     options.fontdb = svg_fontdb();
 
     let tree = usvg::Tree::from_xmltree(&doc, &options).map_err(map_usvg_error)?;
+    if !tree.patterns().is_empty() {
+        return Err(ImageFailure::Unsupported);
+    }
     let svg_size = tree.size();
     let intrinsic_w = svg_size.width();
     let intrinsic_h = svg_size.height();
@@ -393,10 +499,37 @@ fn decode_svg_static(bytes: &[u8], limits: &ImageLimits, native_scale: bool) -> 
         });
     }
 
-    let (render_w, render_h) = if native_scale { (width,height) } else { compute_svg_render_size(intrinsic_w, intrinsic_h, limits) };
+    let (mut render_w, mut render_h) = if native_scale {
+        (width, height)
+    } else {
+        compute_svg_render_size(intrinsic_w, intrinsic_h, limits)
+    };
+    let embedded_pixels = resources.lock().map_err(|_| ImageFailure::Malformed)?.1;
+    let scratch_cap = limits.max_pixels.min((limits.max_decoded_bytes / 4) as u64);
+    if !native_scale
+        && super::workspace::pixels(&tree, render_w, render_h, embedded_pixels) > scratch_cap
+    {
+        (render_w, render_h) = (width, height);
+    }
+    if super::workspace::pixels(&tree, render_w, render_h, embedded_pixels) > scratch_cap {
+        return Err(ImageFailure::TooLarge {
+            limit: limits.max_decoded_bytes,
+        });
+    }
     let render_pixels = u64::from(render_w).saturating_mul(u64::from(render_h));
     if render_pixels > limits.max_pixels
         || render_pixels.saturating_mul(4) > limits.max_decoded_bytes as u64
+    {
+        return Err(ImageFailure::TooLarge {
+            limit: limits.max_decoded_bytes,
+        });
+    }
+
+    if render_pixels.saturating_add(embedded_pixels) > limits.max_pixels
+        || render_pixels
+            .saturating_add(embedded_pixels)
+            .saturating_mul(4)
+            > limits.max_decoded_bytes as u64
     {
         return Err(ImageFailure::TooLarge {
             limit: limits.max_decoded_bytes,
@@ -410,7 +543,15 @@ fn decode_svg_static(bytes: &[u8], limits: &ImageLimits, native_scale: bool) -> 
         render_w as f32 / intrinsic_w,
         render_h as f32 / intrinsic_h,
     );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let root_opacity = super::timeline::root_opacity(&doc);
+    if root_opacity > 0.0 {
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+    }
+    if root_opacity < 1.0 {
+        for channel in pixmap.data_mut() {
+            *channel = (f32::from(*channel) * root_opacity).round() as u8;
+        }
+    }
 
     // Demultiply tiny-skia's premultiplied RGBA into straight RGBA for PNG.
     let mut rgba = pixmap.take();
@@ -437,12 +578,22 @@ fn decode_svg_static(bytes: &[u8], limits: &ImageLimits, native_scale: bool) -> 
         });
     }
 
-    Ok(DecodedImage {
-        format: ImageFormat::Png,
-        width,
-        height,
-        bytes: png_bytes,
-        animation: None,
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Ok(RenderedSvg {
+        image: DecodedImage {
+            format: ImageFormat::Png,
+            width,
+            height,
+            bytes: png_bytes,
+            animation: None,
+        },
+        pixels: DecodedPixels {
+            width: render_w,
+            height: render_h,
+            bgra: rgba,
+        },
     })
 }
 
@@ -662,11 +813,11 @@ fn validate_svg_xml(doc: &usvg::roxmltree::Document<'_>) -> Result<(), ImageFail
     Ok(())
 }
 
-fn svg_usvg_options(limits: &ImageLimits) -> usvg::Options<'static> {
-    svg_options_with_budget(limits, 0, Arc::new(std::sync::Mutex::new((0usize, 0u64))))
-}
-
-fn svg_options_with_budget(limits: &ImageLimits, depth: usize, budget: Arc<std::sync::Mutex<(usize,u64)>>) -> usvg::Options<'static> {
+fn svg_options_with_budget(
+    limits: &ImageLimits,
+    depth: usize,
+    budget: Arc<std::sync::Mutex<(usize, u64, usize)>>,
+) -> usvg::Options<'static> {
     let embedded_limits = limits.clone();
     let mut options = usvg::Options {
         // Never read files from disk or follow non-data hrefs inside `<image>`.
@@ -679,22 +830,49 @@ fn svg_options_with_budget(limits: &ImageLimits, depth: usize, budget: Arc<std::
                 {
                     let mut used = budget.lock().ok()?;
                     used.0 = used.0.checked_add(data.len())?;
-                    if used.0 > MAX_SVG_EMBEDDED_DATA_BYTES { return None; }
+                    if used.0 > MAX_SVG_EMBEDDED_DATA_BYTES {
+                        return None;
+                    }
                 }
                 if mime == "image/svg+xml" {
                     let text = validated_svg(&data).ok()?;
                     let doc = parse_svg(text).ok()?;
-                    let timeline = super::timeline::Timeline::new(&doc);
+                    {
+                        let mut used = budget.lock().ok()?;
+                        used.2 = used.2.checked_add(doc.descendants().count())?;
+                        if used.2 > MAX_SVG_XML_NODES {
+                            return None;
+                        }
+                    }
+                    let timeline = super::timeline::Timeline::new(&doc).ok()?;
                     let xml = timeline.sample(text, timeline.duration_ms);
-                    let mut nested = svg_options_with_budget(&embedded_limits,depth+1,budget.clone());
+                    let mut nested =
+                        svg_options_with_budget(&embedded_limits, depth + 1, budget.clone());
                     nested.fontdb = svg_fontdb();
-                    let tree = usvg::Tree::from_str(&xml,&nested).ok()?;
+                    let normalized = parse_svg(&xml).ok()?;
+                    if super::timeline::root_opacity(&normalized) == 0.0 {
+                        return None;
+                    }
+                    let tree = usvg::Tree::from_xmltree(&normalized, &nested).ok()?;
+                    if !tree.patterns().is_empty() {
+                        return None;
+                    }
                     let size = tree.size();
-                    let pixels = (size.width().ceil() as u64).checked_mul(size.height().ceil() as u64)?;
-                    if size.width() > embedded_limits.max_dimension as f32 || size.height() > embedded_limits.max_dimension as f32 { return None; }
+                    let pixels =
+                        (size.width().ceil() as u64).checked_mul(size.height().ceil() as u64)?;
+                    if size.width() > embedded_limits.max_dimension as f32
+                        || size.height() > embedded_limits.max_dimension as f32
+                    {
+                        return None;
+                    }
                     let mut used = budget.lock().ok()?;
-                    used.1 = used.1.checked_add(pixels)?;
-                    if used.1 > embedded_limits.max_pixels || used.1.saturating_mul(4) > embedded_limits.max_decoded_bytes as u64 { return None; }
+                    let next = used.1.checked_add(pixels)?;
+                    if next.saturating_mul(2) > embedded_limits.max_pixels
+                        || next.saturating_mul(8) > embedded_limits.max_decoded_bytes as u64
+                    {
+                        return None;
+                    }
+                    used.1 = next;
                     return Some(usvg::ImageKind::SVG(tree));
                 }
                 // `usvg` only wraps these bytes; `resvg` decodes them later with
@@ -721,15 +899,50 @@ fn svg_options_with_budget(limits: &ImageLimits, depth: usize, budget: Arc<std::
                 {
                     return None;
                 }
+                let canonical_gif = if format == image::ImageFormat::Gif {
+                    // resvg's GIF decoder allocates the first frame's own grid,
+                    // which can exceed the logical-screen header. Decode under
+                    // image::Limits and flatten that frame to a bounded PNG.
+                    let mut reader =
+                        image::ImageReader::with_format(Cursor::new(data.as_slice()), format);
+                    let mut limits = image::Limits::default();
+                    limits.max_image_width = Some(embedded_limits.max_dimension);
+                    limits.max_image_height = Some(embedded_limits.max_dimension);
+                    limits.max_alloc = Some(embedded_limits.max_decoded_bytes as u64);
+                    reader.limits(limits);
+                    let rgba = reader.decode().ok()?.into_rgba8();
+                    let mut png = Vec::new();
+                    image::codecs::png::PngEncoder::new(&mut png)
+                        .write_image(
+                            rgba.as_raw(),
+                            width,
+                            height,
+                            image::ExtendedColorType::Rgba8,
+                        )
+                        .ok()?;
+                    let mut used = budget.lock().ok()?;
+                    used.0 = used.0.checked_add(png.len())?;
+                    if used.0 > MAX_SVG_EMBEDDED_DATA_BYTES {
+                        return None;
+                    }
+                    Some(Arc::new(png))
+                } else {
+                    None
+                };
                 {
                     let mut used = budget.lock().ok()?;
-                    used.1 = used.1.checked_add(pixels)?;
-                    if used.1 > embedded_limits.max_pixels || used.1.saturating_mul(4) > embedded_limits.max_decoded_bytes as u64 { return None; }
+                    let next = used.1.checked_add(pixels)?;
+                    if next.saturating_mul(2) > embedded_limits.max_pixels
+                        || next.saturating_mul(8) > embedded_limits.max_decoded_bytes as u64
+                    {
+                        return None;
+                    }
+                    used.1 = next;
                 }
                 Some(match format {
                     image::ImageFormat::Jpeg => usvg::ImageKind::JPEG(data),
                     image::ImageFormat::Png => usvg::ImageKind::PNG(data),
-                    image::ImageFormat::Gif => usvg::ImageKind::GIF(data),
+                    image::ImageFormat::Gif => usvg::ImageKind::PNG(canonical_gif?),
                     image::ImageFormat::WebP => usvg::ImageKind::WEBP(data),
                     _ => return None,
                 })

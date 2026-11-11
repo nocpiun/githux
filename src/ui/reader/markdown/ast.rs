@@ -406,7 +406,7 @@ pub fn parse(markdown: &str) -> Document {
     let mut hidden_blocks: Vec<(TagEnd, usize)> = Vec::new();
     // Every Markdown span remembers whether it started in a dropped region.
     // Its end must use that ownership even if suppression has since changed.
-    let mut html_centers: Vec<usize> = Vec::new();
+    let mut html_centers: Vec<Option<usize>> = Vec::new();
     let mut inline_visibility = Vec::new();
 
     fn finish_inline(
@@ -463,11 +463,7 @@ pub fn parse(markdown: &str) -> Document {
         } else if !inline.is_empty() {
             out.push(Block::Paragraph(inline));
         }
-        if notes.len() > 1 && images_only {
-            out.push(Block::ImageRow(notes.into_iter().filter_map(|b| match b { Block::Image{alt,url,hints} => Some((alt,url,hints)), _ => None }).collect()));
-        } else {
-            out.extend(notes);
-        }
+        append_picture_notes(notes, images_only, out);
     }
 
     for event in Parser::new_ext(markdown, options) {
@@ -937,11 +933,34 @@ pub fn parse(markdown: &str) -> Document {
                 // like a dropped opening but is still markup context.
                 let text = std::mem::take(&mut html_buffer);
                 let elements = html::parse(&text);
-                let opening_center = elements.iter().any(|n| matches!(n, Node::Element(e) if e.name == "div" && e.attr("align").is_some_and(|v| v.eq_ignore_ascii_case("center")) && !e.closed));
-                if opening_center { html_centers.push(output_len(&stack)); }
-                if text.trim().eq_ignore_ascii_case("</div>") && let Some(start) = html_centers.pop() {
-                    let out = match stack.last_mut() { Some(Container::Blocks{out,..}) => Some(out), Some(Container::List{current,..}) => Some(current), _ => None };
-                    if let Some(out) = out && start < out.len() { let body = out.drain(start..).collect(); out.push(Block::Centered(body)); }
+                for node in &elements {
+                    if let Node::Element(e) = node
+                        && e.name == "div"
+                        && !e.closed
+                    {
+                        let start = (html_centers.len() < 256
+                            && e.attr("align")
+                                .is_some_and(|v| v.eq_ignore_ascii_case("center")))
+                        .then(|| output_len(&stack));
+                        // Extra openings still own their closes, but do not
+                        // create an unbounded recursive presentation tree.
+                        html_centers.push(start);
+                    }
+                }
+                if text.trim().eq_ignore_ascii_case("</div>")
+                    && let Some(Some(start)) = html_centers.pop()
+                {
+                    let out = match stack.last_mut() {
+                        Some(Container::Blocks { out, .. }) => Some(out),
+                        Some(Container::List { current, .. }) => Some(current),
+                        _ => None,
+                    };
+                    if let Some(out) = out
+                        && start < out.len()
+                    {
+                        let body = out.drain(start..).collect();
+                        out.push(Block::Centered(body));
+                    }
                     continue;
                 }
                 if let Some((name, depth)) = dropped.clone() {
@@ -991,17 +1010,31 @@ pub fn parse(markdown: &str) -> Document {
         Some(Container::Blocks { out, .. }) => out,
         _ => Vec::new(),
     };
-    let mut headings = Vec::new();
-    for (ix, block) in blocks.iter().enumerate() {
-        if let Block::Heading(level, inline) = block {
-            headings.push(Heading {
+    let headings = headings(&blocks);
+    Document { blocks, headings }
+}
+
+pub fn headings(blocks: &[Block]) -> Vec<Heading> {
+    fn collect(block: &Block, index: usize, out: &mut Vec<Heading>) {
+        match block {
+            Block::Heading(level, inline) => out.push(Heading {
                 level: *level,
                 title: inline.text.clone(),
-                block: ix,
-            });
+                block: index,
+            }),
+            Block::Centered(body) => {
+                for child in body {
+                    collect(child, index, out);
+                }
+            }
+            _ => {}
         }
     }
-    Document { blocks, headings }
+    let mut out = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        collect(block, index, &mut out);
+    }
+    out
 }
 
 fn open(inline: &mut Option<(Option<u8>, Building)>, what: Open, in_cell: bool) {
@@ -1176,6 +1209,24 @@ fn blocks_from_nodes(nodes: &[Node], out: &mut Vec<Block>) {
     flush_html_run(&mut run, &mut notes, &mut opens, out);
 }
 
+fn append_picture_notes(notes: Vec<Block>, images_only: bool, out: &mut Vec<Block>) {
+    if notes.len() > 1 && images_only && notes.iter().all(|b| matches!(b, Block::Image { .. })) {
+        let mut pictures = notes
+            .into_iter()
+            .filter_map(|b| match b {
+                Block::Image { alt, url, hints } => Some((alt, url, hints)),
+                _ => None,
+            })
+            .peekable();
+        while pictures.peek().is_some() {
+            // An exceptionally long badge paragraph must remain virtualizable.
+            out.push(Block::ImageRow(pictures.by_ref().take(64).collect()));
+        }
+    } else {
+        out.extend(notes);
+    }
+}
+
 fn flush_html_run(
     run: &mut Inline,
     notes: &mut Vec<Block>,
@@ -1184,10 +1235,11 @@ fn flush_html_run(
 ) {
     close_html_opens(opens, run);
     trim_inline_end(run);
-    if !run.is_empty() {
+    let images_only = run.is_empty();
+    if !images_only {
         out.push(Block::Paragraph(std::mem::take(run)));
     }
-    out.append(notes);
+    append_picture_notes(std::mem::take(notes), images_only, out);
 }
 
 /// Build the inline content of a heading or table cell.
@@ -1209,6 +1261,7 @@ fn block_from_element(element: &Element, out: &mut Vec<Block>) {
     if html::is_dropped(name) {
         return;
     }
+    let start = out.len();
     match name {
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             let level = name.as_bytes()[1] - b'0';
@@ -1249,6 +1302,15 @@ fn block_from_element(element: &Element, out: &mut Vec<Block>) {
             out.extend(notes);
         }
         _ => blocks_from_nodes(&element.children, out),
+    }
+    if element.closed
+        && element
+            .attr("align")
+            .is_some_and(|v| v.eq_ignore_ascii_case("center"))
+        && out.len() > start
+    {
+        let body = out.drain(start..).collect();
+        out.push(Block::Centered(body));
     }
 }
 
@@ -1881,13 +1943,13 @@ mod quote_heading_test {
     }
 }
 
-
 #[cfg(test)]
 mod profile_media_regressions {
     use super::*;
     #[test]
     fn center_container_keeps_image_paragraphs_grouped_and_blank_lines_separate_rows() {
-        let read = parse("<div align=\"center\">
+        let read = parse(
+            "<div align=\"center\">
 
 # Heading
 
@@ -1900,13 +1962,89 @@ mod profile_media_regressions {
 
 </div>
 
-## Links");
-        let Block::Centered(body) = &read.blocks[0] else { panic!("{:?}",read.blocks); };
-        assert!(matches!(&body[0],Block::Heading(1,_)));
+## Links",
+        );
+        let Block::Centered(body) = &read.blocks[0] else {
+            panic!("{:?}", read.blocks);
+        };
+        assert!(matches!(&body[0], Block::Heading(1, _)));
         assert!(matches!(&body[1],Block::Image{url,..} if url == "card.svg"));
-        assert!(matches!(&body[2],Block::ImageRow(images) if images.len() == 2 && images[0].1 == "a.svg" && images[1].1 == "b.svg"));
-        assert!(matches!(&body[3],Block::ImageRow(images) if images.len() == 2 && images[0].1 == "c.svg"));
-        assert_eq!(body.len(),4,"no comment/alt-only/whitespace paragraphs");
-        assert!(matches!(&read.blocks[1],Block::Heading(2,_)),"center scope closes before Links");
+        assert!(
+            matches!(&body[2],Block::ImageRow(images) if images.len() == 2 && images[0].1 == "a.svg" && images[1].1 == "b.svg")
+        );
+        assert!(
+            matches!(&body[3],Block::ImageRow(images) if images.len() == 2 && images[0].1 == "c.svg")
+        );
+        assert_eq!(body.len(), 4, "no comment/alt-only/whitespace paragraphs");
+        assert!(
+            matches!(&read.blocks[1], Block::Heading(2, _)),
+            "center scope closes before Links"
+        );
+    }
+}
+
+#[cfg(test)]
+mod html_picture_row_regressions {
+    use super::*;
+    #[test]
+    fn html_image_paragraph_preserves_grouping_hints_and_center_scope() {
+        let doc = parse(
+            "<p align=\"center\"><img src=\"a.svg\" width=\"30\"/><img src=\"b.svg\" height=\"20\"/></p>",
+        );
+        let Block::Centered(body) = &doc.blocks[0] else {
+            panic!("{:?}", doc.blocks);
+        };
+        let Block::ImageRow(images) = &body[0] else {
+            panic!("{body:?}");
+        };
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].2.width, Some(30));
+        assert_eq!(images[1].2.height, Some(20));
+    }
+}
+
+#[cfg(test)]
+mod media_model_bounds {
+    use super::*;
+    #[test]
+    fn centered_fragments_and_long_image_paragraphs_keep_bounded_render_units() {
+        let markdown = format!(
+            "{}![image](a.svg)
+
+{}",
+            "<div align=\"center\">
+
+"
+            .repeat(1000),
+            "</div>
+
+"
+            .repeat(1000)
+        );
+        let parsed = parse(&markdown);
+        let mut stack = parsed
+            .blocks
+            .iter()
+            .map(|b| (b, 0usize))
+            .collect::<Vec<_>>();
+        let mut max_depth = 0;
+        while let Some((block, depth)) = stack.pop() {
+            max_depth = max_depth.max(depth);
+            if let Block::Centered(body) = block {
+                stack.extend(body.iter().map(|b| (b, depth + 1)));
+            }
+        }
+        assert!(
+            max_depth <= 256,
+            "cross-fragment HTML cannot bypass the nesting bound: {max_depth}"
+        );
+        let parsed = parse(&"![badge](badge.svg) ".repeat(200));
+        assert_eq!(parsed.blocks.len(), 4);
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .all(|b| matches!(b,Block::ImageRow(images) if images.len() <= 64))
+        );
     }
 }

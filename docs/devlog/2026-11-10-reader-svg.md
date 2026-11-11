@@ -1,9 +1,42 @@
-# README 静态 SVG 支持 (`reader-svg`)
+# README SVG 渲染与有限 CSS 动画 (`reader-svg`)
 
-- 日期：2026-11-10（Asia/Shanghai）。任务 ID `reader-svg`，分支 `fix/reader-svg`，base `0c619070be103048f9aa033f2f57520372cbebb2`。PR 链接待创建后补充。
-- 目标与状态：实现中（本地代码与文档已完成，待运行验证与提交 PR）。修复用户问题 5：Markdown 阅读器中的静态 SVG 徽章、GitHub 统计卡片与 Star History 图表经现有授权图片管线与缓存路径光栅化显示，而非报错 `unsupported picture format`。
+- 任务 ID `reader-svg`，同一分支 `fix/reader-svg`、同一 [PR #82](https://github.com/nocpiun/githux/pull/82)。初始 base `0c619070be103048f9aa033f2f57520372cbebb2`；2026-11-11 返工已整合 main `8cad76bb78e4848099339fec4385c3175c5a0fbd` 的已验收字体、Profile 与图片布局，不合并 PR，`merge_owner=coordinator`。
+- 状态：**2026-11-11 负责人否决初次静态交付，返工中**。此前 clean Codex/CI 和有效 PNG 不能证明实际 Profile 内容正确，也不构成人工验收。以下初次静态实现与检查为历史记录；当前行为契约以 [README 图片](../reader-images.md) 为准。
 
-## 改动与决定
+## 2026-11-11 负责人反馈后的集成返工
+
+负责人提供了真实 Profile README 与三份公开 SVG 响应，先读取本地证据再实现，没有把原始响应或用户 Profile 复制进 Git fixture：
+
+- Stats 的 `.stagger` 基础 opacity 为零，依赖 `fadeInAnimation`、450–1050ms 行延迟、forwards fill 才显示；rank 还有 translate/scale 与 stroke-dashoffset 时间线。静态 resvg 会永久保留隐身基础状态。
+- Shields badge 的 logo 是 `data:image/svg+xml`；初次 resolver 拒绝全部嵌套 SVG，所以文字/背景出现而图标缺失。
+- 440×200 roast 是普通 SVG，使用 CSS 自定义属性与 fallback、CJK 字体和内嵌 PNG；不能归因成 foreignObject 或 HTTP 失败。
+- 已验收 #81 解决比例钳制、成功图片背景和作者尺寸提示。残留的一徽章一行来自 AST 把同一段落的图片拆成独立块；本轮保留 #81 的几何语义，并在模型中保留纯图片段落和居中作用域。
+
+实现采用受限声明式时间线，不引入浏览器、不执行脚本、不按主机名或内容打补丁：
+
+1. `timeline.rs` 使用 simplecss 的 selector matcher 与有界 CSS declaration/keyframe 扫描；支持所供样本的 delay、easing、fill-mode、opacity、translate/scale 和 dashoffset。自定义属性、fallback、`!important` 和静态隐藏独立处理。simplecss 的 CSS 2.1 declaration parser 不接受 `--name`，由实测中 fallback 色与变量色不同的失败断言确认，因此只复用其 selector 能力，变量声明另作有界解析。
+2. 后台准备最多五秒/100 帧，最终 PNG 仍在 `DecodedImage` 原字段中；新增可选 `animation` 元数据携带有限 PNG 帧与时间戳，四个 raster 格式变体不变。帧总额计入图片预算；取消/截止时间在各帧之间检查。超时长/超预算的受支持动画使用最终静态 fallback，并明确不是动画验收结果。
+3. 内嵌 SVG 同样验证 XML、主动内容与外部资源边界；递归、节点、字节、累计解码成本都有上限。GIF 先受限解码到 PNG，防止 frame 网格与逻辑头不一致。绘制前检查 canvas/隔离组/滤镜 scratch surfaces，避免小画布叠大量 opacity 层绕过分配预算；超采样可退回固有网格。未能约束 tile 分配的 SVG patterns 暂不接受。
+4. Reader 只选择单个、已解码 BGRA8 的 `RenderImage`，复用既有 pump；中间帧不重测尺寸。第一次 Windows 启动序列的原生捕获发现，逐帧切换 PNG `Image` 会让 GPUI 每次异步解码，产生整张卡片短暂消失的闪烁；因此像素在 provider 中一并准备，UI 只封装现成 buffer，包括最终帧，不在每拍重新解码。已保留帧与当前 scratch 工作面共同扣减解码预算。实际可见绘制开始时间线，完成、reduced motion、暂停/离屏后转为最终 PNG 并释放其余帧。替换文档/账户不保留旧帧。
+5. `ImageRow` 保留纯图片段落的软换行；空行另起段落。`Centered` 在绘制前仍按段落拆成独立虚拟项，标题和文档 unit 的顶层索引随之重建；Ready 不再强制 alt caption。#81 的透明、native/requested sizing 与缩小适配保留。
+6. 接手并补齐 resvg/usvg/tiny-skia 许可文本、哈希与 notices；保留 #78 的 Noto Sans SC 字体 notices。simplecss/svgtypes 复用 usvg 的既有锁定版本。
+
+已完成的本地调查（不等于原生验收）：公开三份响应经过当前解码器的 probe，Stats 为 467×195、27 个采样帧 + 最终帧、10,199,280 decoded bytes；600ms 只有首个延迟行部分出现，最终全部行/值与 rank 可见；roast 为 440×200，CJK 文案、雷达、头像均可见；badge 为 83×20，JS logo 可见。另将 README 的其余徽章无凭据读取为本地响应集合，供 21 个真实图片 URL 的离线原生组合检查，未提交用户素材。
+
+本轮回归断言真实内容的像素和布局：中间/最终行、数值文本区域、rank 缩放、隐藏区域、变量色、logo 空心透明细节、节点/资源/隔离层预算、取消、离屏/暂停/文档切换、缓存重开后的动画，以及行内徽章的 x/y/尺寸/段落间距。最终运行记录待下方补齐，不沿用初次静态交付的通过状态。
+
+### 原生组合证据（2026-11-11）
+
+构建 `githux.exe` 与 `reader_images.exe` 后，在 Kero project `m5d2w59` 的唯一任务 helper 中运行 `reader_images "SVG profile"`；临时 fixture 账户使用合成 token，21 个公开 URL 全部从本地响应 manifest 应答，无实时网络、无真实 PAT。所供 README 原文与公开素材未纳入 Git。
+
+- Windows 150% DPI，原生窗口为 1792×1286 设备像素。普通 screen-copy 捕获到了 Windows 锁屏，未作产品证据；改用仅对本任务窗口的 `PrintWindow(PW_RENDERFULLCONTENT)`，并将捕获线程置为 per-monitor DPI-aware，避免把虚拟化坐标下的半幅截图误判为布局右移。不解锁桌面、不操作其他用户窗口。
+- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,384ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **3,385ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
+- 同一真实窗口中 roast 的中文、雷达、头像与页脚细节可读；Stats 全部行/数值与 rank 保留；19 枚徽章按所供 README 的四个段落成组居中，logo 可见，成功图片没有 alt 图注或 140px 段间占位。后面的 Links 回到普通左对齐。
+- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张捕获留在同目录。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
+
+验证边界：原生渲染捕获成功；桌面保持锁定，未宣称真实鼠标/键盘手动验收、真实 PAT 的正式 Profile 页面 dogfooding 或跨平台原生验收。正式应用另做构建与测试；最终接受/解除 blocked/合并仍由负责人或协调者执行。
+
+## 初次静态交付的改动与决定（历史）
 
 ### 1. 光栅化库选型与依赖
 
@@ -38,7 +71,7 @@
 - `src/data/reader_images_tests.rs`：新增端到端 provider + 持久化缓存 + 离线重开 + `CredentialRejected` 撤权隔离 SVG 回归。
 - `docs/reader-images.md`、`docs/devlog/2026-11-10-reader-svg.md`：更新当前支持能力与边界文档。
 
-## 验证
+## 初次静态交付的验证（历史）
 
 全部通过 `node scripts/verify.mjs` 串行执行（共享 Windows Cargo mutex），过程记录在 `.agents/task/runs/`：
 

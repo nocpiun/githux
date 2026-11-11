@@ -25,11 +25,15 @@
 //! * No cache is shared between readers. Two readers showing the same picture
 //!   have independent state, independent cancellation and independent memory.
 
-mod timeline;
 mod decode;
+mod timeline;
+mod workspace;
 
 #[allow(unused_imports)]
-pub use decode::{DecodedAnimation, DecodedFrame, DecodedImage, ImageFormat, decode_image, detect_format, is_svg_like};
+pub use decode::{
+    DecodedAnimation, DecodedFrame, DecodedImage, DecodedPixels, ImageFormat, decode_image,
+    decode_image_checked, detect_format, is_svg_like,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

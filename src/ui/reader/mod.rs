@@ -808,7 +808,9 @@ impl ReaderView {
         }
         self.drain_images(cx);
         if self.images.borrow_mut().animate(cx.reduce_motion()) {
-            if let Some(document) = self.markdown().cloned() { document.update(cx, |_,cx| cx.notify()); }
+            if let Some(document) = self.markdown().cloned() {
+                document.update(cx, |_, cx| cx.notify());
+            }
             cx.notify();
         }
         self.dispatch_images(cx);

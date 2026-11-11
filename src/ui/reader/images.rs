@@ -53,7 +53,7 @@ pub(super) enum ImageState {
     /// A provider is fetching or decoding it.
     Loading,
     /// Ready to draw, with its intrinsic pixel size.
-    Ready(Arc<Image>, u32, u32),
+    Ready(ImageSource, u32, u32),
     /// The load failed or the address was refused.
     Failed(ImageFailure),
     /// Released to keep the document's decoded-picture budget.
@@ -86,8 +86,8 @@ struct Playback {
     accepted: std::time::Instant,
     last_visible: Option<std::time::Instant>,
     duration_ms: u32,
-    frames: Vec<(u32,Arc<Image>)>,
-    final_image: Arc<Image>,
+    frames: Vec<(u32, ImageSource)>,
+    final_image: ImageSource,
     frame: usize,
     extra_bytes: usize,
 }
@@ -103,7 +103,7 @@ pub(crate) struct ImageBoard {
     states: HashMap<ImageKey, ImageState>,
     ready_order: VecDeque<ImageKey>,
     ready_bytes: usize,
-    ready_costs: HashMap<ImageKey,usize>,
+    ready_costs: HashMap<ImageKey, usize>,
     pending: VecDeque<ImageRequest>,
     /// Requests handed to the provider that have not completed or been
     /// cancelled. Their completions arrive through the sink.
@@ -144,33 +144,65 @@ impl ImageBoard {
 
     pub(super) fn animate(&mut self, reduced_motion: bool) -> bool {
         let now = std::time::Instant::now();
-        let mut finished = Vec::new(); let mut changed = false;
-        for (key,playback) in &mut self.animations {
-            if reduced_motion { finished.push(key.clone()); continue; }
+        let mut finished = Vec::new();
+        let mut changed = false;
+        for (key, playback) in &mut self.animations {
+            if reduced_motion {
+                finished.push(key.clone());
+                continue;
+            }
             let Some(started) = playback.started else {
-                    if now.duration_since(playback.accepted).as_millis() >= 150 { finished.push(key.clone()); }
-                    continue;
-                };
-                if playback.last_visible.is_none_or(|at| now.duration_since(at).as_millis() >= 150) { finished.push(key.clone()); continue; }
-                let elapsed = now.duration_since(started).as_millis() as u32;
-            if reduced_motion || elapsed >= playback.duration_ms { finished.push(key.clone()); continue; }
-            let index = playback.frames.partition_point(|(at,_)| *at <= elapsed).saturating_sub(1);
+                if now.duration_since(playback.accepted).as_millis() >= 150 {
+                    finished.push(key.clone());
+                }
+                continue;
+            };
+            if playback
+                .last_visible
+                .is_none_or(|at| now.duration_since(at).as_millis() >= 150)
+            {
+                finished.push(key.clone());
+                continue;
+            }
+            let elapsed = now.duration_since(started).as_millis() as u32;
+            if reduced_motion || elapsed >= playback.duration_ms {
+                finished.push(key.clone());
+                continue;
+            }
+            let index = playback
+                .frames
+                .partition_point(|(at, _)| *at <= elapsed)
+                .saturating_sub(1);
             if playback.frame != index {
                 playback.frame = index;
-                if let Some(ImageState::Ready(image,..)) = self.states.get_mut(key) { *image = playback.frames[index].1.clone(); changed = true; }
+                if let Some(ImageState::Ready(image, ..)) = self.states.get_mut(key) {
+                    *image = playback.frames[index].1.clone();
+                    changed = true;
+                }
             }
         }
-        for key in finished { self.finish_animation(&key); changed = true; }
+        for key in finished {
+            self.finish_animation(&key);
+            changed = true;
+        }
         changed
     }
     fn finish_animation(&mut self, key: &ImageKey) {
         if let Some(playback) = self.animations.remove(key) {
-            if let Some(ImageState::Ready(image,..)) = self.states.get_mut(key) { *image = playback.final_image; }
+            if let Some(ImageState::Ready(image, ..)) = self.states.get_mut(key) {
+                *image = playback.final_image;
+            }
             self.ready_bytes = self.ready_bytes.saturating_sub(playback.extra_bytes);
-            if let Some(cost) = self.ready_costs.get_mut(key) { *cost = cost.saturating_sub(playback.extra_bytes); }
+            if let Some(cost) = self.ready_costs.get_mut(key) {
+                *cost = cost.saturating_sub(playback.extra_bytes);
+            }
         }
     }
-    fn finish_animations(&mut self) { for key in self.animations.keys().cloned().collect::<Vec<_>>() { self.finish_animation(&key); } }
+    fn finish_animations(&mut self) {
+        for key in self.animations.keys().cloned().collect::<Vec<_>>() {
+            self.finish_animation(&key);
+        }
+    }
 
     pub(super) fn sink(&self) -> ImageSink {
         self.sink.clone()
@@ -277,6 +309,7 @@ impl ImageBoard {
     /// Dropped by a provider replacement, a document change or suspension.
     /// A block that still wants a picture asks again on the next frame.
     pub(super) fn forget_unfinished(&mut self) {
+        self.finish_animations();
         self.pending.clear();
         self.in_flight = 0;
         self.blocks.clear();
@@ -315,14 +348,34 @@ impl ImageBoard {
             Ok(decoded) => {
                 let format = gpui_format(decoded.format);
                 let bytes = decoded.decoded_bytes();
-                let image = Arc::new(Image::from_bytes(format, decoded.bytes));
-                let mut displayed = image.clone();
+                let mut displayed;
                 if let Some(animation) = decoded.animation {
-                    let frames = animation.frames.into_iter().map(|f| (f.at_ms,Arc::new(Image::from_bytes(format,f.bytes)))).collect::<Vec<_>>();
-                    if let Some((_,first)) = frames.first() {
+                    let image = decoded_pixels_source(animation.final_pixels);
+                    displayed = image.clone();
+                    let frames = animation
+                        .frames
+                        .into_iter()
+                        .map(|f| (f.at_ms, decoded_pixels_source(f.pixels)))
+                        .collect::<Vec<_>>();
+                    if let Some((_, first)) = frames.first() {
                         displayed = first.clone();
-                        self.animations.insert(key.clone(),Playback { started: None, accepted: std::time::Instant::now(), last_visible: None, duration_ms: animation.duration_ms, frame: 0, extra_bytes: bytes.saturating_sub(bytes/(frames.len()+1)), frames, final_image: image });
+                        self.animations.insert(
+                            key.clone(),
+                            Playback {
+                                started: None,
+                                accepted: std::time::Instant::now(),
+                                last_visible: None,
+                                duration_ms: animation.duration_ms,
+                                frame: 0,
+                                extra_bytes: bytes.saturating_sub(bytes / (frames.len() + 1)),
+                                frames,
+                                final_image: image,
+                            },
+                        );
                     }
+                } else {
+                    displayed =
+                        ImageSource::Image(Arc::new(Image::from_bytes(format, decoded.bytes)));
                 }
                 *state = ImageState::Ready(displayed, decoded.width, decoded.height);
                 self.ready_costs.insert(key.clone(), bytes);
@@ -394,6 +447,14 @@ impl ImageBoard {
         states.sort();
         states
     }
+}
+
+fn decoded_pixels_source(pixels: crate::content::images::DecodedPixels) -> ImageSource {
+    let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.bgra)
+        .expect("validated BGRA frame dimensions");
+    ImageSource::Render(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+        buffer,
+    )])))
 }
 
 fn gpui_format(format: ImageFormat) -> GpuiImageFormat {
@@ -521,17 +582,18 @@ pub(super) fn image_element(
                 .w_full()
                 .max_w(px(display_width))
                 .aspect_ratio(display_ratio);
-            let picture = img(ImageSource::Image(image.clone()))
+            let picture = img(image.clone())
                 .id(id)
                 .absolute()
                 .inset_0()
                 .size_full()
                 .object_fit(ObjectFit::Contain);
-            // Left-aligned like GitHub's README rendering: the picture, then
-            // its alt text as a caption in the same column.
+            // Retain #81's requested/intrinsic sizing and transparent frame.
+            // A successful image has an inline-sized box and no forced caption.
             div()
                 .debug_selector(move || selector.clone())
-                .w_full()
+                .w(px(display_width))
+                .max_w_full()
                 .flex()
                 .flex_col()
                 .items_start()

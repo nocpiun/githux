@@ -1,0 +1,11 @@
+<!-- Original minimal CSS-variable/CJK card regression, shaped after the public
+     ghfind radar card response inspected 2026-11-11; no copied artwork. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="200" viewBox="0 0 440 200">
+<style>:root{--bg:#0a0a0b;--fg:#f4f4f5;--accent:#a97cf5}text{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif}</style>
+<rect x="1" y="1" width="438" height="198" rx="12" fill="var(--bg,#0a0a0b)" stroke="var(--accent,#a97cf5)"/>
+<text x="18" y="35" fill="var(--accent,#a97cf5)" font-size="14">@developer</text>
+<text x="18" y="92" fill="var(--fg,#f4f4f5)" font-size="32" font-weight="700">Lv.80</text>
+<text x="18" y="120" fill="var(--fg,#f4f4f5)" font-size="14">合体 · 开发者</text>
+<path d="M340 45L385 70V120L340 145L300 115V70Z" fill="var(--accent,#a97cf5)" fill-opacity=".22" stroke="var(--accent,#a97cf5)"/>
+<text x="18" y="180" fill="var(--fg,#f4f4f5)" font-size="11">Readable card details</text>
+</svg>

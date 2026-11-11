@@ -606,30 +606,70 @@ fn the_sink_keeps_completions_until_drained() {
     assert!(sink.drain().is_empty());
 }
 
-
 #[test]
 fn declarative_stats_frames_reveal_delayed_contents_and_retain_final_values() {
-    let decoded = decode_image(include_bytes!("fixtures/entry-stats.svg").to_vec(), &ImageLimits::default()).unwrap();
+    let decoded = decode_image(
+        include_bytes!("fixtures/entry-stats.svg").to_vec(),
+        &ImageLimits::default(),
+    )
+    .unwrap();
     let animation = decoded.animation.as_ref().expect("real finite timeline");
-    assert_eq!((decoded.width,decoded.height),(240,100));
-    assert_eq!(animation.duration_ms,1350);
-    let frame_at = |ms:u32| {
-        let bytes = if ms >= animation.duration_ms { &decoded.bytes } else { &animation.frames.iter().rev().find(|f| f.at_ms <= ms).unwrap().bytes };
+    assert_eq!((decoded.width, decoded.height), (240, 100));
+    assert_eq!(animation.duration_ms, 1350);
+    let frame_at = |ms: u32| {
+        let bytes = if ms >= animation.duration_ms {
+            &decoded.bytes
+        } else {
+            &animation
+                .frames
+                .iter()
+                .rev()
+                .find(|f| f.at_ms <= ms)
+                .unwrap()
+                .bytes
+        };
         image::load_from_memory(bytes).unwrap().to_rgba8()
     };
-    let start = frame_at(0); let middle = frame_at(600); let final_frame = frame_at(1350);
-    assert_eq!(start.dimensions(),final_frame.dimensions());
-    assert_eq!(start.get_pixel(12,32).0,[13,17,23,255]);
-    let green = middle.get_pixel(12,32).0[1];
-    assert!(green > 50 && green < 250, "row has intermediate opacity: {green}");
-    assert_eq!(middle.get_pixel(12,72).0,[13,17,23,255],"last delayed row remains hidden");
-    assert_eq!(final_frame.get_pixel(12,32).0,[0,255,0,255]);
-    assert_eq!(final_frame.get_pixel(12,72).0,[0,255,255,255]);
-    assert_eq!(final_frame.get_pixel(105,35).0,[13,17,23,255],"unanimated hidden geometry stays hidden");
-    assert_eq!(start.get_pixel(195,55).0,[13,17,23,255],"rank starts at zero scale");
-    assert_eq!(final_frame.get_pixel(195,55).0,[255,119,0,255],"rank reaches final scale/translation");
-    let text_pixels = final_frame.enumerate_pixels().filter(|(x,y,p)| *x > 28 && *x < 130 && *y > 65 && p.0[1] > 100).count();
-    assert!(text_pixels > 50,"actual final row text is visible ({text_pixels} pixels)");
+    let start = frame_at(0);
+    let middle = frame_at(600);
+    let final_frame = frame_at(1350);
+    assert_eq!(start.dimensions(), final_frame.dimensions());
+    assert_eq!(start.get_pixel(12, 32).0, [13, 17, 23, 255]);
+    let green = middle.get_pixel(12, 32).0[1];
+    assert!(
+        green > 50 && green < 250,
+        "row has intermediate opacity: {green}"
+    );
+    assert_eq!(
+        middle.get_pixel(12, 72).0,
+        [13, 17, 23, 255],
+        "last delayed row remains hidden"
+    );
+    assert_eq!(final_frame.get_pixel(12, 32).0, [0, 255, 0, 255]);
+    assert_eq!(final_frame.get_pixel(12, 72).0, [0, 255, 255, 255]);
+    assert_eq!(
+        final_frame.get_pixel(105, 35).0,
+        [13, 17, 23, 255],
+        "unanimated hidden geometry stays hidden"
+    );
+    assert_eq!(
+        start.get_pixel(195, 55).0,
+        [13, 17, 23, 255],
+        "rank starts at zero scale"
+    );
+    assert_eq!(
+        final_frame.get_pixel(195, 55).0,
+        [255, 119, 0, 255],
+        "rank reaches final scale/translation"
+    );
+    let text_pixels = final_frame
+        .enumerate_pixels()
+        .filter(|(x, y, p)| *x > 28 && *x < 130 && *y > 65 && p.0[1] > 100)
+        .count();
+    assert!(
+        text_pixels > 50,
+        "actual final row text is visible ({text_pixels} pixels)"
+    );
     assert!(decoded.decoded_bytes() <= ImageLimits::default().max_decoded_bytes);
 }
 
@@ -638,11 +678,307 @@ fn svg_custom_properties_and_nested_data_logo_render_actual_details() {
     use base64::Engine;
     let logo = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#fff" d="M2 2h20v20H2z M6 6v12h12V6z" fill-rule="evenodd"/></svg>"##;
     let data = base64::engine::general_purpose::STANDARD.encode(logo);
-    let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><style>:root{{--accent:#a97cf5;--background:#0a0a0b}} text{{fill:var(--accent,#123456)}}</style><rect width="80" height="20" fill="var(--background,#111111)"/><path d="M30 2h10v16H30z" fill="var(--accent,#123456)"/><image x="2" y="2" width="16" height="16" href="data:image/svg+xml;base64,{data}"/><text x="45" y="14" font-size="10">Lv.80</text></svg>"##);
-    let decoded = decode_image(svg.into_bytes(),&ImageLimits::default()).unwrap();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><style>:root{{--accent:#a97cf5;--background:#0a0a0b}} text{{fill:var(--accent,#123456)}}</style><rect width="80" height="20" fill="var(--background,#111111)"/><path d="M30 2h10v16H30z" fill="var(--accent,#123456)"/><image x="2" y="2" width="16" height="16" href="data:image/svg+xml;base64,{data}"/><text x="45" y="14" font-size="10">Lv.80</text></svg>"##
+    );
+    let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
     let png = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
-    assert_eq!(png.get_pixel(6,6).0,[255,255,255,255],"nested logo outline");
-    assert_eq!(png.get_pixel(18,18).0,[10,10,11,255],"logo hole keeps transparency");
-    assert_eq!(png.get_pixel(65,10).0,[169,124,245,255],"CSS variable fills card geometry");
-    assert!(png.enumerate_pixels().filter(|(x,_,p)| *x > 90 && p.0[0] > 80).count() > 20,"card text is painted");
+    assert_eq!(
+        png.get_pixel(9, 9).0,
+        [255, 255, 255, 255],
+        "nested logo outline"
+    );
+    assert_eq!(
+        png.get_pixel(18, 18).0,
+        [10, 10, 11, 255],
+        "logo hole keeps transparency"
+    );
+    assert_eq!(
+        png.get_pixel(65, 10).0,
+        [169, 124, 245, 255],
+        "CSS variable fills card geometry"
+    );
+    assert!(
+        png.enumerate_pixels()
+            .filter(|(x, _, p)| *x > 90 && p.0[0] > 80)
+            .count()
+            > 20,
+        "card text is painted"
+    );
+}
+
+/// Local investigation only: input responses remain outside the repository.
+#[test]
+#[ignore = "requires GITHUX_SVG_PUBLIC_SAMPLE_DIR with owner-supplied public responses"]
+fn public_svg_probe() {
+    let dir = std::path::PathBuf::from(
+        std::env::var_os("GITHUX_SVG_PUBLIC_SAMPLE_DIR").expect("sample directory"),
+    );
+    let out = std::path::PathBuf::from(
+        std::env::var_os("GITHUX_SVG_PROBE_OUTPUT").expect("output directory"),
+    );
+    std::fs::create_dir_all(&out).unwrap();
+    for name in ["stats", "badge", "roast", "history"] {
+        if name == "history" && !dir.join("sample-history.svg").exists() {
+            continue;
+        }
+        let svg = std::fs::read(dir.join(format!("sample-{name}.svg"))).unwrap();
+        let decoded = decode_image(svg, &ImageLimits::default()).unwrap();
+        std::fs::write(out.join(format!("{name}-final.png")), &decoded.bytes).unwrap();
+        if name == "stats" {
+            let animation = decoded
+                .animation
+                .as_ref()
+                .expect("owner's stats sample must animate");
+            for ms in [0, 600, 1200] {
+                let frame = animation
+                    .frames
+                    .iter()
+                    .rev()
+                    .find(|f| f.at_ms <= ms)
+                    .unwrap();
+                std::fs::write(out.join(format!("stats-{ms}.png")), &frame.bytes).unwrap();
+            }
+        }
+        println!(
+            "{name}: {}x{}, animation={} decoded-bytes={}",
+            decoded.width,
+            decoded.height,
+            decoded.animation.as_ref().map_or(0, |a| a.frames.len()),
+            decoded.decoded_bytes()
+        );
+    }
+}
+
+#[test]
+fn finite_svg_rendering_observes_cancellation_between_frames() {
+    let calls = std::cell::Cell::new(0);
+    let result = decode_image_checked(
+        include_bytes!("fixtures/entry-stats.svg").to_vec(),
+        &ImageLimits::default(),
+        &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 4 {
+                Err(ImageFailure::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(result, Err(ImageFailure::Cancelled));
+    assert_eq!(
+        calls.get(),
+        4,
+        "must stop between frames rather than render the whole sequence"
+    );
+}
+
+#[test]
+fn css_fill_modes_preserve_underlying_hidden_and_important_presentation() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="20"><style>
+    .entry {opacity:.25;animation:fade .2s linear .2s none}
+    .both {opacity:.8;animation-name:fade;animation-duration:.2s;animation-delay:.2s;animation-timing-function:linear;animation-fill-mode:both}
+    .protected {opacity:0!important;animation:fade .2s linear forwards}
+    @keyframes fade {from{opacity:0} to{opacity:1}}
+    </style><rect width="60" height="20" fill="#000"/><rect class="entry" width="20" height="20" fill="#fff"/><rect class="both" x="20" width="20" height="20" fill="#fff"/><rect class="protected" x="40" width="20" height="20" fill="#fff"/></svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = decoded
+        .animation
+        .as_ref()
+        .expect("finite longhand and shorthand animations");
+    let pixel = |ms: u32, x: u32| {
+        let bytes = if ms >= animation.duration_ms {
+            &decoded.bytes
+        } else {
+            &animation
+                .frames
+                .iter()
+                .rev()
+                .find(|f| f.at_ms <= ms)
+                .unwrap()
+                .bytes
+        };
+        image::load_from_memory(bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(x, 10)
+            .0[0]
+    };
+    assert!(
+        (60..=65).contains(&pixel(0, 10)),
+        "none retains underlying opacity before delay"
+    );
+    assert_eq!(
+        pixel(0, 30),
+        0,
+        "backwards fill applies initial keyframe during delay"
+    );
+    assert!(
+        (125..=130).contains(&pixel(300, 10)),
+        "linear intermediate value"
+    );
+    assert!(
+        (60..=65).contains(&pixel(400, 10)),
+        "none returns to underlying opacity"
+    );
+    assert_eq!(pixel(400, 30), 255, "forwards fill retains final value");
+    assert_eq!(
+        pixel(400, 50),
+        0,
+        "important hidden geometry remains hidden"
+    );
+}
+
+#[test]
+fn nested_svg_recursion_and_embedded_raster_costs_share_cumulative_budgets() {
+    use base64::Engine;
+    let mut nested = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/></svg>"##.to_vec();
+    for _ in 0..6 {
+        let data = base64::engine::general_purpose::STANDARD.encode(&nested);
+        nested = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image width="10" height="10" href="data:image/svg+xml;base64,{data}"/></svg>"##).into_bytes();
+    }
+    let decoded = decode_image(nested, &ImageLimits::default()).unwrap();
+    assert_eq!(
+        image::load_from_memory(&decoded.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(5, 5)
+            .0[3],
+        0,
+        "deep embedded logos are skipped at the recursion limit"
+    );
+    let raster = encoded(image::ImageFormat::Png, 300, 300);
+    let data = base64::engine::general_purpose::STANDARD.encode(&raster);
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#0000ff"/><image width="20" height="20" href="data:image/png;base64,{data}"/><image x="20" width="20" height="20" href="data:image/png;base64,{data}"/></svg>"##
+    );
+    let decoded = decode_image(
+        svg.into_bytes(),
+        &ImageLimits {
+            max_decoded_bytes: 1024 * 1024,
+            ..ImageLimits::default()
+        },
+    )
+    .unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    assert_ne!(
+        pixels.get_pixel(20, 20).0,
+        [0, 0, 255, 255],
+        "first embedded raster fits"
+    );
+    assert_eq!(
+        pixels.get_pixel(60, 20).0,
+        [0, 0, 255, 255],
+        "second embedded raster would exceed the cumulative decoded budget and is skipped"
+    );
+}
+
+#[test]
+fn svg_isolated_layers_are_bounded_before_rendering() {
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">{}<rect width="64" height="64" fill="#fff"/>{}</svg>"##,
+        "<g opacity=\".5\">".repeat(80),
+        "</g>".repeat(80)
+    );
+    assert!(
+        matches!(
+            decode_image(
+                svg.into_bytes(),
+                &ImageLimits {
+                    max_decoded_bytes: 1024 * 1024,
+                    ..ImageLimits::default()
+                }
+            ),
+            Err(ImageFailure::TooLarge { .. })
+        ),
+        "the canvas alone fits, but concurrently retained opacity layers exceed the allocation budget"
+    );
+}
+#[test]
+fn ignored_web_fonts_do_not_consume_the_evaluated_css_budget() {
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><style>@font-face{{font-family:unused;src:url(data:font/woff;base64,{})}} :root{{--colour:#ff00ff}}</style><rect width="20" height="20" fill="var(--colour,#000000)"/></svg>"##,
+        "A".repeat(150_000)
+    );
+    let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+    assert_eq!(
+        image::load_from_memory(&decoded.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(10, 10)
+            .0,
+        [255, 0, 255, 255]
+    );
+}
+#[test]
+fn prefixed_svg_names_remain_valid_when_css_is_materialized() {
+    let svg = br##"<s:svg xmlns:s="http://www.w3.org/2000/svg" width="20" height="20"><s:style>.visible{fill:#00ff00}</s:style><s:rect class="visible" width="20" height="20"/></s:svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    assert_eq!(
+        image::load_from_memory(&decoded.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(10, 10)
+            .0,
+        [0, 255, 0, 255]
+    );
+}
+
+#[test]
+fn explicit_root_background_paints_chart_paper_without_exposing_hidden_svg_content() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" style="background:var(--paper,#ff0000)"><style>:root{--paper:#ffffff}</style><text x="4" y="15" font-size="12">Axis 100</text><path d="M4 30H70" stroke="#000"/><rect x="60" y="3" width="15" height="15" fill="#ff0000" opacity="0"/></svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    assert_eq!(
+        pixels.get_pixel(150, 70).0,
+        [255, 255, 255, 255],
+        "explicit white chart paper is painted"
+    );
+    assert_eq!(
+        pixels.get_pixel(130, 10).0,
+        [255, 255, 255, 255],
+        "hidden static rectangle stays hidden"
+    );
+    assert!(
+        pixels
+            .enumerate_pixels()
+            .filter(|(x, y, p)| *x < 110 && *y < 35 && p.0[0] < 100 && p.0[3] == 255)
+            .count()
+            > 30,
+        "black axis labels contrast against the declared paper"
+    );
+    for hidden in ["opacity:0", "visibility:hidden", "display:none"] {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" style="background:#fff;{hidden}"><rect width="20" height="20" fill="#f00"/></svg>"##
+        );
+        let image = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        assert_eq!(
+            image::load_from_memory(&image.bytes)
+                .unwrap()
+                .to_rgba8()
+                .get_pixel(10, 10)
+                .0[3],
+            0,
+            "root visibility must not leak a background: {hidden}"
+        );
+    }
+    for (style, extra, expected) in [
+        ("background:#fff;opacity:.5", "", [255,255,255,128]),
+        ("visibility:hidden", "<style>svg{background-color:#fff!important}</style>", [0,0,0,0]),
+    ] {
+        let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" style="{style}">{extra}</svg>"##);
+        let image=decode_image(svg.into_bytes(),&ImageLimits::default()).unwrap();
+        assert_eq!(image::load_from_memory(&image.bytes).unwrap().to_rgba8().get_pixel(10,10).0,expected,"outer box compositing: {style}");
+    }
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#f00" opacity="0"/></svg>"##;
+    let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    assert_eq!(
+        image::load_from_memory(&image.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(10, 10)
+            .0[3],
+        0,
+        "ordinary alpha images gain no forced background"
+    );
 }

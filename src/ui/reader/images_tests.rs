@@ -450,41 +450,122 @@ fn suspension_invalidates_the_old_scope_and_keeps_ready_pictures() {
     assert!(!board.work_outstanding());
 }
 
-
 fn animated_completion(board: &ImageBoard, key: ImageKey) -> ImageCompletion {
-    ImageCompletion { scope: board.scope(), key, result: Ok(crate::content::images::decode_image(include_bytes!("../../content/images/fixtures/entry-stats.svg").to_vec(),&ImageLimits::default()).unwrap()) }
+    ImageCompletion {
+        scope: board.scope(),
+        key,
+        result: Ok(crate::content::images::decode_image(
+            include_bytes!("../../content/images/fixtures/entry-stats.svg").to_vec(),
+            &ImageLimits::default(),
+        )
+        .unwrap()),
+    }
 }
 #[test]
 fn finite_svg_playback_releases_frames_on_finish_suspend_and_document_switch() {
-    let mut board = board(); let target = target("stats.svg"); let key = target.key();
-    board.want(0,target.clone()); board.take_pending(3);
-    board.apply(animated_completion(&board,key.clone()));
-    assert_eq!(board.animations.len(),1);
+    let mut board = board();
+    let target = target("stats.svg");
+    let key = target.key();
+    board.want(0, target.clone());
+    board.take_pending(3);
+    board.apply(animated_completion(&board, key.clone()));
+    assert_eq!(board.animations.len(), 1);
+    match board.state(&key).unwrap() {
+        ImageState::Ready(ImageSource::Render(image), ..) => {
+            assert_eq!(
+                image.frame_count(),
+                1,
+                "timeline selects a ready single frame, never a looping image"
+            );
+            let offset = (32 * 240 + 12) * 4;
+            assert_eq!(
+                &image.as_bytes(0).unwrap()[offset..offset + 4],
+                &[23, 17, 13, 255],
+                "initial frame is already decoded and paintable"
+            );
+        }
+        _ => panic!("a finite SVG frame must not start a new asynchronous PNG decode"),
+    }
     let retained = board.ready_bytes;
     board.painted(&key);
-    board.animations.get_mut(&key).unwrap().started = Some(std::time::Instant::now()-std::time::Duration::from_millis(600));
+    board.animations.get_mut(&key).unwrap().started =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
     assert!(board.animate(false));
     assert!(board.animations[&key].frame > 0);
-    board.animations.get_mut(&key).unwrap().started = Some(std::time::Instant::now()-std::time::Duration::from_secs(2));
+    board.animations.get_mut(&key).unwrap().started =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     assert!(board.animate(false));
     assert!(board.animations.is_empty());
     assert!(board.ready_bytes < retained);
+    match board.state(&key).unwrap() {
+        ImageState::Ready(ImageSource::Render(image), ..) => {
+            let offset = (72 * 240 + 12) * 4;
+            assert_eq!(
+                &image.as_bytes(0).unwrap()[offset..offset + 4],
+                &[255, 255, 0, 255],
+                "retained final row paints immediately without decode flicker"
+            );
+        }
+        _ => panic!("final frame remains a decoded single-frame image"),
+    }
     assert!(!board.work_outstanding());
-    assert!(!board.animate(false),"settled animation does no permanent frame work");
-    board.begin(2); board.want(0,target.clone()); board.take_pending(3);
-    board.apply(animated_completion(&board,key.clone())); board.suspend();
-    assert!(board.animations.is_empty()); assert!(board.state(&key).unwrap().is_ready());
-    board.begin(3); board.want(0,target); board.take_pending(3);
-    let stale = animated_completion(&board,key.clone()); board.begin(4);
-    assert!(board.apply(stale).is_empty()); assert!(board.animations.is_empty()); assert_eq!(board.ready_bytes,0);
+    assert!(
+        !board.animate(false),
+        "settled animation does no permanent frame work"
+    );
+    board.begin(2);
+    board.want(0, target.clone());
+    board.take_pending(3);
+    board.apply(animated_completion(&board, key.clone()));
+    board.suspend();
+    assert!(board.animations.is_empty());
+    assert!(board.state(&key).unwrap().is_ready());
+    board.begin(3);
+    board.want(0, target);
+    board.take_pending(3);
+    let stale = animated_completion(&board, key.clone());
+    board.begin(4);
+    assert!(board.apply(stale).is_empty());
+    assert!(board.animations.is_empty());
+    assert_eq!(board.ready_bytes, 0);
 }
 #[test]
 fn reduced_motion_and_offscreen_svg_settle_to_the_final_image() {
-    for reduced in [true,false] {
-        let mut board = board(); let target = target("stats.svg"); let key = target.key();
-        board.want(0,target); board.take_pending(3); board.apply(animated_completion(&board,key.clone()));
-        board.animations.get_mut(&key).unwrap().accepted = std::time::Instant::now()-std::time::Duration::from_secs(1);
+    for reduced in [true, false] {
+        let mut board = board();
+        let target = target("stats.svg");
+        let key = target.key();
+        board.want(0, target);
+        board.take_pending(3);
+        board.apply(animated_completion(&board, key.clone()));
+        board.animations.get_mut(&key).unwrap().accepted =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
         assert!(board.animate(reduced));
-        assert!(board.animations.is_empty()); assert!(board.state(&key).unwrap().is_ready()); assert!(!board.work_outstanding());
+        assert!(board.animations.is_empty());
+        assert!(board.state(&key).unwrap().is_ready());
+        assert!(!board.work_outstanding());
     }
+}
+
+#[test]
+fn detaching_the_provider_settles_and_releases_active_svg_frames() {
+    let mut board = board();
+    let target = target("stats.svg");
+    let key = target.key();
+    board.want(0, target);
+    board.take_pending(3);
+    board.apply(animated_completion(&board, key.clone()));
+    let cost = board.ready_bytes;
+    board.set_attached(false);
+    assert!(board.animations.is_empty());
+    assert!(board.ready_bytes < cost);
+    assert!(!board.work_outstanding());
+    let ImageState::Ready(ImageSource::Render(image), ..) = board.state(&key).unwrap() else {
+        panic!("final decoded frame retained");
+    };
+    let offset = (72 * 240 + 12) * 4;
+    assert_eq!(
+        &image.as_bytes(0).unwrap()[offset..offset + 4],
+        &[255, 255, 0, 255]
+    );
 }

@@ -1320,7 +1320,7 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
     let session = fixture.session();
 
     let badge_svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="88" height="20"><rect width="37" height="20" fill="#555"/><rect x="37" width="51" height="20" fill="#4b0"/><text x="19" y="14" fill="#fff" font-size="11">build</text></svg>"##.to_vec();
-    let stats_svg = br##"<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 495 195"><rect width="495" height="195" fill="#fffefe"/><text x="20" y="32" fill="#2f80ed" font-size="18">Stats</text></svg>"##.to_vec();
+    let stats_svg = include_bytes!("../content/images/fixtures/entry-stats.svg").to_vec();
     let chart_svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="533"><path d="M 10 500 L 780 30" stroke="#dd4528" stroke-width="3" fill="none"/><text x="400" y="30" font-size="20">Star History</text></svg>"##.to_vec();
 
     fixture
@@ -1386,7 +1386,22 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
         .result
         .expect("stats svg decodes");
     assert_eq!(stats.format, ImageFormat::Png);
-    assert_eq!((stats.width, stats.height), (495, 195));
+    assert_eq!((stats.width, stats.height), (240, 100));
+    assert!(
+        stats
+            .animation
+            .as_ref()
+            .is_some_and(|a| a.duration_ms == 1350)
+    );
+    assert_eq!(
+        image::load_from_memory(&stats.bytes)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(12, 72)
+            .0,
+        [0, 255, 255, 255],
+        "provider returns visible final row values"
+    );
 
     let chart_sink = ImageSink::new();
     service.start(
@@ -1412,6 +1427,9 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
     // with zero network requests and preserve account/cache authorization.
     let store2 = Fixture::reopen_cache_store(cache_cfg);
     let scope2 = store2.saved_account(account_key).expect("saved scope");
+    let external_reads = external_source.reads.lock().unwrap().len();
+    external_source.bodies.lock().unwrap().clear();
+    let offline_external = external_source.clone();
     let service2 = fixture.service_with_cache(
         session,
         external_source,
@@ -1432,6 +1450,28 @@ async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
         .result
         .expect("cached svg offline");
     assert_eq!((chart_offline.width, chart_offline.height), (800, 533));
+    let stats_offline_sink = ImageSink::new();
+    service2.start(
+        ImageRequest {
+            scope: test_scope(2),
+            key: ImageKey::new("stats-svg-offline"),
+            target: ImageTarget::External {
+                url: "https://stats.invalid/card.svg".into(),
+            },
+        },
+        stats_offline_sink.clone(),
+    );
+    let stats_offline = next_completion(&stats_offline_sink)
+        .await
+        .result
+        .expect("cached animation re-evaluates offline");
+    assert!(stats_offline.animation.is_some());
+    assert_eq!(stats_offline.bytes, stats.bytes);
+    assert_eq!(
+        offline_external.reads.lock().unwrap().len(),
+        external_reads,
+        "fresh cache avoids external network"
+    );
 
     // Credential rejection quarantines private repository SVG cache reads too.
     store2
