@@ -181,6 +181,12 @@ Codex 对 `b6a3c11` 提出 1 项 P1 与 1 项 P2，均成立；仍无待裁决�
 
 注意：不能用 `snapshot_preliminary` 判断该 переход——`apply_branches` 在派发复核任务时已提前清除该标记，因而改用已显示修订的 provenance 判断。
 
+## PR #85 第十一轮审查修复
+
+Codex 对 `3b56e12` 提出 1 项 P2，成立。
+
+- **P2 复核未验证时缺失资源永久 Loading**：摘要与分支列表都回落到缓存（`network_verified` 为假）时，`apply_branches` 既不重新解析也不补读，快照里缺失的根树、README 发现与正文就一直是加载态。修复：该情形清掉 preview 标记并走离线路径补读（根树、README 发现、展开目录与选择解析），让每个资源到达确定状态（内容或可重试错误），保留下来的可读部分与历史标记不变。回归 `an_unverified_revalidation_settles_the_missing_snapshot_resources`（关闭该分支后失败）。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

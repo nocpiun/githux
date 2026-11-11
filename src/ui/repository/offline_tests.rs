@@ -725,6 +725,57 @@ fn a_cache_miss_directory_recovers_after_same_commit_revalidation(cx: &mut TestA
     assert!(page.read_with(cx, |page, _| page.tree_failure("docs").is_none()));
 }
 
+/// Regression (review finding): when the online attempt falls back to cached data, no verified
+/// reply will finish the parts the bundle could not provide, so they must be settled instead of
+/// spinning forever.
+#[gpui::test]
+fn an_unverified_revalidation_settles_the_missing_snapshot_resources(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+
+    let (outcome, provenance) = page.read_with(cx, |page, _| {
+        (
+            page.branches().expect("a loaded branch list").clone(),
+            super::super::RepositoryCacheProvenance {
+                origin: crate::data::RepositoryCacheOrigin::Snapshot,
+                fetched_at_ms: 1,
+                verified_at_ms: 1,
+                completeness: crate::domain::cache::CacheCompleteness::Complete,
+            },
+        )
+    });
+
+    // Simulate the cache-first bundle of a different page: summaries and branches resolved from the
+    // cache (so the online attempt is not verified), with a tree, README discovery and document the
+    // bundle could not provide.
+    fixture.transport.set_offline(true);
+    page.update(cx, |page, cx| {
+        let state = page.branch.as_mut().expect("a displayed branch");
+        state.tree.reset();
+        state.readme = super::super::ReadmeState::Unknown;
+        page.reader = None;
+        page.readme_path = None;
+        page.reader_status = ReaderStatus::Loading;
+        page.snapshot_preliminary = true;
+        page.details_provenance = Some(provenance.clone());
+        page.apply_branches(Ok((outcome, Some(provenance))), cx);
+        assert!(
+            !page.snapshot_preliminary,
+            "an unverified attempt must not keep the preliminary marker forever"
+        );
+    });
+
+    // The parts the bundle lacked are read through the offline path, so each reaches a definite state.
+    settle(&page, cx, |page| {
+        page.reader_status() != &ReaderStatus::Loading && page.tree("").is_some()
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+}
+
 /// Regression (review finding): a cached branch list (network fallback) must not suppress the
 /// revision revalidation when the summary itself was verified online.
 #[gpui::test]

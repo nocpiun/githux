@@ -1981,6 +1981,12 @@ impl RepositoryPage {
                 }
                 // Nothing identifiable to resolve yet: keep the marker so a later successful branch
                 // list retry still revalidates the displayed snapshot.
+            } else if self.snapshot_preliminary {
+                // The online attempt fell back to cached data, so no verified reply will finish the
+                // parts the bundle could not provide. Settle them through the offline path, which
+                // also reaches a definite "not cached" state, instead of leaving spinners behind.
+                self.snapshot_preliminary = false;
+                self.settle_snapshot_offline(cx);
             }
             cx.notify();
             return;
@@ -2023,6 +2029,46 @@ impl RepositoryPage {
             }
         }
         cx.notify();
+    }
+
+    /// Finishes the parts a cache-first bundle could not provide when the online attempt fell back
+    /// to cached data.
+    ///
+    /// The readable snapshot stays on screen with its historical marker; the missing root tree,
+    /// README discovery and document are read through the offline path so each resource reaches a
+    /// definite state (content, "not cached" error with retry, or a plain network failure) rather
+    /// than an endless loading spinner.
+    fn settle_snapshot_offline(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.branch.as_ref() else {
+            return;
+        };
+        let missing_root = state.tree.root().is_none();
+        let missing_readme = matches!(
+            state.readme,
+            ReadmeState::Unknown | ReadmeState::Uncertain | ReadmeState::Failed(_)
+        );
+        let name = state.name.clone();
+        let snapshot = state.snapshot.clone();
+        let mode = RepositoryCacheMode::OfflineOnly;
+        if missing_root {
+            self.spawn_job(Job::Root {
+                branch: name.clone(),
+                snapshot: snapshot.clone(),
+                mode,
+            });
+        }
+        if missing_readme {
+            self.spawn_job(Job::Readme {
+                branch: name,
+                snapshot,
+                mode,
+            });
+        }
+        if !missing_root {
+            // The root is already available, so no `apply_root` reply will resume this work.
+            self.load_expanded(cx);
+            self.resolve_selection(cx);
+        }
     }
 
     fn apply_revision(
