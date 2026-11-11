@@ -1244,7 +1244,10 @@ impl ProfilePage {
                             .as_ref()
                             .is_some_and(|request| *view.read(cx).binding() == request.binding)
                 });
-                let changed_login = self.login != basic.login;
+                // Only an online result may rename the route: a cached spelling is a historical
+                // observation, and the online half of this same read still answers with the login
+                // the request was made with.
+                let changed_login = !reply.preliminary && self.login != basic.login;
                 // Reset sibling section authorizations when a new Basic profile creates a new view.
                 // Basic keeps the token it was read under regardless of provenance: an online Basic
                 // is as revocable as a historical one.
@@ -1257,7 +1260,14 @@ impl ProfilePage {
                 drop(auths);
                 // Server id/login are authoritative. An earlier login-only action is never used as
                 // a numeric identity; Shell canonicalizes the matching TabId after this callback.
-                self.login = basic.login.clone();
+                //
+                // A cache-first snapshot does not adopt its login spelling here: the online half of
+                // the same basic read still carries the login the request was made with, and
+                // `accepts()` compares that value. Renaming the page from a snapshot would reject
+                // that final reply before it could clear its work slot.
+                if !reply.preliminary {
+                    self.login = basic.login.clone();
+                }
                 if !mounted {
                     self.create_view(&basic, &reply.context, window, cx);
                 }
@@ -2915,6 +2925,51 @@ mod tests {
                     .page
                     .read_with(cx, |page, _| page.work.iter().all(Option::is_none))
         });
+    }
+
+    /// Regression (review finding): a cached Basic whose canonical login differs from the requested
+    /// spelling must not rename the page while the online half still carries the requested login —
+    /// that would make `accepts()` reject the final reply and strand Basic in its historical state.
+    #[gpui::test]
+    fn a_cached_alias_login_does_not_strand_the_online_basic_read(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness_with_login(cx, true, "Alice");
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|view| matches!(view.read(cx).basic(), SectionState::Ready(_)))
+                    && page.work.iter().all(Option::is_none)
+            })
+        });
+        // Reopen the page for the non-canonical route spelling, then hold the network: the snapshot
+        // paints with the cached canonical spelling while the online read still answers with the
+        // login the request was made with.
+        harness
+            .page
+            .update(cx, |page, _| page.login = "Alice".into());
+        harness.transport.hold(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+        });
+        harness.transport.hold(false);
+        harness.transport.release_all();
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+                && harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test()
+                        .is_some_and(|view| matches!(view.read(cx).basic(), SectionState::Ready(_)))
+                        && page.work[Section::Basic.index()].is_none()
+                })
+        });
+        assert_eq!(
+            harness.page.read_with(cx, |page, _| page.login.to_string()),
+            "alice"
+        );
     }
 
     /// Cache-first ordering on Profile: a snapshot reply that arrives after the section already shows

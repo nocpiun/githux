@@ -160,7 +160,8 @@ Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：
 - 该消息带 `preliminary` 标记，只在页面仍为空（`details.is_none()`）时应用；摘要/分支/revision 保留 `Snapshot` provenance（既有 `Cached` 胶囊与 `Refresh`），固定对象沿用既有缓存语义。extras 以同一次快照读取，缓存未命中的 section 保持 Loading 而非报“未缓存”。
 - 在线链完全不变并在同一 generation 内继续：网络摘要证明可达后分支列表改用在线模式；若屏上 revision 仍是快照，则以同一 `branch_request` 重新在线解析该 ref。**同一 commit 时保留已加载的 tree/README/reader（含滚动位置）**，仅在 commit 变化时整体替换，因此不会把缓存 A 标成网络验证的 B。
 - 迟到的缓存消息不会覆盖在线结果（`preliminary && details.is_some()` 直接丢弃）。
-- 已知限制：快照只还原根树与初始文档；保存的展开子目录由在线链在后续读取补齐。
+- 保存的嵌套文件选择（如 `src/main.rs`）在快照中按 `RepositoryNavigation::ancestors` 逐级离线读取祖先目录，能解析时直接打开该文件；解析不到时保留 `Selection::File(path)` 交给在线链，而不是静默退回 README。
+- 已知限制：快照还原根树、保存选择所需祖先目录与初始文档；其他从未展开的目录仍由在线链在后续读取补齐。
 
 ## 持久缓存与跨重启离线阅读（2026-11-03）
 

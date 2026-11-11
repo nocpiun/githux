@@ -102,6 +102,15 @@ Codex 对 `9665f19` 提出 1 项 P1 与 2 项 P2，均成立且可直接修复�
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（主程序 1249、其余目标全部）通过。
 
+## PR #85 第二轮审查修复
+
+Codex 对 `4550f17` 提出 2 项 P2，均成立且可直接修复；仍无待裁决事项。
+
+1. **P2 缓存快照改写 login 会作废同一次在线 Basic 回复**：非规范拼写的路由（例如 `/Alice`）打开时，缓存 Basic 带的是上次保存的 canonical login；preliminary 回复若把 `self.login` 改成 canonical，在线半边的回复仍带请求时的 login，`accepts()` 会拒绝它且不释放 work 槽，于是 Basic 一直停在历史态、Retry 也失效。修复：快照回复不改写 `self.login`，也不触发 canonical 导航；只有在线结果可以重命名路由。回归 `a_cached_alias_login_does_not_strand_the_online_basic_read`（撤销修复后失败，恢复后通过）。
+2. **P2 保存的嵌套文件选择被快照改成 README**：`file_in_root` 只接受根目录文件，保存 `src/main.rs` 时 bundle 退回 README 并覆盖页面已恢复的选择，后续重验也不会按 `intent.path` 重建。修复：bundle 现在按 `RepositoryNavigation::ancestors` 逐级离线读取祖先目录（新增 `SnapshotBundle.children`，应用到 `TreeModel` 并展开祖先），能解析时直接用该文件内容；解析失败时保留 `Selection::File(path)` 让在线链继续解析，而不是静默改成 README。回归 `a_saved_nested_file_reopens_from_the_cache_first_bundle`。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 全部通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

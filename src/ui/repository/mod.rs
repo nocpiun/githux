@@ -376,6 +376,8 @@ struct SnapshotBundle {
     branch: Option<String>,
     snapshot: Option<(RepoSnapshot, RepositoryCacheProvenance)>,
     root: Option<DirectoryTree>,
+    /// Directories below the root that were read to resolve a saved nested file selection.
+    children: Vec<DirectoryTree>,
     readme: Option<ReadmeState>,
     /// The document the saved navigation pointed at, already prepared for the reader.
     content: Option<PreparedContent>,
@@ -388,13 +390,10 @@ impl SnapshotBundle {
     }
 }
 
-/// The tree index of an ordinary file at a repository-root path (`""` when it is not one).
-fn file_in_root(tree: &DirectoryTree, path: &str) -> Option<usize> {
-    if path.contains('/') {
-        return None;
-    }
+/// The tree index of an ordinary file named `name` (`None` when it is not one).
+fn file_entry(tree: &DirectoryTree, name: &str) -> Option<usize> {
     tree.entries.iter().position(|entry| {
-        entry.path.as_str() == path && matches!(entry.kind, TreeEntryKind::File { .. })
+        entry.path.as_str() == name && matches!(entry.kind, TreeEntryKind::File { .. })
     })
 }
 
@@ -1780,6 +1779,7 @@ impl RepositoryPage {
             branch,
             snapshot,
             root,
+            children,
             readme,
             content,
             selection,
@@ -1802,6 +1802,9 @@ impl RepositoryPage {
             if let Some(root) = root {
                 tree.set_root(root);
             }
+            for child in children {
+                tree.set_children(child);
+            }
             self.branch = Some(BranchState {
                 name: branch,
                 snapshot,
@@ -1809,9 +1812,21 @@ impl RepositoryPage {
                 tree,
                 readme: readme.clone().unwrap_or(ReadmeState::Unknown),
             });
+            // A saved file selection (including a nested one) is kept even when the snapshot could
+            // not read it: the online chain then resolves the same path instead of reopening the
+            // README.
+            if matches!(selection, Selection::File(_)) {
+                for ancestor in
+                    RepositoryNavigation::ancestors(selection.path().unwrap_or_default())
+                {
+                    self.intent.expanded.insert(ancestor);
+                }
+            }
             self.selection = selection;
             self.readme_path = match &readme {
-                Some(ReadmeState::Found(descriptor)) => Some(descriptor.path.as_str().to_string()),
+                Some(ReadmeState::Found(descriptor)) if self.selection == Selection::Readme => {
+                    Some(descriptor.path.as_str().to_string())
+                }
                 _ => None,
             };
             self.cursor = self.current_path().map(str::to_string);
@@ -1820,6 +1835,7 @@ impl RepositoryPage {
                     self.install_cached_reader(content, None, window, cx);
                     ReaderStatus::Showing
                 }
+                (_, None) if matches!(self.selection, Selection::File(_)) => ReaderStatus::Loading,
                 (Some(ReadmeState::Absent), _) => ReaderStatus::NoReadme,
                 (Some(ReadmeState::Uncertain), _) => ReaderStatus::ReadmeUncertain,
                 (Some(ReadmeState::Failed(error)), _) => ReaderStatus::ReadmeUnavailable(error),
@@ -3161,18 +3177,63 @@ async fn run_job(
                 .await
                 .ok()
                 .map(|scoped| ReadmeState::from_discovery(Ok(scoped.value.value)));
-            // The saved navigation decides which document to reopen: the README by default, or the
-            // file the user last had open. A miss leaves the reader to the online chain.
-            let (selection, content) = match intent.path.as_deref() {
-                Some(path)
-                    if root
-                        .as_ref()
-                        .is_some_and(|tree| file_in_root(tree, path).is_some()) =>
-                {
-                    let tree = root.as_ref().expect("root present");
-                    let index = file_in_root(tree, path).expect("file present");
-                    match BlobIdentity::from_file(tree, index) {
-                        Ok(identity) => match cached
+            // Resolve a saved file selection the same way the page does: walk its ancestors so a
+            // nested file (`src/main.rs`) still reopens from the snapshot instead of silently
+            // falling back to the README. Every read stays offline; anything missing leaves the
+            // selection to the online chain.
+            let mut children = Vec::new();
+            let mut resolved = None;
+            if let (Some(path), Some(root_tree)) = (intent.path.as_deref(), root.as_ref()) {
+                let mut loaded: std::collections::BTreeMap<String, DirectoryTree> =
+                    std::collections::BTreeMap::new();
+                loaded.insert(String::new(), root_tree.clone());
+                let mut complete = true;
+                for ancestor in RepositoryNavigation::ancestors(path) {
+                    let parent = RepositoryNavigation::parent(&ancestor);
+                    let name = RepositoryNavigation::name(&ancestor);
+                    let Some(parent_tree) = loaded.get(parent) else {
+                        complete = false;
+                        break;
+                    };
+                    let Some(index) = parent_tree.entries.iter().position(|entry| {
+                        entry.path.as_str() == name
+                            && matches!(entry.kind, TreeEntryKind::Directory)
+                    }) else {
+                        complete = false;
+                        break;
+                    };
+                    let Ok(handle) = parent_tree.child_directory(index) else {
+                        complete = false;
+                        break;
+                    };
+                    match cached
+                        .directory(
+                            &handle,
+                            &limits.repository,
+                            RepositoryCacheMode::OfflineOnly,
+                            cancel.clone(),
+                        )
+                        .await
+                    {
+                        Ok(scoped) => {
+                            let tree = scoped.value.value;
+                            loaded.insert(ancestor.clone(), tree.clone());
+                            children.push(tree);
+                        }
+                        Err(_) => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    let parent = RepositoryNavigation::parent(path);
+                    let name = RepositoryNavigation::name(path);
+                    if let Some(parent_tree) = loaded.get(parent)
+                        && let Some(index) = file_entry(parent_tree, name)
+                        && let Ok(identity) = BlobIdentity::from_file(parent_tree, index)
+                    {
+                        let content = cached
                             .content(
                                 &identity,
                                 &limits.blob,
@@ -3180,16 +3241,21 @@ async fn run_job(
                                 cancel.clone(),
                             )
                             .await
-                        {
-                            Ok(scoped) => {
-                                (Selection::File(path.to_string()), Some(scoped.value.value))
-                            }
-                            Err(_) => (Selection::File(path.to_string()), None),
-                        },
-                        Err(_) => (Selection::File(path.to_string()), None),
+                            .ok()
+                            .map(|scoped| scoped.value.value);
+                        resolved = Some((Selection::File(path.to_string()), content));
                     }
                 }
-                _ => {
+            }
+            let (selection, content) = match resolved {
+                Some(found) => found,
+                // The snapshot could not resolve the saved file. Keep the file selected so the
+                // online chain restores it instead of the page silently returning to the README.
+                None if intent.path.is_some() => (
+                    Selection::File(intent.path.clone().unwrap_or_default()),
+                    None,
+                ),
+                None => {
                     let content = match &readme {
                         Some(ReadmeState::Found(descriptor)) => {
                             let identity = BlobIdentity::from_readme(descriptor);
@@ -3215,6 +3281,7 @@ async fn run_job(
                 branch: Some(branch),
                 snapshot: Some((snapshot, revision_provenance)),
                 root,
+                children,
                 readme,
                 content,
                 selection,

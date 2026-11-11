@@ -588,6 +588,37 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
     });
 }
 
+/// Regression (review finding): a saved *nested* file selection must reopen from the cache-first
+/// bundle instead of silently falling back to the README.
+#[gpui::test]
+fn a_saved_nested_file_reopens_from_the_cache_first_bundle(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(
+        cx,
+        &fixture,
+        RepositoryNavigation {
+            path: Some("src/main.rs".into()),
+            ..RepositoryNavigation::default()
+        },
+    );
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.selection() == &Selection::File("src/main.rs".into())
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert_eq!(page.current_path(), Some("src/main.rs"));
+    });
+    assert!(
+        reader_text(&page, cx).contains("fn main"),
+        "the cached file content is shown from the snapshot"
+    );
+}
+
 /// Regression (review finding): a revalidation that resolves the same commit keeps the cached tree
 /// and README, but anything the snapshot never had must still be fetched. Otherwise a partial cached
 /// bundle would leave the tree or reader loading forever.
