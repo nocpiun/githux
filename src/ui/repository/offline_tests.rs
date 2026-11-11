@@ -638,6 +638,40 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
     });
 }
 
+/// Regression (review finding): saved expanded directories must resume after a same-commit
+/// revalidation. The cache-first bundle restores only the root (plus a saved file's ancestors), so
+/// nothing would load them once the revalidation keeps the retained tree.
+#[gpui::test]
+fn saved_expansions_resume_after_same_commit_revalidation(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let mut expanded = std::collections::BTreeSet::new();
+    expanded.insert("src".to_string());
+    let (_host, page, cx) = open_cached(
+        cx,
+        &fixture,
+        RepositoryNavigation {
+            expanded,
+            ..RepositoryNavigation::default()
+        },
+    );
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert!(page.expanded().contains("src"));
+    });
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        !page.is_showing_cached_snapshot() && page.tree("src").is_some()
+    });
+}
+
 /// Regression (review finding): a failed branch enumeration after the online summary succeeded must
 /// still revalidate the displayed snapshot from the saved intent or the observed default, instead of
 /// leaving the page historical forever.

@@ -137,6 +137,14 @@ Codex 对 `05e416b` 提出 1 项 P2，成立且可直接修复；仍无待裁决
 
 **已知与本任务无关的既有偶发**：全量 `cargo test --locked` 期间 `data::reader_images::tests::fixed_revision_images_persist_across_reopened_store_and_service` 偶发在重开 `CacheStore` 时得到 `InUse`（该用例用 50ms sleep 等异步写入）。本任务未修改 `src/data/reader_images*`，定向重跑与主程序目标均通过；记录为既有顺序/资源偶发，不归因本任务。
 
+## PR #85 第六轮审查修复
+
+Codex 对 `6b6a8d5` 提出 1 项 P2，成立且可直接修复；仍无待裁决事项。
+
+**P2 同 commit 重验后保存的展开目录不恢复**：bundle 只还原根树（以及保存文件所在路径的祖先），保存的 `intent.expanded` 目录不会由 bundle 读取；同 commit 捷径保留已加载内容后直接返回，没有 Root/Readme 回复来触发 `load_expanded`，于是这些目录保持展开但为空。修复：捷径在保留内容且没有补发 Root/Readme 时显式 `load_expanded` + `resolve_selection`（此时已按在线模式读取）。回归 `saved_expansions_resume_after_same_commit_revalidation`（移除该调用后失败）。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（主程序与各目标通过；`data::reader_images` 既有偶发另记）、`cargo build --locked` 全部通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。
