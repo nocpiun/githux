@@ -34,6 +34,8 @@
 
 页面 host 的读取不发生在 `render`。Shell 只在路由/账户 settle 时创建实例；普通绘制只读取已有实体。Home/Profile 在后台结果到达后经受锁队列和前台轻节拍发布。
 
+账户发布切换可见 workspace 时，`Shell::cancel_account_scoped_view_state` 同时退休该 Shell 的标签重排状态与 GPUI 拖拽预览，旧账户的标题/图标不能跟随指针进入新 workspace。observer 无 Window 借用，平台清理延后到 effect；清理捕获当前 `TabDrag` payload 的存活令牌，payload 被释放或替换即永久失效，因此不能误停后来开始或属于其他窗口的拖拽。切回账户保留原来的真实会话，不复活 ghost。
+
 ## 结果发布与旧响应
 
 每个 host 在请求前固定：

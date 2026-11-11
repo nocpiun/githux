@@ -26,6 +26,7 @@
 //! takes pointer/hit tests, so it cannot intercept a drop, and it disappears as soon as the drag
 //! ends (drop, Escape/cancel, release outside the strip or a lost window focus).
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::ui::tooltip::ui_tooltip;
@@ -53,6 +54,8 @@ pub(super) type Run = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 pub(super) type OnFlag = Rc<dyn Fn(bool, &mut Window, &mut App) + 'static>;
 /// A strip callback that reports which session something happened to.
 pub(super) type OnTab = Rc<dyn Fn(TabId, &mut Window, &mut App) + 'static>;
+/// Drag start reports the payload lifetime as well as the session identity.
+pub(super) type OnDragStart = Rc<dyn Fn(TabId, Rc<Cell<bool>>, &mut Window, &mut App) + 'static>;
 /// A strip callback that also carries the pointer position, used while a drag moves.
 pub(super) type OnTabAt =
     Rc<dyn Fn(TabId, gpui::Point<gpui::Pixels>, &mut Window, &mut App) + 'static>;
@@ -74,11 +77,36 @@ pub(super) struct TabDrag {
     pub id: TabId,
     /// Which strip produced the drag, so another strip's drag is ignored.
     pub owner: gpui::EntityId,
+    /// True only while this exact payload is alive. Shell cleanup may run after an account
+    /// observer, when another gesture has already replaced this drag.
+    pub alive: Rc<Cell<bool>>,
     /// The icon and label the lifted tab must draw, independent of the strip's own (still visible)
     /// entry. Copied when the drag starts because a mid-drag route title change must not alter
     /// the ghost the pointer is already carrying.
     pub title: String,
     pub icon: IconName,
+}
+
+impl Drop for TabDrag {
+    fn drop(&mut self) {
+        self.alive.set(false);
+    }
+}
+
+/// Retire only the captured payload. Its `Drop` invalidates this lifetime even if a later drag
+/// belongs to another window, so deferred account cleanup never needs to guess the active owner.
+pub(super) fn cancel_platform_drag(
+    alive: Rc<Cell<bool>>,
+    handle: gpui::AnyWindowHandle,
+    cx: &mut App,
+) {
+    cx.defer(move |cx| {
+        if alive.get() {
+            let _ = handle.update(cx, |_, window, cx| {
+                cx.stop_active_drag(window);
+            });
+        }
+    });
 }
 
 /// The lifted tab's preview, drawn by GPUI at `pointer - cursor_offset` on every frame of an
@@ -155,7 +183,7 @@ pub(super) struct View {
     pub drop_at: Option<usize>,
     pub toolbar: AnyElement,
     pub on_hover: OnFlag,
-    pub on_drag_start: OnTab,
+    pub on_drag_start: OnDragStart,
     pub on_drag_move: OnTabAt,
     pub on_drop: OnTab,
 }
@@ -395,6 +423,7 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
     let payload = TabDrag {
         id,
         owner,
+        alive: Rc::new(Cell::new(true)),
         title: drag_title,
         icon: drag_icon,
     };
@@ -442,7 +471,7 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
         // Drag handlers are always registered: this `on_drag` callback is what starts a reorder,
         // so gating it on a drag already being in progress would make it unreachable.
         .on_drag(payload, move |drag, _, window, cx| {
-            start(drag.id, window, cx);
+            start(drag.id, drag.alive.clone(), window, cx);
             // The pointer grab must read as the default arrow, not the tab's pointing hand. The
             // active drag is registered only after this constructor returns, so apply the style on
             // the next effect flush; it lives for the whole gesture and clears with the drag.

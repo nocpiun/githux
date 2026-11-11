@@ -30,5 +30,15 @@
 
 ## 后续
 
-- 创建 PR（目标 main，关联 First Release milestone #1，加 `pending` 标签），走 githux-pr-review 等待最新提交的 CI 与 Codex 审查；不自行合并。
-- 负责人手动验收：真实窗口拖动时光标为默认箭头、ghost 跟随与图标/标签正确、取消/窗外释放无残留 ghost/光标。
+2026-11-11：负责人已验收正常拖拽画面并授权合并（[协调者交接](https://github.com/nocpiun/githux/pull/80#issuecomment-6787852285)），本轮继续处理账户切换的正确性修复，不要求重复视觉验收。最终合并证据保存于 PR 与任务 delivery-state。
+
+## 2026-11-11：账户发布时清理真实拖拽
+
+- PR #80 机械 rebase 到 `328960d`，当前 main 基线 `8cad76b`；已比对三个已验收 UI 文件 blob 均未因 rebase 改变。本地旧 head `6d53195` 与既有 runs/review 证据保留。
+- [审查 P2](https://github.com/nocpiun/githux/pull/80#discussion_r4534304077) 成立：`Accounts` 异步发布触发 `Shell::sync_accounts` → `cancel_account_scoped_view_state`，此前只清 Shell reorder，GPUI payload/ghost/光标仍携带旧账户标题图标。
+- 账户清理现在取出该 Shell 当前 payload 的存活令牌，再用保存的 Window handle 在 observer 后的 effect 中停止平台拖拽。`TabDrag::drop` 永久失效自己的令牌，故旧清理即使晚到也不能停止后来或其他窗口的拖拽。未持有本 Shell payload 的账户发布不取消全局其他拖拽。契约见 [正式页面生命周期](../shell-page-integration.md#页面生命周期)。
+- 新增 `account_publication_clears_the_live_tab_ghost`：真实 `Accounts::notify` 走正式 observer/`sync_accounts`，指针输入先建立实际 GPUI ghost；A→B 清除平台 drag、cursor style 和 ghost，B 只有自己的 Home，不含 A 的 tab；B→A 恢复原会话而不恢复 ghost；另开真实拖拽后投递旧 payload 的清理，确认新 ghost/平台 drag 保留。
+- 验证范围：账户 snapshot 使用既有测试 fixture setter 注入；账户投影、observer、workspace 与 GPUI 鼠标拖拽均为生产路径，不涉及真实 GitHub 登录写入或 Windows 原生输入。负责人此前的正常视觉验收保持有效。
+- 聚焦回归通过：run `73e52e48`；反向验证临时省略平台清理后，run `fa9e3583` 在账户切换后的 `!cx.has_active_drag()` 断言失败，确认用例能捕获原缺陷；随后恢复修复。重跑全套的理由为新 main 基线组合及本轮实际生命周期改动。
+- 最终检查：fmt check、all-targets clippy `-D warnings` 通过；完整 `cargo test --locked --no-fail-fast` 的 bin 1231、Home 98、Profile 287、Reader 252、Reader images 781、Repository 877、Overview 44 全部通过。独立 Notifications target（不包含 Shell/tabs）并发 fixture 两次分别失败：首次 localhost bounded-body 请求返回 Network 而非 ResponseTooLarge（`ec33f86c`），隔离重跑通过（`b31403be`）；完整重跑时该用例通过，但 cache reopen 用例返回 InUse（`0e149e7d`）。保留原始失败；Notifications 串行检查 589/589 通过（`334076a0`），native `cargo build --locked` 通过（`c819f8df`）。没有修改非本任务网络/缓存代码。
+- 可复用教训候选：预览加入可见内容后，应审计所有清除宿主交互状态的路径；异步生命周期清理必须绑定具体手势身份，不能仅检查“当前有拖拽”。本次不并发修改共享 LESSONS。

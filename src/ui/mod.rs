@@ -177,6 +177,8 @@ pub struct Shell {
 /// One in-flight tab drag.
 struct TabDragState {
     id: TabId,
+    /// Lifetime of the exact GPUI payload; absent only in state-only test helpers.
+    platform_alive: Option<Rc<std::cell::Cell<bool>>>,
     /// The insertion slot the marker is drawn in: a gap between the tabs as they are currently
     /// shown, in the still-unmodified collection.
     slot: usize,
@@ -653,8 +655,12 @@ impl Shell {
     /// what is dropped is the shell's own transient state and any pending background reveal.
     fn cancel_account_scoped_view_state(&mut self, cx: &mut Context<Self>) {
         self.close_palette(cx);
-        // The tab drag carries a TabId from the workspace that is no longer visible.
-        self.tab_drag = None;
+        // Account publication has no Window borrow. End only this shell's exact platform payload
+        // after the observer returns. Dropping/replacing it invalidates the captured lifetime, so
+        // delayed cleanup can never stop a later drag, including one in another window.
+        if let Some(alive) = self.tab_drag.take().and_then(|drag| drag.platform_alive) {
+            tabs::cancel_platform_drag(alive, self.window_handle, cx);
+        }
         self.tab_motion.cancel();
         self.tab_bars
             .hold(false, self.tab_now_ms(), cx.reduce_motion());
@@ -2320,8 +2326,13 @@ impl Shell {
         };
         let on_drag_start = {
             let this = this.clone();
-            Rc::new(move |id: TabId, window: &mut Window, cx: &mut App| {
-                this.update(cx, |shell, cx| shell.start_tab_drag(id, window, cx));
+            Rc::new(move |id: TabId, alive, window: &mut Window, cx: &mut App| {
+                this.update(cx, |shell, cx| {
+                    shell.start_tab_drag(id, window, cx);
+                    if let Some(drag) = &mut shell.tab_drag {
+                        drag.platform_alive = Some(alive);
+                    }
+                });
             })
         };
         let on_drag_move = {
@@ -2511,6 +2522,7 @@ impl Shell {
         };
         self.tab_drag = Some(TabDragState {
             id,
+            platform_alive: None,
             slot: index,
             target: index,
             position: gpui::Point::default(),
