@@ -10,6 +10,10 @@
 //! Metadata order is `#number → repository → state → relative time`; the number stays first
 //! (owner-requested) instead of moving to the right when reused elsewhere.
 
+#[cfg(test)]
+#[path = "work_item_row_tests.rs"]
+mod tests;
+
 use ely_core::{
     primitives::{FocusRing, Icon, IconName},
     theme::{ActiveTheme, IconSize, Radius, TextSize},
@@ -21,7 +25,7 @@ use gpui::{
 use std::rc::Rc;
 
 /// The single row height both lists reserve in their virtual list state.
-pub(crate) const WORK_ITEM_ROW_HEIGHT: f32 = 72.0;
+pub(crate) const WORK_ITEM_ROW_HEIGHT: f32 = 56.0;
 
 /// A plain action: the row itself, a link or the row-select callback.
 pub(crate) type RowAction = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -131,9 +135,29 @@ struct LinkCell {
     label: String,
     aria: String,
     tooltip: Option<String>,
-    /// Whether the cell takes the leftover metadata width (the repository name).
+    /// Whether a noninteractive slot takes the leftover metadata width.
     flex: bool,
 }
+
+/// Keep observation attached to the real text node's hitbox in renderer tests. The
+/// observer changes no geometry or event handling and is absent from release builds.
+pub(crate) fn text_target<E: StatefulInteractiveElement>(target: E, _id: String) -> E {
+    #[cfg(test)]
+    return target.on_hover(move |hovered, _, cx| {
+        if cx.has_global::<TextHover>() {
+            let state = cx.global_mut::<TextHover>();
+            if *hovered { state.0.insert(_id.clone()); } else { state.0.remove(&_id); }
+        }
+    });
+    #[cfg(not(test))]
+    target
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TextHover(pub std::collections::HashSet<String>);
+#[cfg(test)]
+impl gpui::Global for TextHover {}
 
 fn action_link(cell: LinkCell, action: RowAction, cx: &App) -> AnyElement {
     let LinkCell {
@@ -144,6 +168,8 @@ fn action_link(cell: LinkCell, action: RowAction, cx: &App) -> AnyElement {
         tooltip,
         flex,
     } = cell;
+    let hover_id = id.clone();
+    let tooltip_id = format!("{id}-tooltip");
     let mut element = div()
         .id(SharedString::from(id))
         .role(gpui::Role::Link)
@@ -165,15 +191,18 @@ fn action_link(cell: LinkCell, action: RowAction, cx: &App) -> AnyElement {
         element = element.debug_selector(move || debug);
     }
     if let Some(tooltip) = tooltip {
-        element = element.tooltip(crate::ui::tooltip::ui_tooltip(tooltip));
+        element = element.tooltip(text_tooltip(tooltip, tooltip_id));
     }
     element = element
         // Native truncation, not Ely `Ellipsis`: same reason as the title (L017).
         .truncate()
         .child(label);
 
+    let element = text_target(element, hover_id);
     if flex {
         div()
+            .flex()
+            .items_center()
             .flex_1()
             .min_w_0()
             .overflow_hidden()
@@ -182,6 +211,19 @@ fn action_link(cell: LinkCell, action: RowAction, cx: &App) -> AnyElement {
     } else {
         element.into_any_element()
     }
+}
+
+/// Named tooltip content lets renderer regressions observe the actual delayed tooltip,
+/// using the same builder in production and tests.
+pub(crate) fn text_tooltip(
+    text: String,
+    selector: String,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    ely_core::primitives::Tooltip::rich(move |_, cx| {
+        crate::ui::tooltip::ui_tooltip_content(text.clone(), cx)
+            .debug_selector({ let selector = selector.clone(); move || selector })
+            .into_any_element()
+    })
 }
 
 pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
@@ -208,7 +250,6 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             .role(gpui::Role::Link)
             .aria_label(row.title.clone())
             .tab_index(0)
-            .flex_1()
             .min_w_0()
             .cursor_pointer()
             .focus_ring(cx)
@@ -220,7 +261,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                 window.prevent_default()
             })
-            .tooltip(crate::ui::tooltip::ui_tooltip(row.title_tooltip.clone()))
+            .tooltip(text_tooltip(row.title_tooltip.clone(), format!("{}-tooltip", selectors.title)))
             .debug_selector({
                 let debug = selectors.title.clone();
                 move || debug.clone()
@@ -234,25 +275,22 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
     } else {
         div()
             .id(SharedString::from(selectors.title.clone()))
-            .flex_1()
             .min_w_0()
             .font_weight(gpui::FontWeight::MEDIUM)
             .truncate()
-            .tooltip(crate::ui::tooltip::ui_tooltip(row.title_tooltip.clone()))
+            .tooltip(text_tooltip(row.title_tooltip.clone(), format!("{}-tooltip", selectors.title)))
             .debug_selector({
                 let debug = selectors.title.clone();
                 move || debug.clone()
             })
             .child(row.title.clone())
     };
+    let title = text_target(title, selectors.title.clone());
 
-    // Both lines share one explicit line box: GPUI's default line height is a *font* metric
-    // (phi × size, resolved per run), so the mono `#number` and the UI-font repository cells
-    // measured different line boxes and `items_center` only centred those unequal boxes against
-    // each other — the painted glyphs were still offset. A fixed line height in rems gives every
-    // cell the same box under the window's own font scale, and centring equal boxes also aligns
-    // the painted text. 1.5 is a deliberate, slightly tighter leading than GPUI's phi default so
-    // the two lines fit the 72px row with balanced slack.
+    // Explicit line boxes prevent the mono number and UI labels from acquiring different
+    // heights. At the default theme the two lines plus the 3px gap occupy 39px inside a
+    // 56px item. Painted glyph extents are checked separately with the bundled font;
+    // equal boxes alone do not establish optical balance.
     let title_line_height = gpui::rems(body.0 * 1.5);
     let metadata_line_height = gpui::rems(tiny.0 * 1.5);
     let mut metadata = div()
@@ -260,6 +298,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .items_center()
         .line_height(metadata_line_height)
         .gap_2()
+        .pl(gpui::rems(theme.icon_size(IconSize::Sm).0 + 0.5))
         .w_full()
         .min_w_0()
         .overflow_hidden()
@@ -276,9 +315,8 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         number = number.debug_selector(move || debug);
     }
     metadata = metadata.child(number);
-    // The repository part stays a direct child of the metadata line (never a nested flex row: a
-    // nested row inside a baseline-aligned parent collapses to zero height and would make the
-    // links unclickable).
+    // Only the repository slot grows. Its nested horizontal flex rows keep each link at
+    // its intrinsic text width (or its truncated width), leaving the trailing slack inert.
     match row.repository {
         RepositoryLink::Whole { label, action } => {
             metadata = metadata.child(action_link(
@@ -306,7 +344,6 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             let mut repo_cell = div()
                 .flex()
                 .items_center()
-                .gap_0p5()
                 .min_w_0()
                 .overflow_hidden();
             if !owner.trim().is_empty() {
@@ -326,7 +363,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                         owner_action,
                         cx,
                     ))
-                    .child(div().flex_none().child("/"));
+                    .child(div().flex_none().debug_selector({
+                        let debug = format!("{}-separator", selectors.row);
+                        move || debug
+                    }).child("/"));
             }
             repo_cell = repo_cell.child(action_link(
                 LinkCell {
@@ -343,7 +383,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                 name_action,
                 cx,
             ));
-            metadata = metadata.child(div().flex_1().min_w_0().overflow_hidden().child(repo_cell));
+            metadata = metadata.child(div().flex().flex_1().min_w_0().overflow_hidden().child(repo_cell));
         }
     }
     metadata = metadata.child(
@@ -359,7 +399,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .id(SharedString::from(format!("{}-updated", selectors.row)))
         .min_w_0()
         .overflow_hidden()
-        .tooltip(crate::ui::tooltip::ui_tooltip(row.updated_tooltip.clone()))
+        .tooltip(text_tooltip(row.updated_tooltip.clone(), format!("{}-updated-tooltip", selectors.row)))
         .aria_label(format!("Updated {}", row.updated_tooltip))
         .truncate()
         .child(row.updated_label);
@@ -386,16 +426,13 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             }
             icon_slot
         })
-        .child(title);
+        .child(div().flex().flex_1().min_w_0().overflow_hidden().child(title));
     if let Some(debug) = selectors.title_line.clone() {
         title_line = title_line.debug_selector(move || debug);
     }
 
-    // Centre the two-line block inside the fixed row: `flex_col` + `gap_1` alone packed both
-    // lines at the top, leaving all the slack (72 − 2×8 padding − the two line boxes − the gap)
-    // beneath the metadata, which is exactly the lopsided selected fill the owner rejected.
-    // `justify_center` puts half the slack above the title and half below the metadata, so the
-    // rounded active background is balanced around the content at every width.
+    // The same element owns the list item's measured height and active fill. Compact padding
+    // replaces the old 72px item; no viewport/gutter compensation belongs in this renderer.
     let mut container = div()
         .id(SharedString::from(selectors.row.clone()))
         .aria_label(row.aria)
@@ -406,7 +443,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .flex()
         .flex_col()
         .justify_center()
-        .gap_1()
+        .gap(px(3.0))
         .min_w_0()
         .overflow_hidden()
         .rounded(radius)

@@ -35,7 +35,9 @@ Search 最多可访问 1,000 个位置，包括非整除 page size 的最后一�
 ## 共享工作条目组件（2026-11-04 返工）
 
 条目呈现由 `src/ui/work_item_row.rs` 提供，Home 的 Involved 列与全局 Issues/PR 列表消费同一实现，不再各写近似样式：
-行高固定 `WORK_ITEM_ROW_HEIGHT = 72`、标题 `TextSize::Base`/`MEDIUM` + GPUI 原生 `truncate()`、`Radius::Md` 圆角、`colors.active` 选中底、`TextSize::Xs` 元信息，图标槽竖直居中。两行内容块在固定行高内用 `justify_center` 竖直居中（`flex_col` + `gap_1` 默认会把两行顶到行首，把全部余量留在元信息下方，选中圆角底色因此下重上轻）；标题行与元信息行各自设置显式行高 `rems(字号 × 1.5)`，而不是 GPUI 默认的按字体 phi 行高——mono 的 `#number` 与 UI 字体的仓库链接不再各测各的行盒，`items_center` 居中相同行盒后才真正对齐到同一条绘制基线区域。标题行另加 `page_layout::PAGE_HEADER_INSET` 内缩，与 Home/Notifications 的列头同一 x 起点。元信息顺序统一为 `#number → 仓库名 → 状态 → 相对时间`，编号用主题 `mono_family` 且保持在最前；状态文案与图标颜色按 Open/Closed/Merged/Unknown 分别映射 `success / fg_subtle / accent / warning`，不再固定单色。组件只接收展示值与回调，两个列表各自保留数据模型、账户上下文、typed navigation 与键盘选择；Home 侧 `HomeAction` 与 `select`/`activate` 语义不变。
+行高固定 `WORK_ITEM_ROW_HEIGHT = 56`（2026-11-11 返工由 72 收紧），水平 padding 8px，两行间距 3px；背景与虚拟列表实际 item 使用同一边界。标题 `TextSize::Base`/`MEDIUM`、元信息 `TextSize::Xs`，均原生截断；`Radius::Md` 圆角、`colors.active` 选中底、状态图标颜色保持共享。两行显式行高 `rems(字号 × 1.5)`，metadata 的编号起点与标题文字左沿对齐（避开图标槽和 gap）。行盒留白和 bundled font 的实际 glyph raster 墨迹边界分别核验，不能仅凭 `justify_center` 宣称视觉平衡。
+
+元信息顺序为 `#number → 仓库名 → 状态 → 相对时间`，编号用主题 `mono_family`；Home 的 owner 与 repo 独立导航、斜杠两侧不加布局 gap。只有非交互横向 flex slot 占据余宽，短链接按 intrinsic 文本宽度排版，长链接按显示范围截断；链接 hover、tooltip、pointer、click 不覆盖 trailing blank。标题 tooltip 同样按文字范围，无动作标题不增加 Link role 或 Tab stop。全局列表保留整行选择，仓库文字单独导航并停止冒泡。两端继续持有各自的数据模型、账户上下文和 typed navigation。
 
 ## Shell 接入契约
 
@@ -53,7 +55,7 @@ page.update(cx, |view, _| view.on_repository(callback));
 
 正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`。
 
-元数据行顺序为 `#number → 仓库名 → 状态 → 相对时间`：编号使用 Google Sans Code，位于仓库名之前且只出现一次；两种列表相同。整行按文本基线对齐，并对仓库名做 1 logical px 的相对上移，以抵消数字大写高度与仓库名小写高度造成的视觉偏差（相对定位不参与布局，不改变横向位置）。长仓库名在该行内仍正确截断，不会挤掉编号、状态或时间。
+元数据行顺序和对齐以上述共享组件为准，不再使用旧的 baseline + 1px 相对上移方案；长仓库名在受限 slot 内截断，编号、状态与时间保留各自空间。
 
 时间显示：主行只显示相对年龄（`Just now`、`3 minutes ago`、`2 hours ago`、`Yesterday`、`4 days ago`），不再显示 `Updated` 前缀或 ISO 日期；精确 RFC3339 值只保留在 tooltip 与无障碍说明。解析与格式化复用 `src/ui/home/time.rs` 的同一纯函数（本模块以 `#[path]` 引用该源文件，不复制 parser），因此 offset、小数秒、无效和未来值得到与 Home 一致的诚实结果。页面可见且有行时，本地 wall clock 每 30 秒更新一次以刷新相对文本；窗口失活、隐藏、切离前台或视图释放时停止计时，不产生 GitHub 刷新或后台轮询。这是过渡消费者接点，Notifications 的共享 helper 落地后由协调者统一为单一公共模块。
 

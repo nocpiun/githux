@@ -6,6 +6,9 @@
 //! one-shot typed callbacks. Native Windows input, IME and real GitHub data
 //! remain manual checks recorded in the task devlog.
 
+#[path = "row_tests.rs"]
+mod row_regressions;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
