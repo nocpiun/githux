@@ -133,7 +133,7 @@ Star History 的手绘噪声保留。根 `[patch.crates-io]` 统一使用 `vendo
 - 插值属性为 opacity、fill-opacity、stroke-opacity（数字和百分比均支持）、stroke-dashoffset（数值或 px）和仿射 transform（含 none identity、translate/translateX/translateY、scale/scaleX/scaleY）；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留；普通 presentation transform 作为基础值保留，动画延迟前及 none fill 收尾后恢复。静态隐藏和 `!important` 属性保持其优先级。受支持的 cascade 计算后写入节点，并移除原样式表，避免 usvg 对同一声明再次 cascade、覆盖采样值或根可见性。
 - 播放最多五秒、最多 100 个采样帧（目标约 20 fps）。先为最终图保留至多四分之一解码预算（至少满足固有网格），再按设备密度估算可保留帧数；临时工作面、编码或网格一致性不满足时减半时间采样数，保留稳定空间网格。普通卡片保持动画，高 DPI/大图会减少帧数；低至两个入场样本仍不能满足预算、或时间线超过五秒时才保留计算后的最终 PNG。所有帧与最终图仍共享编码/解码/像素总额，静态 fallback 不作为动画验收证据。
 - 评估的 CSS ≤ 128 KiB，选择器/节点比较 ≤ 2,000,000，规则/变量/停点展开各受 2 MiB 预算约束。变量向同一个有界输出追加，按剩余额度在申请/拼接前检查长度，不先构造指数增长的中间字符串；每次时间线构建共享 100,000 次展开步骤上限，空值也计费，每 128 步复核取消/截止时间，遍历节点时同样复核。条件规则不进入评估预算；`@font-face` 只支持下述有界 data 字体，不读取网络/文件字体。多条动画、重复/无限播放、reverse/alternate/alternate-reverse 方向（包括 shorthand）、其他动画属性及浏览器条件 CSS 不属于本次支持范围，保持基础呈现，不声称完整 CSS 浏览器兼容。
-- `workspace.rs` 在绘制前估算 resvg 的画布、内嵌图片、隔离层和滤镜工作面；超采样不满足预算时退回固有网格，再超限则拒绝。会分配未受 resvg 画布约束的 pattern tiles 暂不支持。
+- `workspace.rs` 在绘制前估算 resvg 的画布、内嵌图片、隔离层和滤镜工作面；矢量 `<image>` 每级按当前目标画布计入额外表面，向内传播祖先缩放与隔离后的目标大小，不按资源固有 1×1 尺寸代替。滤镜 primitive 的完整区域与被 renderer 裁切的 group layer 分开计费，不能沿用 layer 的内部画布裁切来低估滤镜分配；超采样不满足预算时退回固有网格，再超限则拒绝。会分配未受 resvg 画布约束的 pattern tiles 暂不支持。
 - Provider 在每帧准备之间检查取消与总截止时间；账户/session 发布复核及 `no-store` 路径保持原有约束。持久缓存仍存原始响应，不存由当前账户以外继承的动画授权。
 
 Reader 复用既有 pump 选择单帧、已解码的 `gpui::RenderImage`，从实际可见绘制开始计时；只重绘，不因中间帧重测尺寸。最终帧到达后释放其他帧并停止计时；reduced motion、窗口/页面暂停及超过 150ms 未绘制可见交集时同样收尾为最终 PNG。文档/账户替换按代次丢弃整组旧帧。静态图片不产生新的持续工作。

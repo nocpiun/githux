@@ -54,7 +54,7 @@ fn quality_fractional_filter_grids_clip_transparent_edges_without_panicking() {
 
 #[test]
 fn quality_displacement_accepts_canvas_clipped_source_and_full_map_grids() {
-    // The filter exceeds resvg's four-canvas layer clip but remains well inside
+    // The filter exceeds resvg's five-canvas layer clip but remains well inside
     // the decoder budget. SourceGraphic is consequently smaller than the map;
     // the old equal-size assertion panicked even at integral display scales.
     let svg=br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="9"><defs><filter id="hand" x="-1000%" y="-1000%" width="2100%" height="2100%"><feTurbulence baseFrequency=".05" numOctaves="2" result="noise"/><feDisplacementMap in="SourceGraphic" in2="noise" scale="5" xChannelSelector="R" yChannelSelector="G"/></filter></defs><rect x="1.1" y="1.3" width="9.75" height="6.25" fill="#f00" filter="url(#hand)"/></svg>"##;
@@ -71,6 +71,56 @@ fn quality_displacement_accepts_canvas_clipped_source_and_full_map_grids() {
             pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0,
             [255, 0, 0, 255]
         );
+    }
+}
+
+#[test]
+fn quality_full_filter_regions_are_bounded_even_when_the_layer_is_clipped() {
+    let svg=br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="9"><defs><filter id="hand" x="-50000%" y="-50000%" width="100000%" height="100000%"><feTurbulence baseFrequency=".05" result="noise"/><feDisplacementMap in="SourceGraphic" in2="noise" scale="5"/></filter></defs><rect width="10" height="6" fill="#f00" filter="url(#hand)"/></svg>"##;
+    assert!(
+        matches!(
+            decode_image(svg.to_vec(), &ImageLimits::default()),
+            Err(ImageFailure::TooLarge { .. })
+        ),
+        "filter primitives allocate their uncropped region even though the source layer is clipped"
+    );
+}
+
+#[test]
+fn quality_nested_vectors_charge_the_destination_canvas_at_every_level() {
+    fn document(size: u32, opacity: &str) -> Vec<u8> {
+        let mut svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><g opacity="{opacity}"><rect width="1" height="1" fill="blue"/></g></svg>"#
+        );
+        for _ in 0..3 {
+            let data = base64::engine::general_purpose::STANDARD.encode(svg);
+            svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><image width="1" height="1" preserveAspectRatio="none" href="data:image/svg+xml;base64,{data}"/></svg>"#
+            );
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(svg);
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}"><image width="{size}" height="{size}" preserveAspectRatio="none" href="data:image/svg+xml;base64,{data}"/></svg>"#).into_bytes()
+    }
+    let limits = ImageLimits::default();
+    assert!(
+        matches!(
+            decode_image(document(1400, "1"), &limits),
+            Err(ImageFailure::TooLarge { .. })
+        ),
+        "four intrinsic 1x1 resources retain five destination canvases, even at native output"
+    );
+    for opacity in ["1", ".5"] {
+        let decoded = decode_image(document(1000, opacity), &limits).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        let bank = u64::from(pixels.width()) * u64::from(pixels.height()) * 5 * 4;
+        assert!(
+            bank <= limits.max_decoded_bytes as u64,
+            "pre-render grid must fit all five retained destinations"
+        );
+        let center = pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0;
+        assert_eq!(center[2], 255);
+        assert_eq!(center[3], if opacity == "1" { 255 } else { 128 });
+        assert_eq!((decoded.width, decoded.height), (1000, 1000));
     }
 }
 

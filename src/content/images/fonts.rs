@@ -192,6 +192,15 @@ pub(super) fn with_embedded(
                 limit: MAX_ENCODED_FONT,
             });
         }
+        // Unknown data-font formats retain the existing fallback behavior.
+        // Only supported single-face fonts or explicitly rejected collections
+        // enter the bounded SFNT/WOFF parser below.
+        if !matches!(
+            data.get(..4),
+            Some(b"wOFF" | b"OTTO" | b"true" | b"ttcf" | b"\0\x01\0\0")
+        ) {
+            continue;
+        }
         let mut used = budget.lock().map_err(|_| malformed())?;
         let font = unpack_woff(&data, MAX_FONT_BYTES.saturating_sub(used.3))?;
         validate_name_work(&font)?;
