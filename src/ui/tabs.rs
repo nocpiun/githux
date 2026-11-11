@@ -19,8 +19,14 @@
 //! is always reserved so nothing shifts.
 //!
 //! Dragging a tab horizontally asks the shell to reorder the session collection by [`TabId`];
-//! nothing is closed, recreated or re-identified.
+//! nothing is closed, recreated or re-identified. While the pointer is held, GPUI's drag view
+//! draws a non-interactive [`TabGhost`] that matches the lifted tab's icon, label and geometry and
+//! travels one-for-one with the pointer at its initial grab offset; the drag cursor stays the
+//! default arrow and the strip's own entry stays in place as the source marker. The ghost never
+//! takes pointer/hit tests, so it cannot intercept a drop, and it disappears as soon as the drag
+//! ends (drop, Escape/cancel, release outside the strip or a lost window focus).
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::ui::tooltip::ui_tooltip;
@@ -31,9 +37,9 @@ use ely_core::{
     typography::Ellipsis,
 };
 use gpui::{
-    AnyElement, App, ElementId, FocusHandle, FontWeight, IntoElement, MouseButton, ParentElement,
-    Role, ScrollHandle, StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
-    transparent_black,
+    AnyElement, App, BoxShadow, CursorStyle, ElementId, FocusHandle, FontWeight, IntoElement,
+    MouseButton, ParentElement, Render, Role, ScrollHandle, StatefulInteractiveElement, Styled,
+    Window, div, prelude::*, px, rgba, transparent_black,
 };
 
 use crate::workspace::{Route, TabId};
@@ -48,6 +54,8 @@ pub(super) type Run = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 pub(super) type OnFlag = Rc<dyn Fn(bool, &mut Window, &mut App) + 'static>;
 /// A strip callback that reports which session something happened to.
 pub(super) type OnTab = Rc<dyn Fn(TabId, &mut Window, &mut App) + 'static>;
+/// Drag start reports the payload lifetime as well as the session identity.
+pub(super) type OnDragStart = Rc<dyn Fn(TabId, Rc<Cell<bool>>, &mut Window, &mut App) + 'static>;
 /// A strip callback that also carries the pointer position, used while a drag moves.
 pub(super) type OnTabAt =
     Rc<dyn Fn(TabId, gpui::Point<gpui::Pixels>, &mut Window, &mut App) + 'static>;
@@ -69,6 +77,99 @@ pub(super) struct TabDrag {
     pub id: TabId,
     /// Which strip produced the drag, so another strip's drag is ignored.
     pub owner: gpui::EntityId,
+    /// True only while this exact payload is alive. Shell cleanup may run after an account
+    /// observer, when another gesture has already replaced this drag.
+    pub alive: Rc<Cell<bool>>,
+    /// The icon and label the lifted tab must draw, independent of the strip's own (still visible)
+    /// entry. Copied when the drag starts because a mid-drag route title change must not alter
+    /// the ghost the pointer is already carrying.
+    pub title: String,
+    pub icon: IconName,
+}
+
+impl Drop for TabDrag {
+    fn drop(&mut self) {
+        self.alive.set(false);
+    }
+}
+
+/// Retire only the captured payload. Its `Drop` invalidates this lifetime even if a later drag
+/// belongs to another window, so deferred account cleanup never needs to guess the active owner.
+pub(super) fn cancel_platform_drag(
+    alive: Rc<Cell<bool>>,
+    handle: gpui::AnyWindowHandle,
+    cx: &mut App,
+) {
+    cx.defer(move |cx| {
+        if alive.get() {
+            let _ = handle.update(cx, |_, window, cx| {
+                cx.stop_active_drag(window);
+            });
+        }
+    });
+}
+
+/// The lifted tab's preview, drawn by GPUI at `pointer - cursor_offset` on every frame of an
+/// active drag. It never takes the pointer, never starts or accepts a drag, and has no tooltip or
+/// hover affordances, so its only effect is paint: the strip's own drop/reorder logic keeps
+/// running underneath it, and once the drag ends it stops being drawn. Like the tooltip roots in
+/// [`crate::ui::tooltip`], it is prepainted outside the shell's `FocusScope`, so it carries the
+/// theme's UI family itself instead of falling back to the system face.
+struct TabGhost {
+    title: String,
+    icon: IconName,
+}
+
+impl Render for TabGhost {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut gpui::Context<'_, TabGhost>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let colors = &theme.colors;
+        let radius = theme.radius(Radius::Md);
+        let text = theme.text_size(TextSize::Sm);
+        let font_family = theme.font_family.clone();
+        let title = self.title.clone();
+        div()
+            .debug_selector(|| "tab-drag-ghost".to_string())
+            .font_family(font_family)
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(TAB_ICON_GAP))
+            .w(px(TAB_WIDTH))
+            .h(px(TAB_HEIGHT))
+            .pl(px(8.0))
+            .pr(px(4.0))
+            .rounded(radius)
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .text_size(text)
+            .text_color(colors.fg)
+            .font_weight(FontWeight::MEDIUM)
+            .shadow(vec![BoxShadow {
+                color: rgba(0x000000).into(),
+                offset: gpui::point(px(0.0), px(4.0)),
+                blur_radius: px(12.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .child(Icon::new(self.icon).size(IconSize::Xs).color(colors.fg))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(Ellipsis::new(title)),
+            )
+            // The close slot is reserved so the label occupies exactly the same width as the
+            // still-visible source tab; the button itself is not part of the ghost.
+            .child(div().flex().flex_none().size(px(TAB_CLOSE_SIZE)))
+            .into_any_element()
+    }
 }
 
 /// Everything the strip needs for one frame.
@@ -82,7 +183,7 @@ pub(super) struct View {
     pub drop_at: Option<usize>,
     pub toolbar: AnyElement,
     pub on_hover: OnFlag,
-    pub on_drag_start: OnTab,
+    pub on_drag_start: OnDragStart,
     pub on_drag_move: OnTabAt,
     pub on_drop: OnTab,
 }
@@ -317,7 +418,15 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
     let middle_close = entry.close.clone();
     let start = view.on_drag_start.clone();
     let moved = view.on_drag_move.clone();
-    let payload = TabDrag { id, owner };
+    let drag_title = title.clone();
+    let drag_icon = entry.icon;
+    let payload = TabDrag {
+        id,
+        owner,
+        alive: Rc::new(Cell::new(true)),
+        title: drag_title,
+        icon: drag_icon,
+    };
 
     div()
         .id(element_id)
@@ -362,8 +471,17 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
         // Drag handlers are always registered: this `on_drag` callback is what starts a reorder,
         // so gating it on a drag already being in progress would make it unreachable.
         .on_drag(payload, move |drag, _, window, cx| {
-            start(drag.id, window, cx);
-            cx.new(|_| gpui::EmptyView)
+            start(drag.id, drag.alive.clone(), window, cx);
+            // The pointer grab must read as the default arrow, not the tab's pointing hand. The
+            // active drag is registered only after this constructor returns, so apply the style on
+            // the next effect flush; it lives for the whole gesture and clears with the drag.
+            window.defer(cx, |window, cx| {
+                cx.set_active_drag_cursor_style(CursorStyle::Arrow, window);
+            });
+            cx.new(|_| TabGhost {
+                title: drag.title.clone(),
+                icon: drag.icon,
+            })
         })
         .on_drag_move(move |event: &gpui::DragMoveEvent<TabDrag>, window, cx| {
             if event.drag(cx).owner != owner {
