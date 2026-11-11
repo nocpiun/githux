@@ -2064,7 +2064,6 @@ impl RepositoryPage {
                     state.snapshot_provenance = provenance;
                 }
                 self.error = None;
-                let mut subscribed = false;
                 if let Some((missing_root, missing_readme)) = missing {
                     let mode = RepositoryCacheMode::OnlinePreferred;
                     if missing_root {
@@ -2073,7 +2072,6 @@ impl RepositoryPage {
                             snapshot: snapshot.clone(),
                             mode,
                         });
-                        subscribed = true;
                     }
                     if missing_readme {
                         self.spawn_job(Job::Readme {
@@ -2081,13 +2079,16 @@ impl RepositoryPage {
                             snapshot,
                             mode,
                         });
-                        subscribed = true;
                     }
-                }
-                if !subscribed {
-                    // The retained root and README are complete, so no Root/Readme reply will arrive to
-                    // resume work that was waiting on them: saved directory expansions and a saved
-                    // selection have to be resumed here.
+                    if !missing_root {
+                        // The root tree is already available, so no `apply_root` reply will arrive to
+                        // resume saved directory expansions or a saved selection. README discovery
+                        // does not do that either (`apply_readme` only requests README content), so
+                        // resume that work here.
+                        self.load_expanded(cx);
+                        self.resolve_selection(cx);
+                    }
+                } else {
                     self.load_expanded(cx);
                     self.resolve_selection(cx);
                 }

@@ -161,6 +161,17 @@ Codex 对 `d16ac05` 提出 1 项 P2，成立且可直接修复；仍无待裁决
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
 
+## PR #85 第九轮审查修复
+
+Codex 对 `8549fa2` 提出 2 项 P2，均成立且可直接修复；仍无待裁决事项。
+
+1. **P2 撤权后预发布列表仍留在屏上**：缓存先行列表在 `/user/repos` 仍在途时已经显示，而 `clear_revoked_repositories` 会因 `operation.is_some()` 直接返回，撤权后旧行继续可见直到请求结束。修复：当前显示的是缓存先行（`Historical` + `Ready`）列表时，撤权检查照常清理已显示行，但不结束在途操作；最终回复仍按原票据/上下文校验。回归 `a_revocation_retires_a_preliminary_list_while_the_online_read_is_pending`（恢复旧早退后失败）。
+2. **P2 仅缺 README 发现时不恢复保存的文件解析**：同 commit 捷径在只补发 `Job::Readme` 时跳过了 `load_expanded`/`resolve_selection`，而 `apply_readme` 只会在 `Selection::Readme` 时请求正文，于是保存的文件永远停在 Loading。修复：只要根树已保留（`!missing_root`）就恢复展开与选择解析，与是否补发 README 无关。回归 `a_saved_file_resolves_when_only_readme_discovery_was_missing`（恢复旧条件后失败）。
+
+实现细节补充：清理期间在途读取仍拥有最终呈现，因此缓存先行行被清除为中性 Loading（不发布与之竞争的失败文案），且不清 `loaded` 标记——否则 401 之后会在结算时再触发一次自动读取，把凭据拒绝文案覆盖成网络失败（既有 `a_401_is_not_shown_as_offline_history` 回归暴露出这一点）。
+
+本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked` 全部通过。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

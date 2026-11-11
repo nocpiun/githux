@@ -859,7 +859,18 @@ impl Accounts {
         // validated against the same token/context in `apply`, which also owns replacing the
         // pending list; clearing here would overwrite that reply's own failure (e.g. a classified
         // 401) and reset the auto-load marker into a retry loop.
-        if self.operation.is_some() {
+        //
+        // A cache-first list is the exception: it is displayed while the online read is still
+        // pending, so a revocation during that window must retire the visible rows immediately
+        // instead of waiting for the request to settle. It does not end the operation.
+        let preliminary_displayed = matches!(
+            self.snapshot.repositories.origin,
+            RepositoryListOrigin::Historical { .. }
+        ) && matches!(
+            self.snapshot.repositories.preview,
+            RepositoryPreview::Ready(_)
+        );
+        if self.operation.is_some() && !preliminary_displayed {
             return;
         }
         let invalid = self
@@ -875,14 +886,28 @@ impl Accounts {
             self.repository_authorization = None;
             self.repository_context = None;
             self.previous_repositories = None;
+            // While the read is still running its reply owns the final presentation, including a
+            // classified credential rejection. Retire the visible cache-first rows to a neutral
+            // loading state instead of publishing a competing failure message the reply would then
+            // have to overwrite.
+            let in_flight = self.operation.is_some();
             self.snapshot.repositories = Repositories {
                 account: self.snapshot.active.clone(),
-                preview: RepositoryPreview::Failed(
-                    "Repository access changed. Retry to read the current list.".into(),
-                ),
+                preview: if in_flight {
+                    RepositoryPreview::Loading
+                } else {
+                    RepositoryPreview::Failed(
+                        "Repository access changed. Retry to read the current list.".into(),
+                    )
+                },
                 origin: RepositoryListOrigin::Network,
             };
-            self.loaded = None;
+            // The in-flight read already recorded the key it is loading for; clearing the marker
+            // would start another read as soon as it settles (for example re-reading in a loop after
+            // a credential rejection). Only a settled display forgets the marker.
+            if !in_flight {
+                self.loaded = None;
+            }
             cx.notify();
         }
     }

@@ -2483,6 +2483,95 @@ fn a_cached_repository_list_paints_before_the_online_read_finishes_then_is_repla
     );
 }
 
+/// Regression (review finding): a cache-first list is displayed while the online read is still
+/// pending, so an explicit revocation in that window must retire the visible rows immediately.
+#[gpui::test]
+fn a_revocation_retires_a_preliminary_list_while_the_online_read_is_pending(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let transport = Arc::new(HeldRepositoryTransport::new(mock.clone()));
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        transport.clone(),
+        cache.clone(),
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state.repositories.origin == RepositoryListOrigin::Network
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+    });
+    wait_idle(&controller, cx);
+
+    transport.hold(true);
+    refresh(&controller, cx);
+    assert!(
+        beat_until(&controller, cx, |controller, cx| {
+            controller.read_with(cx, |accounts, _| {
+                accounts.busy()
+                    && matches!(
+                        accounts.snapshot().repositories.origin,
+                        RepositoryListOrigin::Historical { .. }
+                    )
+                    && matches!(
+                        &accounts.snapshot().repositories.preview,
+                        RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1
+                    )
+            })
+        }),
+        "the cached list must be displayed while the online read is pending"
+    );
+
+    // An explicit revocation retires the displayed rows even though the read is in flight.
+    let session = runtime_services(&controller, cx)
+        .accounts()
+        .page_session()
+        .unwrap();
+    let binding = runtime_services(&controller, cx)
+        .repositories()
+        .cache(session.context())
+        .unwrap();
+    binding
+        .store()
+        .revoke_repository(binding.scope(), Some(10))
+        .unwrap();
+    assert!(
+        beat_until(&controller, cx, |controller, cx| {
+            controller.read_with(cx, |accounts, _| {
+                !matches!(
+                    accounts.snapshot().repositories.preview,
+                    RepositoryPreview::Ready(_)
+                )
+            })
+        }),
+        "a revoked preliminary list must not stay on screen while the read is pending"
+    );
+    transport.hold(false);
+    transport.release_all();
+    settle_beats(&controller, cx);
+}
+
+fn runtime_services(
+    controller: &Entity<Accounts>,
+    cx: &mut VisualTestContext,
+) -> crate::app::accounts::AccountServices {
+    controller.read_with(cx, |accounts, _| {
+        accounts.services().expect("an open runtime")
+    })
+}
+
 /// An explicit 401 is a credential rejection, not a transient outage: it must not be shown as
 /// offline history, and the old snapshot must not become current again.
 #[gpui::test]

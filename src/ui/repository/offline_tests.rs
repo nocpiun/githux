@@ -655,6 +655,49 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
     });
 }
 
+/// Regression (review finding): when only README discovery was missing, the retained root is still
+/// available, so a saved file selection has to be resolved instead of waiting for an `apply_root`
+/// reply that will never arrive.
+#[gpui::test]
+fn a_saved_file_resolves_when_only_readme_discovery_was_missing(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+
+    // Simulate a snapshot with a retained root but no README discovery and no document, reopened at
+    // a saved file selection.
+    page.update_in(cx, |page, window, cx| {
+        let identity = page.details.as_ref().expect("details").identity.clone();
+        let name = page
+            .branch
+            .as_ref()
+            .expect("a displayed branch")
+            .name
+            .clone();
+        let request = page.branch_request;
+        let state = page.branch.as_mut().unwrap();
+        state.readme = super::super::ReadmeState::Unknown;
+        page.selection = Selection::File("src/main.rs".into());
+        page.readme_path = None;
+        page.reader = None;
+        page.reader_status = ReaderStatus::Loading;
+        page.spawn_job(super::super::Job::Revision {
+            branch: name,
+            request,
+            identity,
+            mode: crate::data::RepositoryCacheMode::OnlinePreferred,
+        });
+        page.drain(window, cx);
+    });
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.selection() == &Selection::File("src/main.rs".into())
+    });
+}
+
 /// Regression (review finding): a cached branch list (network fallback) must not suppress the
 /// revision revalidation when the summary itself was verified online.
 #[gpui::test]
