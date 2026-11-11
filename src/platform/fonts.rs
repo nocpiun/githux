@@ -1,9 +1,10 @@
 //! Register fixed font bytes embedded in the executable, independent of the working directory.
 //!
-//! The private UI family has original Noto Sans glyphs and Noto Sans SC glyphs for characters
-//! outside Noto Sans's coverage. This avoids GPUI/Windows' system-only fallback lookup: Chinese
-//! resolves directly in our in-memory font, even without an OS installation. The reproducible
-//! OFL derivative and per-character outline verification live in scripts/build-ui-fonts.py.
+//! The private UI family has Noto Sans SC glyphs directly embedded for all UI text,
+//! providing consistent typography for both Latin and CJK glyphs. This avoids GPUI/Windows'
+//! system-only fallback lookup: all UI characters resolve directly in our in-memory font,
+//! even without an OS installation. The reproducible OFL derivative and per-character outline
+//! verification live in scripts/build-ui-fonts.py.
 //! Google Sans Code remains independent.
 
 use std::borrow::Cow;
