@@ -22,7 +22,7 @@ use super::{
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
 };
-use crate::ui::reader::images::{self, ImageBoard, ImageState};
+use crate::ui::reader::images::{self, ImageBoard, ImageHints, ImageState};
 
 /// Texts this long parse at once; longer ones parse in the background.
 const AT_ONCE: usize = 128 << 10;
@@ -966,7 +966,17 @@ impl MarkdownView {
                 .text_size(gpui::px(sm))
                 .child(tex.clone())
                 .into_any_element(),
-            Block::Image { alt, url } => self.picture_unit(ix, alt, url, &colors, xs, radius),
+            Block::Image { alt, url, hints } => self.picture_unit(
+                ix,
+                alt,
+                url,
+                *hints,
+                images::PictureStyle {
+                    colors: &colors,
+                    small_text: xs,
+                    radius,
+                },
+            ),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
                 .font_family(mono)
@@ -1260,7 +1270,17 @@ impl MarkdownView {
                     .child(view)
                     .into_any_element()
             }
-            Block::Image { alt, url } => self.picture_unit(ix, alt, url, colors, body, radius),
+            Block::Image { alt, url, hints } => self.picture_unit(
+                ix,
+                alt,
+                url,
+                *hints,
+                images::PictureStyle {
+                    colors,
+                    small_text: body,
+                    radius,
+                },
+            ),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
@@ -1284,9 +1304,8 @@ impl MarkdownView {
         ix: usize,
         alt: &str,
         url: &str,
-        colors: &ely_core::theme::Palette,
-        size: f32,
-        radius: gpui::Rems,
+        hints: ImageHints,
+        style: images::PictureStyle<'_>,
     ) -> AnyElement {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(url, context) {
@@ -1300,11 +1319,8 @@ impl MarkdownView {
             images::image_selector(ix),
             alt,
             &state,
-            images::PictureStyle {
-                colors,
-                small_text: size,
-                radius,
-            },
+            hints,
+            style,
             images::frame_selector(ix),
         )
     }
