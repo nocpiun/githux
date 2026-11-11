@@ -112,7 +112,9 @@ fn open(
 struct HeldRepositoryTransport {
     inner: Arc<MockTransport>,
     hold_repositories: std::sync::atomic::AtomicBool,
-    release: tokio::sync::Notify,
+    /// True while held requests may continue; arming a hold resets it so a request starting after
+    /// the release cannot miss the wake-up.
+    release: tokio::sync::watch::Sender<bool>,
 }
 
 impl HeldRepositoryTransport {
@@ -120,17 +122,20 @@ impl HeldRepositoryTransport {
         Self {
             inner,
             hold_repositories: std::sync::atomic::AtomicBool::new(false),
-            release: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(true).0,
         }
     }
 
     fn hold(&self, held: bool) {
         self.hold_repositories
             .store(held, std::sync::atomic::Ordering::SeqCst);
+        if held {
+            self.release.send_replace(false);
+        }
     }
 
     fn release_all(&self) {
-        self.release.notify_waiters();
+        self.release.send_replace(true);
     }
 }
 
@@ -167,8 +172,18 @@ impl Transport for HeldRepositoryTransport {
                 .load(std::sync::atomic::Ordering::SeqCst)
                 && request.url.contains("/user/repos")
             {
+                let mut released = self.release.subscribe();
                 tokio::select! {
-                    _ = self.release.notified() => {}
+                    _ = async {
+                        loop {
+                            if *released.borrow_and_update() {
+                                break;
+                            }
+                            if released.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    } => {}
                     _ = cancel.clone().cancelled() => {
                         return Err(TransportError::Cancelled);
                     }

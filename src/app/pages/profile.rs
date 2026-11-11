@@ -156,6 +156,10 @@ struct Reply {
 pub struct ProfilePage {
     tab: TabId,
     login: String,
+    /// The login spelling this page was opened with. A canonical rename keeps it, so replies to
+    /// requests started before that rename (the cache-first section reads) are still recognized as
+    /// belonging to this profile instead of being discarded with their work slots still occupied.
+    opened_login: String,
     services: Option<AccountServices>,
     session: Option<PageReadSession>,
     cached_session: Option<CachedPageReadSession>,
@@ -200,6 +204,7 @@ impl ProfilePage {
             .map(|client| Arc::new(client) as Arc<dyn ExternalImageBytes>);
         let mut this = Self {
             tab,
+            opened_login: login.clone(),
             login,
             services: None,
             session: None,
@@ -957,7 +962,7 @@ impl ProfilePage {
         if reply.generation != self.generation
             || reply.selection != self.selection
             || reply.request != self.requests[reply.section.index()]
-            || reply.login != self.login
+            || (reply.login != self.login && reply.login != self.opened_login)
         {
             return false;
         }
@@ -2261,7 +2266,12 @@ mod tests {
         /// Test-only: hold every profile read at the transport boundary so a cache-first paint can be
         /// observed while the network is still pending.
         held: AtomicBool,
-        release: tokio::sync::Notify,
+        /// Test-only: hold everything except the basic `/users/<login>` read, so a canonical rename
+        /// can be observed while sibling section reads are still in flight.
+        hold_siblings: AtomicBool,
+        /// True while held requests may continue. Arming a hold resets it, so a request that starts
+        /// after the release cannot miss the notification the way a bare `notify_waiters` can.
+        release: tokio::sync::watch::Sender<bool>,
     }
 
     impl ProfileFixtureTransport {
@@ -2279,16 +2289,27 @@ mod tests {
                 diagram: png_bytes(160, 90),
                 slow_gate: Mutex::new(None),
                 held: AtomicBool::new(false),
-                release: tokio::sync::Notify::new(),
+                hold_siblings: AtomicBool::new(false),
+                release: tokio::sync::watch::channel(true).0,
             }
         }
 
         fn hold(&self, held: bool) {
             self.held.store(held, Ordering::SeqCst);
+            if held {
+                self.release.send_replace(false);
+            }
+        }
+
+        fn hold_siblings(&self, held: bool) {
+            self.hold_siblings.store(held, Ordering::SeqCst);
+            if held {
+                self.release.send_replace(false);
+            }
         }
 
         fn release_all(&self) {
-            self.release.notify_waiters();
+            self.release.send_replace(true);
         }
 
         fn set_offline(&self, offline: bool) {
@@ -2346,12 +2367,24 @@ mod tests {
             Box::pin(async move {
                 let url = request.url.clone();
                 self.reads.lock().unwrap().push(url.clone());
-                if self.held.load(Ordering::SeqCst)
+                let holds = (self.held.load(Ordering::SeqCst)
+                    || (self.hold_siblings.load(Ordering::SeqCst)
+                        && !url.starts_with("https://api.github.com/users/")))
                     && !url.ends_with("/user")
-                    && !url.contains("/user/repos")
-                {
+                    && !url.contains("/user/repos");
+                if holds {
+                    let mut released = self.release.subscribe();
                     tokio::select! {
-                        _ = self.release.notified() => {}
+                        _ = async {
+                            loop {
+                                if *released.borrow_and_update() {
+                                    break;
+                                }
+                                if released.changed().await.is_err() {
+                                    break;
+                                }
+                            }
+                        } => {}
                         _ = cancel.clone().cancelled() => {
                             return Err(TransportError::Cancelled);
                         }
@@ -2898,7 +2931,7 @@ mod tests {
         });
 
         // 3. Release the network: the fresh results replace every saved marker.
-        harness.transport.hold(false);
+        harness.transport.hold_siblings(false);
         harness.transport.release_all();
         wait_for_profile(&harness, cx, |cx| {
             cx.debug_bounds("profile-basic-provenance-historical")
@@ -2946,7 +2979,9 @@ mod tests {
         harness
             .page
             .update(cx, |page, _| page.login = "Alice".into());
-        harness.transport.hold(true);
+        // Hold the sibling section reads only: the basic read may finish (and canonicalize the
+        // login) while those requests are still in flight.
+        harness.transport.hold_siblings(true);
         cx.update_window_entity(&harness.page, |page, _, cx| {
             let services = harness.controller.read(cx).services();
             page.rebind(services, cx);
@@ -2957,13 +2992,28 @@ mod tests {
         });
         harness.transport.hold(false);
         harness.transport.release_all();
+        // Every section started before the rename must still finish: the canonical login change is
+        // the same profile, not a different target.
         wait_for_profile(&harness, cx, |cx| {
             cx.debug_bounds("profile-basic-provenance-historical")
                 .is_none()
+                && cx
+                    .debug_bounds("profile-repositories-provenance-historical")
+                    .is_none()
+                && cx
+                    .debug_bounds("profile-contributions-provenance-historical")
+                    .is_none()
+                && cx
+                    .debug_bounds("profile-readme-provenance-historical")
+                    .is_none()
                 && harness.page.read_with(cx, |page, cx| {
-                    page.view_for_test()
-                        .is_some_and(|view| matches!(view.read(cx).basic(), SectionState::Ready(_)))
-                        && page.work[Section::Basic.index()].is_none()
+                    page.view_for_test().is_some_and(|view| {
+                        let view = view.read(cx);
+                        matches!(view.basic(), SectionState::Ready(_))
+                            && matches!(view.repositories(), SectionState::Ready(_))
+                            && matches!(view.contributions(), SectionState::Ready(_))
+                            && matches!(view.readme_state(), SectionState::Ready(()))
+                    }) && page.work.iter().all(Option::is_none)
                 })
         });
         assert_eq!(

@@ -111,6 +111,14 @@ Codex 对 `4550f17` 提出 2 项 P2，均成立且可直接修复；仍无待裁
 
 本轮验证（同一源码）：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 全部通过。
 
+## PR #85 第三轮审查修复
+
+Codex 对 `6e69090` 提出 1 项 P2（上一轮修复暴露的相邻问题），成立且可直接修复；仍无待裁决事项。
+
+**P2 canonical login 改名会作废已在途的兄弟 section 回复**：缓存 Basic 先用原始拼写启动 Repositories/Contributions/Readme；若在线 Basic 先返回并把 `self.login` 改成 canonical，兄弟回复（仍带原始拼写）会被 `accepts()` 拒绝且不释放 work 槽，section 停在历史/加载态且 retry 无法开始。修复：`ProfilePage` 保留打开时的拼写 `opened_login`；`accepts()` 接受当前 canonical 或打开时拼写（两者由同一路由解析到同一 profile，target 数字 ID 未变）。回归 `a_cached_alias_login_does_not_strand_the_online_basic_read`（扩展到四个 section 全部转在线且 work 槽清空；撤销修复后失败，恢复后通过）。
+
+同时把三个测试夹具的“hold/release”从 `Notify::notify_waiters` 改为 `watch<bool>`：请求可能先读到 hold 标志、在 release 之后才注册等待者，`notify_waiters` 会漏掉它；`watch` 的当前值不会漏。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

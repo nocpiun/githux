@@ -73,7 +73,9 @@ pub(super) struct OfflineTransport {
     /// Test-only: hold every repository read at the transport boundary so a cache-first paint can be
     /// observed while the online chain is still pending.
     held: std::sync::atomic::AtomicBool,
-    release: tokio::sync::Notify,
+    /// True while held requests may continue; arming a hold resets it so a request starting after
+    /// the release cannot miss the wake-up.
+    release: tokio::sync::watch::Sender<bool>,
 }
 
 impl OfflineTransport {
@@ -83,16 +85,19 @@ impl OfflineTransport {
             offline: Mutex::new(false),
             readme_image: Mutex::new(false),
             held: std::sync::atomic::AtomicBool::new(false),
-            release: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(true).0,
         }
     }
 
     pub(super) fn hold(&self, held: bool) {
         self.held.store(held, std::sync::atomic::Ordering::SeqCst);
+        if held {
+            self.release.send_replace(false);
+        }
     }
 
     pub(super) fn release_all(&self) {
-        self.release.notify_waiters();
+        self.release.send_replace(true);
     }
 
     pub(super) fn set_offline(&self, offline: bool) {
@@ -231,8 +236,18 @@ impl Transport for OfflineTransport {
             if self.held.load(std::sync::atomic::Ordering::SeqCst)
                 && !request.url.ends_with("/user")
             {
+                let mut released = self.release.subscribe();
                 tokio::select! {
-                    _ = self.release.notified() => {}
+                    _ = async {
+                        loop {
+                            if *released.borrow_and_update() {
+                                break;
+                            }
+                            if released.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    } => {}
                     _ = cancel.clone().cancelled() => {
                         return Err(TransportError::Cancelled);
                     }
