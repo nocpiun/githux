@@ -28,11 +28,11 @@
 
 | 检查 | 结果 | runner run |
 | --- | --- | --- |
-| `cargo test --locked --test reader_images` | 808 passed，0 failed，1 个公开样本 probe 默认 ignored | `3a696e40-50e4-42ff-9c71-859bafc031b2` |
-| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `7c6b392c-0bcb-4373-8e6e-17ce8febf653` |
-| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `11cd7a38-13ea-41c4-9741-df0bc21c6270` |
-| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，图中文字/图标可见 | `06c1b613-3b6e-41d6-9df2-fae3bf1503fa` |
-| `cargo fmt --all -- --check` | 通过 | `a04c1f60-f57c-4997-be7e-cd1fd6cd9063` |
+| `cargo test --locked --test reader_images` | 811 passed，0 failed，1 个公开样本 probe 默认 ignored | `a06fbfa9-00ef-4bcc-96e5-235a9bd283bf` |
+| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `fd786b32-6731-4136-8606-7d06d12270c3` |
+| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `8996c06c-f6d4-4e03-be90-bfcf52239768` |
+| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，图中文字/图标可见 | `e7e84245-07ee-4acd-ac22-b68022067e82` |
+| `cargo fmt --all -- --check` | 通过 | `98bb67fb-a2cc-4bc5-9680-adb6f85a6161` |
 
 中途在 main `54c8afbc` 集成点运行的全套 `cargo test --locked` 也通过：1255 / 98 / 607 / 310 / 275 / 806 / 901 / 44（run `7d23115a-30c6-4d16-8b11-9ea012c5a5a7`）。它早于最后的 Flow 宿主宽度/根样式修复与 #83 同步，不冒充最终提交的全套检查；最终提交仍须获得新的 CI 与 Codex 审查。
 
@@ -41,15 +41,17 @@
 构建 `githux.exe` 与 `reader_images.exe` 后，在 Kero project `m5d2w59` 的唯一任务 helper 中运行 `reader_images "SVG profile"`；临时 fixture 账户使用合成 token，21 个公开 URL 全部从本地响应 manifest 应答，无实时网络、无真实 PAT。所供 README 原文与公开素材未纳入 Git。
 
 - Windows 150% DPI，原生窗口为 1792×1286 设备像素。普通 screen-copy 捕获到了 Windows 锁屏，未作产品证据；改用仅对本任务窗口的 `PrintWindow(PW_RENDERFULLCONTENT)`，并将捕获线程置为 per-monitor DPI-aware，避免把虚拟化坐标下的半幅截图误判为布局右移。不解锁桌面、不操作其他用户窗口。
-- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,345ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **4,444ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
+- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,370ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **3,942ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
 - 同一真实窗口中 roast 的中文、雷达、头像与页脚细节可读；Stats 全部行/数值与 rank 保留；19 枚徽章按所供 README 的四个段落成组居中，logo 可见，成功图片没有 alt 图注或 140px 段间占位。后面的 Links 回到普通左对齐。
-- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张 `review-fix-native-*.png` 捕获留在同目录（main `f9e31a0`、build run `11cd7a38`，helper session `zirwkhm`）。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
+- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张 `bounded-review-native-*.png` 捕获留在同目录（main `f9e31a0`、build run `8996c06c`，helper session `zirwkhm`）。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
 
 验证边界：原生渲染捕获成功；桌面保持锁定，未宣称真实鼠标/键盘手动验收、真实 PAT 的正式 Profile 页面 dogfooding 或跨平台原生验收。正式应用另做构建与测试；最终接受/解除 blocked/合并仍由负责人或协调者执行。
 
 ## 返工后的审查修复（2026-11-11）
 
 首轮 head `00a107aa` 的 Codex review `5856080149` 提出一条 P2（`4535769796`），核实成立：基础 CSS 属性已解析变量，keyframe stop 还保留原始 `var()`，导致 `to { opacity:var(--visible,1) }` 插值失败、最终仍隐藏。现在按每个动画节点的继承变量环境解析每个 stop，并在插入属性前累计展开字节，沿用两 MiB 上限。回归同时断言默认 fallback 与祖先定义 `.5` 的两个节点，在开始/中间/最终时刻分别为 alpha `(0,0)` / `(128,64)` / `(255,128)`。重新跑 808 个 Reader 测试、全目标 clippy、构建与公开 probe 全通过；七张公开 probe PNG 与修复前逐字节一致，并以修复后构建重新采集上述 60 帧原生序列。没有裁决事项，合并仍由协调者负责。
+
+第二轮 head `394a4283` 的 review `5856283143` 提出 P1 `4535932686` 和 P2 `4535932697`，均核实成立并修复：变量串递归拼接可能先分配巨型中间值，现向同一输出缓冲直接展开，按当前剩余限额在申请/追加前检查，保留深度上限；811 项 Reader 回归包含 1 MiB inline seed 的三倍递归链和低限额下输出长度/容量不越界的断言。普通 `transform` presentation 属性现在保留为基础值，延迟前/none fill 结束后恢复；像素回归同时验证基础位置、动画替换位置与最终恢复位置。重新通过上表的测试、全目标 clippy、构建、probe 与格式检查，七张公开 probe PNG 未改变，并再次从新构建采集 60 帧原生证据。
 
 ## 初次静态交付的改动与决定（历史）
 

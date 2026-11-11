@@ -208,39 +208,69 @@ fn milliseconds(s: &str) -> Option<f64> {
     };
     v.is_finite().then_some(v)
 }
-fn resolve_vars(value: &str, vars: &Properties, depth: usize) -> Option<String> {
+fn expand_vars_into(
+    value: &str,
+    vars: &Properties,
+    depth: usize,
+    out: &mut String,
+    limit: usize,
+) -> Result<bool, super::ImageFailure> {
     if depth > 16 {
-        return None;
+        return Ok(false);
     }
-    let Some(start) = value.find("var(") else {
-        return Some(value.to_string());
+    let append = |out: &mut String, part: &str| -> Result<(), super::ImageFailure> {
+        if part.len() > limit.saturating_sub(out.len()) {
+            return Err(super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            });
+        }
+        out.try_reserve_exact(part.len())
+            .map_err(|_| super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            })?;
+        out.push_str(part);
+        Ok(())
     };
-    let mut level = 1;
-    let mut end = start + 4;
-    for (i, c) in value[start + 4..].char_indices() {
-        match c {
-            '(' => level += 1,
-            ')' => level -= 1,
-            _ => {}
+    let mut rest = value;
+    while let Some(start) = rest.find("var(") {
+        append(out, &rest[..start])?;
+        let mut level = 1;
+        let mut end = None;
+        for (i, c) in rest[start + 4..].char_indices() {
+            match c {
+                '(' => level += 1,
+                ')' => level -= 1,
+                _ => {}
+            }
+            if level == 0 {
+                end = Some(start + 4 + i);
+                break;
+            }
         }
-        if level == 0 {
-            end = start + 4 + i;
-            break;
+        let Some(end) = end else {
+            return Ok(false);
+        };
+        let (name, fallback) = rest[start + 4..end]
+            .split_once(',')
+            .map_or((&rest[start + 4..end], None), |(a, b)| (a, Some(b)));
+        let Some(replacement) = vars.get(name.trim()).map(String::as_str).or(fallback) else {
+            return Ok(false);
+        };
+        if !expand_vars_into(replacement, vars, depth + 1, out, limit)? {
+            return Ok(false);
         }
+        rest = &rest[end + 1..];
     }
-    if level != 0 {
-        return None;
-    }
-    let (name, fallback) = value[start + 4..end]
-        .split_once(',')
-        .map_or((&value[start + 4..end], None), |(a, b)| (a, Some(b)));
-    let replacement = vars.get(name.trim()).map(String::as_str).or(fallback)?;
-    let replacement = resolve_vars(replacement, vars, depth + 1)?;
-    resolve_vars(
-        &format!("{}{}{}", &value[..start], replacement, &value[end + 1..]),
-        vars,
-        depth + 1,
-    )
+    append(out, rest)?;
+    Ok(true)
+}
+fn resolve_vars(
+    value: &str,
+    vars: &Properties,
+    limit: usize,
+) -> Result<Option<String>, super::ImageFailure> {
+    let mut out = String::new();
+    Ok(expand_vars_into(value, vars, 0, &mut out, limit)?.then_some(out))
 }
 fn resolve_properties(
     properties: Properties,
@@ -249,7 +279,13 @@ fn resolve_properties(
 ) -> Result<Properties, super::ImageFailure> {
     let mut resolved = Properties::new();
     for (key, value) in properties {
-        if let Some(value) = resolve_vars(&value, vars, 0) {
+        let limit = (2usize * 1024 * 1024)
+            .checked_sub(*expanded)
+            .and_then(|n| n.checked_sub(key.len()))
+            .ok_or(super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            })?;
+        if let Some(value) = resolve_vars(&value, vars, limit)? {
             *expanded = expanded
                 .saturating_add(key.len())
                 .saturating_add(value.len());
@@ -399,7 +435,9 @@ impl Timeline {
             let mut props = Properties::new();
             let mut important = Properties::new();
             for attr in node.attributes() {
-                if attr.name() != "style" && attr.value().contains("var(") {
+                if attr.name() == "transform"
+                    || (attr.name() != "style" && attr.value().contains("var("))
+                {
                     props.insert(attr.name().to_string(), attr.value().to_string());
                 }
             }
@@ -732,4 +770,29 @@ fn ease(x: f64, name: &str) -> f64 {
         }
     }
     curve((low + high) / 2.0, y1, y2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn variable_expansion_never_builds_an_oversized_intermediate_string() {
+        let mut vars = Properties::from([("--v0".into(), "a".repeat(4096))]);
+        for i in 1..=5 {
+            vars.insert(
+                format!("--v{i}"),
+                format!("var(--v{})var(--v{})var(--v{})", i - 1, i - 1, i - 1),
+            );
+        }
+        let mut output = String::new();
+        assert!(matches!(
+            expand_vars_into("var(--v5)", &vars, 0, &mut output, 8192),
+            Err(super::super::ImageFailure::TooLarge { .. })
+        ));
+        assert_eq!(output.len(), 8192);
+        assert!(
+            output.capacity() <= 8192,
+            "only the bounded output is allocated, with no recursive concatenation buffers"
+        );
+    }
 }

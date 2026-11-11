@@ -121,9 +121,9 @@ let reader = cx.new(|cx| {
 
 - 支持标准 `@keyframes` 的 `from` / `to` / 百分比停点，单条一次性 `animation` shorthand 或 name/duration/delay/timing-function/fill-mode longhand，毫秒/秒（包括负 delay）、`none` / `forwards` / `backwards` / `both`、linear/ease/ease-in/ease-out/ease-in-out。
 - 支持显式单色根背景（将颜色 `background` shorthand 规范为 resvg 接受的 `background-color`），使白纸图表的黑色标签保持对比；没有声明背景的图片仍透明。顶层 SVG 的 opacity/display 在完整表面上应用，隐藏根的背景不泄漏，静态隐藏子元素不被改成可见。
-- 插值属性为 opacity、fill-opacity、stroke-opacity、stroke-dashoffset 和仿射 transform；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留。静态隐藏和 `!important` 属性保持其优先级。受支持的 cascade 计算后写入节点，并移除原样式表，避免 usvg 对同一声明再次 cascade、覆盖采样值或根可见性。
+- 插值属性为 opacity、fill-opacity、stroke-opacity、stroke-dashoffset 和仿射 transform；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留；普通 presentation transform 作为基础值保留，动画延迟前及 none fill 收尾后恢复。静态隐藏和 `!important` 属性保持其优先级。受支持的 cascade 计算后写入节点，并移除原样式表，避免 usvg 对同一声明再次 cascade、覆盖采样值或根可见性。
 - 播放最多五秒、最多 100 个采样帧（约 20 fps），动画使用固有网格以限制内存，所有帧与最终 PNG 共享 `max_response_bytes` / `max_decoded_bytes` 总额。支持的时间线过长或帧总额超限时保留计算后的最终 PNG；这是静态 fallback，不作为动画验收证据。
-- 评估的 CSS ≤ 128 KiB，选择器/节点比较 ≤ 2,000,000，规则/变量/停点展开各受 2 MiB 预算约束。未加载的 `@font-face` / 条件规则不进入评估预算；不读取网络/文件字体。多条动画、重复/无限播放、其他动画属性及浏览器条件 CSS 不属于本次支持范围，保持基础呈现，不声称完整 CSS 浏览器兼容。
+- 评估的 CSS ≤ 128 KiB，选择器/节点比较 ≤ 2,000,000，规则/变量/停点展开各受 2 MiB 预算约束。变量向同一个有界输出追加，按剩余额度在申请/拼接前检查长度，不先构造指数增长的中间字符串。未加载的 `@font-face` / 条件规则不进入评估预算；不读取网络/文件字体。多条动画、重复/无限播放、其他动画属性及浏览器条件 CSS 不属于本次支持范围，保持基础呈现，不声称完整 CSS 浏览器兼容。
 - `workspace.rs` 在绘制前估算 resvg 的画布、内嵌图片、隔离层和滤镜工作面；超采样不满足预算时退回固有网格，再超限则拒绝。会分配未受 resvg 画布约束的 pattern tiles 暂不支持。
 - Provider 在每帧准备之间检查取消与总截止时间；账户/session 发布复核及 `no-store` 路径保持原有约束。持久缓存仍存原始响应，不存由当前账户以外继承的动画授权。
 

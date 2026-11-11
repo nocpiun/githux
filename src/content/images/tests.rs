@@ -785,6 +785,63 @@ fn keyframe_variables_resolve_per_animated_node_with_inherited_values_and_fallba
 }
 
 #[test]
+fn recursive_inline_variables_are_rejected_with_the_remaining_expansion_budget() {
+    let mut style = format!("--v0:{};", "a".repeat(1024 * 1024));
+    for i in 1..=5 {
+        style.push_str(&format!(
+            "--v{i}:var(--v{})var(--v{})var(--v{});",
+            i - 1,
+            i - 1,
+            i - 1
+        ));
+    }
+    style.push_str("fill:var(--v5)");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" style="{style}"/></svg>"#
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { limit: 2_097_152 })
+    ));
+}
+
+#[test]
+fn transform_animation_without_fill_restores_the_presentation_transform() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="8"><style>rect{animation:move .2s .1s linear}@keyframes move{from{transform:translate(0 0)}to{transform:translate(10 0)}}</style><rect width="5" height="8" fill="red" transform="translate(20 0)"/></svg>"#;
+    let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = image.animation.as_ref().unwrap();
+    let pixels = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_rgba8();
+    let first = pixels(&animation.frames[0].bytes);
+    assert_eq!(
+        (first.get_pixel(22, 4).0[3], first.get_pixel(2, 4).0[3]),
+        (255, 0),
+        "underlying transform before the delay"
+    );
+    let middle = pixels(
+        &animation
+            .frames
+            .iter()
+            .find(|f| f.at_ms == 150)
+            .unwrap()
+            .bytes,
+    );
+    assert_eq!(
+        (middle.get_pixel(5, 4).0[3], middle.get_pixel(22, 4).0[3]),
+        (255, 0),
+        "the active animation replaces the presentation transform"
+    );
+    let final_pixels = pixels(&image.bytes);
+    assert_eq!(
+        (
+            final_pixels.get_pixel(22, 4).0[3],
+            final_pixels.get_pixel(2, 4).0[3]
+        ),
+        (255, 0),
+        "none fill restores the underlying transform in the retained final image"
+    );
+}
+
+#[test]
 fn finite_svg_rendering_observes_cancellation_between_frames() {
     let calls = std::cell::Cell::new(0);
     let result = decode_image_checked(
