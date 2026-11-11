@@ -83,6 +83,7 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
 - fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
 - 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding、边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
+- 单元格图片（Markdown `![alt](url)` 与 HTML `<img>`）不再退化为 alt 文本：`ast::CellImage` 记录图片及其 alt 在 cell 文本中的字节范围，`cell_parts` 给出按阅读顺序的「文本段 / 图片」序列。`DocText` 与渲染器遍历同一份序列，每个 piece 一个单元，复制文本仍是原 cell 文本；同一 cell 内的文字、链接和图片保持先后顺序。图片按 cell 内容宽等比缩放，行高由真实图片尺寸决定，落地后重测所在顶层块。
 - 图片按注入的 provider 显示（未注入时保留 alt/未载入占位），HTML 规范化后走同一 `Block`/`Inline`（其中 `<img>` 同样交给图片板），链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。图片成功时按解码原生尺寸绘制，不拉伸到栏宽、不叠加占位背景；`<img width="…" height="…">` 的像素提示会被保留到渲染层，仅能缩小（不超过原生尺寸），超宽图按比例缩小到可用栏宽。
 - Source gutter 仍为原 0.75rem 加 6px。
 
@@ -116,7 +117,8 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
 - **图片**：仓库模式不允许本地文件/data 图片，图片 URL 由既有图片管线（`links::resolve` → `ImageTarget` → 宿主 provider）判定；HTML 的 `img`/`a` 与 Markdown 共用同一安全边界，不新增读取路径。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 的 CSS 布局、`colspan`/`rowspan`、脚注样式、绝对 URL 重写）。无法支持的语法按内容保留的近似排版显示，不在本模块另造。
-- **表格单元格内图片**：仍只显示 alt 文本（AST 在 cell 中没有块列表可挂图片）；行内图片被提取为段落后的图片块，不是文字行内原位置。SVG 等未支持格式明确 Unsupported。细节与支持边界见 [README 图片](reader-images.md#支持边界明确未覆盖)。
+- **表格单元格内图片**：cell 内记录 `CellImage`（见 [README 图片](reader-images.md#显示尺寸与滚动)），图片按 cell 宽度等比缩放，复制/选区仍走同一条 `DocText` 单元序列；cell 内的文本段与图片按阅读顺序各占一行，不在文字行内原位置。SVG 等未支持格式明确 Unsupported。
+- **段落行内图片**：被提取为段落后的图片块，不是文字行内原位置。
 - **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有；README 图片能力也只在独立预览中验收，正式 Shell 的 provider 接线契约见 [README 图片](reader-images.md#后续正式接线契约)。本轮的预览与 fixture 只用于验收，不冒充真实数据。
 
 

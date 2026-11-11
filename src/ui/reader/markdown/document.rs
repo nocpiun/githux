@@ -18,7 +18,7 @@ use gpui::{
 };
 
 use super::{
-    ast::{self, Align, Block, Inline},
+    ast::{self, Align, Block, CellImage, Inline},
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
 };
@@ -109,6 +109,10 @@ pub struct MarkdownView {
     dragging: bool,
     /// A link pressed on the last press, opened only on a click without drag.
     pressed_link: Option<String>,
+    /// A picture link pressed inside a table cell. It shares the click
+    /// semantics of a text link: any drag clears it, so selecting text that
+    /// crosses a picture never opens the page by accident.
+    picture_link: Rc<RefCell<Option<String>>>,
     /// Top-level block the press landed in, so a drag maps hits in order.
     anchor_block: Option<usize>,
     /// Real layouts of visible paragraphs, keyed by their unit index in the
@@ -158,6 +162,7 @@ impl MarkdownView {
             head: 0,
             dragging: false,
             pressed_link: None,
+            picture_link: Default::default(),
             anchor_block: None,
             paragraphs: Default::default(),
             paragraph_ranges: Default::default(),
@@ -170,7 +175,10 @@ impl MarkdownView {
         // Losing focus ends the gesture: a later move must not keep extending
         // an old selection.
         let focus = view.focus.clone();
-        view._focus_loss = Some(cx.on_blur(&focus, window, |view, _, cx| view.end_drag(cx)));
+        view._focus_loss = Some(cx.on_blur(&focus, window, |view, _, cx| {
+            view.picture_link.borrow_mut().take();
+            view.end_drag(cx)
+        }));
         // The list owns its offset; the overlay scrollbar lives outside it and
         // needs a frame whenever the list scrolls.
         let this = cx.entity().downgrade();
@@ -407,7 +415,12 @@ impl MarkdownView {
 
     /// Drops the selection and any drag, without touching scroll position.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if self.anchor != self.head || self.dragging || self.pressed_link.is_some() {
+        let picture = self.picture_link.borrow_mut().take();
+        if self.anchor != self.head
+            || self.dragging
+            || self.pressed_link.is_some()
+            || picture.is_some()
+        {
             self.anchor = 0;
             self.head = 0;
             self.dragging = false;
@@ -419,6 +432,7 @@ impl MarkdownView {
     /// Ends transient gestures while preserving the completed selection for later copy.
     pub(crate) fn cancel_gesture(&mut self, cx: &mut Context<Self>) {
         self.pressed_link = None;
+        self.picture_link.borrow_mut().take();
         self.end_drag(cx);
     }
 
@@ -449,6 +463,7 @@ impl MarkdownView {
         self.head = at;
         self.dragging = true;
         self.pressed_link = link;
+        self.picture_link.borrow_mut().take();
         cx.notify();
     }
 
@@ -458,6 +473,7 @@ impl MarkdownView {
         // it later returns to the press position: a link must not open.
         if self.dragging {
             self.pressed_link = None;
+            self.picture_link.borrow_mut().take();
         }
         if self.dragging && self.head != at {
             self.head = at;
@@ -476,9 +492,11 @@ impl MarkdownView {
     /// Opens the link recorded by the press, if the gesture stayed a click.
     fn click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.anchor != self.head {
+            self.picture_link.borrow_mut().take();
             return;
         }
-        if let Some(url) = self.pressed_link.take()
+        let picture = self.picture_link.borrow_mut().take();
+        if let Some(url) = self.pressed_link.take().or(picture)
             && let Some(on_link) = &self.on_link
         {
             on_link(&url, window, cx);
@@ -795,6 +813,7 @@ impl MarkdownView {
                     text: text.clone(),
                     styles: Vec::new(),
                     links: Vec::new(),
+                    cell_images: Vec::new(),
                 };
                 // The language label is a real element above the code body.
                 // Shifting it up fixes the old centred gap without moving the
@@ -878,38 +897,25 @@ impl MarkdownView {
                 repeated_head,
             } => {
                 let repeated = *repeated_head;
+                let picture = images::PictureStyle {
+                    colors: &colors,
+                    small_text: xs,
+                    radius,
+                };
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
-                        let mut cell = div()
-                            .debug_selector(move || format!("markdown-cell-{ix}-{row}-{column}"))
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .child(if repeated && header {
-                                // A repeated chunk header is presentation only:
-                                // its document range is empty, so it must not
-                                // take part in offset hit testing. It still
-                                // consumes its unit to keep the cursor in step.
-                                let _ = this.next_unit(ix, &unit_cursor);
-                                div().child(inline.text.clone()).into_any_element()
-                            } else {
-                                this.paragraph_unit(
-                                    gpui::ElementId::Name(
-                                        format!("reader-cell-{ix}-{row}-{column}").into(),
-                                    ),
-                                    inline,
-                                    this.next_unit(ix, &unit_cursor),
-                                )
-                                .align(table_align(aligns, column))
-                                .into_any_element()
-                            });
-                        if header {
-                            cell = cell
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(colors.fg_muted);
-                        }
-                        cell
+                        this.table_cell(
+                            ix,
+                            &unit_cursor,
+                            inline,
+                            column,
+                            aligns,
+                            repeated,
+                            header,
+                            &format!("cell-{ix}-{row}-{column}"),
+                            format!("markdown-cell-{ix}-{row}-{column}"),
+                            picture,
+                        )
                     };
                 // Table text uses the same body size and line height as prose:
                 // cells inherit it, so the shaped runs, selection, links and
@@ -1170,28 +1176,25 @@ impl MarkdownView {
                 repeated_head,
             } => {
                 let repeated = *repeated_head;
+                let picture = images::PictureStyle {
+                    colors,
+                    small_text: body,
+                    radius,
+                };
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .child(if repeated && header {
-                                let _ = this.next_unit(ix, units);
-                                div().child(inline.text.clone()).into_any_element()
-                            } else {
-                                this.paragraph_unit(
-                                    gpui::ElementId::Name(
-                                        format!("reader-nested-cell-{}-{row}-{column}", id.1)
-                                            .into(),
-                                    ),
-                                    inline,
-                                    this.next_unit(ix, units),
-                                )
-                                .align(table_align(aligns, column))
-                                .into_any_element()
-                            })
+                        this.table_cell(
+                            ix,
+                            units,
+                            inline,
+                            column,
+                            aligns,
+                            repeated,
+                            header,
+                            &format!("nested-{}-{row}-{column}", id.1),
+                            format!("markdown-nested-cell-{}-{row}-{column}", id.1),
+                            picture,
+                        )
                     };
                 // Same body size and line height as prose, so a nested table
                 // is not larger than the text around it.
@@ -1297,6 +1300,180 @@ impl MarkdownView {
 }
 
 impl MarkdownView {
+    /// One table cell: its text runs and any pictures it keeps inline.
+    ///
+    /// A cell registers one document unit per piece (see [`ast::cell_parts`]),
+    /// exactly as `DocText` registered them, so selection, links and copy keep
+    /// working through a cell that also shows images. `presentation` marks the
+    /// repeated header of a virtualized chunk: it paints the same pieces but
+    /// takes no part in offset hit testing.
+    #[allow(clippy::too_many_arguments)]
+    fn table_cell(
+        &self,
+        ix: usize,
+        units: &std::cell::Cell<usize>,
+        cell: &Inline,
+        column: usize,
+        aligns: &[Align],
+        repeated: bool,
+        header: bool,
+        key: &str,
+        selector: String,
+        picture: images::PictureStyle<'_>,
+    ) -> AnyElement {
+        let align = table_align(aligns, column);
+        let presentation = repeated && header;
+        let content = if cell.cell_images.is_empty() {
+            // A cell without pictures draws exactly as it always has: one
+            // shaped paragraph, aligned per column.
+            if presentation {
+                let _ = self.next_unit(ix, units);
+                div().child(cell.text.clone()).into_any_element()
+            } else {
+                self.paragraph_unit(
+                    gpui::ElementId::Name(format!("reader-{key}-0").into()),
+                    cell,
+                    self.next_unit(ix, units),
+                )
+                .align(align)
+                .into_any_element()
+            }
+        } else {
+            // A cell with pictures stacks them with its text runs in reading
+            // order. Each piece keeps the cell's full inner width, so a
+            // picture shrinks to a narrow cell and keeps its aspect ratio
+            // instead of being clipped or stretching the column.
+            let mut content = div().flex().flex_col().gap_1().w_full().min_w_0();
+            content = match align {
+                TextAlign::Center => content.items_center(),
+                TextAlign::Right => content.items_end(),
+                TextAlign::Left => content.items_start(),
+            };
+            let parts = ast::cell_parts(cell);
+            for (at, part) in parts.iter().enumerate() {
+                match part.image {
+                    Some(image) => {
+                        // `DocText` registered one unit per piece, in this
+                        // order, so the cursor advances once per piece either
+                        // way; a picture's unit is its alt text, so copying
+                        // keeps the description while the cell paints pixels.
+                        let _ = self.next_unit(ix, units);
+                        // `[![alt](img)](link)` keeps the link around the alt
+                        // bytes, which are exactly the picture's place, so the
+                        // pixels stay the clickable target the text was.
+                        let link = (!presentation)
+                            .then(|| {
+                                cell.links.iter().find(|(range, _)| {
+                                    range.start <= image.alt_range.start
+                                        && range.end >= image.alt_range.end
+                                })
+                            })
+                            .flatten()
+                            .map(|(_, url)| url.clone());
+                        let picture =
+                            self.cell_picture(ix, image, format!("{key}-picture-{at}"), picture);
+                        let frame = div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .when(align == TextAlign::Center, |row| row.justify_center())
+                            .when(align == TextAlign::Right, |row| row.justify_end())
+                            .child(picture);
+                        content = content.child(match link {
+                            Some(url) => {
+                                // The press only records the URL; the document's
+                                // own click handling opens it, so a drag that
+                                // crosses the picture cannot navigate away.
+                                let pressed = self.picture_link.clone();
+                                frame
+                                    .id(gpui::ElementId::Name(
+                                        format!("reader-{key}-link-{at}").into(),
+                                    ))
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+                                        *pressed.borrow_mut() = Some(url.clone());
+                                    })
+                                    .into_any_element()
+                            }
+                            None => frame.into_any_element(),
+                        });
+                    }
+                    None => {
+                        // One unit per text run, in the same order `DocText`
+                        // registered them. A repeated chunk header is
+                        // presentation only: it consumes its unit to keep the
+                        // cursor in step but stays out of offset hit testing.
+                        let unit = self.next_unit(ix, units);
+                        let piece = cell.slice(part.range.clone());
+                        content = content.child(div().w_full().min_w_0().child(if presentation {
+                            div().child(piece.text).into_any_element()
+                        } else {
+                            self.paragraph_unit(
+                                gpui::ElementId::Name(format!("reader-{key}-{at}").into()),
+                                &piece,
+                                unit,
+                            )
+                            .align(align)
+                            .into_any_element()
+                        }));
+                    }
+                }
+            }
+            content.into_any_element()
+        };
+        let mut cell = div()
+            .debug_selector(move || selector)
+            .flex_1()
+            .min_w_0()
+            .px_3()
+            .py_2()
+            .child(content);
+        if header {
+            cell = cell
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(picture.colors.fg_muted);
+        }
+        cell.into_any_element()
+    }
+
+    /// One picture inside a table cell, sized within the cell.
+    ///
+    /// It draws through the same picture presenter as every other picture, so
+    /// the pending/failed/ready states are the reader's, not a table-only copy.
+    fn cell_picture(
+        &self,
+        ix: usize,
+        picture: &CellImage,
+        key: String,
+        style: images::PictureStyle<'_>,
+    ) -> AnyElement {
+        let state = match (&self.image_board, &self.resource_context) {
+            (Some(board), Some(context)) => match images::resolve_target(&picture.url, context) {
+                Ok(target) => board.borrow_mut().want(ix, target),
+                Err(failure) => ImageState::Failed(failure),
+            },
+            _ => ImageState::Unavailable,
+        };
+        // A landed picture is the cell's content, and the surrounding row may
+        // already be its caption; its description stays in the copy model and
+        // in every not-yet/never-loaded state, where it is the only readable
+        // thing. The shared presenter still decides how those states look.
+        let alt = if state.is_ready() {
+            ""
+        } else {
+            picture.alt.as_str()
+        };
+        images::image_element(
+            gpui::ElementId::Name(format!("reader-{key}").into()),
+            format!("markdown-{key}-note"),
+            alt,
+            &state,
+            picture.hints,
+            style,
+            format!("markdown-{key}-frame"),
+        )
+    }
+
     /// One picture block: the resolved state of its source, or the honest
     /// reason it cannot be shown. The alt text stays visible in every state.
     fn picture_unit(
@@ -1489,7 +1666,12 @@ impl MarkdownView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|view, _, _, cx| view.end_drag(cx)),
+                cx.listener(|view, _, _, cx| {
+                    // Released outside the reading area: a pending picture link
+                    // must not survive into the next gesture.
+                    view.picture_link.borrow_mut().take();
+                    view.end_drag(cx)
+                }),
             )
             .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;
@@ -1602,7 +1784,12 @@ impl Render for MarkdownView {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|view, _, _, cx| view.end_drag(cx)),
+                cx.listener(|view, _, _, cx| {
+                    // Released outside the reading area: a pending picture link
+                    // must not survive into the next gesture.
+                    view.picture_link.borrow_mut().take();
+                    view.end_drag(cx)
+                }),
             )
             .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
                 let keystroke = &event.keystroke;

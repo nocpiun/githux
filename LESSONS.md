@@ -162,3 +162,10 @@
 - **原因**：PR #73 原实现用 2 秒节流的门禁探测喂 `gate_denied`，`revoke_repository(scope, Some(id))` 更新账户代次之外只翻转仓库授权，页面因此在撤权后继续显示私有内容，`revoke + revalidate` 同窗口时永不生效。缩短间隔只是缩小窗口，不能消除漏判。
 - **证据**：确定性回归 `repository_revocation_clears_the_displayed_page_in_one_drain`（单次 drain、不睡眠即要求清空，交付 head 上失败 run `653e5a3f`，把校验改回恒真再次失败 run `d2603345`，恢复后通过 `af02e39b`）与 `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`（撤权前完成的回复不得回填，重新授权不得复活旧令牌）；见[开发日志](docs/devlog/2026-11-03-repository-offline.md)与[仓库浏览](docs/repository-browser.md)。
 - **范围**：任何“显示/发布已缓存或已授权内容”的消费方（页面、图片 provider、内嵌聚合区）。不适用于纯展示性、无授权语义的轮询状态刷新。
+
+## L023：可读降级不能冒充“已支持”，多段内容的单元拆分必须由模型与渲染器共用
+
+- **规则**：当某类内容暂时无法按原语义绘制时（例如 AST 的 table cell 只有行内文本、没有块列表可挂图片），降级成 alt/文本只能算“保留可读内容”，不是“已支持”，相关文档、测试与注释都必须标成未覆盖，不能把降级状态写成特性。等模型层补上后，新增的多段结构（文本段与图片）必须由**同一个拆分函数**同时服务复制模型（`DocText`）与渲染器，逐段登记/消费单元；两边各写一套拆分规则会让选区偏移、游标与复制文本在部分行悄悄错位。
+- **原因**：`reader-table-images` 修复前，`ast.rs` 的 `in_cell` 分支刻意保留 alt 文本，于是公开 README 的 Screenshots 表格只显示 “Dashboard/Monitor” 而看不到截图，负责人只能看到文字；主题文档也确实把“表格内图片不加载”写成边界，但没有阻止功能被当成“已支持表格图片”。修复时若只改渲染器、不让 `DocText` 用同一份切分，cell 内的图片会多出一个未登记单元，后续 cell 的选区与 Ctrl+C 都会错一截。
+- **证据**：2026-11-11 `reader-table-images` 的 `ast::CellImage` + `cell_parts` 同时被 `doctext::DocText::cell` 与 `document::MarkdownView::table_cell` 使用，回归 `a_picture_cell_registers_one_unit_per_piece`、`copying_a_table_with_pictures_keeps_the_cell_text_and_tabs` 与 `screenshot_table_cells_draw_their_pictures_and_keep_the_caption_rows` 覆盖单元数、复制文本和真实布局；见[开发日志](docs/devlog/2026-11-11-reader-table-images.md)。
+- **范围**：任何把“可读文本占位”用于暂不支持内容的地方（表格、列表、引用中的富内容、HTML 子集）；也适用于后续新增 cell/段落分段渲染的改动。

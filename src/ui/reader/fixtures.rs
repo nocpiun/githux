@@ -66,6 +66,31 @@ pub const LINK_ONLY: &str = "[press me](guide.md#setup)\n";
 /// The first block is one dangerous link.
 pub const DANGEROUS_LINK_ONLY: &str = "[do not run](javascript:alert(1))\n";
 
+/// A README "Screenshots" table: two columns of pictures followed by caption
+/// rows, with the last row using only its first cell.
+///
+/// It mirrors the public OPanel README this reader must render, including the
+/// empty first header row, the centered columns and repository-relative image
+/// paths. The pictures themselves are supplied by the test's image provider.
+pub const SCREENSHOT_TABLE: &str = "## Screenshots
+
+|||
+|:---:|:---:|
+|![Dashboard](./images/preview-dashboard.png)|![Monitor](./images/preview-monitor.png)|
+|**Dashboard**|**Monitor**|
+|![Map](./images/preview-map.png)|![Players Manager](./images/preview-players.png)|
+|**Map**|**Players Manager**|
+|![Terminal](./images/preview-terminal.png)||
+|**Terminal**||
+";
+
+pub fn screenshot_table() -> PreparedBody {
+    PreparedBody::Utf8 {
+        text: SCREENSHOT_TABLE.to_string(),
+        has_bom: false,
+    }
+}
+
 /// One short inline-code span, for the padding/background layout check.
 ///
 /// Exactly one code span, so `reader-inline-code` names one element.

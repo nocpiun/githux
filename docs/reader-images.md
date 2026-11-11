@@ -113,10 +113,15 @@ GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按
 ## 显示、尺寸与滚动
 
 - 每个图片块保持比例：图片盒用 `width/height` 比例，宽度是唯一固定的维度（受内容列宽限制，并 `max_w(intrinsic)`），高度由比例推导，因此**小图不被拉大为模糊**、宽图不撑破列、很高的图通过收窄宽度限制高度（有效高度上限约 640px）；图片本身绝对定位在这个盒内 `ObjectFit::Contain`——若让它参与盒子的正常流，它自己的高度会让盒子突破比例（实测 320×180 曾变成 320×479）。
-- alt 文本在 Ready 时作为图注显示，在 Loading/Failed/Refused/无 provider 时与原因一起显示；空 alt 也有可读的占位文本。
+- alt 文本在 Ready 时作为图注显示，在 Loading/Failed/Refused/无 provider 时与原因一起显示；空 alt 也有可读的占位文本。表格 cell 的图片是例外：Ready 时不把 alt 交给 presenter（README 的 Screenshots 表格通常已有独立的 caption 行，重复显示会多出一行），未加载/失败/无 provider 时仍传 alt；alt 始终保留在 `DocText` 复制模型里。
 - 未知尺寸（加载中/失败/拒绝）预留 140px 占位高度；图片完成后对该顶层块调用真实 `ListState::remeasure_items`，以**锚定当前滚动位置**的方式重测，不重排版整篇文档，不插入假 AST 项，不把文末 inset 挤出测量范围，不因图片落地产生全文档高频重绘。在 `MarkdownLayout::Flow`（自然高度）下改为请求一次重绘并由 `on_layout_changed` 通知宿主，宿主的页面容器随之增长。
-- 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。表格内图片仍受 AST 限制（见下）。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
+- 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
 - 行内图片与嵌套块（引用/列表/脚注）中的 `Block::Image` 走同一状态与占位逻辑；段落中夹在文字里的图片在解析阶段仍被提取为紧随段落的图片块（沿用既有 AST 行为），**不在一行文字中间原位置绘制**。
+- **表格单元格图片**：AST 在 cell 内没有块列表，图片不能像段落图片那样移到块后。单元格改为记录 `CellImage`（alt、URL、`width`/`height` 提示和 alt 在 cell 文本中的字节范围），`cell_parts` 把单元格拆成「文本段 / 图片」的阅读顺序；`DocText` 与渲染器遍历同一份拆分，因此一个 cell 可能登记多个单元而复制文本仍是原来的 cell 文本（alt 保留原位）。
+  - 渲染复用同一 `ImageBoard`/`images::image_element` 状态与预算：仓库相对路径仍按固定 commit 解析，外链走同一条无凭据通路；未注入 provider 时同样诚实占位。
+  - 图片在自己的 cell 内按 `width/height` 比例缩放：`w_full` 受 cell 内容宽约束并 `max_w(intrinsic)`，所以窄 cell 缩小、宽 cell 不限幅放大，单元格高度随比例增长。
+  - 图片落地同样对该顶层块（表格行所在的虚拟化块）重测，不改变滚动锚点；`[![alt](img)](link)` 的链接范围覆盖 alt 字节，点击图片会像点击那段文字一样报告 `ReaderAction::Link`，而拖选经过图片会取消这次点击。
+  - 占位/失败/无 provider 的可见呈现仍由共享 presenter 决定；表格代码只传入该图片的 alt，不另造 placeholder。待 reader-svg 的通用 pending 呈现改动合入后，表格图片自动跟随「pending 不显示占位框与 alt」的规则。
 
 ## 生命周期与取消
 
@@ -127,8 +132,7 @@ GIF 可以有多帧；GPUI 的 `Img` 在非 reduced-motion 且窗口活动时按
 
 ## 支持边界（明确未覆盖）
 
-- **表格单元格内的图片不加载**：AST 在 cell 中没有块列表可挂图片，现有行为是保留 alt 文本在单元格内（见 `ast.rs` 的 `in_cell` 分支）。这不属于「已覆盖表格图片」。
-- 段落中的 inline 图片被提取为段落后的图片块；不是文字行内原位置。
+- 段落中的 inline 图片被提取为段落后的图片块；不是文字行内原位置。表格单元格中的图片同样不在文字行内原位置：cell 内的文本段与图片按阅读顺序各占一行（`flex_col`），不在一行文字中间绘制。
 - SVG、AVIF、BMP、TIFF、ICO 等不在支持范围（Unsupported）；不执行任何图片内脚本或外部资源。
 - 不做磁盘缓存、离线图片、跨账户/跨实例的持久授权复用；不把 badge 当永久固定。
 - 尚未接入正式 Shell：`src/ui/repository/mod.rs`、profile、Home 仍使用旧 Reader API，无 provider 时行为与以前一致（显示诚实占位）。
