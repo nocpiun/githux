@@ -533,6 +533,106 @@ fn pictures_load_without_an_unrelated_redraw(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn ready_pictures_draw_at_their_own_size_without_a_placeholder(cx: &mut TestAppContext) {
+    let (_pipeline, reader, cx) = open(cx, Scene::Healthy);
+    let relative = repository_key("docs/images/diagram.png");
+    settle(&reader, cx, |reader| {
+        reader.image_state(&relative).as_deref() == Some("ready")
+    });
+    cx.simulate_resize(size(px(900.0), px(1400.0)));
+    frames(cx);
+
+    // The relative picture (block 2) is a 320x180 raster. It keeps its own
+    // dimensions and has no placeholder frame.
+    let frame = cx
+        .debug_bounds("markdown-picture-frame-2")
+        .expect("the ready picture keeps a measurable frame");
+    assert!(
+        (frame.size.width - px(320.0)).abs() < px(1.0),
+        "a small picture is not upscaled or stretched: {frame:?}"
+    );
+    assert!(
+        (frame.size.height - px(180.0)).abs() < px(1.0),
+        "the picture keeps its intrinsic height: {frame:?}"
+    );
+
+    // The HTML badge asked for 64x36, which is smaller than the same 320x180
+    // source and must be honoured without upscaling it back up. It sits near
+    // the end of the document, so scroll to it and locate its frame.
+    reader.update_in(cx, |reader, _window, cx| {
+        let document = reader.markdown().expect("markdown").clone();
+        document.update(cx, |document, cx| {
+            document.list_state().scroll_to_end();
+            cx.notify();
+        });
+    });
+    frames(cx);
+    let badge = (0..reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .map(|document| document.read(cx).block_count())
+            .unwrap_or(0)
+    }))
+        .filter_map(|index| {
+            let selector: &'static str =
+                Box::leak(format!("markdown-picture-frame-{index}").into_boxed_str());
+            cx.debug_bounds(selector).map(|bounds| (index, bounds))
+        })
+        .max_by_key(|(index, _)| *index)
+        .map(|(_, bounds)| bounds)
+        .expect("the HTML badge frame is measured after scrolling to the end");
+    assert!(
+        (badge.size.width - px(64.0)).abs() < px(1.0),
+        "an HTML width hint is honoured: {badge:?}"
+    );
+    assert!(
+        (badge.size.height - px(36.0)).abs() < px(1.0),
+        "an HTML height hint is honoured: {badge:?}"
+    );
+}
+
+#[gpui::test]
+fn an_oversized_picture_shrinks_to_the_column_and_keeps_its_ratio(cx: &mut TestAppContext) {
+    let (_pipeline, reader, cx) = open(cx, Scene::Extremes);
+    let wide = repository_key("docs/images/banner.png");
+    settle(&reader, cx, |reader| {
+        reader.image_state(&wide).as_deref() == Some("ready")
+    });
+    cx.simulate_resize(size(px(900.0), px(1400.0)));
+    frames(cx);
+
+    // The banner block is index 2 and is 1600x200, wider than the 900px
+    // window. It must shrink to the available column while preserving 8:1.
+    let frame = cx
+        .debug_bounds("markdown-picture-frame-2")
+        .expect("the wide banner is measured");
+    let root = cx.debug_bounds("reader-markdown").expect("root");
+    assert!(
+        frame.size.width <= root.size.width + px(1.0),
+        "an oversized picture fits the reading column: {frame:?} vs {root:?}"
+    );
+    assert!(
+        (frame.size.width / frame.size.height - 1600.0 / 200.0).abs() < 0.1,
+        "an oversized picture keeps its aspect ratio: {frame:?}"
+    );
+
+    // The tall figure (block 4) is 120x900. It is narrower than the column,
+    // so it keeps its native size instead of being letterboxed into a shorter
+    // placeholder panel.
+    let tall = cx
+        .debug_bounds("markdown-picture-frame-4")
+        .expect("the tall figure is measured");
+    assert!(
+        (tall.size.width - px(120.0)).abs() < px(1.0),
+        "a tall picture keeps its intrinsic width: {tall:?}"
+    );
+    assert!(
+        (tall.size.height - px(900.0)).abs() < px(1.0),
+        "a tall picture keeps its intrinsic height instead of being capped: {tall:?}"
+    );
+}
+
 /// Finding: replacing an attached provider must re-ask the new provider instead
 /// of leaving the old `Loading` states in place.
 #[gpui::test]

@@ -153,7 +153,7 @@ pub(super) fn state_panel_with_retry(
         .gap_2()
         .p_3()
         .rounded(theme.radius(Radius::Md))
-        .bg(theme.colors.bg)
+        .bg(theme.colors.surface)
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(theme.colors.warning)
         .tooltip(ui_tooltip(message))
@@ -204,7 +204,7 @@ pub(super) fn initials(basic: &ProfileBasic) -> String {
 
 impl Render for ProfileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let background = cx.theme().colors.bg;
+        let background = cx.theme().colors.surface;
         let measure_owner = cx.entity().downgrade();
         let measure = gpui::canvas(
             move |bounds, _, cx| {

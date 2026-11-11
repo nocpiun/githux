@@ -22,7 +22,7 @@ use super::{
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
 };
-use crate::ui::reader::images::{self, ImageBoard, ImageState};
+use crate::ui::reader::images::{self, ImageBoard, ImageHints, ImageState};
 
 /// Texts this long parse at once; longer ones parse in the background.
 const AT_ONCE: usize = 128 << 10;
@@ -968,7 +968,17 @@ impl MarkdownView {
                 .into_any_element(),
             Block::ImageRow(pictures) => self.picture_row(ix,pictures,&colors,xs,radius),
             Block::Centered(blocks) => div().w_full().flex().flex_col().items_center().gap_2().children(blocks.iter().enumerate().map(|(at,block)| self.nested(ix,&unit_cursor,("center",format!("{ix}-{at}")),block,nested_style))).into_any_element(),
-            Block::Image { alt, url } => self.picture_unit(ix, alt, url, &colors, xs, radius),
+            Block::Image { alt, url, hints } => self.picture_unit(
+                ix,
+                alt,
+                url,
+                *hints,
+                images::PictureStyle {
+                    colors: &colors,
+                    small_text: xs,
+                    radius,
+                },
+            ),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
                 .font_family(mono)
@@ -1264,7 +1274,17 @@ impl MarkdownView {
             }
             Block::ImageRow(pictures) => self.picture_row(ix,pictures,colors,body,radius),
             Block::Centered(blocks) => div().w_full().flex().flex_col().items_center().gap_2().children(blocks.iter().enumerate().map(|(at,block)| self.nested(ix,units,("center",format!("{ix}-{at}")),block,style))).into_any_element(),
-            Block::Image { alt, url } => self.picture_unit(ix, alt, url, colors, body, radius),
+            Block::Image { alt, url, hints } => self.picture_unit(
+                ix,
+                alt,
+                url,
+                *hints,
+                images::PictureStyle {
+                    colors,
+                    small_text: body,
+                    radius,
+                },
+            ),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
@@ -1281,10 +1301,10 @@ impl MarkdownView {
 }
 
 impl MarkdownView {
-    fn picture_row(&self, ix: usize, pictures: &[(String,String)], colors: &ely_core::theme::Palette, size: f32, radius: gpui::Rems) -> AnyElement {
-        div().debug_selector(move || format!("markdown-picture-row-{ix}")).flex().flex_wrap().items_center().gap_1().children(pictures.iter().enumerate().map(|(at,(alt,url))| {
+    fn picture_row(&self, ix: usize, pictures: &[(String,String,ImageHints)], colors: &ely_core::theme::Palette, size: f32, radius: gpui::Rems) -> AnyElement {
+        div().debug_selector(move || format!("markdown-picture-row-{ix}")).flex().flex_wrap().items_center().gap_1().children(pictures.iter().enumerate().map(|(at,(alt,url,hints))| {
             // Different pictures in one paragraph must keep independent element IDs.
-            div().id(gpui::ElementId::Name(format!("picture-row-{ix}-{at}").into())).child(self.picture_unit(ix,alt,url,colors,size,radius))
+            div().id(gpui::ElementId::Name(format!("picture-row-{ix}-{at}").into())).child(self.picture_unit(ix,alt,url,*hints,images::PictureStyle { colors,small_text:size,radius }))
         })).into_any_element()
     }
 
@@ -1295,9 +1315,8 @@ impl MarkdownView {
         ix: usize,
         alt: &str,
         url: &str,
-        colors: &ely_core::theme::Palette,
-        size: f32,
-        radius: gpui::Rems,
+        hints: ImageHints,
+        style: images::PictureStyle<'_>,
     ) -> AnyElement {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(url, context) {
@@ -1312,11 +1331,8 @@ impl MarkdownView {
             images::image_selector(ix),
             alt,
             &state,
-            images::PictureStyle {
-                colors,
-                small_text: size,
-                radius,
-            },
+            hints,
+            style,
             images::frame_selector(ix),
         );
         div().max_w_full().child(picture).on_children_prepainted(move |bounds,window,_| {

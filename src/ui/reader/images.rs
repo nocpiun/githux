@@ -26,16 +26,26 @@ use crate::content::images::{
 
 use super::{LinkTarget, ResourceContext, links};
 
-/// The narrowest displayed width/height ratio. A very tall picture is shown in
-/// a box at least this wide relative to its height, letterboxed, so one image
-/// cannot dominate the reading column.
-const MIN_DISPLAY_RATIO: f32 = 0.25;
-/// The widest displayed width/height ratio, for very wide banners.
-const MAX_DISPLAY_RATIO: f32 = 12.0;
 /// Vertical space reserved while a picture loads or has failed.
 const PLACEHOLDER_HEIGHT: f32 = 140.0;
-/// Largest height a ready picture occupies; taller pictures are letterboxed.
-pub(super) const MAX_DISPLAY_HEIGHT: f32 = 640.0;
+
+/// Dimensions an author asked for through HTML `width`/`height` attributes, in
+/// CSS pixels. `None` means "use the picture's intrinsic size".
+///
+/// Markdown `![...](...)` images carry no hints; only parsed HTML `<img>`
+/// attributes can request a size, so intrinsic-only pictures and explicit
+/// requests stay distinguishable all the way to the renderer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ImageHints {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl ImageHints {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.width.is_none() && self.height.is_none()
+    }
+}
 
 /// What the reader currently knows about one picture.
 #[derive(Clone)]
@@ -454,6 +464,7 @@ pub(super) fn image_element(
     selector: String,
     alt: &str,
     state: &ImageState,
+    hints: ImageHints,
     style: PictureStyle<'_>,
     frame_selector: String,
 ) -> AnyElement {
@@ -478,24 +489,38 @@ pub(super) fn image_element(
     };
     match state {
         ImageState::Ready(image, width, height) => {
-            // The picture's box keeps the file's own aspect ratio and is
-            // constrained by the reading column. Width is the only fixed
-            // dimension (the column width, capped by the intrinsic width), so
-            // the height derives from the ratio and a very tall picture is
-            // bounded by capping the width rather than by a competing height
-            // limit. A child image in the flow would contribute its own height
-            // and let the box outgrow the ratio, so the picture is painted
-            // inside an absolutely positioned layer of that box.
-            let ratio = (*width as f32 / (*height as f32).max(1.0))
-                .clamp(MIN_DISPLAY_RATIO, MAX_DISPLAY_RATIO);
-            let max_width = (*width as f32).min(MAX_DISPLAY_HEIGHT * ratio);
-            let mut frame = div()
+            // The real pixels are drawn at their intrinsic or author-requested
+            // size, never upscaled and never wrapped in a placeholder panel. A
+            // ready picture keeps no background, no rounding and no forced
+            // frame: success is pixels and alpha only.
+            //
+            // The box only reserves the displayed area (its width and aspect
+            // ratio), so a picture wider than the reading column shrinks to
+            // fit while a small picture keeps its own size. HTML `width`/
+            // `height` hints are honoured but still bounded by the intrinsic
+            // dimensions, so an author can shrink a picture without upscaling
+            // or distorting it.
+            let intrinsic_width = *width as f32;
+            let intrinsic_height = (*height as f32).max(1.0);
+            let intrinsic_ratio = intrinsic_width / intrinsic_height;
+            let requested_width = hints
+                .width
+                .map(|w| (w as f32).min(intrinsic_width).max(1.0));
+            let requested_height = hints
+                .height
+                .map(|h| (h as f32).min(intrinsic_height).max(1.0));
+            let (display_width, display_ratio) = match (requested_width, requested_height) {
+                (Some(width), Some(height)) => (width, width / height),
+                (Some(width), None) => (width, intrinsic_ratio),
+                (None, Some(height)) => (height * intrinsic_ratio, intrinsic_ratio),
+                (None, None) => (intrinsic_width, intrinsic_ratio),
+            };
+            let frame = div()
                 .debug_selector(move || frame_selector.clone())
                 .relative()
-                .w(px(max_width))
-                .max_w_full()
-                .overflow_hidden();
-            frame.style().aspect_ratio = Some(ratio);
+                .w_full()
+                .max_w(px(display_width))
+                .aspect_ratio(display_ratio);
             let picture = img(ImageSource::Image(image.clone()))
                 .id(id)
                 .absolute()
@@ -506,8 +531,10 @@ pub(super) fn image_element(
             // its alt text as a caption in the same column.
             div()
                 .debug_selector(move || selector.clone())
-                .max_w_full()
-                .flex_none()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_start()
                 .child(frame.child(picture))
                 .into_any_element()
         }

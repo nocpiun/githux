@@ -159,7 +159,7 @@ fn containers_emphasis_links_and_pictures_keep_their_semantics() {
         .blocks
         .iter()
         .find_map(|block| match block {
-            Block::Image { alt, url } => Some((alt.clone(), url.clone())),
+            Block::Image { alt, url, .. } => Some((alt.clone(), url.clone())),
             _ => None,
         })
         .expect("the centred image is a picture block");
@@ -914,4 +914,50 @@ fn a_script_string_cannot_close_a_dropped_template() {
     let text = copied(&doc.blocks);
     assert!(!text.contains("hidden"), "{text:?}");
     assert!(text.contains("after"), "{text:?}");
+}
+
+#[test]
+fn html_img_width_and_height_become_image_hints() {
+    let doc = parse(
+        "<img src=\"a.png\" alt=\"wide\" width=\"300\" height=\"120\">\n\n\
+         <img src=\"b.png\" alt=\"width-only\" width=\"220\">\n\n\
+         <img src=\"c.png\" alt=\"height-only\" height=\"80\">\n\n\
+         <img src=\"d.png\" alt=\"bare\">\n\n\
+         <img src=\"e.png\" alt=\"junk\" width=\"50%\" height=\"0\">\n",
+    );
+    let images: Vec<(&str, Option<u32>, Option<u32>)> = doc
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Image { alt, hints, .. } => Some((alt.as_str(), hints.width, hints.height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        images,
+        vec![
+            ("wide", Some(300), Some(120)),
+            ("width-only", Some(220), None),
+            ("height-only", None, Some(80)),
+            ("bare", None, None),
+            // A percentage and zero are not positive pixel hints.
+            ("junk", None, None),
+        ],
+        "{doc:?}"
+    );
+}
+
+#[test]
+fn markdown_images_never_carry_hints() {
+    let doc = parse("![alt](a.png)\n\n![tall](b.png)");
+    let hints: Vec<super::super::images::ImageHints> = doc
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Image { hints, .. } => Some(*hints),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hints.len(), 2, "{doc:?}");
+    assert!(hints.iter().all(|hints| hints.is_empty()), "{hints:?}");
 }
