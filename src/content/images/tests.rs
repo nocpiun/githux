@@ -963,12 +963,26 @@ fn explicit_root_background_paints_chart_paper_without_exposing_hidden_svg_conte
         );
     }
     for (style, extra, expected) in [
-        ("background:#fff;opacity:.5", "", [255,255,255,128]),
-        ("visibility:hidden", "<style>svg{background-color:#fff!important}</style>", [0,0,0,0]),
+        ("background:#fff;opacity:.5", "", [255, 255, 255, 128]),
+        (
+            "visibility:hidden",
+            "<style>svg{background-color:#fff!important}</style>",
+            [0, 0, 0, 0],
+        ),
     ] {
-        let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" style="{style}">{extra}</svg>"##);
-        let image=decode_image(svg.into_bytes(),&ImageLimits::default()).unwrap();
-        assert_eq!(image::load_from_memory(&image.bytes).unwrap().to_rgba8().get_pixel(10,10).0,expected,"outer box compositing: {style}");
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" style="{style}">{extra}</svg>"##
+        );
+        let image = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        assert_eq!(
+            image::load_from_memory(&image.bytes)
+                .unwrap()
+                .to_rgba8()
+                .get_pixel(10, 10)
+                .0,
+            expected,
+            "outer box compositing: {style}"
+        );
     }
     let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#f00" opacity="0"/></svg>"##;
     let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();

@@ -48,6 +48,7 @@ struct NodeStyle {
 }
 pub(super) struct Timeline {
     nodes: Vec<NodeStyle>,
+    styles: Vec<std::ops::Range<usize>>,
     pub duration_ms: f64,
 }
 
@@ -370,6 +371,9 @@ impl Timeline {
         let mut duration_ms: f64 = 0.0;
         let mut tracks_count = 0;
         for node in doc.descendants().filter(Node::is_element) {
+            if node.ancestors().any(|n| n.has_tag_name("style")) {
+                continue;
+            }
             let mut props = Properties::new();
             let mut important = Properties::new();
             for attr in node.attributes() {
@@ -563,10 +567,28 @@ impl Timeline {
                 });
             }
         }
-        Ok(Self { nodes, duration_ms })
+        let styles = doc
+            .descendants()
+            .filter(|n| {
+                n.has_tag_name("style") && !n.ancestors().skip(1).any(|p| p.has_tag_name("style"))
+            })
+            .map(|n| n.range())
+            .collect();
+        Ok(Self {
+            nodes,
+            styles,
+            duration_ms,
+        })
     }
     pub fn sample(&self, xml: &str, time_ms: f64) -> String {
-        let mut edits = Vec::new();
+        // All supported declarations have already been cascaded and are inline.
+        // Keeping the original sheets would let usvg recascade !important with
+        // its different inline priority and undo sampled/visibility values.
+        let mut edits = self
+            .styles
+            .iter()
+            .map(|range| (range.clone(), String::new()))
+            .collect::<Vec<_>>();
         for node in &self.nodes {
             let mut props = node.properties.clone();
             for track in &node.tracks {

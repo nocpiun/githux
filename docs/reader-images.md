@@ -48,7 +48,7 @@ let reader = cx.new(|cx| {
 - **每个 reader 一份 provider**：接口允许共享，但推荐一份文档代次一份 provider。`ImageScope { reader, generation }` 让两个 reader 即使 generation 数字相同也不会互相取消或接收对方的完成；`RepositoryImageService` 的快照/目录缓存只在它自己的实例内，SHA 相同不是跨账户的授权依据。
 - **更换文档/账户/选择**：与现有 reader 规则一致，推荐换实体（或至少调 `show`）。`show` 推进图片代次、取消在途、清空旧图片与旧错误。账户失效时宿主在 `cancel_interactions` 的同时移除 reader；图片服务自己的 `verify()` 复核 session，旧授权下的字节不会变成当前文档的图片。
 - **隐藏窗口**：`observe_window_visibility` 取消当前 scope 的在途工作、保留已完成的图片；恢复可见时下一帧按需重新请求。
-- **解码与绘制**：解码在 provider 的后台线程完成，UI render 不做网络、不做解码、不做阻塞 I/O。已接受的图片以 `gpui::Image`（原始已验证字节）交给 GPUI 绘制，像素缓冲不在本模块常驻。
+- **解码与绘制**：解码在 provider 的后台线程完成，UI render 不做网络、不做解码、不做阻塞 I/O。普通静态图片以 `gpui::Image`（原始已验证字节）绘制；有限 SVG 时间线的 BGRA8 缓冲由后台预备并移交给单帧 `RenderImage`，按保留预算计费，收尾只保留最终帧。
 
 ## 地址解析与边界
 
@@ -120,7 +120,8 @@ let reader = cx.new(|cx| {
 `resvg` 本身不执行 CSS 时间线。`content/images/timeline.rs` 在后台对 XML 节点匹配受支持的 CSS 规则，解析自定义属性及 `var()` fallback，计算每个时刻的属性，再交给 resvg 光栅化；它不执行脚本，也不通过修改所有 `opacity=0` 来显示内容。
 
 - 支持标准 `@keyframes` 的 `from` / `to` / 百分比停点，单条一次性 `animation` shorthand 或 name/duration/delay/timing-function/fill-mode longhand，毫秒/秒（包括负 delay）、`none` / `forwards` / `backwards` / `both`、linear/ease/ease-in/ease-out/ease-in-out。
-- 插值属性为 opacity、fill-opacity、stroke-opacity、stroke-dashoffset 和仿射 transform；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留。静态隐藏和 `!important` 属性保持其优先级。
+- 支持显式单色根背景（将颜色 `background` shorthand 规范为 resvg 接受的 `background-color`），使白纸图表的黑色标签保持对比；没有声明背景的图片仍透明。顶层 SVG 的 opacity/display 在完整表面上应用，隐藏根的背景不泄漏，静态隐藏子元素不被改成可见。
+- 插值属性为 opacity、fill-opacity、stroke-opacity、stroke-dashoffset 和仿射 transform；已验证样本使用 translate/scale。静态 transform-origin 在转为 SVG transform 时保留。静态隐藏和 `!important` 属性保持其优先级。受支持的 cascade 计算后写入节点，并移除原样式表，避免 usvg 对同一声明再次 cascade、覆盖采样值或根可见性。
 - 播放最多五秒、最多 100 个采样帧（约 20 fps），动画使用固有网格以限制内存，所有帧与最终 PNG 共享 `max_response_bytes` / `max_decoded_bytes` 总额。支持的时间线过长或帧总额超限时保留计算后的最终 PNG；这是静态 fallback，不作为动画验收证据。
 - 评估的 CSS ≤ 128 KiB，选择器/节点比较 ≤ 2,000,000，规则/变量/停点展开各受 2 MiB 预算约束。未加载的 `@font-face` / 条件规则不进入评估预算；不读取网络/文件字体。多条动画、重复/无限播放、其他动画属性及浏览器条件 CSS 不属于本次支持范围，保持基础呈现，不声称完整 CSS 浏览器兼容。
 - `workspace.rs` 在绘制前估算 resvg 的画布、内嵌图片、隔离层和滤镜工作面；超采样不满足预算时退回固有网格，再超限则拒绝。会分配未受 resvg 画布约束的 pattern tiles 暂不支持。
@@ -137,7 +138,7 @@ GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会
 - Ready 图片不强制显示 alt 图注；alt 保留在文档文本/失败信息中。Loading/Failed/Refused/无 provider 的状态仍给出与该资源相关的信息。
 - 未知尺寸（加载中/失败/拒绝）预留 140px 占位高度；图片完成后对该顶层块调用真实 `ListState::remeasure_items`，以**锚定当前滚动位置**的方式重测，不重排版整篇文档，不插入假 AST 项，不把文末 inset 挤出测量范围，不因图片落地产生全文档高频重绘。在 `MarkdownLayout::Flow`（自然高度）下改为请求一次重绘并由 `on_layout_changed` 通知宿主，宿主的页面容器随之增长。
 - 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。表格内图片仍受 AST 限制（见下）。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
-- 同一纯图片段落（包括软换行间隔的链接徽章）保留为可换行的 `ImageRow`，空行另起段落；极长图片段落按最多 64 张图片切成有界组，跨片段居中 wrapper 最多保留 256 层。居中容器中的段落/图片行保持居中，但渲染前仍按原段落拆成独立虚拟项，不让整篇 Profile 成为一个无界行。混合文字和图片的段落仍将图片提取到文字后，未声称支持文字行盒中原位置嵌图。
+- 同一纯图片段落（包括软换行间隔的链接徽章）保留为可换行的 `ImageRow`，空行另起段落；极长图片段落按最多 64 张图片切成有界组，跨片段居中 wrapper 最多保留 256 层。居中容器中的段落/图片行使用占满可用列宽的作用域，保留普通标题与正文的字号/间距，渲染前仍按原段落拆成独立虚拟项，不让整篇 Profile 成为一个无界行。混合文字和图片的段落仍将图片提取到文字后，未声称支持文字行盒中原位置嵌图。
 
 ## 生命周期与取消
 

@@ -1,6 +1,6 @@
 # README SVG 渲染与有限 CSS 动画 (`reader-svg`)
 
-- 任务 ID `reader-svg`，同一分支 `fix/reader-svg`、同一 [PR #82](https://github.com/nocpiun/githux/pull/82)。初始 base `0c619070be103048f9aa033f2f57520372cbebb2`；2026-11-11 返工已整合 main `8cad76bb78e4848099339fec4385c3175c5a0fbd` 的已验收字体、Profile 与图片布局，不合并 PR，`merge_owner=coordinator`。
+- 任务 ID `reader-svg`，同一分支 `fix/reader-svg`、同一 [PR #82](https://github.com/nocpiun/githux/pull/82)。初始 base `0c619070be103048f9aa033f2f57520372cbebb2`；2026-11-11 返工已整合 main `f9e31a07ad3c5352eebd803592d420d624dc2bf1` 的已验收字体、Profile、图片布局、tabs 与行链接；未引入未合并的 #84 viewport padding 方案，不修改页面宿主或缓存首屏任务的文件。不合并 PR，`merge_owner=coordinator`。
 - 状态：**2026-11-11 负责人否决初次静态交付，返工中**。此前 clean Codex/CI 和有效 PNG 不能证明实际 Profile 内容正确，也不构成人工验收。以下初次静态实现与检查为历史记录；当前行为契约以 [README 图片](../reader-images.md) 为准。
 
 ## 2026-11-11 负责人反馈后的集成返工
@@ -14,25 +14,36 @@
 
 实现采用受限声明式时间线，不引入浏览器、不执行脚本、不按主机名或内容打补丁：
 
-1. `timeline.rs` 使用 simplecss 的 selector matcher 与有界 CSS declaration/keyframe 扫描；支持所供样本的 delay、easing、fill-mode、opacity、translate/scale 和 dashoffset。自定义属性、fallback、`!important` 和静态隐藏独立处理。simplecss 的 CSS 2.1 declaration parser 不接受 `--name`，由实测中 fallback 色与变量色不同的失败断言确认，因此只复用其 selector 能力，变量声明另作有界解析。
+1. `timeline.rs` 使用 simplecss 的 selector matcher 与有界 CSS declaration/keyframe 扫描；支持所供样本的 delay、easing、fill-mode、opacity、translate/scale 和 dashoffset。自定义属性、fallback、`!important` 和静态隐藏独立处理并移除已完成 cascade 的原样式表，避免 usvg 自己的 important 优先级再次覆盖采样/根可见性。simplecss 的 CSS 2.1 declaration parser 不接受 `--name`，由实测中 fallback 色与变量色不同的失败断言确认，因此只复用其 selector 能力，变量声明另作有界解析。
 2. 后台准备最多五秒/100 帧，最终 PNG 仍在 `DecodedImage` 原字段中；新增可选 `animation` 元数据携带有限 PNG 帧与时间戳，四个 raster 格式变体不变。帧总额计入图片预算；取消/截止时间在各帧之间检查。超时长/超预算的受支持动画使用最终静态 fallback，并明确不是动画验收结果。
 3. 内嵌 SVG 同样验证 XML、主动内容与外部资源边界；递归、节点、字节、累计解码成本都有上限。GIF 先受限解码到 PNG，防止 frame 网格与逻辑头不一致。绘制前检查 canvas/隔离组/滤镜 scratch surfaces，避免小画布叠大量 opacity 层绕过分配预算；超采样可退回固有网格。未能约束 tile 分配的 SVG patterns 暂不接受。
 4. Reader 只选择单个、已解码 BGRA8 的 `RenderImage`，复用既有 pump；中间帧不重测尺寸。第一次 Windows 启动序列的原生捕获发现，逐帧切换 PNG `Image` 会让 GPUI 每次异步解码，产生整张卡片短暂消失的闪烁；因此像素在 provider 中一并准备，UI 只封装现成 buffer，包括最终帧，不在每拍重新解码。已保留帧与当前 scratch 工作面共同扣减解码预算。实际可见绘制开始时间线，完成、reduced motion、暂停/离屏后转为最终 PNG 并释放其余帧。替换文档/账户不保留旧帧。
-5. `ImageRow` 保留纯图片段落的软换行；空行另起段落。`Centered` 在绘制前仍按段落拆成独立虚拟项，标题和文档 unit 的顶层索引随之重建；Ready 不再强制 alt caption。#81 的透明、native/requested sizing 与缩小适配保留。
-6. 接手并补齐 resvg/usvg/tiny-skia 许可文本、哈希与 notices；保留 #78 的 Noto Sans SC 字体 notices。simplecss/svgtypes 复用 usvg 的既有锁定版本。
+5. `ImageRow` 保留纯图片段落的软换行；空行另起段落。`Centered` 在绘制前仍按段落拆成独立虚拟项，标题和文档 unit 的顶层索引随之重建；复用普通标题/正文 renderer，Ready 不再强制 alt caption。原生外层滚动容器复核暴露了 flex 块宽度随内容收缩、导致居中失效的问题，显式占满列宽后修复，并把回归改成真实外层 scroll host 结构。#81 的透明、native/requested sizing 与缩小适配保留。
+6. Star History 的真实响应声明根 `background:#fff`；resvg 接受 `background-color` 而不接受这条 shorthand，原来黑色标签会落在透明背景上。颜色 shorthand 规范化后使用库本身的背景绘制；普通透明图不补背景。usvg 又直接转换根的 children、忽略根 opacity/display，因此在最终表面上应用声明值；根 visibility 隐藏时不绘制根背景。回归覆盖黑色文字对比、静态隐藏子节点、根 opacity/display/visibility、半透明白纸与重要背景声明，未强行把 opacity=0 改成 1。
+7. 接手并补齐 resvg/usvg/tiny-skia 许可文本、哈希与 notices；保留 #78 的 Noto Sans SC 字体 notices。simplecss/svgtypes 复用 usvg 的既有锁定版本。
 
 已完成的本地调查（不等于原生验收）：公开三份响应经过当前解码器的 probe，Stats 为 467×195、27 个采样帧 + 最终帧、10,199,280 decoded bytes；600ms 只有首个延迟行部分出现，最终全部行/值与 rank 可见；roast 为 440×200，CJK 文案、雷达、头像均可见；badge 为 83×20，JS logo 可见。另将 README 的其余徽章无凭据读取为本地响应集合，供 21 个真实图片 URL 的离线原生组合检查，未提交用户素材。
 
-本轮回归断言真实内容的像素和布局：中间/最终行、数值文本区域、rank 缩放、隐藏区域、变量色、logo 空心透明细节、节点/资源/隔离层预算、取消、离屏/暂停/文档切换、缓存重开后的动画，以及行内徽章的 x/y/尺寸/段落间距。最终运行记录待下方补齐，不沿用初次静态交付的通过状态。
+本轮回归断言真实内容的像素和布局：中间/最终行、数值文本区域、rank 缩放、隐藏区域、变量色、logo 空心透明细节、节点/资源/隔离层预算、取消、离屏/暂停/文档切换、缓存重开后的动画，以及行内徽章的 x/y/尺寸/段落间距。回归通过原生窗口捕获发现的空白闪烁、Flow 宿主下的居中、根背景与重要声明再 cascade 问题后，最终 focused 检查基于 main `f9e31a0`，不沿用初次静态交付的通过状态。
+
+| 检查 | 结果 | runner run |
+| --- | --- | --- |
+| `cargo test --locked --test reader_images` | 807 passed，0 failed，1 个公开样本 probe 默认 ignored | `b4f0b257-7fcb-440b-8520-9860d8d087b8` |
+| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `00d0d638-3e4c-4ce3-a476-36afc9923304` |
+| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `d938b5a0-2121-4383-802d-d2dfd8766e2c` |
+| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，图中文字/图标可见 | `106a617d-9e3d-4b49-b6ec-62d2ac658b4b` |
+| `cargo fmt --all -- --check` | 通过 | `7ec10550-e581-4af2-90c8-6d6c1a94b84d` |
+
+中途在 main `54c8afbc` 集成点运行的全套 `cargo test --locked` 也通过：1255 / 98 / 607 / 310 / 275 / 806 / 901 / 44（run `7d23115a-30c6-4d16-8b11-9ea012c5a5a7`）。它早于最后的 Flow 宿主宽度/根样式修复与 #83 同步，不冒充最终提交的全套检查；最终提交仍须获得新的 CI 与 Codex 审查。
 
 ### 原生组合证据（2026-11-11）
 
 构建 `githux.exe` 与 `reader_images.exe` 后，在 Kero project `m5d2w59` 的唯一任务 helper 中运行 `reader_images "SVG profile"`；临时 fixture 账户使用合成 token，21 个公开 URL 全部从本地响应 manifest 应答，无实时网络、无真实 PAT。所供 README 原文与公开素材未纳入 Git。
 
 - Windows 150% DPI，原生窗口为 1792×1286 设备像素。普通 screen-copy 捕获到了 Windows 锁屏，未作产品证据；改用仅对本任务窗口的 `PrintWindow(PW_RENDERFULLCONTENT)`，并将捕获线程置为 per-monitor DPI-aware，避免把虚拟化坐标下的半幅截图误判为布局右移。不解锁桌面、不操作其他用户窗口。
-- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,384ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **3,385ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
+- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,315ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **4,020ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
 - 同一真实窗口中 roast 的中文、雷达、头像与页脚细节可读；Stats 全部行/数值与 rank 保留；19 枚徽章按所供 README 的四个段落成组居中，logo 可见，成功图片没有 alt 图注或 140px 段间占位。后面的 Links 回到普通左对齐。
-- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张捕获留在同目录。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
+- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张 `accepted-base-native-*.png` 捕获留在同目录（main `f9e31a0`、build run `d938b5a0`，helper session `zirwkhm`）。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
 
 验证边界：原生渲染捕获成功；桌面保持锁定，未宣称真实鼠标/键盘手动验收、真实 PAT 的正式 Profile 页面 dogfooding 或跨平台原生验收。正式应用另做构建与测试；最终接受/解除 blocked/合并仍由负责人或协调者执行。
 
@@ -121,7 +132,7 @@
 
 1. **超采样取整可能越过像素预算**：`2001×2000` 的合法 SVG 本身低于 8,000,000 像素，但按 `sqrt(cap/(w*h))` 缩放后四舍五入得到 `2829×2828 = 8,000,412`，被随后的检查判为 `TooLarge`，等于可选的超采样拒绝了本可支持的图片。现在先向下取整，若乘积仍超限则按比例缩小并做有界递减，保证 `render_w*render_h <= min(max_pixels, max_decoded_bytes/4)`。新增 `svg_dimensions_just_below_the_pixel_budget_still_render`（2001×2000 正常解码，实际 PNG 网格不超过像素/字节预算，`decoded_bytes` 与网格一致）。
 
-## 运行与限制
+## 初次静态交付的运行边界（历史，已由返工取代）
 
 - 构建产物：`target/debug/githux.exe`（`cargo build --locked`）。预览入口沿用 `cargo run --example reader_images`，但本任务未修改预览 fixture（归 `reader-image-layout`），因此预览仍只展示原有 PNG 场景；SVG 的生产路径证据来自数据层/provider 回归，不是外部网络可达性证明。
 - 不声称原生视觉验收：本任务无 UI 改动，照片/徽章的实际排版、去灰底与拉伸由 `reader-image-layout` 负责并经负责人原生窗口验收。
