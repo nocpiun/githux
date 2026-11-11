@@ -878,6 +878,53 @@ fn single_stop_keyframes_use_underlying_opacity_at_missing_endpoints() {
 }
 
 #[test]
+fn percentage_opacity_keyframes_reveal_fill_stroke_and_group_content() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="10"><style>#a{animation:a .2s linear forwards}#b{animation:b .2s linear forwards}#c{animation:c .2s linear forwards}@keyframes a{from{opacity:0%}to{opacity:100%}}@keyframes b{from{fill-opacity:0%}to{fill-opacity:100%}}@keyframes c{from{stroke-opacity:0%}to{stroke-opacity:100%}}</style><rect id="a" width="10" height="10" fill="red" opacity="0"/><rect id="b" x="15" width="10" height="10" fill="blue" fill-opacity="0"/><path id="c" d="M30 5H39" stroke="lime" stroke-width="4" stroke-opacity="0"/></svg>"#;
+    let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = image.animation.as_ref().unwrap();
+    for (bytes, expected) in [
+        (&animation.frames[0].bytes, 0),
+        (
+            &animation
+                .frames
+                .iter()
+                .find(|f| f.at_ms == 100)
+                .unwrap()
+                .bytes,
+            128,
+        ),
+        (&image.bytes, 255),
+    ] {
+        let pixels = image::load_from_memory(bytes).unwrap().to_rgba8();
+        for x in [5, 20, 35] {
+            assert_eq!(pixels.get_pixel(x, 5).0[3], expected);
+        }
+    }
+}
+
+#[test]
+fn inherited_custom_properties_keep_the_ancestor_computed_value() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="10" style="--base:red;--ink:var(--base);--alpha:.5;--visible:var(--alpha)"><style>#c{opacity:0;animation:show .2s linear forwards}@keyframes show{from{opacity:0}to{opacity:var(--visible)}}</style><rect width="10" height="10" style="--base:blue;fill:var(--ink)"/><rect x="15" width="10" height="10" style="--base:blue;--ink:var(--base);fill:var(--ink)"/><rect id="c" x="30" width="10" height="10" style="--alpha:1;fill:var(--ink)"/></svg>"#;
+    let image = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&image.bytes).unwrap().to_rgba8();
+    assert_eq!(
+        pixels.get_pixel(5, 5).0,
+        [255, 0, 0, 255],
+        "inherited ink was computed on the red ancestor"
+    );
+    assert_eq!(
+        pixels.get_pixel(20, 5).0,
+        [0, 0, 255, 255],
+        "a locally redeclared ink uses the local blue value"
+    );
+    assert_eq!(
+        pixels.get_pixel(35, 5).0,
+        [255, 0, 0, 128],
+        "animation inherits the computed .5 endpoint despite a descendant alpha override"
+    );
+}
+
+#[test]
 fn finite_svg_rendering_observes_cancellation_between_frames() {
     let calls = std::cell::Cell::new(0);
     let result = decode_image_checked(

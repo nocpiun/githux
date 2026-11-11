@@ -28,11 +28,11 @@
 
 | 检查 | 结果 | runner run |
 | --- | --- | --- |
-| `cargo test --locked --test reader_images` | 813 passed，0 failed，1 个公开样本 probe 默认 ignored | `36de18c6-f8bb-424b-b68d-47e62620bcf0` |
-| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `ae4f2536-32ea-45b2-8c13-dad1384aae98` |
-| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `36a64078-66b2-4113-a5e9-94902880a494` |
-| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，图中文字/图标可见 | `d723034d-0ce6-4b96-9b27-aa51cdc7f928` |
-| `cargo fmt --all -- --check` | 通过 | `3bcaf77e-2dcf-436b-b2d7-70ded111cd3a` |
+| `cargo test --locked --test reader_images` | 815 passed，0 failed，1 个公开样本 probe 默认 ignored | `251985e8-316c-4bac-b36b-ddb23a85fac0` |
+| `cargo clippy --locked --all-targets -- -D warnings` | 全目标通过，零警告 | `a38ce584-9852-4882-8a5d-bb3f33a8af56` |
+| `cargo build --locked --bin githux --example reader_images` | 正式应用与预览通过 | `064040d8-0f82-469a-aaa6-df1a6428c65d` |
+| opt-in `public_svg_probe -- --ignored --nocapture` | 所供 Stats/badge/roast 与新取 Star History 响应均成功，图中文字/图标可见 | `d201022c-a709-4059-be16-aba683f8c4b3` |
+| `cargo fmt --all -- --check` | 通过 | `1d62b081-237d-47fb-910a-b094a111a49b` |
 
 中途在 main `54c8afbc` 集成点运行的全套 `cargo test --locked` 也通过：1255 / 98 / 607 / 310 / 275 / 806 / 901 / 44（run `7d23115a-30c6-4d16-8b11-9ea012c5a5a7`）。它早于最后的 Flow 宿主宽度/根样式修复与 #83 同步，不冒充最终提交的全套检查；最终提交仍须获得新的 CI 与 Codex 审查。
 
@@ -41,9 +41,9 @@
 构建 `githux.exe` 与 `reader_images.exe` 后，在 Kero project `m5d2w59` 的唯一任务 helper 中运行 `reader_images "SVG profile"`；临时 fixture 账户使用合成 token，21 个公开 URL 全部从本地响应 manifest 应答，无实时网络、无真实 PAT。所供 README 原文与公开素材未纳入 Git。
 
 - Windows 150% DPI，原生窗口为 1792×1286 设备像素。普通 screen-copy 捕获到了 Windows 锁屏，未作产品证据；改用仅对本任务窗口的 `PrintWindow(PW_RENDERFULLCONTENT)`，并将捕获线程置为 per-monitor DPI-aware，避免把虚拟化坐标下的半幅截图误判为布局右移。不解锁桌面、不操作其他用户窗口。
-- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,392ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **3,906ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
+- 第一次启动序列明确暴露逐帧 PNG 异步解码闪烁；改成预解码 BGRA8 后重建并重新采集 60 帧。Stats 首个可绘制帧到最终帧为 **1,334ms**（CSS 时长 1,350ms，含采样/捕获误差），随后 **4,157ms** 的所有 Stats 区域逐像素一致；从首次出现到最后，卡片背景始终存在，没有先前的整图空白闪烁。捕获中可辨认标题渐入、rank 缩放/arc 进度和延迟统计行依次显现。
 - 同一真实窗口中 roast 的中文、雷达、头像与页脚细节可读；Stats 全部行/数值与 rank 保留；19 枚徽章按所供 README 的四个段落成组居中，logo 可见，成功图片没有 alt 图注或 140px 段间占位。后面的 Links 回到普通左对齐。
-- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张 `endpoint-review-native-*.png` 捕获留在同目录（main `f9e31a0`、build run `36a64078`，helper session `zirwkhm`）。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
+- 本地复核产物：`.agents/task/native-svg/ready-profile-final.png`、`ready-profile-animation.gif`（一次播放，按捕获文件时间间隔导出）、`evidence.json`；原始 60 张 `opacity-review-native-*.png` 捕获留在同目录（main `f9e31a0`、build run `064040d8`，helper session `zirwkhm`）。它们是本机调查证据，不是被 Git 跟踪的测试前置，也不是人工验收通过记录。
 
 验证边界：原生渲染捕获成功；桌面保持锁定，未宣称真实鼠标/键盘手动验收、真实 PAT 的正式 Profile 页面 dogfooding 或跨平台原生验收。正式应用另做构建与测试；最终接受/解除 blocked/合并仍由负责人或协调者执行。
 
@@ -54,6 +54,8 @@
 第二轮 head `394a4283` 的 review `5856283143` 提出 P1 `4535932686` 和 P2 `4535932697`，均核实成立并修复：变量串递归拼接可能先分配巨型中间值，现向同一输出缓冲直接展开，按当前剩余限额在申请/追加前检查，保留深度上限；811 项 Reader 回归包含 1 MiB inline seed 的三倍递归链和低限额下输出长度/容量不越界的断言。普通 `transform` presentation 属性现在保留为基础值，延迟前/none fill 结束后恢复；像素回归同时验证基础位置、动画替换位置与最终恢复位置。重新通过上表的测试、全目标 clippy、构建、probe 与格式检查，七张公开 probe PNG 未改变，并再次从新构建采集 60 帧原生证据。
 
 第三轮 head `84ae25bd` 的 review `5856517624` 提出 P1 `4536113431` 与 P2 `4536113441`，同样核实成立：空变量十倍递归并不产生输出，字节限额不能约束 CPU；现对整次时间线构建共享 100,000 步工作限额，空值计费、每 128 步检查取消/截止时间，节点遍历也检查。回归证明零输出展开耗尽工作限额，并能在限额耗尽前取消。仅有 `to` / `from` 的 keyframes 则从元素基础 CSS/presentation 值补齐缺失端点，继承属性按祖先基础值查找，并按各属性自己的停点插值；回归验证开始/中间/最终 alpha `(0,255)` / `(128,153)` / `(255,51)`。本轮 813 项 Reader 测试通过；随后按 clippy 建议把取模判定改成等价 `is_multiple_of` 并通过最终全目标 clippy、构建、probe 与格式检查。公开七张 PNG 仍逐字节相同，原生序列再次从最终构建采集。
+
+第四轮 head `611f04c8` 的 review `5856997279` 提出两条 P2（`4536496340`、`4536496346`），核实并修复：opacity/fill-opacity/stroke-opacity 百分比端点先归一化为 0–1 再插值；局部自定义属性在声明元素的完整变量环境中先计算，子元素继承计算值，不能用自己的变量覆盖反向重绑定祖先表达式。回归覆盖三种百分比透明度的初始/中间/最终 alpha，以及祖先红色派生变量、子级蓝色覆盖/本地重新声明、动画继承 `.5` 端点的区别。最终 815 项 Reader 测试及上表全部检查通过；七张公开 PNG 仍相同，并以当前构建刷新 60 帧原生序列。
 
 ## 初次静态交付的改动与决定（历史）
 

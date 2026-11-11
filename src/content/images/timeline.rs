@@ -545,12 +545,12 @@ impl Timeline {
                 .and_then(|p| inherited.get(&p.id()))
                 .cloned()
                 .unwrap_or_default();
-            vars.extend(
-                props
-                    .iter()
-                    .filter(|(k, _)| k.starts_with("--"))
-                    .map(|(k, v)| (k.clone(), v.clone())),
-            );
+            let local_vars: Properties = props
+                .iter()
+                .filter(|(key, _)| key.starts_with("--"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            vars.extend(local_vars.clone());
             expanded_bytes = expanded_bytes
                 .saturating_add(vars.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>());
             if expanded_bytes > 2 * 1024 * 1024 {
@@ -558,6 +558,14 @@ impl Timeline {
                     limit: 2 * 1024 * 1024,
                 });
             }
+            // Custom properties inherit their computed value. Descendant
+            // overrides must not rebind references declared on an ancestor.
+            let computed_vars =
+                resolve_properties(local_vars.clone(), &vars, &mut expanded_bytes, &mut work)?;
+            for key in local_vars.keys() {
+                vars.remove(key);
+            }
+            vars.extend(computed_vars);
             inherited.insert(node.id(), vars.clone());
             props.retain(|key, _| !key.starts_with("--"));
             props = resolve_properties(props, &vars, &mut expanded_bytes, &mut work)?;
@@ -906,9 +914,27 @@ fn interpolate(key: &str, a: &str, b: &str, p: f64) -> Option<String> {
     ) {
         return None;
     }
-    let a = a.parse::<f64>().ok()?;
-    let b = b.parse::<f64>().ok()?;
-    (a.is_finite() && b.is_finite()).then(|| (a + (b - a) * p).to_string())
+    let scalar = |value: &str| {
+        let number = if key != "stroke-dashoffset" {
+            value
+                .strip_suffix('%')
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(|value| value / 100.0)
+                .or_else(|| value.parse::<f64>().ok())
+        } else {
+            value.parse::<f64>().ok()
+        }?;
+        number.is_finite().then(|| {
+            if key == "stroke-dashoffset" {
+                number
+            } else {
+                number.clamp(0.0, 1.0)
+            }
+        })
+    };
+    let a = scalar(a)?;
+    let b = scalar(b)?;
+    Some((a + (b - a) * p).to_string())
 }
 fn ease(x: f64, name: &str) -> f64 {
     let (x1, y1, x2, y2) = match name {
