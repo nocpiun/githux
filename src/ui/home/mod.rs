@@ -1981,7 +1981,8 @@ fn list_rows<T: PanelRows + 'static>(
             },
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(1.5, scroll::LIST_BAR_LANE),
+        placement: scroll::Placement::overlay(1.5, scroll::LIST_BAR_LANE)
+            .with_track_insets(insets.top, insets.bottom),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,
@@ -2040,15 +2041,7 @@ fn list_rows<T: PanelRows + 'static>(
             motion,
             Instant::now,
         ))
-        .child(
-            div()
-                .absolute()
-                .top(insets.top)
-                .bottom(insets.bottom)
-                .left_0()
-                .right_0()
-                .child(bar),
-        )
+        .child(bar)
         .on_hover(cx.listener(move |view, hovered, _, cx| {
             let panel = view.panel_mut(column);
             if panel

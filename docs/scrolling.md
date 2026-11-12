@@ -51,6 +51,8 @@
 
 `Placement::inset` 描述**可见线到区域尾侧边缘的间隙**；较宽的 `hit` 命中条从该边缘向容器**内部**展开，不再把可见线居中推离边缘。`overlay(1.5, 8.0)` 因此得到 1.5 px 可见间隙和完整 8 px 命中条：命中条覆盖 `right-8..right`（纵向）或 `bottom-8..bottom`（横向），可见线位于 `right-4.5..right-1.5` / `bottom-4.5..bottom-1.5`。`Placement::BAND`（标签条）保持 `inset = 0`、`hit = THICKNESS`，可见线与命中区都贴预留 band 的起点。
 
+`Placement::with_track_insets(start, end)` 另表示沿滚动轴保留的首尾 track 留白。Bar 所在区域仍覆盖完整 native viewport，布局和 thumb 几何共同扣除这两个值、对称 `inset` 及 crossing `corner`；拖动换算直接使用已布局 hit track 的实际长度。不能只缩小 Bar 的外层 wrapper 而继续用完整 viewport 长度计算 thumb，否则到末尾时 thumb 会越过 track，鼠标拖到可见底端也不能对应真实内容末尾。
+
 ### 尾侧间隙审计（2026-10-29）
 
 此前 `overlay(4, 8)` 把 3 px 可见线居中放进 8 px 命中区，实际可见间隙为 `4 + (8-3)/2 = 6.5` px，在侧栏右缘看起来偏远。统一改为可见间隙语义后，以下实际调用点由 `overlay(4.0, 8.0)`（Profile heatmap 为 `overlay(3.0, 8.0)`）改为 `overlay(1.5, 8.0)`：
@@ -99,7 +101,7 @@ GPUI `List` 的 prepaint/paint 以真实 list bounds 建立 `ContentMask`，`uni
 
 `uniform_list` 原生 padding 可正确表达 Files 留白，但尾部可见范围使用扣除 padding 的高度，可能漏画落在最后 7px 内的真实行。共享 helper 仅在该范围尾项之后 overdraw 最多一个真实行，沿用数据 ID、事件和完整 native clip，不增加 native item count 或改变统一行高。测试同时核对该行的真实 paint mask 与点击，而非用填色模拟内容。
 
-中间偏移回归通过连续真实 wheel 建立位置，检查渲染场景中行背景 quad 的**继承 content mask**，以及紧邻 header/面板边缘、位于行中部的半像素探针是否被实际可见矩形覆盖；同时在原空白带发送 wheel，核对列内只消费一次。普通/放大字体、宽/窄布局和显示缩放均参与验证。树正常半行裁切仍限于真实边界；0 高度 pane 不可要求容纳完整一行。首尾 reveal、thumb 与 Feed append 仍独立保留，不能代替这些中间位置证据。
+中间偏移回归通过连续真实 wheel 建立位置，检查渲染场景中行背景 quad 的**继承 content mask**，以及紧邻 header/面板边缘、位于行中部的半像素探针是否被实际可见矩形覆盖；同时在原空白带发送 wheel，核对列内只消费一次。普通/放大字体、宽/窄布局和显示缩放均参与验证。树正常半行裁切仍限于真实边界；0 高度 pane 不可要求容纳完整一行。首尾 reveal、thumb 与 Feed append 仍独立保留，不能代替这些中间位置证据。thumb 回归还必须量实际控件 bounds：最大偏移时 thumb 末端应与物理 track 末端相接，并由真实鼠标拖到该末端验证数据范围和末尾留白；仅直接写 target 最大 offset 无法证明 Bar 几何正确。
 
 回归包括 Home/Feed 独立列表的短/长内容、宽/窄布局、首尾 reveal、通道拖动与隐藏时宽度稳定，以及真实 Shell/page host 的组合路径；最终执行结果和原生验收边界见 [本轮日志](devlog/2026-11-10-ui-scroll-geometry.md)。
 

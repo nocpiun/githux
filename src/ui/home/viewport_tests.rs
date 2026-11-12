@@ -580,6 +580,61 @@ fn first_and_last_rows_fit_the_real_viewport_at_both_layout_widths(cx: &mut Test
 }
 
 #[gpui::test]
+fn inset_scrollbar_thumb_stays_in_track_and_drag_reaches_end(cx: &mut TestAppContext) {
+    use crate::ui::scroll::ScrollTarget;
+    let (view, cx) = open(cx);
+    for (width, height, font_scale, count) in [(1180.0, 800.0, 1.0, 80), (640.0, 1400.0, 1.5, 1000)]
+    {
+        cx.update(|_, cx| ely_core::theme::Theme::update(cx, |t| t.font_scale = font_scale));
+        cx.simulate_resize(size(px(width), px(height)));
+        populate(&view, count, cx);
+        view.update(cx, |v, cx| {
+            v.home_view.pinned_clock = Some(0);
+            v.show_scrollbar(Column::Home);
+            let m = &v.home_view.motion;
+            m.set_axis_offset(gpui::Axis::Vertical, -m.max_offset().y);
+            cx.notify();
+        });
+        frames(cx);
+        let track = bounds(cx, "home-scrollbar-y".into());
+        let thumb = bounds(cx, "home-scrollbar-y-thumb".into());
+        assert!(
+            (thumb.bottom() - track.bottom()).abs() < px(0.02),
+            "maximum thumb must end inside its physical track: thumb={thumb:?} track={track:?}"
+        );
+        cx.update(|w, cx| view.update(cx, |v, cx| v.select(Column::Home, 0, w, cx)));
+        frames(cx);
+        let thumb = bounds(cx, "home-scrollbar-y-thumb".into());
+        let start = thumb.center();
+        cx.simulate_mouse_move(start, None, Modifiers::none());
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
+        for step in 1..=8 {
+            cx.simulate_mouse_move(
+                start + point(px(0.0), px(step as f32)),
+                Some(gpui::MouseButton::Left),
+                Modifiers::none(),
+            );
+            frames(cx);
+        }
+        let end = point(start.x, track.bottom() - px(0.25));
+        cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), Modifiers::none());
+        frames(cx);
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
+        frames(cx);
+        view.read_with(cx, |v, _| {
+            assert!(
+                (v.home_view.motion.offset().y + v.home_view.motion.max_offset().y).abs()
+                    < px(0.02),
+                "drag to physical track bottom reaches native range end"
+            )
+        });
+        let native = view.read_with(cx, |v, _| v.home_view.scroll.viewport_bounds());
+        let last = bounds(cx, format!("home-item-row-{}", count - 1));
+        assert!((native.bottom() - last.bottom() - px(8.0)).abs() < px(0.02));
+    }
+}
+
+#[gpui::test]
 fn scrollbar_hit_lane_is_outside_rows_and_drives_only_its_list(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     cx.simulate_resize(size(px(1180.0), px(800.0)));

@@ -29,6 +29,14 @@ uniform-list 虽支持 content padding，其可见尾范围仍按 padded height 
 
 新基线组合验证通过 16 项针对性 viewport/Shell 场景（`b9967e99-ed57-44ff-8aed-de6f1063423c`）、fmt check（`c9a81ade-0677-45d2-9b4d-13e47c20aa7a`）和 all-target clippy（`2f578879-f6de-40c7-9b64-b6b35940ea8b`），覆盖首尾留白、中间 mask/input、未测量尾部最大拖动及 Files 的真实尾行点击。没有因基线变化重复无关测试。最终 clean-head 预览、CI/Codex 结果放 PR 和本地交付状态，避免为补自身 SHA 再造未审查提交。`pending` 与负责人管理的 `blocked` 均保留；旧 exe/旧收据和测试平台结果都不代替本轮 Windows 原生验收。不终止、不覆盖用户启动的 app 窗口。
 
+## Codex 补充：物理 track 与内容 viewport 的几何分离
+
+`df18f4a` 的新审查指出 inset Bar wrapper 缩短了物理 track，但 thumb 仍按完整 viewport 长度计算。接受该项 P2；实际控件回归 `31167488-ed6f-44f5-ad22-b814fd880740` 先失败：最大偏移时 thumb.bottom=806.5、track.bottom=790.5，越界 16px。直接写 native target 最大 offset 的测试不足以证明实际控件和鼠标映射正确。
+
+共享 `Placement::with_track_insets` 同时驱动轨道布局与 thumb 长度/位置，Home/Feed、global、Notifications、Files 的 Bar 区域保持完整 viewport，不再另用缩进 wrapper。拖动计算读取事件提供的实际 hit track 长度；内容 viewport/reach、首尾留白、窄通道及样式不变。新增实际鼠标回归覆盖普通 thumb 与 24px 最小 thumb、宽/窄与放大字体，断言末端贴合物理 track，并拖到可见底部后核对真实数据末尾和 8px 留白。
+
+聚焦回归通过（`440a7466-b177-40d7-b28f-685554693e3a`），受影响的共享滚动/页面及 Shell 共 45 项组合回归通过（`de78ff10-af41-4e69-865d-4a9138a86a03`），fmt check（`9f0fbbaa-5a4a-4485-a24d-9f7da283a2fb`）和 all-target clippy（`9b7986af-e8b1-4e10-886b-32ea1e3f94ea`）通过。没有待裁决争议；保留既有协调者合并归属及标签，最终 head 仍须重新 CI/Codex 和负责人原生验收。
+
 ## 原始反馈 7 前次返工（历史：cc387aa 的留白删除已被拒收）
 
 前轮 `bd73a9f` 的首尾/reveal 验证和字号修复没有证明原始 padding 遮挡消失；负责人已撤回验收。继续使用同一 PR #84/worktree/session，恢复 `pending`，不修改 `blocked`，合并仍由协调者执行。先前通过的通道与字号修复保留。

@@ -31,8 +31,8 @@ use std::rc::Rc;
 
 use ely_core::theme::ActiveTheme;
 use gpui::{
-    AnyElement, App, Axis, EmptyView, EntityId, Hsla, IntoElement, StatefulInteractiveElement,
-    Styled, Window, div, prelude::*, px,
+    AnyElement, App, Axis, EmptyView, EntityId, Hsla, IntoElement, Pixels,
+    StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
 };
 
 /// Visible thickness of the line, in logical pixels.
@@ -100,6 +100,10 @@ pub struct Placement {
     /// Extra length left at the track's far end for the crossing axis, so two bars
     /// never meet in the same corner.
     pub corner: f32,
+    /// Additional along-axis breathing room inside the full viewport region.
+    /// These shorten the physical track, not the content viewport or reach.
+    pub track_start: f32,
+    pub track_end: f32,
     /// Cross-axis size of the interactive track, measured inward from the region edge.
     /// Overlay lines keep their visual inset independently of this hit width.
     pub hit: f32,
@@ -111,6 +115,8 @@ impl Placement {
     pub const BAND: Self = Self {
         inset: 0.0,
         corner: 0.0,
+        track_start: 0.0,
+        track_end: 0.0,
         hit: THICKNESS,
         edge: Edge::Start,
     };
@@ -121,9 +127,19 @@ impl Placement {
         Self {
             inset,
             corner: 0.0,
+            track_start: 0.0,
+            track_end: 0.0,
             hit,
             edge: Edge::End,
         }
+    }
+
+    /// Reserve visible end gaps while keeping Bar's region equal to the native
+    /// viewport. Geometry and layout use these same physical track insets.
+    pub fn with_track_insets(mut self, start: Pixels, end: Pixels) -> Self {
+        self.track_start = f32::from(start).max(0.0);
+        self.track_end = f32::from(end).max(0.0);
+        self
     }
 
     /// Leaves room at the far end for the crossing bar; `other` is that bar's [`Placement`].
@@ -178,7 +194,12 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
         let Some((viewport, reach, offset)) = axis_metrics(self.target, axis) else {
             return div().into_any_element();
         };
-        let track = (viewport - 2.0 * placement.inset - placement.corner).max(0.0);
+        let track = (viewport
+            - placement.track_start
+            - placement.track_end
+            - 2.0 * placement.inset
+            - placement.corner)
+            .max(0.0);
         let Some(thumb) = Thumb::new(viewport, reach, offset, track, style.min_thumb) else {
             return div().into_any_element();
         };
@@ -188,7 +209,8 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
             Edge::End => placement.hit.max(placement.inset + style.thickness),
         });
         let inset = px(placement.inset);
-        let corner = px(placement.corner);
+        let track_start = px(placement.inset + placement.track_start);
+        let track_end = px(placement.inset + placement.corner + placement.track_end);
         let (idle, busy) = style.colors(cx);
         let press_ratio = if thumb.travel > 0.0 {
             thumb.start / thumb.travel
@@ -221,7 +243,12 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
                 let Some((viewport, reach, offset)) = axis_metrics(&move_target, axis) else {
                     return;
                 };
-                let track = (viewport - 2.0 * placement.inset - placement.corner).max(0.0);
+                // Event bounds are the laid-out hit track, including any
+                // along-axis inset and device-pixel rounding.
+                let track = f32::from(match axis {
+                    Axis::Horizontal => event.bounds.size.width,
+                    Axis::Vertical => event.bounds.size.height,
+                });
                 let Some(thumb) = Thumb::new(viewport, reach, offset, track, style.min_thumb)
                 else {
                     return;
@@ -243,16 +270,18 @@ impl<T: ScrollTarget + Clone + 'static> Bar<'_, T> {
             });
         let track_el = match (axis, placement.edge) {
             (Axis::Horizontal, Edge::Start) => {
-                track_el.left(inset).right(inset + corner).top_0().h(hit)
+                track_el.left(track_start).right(track_end).top_0().h(hit)
             }
-            (Axis::Horizontal, Edge::End) => {
-                track_el.left(inset).right(inset + corner).bottom_0().h(hit)
-            }
+            (Axis::Horizontal, Edge::End) => track_el
+                .left(track_start)
+                .right(track_end)
+                .bottom_0()
+                .h(hit),
             (Axis::Vertical, Edge::Start) => {
-                track_el.top(inset).bottom(inset + corner).left_0().w(hit)
+                track_el.top(track_start).bottom(track_end).left_0().w(hit)
             }
             (Axis::Vertical, Edge::End) => {
-                track_el.top(inset).bottom(inset + corner).right_0().w(hit)
+                track_el.top(track_start).bottom(track_end).right_0().w(hit)
             }
         };
 

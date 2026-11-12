@@ -776,7 +776,7 @@ fn tree_column(
             name: "repository-tree-scrollbar",
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(2.5, 8.0),
+        placement: scroll::Placement::overlay(2.5, 8.0).with_track_insets(edge_gap, edge_gap),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,
@@ -868,8 +868,8 @@ fn tree_column(
                     div()
                         .debug_selector(|| "repository-tree-bar-region".into())
                         .absolute()
-                        .top(edge_gap)
-                        .bottom(edge_gap)
+                        .top_0()
+                        .bottom_0()
                         .left_0()
                         .right_0()
                         .child(bar),
