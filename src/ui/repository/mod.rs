@@ -183,10 +183,11 @@ pub enum PageAction {
 pub type OnPageAction = Rc<dyn Fn(PageAction, &mut Window, &mut App)>;
 
 /// Which document the reader shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Selection {
     /// The repository's README at the fixed commit, as identified by the
     /// descriptor's own path (root, `docs/`, `.github/`, …).
+    #[default]
     Readme,
     /// A file at the fixed commit.
     File(String),
@@ -323,6 +324,9 @@ struct Message {
     /// afterwards even if a later read restored access.
     authorization: Option<CacheAuthorization>,
     context: RepositoryReadContext,
+    /// A cache-first observation published while the online chain is still running. It may fill an
+    /// empty page but never ends or overrides the online read that owns the same resource.
+    preliminary: bool,
     body: Body,
 }
 
@@ -351,9 +355,47 @@ enum Body {
         branch: String,
         commit: ObjectSha,
         path: String,
+        mode: RepositoryCacheMode,
         result: Result<DirectoryTree, PageError>,
     },
     Content(ContentReply),
+    /// One complete cache-first read of the repository entry: summary, branch list, fixed revision,
+    /// root tree, README discovery and the initial document. Published as a single message so the
+    /// header, tree and reader can never disagree about which commit they describe.
+    Snapshot(Box<SnapshotBundle>),
+}
+
+/// Everything one cache-first read found, or nothing where the snapshot could not answer.
+///
+/// All fields come from the same persisted account partition and the same fixed commit, so the
+/// header, tree and reader can never describe different versions. A missing field means "the
+/// snapshot cannot answer this", which leaves that part of the page to the online chain.
+#[derive(Default)]
+struct SnapshotBundle {
+    details: Option<(RepositoryDetails, RepositoryCacheProvenance)>,
+    branches: Option<(BranchesOutcome, RepositoryCacheProvenance)>,
+    branch: Option<String>,
+    snapshot: Option<(RepoSnapshot, RepositoryCacheProvenance)>,
+    root: Option<DirectoryTree>,
+    /// Directories below the root that were read to resolve a saved nested file selection.
+    children: Vec<DirectoryTree>,
+    readme: Option<ReadmeState>,
+    /// The document the saved navigation pointed at, already prepared for the reader.
+    content: Option<PreparedContent>,
+    selection: Selection,
+}
+
+impl SnapshotBundle {
+    fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// The tree index of an ordinary file named `name` (`None` when it is not one).
+fn file_entry(tree: &DirectoryTree, name: &str) -> Option<usize> {
+    tree.entries.iter().position(|entry| {
+        entry.path.as_str() == name && matches!(entry.kind, TreeEntryKind::File { .. })
+    })
 }
 
 /// One content reply, bundled so the publication check reads as one step.
@@ -403,6 +445,15 @@ pub struct RepositoryPage {
     branches: Option<BranchesOutcome>,
     branches_provenance: Option<RepositoryCacheProvenance>,
     branches_error: Option<PageError>,
+    /// True while the displayed branch/tree/reader came from the cache-first bundle and the online
+    /// chain has not yet re-resolved that branch. It makes the online chain replace the snapshot
+    /// (instead of treating it as an already-loaded branch) exactly once.
+    snapshot_preliminary: bool,
+    /// True once this generation resolved its revision from the network. Reads the user starts
+    /// afterwards (expanding a directory, opening a file) then prefer the network even if the
+    /// summary or branch list was still served from the cache, so a cache-phase "not cached" result
+    /// cannot stick after the commit is verified.
+    online_verified: bool,
     branch: Option<BranchState>,
     /// Monotonic identity of the newest branch resolution. A → B → A shares the
     /// page generation, so a branch name alone cannot tell an older A reply from
@@ -499,8 +550,10 @@ impl RepositoryPage {
             branches: None,
             branches_provenance: None,
             branches_error: None,
+            snapshot_preliminary: false,
             branch: None,
             branch_request: 0,
+            online_verified: false,
             branches_loading: false,
             selection_request: 0,
             pending_content: None,
@@ -624,6 +677,8 @@ impl RepositoryPage {
         self.branches = None;
         self.branches_provenance = None;
         self.branches_error = None;
+        self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -651,6 +706,7 @@ impl RepositoryPage {
         self.active = true;
         self.error = None;
         self.work = Some(Work::new());
+        self.spawn_snapshot();
         self.spawn_job(Job::Repository {
             locator: self.locator.clone(),
             star_write_generation: self.star_write_generation,
@@ -713,6 +769,8 @@ impl RepositoryPage {
         self.branches = None;
         self.branches_provenance = None;
         self.branches_error = None;
+        self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -792,6 +850,8 @@ impl RepositoryPage {
         self.selection_request = self.selection_request.wrapping_add(1);
         self.details = None;
         self.details_provenance = None;
+        self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.branches = None;
         self.branches_provenance = None;
@@ -803,6 +863,7 @@ impl RepositoryPage {
         self.error = None;
         self.cursor = None;
         self.invalidate_rows();
+        self.spawn_snapshot();
         self.spawn_job(Job::Repository {
             locator: self.locator.clone(),
             star_write_generation: self.star_write_generation,
@@ -956,7 +1017,9 @@ impl RepositoryPage {
                 return;
             }
         };
-        branch.tree.begin_load(path);
+        branch
+            .tree
+            .begin_load(path, RepositoryCacheMode::OnlinePreferred);
         self.invalidate_rows();
         self.spawn_job(Job::Directory {
             branch: branch_name,
@@ -1166,6 +1229,7 @@ impl RepositoryPage {
     }
 
     fn load_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        let mode = self.current_read_mode();
         let Some(branch) = self.branch.as_mut() else {
             return;
         };
@@ -1180,10 +1244,9 @@ impl RepositoryPage {
                 return;
             }
         };
-        branch.tree.begin_load(path);
         let branch_name = branch.name.clone();
         let commit = branch.commit().clone();
-        let mode = self.current_read_mode();
+        branch.tree.begin_load(path, mode);
         self.invalidate_rows();
         self.spawn_job(Job::Directory {
             branch: branch_name,
@@ -1444,6 +1507,11 @@ impl RepositoryPage {
     }
 
     pub(super) fn current_read_mode(&self) -> RepositoryCacheMode {
+        if self.online_verified {
+            // The commit on screen was verified online, so a read the user starts now prefers the
+            // network rather than repeating the cache-only pass.
+            return RepositoryCacheMode::OnlinePreferred;
+        }
         if self
             .branch
             .as_ref()
@@ -1623,6 +1691,8 @@ impl RepositoryPage {
         self.branches = None;
         self.branches_provenance = None;
         self.branches_error = None;
+        self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -1652,12 +1722,17 @@ impl RepositoryPage {
                 .is_current(&message.context)
             || !Self::authorization_current(&message.authorization)
             || (message.branch_request != self.branch_request
-                && !matches!(&message.body, Body::Branches(_)))
+                && !matches!(&message.body, Body::Branches(_) | Body::Snapshot(_)))
         {
             return;
         }
+        // A cache-first bundle may only fill a page that no online result has written yet. Once any
+        // part of the online chain has published, its values own the page until an explicit Refresh.
+        if message.preliminary && self.details.is_some() {
+            return;
+        }
         let slot = match &message.body {
-            Body::Repository { .. } => AuthSlot::Repository,
+            Body::Repository { .. } | Body::Snapshot(_) => AuthSlot::Repository,
             Body::Branches(_) => AuthSlot::Branches,
             Body::Revision { .. } | Body::Root { .. } | Body::Readme { .. } => AuthSlot::Revision,
             Body::Directory { .. } | Body::Content(_) => AuthSlot::Content,
@@ -1687,9 +1762,11 @@ impl RepositoryPage {
                 branch,
                 commit,
                 path,
+                mode,
                 result,
-            } => self.apply_directory(branch, commit, path, result, cx),
+            } => self.apply_directory(branch, commit, path, mode, result, cx),
             Body::Content(content) => self.apply_content(content, window, cx),
+            Body::Snapshot(bundle) => self.apply_snapshot(*bundle, window, cx),
         }
         // Only a reply that passed its own carried-token check above may replace
         // the displayed token, and only for the resource it produced. Other
@@ -1700,6 +1777,97 @@ impl RepositoryPage {
         {
             self.adopt_authorization(slot, &Some(authorization.clone()));
         }
+    }
+
+    /// Publishes a whole cache-first page read.
+    ///
+    /// The bundle is applied as one unit so the summary, branch list, fixed revision, tree and
+    /// reader all describe the same commit. Its parts keep `RepositoryCacheOrigin::Snapshot`
+    /// provenance, which is what draws the `Cached` marker; the online chain replaces them as its
+    /// results arrive. Nothing here starts follow-up jobs: the online chain already owns them, and a
+    /// cached read must not suppress or duplicate that revalidation.
+    fn apply_snapshot(
+        &mut self,
+        bundle: SnapshotBundle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SnapshotBundle {
+            details,
+            branches,
+            branch,
+            snapshot,
+            root,
+            children,
+            readme,
+            content,
+            selection,
+        } = bundle;
+        let Some((details, details_provenance)) = details else {
+            return;
+        };
+        let identity = details.identity.clone();
+        self.details = Some(details);
+        self.details_provenance = Some(details_provenance);
+        if let Some((outcome, provenance)) = branches {
+            // The picker only; the revision below is authoritative for the fixed commit.
+            self.branches = Some(outcome);
+            self.branches_provenance = Some(provenance);
+        }
+        if let (Some(branch), Some((snapshot, provenance))) = (branch, snapshot) {
+            // The bundle's branch is only what the snapshot displayed. It is deliberately not written
+            // into the navigation intent: when no branch was saved, the online summary may report a
+            // different default and the intent must stay free to follow it.
+            self.snapshot_preliminary = true;
+            let mut tree = TreeModel::default();
+            if let Some(root) = root {
+                tree.set_root(root);
+            }
+            for child in children {
+                tree.set_children(child);
+            }
+            self.branch = Some(BranchState {
+                name: branch,
+                snapshot,
+                snapshot_provenance: Some(provenance),
+                tree,
+                readme: readme.clone().unwrap_or(ReadmeState::Unknown),
+            });
+            // A saved file selection (including a nested one) is kept even when the snapshot could
+            // not read it: the online chain then resolves the same path instead of reopening the
+            // README.
+            if matches!(selection, Selection::File(_)) {
+                for ancestor in
+                    RepositoryNavigation::ancestors(selection.path().unwrap_or_default())
+                {
+                    self.intent.expanded.insert(ancestor);
+                }
+            }
+            self.selection = selection;
+            self.readme_path = match &readme {
+                Some(ReadmeState::Found(descriptor)) if self.selection == Selection::Readme => {
+                    Some(descriptor.path.as_str().to_string())
+                }
+                _ => None,
+            };
+            self.cursor = self.current_path().map(str::to_string);
+            self.reader_status = match (readme, content) {
+                (_, Some(content)) => {
+                    self.install_cached_reader(content, None, window, cx);
+                    ReaderStatus::Showing
+                }
+                (_, None) if matches!(self.selection, Selection::File(_)) => ReaderStatus::Loading,
+                (Some(ReadmeState::Absent), _) => ReaderStatus::NoReadme,
+                (Some(ReadmeState::Uncertain), _) => ReaderStatus::ReadmeUncertain,
+                (Some(ReadmeState::Failed(error)), _) => ReaderStatus::ReadmeUnavailable(error),
+                _ => ReaderStatus::Loading,
+            };
+        }
+        self.invalidate_rows();
+        self.start_overview(identity, true, window, cx);
+        // The cached summary means the network was not verified for this page, so no Star status
+        // request runs while the snapshot is on screen (see `start_star_read`).
+        cx.notify();
     }
 
     fn apply_repository(
@@ -1719,16 +1887,25 @@ impl RepositoryPage {
                 let star_request = self.star_request;
                 let identity = details.identity.clone();
                 self.details = Some(details);
-                // Provenance is applied *before* choosing the next read mode, so a
-                // page that was showing a cached snapshot switches back to
-                // `OnlinePreferred` for the dependent branches/revision reads.
+                // Provenance is applied *before* choosing the next read mode, so a page that was
+                // showing a cached snapshot switches back to `OnlinePreferred` for the dependent
+                // branches/revision reads. A summary this pass read from the network proves the
+                // network is reachable even when the branch list and revision on screen are still
+                // snapshots, so those are revalidated online rather than staying offline-only.
+                let network_verified = provenance
+                    .as_ref()
+                    .is_none_or(|value| value.origin == RepositoryCacheOrigin::Network);
                 self.details_provenance = provenance;
-                let mode = self.current_read_mode();
+                let mode = if network_verified {
+                    RepositoryCacheMode::OnlinePreferred
+                } else {
+                    self.current_read_mode()
+                };
                 self.spawn_job(Job::Branches {
                     identity: identity.clone(),
                     mode,
                 });
-                self.start_overview(identity, window, cx);
+                self.start_overview(identity, false, window, cx);
                 if star_request == self.star_request {
                     self.start_star_read(cx);
                 }
@@ -1754,10 +1931,82 @@ impl RepositoryPage {
             Err(error) => (None, None, Some(error)),
         };
         self.branches_error = error;
+        // A summary or branch list this pass read from the network proves the network is reachable,
+        // so a still-cached revision is revalidated instead of staying offline-only. The branch list
+        // may itself have fallen back to a cached picker while the summary was verified online.
+        let network_verified = provenance
+            .as_ref()
+            .is_none_or(|value| value.origin == RepositoryCacheOrigin::Network)
+            || self
+                .details_provenance
+                .as_ref()
+                .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
         self.branches_provenance = provenance;
         self.branches = outcome.clone();
         if self.branch.is_some() {
             // Retrying enumeration updates only the picker, never the loaded snapshot.
+            //
+            // The one exception is a branch that was painted from the cache-first bundle: the online
+            // chain must still re-resolve it, or the page would keep its historical tree and reader
+            // forever. The previously displayed commit stays on screen until that reply arrives.
+            if self.snapshot_preliminary && network_verified {
+                // Re-run the product branch choice against the freshly observed default: the snapshot
+                // may have displayed an old default (or a branch that no longer exists). A failed
+                // branch enumeration is not a reason to give up — the saved intent or the observed
+                // default is still a valid ref to revalidate.
+                let chosen = match outcome.as_ref() {
+                    Some(outcome) => {
+                        match branch_choice(
+                            outcome,
+                            details.default_branch.as_ref(),
+                            self.intent.branch.as_deref(),
+                        ) {
+                            BranchChoice::Selected(branch) => Some(branch.as_str().to_string()),
+                            BranchChoice::None { .. } => None,
+                        }
+                    }
+                    None => self.intent.branch.clone().or_else(|| {
+                        details
+                            .default_branch
+                            .as_ref()
+                            .map(|reference| reference.as_str().to_string())
+                    }),
+                };
+                if let Some(chosen) = chosen {
+                    self.snapshot_preliminary = false;
+                    let displayed = self.branch.as_ref().map(|branch| branch.name.clone());
+                    match displayed {
+                        // Same branch: keep the displayed commit, tree and reader (and their
+                        // identities, so the reader's callbacks stay valid) while it revalidates.
+                        Some(displayed) if chosen == displayed => {
+                            self.intent.branch = Some(displayed);
+                            self.spawn_job(Job::Revision {
+                                branch: chosen,
+                                request: self.branch_request,
+                                identity: details.identity,
+                                mode: RepositoryCacheMode::OnlinePreferred,
+                            });
+                        }
+                        // A different default than the snapshot showed: resolve it from scratch.
+                        _ => {
+                            self.branch = None;
+                            self.reader = None;
+                            self.readme_path = None;
+                            self.reader_status = ReaderStatus::Loading;
+                            self.invalidate_rows();
+                            self.begin_branch(chosen, cx);
+                        }
+                    }
+                }
+                // Nothing identifiable to resolve yet: keep the marker so a later successful branch
+                // list retry still revalidates the displayed snapshot.
+            } else if self.snapshot_preliminary {
+                // The online attempt fell back to cached data, so no verified reply will finish the
+                // parts the bundle could not provide. Settle them through the offline path, which
+                // also reaches a definite "not cached" state, instead of leaving spinners behind.
+                self.snapshot_preliminary = false;
+                self.settle_snapshot_offline(cx);
+            }
             cx.notify();
             return;
         }
@@ -1801,6 +2050,46 @@ impl RepositoryPage {
         cx.notify();
     }
 
+    /// Finishes the parts a cache-first bundle could not provide when the online attempt fell back
+    /// to cached data.
+    ///
+    /// The readable snapshot stays on screen with its historical marker; the missing root tree,
+    /// README discovery and document are read through the offline path so each resource reaches a
+    /// definite state (content, "not cached" error with retry, or a plain network failure) rather
+    /// than an endless loading spinner.
+    fn settle_snapshot_offline(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.branch.as_ref() else {
+            return;
+        };
+        let missing_root = state.tree.root().is_none();
+        let missing_readme = matches!(
+            state.readme,
+            ReadmeState::Unknown | ReadmeState::Uncertain | ReadmeState::Failed(_)
+        );
+        let name = state.name.clone();
+        let snapshot = state.snapshot.clone();
+        let mode = RepositoryCacheMode::OfflineOnly;
+        if missing_root {
+            self.spawn_job(Job::Root {
+                branch: name.clone(),
+                snapshot: snapshot.clone(),
+                mode,
+            });
+        }
+        if missing_readme {
+            self.spawn_job(Job::Readme {
+                branch: name,
+                snapshot,
+                mode,
+            });
+        }
+        if !missing_root {
+            // The root is already available, so no `apply_root` reply will resume this work.
+            self.load_expanded(cx);
+            self.resolve_selection(cx);
+        }
+    }
+
     fn apply_revision(
         &mut self,
         branch: String,
@@ -1814,7 +2103,107 @@ impl RepositoryPage {
             return;
         }
         match result {
+            // Re-resolving the same ref can legitimately resolve to the same commit (the usual case:
+            // the branch has not moved). The tree, README and reader are addressed by that commit, so
+            // they stay valid and are kept, which also preserves the reader's scroll position instead
+            // of reloading identical bytes.
+            Ok((snapshot, provenance))
+                if self.branch.as_ref().is_some_and(|state| {
+                    state.name == branch && state.commit() == snapshot.commit()
+                }) =>
+            {
+                // A displayed revision that still carries snapshot provenance came from the
+                // cache-first bundle, so its tree and reader may hold errors produced by
+                // `OfflineOnly` reads that this online verification can now retry.
+                let cache_painted = self.branch.as_ref().is_some_and(|state| {
+                    state
+                        .snapshot_provenance
+                        .as_ref()
+                        .is_some_and(|provenance| {
+                            provenance.origin == RepositoryCacheOrigin::Snapshot
+                        })
+                });
+                // A cache-first bundle can display the revision while the tree, README discovery or
+                // the document itself was never cached. The commit is unchanged, so the already
+                // loaded parts stay, but anything still missing has to be fetched now.
+                let missing = self.branch.as_ref().map(|state| {
+                    (
+                        state.tree.root().is_none(),
+                        matches!(
+                            state.readme,
+                            ReadmeState::Unknown | ReadmeState::Uncertain | ReadmeState::Failed(_)
+                        ),
+                    )
+                });
+                let verified_online = provenance
+                    .as_ref()
+                    .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
+                if let Some(state) = self.branch.as_mut() {
+                    state.snapshot = snapshot.clone();
+                    state.snapshot_provenance = provenance;
+                }
+                self.error = None;
+                // The revision this page displays is now verified against the network, so reads the
+                // user starts from here on prefer the network over another cache-only pass.
+                if verified_online {
+                    self.online_verified = true;
+                }
+                if cache_painted {
+                    // Everything the preliminary snapshot could not settle came from `OfflineOnly`
+                    // reads. Completed failures are cleared, and reads that are still in flight are
+                    // superseded so their late cache-miss result is discarded and the verified chain
+                    // requests the same paths again.
+                    if let Some(state) = self.branch.as_mut() {
+                        state.tree.clear_failures();
+                        let _superseded = state.tree.supersede_pending_loads();
+                    }
+                    if self.pending_content.take().is_some() {
+                        // A new selection identity drops the pending reply in `apply_content`.
+                        self.selection_request = self.selection_request.wrapping_add(1);
+                    }
+                    if matches!(
+                        self.reader_status,
+                        ReaderStatus::ContentFailed(_) | ReaderStatus::SelectionUnavailable { .. }
+                    ) {
+                        self.reader = None;
+                        self.reader_status = ReaderStatus::Loading;
+                    }
+                }
+                if let Some((missing_root, missing_readme)) = missing {
+                    let mode = RepositoryCacheMode::OnlinePreferred;
+                    if missing_root {
+                        self.spawn_job(Job::Root {
+                            branch: branch.clone(),
+                            snapshot: snapshot.clone(),
+                            mode,
+                        });
+                    }
+                    if missing_readme {
+                        self.spawn_job(Job::Readme {
+                            branch: branch.clone(),
+                            snapshot,
+                            mode,
+                        });
+                    }
+                    if !missing_root {
+                        // The root tree is already available, so no `apply_root` reply will arrive to
+                        // resume saved directory expansions or a saved selection. README discovery
+                        // does not do that either (`apply_readme` only requests README content), so
+                        // resume that work here.
+                        self.load_expanded(cx);
+                        self.resolve_selection(cx);
+                    }
+                } else {
+                    self.load_expanded(cx);
+                    self.resolve_selection(cx);
+                }
+                cx.notify();
+                return;
+            }
             Ok((snapshot, provenance)) => {
+                let verified_online = provenance
+                    .as_ref()
+                    .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
                 self.branch = Some(BranchState {
                     name: branch.clone(),
                     snapshot: snapshot.clone(),
@@ -1822,6 +2211,7 @@ impl RepositoryPage {
                     tree: TreeModel::default(),
                     readme: ReadmeState::Unknown,
                 });
+                self.online_verified = verified_online;
                 self.error = None;
                 self.reader = None;
                 self.readme_path = None;
@@ -1906,6 +2296,7 @@ impl RepositoryPage {
         branch: String,
         commit: ObjectSha,
         path: String,
+        mode: RepositoryCacheMode,
         result: Result<DirectoryTree, PageError>,
         cx: &mut Context<Self>,
     ) {
@@ -1913,6 +2304,11 @@ impl RepositoryPage {
             return;
         };
         if state.name != branch || state.commit() != &commit {
+            return;
+        }
+        // A result for a read this page has already superseded (a cache-only pass replaced by the
+        // verified online chain) must not publish content or a failure the retry owns.
+        if !state.tree.matches_pending(&path, mode) {
             return;
         }
         match result {
@@ -1987,38 +2383,8 @@ impl RepositoryPage {
                 if content.identity.path().as_str() != path {
                     return;
                 }
-                let kind = DocumentKind::for_path(&path);
-                let page = cx.entity().downgrade();
-                let generation = self.generation;
-                let branch_request = self.branch_request;
-                let selected_request = self.selection_request;
                 let provider = self.image_provider_for(&content);
-                let reader = cx.new(|cx| {
-                    let mut reader = ReaderView::from_prepared(content, kind, window, cx);
-                    reader.set_markdown_layout(crate::ui::reader::MarkdownLayout::Repository, cx);
-                    reader.set_image_limits(self.services.image_limits.clone(), cx);
-                    reader.set_image_provider(provider, cx);
-                    reader.on_action(Rc::new(move |action, window, cx| {
-                        // The callback runs inside ReaderView::update. Defer the
-                        // host action so cancelling/replacing that reader cannot
-                        // re-enter the entity currently dispatching the link.
-                        let page = page.clone();
-                        window.defer(cx, move |window, cx| {
-                            let _ = page.update(cx, |page, cx| {
-                                if page.active
-                                    && page.generation == generation
-                                    && page.branch_request == branch_request
-                                    && page.selection_request == selected_request
-                                    && page.session.as_ref().is_some_and(RepositorySession::verify)
-                                {
-                                    page.on_reader_action(action, window, cx);
-                                }
-                            });
-                        });
-                    }));
-                    reader
-                });
-                self.reader = Some(reader);
+                self.install_cached_reader(content, provider, window, cx);
                 self.reader_status = ReaderStatus::Showing;
             }
             Err(error) => {
@@ -2027,6 +2393,52 @@ impl RepositoryPage {
             }
         }
         cx.notify();
+    }
+
+    /// Installs one prepared document as the reader for the current fixed commit and selection.
+    ///
+    /// The reader keeps its own link, image and selection lifecycle, so both the online content job
+    /// and the cache-first bundle must create it the same way.
+    fn install_cached_reader(
+        &mut self,
+        content: PreparedContent,
+        provider: Option<Arc<dyn ImageProvider>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = content.identity.path().as_str().to_string();
+        let kind = DocumentKind::for_path(&path);
+        let page = cx.entity().downgrade();
+        let generation = self.generation;
+        let branch_request = self.branch_request;
+        let selected_request = self.selection_request;
+        let provider = provider.or_else(|| self.image_provider_for(&content));
+        let reader = cx.new(|cx| {
+            let mut reader = ReaderView::from_prepared(content, kind, window, cx);
+            reader.set_markdown_layout(crate::ui::reader::MarkdownLayout::Repository, cx);
+            reader.set_image_limits(self.services.image_limits.clone(), cx);
+            reader.set_image_provider(provider, cx);
+            reader.on_action(Rc::new(move |action, window, cx| {
+                // The callback runs inside ReaderView::update. Defer the host action so
+                // cancelling/replacing that reader cannot re-enter the entity currently
+                // dispatching the link.
+                let page = page.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = page.update(cx, |page, cx| {
+                        if page.active
+                            && page.generation == generation
+                            && page.branch_request == branch_request
+                            && page.selection_request == selected_request
+                            && page.session.as_ref().is_some_and(RepositorySession::verify)
+                        {
+                            page.on_reader_action(action, window, cx);
+                        }
+                    });
+                });
+            }));
+            reader
+        });
+        self.reader = Some(reader);
     }
 
     /// Routes a reader link press. External URLs are handed to the host; a
@@ -2546,7 +2958,7 @@ impl RepositoryPage {
     /// already knows it. The repository summary job resolves it, so it has none.
     fn job_repository_id(&self, job: &Job) -> Option<u64> {
         match job {
-            Job::Repository { .. } => None,
+            Job::Repository { .. } | Job::Snapshot { .. } => None,
             Job::Branches { identity, .. }
             | Job::Revision { identity, .. }
             | Job::Root {
@@ -2573,7 +2985,7 @@ impl RepositoryPage {
     /// The displayed resource a job's result will replace.
     fn job_slot(job: &Job) -> AuthSlot {
         match job {
-            Job::Repository { .. } => AuthSlot::Repository,
+            Job::Repository { .. } | Job::Snapshot { .. } => AuthSlot::Repository,
             Job::Branches { .. } => AuthSlot::Branches,
             Job::Revision { .. } | Job::Root { .. } | Job::Readme { .. } => AuthSlot::Revision,
             Job::Directory { .. } | Job::Content { .. } => AuthSlot::Content,
@@ -2586,6 +2998,53 @@ impl RepositoryPage {
             store: binding.store().clone(),
             scope: binding.scope().clone(),
         })
+    }
+
+    /// Starts the cache-first pass for this generation.
+    ///
+    /// It runs beside the ordinary online chain (never in front of it, and never instead of it), so a
+    /// pending network request is not gated on cache I/O. Its single reply may only fill a page that
+    /// is still empty; the online chain replaces it as its own results arrive.
+    fn spawn_snapshot(&mut self) {
+        let (Some(session), Some(context)) = (self.session.clone(), self.context.clone()) else {
+            return;
+        };
+        let Some(cancel) = self.work.as_ref().map(Work::token) else {
+            return;
+        };
+        let Some(cached) = self.cached_session.clone() else {
+            return;
+        };
+        let authorization = self.cache_binding.as_ref().and_then(|binding| {
+            Self::capture_authorization(binding.store(), binding.scope(), None)
+        });
+        let inbox = self.inbox.clone();
+        let alive = self.alive.clone();
+        let generation = self.generation;
+        let branch_request = self.branch_request;
+        let limits = self.services.limits.clone();
+        let job = Job::Snapshot {
+            locator: self.locator.clone(),
+            hint: self.cache_hint(),
+            intent: self.intent.clone(),
+        };
+        let spawned = self.services.executor.handle().spawn(async move {
+            let body = run_job(Some(&cached), &session, job, &limits, cancel).await;
+            if *alive.borrow() {
+                inbox
+                    .lock()
+                    .expect("repository page inbox")
+                    .push_back(Message {
+                        generation,
+                        branch_request,
+                        authorization,
+                        context,
+                        preliminary: true,
+                        body,
+                    });
+            }
+        });
+        let _ = spawned;
     }
 
     fn spawn_job(&mut self, job: Job) {
@@ -2623,6 +3082,7 @@ impl RepositoryPage {
                         branch_request,
                         authorization,
                         context,
+                        preliminary: false,
                         body,
                     });
             }
@@ -2656,6 +3116,12 @@ enum Job {
         star_write_generation: u64,
         mode: RepositoryCacheMode,
         hint: Option<CacheHint>,
+    },
+    /// Reads everything the page needs from the persisted snapshot, without the network.
+    Snapshot {
+        locator: RepositoryLocator,
+        hint: Option<CacheHint>,
+        intent: RepositoryNavigation,
     },
     Branches {
         identity: RepositoryIdentity,
@@ -2777,6 +3243,220 @@ async fn run_job(
                 star_write_generation,
             }
         }
+        // The cache-first pass deliberately reads through `OfflineOnly` only: it must never turn
+        // into a hidden network request, and every part of the bundle comes from the same persisted
+        // account partition. Anything missing simply leaves that part of the page to the online
+        // chain, so a partial snapshot never fabricates an empty tree or README.
+        Job::Snapshot {
+            locator,
+            hint,
+            intent,
+        } => {
+            let Some(cached) = session else {
+                return Body::Snapshot(Box::new(SnapshotBundle::empty()));
+            };
+            let known = match &hint {
+                Some(hint) => read_identity(hint, &locator).await,
+                None => None,
+            };
+            let Some(identity) = known else {
+                return Body::Snapshot(Box::new(SnapshotBundle::empty()));
+            };
+            let details = cached
+                .repository(
+                    &identity,
+                    &limits.repository,
+                    RepositoryCacheMode::OfflineOnly,
+                    cancel.clone(),
+                )
+                .await
+                .ok()
+                .map(|scoped| (scoped.value.value, scoped.value.provenance));
+            let Some((details, details_provenance)) = details else {
+                return Body::Snapshot(Box::new(SnapshotBundle::empty()));
+            };
+            let branches = cached
+                .branches(
+                    &identity,
+                    &limits.repository,
+                    RepositoryCacheMode::OfflineOnly,
+                    cancel.clone(),
+                )
+                .await
+                .ok()
+                .map(|scoped| (scoped.value.value, scoped.value.provenance));
+            let chosen = match &branches {
+                Some((outcome, _)) => match branch_choice(
+                    outcome,
+                    details.default_branch.as_ref(),
+                    intent.branch.as_deref(),
+                ) {
+                    BranchChoice::Selected(branch) => Some(branch.as_str().to_string()),
+                    BranchChoice::None { .. } => None,
+                },
+                None => intent
+                    .branch
+                    .as_deref()
+                    .and_then(|name| DynamicRef::new(name).ok())
+                    .or_else(|| details.default_branch.clone())
+                    .map(|reference| reference.as_str().to_string()),
+            };
+            let Some(branch) = chosen else {
+                return Body::Snapshot(Box::new(SnapshotBundle {
+                    details: Some((details, details_provenance)),
+                    branches,
+                    ..SnapshotBundle::empty()
+                }));
+            };
+            let spec = RevisionSpec::Ref(DynamicRef::new(branch.clone()).expect("validated ref"));
+            let revision = cached
+                .revision(
+                    &identity,
+                    spec,
+                    &limits.repository,
+                    RepositoryCacheMode::OfflineOnly,
+                    cancel.clone(),
+                )
+                .await
+                .ok()
+                .map(|scoped| (scoped.value.value, scoped.value.provenance));
+            let Some((snapshot, revision_provenance)) = revision else {
+                return Body::Snapshot(Box::new(SnapshotBundle {
+                    details: Some((details, details_provenance)),
+                    branches,
+                    ..SnapshotBundle::empty()
+                }));
+            };
+            let root = cached
+                .directory(
+                    &SnapshotDirectory::root(&snapshot),
+                    &limits.repository,
+                    RepositoryCacheMode::OfflineOnly,
+                    cancel.clone(),
+                )
+                .await
+                .ok()
+                .map(|scoped| scoped.value.value);
+            let readme = cached
+                .readme(
+                    &snapshot,
+                    &limits.repository,
+                    RepositoryCacheMode::OfflineOnly,
+                    cancel.clone(),
+                )
+                .await
+                .ok()
+                .map(|scoped| ReadmeState::from_discovery(Ok(scoped.value.value)));
+            // Resolve a saved file selection the same way the page does: walk its ancestors so a
+            // nested file (`src/main.rs`) still reopens from the snapshot instead of silently
+            // falling back to the README. Every read stays offline; anything missing leaves the
+            // selection to the online chain.
+            let mut children = Vec::new();
+            let mut resolved = None;
+            if let (Some(path), Some(root_tree)) = (intent.path.as_deref(), root.as_ref()) {
+                let mut loaded: std::collections::BTreeMap<String, DirectoryTree> =
+                    std::collections::BTreeMap::new();
+                loaded.insert(String::new(), root_tree.clone());
+                let mut complete = true;
+                for ancestor in RepositoryNavigation::ancestors(path) {
+                    let parent = RepositoryNavigation::parent(&ancestor);
+                    let name = RepositoryNavigation::name(&ancestor);
+                    let Some(parent_tree) = loaded.get(parent) else {
+                        complete = false;
+                        break;
+                    };
+                    let Some(index) = parent_tree.entries.iter().position(|entry| {
+                        entry.path.as_str() == name
+                            && matches!(entry.kind, TreeEntryKind::Directory)
+                    }) else {
+                        complete = false;
+                        break;
+                    };
+                    let Ok(handle) = parent_tree.child_directory(index) else {
+                        complete = false;
+                        break;
+                    };
+                    match cached
+                        .directory(
+                            &handle,
+                            &limits.repository,
+                            RepositoryCacheMode::OfflineOnly,
+                            cancel.clone(),
+                        )
+                        .await
+                    {
+                        Ok(scoped) => {
+                            let tree = scoped.value.value;
+                            loaded.insert(ancestor.clone(), tree.clone());
+                            children.push(tree);
+                        }
+                        Err(_) => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    let parent = RepositoryNavigation::parent(path);
+                    let name = RepositoryNavigation::name(path);
+                    if let Some(parent_tree) = loaded.get(parent)
+                        && let Some(index) = file_entry(parent_tree, name)
+                        && let Ok(identity) = BlobIdentity::from_file(parent_tree, index)
+                    {
+                        let content = cached
+                            .content(
+                                &identity,
+                                &limits.blob,
+                                RepositoryCacheMode::OfflineOnly,
+                                cancel.clone(),
+                            )
+                            .await
+                            .ok()
+                            .map(|scoped| scoped.value.value);
+                        resolved = Some((Selection::File(path.to_string()), content));
+                    }
+                }
+            }
+            let (selection, content) = match resolved {
+                Some(found) => found,
+                // The snapshot could not resolve the saved file. Keep the file selected so the
+                // online chain restores it instead of the page silently returning to the README.
+                None if intent.path.is_some() => (
+                    Selection::File(intent.path.clone().unwrap_or_default()),
+                    None,
+                ),
+                None => {
+                    let content = match &readme {
+                        Some(ReadmeState::Found(descriptor)) => {
+                            let identity = BlobIdentity::from_readme(descriptor);
+                            cached
+                                .content(
+                                    &identity,
+                                    &limits.blob,
+                                    RepositoryCacheMode::OfflineOnly,
+                                    cancel.clone(),
+                                )
+                                .await
+                                .ok()
+                                .map(|scoped| scoped.value.value)
+                        }
+                        _ => None,
+                    };
+                    (Selection::Readme, content)
+                }
+            };
+            Body::Snapshot(Box::new(SnapshotBundle {
+                details: Some((details, details_provenance)),
+                branches,
+                branch: Some(branch),
+                snapshot: Some((snapshot, revision_provenance)),
+                root,
+                children,
+                readme,
+                content,
+                selection,
+            }))
+        }
         Job::Branches { identity, mode } => Body::Branches(match session {
             Some(cached) => cached
                 .branches(&identity, &limits.repository, mode, cancel)
@@ -2887,6 +3567,7 @@ async fn run_job(
                 branch,
                 commit,
                 path,
+                mode,
                 result,
             }
         }

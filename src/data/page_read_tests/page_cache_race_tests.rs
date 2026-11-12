@@ -87,3 +87,63 @@ async fn page_cache_switch_during_read_discards_success_and_cache_write() {
         PageValue::Miss(CacheMiss::NotCached)
     ));
 }
+
+/// A cache replay answers from persistent storage, so it must never wait for a bounded network
+/// permit. A cache-first paint stays available even while every request slot is busy with the
+/// revalidation it runs beside — otherwise the snapshot would only appear once the network freed a
+/// slot, which is exactly the wait it exists to avoid.
+#[tokio::test]
+async fn offline_replay_does_not_wait_for_a_network_permit() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 1).await;
+    login(&svc, &transport, 1, "viewer", "synthetic").await;
+    let cache_dir = tempfile::tempdir().unwrap();
+    let store = CacheStore::open(CacheConfig::at(cache_dir.path().to_path_buf())).unwrap();
+    let cached = cache_session(&svc, &store);
+    transport.push(
+        200,
+        json!({"total_count": 0, "incomplete_results": false, "items": []}),
+    );
+    cached
+        .home(
+            PageReadMode::Online,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+    // Hold the only network permit.
+    let permit = svc.executor.semaphore().acquire_owned().await.unwrap();
+    let replay = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cached.home(
+            PageReadMode::Offline,
+            None,
+            &Default::default(),
+            Default::default(),
+        ),
+    )
+    .await
+    .expect("a cache replay must not queue behind a network permit");
+    assert!(matches!(
+        replay.unwrap().value,
+        PageValue::Value {
+            origin: crate::data::page_cache::PageOrigin::HistoricalSnapshot,
+            ..
+        }
+    ));
+    drop(permit);
+
+    // The same replay must still honour cancellation and the account gate.
+    let (cancel, source) = crate::network::cancel::CancellationToken::new();
+    source.cancel();
+    assert!(matches!(
+        cached
+            .home(PageReadMode::Offline, None, &Default::default(), cancel)
+            .await,
+        Err(PageCacheError::Context(GitHubError::Cancelled))
+    ));
+}

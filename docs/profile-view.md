@@ -133,6 +133,14 @@ cargo run --example profile
 
 覆盖见 `src/ui/profile/tests.rs` 与 `heatmap.rs`：binding/account/target 变化与旧更新、部分 GraphQL 数据/错误、缺失基本字段、pin 顺序、gist-only/mixed/truncated/unclassified、真实空与 denied、Reader 链接、typed repository action、闰年/跨年、zero/missing/unknown levels、键盘/鼠标 day detail、长 README/元数据与有界横向范围。实际完整检查与本机窗口边界见 [开发日志](devlog/2026-10-28-profile-view.md)。
 
+## 2026-11-11 Cache-first 各 section 独立呈现
+
+- `ProfilePage::start(section)` 为每个 section 额外启动只读本地快照的作业（`read_cached_first_section`，`PageReadMode::Offline`），与原有在线读取并发；日历先试当前 rolling year，再试记录区间。
+- 快照 `Reply` 带 `preliminary` 标记：只在 section 仍为 `Loading` 时填充，且不结束该 section 的请求；在线结果照旧覆盖。
+- 缓存 Basic 快照即可创建 `ProfileView` 并立即启动 pinned/calendar/README 的读取（各自缓存先行），因此这些 section 不等待网络 Basic。
+- 网络 Basic 到达后原地更新同一 view（同 target/binding），不重建 view、不重置兄弟 section 的滚动与 README reader；只有 login 变化才发 canonical 导航。
+- `CacheAuthorization` 票据、monitor 与 `retire_displayed_sections` 语义不变：快照与在线结果都带请求前票据，发布前与显示期间复核。
+
 ## 2026-11-10 页面背景表面与链接命中区修复
 
 - **Profile 页面背景对齐 Workspace Tab Bar / 页面表面**：`ProfileView::render` 根节点及 section 错误面板从 `colors.bg` 改为使用语义 `colors.surface`，与 Workspace Tab 条、Island 表面以及 Home/Repository/Notifications 页面保持一致。头像上方的间隙带、Overview 标记、各 section（含空/缺失 README、加载中与错误状态）在所有支持的主题下与 Tab 栏底色无缝衔接。卡片、选区和各状态标记的对比度完整保留。

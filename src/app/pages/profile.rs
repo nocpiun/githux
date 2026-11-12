@@ -147,12 +147,19 @@ struct Reply {
     selection: u64,
     context: RepositoryReadContext,
     login: String,
+    /// A cache-first observation published while the online read is still pending. It never ends the
+    /// section's request: the same reply's final result still owns the work slot.
+    preliminary: bool,
     result: SectionResult,
 }
 
 pub struct ProfilePage {
     tab: TabId,
     login: String,
+    /// The login spelling this page was opened with. A canonical rename keeps it, so replies to
+    /// requests started before that rename (the cache-first section reads) are still recognized as
+    /// belonging to this profile instead of being discarded with their work slots still occupied.
+    opened_login: String,
     services: Option<AccountServices>,
     session: Option<PageReadSession>,
     cached_session: Option<CachedPageReadSession>,
@@ -197,6 +204,7 @@ impl ProfilePage {
             .map(|client| Arc::new(client) as Arc<dyn ExternalImageBytes>);
         let mut this = Self {
             tab,
+            opened_login: login.clone(),
             login,
             services: None,
             session: None,
@@ -566,6 +574,7 @@ impl ProfilePage {
                 selection: self.selection,
                 context,
                 login: self.login.clone(),
+                preliminary: false,
                 result,
             });
             return;
@@ -595,6 +604,59 @@ impl ProfilePage {
         let alive = self.alive.clone();
         let inbox = self.inbox.clone();
         let repos_for_authorization = services.repositories();
+        // Cache-first: an empty section publishes its last readable snapshot right away instead of
+        // waiting for the online read to finish or fail first. It is its own background job so the
+        // network read starts immediately and a slow disk cannot delay it. A section that already
+        // shows content (a retry or a sibling-triggered re-read) keeps what is on screen until the
+        // online result replaces it, so it needs no second snapshot read.
+        if self.section_is_empty(section, cx)
+            && let Some(cached_first) = cached.clone()
+        {
+            let cached_first_authorization = authorization.clone();
+            let cached_first_basic = basic.clone();
+            let cached_first_range = range.clone();
+            let cached_first_login = login.clone();
+            let cached_first_inbox = inbox.clone();
+            let cached_first_alive = self.alive.clone();
+            let cached_first_cancel = cancel.clone();
+            let cached_first_context = context.clone();
+            let repos_for_snapshot = repos_for_authorization.clone();
+            let session_for_snapshot = session.clone();
+            let _ = services.executor().handle().spawn(async move {
+                let found = read_cached_first_section(SnapshotRequest {
+                    repos: &repos_for_snapshot,
+                    session: &session_for_snapshot,
+                    cached: &cached_first,
+                    authorization: cached_first_authorization.clone(),
+                    login: &cached_first_login,
+                    section,
+                    basic: cached_first_basic.as_ref(),
+                    range: &cached_first_range,
+                    cancel: cached_first_cancel,
+                })
+                .await;
+                if let Some((section, result)) = found
+                    && *cached_first_alive.borrow()
+                    && cached_first_authorization
+                        .as_ref()
+                        .is_none_or(CacheAuthorization::is_current)
+                {
+                    cached_first_inbox
+                        .lock()
+                        .expect("profile inbox")
+                        .push_back(Reply {
+                            section,
+                            generation,
+                            request,
+                            selection,
+                            context: cached_first_context,
+                            login: cached_first_login,
+                            preliminary: true,
+                            result,
+                        });
+                }
+            });
+        }
         let submitted = services.executor().handle().spawn(async move {
             let authorization = authorization.as_ref();
             let result = match section {
@@ -655,12 +717,31 @@ impl ProfilePage {
                     selection,
                     context,
                     login,
+                    preliminary: false,
                     result,
                 });
             }
         });
         if submitted.is_err() {
             self.work[index] = None;
+        }
+    }
+
+    /// Whether one section currently shows no content, so a cached snapshot may fill it.
+    ///
+    /// A section that already shows data keeps it (including its scroll position and README reader)
+    /// until the online result replaces it. Before the Basic profile creates the view there is no
+    /// section content yet, so only Basic qualifies.
+    fn section_is_empty(&self, section: Section, cx: &gpui::App) -> bool {
+        let Some(view) = self.view.as_ref() else {
+            return section == Section::Basic;
+        };
+        let view = view.read(cx);
+        match section {
+            Section::Basic => matches!(view.basic(), SectionState::Loading),
+            Section::Repositories => matches!(view.repositories(), SectionState::Loading),
+            Section::Contributions => matches!(view.contributions(), SectionState::Loading),
+            Section::Readme => matches!(view.readme_state(), SectionState::Loading),
         }
     }
 
@@ -854,11 +935,34 @@ impl ProfilePage {
         self.unavailable = Some(PresentationError::Forbidden);
     }
 
+    /// Final ordering check for a cache-first section value.
+    ///
+    /// A snapshot only fills a section that is still empty. Once the online read has ended this
+    /// request (its work slot is gone) or any content is displayed, the cache-first value is dropped:
+    /// that keeps a late cache completion from overwriting newer network content and stops a re-read
+    /// from resetting an already displayed section's scroll position and README reader.
+    fn accept_preliminary(&self, reply: &Reply, cx: &gpui::App) -> bool {
+        if self.work[reply.section.index()].is_none() {
+            return false;
+        }
+        let historical = match &reply.result {
+            SectionResult::Basic(Ok(outcome)) => outcome.provenance.as_ref(),
+            SectionResult::Repositories(Ok(outcome)) => outcome.provenance.as_ref(),
+            SectionResult::Contributions(Ok((outcome, _))) => outcome.provenance.as_ref(),
+            SectionResult::Readme(Ok(outcome)) => outcome.provenance.as_ref(),
+            _ => None,
+        };
+        if !historical.is_some_and(ProfileProvenance::is_historical) {
+            return false;
+        }
+        self.section_is_empty(reply.section, cx)
+    }
+
     fn accepts(&self, reply: &Reply) -> bool {
         if reply.generation != self.generation
             || reply.selection != self.selection
             || reply.request != self.requests[reply.section.index()]
-            || reply.login != self.login
+            || (reply.login != self.login && reply.login != self.opened_login)
         {
             return false;
         }
@@ -917,14 +1021,20 @@ impl ProfilePage {
         if let Some(auth) = &authorization
             && !auth.is_current()
         {
-            self.work[reply.section.index()] = None;
+            // An invalidated ticket retires whatever it backed, online or historical. The final
+            // reply clears the work slot; see below.
             self.retire_displayed_sections(cx);
             cx.notify();
             return;
         }
-        self.work[reply.section.index()] = None;
+        if !reply.preliminary {
+            self.work[reply.section.index()] = None;
+        }
         self.authorizations.lock().expect("profile authorizations")[reply.section.index()] =
             authorization;
+        if reply.preliminary && !self.accept_preliminary(&reply, cx) {
+            return;
+        }
         match reply.section {
             Section::Basic => self.apply_basic(reply, window, cx),
             section => {
@@ -1128,41 +1238,97 @@ impl ProfilePage {
                 provenance,
                 authorization,
             }) => {
+                // The same profile can now arrive twice in one request: first from the persisted
+                // snapshot, then from the network. Recreating the view would throw away every sibling
+                // section (and its scroll and README reader) that was already published, so an
+                // already mounted view for this same profile is updated in place instead.
+                let mounted = self.view.as_ref().is_some_and(|view| {
+                    view.read(cx).target().id == basic.id
+                        && self
+                            .request
+                            .as_ref()
+                            .is_some_and(|request| *view.read(cx).binding() == request.binding)
+                });
+                // Only an online result may rename the route: a cached spelling is a historical
+                // observation, and the online half of this same read still answers with the login
+                // the request was made with.
+                let changed_login = !reply.preliminary && self.login != basic.login;
                 // Reset sibling section authorizations when a new Basic profile creates a new view.
                 // Basic keeps the token it was read under regardless of provenance: an online Basic
                 // is as revocable as a historical one.
                 let mut auths = self.authorizations.lock().expect("profile authorizations");
-                *auths = [authorization, None, None, None];
+                if mounted {
+                    auths[Section::Basic.index()] = authorization;
+                } else {
+                    *auths = [authorization, None, None, None];
+                }
                 drop(auths);
                 // Server id/login are authoritative. An earlier login-only action is never used as
                 // a numeric identity; Shell canonicalizes the matching TabId after this callback.
-                self.login = basic.login.clone();
-                self.create_view(&basic, &reply.context, window, cx);
-                let canonical = PageNavigation::CanonicalProfile {
-                    tab: self.tab,
-                    login: basic.login.clone(),
-                };
+                //
+                // A cache-first snapshot does not adopt its login spelling here: the online half of
+                // the same basic read still carries the login the request was made with, and
+                // `accepts()` compares that value. Renaming the page from a snapshot would reject
+                // that final reply before it could clear its work slot.
+                if !reply.preliminary {
+                    self.login = basic.login.clone();
+                }
+                if !mounted {
+                    self.create_view(&basic, &reply.context, window, cx);
+                }
                 let request = self.request.clone().expect("view request");
                 if let Some(view) = self.view.clone() {
                     let state = SectionState::Ready(basic.clone());
                     view.update(cx, |view, cx| {
                         view.update_basic_with_provenance(&request, state, provenance, cx);
                     });
-                    self.sync_avatar(basic, cx);
+                    self.sync_avatar(basic.clone(), cx);
                 }
+                if changed_login {
+                    // The README comes from the public repository whose name is the profile login, so
+                    // a canonical rename changes which repository that is. A cached Basic may
+                    // already have started (or finished) discovery against the old name: reject that
+                    // request and read the new one.
+                    if let Some(work) = self.work[Section::Readme.index()].take() {
+                        work.source.cancel();
+                    }
+                    self.requests[Section::Readme.index()] =
+                        self.requests[Section::Readme.index()].saturating_add(1);
+                    if let Some(view) = self.view.clone() {
+                        let request = self.request.clone().expect("view request");
+                        view.update(cx, |view, cx| {
+                            view.update_readme(&request, SectionState::Loading, window, cx);
+                        });
+                    }
+                }
+                // Every sibling section that still has no content is read now; one that is already
+                // displayed keeps its value until its own online read replaces it.
                 for section in [
                     Section::Repositories,
                     Section::Contributions,
                     Section::Readme,
                 ] {
-                    self.start(section, cx);
+                    // The README is login-dependent, so a canonical rename restarts it even when it
+                    // already had content.
+                    if (section == Section::Readme && changed_login)
+                        || self.section_is_empty(section, cx)
+                    {
+                        self.start(section, cx);
+                    }
                 }
-                // Shell is the outer mutator while it drives this page's update, so it cannot be
-                // re-entered synchronously. The canonical rename is delivered after this frame.
-                let navigation = self.navigation.clone();
-                window.defer(cx, move |window, cx| {
-                    navigation(canonical, window, cx);
-                });
+                if changed_login {
+                    // Shell is the outer mutator while it drives this page's update, so it cannot
+                    // be re-entered synchronously. The canonical rename is delivered after this
+                    // frame, and only when the login actually changed.
+                    let canonical = PageNavigation::CanonicalProfile {
+                        tab: self.tab,
+                        login: basic.login.clone(),
+                    };
+                    let navigation = self.navigation.clone();
+                    window.defer(cx, move |window, cx| {
+                        navigation(canonical, window, cx);
+                    });
+                }
             }
             Err(error) => {
                 self.view = None;
@@ -1344,6 +1510,131 @@ fn unpack_page_value<T>(
             })
         }
         PageValue::Miss(miss) => Err(PresentationError::from_cache_miss(miss)),
+    }
+}
+
+/// Reads the last persisted snapshot for one section without contacting the network.
+///
+/// This is the cache-first half of a section read: it runs alongside the ordinary online read and,
+/// when an authorized readable snapshot exists, publishes that content immediately so a slow request
+/// does not have to finish (or fail) before anything is shown. Every miss, corruption, stale
+/// authorization or operational cache fault yields `None`, which leaves the ordinary read in charge
+/// and never fabricates an empty or failed section.
+struct SnapshotRequest<'a> {
+    repos: &'a crate::data::RepoService,
+    session: &'a PageReadSession,
+    cached: &'a CachedPageReadSession,
+    authorization: Option<CacheAuthorization>,
+    login: &'a str,
+    section: Section,
+    basic: Option<&'a ProfileBasic>,
+    range: &'a ContributionRange,
+    cancel: CancellationToken,
+}
+
+async fn read_cached_first_section(
+    request: SnapshotRequest<'_>,
+) -> Option<(Section, SectionResult)> {
+    let SnapshotRequest {
+        repos,
+        session,
+        cached,
+        authorization,
+        login,
+        section,
+        basic,
+        range,
+        cancel,
+    } = request;
+    match section {
+        Section::Basic => {
+            let scoped = cached
+                .profile(PageReadMode::Offline, login, cancel)
+                .await
+                .ok()?;
+            let outcome = unpack_historical(scoped.value, authorization)?;
+            Some((section, SectionResult::Basic(Ok(outcome))))
+        }
+        Section::Repositories => {
+            let limits = ProfileLimits::default();
+            let scoped = cached
+                .profile_pinned(PageReadMode::Offline, login, &limits, cancel)
+                .await
+                .ok()?;
+            let outcome = unpack_historical(scoped.value, authorization)?;
+            Some((section, SectionResult::Repositories(Ok(outcome))))
+        }
+        Section::Contributions => {
+            let limits = ProfileLimits::default();
+            // A snapshot may have been stored under an earlier rolling year; try the recorded
+            // interval as well instead of making cached reading date-dependent.
+            // Try the interval this page asks for first, then the interval the snapshot was
+            // recorded at (an earlier rolling year), so cached reading is not date-dependent.
+            let mut ranges = vec![range.clone()];
+            if let Some(previous) = load_calendar_range(repos, session.context(), login).await
+                && &previous != range
+            {
+                ranges.push(previous);
+            }
+            for candidate in ranges {
+                let scoped = cached
+                    .contribution_calendar(
+                        PageReadMode::Offline,
+                        login,
+                        &candidate,
+                        &limits,
+                        cancel.clone(),
+                    )
+                    .await
+                    .ok()?;
+                if let Some(outcome) = unpack_historical(scoped.value, authorization.clone()) {
+                    return Some((
+                        section,
+                        SectionResult::Contributions(Ok((outcome, candidate))),
+                    ));
+                }
+            }
+            None
+        }
+        Section::Readme => {
+            let basic = basic?;
+            let repo_limits = RepositoryLimits::default();
+            let blob_limits = BlobLimits::default();
+            let scoped = cached
+                .profile_readme(
+                    PageReadMode::Offline,
+                    basic,
+                    &repo_limits,
+                    &blob_limits,
+                    cancel,
+                )
+                .await
+                .ok()?;
+            let outcome = unpack_historical(scoped.value, authorization)?;
+            Some((section, SectionResult::Readme(Ok(outcome))))
+        }
+    }
+}
+
+/// Converts a value into a section outcome only when it really came from the persistent snapshot.
+///
+/// A `Network` origin would mean the replay performed a live read, which is not something the
+/// cache-first half may publish as its own; a miss is not content either.
+fn unpack_historical<T>(
+    value: PageValue<T>,
+    authorization: Option<CacheAuthorization>,
+) -> Option<SectionOutcome<T>> {
+    match value {
+        PageValue::Value {
+            value,
+            origin: PageOrigin::HistoricalSnapshot,
+            metadata,
+        } => Some(SectionOutcome {
+            value,
+            provenance: Some(ProfileProvenance::from_cache(true, &metadata)),
+            authorization,
+        }),
+        PageValue::Value { .. } | PageValue::Miss(_) => None,
     }
 }
 
@@ -1993,6 +2284,15 @@ mod tests {
         reads: Mutex<Vec<String>>,
         diagram: Vec<u8>,
         slow_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        /// Test-only: hold every profile read at the transport boundary so a cache-first paint can be
+        /// observed while the network is still pending.
+        held: AtomicBool,
+        /// Test-only: hold everything except the basic `/users/<login>` read, so a canonical rename
+        /// can be observed while sibling section reads are still in flight.
+        hold_siblings: AtomicBool,
+        /// True while held requests may continue. Arming a hold resets it, so a request that starts
+        /// after the release cannot miss the notification the way a bare `notify_waiters` can.
+        release: tokio::sync::watch::Sender<bool>,
     }
 
     impl ProfileFixtureTransport {
@@ -2009,7 +2309,28 @@ mod tests {
                 reads: Mutex::new(Vec::new()),
                 diagram: png_bytes(160, 90),
                 slow_gate: Mutex::new(None),
+                held: AtomicBool::new(false),
+                hold_siblings: AtomicBool::new(false),
+                release: tokio::sync::watch::channel(true).0,
             }
+        }
+
+        fn hold(&self, held: bool) {
+            self.held.store(held, Ordering::SeqCst);
+            if held {
+                self.release.send_replace(false);
+            }
+        }
+
+        fn hold_siblings(&self, held: bool) {
+            self.hold_siblings.store(held, Ordering::SeqCst);
+            if held {
+                self.release.send_replace(false);
+            }
+        }
+
+        fn release_all(&self) {
+            self.release.send_replace(true);
         }
 
         fn set_offline(&self, offline: bool) {
@@ -2067,6 +2388,29 @@ mod tests {
             Box::pin(async move {
                 let url = request.url.clone();
                 self.reads.lock().unwrap().push(url.clone());
+                let holds = (self.held.load(Ordering::SeqCst)
+                    || (self.hold_siblings.load(Ordering::SeqCst)
+                        && !url.starts_with("https://api.github.com/users/")))
+                    && !url.ends_with("/user")
+                    && !url.contains("/user/repos");
+                if holds {
+                    let mut released = self.release.subscribe();
+                    tokio::select! {
+                        _ = async {
+                            loop {
+                                if *released.borrow_and_update() {
+                                    break;
+                                }
+                                if released.changed().await.is_err() {
+                                    break;
+                                }
+                            }
+                        } => {}
+                        _ = cancel.clone().cancelled() => {
+                            return Err(TransportError::Cancelled);
+                        }
+                    }
+                }
                 if url.ends_with("/user") {
                     let id = *self.user_id.lock().unwrap();
                     let login = self.user_login.lock().unwrap().clone();
@@ -2086,7 +2430,8 @@ mod tests {
                         200,
                         serde_json::json!({
                             "id": 1,
-                            "login": "alice",
+                            // The fixture can report a renamed canonical login (same numeric id).
+                            "login": self.user_login.lock().unwrap().clone(),
                             "name": "Alice Example",
                             "bio": "Systems programmer",
                             "avatar_url": null,
@@ -2518,7 +2863,9 @@ mod tests {
     ) {
         // A wall-clock deadline rather than a fixed iteration count: the shared test binary runs
         // many suites in parallel, so background reads and image decoding can be starved for a while.
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        // Deadline-bounded rather than a fixed number of frames: the shared test binary runs many
+        // GPUI suites in parallel, so progress can stall for a while. The assertions are unchanged.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             pump_page(harness, cx);
             if check(cx) {
@@ -2526,10 +2873,341 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "profile page did not reach expected state"
+                "profile page did not reach expected state: view={:?} work={:?}",
+                harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test().map(|view| {
+                        let v = view.read(cx);
+                        (
+                            format!("{:?}", v.basic()),
+                            format!("{:?}", v.repositories()),
+                            format!("{:?}", v.contributions()),
+                            format!("{:?}", v.readme_state()),
+                            v.reader().is_some(),
+                        )
+                    })
+                }),
+                harness.page.read_with(cx, |page, _| page
+                    .work
+                    .iter()
+                    .map(Option::is_some)
+                    .collect::<Vec<_>>()),
             );
+
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Cache-first Profile: every section that has a readable snapshot paints while the online reads
+    /// are still held at the transport boundary, and the online results then replace them.
+    #[gpui::test]
+    fn cached_sections_paint_before_the_network_reads_finish_and_are_then_replaced(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        // 1. Warm every section plus its cached representation.
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                let Some(view) = page.view_for_test() else {
+                    return false;
+                };
+                let v = view.read(cx);
+                matches!(v.basic(), SectionState::Ready(_))
+                    && matches!(v.repositories(), SectionState::Ready(_))
+                    && matches!(v.contributions(), SectionState::Ready(_))
+                    && matches!(v.readme_state(), SectionState::Ready(()))
+            })
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        pump_page(&harness, cx);
+
+        // 2. Hold the transport and rebind: the cache-first pass must publish without the network.
+        harness.transport.hold(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+                && harness.page.read_with(cx, |page, cx| {
+                    let Some(view) = page.view_for_test() else {
+                        return false;
+                    };
+                    let v = view.read(cx);
+                    matches!(v.repositories(), SectionState::Ready(_))
+                        && matches!(v.contributions(), SectionState::Ready(_))
+                        && matches!(v.readme_state(), SectionState::Ready(()))
+                })
+                && cx
+                    .debug_bounds("profile-repositories-provenance-historical")
+                    .is_some()
+                && cx
+                    .debug_bounds("profile-contributions-provenance-historical")
+                    .is_some()
+                && cx
+                    .debug_bounds("profile-readme-provenance-historical")
+                    .is_some()
+        });
+        harness.page.read_with(cx, |page, _| {
+            assert!(
+                page.work.iter().all(Option::is_some),
+                "the online reads still own their sections"
+            );
+        });
+
+        // 3. Release the network: the fresh results replace every saved marker.
+        harness.transport.hold_siblings(false);
+        harness.transport.release_all();
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+                && cx
+                    .debug_bounds("profile-repositories-provenance-historical")
+                    .is_none()
+                && cx
+                    .debug_bounds("profile-contributions-provenance-historical")
+                    .is_none()
+                && cx
+                    .debug_bounds("profile-readme-provenance-historical")
+                    .is_none()
+                && harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test().is_some_and(|view| {
+                        let v = view.read(cx);
+                        matches!(v.basic(), SectionState::Ready(_))
+                            && matches!(v.repositories(), SectionState::Ready(_))
+                            && matches!(v.contributions(), SectionState::Ready(_))
+                            && matches!(v.readme_state(), SectionState::Ready(()))
+                    })
+                })
+                && harness
+                    .page
+                    .read_with(cx, |page, _| page.work.iter().all(Option::is_none))
+        });
+    }
+
+    /// Regression (review finding): a cached Basic whose canonical login differs from the requested
+    /// spelling must not rename the page while the online half still carries the requested login —
+    /// that would make `accepts()` reject the final reply and strand Basic in its historical state.
+    #[gpui::test]
+    fn a_cached_alias_login_does_not_strand_the_online_basic_read(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness_with_login(cx, true, "Alice");
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|view| matches!(view.read(cx).basic(), SectionState::Ready(_)))
+                    && page.work.iter().all(Option::is_none)
+            })
+        });
+        // Reopen the page for the non-canonical route spelling, then hold the network: the snapshot
+        // paints with the cached canonical spelling while the online read still answers with the
+        // login the request was made with.
+        harness
+            .page
+            .update(cx, |page, _| page.login = "Alice".into());
+        // Hold the sibling section reads only: the basic read may finish (and canonicalize the
+        // login) while those requests are still in flight.
+        harness.transport.hold_siblings(true);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_some()
+        });
+        harness.transport.hold(false);
+        harness.transport.release_all();
+        // Every section started before the rename must still finish: the canonical login change is
+        // the same profile, not a different target.
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+                && cx
+                    .debug_bounds("profile-repositories-provenance-historical")
+                    .is_none()
+                && cx
+                    .debug_bounds("profile-contributions-provenance-historical")
+                    .is_none()
+                && cx
+                    .debug_bounds("profile-readme-provenance-historical")
+                    .is_none()
+                && harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test().is_some_and(|view| {
+                        let view = view.read(cx);
+                        matches!(view.basic(), SectionState::Ready(_))
+                            && matches!(view.repositories(), SectionState::Ready(_))
+                            && matches!(view.contributions(), SectionState::Ready(_))
+                            && matches!(view.readme_state(), SectionState::Ready(()))
+                    }) && page.work.iter().all(Option::is_none)
+                })
+        });
+        assert_eq!(
+            harness.page.read_with(cx, |page, _| page.login.to_string()),
+            "alice"
+        );
+    }
+
+    /// Regression (review finding): the README comes from the public repository named after the
+    /// login, so a canonical rename must restart README discovery. Otherwise the cached Basic would
+    /// leave the page showing (or omitting) the old `old/old` README.
+    #[gpui::test]
+    fn a_canonical_login_rename_restarts_the_cached_readme_read(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness_with_login(cx, true, "alice");
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    let view = view.read(cx);
+                    matches!(view.basic(), SectionState::Ready(_))
+                        && matches!(view.readme_state(), SectionState::Ready(()))
+                }) && page.work.iter().all(Option::is_none)
+            })
+        });
+        let reads_before = harness.transport.reads.lock().unwrap().len();
+
+        // Same numeric account, new canonical login: the cached Basic still says "alice".
+        harness.transport.set_user(1, "alicia");
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            let services = harness.controller.read(cx).services();
+            page.rebind(services, cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, _| {
+                page.login == "alicia" && page.work[Section::Readme.index()].is_none()
+            }) && harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    !matches!(view.read(cx).readme_state(), SectionState::Loading)
+                })
+            })
+        });
+
+        let reads = harness.transport.reads.lock().unwrap().clone();
+        assert!(
+            reads[reads_before..]
+                .iter()
+                .any(|url| url.to_ascii_lowercase().contains("/repos/alicia/alicia")),
+            "README discovery must run again for the new same-name repository: {reads:?}"
+        );
+    }
+
+    /// Cache-first ordering on Profile: a snapshot reply that arrives after the section already shows
+    /// network content must not roll it back to a historical value.
+    #[gpui::test]
+    fn a_late_profile_snapshot_reply_never_rolls_back_a_newer_network_section(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .is_some_and(|view| matches!(view.read(cx).basic(), SectionState::Ready(_)))
+                    && page.work.iter().all(Option::is_none)
+            })
+        });
+        // Build the snapshot a slow cache read would have produced for this account.
+        let session = harness.accounts.page_session().unwrap();
+        let binding = harness
+            .accounts
+            .repo_service()
+            .cache(session.context())
+            .unwrap();
+        let cached = CachedPageReadSession::new(
+            session.clone(),
+            binding.store().clone(),
+            binding.scope().clone(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cached_basic = rt.block_on(async {
+            cached
+                .profile(PageReadMode::Offline, "alice", Default::default())
+                .await
+                .unwrap()
+        });
+        let PageValue::Value {
+            value, metadata, ..
+        } = cached_basic.value
+        else {
+            panic!("the warmed profile snapshot must be readable");
+        };
+        cx.update_window_entity(&harness.page, |page, window, cx| {
+            let request = page.requests[Section::Basic.index()];
+            page.work[Section::Basic.index()] = Some(Work::new());
+            page.inbox.lock().expect("profile inbox").push_back(Reply {
+                section: Section::Basic,
+                generation: page.generation,
+                request,
+                selection: page.selection,
+                context: session.context().clone(),
+                login: page.login.clone(),
+                preliminary: true,
+                result: SectionResult::Basic(Ok(SectionOutcome {
+                    value,
+                    provenance: Some(ProfileProvenance::from_cache(true, &metadata)),
+                    authorization: None,
+                })),
+            });
+            let reply = page
+                .inbox
+                .lock()
+                .expect("profile inbox")
+                .pop_back()
+                .unwrap();
+            page.apply(reply, window, cx);
+            // The simulated late cache read never owned this section's work slot in reality; clear
+            // it so the page is usable afterwards.
+            page.work[Section::Basic.index()] = None;
+        });
+        // The section already showed online content, so the snapshot is dropped entirely.
+        assert!(!harness.page.read_with(cx, |page, cx| {
+            page.view_for_test().is_some_and(|view| {
+                view.read(cx)
+                    .basic_provenance()
+                    .is_some_and(ProfileProvenance::is_historical)
+            })
+        }));
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    matches!(view.read(cx).basic(), SectionState::Ready(_))
+                        && view
+                            .read(cx)
+                            .basic_provenance()
+                            .is_none_or(|p| !p.is_historical())
+                })
+            })
+        });
+    }
+
+    /// A cache miss on Profile preserves ordinary online loading rather than showing an empty or
+    /// failed section.
+    #[gpui::test]
+    fn a_profile_cache_miss_keeps_online_loading_and_then_shows_the_network_result(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = build_harness(cx, true);
+        harness.transport.hold(true);
+        // The basic section stays in its loading state while the transport is held: the empty cache
+        // must not answer for it.
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, _| {
+                page.view_for_test().is_none()
+                    && page.work[Section::Basic.index()].is_some()
+                    && page.cached_session.is_some()
+            })
+        });
+        harness.transport.hold(false);
+        harness.transport.release_all();
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    let v = view.read(cx);
+                    matches!(v.basic(), SectionState::Ready(_))
+                        && matches!(v.repositories(), SectionState::Ready(_))
+                        && matches!(v.contributions(), SectionState::Ready(_))
+                        && matches!(v.readme_state(), SectionState::Ready(()))
+                }) && page.work.iter().all(Option::is_none)
+            })
+        });
     }
 
     #[gpui::test]
@@ -2837,11 +3515,12 @@ mod tests {
             let services = harness.controller.read(cx).services();
             page.rebind(services, cx);
         });
+        // The host state is the contract here: the replaced PAT retires the old view and shows a
+        // failure. Waiting on the rendered mark instead made this wait depend on frame timing.
         wait_for_profile(&harness, cx, |cx| {
-            cx.debug_bounds("profile-page-basic-error").is_some()
-                && harness
-                    .page
-                    .read_with(cx, |page, _| page.view_for_test().is_none())
+            harness.page.read_with(cx, |page, _| {
+                page.view_for_test().is_none() && page.unavailable.is_some()
+            })
         });
 
         // Remove account (C2): immediately clears/blocks.
@@ -3243,6 +3922,7 @@ mod tests {
             selection: page.selection,
             context: session.context().clone(),
             login: page.login.clone(),
+            preliminary: false,
             result: SectionResult::Basic(Ok(outcome)),
         });
 
@@ -3329,6 +4009,7 @@ mod tests {
             selection: page.selection,
             context: session.context().clone(),
             login: page.login.clone(),
+            preliminary: false,
             result: SectionResult::Repositories(Ok(outcome)),
         });
 

@@ -55,6 +55,7 @@ impl RepoService {
         Ok(RepositorySession {
             service: self.clone(),
             context,
+            local: false,
             #[cfg(test)]
             preparation: Arc::new(Mutex::new(None)),
         })
@@ -106,6 +107,40 @@ impl RepoService {
         F: FnOnce(Pat, CancellationToken) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
+        self.read_authenticated_with(context, cancel, false, read)
+            .await
+    }
+
+    /// The same authenticated path for a replay whose transport answers from persistent storage.
+    /// No HTTP request is issued, so the bounded network permit is skipped; every credential,
+    /// epoch, context and cancellation check still runs.
+    pub(in crate::data) async fn read_authenticated_local<T, E, F, Fut>(
+        &self,
+        context: &RepositoryReadContext,
+        cancel: CancellationToken,
+        read: F,
+    ) -> Result<T, E>
+    where
+        E: From<GitHubError>,
+        F: FnOnce(Pat, CancellationToken) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        self.read_authenticated_with(context, cancel, true, read)
+            .await
+    }
+
+    async fn read_authenticated_with<T, E, F, Fut>(
+        &self,
+        context: &RepositoryReadContext,
+        cancel: CancellationToken,
+        local: bool,
+        read: F,
+    ) -> Result<T, E>
+    where
+        E: From<GitHubError>,
+        F: FnOnce(Pat, CancellationToken) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
         if !self.is_current(context) {
             return Err(GitHubError::StaleContext.into());
         }
@@ -145,14 +180,19 @@ impl RepoService {
                 .ok_or(GitHubError::CredentialStore {
                     message: "credential missing".into(),
                 })?;
-            let _permit = tokio::select! {
-                biased;
-                _ = cancel.clone().cancelled() => return Err(GitHubError::Cancelled.into()),
-                permit = self.executor.semaphore().acquire_owned() => {
-                    permit.map_err(|_| GitHubError::CredentialStore {
-                        message: "request scheduler closed".into(),
-                    })?
-                }
+            // A local (cache replay) read sends nothing, so it must not wait for a network slot.
+            let _permit = if local {
+                None
+            } else {
+                Some(tokio::select! {
+                    biased;
+                    _ = cancel.clone().cancelled() => return Err(GitHubError::Cancelled.into()),
+                    permit = self.executor.semaphore().acquire_owned() => {
+                        permit.map_err(|_| GitHubError::CredentialStore {
+                            message: "request scheduler closed".into(),
+                        })?
+                    }
+                })
             };
             // A queued task must not send after losing its original context.
             if !self.is_current(context) {
@@ -212,6 +252,11 @@ impl PreparationProbe {
 pub struct RepositorySession {
     service: RepoService,
     context: RepositoryReadContext,
+    /// Set for a replay session whose transport answers from the persistent cache instead of the
+    /// network. Such a read issues no HTTP request, so it must not hold (or wait for) one of the
+    /// bounded network permits: a cache-first paint has to stay available while every request slot
+    /// is busy with the revalidation it runs beside.
+    local: bool,
     #[cfg(test)]
     preparation: Arc<Mutex<Option<PreparationProbe>>>,
 }
@@ -225,6 +270,15 @@ impl std::fmt::Debug for RepositorySession {
 }
 
 impl RepositorySession {
+    /// Marks this session as answering from local storage only (cache replay).
+    ///
+    /// The credential, account epoch and context checks are unchanged; only the bounded network
+    /// permit is skipped, because no request will be sent.
+    pub(in crate::data) fn local(mut self) -> Self {
+        self.local = true;
+        self
+    }
+
     pub fn context(&self) -> &RepositoryReadContext {
         &self.context
     }
@@ -261,10 +315,15 @@ impl RepositorySession {
         F: FnOnce(Pat, CancellationToken) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let value = self
-            .service
-            .read_authenticated(&self.context, cancel, read)
-            .await?;
+        let value = if self.local {
+            self.service
+                .read_authenticated_local(&self.context, cancel, read)
+                .await?
+        } else {
+            self.service
+                .read_authenticated(&self.context, cancel, read)
+                .await?
+        };
         Ok(Scoped {
             context: self.context.clone(),
             value,

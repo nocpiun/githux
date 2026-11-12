@@ -50,6 +50,25 @@
 
 在线/历史副本共用 `CacheAuthorization`：请求前通过同一 binding 的 `store.authorization(scope, None)` 捕获，后台完成及 UI apply 前检查同一 token 的 `is_current()`，显示期间由 drain 继续检查。`None` 资源表示聚合，独立仓库使用 `Some(repo_id)`。Token 捕获只取独立内存锁、检查只做原子读取，不等待 SQLite；撤权或新 gate 恢复后旧 token 永远无效。侧栏已经消费此接口，Home/Profile/Repository 由各自原执行者消费。详见 [cache-core](cache-core.md#已显示副本的权限失效接口)。
 
+## Cache-first 首次内容呈现（2026-11-11）
+
+已有可读快照时，正式页面不再等网络返回或失败才显示内容：每个独立 section 都会在后台先读本地快照并立即呈现，再让在线结果覆盖。实现细节与逐面覆盖见 [缓存先行开发日志](devlog/2026-11-11-cache-first-paint.md)。
+
+**顺序规则（各宿主一致）**
+
+1. 快照读取只做 `PageReadMode::Offline`/`RepositoryCacheMode::OfflineOnly`（纯本地），与在线读取**并发**启动；在线读取先开始，缓存 I/O 不前置、不替代网络。
+2. 宿主为每个 section 保存显式发布标记（Home 的 `PublishMark`；其余页面的 `Reply`/`Message::preliminary`）。快照回复仅在“本 generation/request 尚未发布网络值、且未发布过同一快照”时生效；网络回复永远覆盖快照，迟到缓存不会回滚在线成功。
+3. 快照阶段不释放 work 槽、不恢复刷新可用性、不推进 Feed 轮询冷却；这些仍由在线读取收尾，因此“快照在屏 + 刷新不可用”不会变成重复刷新。
+4. 未命中、损坏、权限拒绝、存储 I/O 故障一律不发布内容，保留原有 online loading；旧快照/损坏内容不会被伪造成空成功。
+5. 同一 `(partition, fetched_at_ms)` 的历史快照不重复发布（重复发布只会重置滚动与选择）。
+6. 权限仍由既有 `CacheAuthorization` 票据与 session/context 复核把关：快照与在线结果携带同一请求前票据，发布前与显示期间都检查，撤权/换 PAT/移除账户照旧清除已显示副本。
+
+**覆盖范围**：启动侧栏仓库列表、Home/Feed、Profile basic/pinned/calendar/README、Repository 摘要/分支/revision/根树/README/正文与 overview extras。Notifications 与全局 Issues/PR 列表没有可复用持久快照，本批不做新持久缓存产品。
+
+**本地回放不占网络并发配额**：缓存复用的仍是既有在线适配器与真实 transport 回放，但回放不发请求，因此 `RepositorySession::local` / `RepoService::read_authenticated_local` 让 Offline 分支跳过 `BackgroundExecutor` 的有界网络 permit（凭据、epoch/context、取消、gate/lease 检查不变）。否则所有网络槽位都被挂起的重验占用时，缓存首帧会被饿死。
+
+**Repository 一致性**：入口用一次 `OfflineOnly` 作业读完整快照（locator index → 摘要 → 分支 → ref revision → 根树 → README → 初始正文）后作为单个消息发布，header/tree/README 永远指向同一 commit；在线链随后重验，同一 commit 时保留按 commit 寻址的 tree/README/reader（含滚动位置），commit 变化才整体替换。
+
 ## 页面绑定
 
 页面/仓库消费者通过固定读会话取绑定，不持有跨账户的 scope：

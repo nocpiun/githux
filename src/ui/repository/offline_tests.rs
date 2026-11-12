@@ -70,6 +70,16 @@ pub(super) struct OfflineTransport {
     pub(super) inner: Arc<FixtureTransport>,
     offline: Mutex<bool>,
     readme_image: Mutex<bool>,
+    /// Test-only: hold every repository read at the transport boundary so a cache-first paint can be
+    /// observed while the online chain is still pending.
+    held: std::sync::atomic::AtomicBool,
+    /// True while held requests may continue; arming a hold resets it so a request starting after
+    /// the release cannot miss the wake-up.
+    release: tokio::sync::watch::Sender<bool>,
+    /// Test-only: the default branch the repository summary reports, to model a moved default.
+    default_branch: Mutex<Option<String>>,
+    /// Test-only: fail the branch enumeration so the cached picker is replayed instead.
+    fail_branches: std::sync::atomic::AtomicBool,
 }
 
 impl OfflineTransport {
@@ -78,7 +88,31 @@ impl OfflineTransport {
             inner: Arc::new(FixtureTransport::new(scene)),
             offline: Mutex::new(false),
             readme_image: Mutex::new(false),
+            held: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::watch::channel(true).0,
+            default_branch: Mutex::new(None),
+            fail_branches: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(super) fn fail_branches(&self, fail: bool) {
+        self.fail_branches
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn set_default_branch(&self, branch: Option<&str>) {
+        *self.default_branch.lock().unwrap() = branch.map(str::to_string);
+    }
+
+    pub(super) fn hold(&self, held: bool) {
+        self.held.store(held, std::sync::atomic::Ordering::SeqCst);
+        if held {
+            self.release.send_replace(false);
+        }
+    }
+
+    pub(super) fn release_all(&self) {
+        self.release.send_replace(true);
     }
 
     pub(super) fn set_offline(&self, offline: bool) {
@@ -102,6 +136,34 @@ impl OfflineTransport {
     }
 
     fn custom_answer(&self, request: &HttpRequest) -> Option<HttpResponse> {
+        if let Some(branch) = self.default_branch.lock().unwrap().clone()
+            && request.method == crate::network::transport::HttpMethod::Get
+            && request.url.ends_with(&format!("/repos/{OWNER}/{NAME}"))
+        {
+            return Some(json_response(
+                200,
+                &serde_json::json!({
+                    "id": 42,
+                    "name": NAME,
+                    "owner": { "id": 7, "login": OWNER },
+                    "description": "A tiny double-entry ledger, kept small enough to browse.",
+                    "visibility": "private",
+                    "private": true,
+                    "default_branch": branch,
+                    "fork": false,
+                    "archived": false,
+                    "stargazers_count": 128,
+                    "forks_count": 9,
+                    "open_issues_count": 4,
+                    "subscribers_count": 12,
+                    "size": 64,
+                    "html_url": "https://example.invalid/octo/ledger",
+                    "clone_url": "https://example.invalid/octo/ledger.git",
+                    "pushed_at": "2026-10-20T10:00:00Z"
+                })
+                .to_string(),
+            ));
+        }
         if !*self.readme_image.lock().unwrap() {
             return None;
         }
@@ -213,6 +275,35 @@ impl Transport for OfflineTransport {
                 return Err(TransportError::Network {
                     message: "offline fixture: connection refused".into(),
                 });
+            }
+            if self.held.load(std::sync::atomic::Ordering::SeqCst)
+                && !request.url.ends_with("/user")
+            {
+                let mut released = self.release.subscribe();
+                tokio::select! {
+                    _ = async {
+                        loop {
+                            if *released.borrow_and_update() {
+                                break;
+                            }
+                            if released.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    } => {}
+                    _ = cancel.clone().cancelled() => {
+                        return Err(TransportError::Cancelled);
+                    }
+                }
+            }
+            if self.fail_branches.load(std::sync::atomic::Ordering::SeqCst)
+                && request.url.contains("/branches")
+            {
+                return Ok(json_response(
+                    500,
+                    &serde_json::json!({"message": "synthetic branch enumeration failure"})
+                        .to_string(),
+                ));
             }
             if let Some(custom) = self.custom_answer(&request) {
                 return Ok(custom);
@@ -395,7 +486,10 @@ fn settle(
     cx: &mut VisualTestContext,
     mut done: impl FnMut(&RepositoryPage) -> bool,
 ) {
-    for _ in 0..800 {
+    // Deadline-based, not a fixed iteration count: a loaded machine must not fail a test that is
+    // only waiting for its own replies to be drained.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
         page.update_in(cx, |page, window, cx| page.drain(window, cx));
         cx.run_until_parked();
         frames(cx);
@@ -403,12 +497,13 @@ fn settle(
         if page.read_with(cx, |page, _| done(page)) {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "page did not settle; error={:?} status={:?}",
+            page.read_with(cx, |page, _| page.error().cloned()),
+            page.read_with(cx, |page, _| page.reader_status().clone())
+        );
     }
-    panic!(
-        "page did not settle; error={:?} status={:?}",
-        page.read_with(cx, |page, _| page.error().cloned()),
-        page.read_with(cx, |page, _| page.reader_status().clone())
-    );
 }
 
 fn reader_text(page: &Entity<RepositoryPage>, cx: &mut VisualTestContext) -> String {
@@ -493,6 +588,664 @@ fn warm_up(cx: &mut TestAppContext, fixture: &CachedFixture) -> usize {
         release_page(&host, cx);
     }
     fixture.transport.recorded().len()
+}
+
+/// Cache-first repository entry: after a restart the persisted page (summary, tree, README and its
+/// extras) paints while the online chain is still held at the transport boundary, and the network
+/// result then replaces it without a manual Refresh.
+#[gpui::test]
+fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    // The bundle paints from disk only: nothing can have answered over the held transport.
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.tree("").is_some()
+            && page.tree("src").is_none()
+    });
+    page.read_with(cx, |page, cx| {
+        assert!(
+            page.is_showing_cached_snapshot(),
+            "the painted page must be labelled as a saved snapshot"
+        );
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Snapshot)
+        );
+        assert_eq!(
+            page.current_path(),
+            Some("README.md"),
+            "the README from the snapshot is on screen"
+        );
+        let reader = page.reader().expect("a reader is showing").read(cx);
+        let text = if let Some(doc) = reader.markdown() {
+            doc.read(cx).document_text().to_string()
+        } else {
+            String::new()
+        };
+        assert!(
+            text.contains("Ledger"),
+            "the cached README content is rendered: {text}"
+        );
+    });
+
+    // Release the network: the online chain revalidates the same ref and replaces the provenance.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Network),
+            "the online summary replaced the snapshot"
+        );
+        assert_eq!(
+            page.fixed_commit()
+                .map(|commit| commit.as_str().to_string()),
+            Some(MAIN_COMMIT.to_string())
+        );
+        assert_eq!(page.current_path(), Some("README.md"));
+    });
+}
+
+/// Regression (review finding): when only README discovery was missing, the retained root is still
+/// available, so a saved file selection has to be resolved instead of waiting for an `apply_root`
+/// reply that will never arrive.
+#[gpui::test]
+fn a_saved_file_resolves_when_only_readme_discovery_was_missing(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+
+    // Simulate a snapshot with a retained root but no README discovery and no document, reopened at
+    // a saved file selection.
+    page.update_in(cx, |page, window, cx| {
+        let identity = page.details.as_ref().expect("details").identity.clone();
+        let name = page
+            .branch
+            .as_ref()
+            .expect("a displayed branch")
+            .name
+            .clone();
+        let request = page.branch_request;
+        let state = page.branch.as_mut().unwrap();
+        state.readme = super::super::ReadmeState::Unknown;
+        page.selection = Selection::File("src/main.rs".into());
+        page.readme_path = None;
+        page.reader = None;
+        page.reader_status = ReaderStatus::Loading;
+        page.spawn_job(super::super::Job::Revision {
+            branch: name,
+            request,
+            identity,
+            mode: crate::data::RepositoryCacheMode::OnlinePreferred,
+        });
+        page.drain(window, cx);
+    });
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.selection() == &Selection::File("src/main.rs".into())
+    });
+}
+
+/// Regression (review finding): a directory that the preliminary offline pass reported as "not
+/// cached" must be retried once the same commit is verified online.
+#[gpui::test]
+fn a_cache_miss_directory_recovers_after_same_commit_revalidation(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // Expanding an uncached directory while offline-only records a cache miss.
+    page.update(cx, |page, cx| page.toggle_directory("docs", cx));
+    settle(&page, cx, |page| page.tree_failure("docs").is_some());
+    assert!(page.read_with(cx, |page, _| page.tree("docs").is_none()));
+
+    // Revalidation resolves the same commit; the retryable miss must not stick.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| page.tree("docs").is_some());
+    assert!(page.read_with(cx, |page, _| page.tree_failure("docs").is_none()));
+}
+
+/// Regression (review finding): when the online attempt falls back to cached data, no verified
+/// reply will finish the parts the bundle could not provide, so they must be settled instead of
+/// spinning forever.
+#[gpui::test]
+fn an_unverified_revalidation_settles_the_missing_snapshot_resources(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+
+    let (outcome, provenance) = page.read_with(cx, |page, _| {
+        (
+            page.branches().expect("a loaded branch list").clone(),
+            super::super::RepositoryCacheProvenance {
+                origin: crate::data::RepositoryCacheOrigin::Snapshot,
+                fetched_at_ms: 1,
+                verified_at_ms: 1,
+                completeness: crate::domain::cache::CacheCompleteness::Complete,
+            },
+        )
+    });
+
+    // Simulate the cache-first bundle of a different page: summaries and branches resolved from the
+    // cache (so the online attempt is not verified), with a tree, README discovery and document the
+    // bundle could not provide.
+    fixture.transport.set_offline(true);
+    page.update(cx, |page, cx| {
+        let state = page.branch.as_mut().expect("a displayed branch");
+        state.tree.reset();
+        state.readme = super::super::ReadmeState::Unknown;
+        page.reader = None;
+        page.readme_path = None;
+        page.reader_status = ReaderStatus::Loading;
+        page.snapshot_preliminary = true;
+        page.details_provenance = Some(provenance.clone());
+        page.apply_branches(Ok((outcome, Some(provenance))), cx);
+        assert!(
+            !page.snapshot_preliminary,
+            "an unverified attempt must not keep the preliminary marker forever"
+        );
+    });
+
+    // The parts the bundle lacked are read through the offline path, so each reaches a definite state.
+    settle(&page, cx, |page| {
+        page.reader_status() != &ReaderStatus::Loading && page.tree("").is_some()
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+}
+
+/// Regression (review finding): a cache-only read that is still in flight when the same commit is
+/// verified online must be superseded. Its late cache-miss result is discarded and the verified
+/// chain requests the same path again, so neither a directory nor a document stays on an error (or
+/// loading) produced by the preliminary pass.
+#[gpui::test]
+fn a_pending_cache_phase_read_is_superseded_by_online_verification(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+
+    let (branch, snapshot, commit, request) = page.read_with(cx, |page, _| {
+        let state = page.branch.as_ref().expect("a displayed branch");
+        (
+            state.name.clone(),
+            state.snapshot.clone(),
+            state.commit().clone(),
+            page.branch_request,
+        )
+    });
+    let identity = page.read_with(cx, |page, _| {
+        let state = page.branch.as_ref().expect("a displayed branch");
+        match &state.readme {
+            super::super::ReadmeState::Found(descriptor) => {
+                crate::domain::blob::BlobIdentity::from_readme(descriptor)
+            }
+            other => panic!("the fixture must discover a README, got {other:?}"),
+        }
+    });
+
+    let (request_before, reader_status) = page.update(cx, |page, cx| {
+        let state = page.branch.as_mut().expect("a displayed branch");
+        state.snapshot_provenance = Some(super::super::RepositoryCacheProvenance {
+            origin: RepositoryCacheOrigin::Snapshot,
+            fetched_at_ms: 1,
+            verified_at_ms: 1,
+            completeness: crate::domain::cache::CacheCompleteness::Complete,
+        });
+        // A directory and a document read are in flight from the cache-only pass.
+        state
+            .tree
+            .begin_load("docs", crate::data::RepositoryCacheMode::OfflineOnly);
+        page.intent.expanded.insert("docs".to_string());
+        page.selection = Selection::Readme;
+        page.pending_content = Some(identity.clone());
+        page.reader = None;
+        page.reader_status = ReaderStatus::Loading;
+        let request_before = page.selection_request;
+        // Same commit resolved from the network: the displayed bucket is verified.
+        page.apply_revision(
+            branch.clone(),
+            request,
+            Ok((
+                snapshot.clone(),
+                Some(super::super::RepositoryCacheProvenance {
+                    origin: RepositoryCacheOrigin::Network,
+                    fetched_at_ms: 2,
+                    verified_at_ms: 2,
+                    completeness: crate::domain::cache::CacheCompleteness::Complete,
+                }),
+            )),
+            cx,
+        );
+        assert!(
+            page.pending_content.is_some(),
+            "the superseded document read must be replaced by a new one"
+        );
+        assert_ne!(
+            page.selection_request, request_before,
+            "a superseded document read needs a new identity so its reply is dropped"
+        );
+        assert!(
+            page.branch.as_ref().unwrap().tree.is_loading("docs"),
+            "the superseded directory is requested again through the verified chain"
+        );
+        (request_before, page.reader_status.clone())
+    });
+    let _ = request_before;
+    let _ = reader_status;
+
+    // The late cache-only result arrives after verification: it must not publish a failure.
+    page.update(cx, |page, cx| {
+        page.apply_directory(
+            branch.clone(),
+            commit.clone(),
+            "docs".to_string(),
+            crate::data::RepositoryCacheMode::OfflineOnly,
+            Err(super::super::PageError::new(
+                "`docs` is not cached offline.",
+                Some("Only cached content is available right now.".to_string()),
+                true,
+            )),
+            cx,
+        );
+    });
+    page.read_with(cx, |page, _| {
+        assert!(
+            page.tree_failure("docs").is_none(),
+            "a superseded cache-miss result must not become a visible failure"
+        );
+    });
+
+    // The retried reads finish online: the directory is there and the file opens.
+    settle(&page, cx, |page| {
+        page.tree("docs").is_some() && page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.tree_failure("docs").is_none());
+        assert!(!page.is_showing_cached_snapshot());
+    });
+}
+
+/// Regression (review finding): a cached branch list (network fallback) must not suppress the
+/// revision revalidation when the summary itself was verified online.
+#[gpui::test]
+fn a_cached_branch_fallback_still_revalidates_the_shown_revision(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // The online summary succeeds; branch enumeration fails and replays the cached picker. The
+    // displayed revision must still be re-resolved, so only the picker stays historical.
+    fixture.transport.fail_branches(true);
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        page.revision_provenance()
+            .is_some_and(|provenance| provenance.origin == RepositoryCacheOrigin::Network)
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.selected_branch(), Some("main"));
+        assert_eq!(page.reader_status(), &ReaderStatus::Showing);
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Network)
+        );
+    });
+}
+
+/// Regression (review finding): saved expanded directories must resume after a same-commit
+/// revalidation. The cache-first bundle restores only the root (plus a saved file's ancestors), so
+/// nothing would load them once the revalidation keeps the retained tree.
+#[gpui::test]
+fn saved_expansions_resume_after_same_commit_revalidation(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let mut expanded = std::collections::BTreeSet::new();
+    expanded.insert("src".to_string());
+    let (_host, page, cx) = open_cached(
+        cx,
+        &fixture,
+        RepositoryNavigation {
+            expanded,
+            ..RepositoryNavigation::default()
+        },
+    );
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert!(page.expanded().contains("src"));
+    });
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        !page.is_showing_cached_snapshot() && page.tree("src").is_some()
+    });
+}
+
+/// Regression (review finding): a failed branch enumeration after the online summary succeeded must
+/// still revalidate the displayed snapshot from the saved intent or the observed default, instead of
+/// leaving the page historical forever.
+#[gpui::test]
+fn a_failed_branch_enumeration_still_revalidates_the_cached_revision(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+
+    // The online summary succeeds, but branch enumeration fails with no usable fallback.
+    page.update_in(cx, |page, window, cx| {
+        let context = page.context.clone().expect("context");
+        let generation = page.generation;
+        let branch_request = page.branch_request;
+        let details = page.details.clone().expect("a displayed summary");
+        page.inbox
+            .lock()
+            .expect("repository page inbox")
+            .push_back(super::super::Message {
+                generation,
+                branch_request,
+                authorization: None,
+                context: context.clone(),
+                preliminary: false,
+                body: super::super::Body::Repository {
+                    result: Ok((
+                        details,
+                        Some(crate::data::RepositoryCacheProvenance {
+                            origin: RepositoryCacheOrigin::Network,
+                            fetched_at_ms: 1,
+                            verified_at_ms: 1,
+                            completeness: crate::domain::cache::CacheCompleteness::Complete,
+                        }),
+                    )),
+                    star_write_generation: page.star_write_generation,
+                },
+            });
+        page.inbox
+            .lock()
+            .expect("repository page inbox")
+            .push_back(super::super::Message {
+                generation,
+                branch_request,
+                authorization: None,
+                context,
+                preliminary: false,
+                body: super::super::Body::Branches(Err(super::super::PageError::new(
+                    "branch enumeration failed",
+                    Some("synthetic".into()),
+                    true,
+                ))),
+            });
+        page.drain(window, cx);
+    });
+
+    // Releasing the network lets the revalidation resolve the same ref and replace the snapshot.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        !page.is_showing_cached_snapshot() && page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.selected_branch(), Some("main"));
+    });
+}
+
+/// Regression (review finding): when the repository's default branch moved, the cache-first bundle
+/// may display the old default. The online summary must then re-run the product branch choice
+/// instead of re-resolving the cached branch forever.
+#[gpui::test]
+fn a_moved_default_branch_replaces_the_cached_default(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert_eq!(page.selected_branch(), Some("main"));
+    });
+
+    // The moved default is only visible to the online summary.
+    fixture
+        .transport
+        .set_default_branch(Some("feature/docs-polish"));
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        !page.is_showing_cached_snapshot()
+            && page.selected_branch() == Some("feature/docs-polish")
+            && page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(
+        reader_text(&page, cx).contains("docs polish"),
+        "the new default branch's README is displayed"
+    );
+}
+
+/// Regression (review finding): a saved *nested* file selection must reopen from the cache-first
+/// bundle instead of silently falling back to the README.
+#[gpui::test]
+fn a_saved_nested_file_reopens_from_the_cache_first_bundle(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(
+        cx,
+        &fixture,
+        RepositoryNavigation {
+            path: Some("src/main.rs".into()),
+            ..RepositoryNavigation::default()
+        },
+    );
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+            && page.selection() == &Selection::File("src/main.rs".into())
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.is_showing_cached_snapshot());
+        assert_eq!(page.current_path(), Some("src/main.rs"));
+    });
+    assert!(
+        reader_text(&page, cx).contains("fn main"),
+        "the cached file content is shown from the snapshot"
+    );
+}
+
+/// Regression (review finding): a revalidation that resolves the same commit keeps the cached tree
+/// and README, but anything the snapshot never had must still be fetched. Otherwise a partial cached
+/// bundle would leave the tree or reader loading forever.
+#[gpui::test]
+fn a_same_commit_revalidation_fetches_the_resources_the_snapshot_lacked(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+
+    // Simulate a snapshot that carried only the revision: no root tree, no README discovery and no
+    // document. Re-resolving the same ref has to fill them.
+    page.update_in(cx, |page, window, cx| {
+        let identity = page.details.as_ref().expect("details").identity.clone();
+        let name = page
+            .branch
+            .as_ref()
+            .expect("a displayed branch")
+            .name
+            .clone();
+        let request = page.branch_request;
+        let state = page.branch.as_mut().unwrap();
+        state.tree = super::super::navigation::TreeModel::default();
+        state.readme = super::super::ReadmeState::Unknown;
+        page.reader = None;
+        page.reader_status = ReaderStatus::Loading;
+        page.spawn_job(super::super::Job::Revision {
+            branch: name,
+            request,
+            identity,
+            mode: crate::data::RepositoryCacheMode::OnlinePreferred,
+        });
+        page.drain(window, cx);
+    });
+    settle(&page, cx, |page| {
+        page.tree("").is_some()
+            && page.readme_path().is_some()
+            && page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(!page.is_showing_cached_snapshot());
+        assert_eq!(page.current_path(), Some("README.md"));
+    });
+}
+
+/// Regression (review finding): the reader created from the cached snapshot keeps working when the
+/// same-commit revalidation retains it. Its callbacks are guarded by the page's `branch_request` and
+/// `selection_request`, so a revalidation must not advance those identities while keeping the reader.
+#[gpui::test]
+fn the_retained_cached_reader_keeps_its_page_identity_after_revalidation(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+    let (cached_reader, cached_branch_request, cached_selection_request) =
+        page.read_with(cx, |page, _| {
+            (
+                page.reader().cloned().expect("a reader"),
+                page.branch_request,
+                page.selection_request,
+            )
+        });
+
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| !page.is_showing_cached_snapshot());
+    page.read_with(cx, |page, _| {
+        assert!(
+            page.reader()
+                .is_some_and(|reader| reader.entity_id() == cached_reader.entity_id()),
+            "the same-commit revalidation keeps the displayed reader"
+        );
+        assert_eq!(
+            page.branch_request, cached_branch_request,
+            "the revalidated branch keeps the identity the retained reader's callbacks captured"
+        );
+        assert_eq!(page.selection_request, cached_selection_request);
+        assert_eq!(page.reader_status(), &ReaderStatus::Showing);
+    });
+    release_page(&host, cx);
+}
+
+/// A cache-first reply that arrives after the online chain already published must not roll the page
+/// back to the saved snapshot.
+#[gpui::test]
+fn a_late_cached_repository_reply_never_rolls_back_the_network_page(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+    let online_details = page.read_with(cx, |page, _| page.details().cloned().unwrap());
+
+    // Replay the summary a slow cache read would produce, marked as a preliminary observation.
+    page.update_in(cx, |page, window, cx| {
+        let context = page.context.clone().expect("context");
+        let generation = page.generation;
+        let branch_request = page.branch_request;
+        page.inbox
+            .lock()
+            .expect("repository page inbox")
+            .push_back(super::super::Message {
+                generation,
+                branch_request,
+                authorization: None,
+                context,
+                preliminary: true,
+                body: super::super::Body::Repository {
+                    result: Ok((
+                        online_details.clone(),
+                        Some(crate::data::RepositoryCacheProvenance {
+                            origin: RepositoryCacheOrigin::Snapshot,
+                            fetched_at_ms: f64::MIN as i64,
+                            verified_at_ms: 1,
+                            completeness: crate::domain::cache::CacheCompleteness::Complete,
+                        }),
+                    )),
+                    star_write_generation: page.star_write_generation,
+                },
+            });
+        page.drain(window, cx);
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.details_provenance()
+                .map(|provenance| provenance.origin),
+            Some(RepositoryCacheOrigin::Network),
+            "a late cache completion must not replace newer network content"
+        );
+        assert!(!page.is_showing_cached_snapshot());
+    });
 }
 
 /// The ordered product scenario: online warm-up, restart, offline reading of
@@ -974,6 +1727,7 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
                 branch_request: old_branch_request,
                 authorization: None,
                 context: page.context.clone().expect("context"),
+                preliminary: false,
                 body: super::super::Body::Revision {
                     branch: "main".into(),
                     request: old_branch_request,
@@ -1049,6 +1803,7 @@ fn reply_captured_before_revocation_is_rejected_afterwards_and_never_revived(
                 branch_request: old_branch_request,
                 authorization: Some(old_authorization.clone()),
                 context: context.clone(),
+                preliminary: false,
                 body: super::super::Body::Revision {
                     branch: "main".into(),
                     request: old_branch_request,

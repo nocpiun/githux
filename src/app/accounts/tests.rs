@@ -107,6 +107,93 @@ fn open(
 
 /// The same test composition, but with a real business `CacheStore` injected exactly as production
 /// startup does through `open_accounts_with_cache`. Used by the avatar cache-binding tests.
+/// Holds `/user/repos` at the transport boundary so a cache-first paint can be observed while the
+/// online read is still pending. Every other request passes straight through to the mock.
+struct HeldRepositoryTransport {
+    inner: Arc<MockTransport>,
+    hold_repositories: std::sync::atomic::AtomicBool,
+    /// True while held requests may continue; arming a hold resets it so a request starting after
+    /// the release cannot miss the wake-up.
+    release: tokio::sync::watch::Sender<bool>,
+}
+
+impl HeldRepositoryTransport {
+    fn new(inner: Arc<MockTransport>) -> Self {
+        Self {
+            inner,
+            hold_repositories: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::watch::channel(true).0,
+        }
+    }
+
+    fn hold(&self, held: bool) {
+        self.hold_repositories
+            .store(held, std::sync::atomic::Ordering::SeqCst);
+        if held {
+            self.release.send_replace(false);
+        }
+    }
+
+    fn release_all(&self) {
+        self.release.send_replace(true);
+    }
+}
+
+impl Transport for HeldRepositoryTransport {
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let response = self.execute(request, cancel).await?;
+            if response.body.len() > max_body_bytes {
+                return Err(TransportError::ResponseTooLarge {
+                    limit: max_body_bytes,
+                });
+            }
+            Ok(response)
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if self
+                .hold_repositories
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && request.url.contains("/user/repos")
+            {
+                let mut released = self.release.subscribe();
+                tokio::select! {
+                    _ = async {
+                        loop {
+                            if *released.borrow_and_update() {
+                                break;
+                            }
+                            if released.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    } => {}
+                    _ = cancel.clone().cancelled() => {
+                        return Err(TransportError::Cancelled);
+                    }
+                }
+            }
+            self.inner.execute(request, cancel).await
+        })
+    }
+}
+
 fn open_cached(
     path: &std::path::Path,
     store: Arc<InMemoryCredentialStore>,
@@ -2325,6 +2412,166 @@ fn a_network_failure_falls_back_to_the_cached_list_as_history(cx: &mut TestAppCo
     );
 }
 
+/// Cache-first sidebar: a recorded list is published immediately while the online `/user/repos` read
+/// is still pending, and the live result then replaces it.
+#[gpui::test]
+fn a_cached_repository_list_paints_before_the_online_read_finishes_then_is_replaced(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let transport = Arc::new(HeldRepositoryTransport::new(mock.clone()));
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+        // The next `/user/repos` answer belongs to the held revalidation.
+        mock.enqueue(Ok(repos(1, "alice", &["alpha", "beta"])))
+            .await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        transport.clone(),
+        cache,
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state.repositories.origin == RepositoryListOrigin::Network
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+    });
+    wait_idle(&controller, cx);
+
+    // Hold the network and refresh: the recorded list must appear while the read is in flight.
+    transport.hold(true);
+    refresh(&controller, cx);
+    assert!(
+        beat_until(&controller, cx, |controller, cx| {
+            controller.read_with(cx, |accounts, _| {
+                accounts.busy()
+                    && matches!(
+                        accounts.snapshot().repositories.origin,
+                        RepositoryListOrigin::Historical { .. }
+                    )
+                    && matches!(
+                        &accounts.snapshot().repositories.preview,
+                        RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1
+                    )
+            })
+        }),
+        "the cached list must paint while the online read is still pending"
+    );
+
+    // Releasing the network replaces it with the live, complete list.
+    transport.hold(false);
+    transport.release_all();
+    wait_for(&controller, cx, |state| {
+        state.repositories.origin == RepositoryListOrigin::Network
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2)
+    });
+    assert!(
+        snapshot(&controller, cx)
+            .repositories
+            .historical_status()
+            .is_none(),
+        "a live list carries no offline snapshot line"
+    );
+}
+
+/// Regression (review finding): a cache-first list is displayed while the online read is still
+/// pending, so an explicit revocation in that window must retire the visible rows immediately.
+#[gpui::test]
+fn a_revocation_retires_a_preliminary_list_while_the_online_read_is_pending(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let mock = Arc::new(MockTransport::new());
+    let transport = Arc::new(HeldRepositoryTransport::new(mock.clone()));
+    let host = host_runtime();
+    host.block_on(async {
+        mock.enqueue(Ok(user(1, "alice"))).await;
+        mock.enqueue(Ok(repos(1, "alice", &["alpha"]))).await;
+    });
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open_cached(
+        &temp.path().join("accounts.sqlite3"),
+        store,
+        transport.clone(),
+        cache.clone(),
+    );
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    let _ = &view;
+    put_token(&controller, cx, "synthetic");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| {
+        state.repositories.origin == RepositoryListOrigin::Network
+            && matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
+    });
+    wait_idle(&controller, cx);
+
+    transport.hold(true);
+    refresh(&controller, cx);
+    assert!(
+        beat_until(&controller, cx, |controller, cx| {
+            controller.read_with(cx, |accounts, _| {
+                accounts.busy()
+                    && matches!(
+                        accounts.snapshot().repositories.origin,
+                        RepositoryListOrigin::Historical { .. }
+                    )
+                    && matches!(
+                        &accounts.snapshot().repositories.preview,
+                        RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1
+                    )
+            })
+        }),
+        "the cached list must be displayed while the online read is pending"
+    );
+
+    // An explicit revocation retires the displayed rows even though the read is in flight.
+    let session = runtime_services(&controller, cx)
+        .accounts()
+        .page_session()
+        .unwrap();
+    let binding = runtime_services(&controller, cx)
+        .repositories()
+        .cache(session.context())
+        .unwrap();
+    binding
+        .store()
+        .revoke_repository(binding.scope(), Some(10))
+        .unwrap();
+    assert!(
+        beat_until(&controller, cx, |controller, cx| {
+            controller.read_with(cx, |accounts, _| {
+                !matches!(
+                    accounts.snapshot().repositories.preview,
+                    RepositoryPreview::Ready(_)
+                )
+            })
+        }),
+        "a revoked preliminary list must not stay on screen while the read is pending"
+    );
+    transport.hold(false);
+    transport.release_all();
+    settle_beats(&controller, cx);
+}
+
+fn runtime_services(
+    controller: &Entity<Accounts>,
+    cx: &mut VisualTestContext,
+) -> crate::app::accounts::AccountServices {
+    controller.read_with(cx, |accounts, _| {
+        accounts.services().expect("an open runtime")
+    })
+}
+
 /// An explicit 401 is a credential rejection, not a transient outage: it must not be shown as
 /// offline history, and the old snapshot must not become current again.
 #[gpui::test]
@@ -2571,6 +2818,7 @@ fn revocation_clears_online_rows_and_rejects_queued_replies_even_after_gate_reco
                     origin,
                 }),
                 repository_authorization: Some(token.clone()),
+                preliminary: false,
             };
             accounts.apply(reply, cx);
         });
