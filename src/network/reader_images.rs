@@ -324,7 +324,7 @@ impl ExternalImageBytes for ReqwestExternalImages {
             loop {
                 let mut request = self.client.get(url.clone()).header(
                     "Accept",
-                    "image/png,image/jpeg,image/webp,image/gif,*/*;q=0.8",
+                    "image/png,image/jpeg,image/webp,image/gif,image/svg+xml,*/*;q=0.8",
                 );
                 if hops == 0 {
                     if let Some(inm) = validation.if_none_match {

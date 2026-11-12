@@ -25,7 +25,9 @@ uniform-list 虽支持 content padding，其可见尾范围仍按 padded height 
 
 最终本地 runner 已通过：114 项相关组件回归（`a9d349ec-4202-4958-92a2-a2fc5e1d6d6e`）、1 项正式 Shell 组合回归（`817035c2-c115-433f-a230-bae2af0f8a58`，含中间 paint mask、Home/Feed、Files、sidebar 与 reveal）、fmt（`d9a03032-cb79-4543-9e59-6e39c11d69d1`）及 all-target clippy（`3ecd947f-0d51-4e82-9318-817502bbff05`）。聚焦的无测试补值 thumb-max 回归亦通过（`382b1504-e9a7-46f0-850a-a9db0719ddbc`）。检查按实际修改/失败集中收尾，全部通过共享 runner，dev/test debug=0、incremental=0；构建槽等待与执行时长分别保存在收据。
 
-本地 Rust/app 基线为 `f9e31a0`。期间 main 前进到 `daf9f68`（#87，仅工作流/runner/派发文档与脚本），Cargo、Rust/app/test/CI-workflow 文件均无变化；保留现有提交历史，当前 head 的 CI 集成基线仍由审查收据核验。最终 clean-head 预览、CI/Codex 结果放 PR 和本地交付状态，避免为补自身 SHA 再造未审查提交。`pending` 与负责人管理的 `blocked` 均保留；旧 exe/旧收据和测试平台结果都不代替本轮 Windows 原生验收。不终止、不覆盖用户启动的 app 窗口。
+初轮本地 Rust/app 基线为 `f9e31a0`。等待 `f426f93` 审查期间，main 先合入 #87（工作流/runner），再合入 Reader SVG #82（`8c63ce7`）。`f426f93` 的 Codex 已 clean，但等待器据实返回 `base_changed`；随后将已发布 main 合入任务分支，保留 `cc387aa`、`f426f93` 提交历史，不手工修改 Reader/image 实现。相对 main 的 PR 差异仍为本任务 16 个文件。
+
+新基线组合验证通过 16 项针对性 viewport/Shell 场景（`b9967e99-ed57-44ff-8aed-de6f1063423c`）、fmt check（`c9a81ade-0677-45d2-9b4d-13e47c20aa7a`）和 all-target clippy（`2f578879-f6de-40c7-9b64-b6b35940ea8b`），覆盖首尾留白、中间 mask/input、未测量尾部最大拖动及 Files 的真实尾行点击。没有因基线变化重复无关测试。最终 clean-head 预览、CI/Codex 结果放 PR 和本地交付状态，避免为补自身 SHA 再造未审查提交。`pending` 与负责人管理的 `blocked` 均保留；旧 exe/旧收据和测试平台结果都不代替本轮 Windows 原生验收。不终止、不覆盖用户启动的 app 窗口。
 
 ## 原始反馈 7 前次返工（历史：cc387aa 的留白删除已被拒收）
 
