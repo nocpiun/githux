@@ -1571,7 +1571,7 @@ fn replacing_markdown_rejects_previous_background_results(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext) {
+fn a_repository_file_picture_draws_nothing_without_loading(cx: &mut TestAppContext) {
     let (reader, cx) = open(
         cx,
         PreparedBody::Utf8 {
@@ -1581,17 +1581,19 @@ fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext)
         DocumentKind::Markdown,
     );
     frames(cx);
-    assert!(cx.debug_bounds("markdown-picture-note-0").is_some());
-    assert!(
-        reader
-            .read_with(cx, |r, cx| r
-                .markdown()
-                .unwrap()
-                .read(cx)
-                .text()
-                .to_string())
-            .contains("file:")
-    );
+    // The address is refused, so no picture element and no placeholder exist;
+    // the alt text and the source stay readable in the document model.
+    assert!(cx.debug_bounds("markdown-picture-0").is_none());
+    assert!(cx.debug_bounds("markdown-picture-frame-0").is_none());
+    let (text, alt) = reader.read_with(cx, |r, cx| {
+        let document = r.markdown().unwrap().read(cx);
+        (
+            document.text().to_string(),
+            document.document_text().to_string(),
+        )
+    });
+    assert!(text.contains("file:"), "{text:?}");
+    assert!(alt.contains("untrusted"), "{alt:?}");
 }
 
 #[gpui::test]
@@ -2938,8 +2940,7 @@ fn a_pending_table_picture_is_silent_and_loads_when_a_provider_attaches(cx: &mut
     // No provider is attached: pending demand stays invisible. No placeholder
     // box, no visible alt, and no picture row.
     assert!(
-        cx.debug_bounds("markdown-cell-1-1-0-picture-0-note")
-            .is_none(),
+        cx.debug_bounds("markdown-cell-1-1-0-picture-0").is_none(),
         "a pending cell picture must not show a placeholder"
     );
     assert!(
@@ -2973,6 +2974,155 @@ fn a_pending_table_picture_is_silent_and_loads_when_a_provider_attaches(cx: &mut
             .is_some(),
         "the late provider paints the pending cell picture"
     );
+}
+
+#[gpui::test]
+fn a_refused_or_failed_cell_picture_draws_nothing(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot | note |
+|---|---|
+| ![Secret](file:///c:/secret.png) | a refused address |
+| ![Gone](missing.png) | a failed load |
+
+After.
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    // A provider that fails every request, so the second picture is a real
+    // failure rather than an unrequested source.
+    struct Failing;
+    impl crate::content::images::ImageProvider for Failing {
+        fn start(
+            &self,
+            request: crate::content::images::ImageRequest,
+            sink: crate::content::images::ImageSink,
+        ) {
+            sink.push(crate::content::images::ImageCompletion {
+                scope: request.scope,
+                key: request.key,
+                result: Err(crate::content::images::ImageFailure::NotFound),
+            });
+        }
+        fn cancel(&self, _scope: crate::content::images::ImageScope) {}
+    }
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(std::sync::Arc::new(Failing)), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+
+    // Neither the refused address nor the failed load paints a picture, a
+    // placeholder, an alt label or a frame; both rows keep only their text.
+    for row in [1, 2] {
+        let picture: &'static str =
+            Box::leak(format!("markdown-cell-0-{row}-0-picture-0").into_boxed_str());
+        let frame: &'static str =
+            Box::leak(format!("markdown-cell-0-{row}-0-picture-0-frame").into_boxed_str());
+        assert!(
+            cx.debug_bounds(picture).is_none(),
+            "cell picture {row} must not draw a placeholder"
+        );
+        assert!(
+            cx.debug_bounds(frame).is_none(),
+            "cell picture {row} must not reserve a frame"
+        );
+        let cell: &'static str = Box::leak(format!("markdown-cell-0-{row}-0").into_boxed_str());
+        let bounds = cx.debug_bounds(cell).expect("the cell is still laid out");
+        assert!(
+            bounds.size.height > px(1.0) && bounds.size.height < px(80.0),
+            "the cell keeps only its text height: {bounds:?}"
+        );
+    }
+    // The table's own structure and the author's caption rows are untouched.
+    assert!(cx.debug_bounds("markdown-cell-0-1-1").is_some());
+    assert!(
+        cx.debug_bounds("markdown-cell-0-0-0").is_some(),
+        "the header row still exists"
+    );
+    let text = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .expect("markdown")
+            .read(cx)
+            .document_text()
+            .to_string()
+    });
+    assert!(
+        text.contains("Secret") && text.contains("Gone"),
+        "both alts stay in the copy model: {text:?}"
+    );
+}
+
+#[gpui::test]
+fn a_released_cell_picture_disappears_instead_of_reserving_its_box(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| one | two |\n|---|---|\n| ![One](one.png) | ![Two](two.png) |\n| **One** | **Two** |\n"
+                .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_limits(
+            crate::content::images::ImageLimits {
+                max_ready_images: 1,
+                ..Default::default()
+            },
+            cx,
+        );
+    });
+    let images = std::sync::Arc::new(TableImages::new(&[
+        ("one.png", 320, 180),
+        ("two.png", 120, 240),
+    ]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+
+    // Both pictures were decoded, but the budget keeps only one: the released
+    // one draws nothing at all rather than a placeholder panel.
+    let states = reader.read_with(cx, |reader, _| reader.image_states_debug());
+    assert!(
+        states.iter().any(|(_, state)| *state == "released"),
+        "the budget really released a picture: {states:?}"
+    );
+    let mut drawn = 0;
+    for column in [0, 1] {
+        let frame: &'static str =
+            Box::leak(format!("markdown-cell-0-1-{column}-picture-0-frame").into_boxed_str());
+        let picture: &'static str =
+            Box::leak(format!("markdown-cell-0-1-{column}-picture-0").into_boxed_str());
+        if cx.debug_bounds(frame).is_some() {
+            drawn += 1;
+        } else {
+            assert!(
+                cx.debug_bounds(picture).is_none(),
+                "a released cell picture shows no placeholder or label"
+            );
+        }
+        // The cell itself keeps its own height for the author's text row.
+        let cell: &'static str = Box::leak(format!("markdown-cell-0-1-{column}").into_boxed_str());
+        assert!(
+            cx.debug_bounds(cell)
+                .is_some_and(|bounds| bounds.size.height > px(1.0)),
+            "the cell keeps a real row after the picture is released"
+        );
+    }
+    assert_eq!(drawn, 1, "only the retained picture is drawn");
+    // The author's caption row is untouched by the release.
+    assert!(cx.debug_bounds("markdown-cell-0-2-0").is_some());
+    assert!(cx.debug_bounds("markdown-cell-0-2-1").is_some());
 }
 
 #[gpui::test]

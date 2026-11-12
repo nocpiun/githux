@@ -940,11 +940,6 @@ impl MarkdownView {
                 repeated_head,
             } => {
                 let repeated = *repeated_head;
-                let picture = images::PictureStyle {
-                    colors: &colors,
-                    small_text: xs,
-                    radius,
-                };
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
                         this.table_cell(
@@ -957,7 +952,7 @@ impl MarkdownView {
                             header,
                             &format!("cell-{ix}-{row}-{column}"),
                             format!("markdown-cell-{ix}-{row}-{column}"),
-                            picture,
+                            colors.fg_muted,
                         )
                     };
                 // Table text uses the same body size and line height as prose:
@@ -1015,9 +1010,7 @@ impl MarkdownView {
                 .text_size(gpui::px(sm))
                 .child(tex.clone())
                 .into_any_element(),
-            Block::ImageRow(pictures) => {
-                self.picture_row(ix, &unit_cursor, pictures, &colors, xs, radius)
-            }
+            Block::ImageRow(pictures) => self.picture_row(ix, &unit_cursor, pictures),
             Block::Centered(blocks) => div()
                 .w_full()
                 .flex()
@@ -1034,17 +1027,9 @@ impl MarkdownView {
                     )
                 }))
                 .into_any_element(),
-            Block::Image { alt, url, hints } => self.picture_unit(
-                ix,
-                alt,
-                url,
-                *hints,
-                images::PictureStyle {
-                    colors: &colors,
-                    small_text: xs,
-                    radius,
-                },
-            ),
+            Block::Image { url, hints, .. } => self
+                .picture_unit(ix, url, *hints)
+                .unwrap_or_else(|| div().into_any_element()),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
                 .font_family(mono)
@@ -1084,15 +1069,15 @@ impl MarkdownView {
         // Flow mode uses the same real first/last block inset; the host scrolls
         // it, so the document does not need list-level padding tricks.
         let vertical = window.rem_size() * 0.75;
-        let pending_images = self.only_pending_images(block);
+        let hidden_images = self.only_hidden_images(block);
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
             .when(centered, |block| {
                 block.w_full().flex().flex_col().items_center()
             })
             .px_3()
-            .when(!pending_images, |block| block.py_1())
-            .when(pending_images, |block| {
+            .when(!hidden_images, |block| block.py_1())
+            .when(hidden_images, |block| {
                 block.h(gpui::px(0.0)).overflow_hidden()
             })
             // Include real content insets in first/last block measurements.
@@ -1250,11 +1235,6 @@ impl MarkdownView {
                 repeated_head,
             } => {
                 let repeated = *repeated_head;
-                let picture = images::PictureStyle {
-                    colors,
-                    small_text: body,
-                    radius,
-                };
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
                         this.table_cell(
@@ -1267,7 +1247,7 @@ impl MarkdownView {
                             header,
                             &format!("nested-{}-{row}-{column}", id.1),
                             format!("markdown-nested-cell-{}-{row}-{column}", id.1),
-                            picture,
+                            colors.fg_muted,
                         )
                     };
                 // Same body size and line height as prose, so a nested table
@@ -1347,9 +1327,7 @@ impl MarkdownView {
                     .child(view)
                     .into_any_element()
             }
-            Block::ImageRow(pictures) => {
-                self.picture_row(ix, units, pictures, colors, body, radius)
-            }
+            Block::ImageRow(pictures) => self.picture_row(ix, units, pictures),
             Block::Centered(blocks) => div()
                 .w_full()
                 .flex()
@@ -1360,22 +1338,13 @@ impl MarkdownView {
                     self.nested(ix, units, ("center", format!("{ix}-{at}")), block, style)
                 }))
                 .into_any_element(),
-            Block::Image { alt, url, hints } => self.picture_unit(
-                ix,
-                alt,
-                url,
-                *hints,
-                images::PictureStyle {
-                    colors,
-                    small_text: body,
-                    radius,
-                },
-            ),
+            Block::Image { url, hints, .. } => self
+                .picture_unit(ix, url, *hints)
+                .unwrap_or_else(|| div().into_any_element()),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
                 .child(match other {
-                    Block::Image { alt, .. } => alt.clone(),
                     Block::Html(text) => text.clone(),
                     Block::Math { tex, .. } => tex.clone(),
                     Block::Paragraph(inline) => inline.text.clone(),
@@ -1406,7 +1375,7 @@ impl MarkdownView {
         header: bool,
         key: &str,
         selector: String,
-        picture: images::PictureStyle<'_>,
+        muted: gpui::Hsla,
     ) -> AnyElement {
         let align = table_align(aligns, column);
         let presentation = repeated && header;
@@ -1447,7 +1416,7 @@ impl MarkdownView {
                         let unit = self.next_unit(ix, units);
                         let link = image.link.clone();
                         let Some(picture) =
-                            self.cell_picture(ix, image, format!("{key}-picture-{at}"), picture)
+                            self.cell_picture(ix, image, format!("{key}-picture-{at}"))
                         else {
                             // Pending demand stays invisible and adds no cell
                             // row; the board still has the request and remeasures
@@ -1517,26 +1486,19 @@ impl MarkdownView {
             .py_2()
             .child(content);
         if header {
-            cell = cell
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(picture.colors.fg_muted);
+            cell = cell.font_weight(gpui::FontWeight::MEDIUM).text_color(muted);
         }
         cell.into_any_element()
     }
 
     /// One picture inside a table cell, sized within the cell.
     ///
-    /// It draws through the same picture presenter as every other picture, so
-    /// pending demand stays invisible, failures keep their diagnostic, and a
-    /// landed picture keeps its logical size. `None` means the picture is still
-    /// pending: the board already has the request, so the cell adds no row.
-    fn cell_picture(
-        &self,
-        ix: usize,
-        picture: &CellImage,
-        key: String,
-        style: images::PictureStyle<'_>,
-    ) -> Option<AnyElement> {
+    /// It draws through the same picture presenter as every other picture.
+    /// `None` means nothing is drawn: still loading, failed/refused,
+    /// unavailable or released after eviction. The cell then adds neither a
+    /// row nor a gap for it, while its alt text stays in the copy model and a
+    /// landed picture keeps its logical size.
+    fn cell_picture(&self, ix: usize, picture: &CellImage, key: String) -> Option<AnyElement> {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(&picture.url, context) {
                 Ok(target) => board.borrow_mut().want(ix, target),
@@ -1544,24 +1506,16 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
-        if self.pending_image(&picture.url) {
+        if !state.is_ready() {
+            // Demand is registered; the shared presenter and the reader pump
+            // keep the state machine, budgets and remeasurement unchanged.
             return None;
         }
-        // A landed picture is the cell's content, and the surrounding row may
-        // already be its caption; its description stays in the copy model and
-        // in every failed state, where it is the only readable thing.
-        let alt = if state.is_ready() {
-            ""
-        } else {
-            picture.alt.as_str()
-        };
         let element = images::image_element(
             gpui::ElementId::Name(format!("reader-{key}").into()),
-            format!("markdown-{key}-note"),
-            alt,
+            format!("markdown-{key}"),
             &state,
             picture.hints,
-            style,
             format!("markdown-{key}-frame"),
         );
         Some(images::painted_when_visible(
@@ -1577,9 +1531,6 @@ impl MarkdownView {
         ix: usize,
         units: &std::cell::Cell<usize>,
         pictures: &[(String, String, ImageHints)],
-        colors: &ely_core::theme::Palette,
-        size: f32,
-        radius: gpui::Rems,
     ) -> AnyElement {
         div()
             .debug_selector(move || format!("markdown-picture-row-{ix}"))
@@ -1603,21 +1554,11 @@ impl MarkdownView {
                         if !alt.is_empty() {
                             let _ = self.next_unit(ix, units);
                         }
+                        // Every non-ready picture is dropped from the row, so it
+                        // cannot claim its own gap or keep an empty box. The
+                        // shared presenter already reports only pixels.
+                        let picture = self.picture_unit(ix, url, *hints)?;
                         // Different pictures in one paragraph must keep independent element IDs.
-                        let picture = self.picture_unit(
-                            ix,
-                            alt,
-                            url,
-                            *hints,
-                            images::PictureStyle {
-                                colors,
-                                small_text: size,
-                                radius,
-                            },
-                        );
-                        if self.pending_image(url) {
-                            return None;
-                        }
                         Some(
                             div()
                                 .debug_selector(move || {
@@ -1646,41 +1587,48 @@ impl MarkdownView {
         )
     }
 
-    fn pending_image(&self, url: &str) -> bool {
-        self.image_board
-            .as_ref()
-            .zip(self.resource_context.as_ref())
-            .is_some_and(|(board, context)| {
-                images::resolve_target(url, context)
-                    .ok()
-                    .is_some_and(|target| board.borrow().is_loading(&target.key()))
-            })
+    /// Whether a picture source is on screen right now.
+    ///
+    /// Only `Ready` paints. Loading/unrequested, failed/refused, unavailable
+    /// and released pictures all render nothing, so a block made only of them
+    /// must not keep its image padding or an empty row around them.
+    fn picture_visible(&self, url: &str) -> bool {
+        let Some(board) = self.image_board.as_ref() else {
+            // Without a board no picture can paint.
+            return false;
+        };
+        let Some(context) = self.resource_context.as_ref() else {
+            return false;
+        };
+        match images::resolve_target(url, context) {
+            Ok(target) => board.borrow().is_ready(&target.key()),
+            Err(_) => false,
+        }
     }
 
-    fn only_pending_images(&self, block: &Block) -> bool {
-        let loading = |url: &str| self.pending_image(url);
+    /// A block whose pictures are all invisible contributes no image row.
+    fn only_hidden_images(&self, block: &Block) -> bool {
+        let hidden = |url: &str| !self.picture_visible(url);
         match block {
-            Block::Image { url, .. } => loading(url),
+            Block::Image { url, .. } => hidden(url),
             Block::ImageRow(pictures) => {
-                !pictures.is_empty() && pictures.iter().all(|(_, url, _)| loading(url))
+                !pictures.is_empty() && pictures.iter().all(|(_, url, _)| hidden(url))
             }
             Block::Centered(body) => {
-                !body.is_empty() && body.iter().all(|block| self.only_pending_images(block))
+                !body.is_empty() && body.iter().all(|block| self.only_hidden_images(block))
             }
             _ => false,
         }
     }
 
-    /// One picture block: pending demand is visually collapsed; failures retain
-    /// diagnostics, and successful pixels retain their author dimensions.
-    fn picture_unit(
-        &self,
-        ix: usize,
-        alt: &str,
-        url: &str,
-        hints: ImageHints,
-        style: images::PictureStyle<'_>,
-    ) -> AnyElement {
+    /// One picture block: real pixels when ready, nothing at all otherwise.
+    ///
+    /// `None` means the picture contributes no element of its own: still
+    /// loading/unrequested, failed/refused, unavailable or released. Demand is
+    /// still registered through `want`, so the state machine, budgets,
+    /// cancellation and remeasurement are unchanged; only the visuals are
+    /// omitted, and alt text stays in the copy model.
+    fn picture_unit(&self, ix: usize, url: &str, hints: ImageHints) -> Option<AnyElement> {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(url, context) {
                 Ok(target) => board.borrow_mut().want(ix, target),
@@ -1688,16 +1636,20 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
+        if !state.is_ready() {
+            return None;
+        }
         let picture = images::image_element(
             gpui::ElementId::Name(format!("reader-picture-{ix}-{url}").into()),
             images::image_selector(ix),
-            alt,
             &state,
             hints,
-            style,
             images::frame_selector(ix),
         );
-        images::painted_when_visible(picture, self.picture_visibility(url))
+        Some(images::painted_when_visible(
+            picture,
+            self.picture_visibility(url),
+        ))
     }
 
     /// A paragraph drawn from one unit of the document model.

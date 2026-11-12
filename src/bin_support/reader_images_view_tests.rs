@@ -104,6 +104,9 @@ fn state_of(reader: &Entity<ReaderView>, cx: &mut VisualTestContext, key: &Image
 }
 
 /// Every picture block that actually painted, by top-level block index.
+///
+/// The selector exists only while a picture really draws, so this is also the
+/// check that a non-ready picture reserved nothing.
 fn painted_picture_blocks(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) -> Vec<usize> {
     let blocks = reader.read_with(cx, |reader, cx| {
         reader
@@ -114,7 +117,7 @@ fn painted_picture_blocks(reader: &Entity<ReaderView>, cx: &mut VisualTestContex
     (0..blocks)
         .filter(|index| {
             let selector: &'static str =
-                Box::leak(format!("markdown-picture-note-{index}").into_boxed_str());
+                Box::leak(format!("markdown-picture-{index}").into_boxed_str());
             cx.debug_bounds(selector).is_some()
         })
         .collect()
@@ -215,7 +218,7 @@ fn pictures_keep_their_alt_text_and_stay_inside_the_reading_column(cx: &mut Test
 }
 
 #[gpui::test]
-fn a_missing_or_refused_picture_shows_an_honest_placeholder(cx: &mut TestAppContext) {
+fn a_missing_or_refused_picture_draws_nothing_at_all(cx: &mut TestAppContext) {
     let (_pipeline, reader, cx) = open(cx, Scene::Failure);
     let text = repository_key("docs/images/notes.txt");
     let missing = repository_key("docs/images/missing.png");
@@ -227,19 +230,46 @@ fn a_missing_or_refused_picture_shows_an_honest_placeholder(cx: &mut TestAppCont
                 .image_state(&missing)
                 .is_some_and(|state| state != "loading")
     });
+    // The reasons stay internal state; the page shows nothing for them.
     assert_eq!(
         state_of(&reader, cx, &text),
         "unsupported picture format",
         "a text file is not silently accepted"
     );
     assert_eq!(state_of(&reader, cx, &missing), "picture not found");
-    // Every picture block still draws, with its alt text.
     frames(cx);
     let painted = painted_picture_blocks(&reader, cx);
     assert!(
-        painted.len() >= 3,
-        "a failed picture still draws its placeholder: {painted:?}"
+        painted.is_empty(),
+        "a failed picture draws no placeholder, panel or label: {painted:?}"
     );
+    // No picture frame is laid out either, so nothing reserves the old box.
+    let blocks = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .map(|document| document.read(cx).block_count())
+            .unwrap_or(0)
+    });
+    for index in 0..blocks {
+        let selector: &'static str =
+            Box::leak(format!("markdown-picture-frame-{index}").into_boxed_str());
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "block {index} must not reserve a picture frame"
+        );
+    }
+    // The surrounding prose still reads normally, and the alt text survives in
+    // the copy model even though it is never painted.
+    let text = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .expect("markdown")
+            .read(cx)
+            .document_text()
+            .to_string()
+    });
+    assert!(text.contains("This picture does not exist:"), "{text:?}");
+    assert!(text.contains("missing"), "alt stays copyable: {text:?}");
 }
 
 #[gpui::test]
@@ -360,16 +390,10 @@ fn a_reader_before_provider_attachment_keeps_pending_pictures_collapsed(cx: &mut
             .is_none(),
         "without a provider nothing is requested"
     );
-    let painted = painted_picture_blocks(&reader, cx);
-    for index in painted {
-        let selector: &'static str =
-            Box::leak(format!("markdown-picture-note-{index}").into_boxed_str());
-        assert_eq!(
-            cx.debug_bounds(selector).unwrap().size.height,
-            px(0.0),
-            "unrequested valid images have no panel or label"
-        );
-    }
+    assert!(
+        painted_picture_blocks(&reader, cx).is_empty(),
+        "an unrequested picture draws nothing until a provider answers"
+    );
     assert!(cx.debug_bounds("reader-markdown").is_some());
 }
 
@@ -485,7 +509,7 @@ fn picture_blocks_measure_next_to_their_paragraphs(cx: &mut TestAppContext) {
     let (_index, paragraph) = paragraph.expect("a paragraph near a picture");
     assert!(paragraph.size.height > px(1.0) && paragraph.size.height < px(80.0));
     let picture = cx
-        .debug_bounds("markdown-picture-note-2")
+        .debug_bounds("markdown-picture-2")
         .expect("the picture block is measured");
     let frame = cx
         .debug_bounds("markdown-picture-frame-2")

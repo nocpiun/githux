@@ -20,7 +20,7 @@
   - `Block::Table` 改为按 `cell_parts` 逐 piece 登记单元：cell 内文本段与图片（alt 文本）各一个单元，只有 cell 的最后一个 piece 带 `\t`/换行分隔符。复制文本与以前逐字节相同（仍是原 cell 文本），但单元数可以大于 1；重复表头也按 piece 数登记空单元，保持渲染游标同步。
 - `document.rs`
   - 顶层与嵌套表格共用一个 `table_cell` 帮助函数：无图片 cell 保持原段落路径；有图片 cell 用 `flex_col` 按阅读顺序堆叠文本段与图片，文本段仍是 `ParagraphView`（选区/链接/列对齐不变），图片走新的 `cell_picture`。
-  - `cell_picture` 复用 `images::resolve_target`、`ImageBoard::want(ix, ..)` 与 `images::image_element`，因此账户/文档代次、取消、预算、no-store、失败降级全部沿用现有实现；图片按 `ix`（顶层块）登记，落地时重测该块/行。它不实现自己的 placeholder：pending/failed/unavailable 的可见呈现仍是共享 presenter 的决定。
+  - `cell_picture` 复用 `images::resolve_target`、`ImageBoard::want(ix, ..)` 与 `images::image_element`，因此账户/文档代次、取消、预算、no-store、失败降级全部沿用现有实现；图片按 `ix`（顶层块）登记，落地时重测该块/行。它不实现自己的 placeholder：非 Ready 的可见呈现由共享 presenter 决定（后续按负责人指令统一为完全不绘制）。
   - 只有 Ready 状态不再把 alt 交给 presenter（否则同一 row 的 caption 会重复）；未加载/失败/无 provider 时仍把 alt 传入，保留可读的失败说明和语义。alt 始终在 `DocText` 复制模型里。
   - 图片的绘制区域登记为该单元的真实命中目标（`PictureHit`）：图片没有可命中的字形排版，若不登记，从图片起手的拖选会被当成空白并从文档起点开始。命中后按拖拽方向取该单元范围的端点，选区从图片所在 cell 开始。
   - `[![alt](img)](link)`：解析时把**包住该图片自己的**链接记录在 `CellImage::link` 上，而不是从 `Inline::links` 的字节包含关系反推（空 alt 图片的范围是零长度，无法与相邻链接区分）。渲染据此显示手形光标，点击沿用文档的 press/click 路径（任何拖动、移出窗口、失焦或清空选区都会取消），危险 scheme 仍由 `links::resolve` 拒绝。
@@ -52,7 +52,7 @@
   - `a_picture_wrapped_in_a_link_in_a_cell_opens_the_link`：图片链接通过 `ReaderAction::Link` 报告外链；`a_drag_that_starts_on_a_linked_cell_picture_does_not_open_it` 证明拖选经过图片不会误导航；`dragging_from_a_cell_picture_selects_from_the_picture_not_the_document_start` 证明从图片起手的拖选不会选中整篇文档；`an_empty_alt_cell_picture_opens_its_own_link_not_the_neighbouring_one` 覆盖空 alt 图片与相邻链接的归属。
   - `a_text_link_beside_a_cell_picture_still_opens`：同一 cell 内的文字链接仍按原偏移解析到固定 commit。
   - `copying_a_table_with_pictures_keeps_the_cell_text_and_tabs`：Ctrl+A/C 在有图片的表格里仍以 alt 文本 + tab/换行复制。
-  - `a_table_cell_picture_without_a_provider_stays_honest`：没有 provider 时仍走共享的诚实占位，alt 仍在复制文本里。
+  - `a_table_cell_picture_without_a_provider_stays_honest`：没有 provider 时保持静默（不绘制占位），alt 仍在复制文本里（后续按负责人指令改为与所有非 Ready 状态一致）。
   - `an_html_table_cell_picture_uses_the_same_image_lifecycle`：sanitized HTML 表格 cell 图片走同一解析与 provider 路径。
 
 ## 与未合并 SVG 任务（PR82）的集成边界
@@ -78,8 +78,29 @@
   - `cargo build --locked` 与 `cargo build --locked --example reader_images` 通过；清洁 head 上的预览产物与收据记录在 `.agents/task/preview/`。
 - 未重复运行无关的整套测试；新的图片/表格组合行为由上述针对性目标与 CI 覆盖。
 
+## 2026-11-12 非 Ready 图片完全静默（同一 PR 返工）
+
+负责人此前“保留失败诊断”的指令已被取代：**只要图片不能显示，就什么都不画**。这不是验收，而是同一 PR 的行为返工，仍在原 worktree / 分支 / PR #86 上完成。
+
+- 共享 presenter `images::image_element` 只保留一条绘制分支：`Ready` 画真实像素（alpha、原生/作者请求尺寸、逻辑 DPI 宽度、列对齐、链接、有限 SVG 动画全部不变）；`Loading`、`Failed/Refused`、`Unavailable`、`Released` 统一画零尺寸空元素。原先的 `note` 闭包（`px_3`/`py_2`/`sunken` 背景 + alt/诊断文案）整体删除，`PictureStyle` 也随之删掉（不再需要主题颜色、小字号与圆角）。
+- `markdown/document.rs`
+  - `picture_unit` 改为返回 `Option<AnyElement>`，非 Ready 直接返回 `None`；`picture_row` 用 `?` 把不可见图片从 flex 行里彻底移除，因此不会留下 gap。
+  - `cell_picture` 同样在非 Ready 时返回 `None`（此前只对 pending 这样做），失败/拒绝/不可用/已释放的 cell 图片都不生成子元素、不占行、不显示 alt；表头、边框与作者写的 caption 行（`**Dashboard**` 等）不受影响。
+  - `pending_image` + `only_pending_images` 改为 `picture_visible` + `only_hidden_images`：判定依据从“是否 loading”变成“是否 Ready”，全部不可见的图片块高度归零、不加图片内边距。`ImageBoard` 新增 `is_ready(&ImageKey)`（只读，不登记需求），并删除了因此失去调用方的 `is_loading`、`attached()`。
+  - 调试选择器 `markdown-picture-note-{ix}` 更名为 `markdown-picture-{ix}`，只在真正绘制时存在，所以“选择器不存在”本身就是“没有预留空间”的证据；cell 图片同理使用 `markdown-{cell}-picture-{part}`。`frame` 选择器保持 `markdown-picture-frame-{ix}` / `…-picture-{part}-frame`。
+- 文档：`docs/reader-images.md`、`docs/content-reader.md` 把“失败/拒绝仍显示诊断”“未请求/加载中折叠”等表述统一改成“非 Ready 一律不绘制”，并说明失败原因只作为内部状态（测试/调度），alt 仍留在复制模型里。
+- 回归：
+  - `ui::reader::tests::a_missing_or_refused_picture_draws_nothing_at_all`（原 `…shows_an_honest_placeholder`）：失败/拒绝/不支持格式一律无 picture 选择器、无 frame，正文照常，alt 仍可复制。
+  - `ui::reader::tests::a_refused_or_failed_cell_picture_draws_nothing`：cell 内的 `file:` 拒绝与真实 `NotFound` 都不画元素，cell 只保留文字高度，表头/边框/图注行不变。
+  - `ui::reader::tests::a_released_cell_picture_disappears_instead_of_reserving_its_box`：`max_ready_images: 1` 触发真实淘汰后，被释放的图片不再占位，只有保留的那一张绘制，作者图注行仍在。
+  - `ui::reader::tests::a_repository_file_picture_draws_nothing_without_loading`（原 `…draws_a_note_without_loading`）：`file:` 图标不绘制，源地址与 alt 仍可读。
+  - `bin_support` 图片视图测试改用 `markdown-picture-{ix}`：`a_missing_or_refused_picture_draws_nothing_at_all` 断言所有失败块都不绘制，`a_reader_before_provider_attachment_keeps_pending_pictures_collapsed` 与 `quality_silent_pending_*` 断言 pending 既无 picture 也无 frame 选择器。
+- 验证（共享 build slot，进程内 `TEMP`/`TMP` 指向本 worktree 的 `.agents/task/tmp`，`CARGO_PROFILE_DEV_DEBUG=0`、`CARGO_PROFILE_TEST_DEBUG=0`、`CARGO_INCREMENTAL=0`）：`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`cargo test --locked --bin githux -- ui::reader`（220 passed）、`cargo test --locked --test reader --test reader_images --test repository` 全部通过。
+- 与图片性能任务的边界：本任务只改呈现层（`image_element`、`picture_unit`/`picture_row`/`cell_picture`、`only_hidden_images`、`is_ready`）。`ImageBoard` 的调度、预算、淘汰、解码与 provider 仍归性能任务；双方各自只写自己的 worktree，接口若再变以本条与 `.agents/task/reader-performance-handoff.md` 记录为准。
+
 ## 后续
 
 - 需要负责人原生窗口视觉验收（真实截图表格、窄窗口、缩放比例）。
 - 表格内的图片与文本按块堆叠（各占一行），不是文字行内原位置；与段落内联图片的既有取舍一致，已在主题文档写明。
 - 未新增表格图片的端到端 fixture 场景到 `reader-images` 预览（该装配与 PR82 重叠）；本任务的布局/完成回归使用 `ui::reader` 测试内的确定性 provider。
+
