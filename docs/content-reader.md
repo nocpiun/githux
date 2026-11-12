@@ -1,6 +1,6 @@
 # 可复用只读阅读器
 
-更新：2026-10-30（可选 README 图片能力；Flow 背景由宿主负责）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读凭据、不落盘。图片能力是可注入的（`set_image_provider`），**由宿主提供的 provider 执行读取与解码**，reader 自身不在 render 中发网络或解码；不传 provider 时所有图片保持诚实的 alt/占位状态，见 [README 图片](reader-images.md)。
+更新：2026-10-30（可选 README 图片能力；Flow 背景由宿主负责）。R3 的 UI 切片，位于 `src/ui/reader/**`、独立预览 `examples/reader.rs` 和测试入口 `tests/reader.rs`。它消费已有的 [`content::PreparedContent`](../src/content/mod.rs) 与 `domain::blob::BlobIdentity`，把「已准备好的正文」呈现成本模块自行维护的 Markdown 阅读视图或只读源码视图；不读凭据、不落盘。图片能力是可注入的（`set_image_provider`），**由宿主提供的 provider 执行读取与解码**，reader 自身不在 render 中发网络或解码；不传 provider 时合法待请求图片保持零高度，alt 语义继续保存在复制文本中，见 [README 图片](reader-images.md)。
 
 **状态边界：** 阅读器组件与预览已实现并通过测试平台验证；**尚未接入 `src/ui/mod.rs` / `src/app` / 仓库页面**，因此主界面仍不显示真实仓库正文。接入属于后续 data⇄UI 接线任务，本轮不把预览当作「真实数据已接主界面」。
 
@@ -83,7 +83,7 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
 - fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
 - 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding、边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
-- 图片按注入的 provider 显示（未注入时保留 alt/未载入占位），HTML 规范化后走同一 `Block`/`Inline`（其中 `<img>` 同样交给图片板），链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。图片成功时按解码原生尺寸绘制，不拉伸到栏宽、不叠加占位背景；`<img width="…" height="…">` 的像素提示会被保留到渲染层，仅能缩小（不超过原生尺寸），超宽图按比例缩小到可用栏宽。
+- 图片按注入的 provider 显示（未请求/排队/加载中静默折叠，失败/拒绝保留诊断），HTML 规范化后走同一 `Block`/`Inline`（其中 `<img>` 同样交给图片板），链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。图片成功时按解码原生尺寸绘制，不拉伸到栏宽、不叠加占位背景；`<img width="…" height="…">` 的像素提示会被保留到渲染层，仅能缩小（不超过原生尺寸），超宽图按比例缩小到可用栏宽。
 - Source gutter 仍为原 0.75rem 加 6px。
 
 ## HTML 子集（2026-10-29）
@@ -93,10 +93,11 @@ README 中常见的原始 HTML 由本地 `src/ui/reader/markdown/html.rs` 规范
 - 注释（`<!-- ... -->`，含跨行、行内）与 `<!doctype>`、处理指令一律丢弃，不进入可见正文、文档模型或复制文本。
 - 容器与结构：`div`/`section`/`article`/`p`/`center`/`details`/`summary`/`figure` 等展开为段落；`h1`–`h6` 成为标题并进入导航索引；`ul`/`ol`/`li` 成为真实列表；`blockquote`、`hr`、`br` 分别成为引用、分隔线、换行。
 - 行内语义：`strong`/`b`、`em`/`i`、`del`/`s`、`code`/`kbd`/`samp`、`a href`、`img src` 映射为与 Markdown 相同的样式、链接和图片块。`<img>` 只产生 `Block::Image`，URL 仍由 `links::resolve` 与图片管线判定；`width`/`height` 属性解析为可选尺寸提示（仅正整像素，百分比/单位忽略）随图片块传递到渲染层。
+- 图片呈现：纯图片段落保留为可换行的同一行组，空行分隔各组；图片成功时保留 alpha 与原生/作者请求大小，不强制 alt 图注；待加载项先登记需求再从可见图片行移除，不为其保留 gap 或 140px 面板。常见 `align="center"` 容器对段落和图片行生效，随后仍按段落分为独立虚拟项，标题/选择的顶层块映射随之重建。混合文字与图片的行盒布局仍有下文限制。
 - 表格：`table`/`thead`/`tbody`/`tr`/`th`/`td` 转成 `Block::Table`；首行全为 `th` 时作为表头，否则第一行提升为表头；`align` 属性或 `style="text-align:..."` 决定列对齐；单元格内的块级内容按行内文本展平。补齐空单元格前检查总预算（含表头最多 65,536 格），超宽×超长的表格回退为按行文本，避免二次内存膨胀。
 - 代码：`pre`/`code` 成为围栏代码块（`class="language-x"` 取语言）；Markdown 行内代码与围栏代码中的 HTML 原样保留，因为它们是 `Code`/`CodeBlock` 事件而非 HTML 事件。
 - 安全：`script`/`style`/`template`/`iframe`/`object`/`embed`/`head`/`title`/`textarea` 等整段丢弃（含开闭标签之间作为独立事件到达的正文，也含空行把块级 HTML 截断后继续出现的 Markdown 内容；丢弃元素前后的可见内容仍保留，列表/引用开闭正常平衡），事件处理属性只被忽略，绝不回写原始 HTML；实体按常见命名引用与数值引用解码，未知或畸形实体保留字面文本，`&nbsp;` 等 Unicode 空白不会被折叠成普通空格。
-- 明确不支持：`align` 等布局属性的视觉居中/对齐（内容保留、布局忽略）；`colspan`/`rowspan`；SVG/MathML 与 CSS 布局；`<details>` 的折叠交互（默认全部展开）；未闭合标签按容错规则丢弃或展开。元素树嵌套深度上限 256 层，更深的标签被展平（文本保留、额外标签丢弃），以避免小体积输入触发递归栈溢出。复杂嵌套或表格跨度会退化为内容保留的近似排版。
+- 明确不支持：除上述居中子集外的 HTML/CSS 页面布局；`colspan`/`rowspan`；直接嵌入 Markdown HTML 树中的 SVG/MathML（图片响应的受限 SVG 解码另见 README 图片契约）；`<details>` 的折叠交互（默认全部展开）；未闭合标签按容错规则丢弃或展开。元素树嵌套深度上限 256 层，更深的标签被展平（文本保留、额外标签丢弃），以避免小体积输入触发递归栈溢出。复杂嵌套或表格跨度会退化为内容保留的近似排版。
 
 ## 滚动条（共享核心）
 
@@ -116,7 +117,7 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
 - **图片**：仓库模式不允许本地文件/data 图片，图片 URL 由既有图片管线（`links::resolve` → `ImageTarget` → 宿主 provider）判定；HTML 的 `img`/`a` 与 Markdown 共用同一安全边界，不新增读取路径。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 的 CSS 布局、`colspan`/`rowspan`、脚注样式、绝对 URL 重写）。无法支持的语法按内容保留的近似排版显示，不在本模块另造。
-- **表格单元格内图片**：仍只显示 alt 文本（AST 在 cell 中没有块列表可挂图片）；行内图片被提取为段落后的图片块，不是文字行内原位置。SVG 等未支持格式明确 Unsupported。细节与支持边界见 [README 图片](reader-images.md#支持边界明确未覆盖)。
+- **表格单元格内图片**：仍只显示 alt 文本（AST 在 cell 中没有块列表可挂图片）；混合文字/图片段落仍将图片提取到文字后。纯图片段落保留为 `ImageRow`。SVG 支持有界静态光栅化与有限 CSS 入场时间线；细节与明确的未覆盖项见 [README 图片](reader-images.md#支持边界明确未覆盖)。
 - **接入**：仓库页面的文件选择与正文请求、data 层会话接线还没有；README 图片能力也只在独立预览中验收，正式 Shell 的 provider 接线契约见 [README 图片](reader-images.md#后续正式接线契约)。本轮的预览与 fixture 只用于验收，不冒充真实数据。
 
 

@@ -10,11 +10,14 @@
 //!
 //! * Every picture is bounded before it can allocate: the encoded response is
 //!   capped while it streams, the header is read first, and the full decode
-//!   runs under [`image::Limits`] so an oversized or malformed payload is
-//!   rejected instead of becoming a broken-image state.
-//! * Only PNG, JPEG, WebP and GIF are accepted, matching the formats the
-//!   existing `image` dependency is built with. SVG is reported as
-//!   [`ImageFailure::Unsupported`] rather than executed or silently accepted.
+//!   runs under [`image::Limits`] (or bounded SVG tree/pixmap caps for static
+//!   SVGs) so an oversized or malformed payload is rejected instead of becoming
+//!   a broken-image state.
+//! * PNG, JPEG, WebP and GIF pass through as validated raster bytes; static
+//!   SVGs are rasterized to PNG bytes with external references and scripting
+//!   disabled, while unsupported SVG features (`<foreignObject>`, `<script>`,
+//!   SMIL animation, etc.) and unknown formats are reported as
+//!   [`ImageFailure::Unsupported`].
 //! * The reader owns the document-generation check; a provider owns the
 //!   account/authorization check. A completion carries the generation it was
 //!   requested under so a stale result can never be published into a newer
@@ -23,9 +26,17 @@
 //!   have independent state, independent cancellation and independent memory.
 
 mod decode;
+mod fonts;
+mod render_options;
+pub use render_options::ImageRenderOptions;
+mod timeline;
+mod workspace;
 
 #[allow(unused_imports)]
-pub use decode::{DecodedImage, ImageFormat, decode_image, detect_format, is_svg_like};
+pub use decode::{
+    DecodedAnimation, DecodedFrame, DecodedImage, DecodedPixels, ImageFormat, decode_image,
+    decode_image_checked, decode_image_with_options_checked, detect_format, is_svg_like,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -284,11 +295,24 @@ pub trait ImageProvider: Send + Sync + 'static {
     /// Implementations must not block the calling thread.
     fn start(&self, request: ImageRequest, sink: ImageSink);
 
+    /// Supplies physical display density without changing request identity or
+    /// logical author dimensions. Existing/custom providers remain compatible.
+    fn start_with_options(
+        &self,
+        request: ImageRequest,
+        sink: ImageSink,
+        _options: ImageRenderOptions,
+    ) {
+        self.start(request, sink);
+    }
+
     /// Cancels every load started under `scope` (one reader's document
     /// generation). Safe to call repeatedly, and it must not affect any other
     /// scope, including the same generation number in another reader.
     fn cancel(&self, scope: ImageScope);
 }
 
+#[cfg(test)]
+mod quality_tests;
 #[cfg(test)]
 mod tests;
