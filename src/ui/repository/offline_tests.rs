@@ -486,7 +486,10 @@ fn settle(
     cx: &mut VisualTestContext,
     mut done: impl FnMut(&RepositoryPage) -> bool,
 ) {
-    for _ in 0..800 {
+    // Deadline-based, not a fixed iteration count: a loaded machine must not fail a test that is
+    // only waiting for its own replies to be drained.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
         page.update_in(cx, |page, window, cx| page.drain(window, cx));
         cx.run_until_parked();
         frames(cx);
@@ -494,12 +497,13 @@ fn settle(
         if page.read_with(cx, |page, _| done(page)) {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "page did not settle; error={:?} status={:?}",
+            page.read_with(cx, |page, _| page.error().cloned()),
+            page.read_with(cx, |page, _| page.reader_status().clone())
+        );
     }
-    panic!(
-        "page did not settle; error={:?} status={:?}",
-        page.read_with(cx, |page, _| page.error().cloned()),
-        page.read_with(cx, |page, _| page.reader_status().clone())
-    );
 }
 
 fn reader_text(page: &Entity<RepositoryPage>, cx: &mut VisualTestContext) -> String {
@@ -774,6 +778,120 @@ fn an_unverified_revalidation_settles_the_missing_snapshot_resources(cx: &mut Te
         page.reader_status() != &ReaderStatus::Loading && page.tree("").is_some()
     });
     assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+}
+
+/// Regression (review finding): a cache-only read that is still in flight when the same commit is
+/// verified online must be superseded. Its late cache-miss result is discarded and the verified
+/// chain requests the same path again, so neither a directory nor a document stays on an error (or
+/// loading) produced by the preliminary pass.
+#[gpui::test]
+fn a_pending_cache_phase_read_is_superseded_by_online_verification(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+
+    let (branch, snapshot, commit, request) = page.read_with(cx, |page, _| {
+        let state = page.branch.as_ref().expect("a displayed branch");
+        (
+            state.name.clone(),
+            state.snapshot.clone(),
+            state.commit().clone(),
+            page.branch_request,
+        )
+    });
+    let identity = page.read_with(cx, |page, _| {
+        let state = page.branch.as_ref().expect("a displayed branch");
+        match &state.readme {
+            super::super::ReadmeState::Found(descriptor) => {
+                crate::domain::blob::BlobIdentity::from_readme(descriptor)
+            }
+            other => panic!("the fixture must discover a README, got {other:?}"),
+        }
+    });
+
+    let (request_before, reader_status) = page.update(cx, |page, cx| {
+        let state = page.branch.as_mut().expect("a displayed branch");
+        state.snapshot_provenance = Some(super::super::RepositoryCacheProvenance {
+            origin: RepositoryCacheOrigin::Snapshot,
+            fetched_at_ms: 1,
+            verified_at_ms: 1,
+            completeness: crate::domain::cache::CacheCompleteness::Complete,
+        });
+        // A directory and a document read are in flight from the cache-only pass.
+        state
+            .tree
+            .begin_load("docs", crate::data::RepositoryCacheMode::OfflineOnly);
+        page.intent.expanded.insert("docs".to_string());
+        page.selection = Selection::Readme;
+        page.pending_content = Some(identity.clone());
+        page.reader = None;
+        page.reader_status = ReaderStatus::Loading;
+        let request_before = page.selection_request;
+        // Same commit resolved from the network: the displayed bucket is verified.
+        page.apply_revision(
+            branch.clone(),
+            request,
+            Ok((
+                snapshot.clone(),
+                Some(super::super::RepositoryCacheProvenance {
+                    origin: RepositoryCacheOrigin::Network,
+                    fetched_at_ms: 2,
+                    verified_at_ms: 2,
+                    completeness: crate::domain::cache::CacheCompleteness::Complete,
+                }),
+            )),
+            cx,
+        );
+        assert!(
+            page.pending_content.is_some(),
+            "the superseded document read must be replaced by a new one"
+        );
+        assert_ne!(
+            page.selection_request, request_before,
+            "a superseded document read needs a new identity so its reply is dropped"
+        );
+        assert!(
+            page.branch.as_ref().unwrap().tree.is_loading("docs"),
+            "the superseded directory is requested again through the verified chain"
+        );
+        (request_before, page.reader_status.clone())
+    });
+    let _ = request_before;
+    let _ = reader_status;
+
+    // The late cache-only result arrives after verification: it must not publish a failure.
+    page.update(cx, |page, cx| {
+        page.apply_directory(
+            branch.clone(),
+            commit.clone(),
+            "docs".to_string(),
+            crate::data::RepositoryCacheMode::OfflineOnly,
+            Err(super::super::PageError::new(
+                "`docs` is not cached offline.",
+                Some("Only cached content is available right now.".to_string()),
+                true,
+            )),
+            cx,
+        );
+    });
+    page.read_with(cx, |page, _| {
+        assert!(
+            page.tree_failure("docs").is_none(),
+            "a superseded cache-miss result must not become a visible failure"
+        );
+    });
+
+    // The retried reads finish online: the directory is there and the file opens.
+    settle(&page, cx, |page| {
+        page.tree("docs").is_some() && page.reader_status() == &ReaderStatus::Showing
+    });
+    page.read_with(cx, |page, _| {
+        assert!(page.tree_failure("docs").is_none());
+        assert!(!page.is_showing_cached_snapshot());
+    });
 }
 
 /// Regression (review finding): a cached branch list (network fallback) must not suppress the

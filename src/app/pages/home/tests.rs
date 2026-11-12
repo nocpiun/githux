@@ -460,7 +460,10 @@ fn open_page_with_navigation<'a>(
 }
 
 fn settle(page: &Entity<HomePage>, cx: &mut VisualTestContext) {
-    for _ in 0..400 {
+    // Deadline-based, not a fixed iteration count: a loaded machine must not fail a test that is
+    // only waiting for its own reads to be drained.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
         cx.run_until_parked();
         page.update(cx, |page, cx| page.drain_for_test(cx));
         cx.update(|window, _| window.refresh());
@@ -468,14 +471,13 @@ fn settle(page: &Entity<HomePage>, cx: &mut VisualTestContext) {
         if page.read_with(cx, |page, cx| page.is_ready_for_test(cx)) {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "HomePage did not settle: home={:?}, feed={:?}",
+            page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone()),
+            page.read_with(cx, |page, cx| page.view.read(cx).feed_state().clone()),
+        );
     }
-    let (home, feed) = page.read_with(cx, |page, cx| {
-        (
-            page.view.read(cx).home_state().clone(),
-            page.view.read(cx).feed_state().clone(),
-        )
-    });
-    panic!("HomePage did not settle: home={home:?}, feed={feed:?}");
 }
 
 /// Drives the page's drain until `done` holds or a generous deadline passes, so a test waits for a
@@ -1591,24 +1593,9 @@ fn cached_home_and_feed_paint_before_the_network_read_finishes_then_are_replaced
     let (page, cx) = open_page(&mut fixture, cx);
 
     // Drain only the snapshot half: content must appear with the online read still pending.
-    let mut painted = false;
-    for _ in 0..600 {
-        cx.run_until_parked();
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.update(|window, _| window.refresh());
-        let (title, ids) = (home_title(&page, cx), feed_ids(&page, cx));
-        if title.as_deref() == Some("cached home") && ids == ["first"] {
-            painted = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert!(
-        painted,
-        "the persisted snapshot must paint while the online reads are still pending: home={:?} feed={:?}",
-        page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone()),
-        page.read_with(cx, |page, cx| page.view.read(cx).feed_state().clone()),
-    );
+    drive_until(&page, cx, |page, cx| {
+        home_title(page, cx).as_deref() == Some("cached home") && feed_ids(page, cx) == ["first"]
+    });
     page.read_with(cx, |page, cx| {
         assert!(
             page.view.read(cx).provenance(Column::Home).is_some(),
@@ -1737,20 +1724,9 @@ fn a_second_network_refresh_replaces_the_first_network_result(cx: &mut TestAppCo
     cx.update_window_entity(&page, |page, window, cx| {
         page.refresh_for_test(Column::Home, window, cx)
     });
-    for _ in 0..600 {
-        cx.run_until_parked();
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.update(|window, _| window.refresh());
-        if home_title(&page, cx).as_deref() == Some("online refreshed") {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(
-        home_title(&page, cx).as_deref(),
-        Some("online refreshed"),
-        "a later network result must replace the previous network result"
-    );
+    drive_until(&page, cx, |page, cx| {
+        home_title(page, cx).as_deref() == Some("online refreshed")
+    });
 }
 
 /// Regression (review finding): a deduplicated snapshot must never shrink an already continued
@@ -1771,16 +1747,9 @@ fn refreshing_an_offline_feed_keeps_its_cached_continuation_pages(cx: &mut TestA
     cx.update_window_entity(&page, |page, window, cx| {
         page.load_more_for_test(window, cx)
     });
-    for _ in 0..400 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        cx.update(|window, _| window.refresh());
-        if feed_ids(&page, cx) == ["first", "second"] {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(feed_ids(&page, cx), ["first", "second"]);
+    drive_until(&page, cx, |page, cx| {
+        feed_ids(page, cx) == ["first", "second"]
+    });
 
     // Refresh while still offline: the replay is the same first-page snapshot, which must not
     // replace the continued collection with a shorter one.
@@ -1790,15 +1759,9 @@ fn refreshing_an_offline_feed_keeps_its_cached_continuation_pages(cx: &mut TestA
     cx.update_window_entity(&page, |page, window, cx| {
         page.refresh_for_test(Column::Feed, window, cx)
     });
-    for _ in 0..400 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        cx.update(|window, _| window.refresh());
-        if page.read_with(cx, |page, _| page.work[1].is_none()) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    drive_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, _| page.work[1].is_none())
+    });
     assert_eq!(
         feed_ids(&page, cx),
         ["first", "second"],

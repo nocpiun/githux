@@ -355,6 +355,7 @@ enum Body {
         branch: String,
         commit: ObjectSha,
         path: String,
+        mode: RepositoryCacheMode,
         result: Result<DirectoryTree, PageError>,
     },
     Content(ContentReply),
@@ -448,6 +449,11 @@ pub struct RepositoryPage {
     /// chain has not yet re-resolved that branch. It makes the online chain replace the snapshot
     /// (instead of treating it as an already-loaded branch) exactly once.
     snapshot_preliminary: bool,
+    /// True once this generation resolved its revision from the network. Reads the user starts
+    /// afterwards (expanding a directory, opening a file) then prefer the network even if the
+    /// summary or branch list was still served from the cache, so a cache-phase "not cached" result
+    /// cannot stick after the commit is verified.
+    online_verified: bool,
     branch: Option<BranchState>,
     /// Monotonic identity of the newest branch resolution. A → B → A shares the
     /// page generation, so a branch name alone cannot tell an older A reply from
@@ -547,6 +553,7 @@ impl RepositoryPage {
             snapshot_preliminary: false,
             branch: None,
             branch_request: 0,
+            online_verified: false,
             branches_loading: false,
             selection_request: 0,
             pending_content: None,
@@ -671,6 +678,7 @@ impl RepositoryPage {
         self.branches_provenance = None;
         self.branches_error = None;
         self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -762,6 +770,7 @@ impl RepositoryPage {
         self.branches_provenance = None;
         self.branches_error = None;
         self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -842,6 +851,7 @@ impl RepositoryPage {
         self.details = None;
         self.details_provenance = None;
         self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.branches = None;
         self.branches_provenance = None;
@@ -1007,7 +1017,9 @@ impl RepositoryPage {
                 return;
             }
         };
-        branch.tree.begin_load(path);
+        branch
+            .tree
+            .begin_load(path, RepositoryCacheMode::OnlinePreferred);
         self.invalidate_rows();
         self.spawn_job(Job::Directory {
             branch: branch_name,
@@ -1217,6 +1229,7 @@ impl RepositoryPage {
     }
 
     fn load_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        let mode = self.current_read_mode();
         let Some(branch) = self.branch.as_mut() else {
             return;
         };
@@ -1231,10 +1244,9 @@ impl RepositoryPage {
                 return;
             }
         };
-        branch.tree.begin_load(path);
         let branch_name = branch.name.clone();
         let commit = branch.commit().clone();
-        let mode = self.current_read_mode();
+        branch.tree.begin_load(path, mode);
         self.invalidate_rows();
         self.spawn_job(Job::Directory {
             branch: branch_name,
@@ -1495,6 +1507,11 @@ impl RepositoryPage {
     }
 
     pub(super) fn current_read_mode(&self) -> RepositoryCacheMode {
+        if self.online_verified {
+            // The commit on screen was verified online, so a read the user starts now prefers the
+            // network rather than repeating the cache-only pass.
+            return RepositoryCacheMode::OnlinePreferred;
+        }
         if self
             .branch
             .as_ref()
@@ -1675,6 +1692,7 @@ impl RepositoryPage {
         self.branches_provenance = None;
         self.branches_error = None;
         self.snapshot_preliminary = false;
+        self.online_verified = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -1744,8 +1762,9 @@ impl RepositoryPage {
                 branch,
                 commit,
                 path,
+                mode,
                 result,
-            } => self.apply_directory(branch, commit, path, result, cx),
+            } => self.apply_directory(branch, commit, path, mode, result, cx),
             Body::Content(content) => self.apply_content(content, window, cx),
             Body::Snapshot(bundle) => self.apply_snapshot(*bundle, window, cx),
         }
@@ -2116,17 +2135,31 @@ impl RepositoryPage {
                         ),
                     )
                 });
+                let verified_online = provenance
+                    .as_ref()
+                    .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
                 if let Some(state) = self.branch.as_mut() {
                     state.snapshot = snapshot.clone();
                     state.snapshot_provenance = provenance;
                 }
                 self.error = None;
+                // The revision this page displays is now verified against the network, so reads the
+                // user starts from here on prefer the network over another cache-only pass.
+                if verified_online {
+                    self.online_verified = true;
+                }
                 if cache_painted {
-                    // Failures produced while the preliminary snapshot was showing came from
-                    // `OfflineOnly` reads. The commit is now verified online, so those paths are
-                    // retried instead of keeping a "not cached" error on screen.
+                    // Everything the preliminary snapshot could not settle came from `OfflineOnly`
+                    // reads. Completed failures are cleared, and reads that are still in flight are
+                    // superseded so their late cache-miss result is discarded and the verified chain
+                    // requests the same paths again.
                     if let Some(state) = self.branch.as_mut() {
                         state.tree.clear_failures();
+                        let _superseded = state.tree.supersede_pending_loads();
+                    }
+                    if self.pending_content.take().is_some() {
+                        // A new selection identity drops the pending reply in `apply_content`.
+                        self.selection_request = self.selection_request.wrapping_add(1);
                     }
                     if matches!(
                         self.reader_status,
@@ -2168,6 +2201,9 @@ impl RepositoryPage {
                 return;
             }
             Ok((snapshot, provenance)) => {
+                let verified_online = provenance
+                    .as_ref()
+                    .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
                 self.branch = Some(BranchState {
                     name: branch.clone(),
                     snapshot: snapshot.clone(),
@@ -2175,6 +2211,7 @@ impl RepositoryPage {
                     tree: TreeModel::default(),
                     readme: ReadmeState::Unknown,
                 });
+                self.online_verified = verified_online;
                 self.error = None;
                 self.reader = None;
                 self.readme_path = None;
@@ -2259,6 +2296,7 @@ impl RepositoryPage {
         branch: String,
         commit: ObjectSha,
         path: String,
+        mode: RepositoryCacheMode,
         result: Result<DirectoryTree, PageError>,
         cx: &mut Context<Self>,
     ) {
@@ -2266,6 +2304,11 @@ impl RepositoryPage {
             return;
         };
         if state.name != branch || state.commit() != &commit {
+            return;
+        }
+        // A result for a read this page has already superseded (a cache-only pass replaced by the
+        // verified online chain) must not publish content or a failure the retry owns.
+        if !state.tree.matches_pending(&path, mode) {
             return;
         }
         match result {
@@ -3524,6 +3567,7 @@ async fn run_job(
                 branch,
                 commit,
                 path,
+                mode,
                 result,
             }
         }

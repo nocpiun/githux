@@ -202,6 +202,21 @@ Codex 对 `3b56e12` 提出 1 项 P2，成立。
 - 一个非本任务失败：`network::transport::bounded_tests::chunked_and_no_length_stop_before_eof_on_success_and_errors` 在一次全量并发运行中报 `Err(Network{"error sending request"})` 而非 `ResponseTooLarge`（本地 HTTP 测试服务在高并发下连接失败），单独运行该模块通过；与 cache-first 无交集（transport 未改动）。
 - 无新增语义选择：合并没有改变已接受行为，因此不改 UI 呈现、不重写 Reader/SVG/表格图片，也不改 `merge_owner`。
 
+## 基线整合后的审查修复（第十二轮）
+
+Codex 对 `4d2c729`（合并 `a2c5ade` 后的 head）提出 1 项 P2，成立。
+
+- **P2 复核成功时未作废仍在途的缓存阶段读取**：第十轮只清理了“已到达的失败”。若用户在预览快照阶段展开未缓存目录或打开文件、其 `OfflineOnly` 读取在复核成功时仍未返回，`loading` 标记会挡住重试（`load_expanded` 跳过 loading、`resolve_path` 直接返回、`pending_content` 挡住重新请求），随后迟到回复按未变的 branch/commit 校验通过，把缓存未命中错误发布到已验证的页面上且不再自动重试。
+- 修复：
+  1. `TreeModel.loading` 改为 `BTreeMap<path, RepositoryCacheMode>`，新增 `matches_pending(path, mode)`；`Job::Directory`/`Body::Directory` 携带 `mode`，`apply_directory` 只应用“当前仍在等待的那个模式”的回复，其余（被作废的离线读取）直接丢弃。
+  2. 新增 `supersede_pending_loads()`：复核成功（且屏上修订仍带 snapshot provenance）时作废全部在途目录读取，`load_expanded`/`resolve_selection` 随即以在线模式重新请求。
+  3. 文档读取：作废时清空 `pending_content` 并推进 `selection_request`，迟到正文回复因身份不符被丢弃，同时立刻发起新的正文读取。
+  4. 新增 `online_verified` 纪元：该 generation 的修订一旦由网络验证，用户后续发起的读取（展开目录/打开文件）走 `OnlinePreferred`，不会在摘要或分支列表仍来自缓存时重复一次纯缓存读取、再报同样的未缓存错误；`refresh_rebind`/换分支等代次边界重置。
+- 回归 `a_pending_cache_phase_read_is_superseded_by_online_verification`：构造“目录与 README 正文读取仍在途”的预览状态，复核同一 commit 后断言在途目录被重新请求、正文读取换了身份、迟到的离线未命中结果不产生可见错误，最终目录内容与正文都在线到达（仅回退本修复后该用例失败）。
+- 顺带修正本任务两处测试夹具的等待方式：`src/app/pages/home/tests.rs::settle` 与 `src/ui/repository/offline_tests.rs::settle` 由固定迭代次数改为 60 秒截止时间。原因是一次全量并发运行中 `app::pages::home::tests::a_cache_miss_keeps_the_ordinary_online_loading_path` 因 ~0.8s 固定预算在高负载下超时（状态仍是 Loading，非产品行为变化）。改为截止时间后全量运行通过。
+
+本轮验证（同一提交）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（bin 1343、home 116、notifications 642、profile 344、reader 309、reader_images 846、repository 953、repository_overview 44、scroll_viewports 1344，0 失败）、`cargo build --locked`。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。
