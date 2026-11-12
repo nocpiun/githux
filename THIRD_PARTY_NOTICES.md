@@ -37,8 +37,9 @@ Lucide icons, bundled by `ely-core` and embedded via `include_bytes!`.
   revision `30c66fe1d5d23db769a6c834b771d054d7f288cf` (MIT). See
   [docs/content-reader-markdown-patch.md](docs/content-reader-markdown-patch.md).
 - `vendor/resvg/` is the crates.io resvg 0.46.0 source with local
-  displacement scale and clipped-grid corrections. Both original MIT/Apache texts are retained;
-  [PATCH.md](vendor/resvg/PATCH.md) describes the modification.
+  displacement scale and clipped-grid corrections. Both original MIT/Apache texts are retained.
+  It also replaces a deprecated IIR blur pixel conversion with its equivalent
+  byte cast. [PATCH.md](vendor/resvg/PATCH.md) describes these modifications.
 - `src/content/images/fixtures/embedded-font.woff` is a test-only renamed subset
   of Google Sans Code (SIL OFL 1.1); see its adjacent README and the existing
   [Google Sans Code OFL](assets/fonts/google-sans-code/OFL.txt).

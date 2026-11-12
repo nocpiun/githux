@@ -3,6 +3,34 @@ use base64::Engine;
 use image::GenericImageView;
 
 #[test]
+fn quality_small_sigma_blur_preserves_channels_and_alpha() {
+    // The final 2x grid keeps sigma below resvg's box-blur threshold of 2.
+    // This therefore exercises the IIR path and its packed RGBA byte view.
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="16"><defs><filter id="blur" x="0" y="0" width="24" height="16" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="0.4"/></filter></defs><rect x="8" y="4" width="8" height="8" fill="#2040c0" fill-opacity="0.75" filter="url(#blur)"/></svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    let scale = pixels.width() / 24;
+    let center = pixels.get_pixel(12 * scale, 8 * scale).0;
+    for (actual, expected) in center[..3].iter().zip([32_u8, 64, 192]) {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "blur must preserve RGBA channel order"
+        );
+    }
+    assert!(
+        (188..=192).contains(&center[3]),
+        "interior alpha: {center:?}"
+    );
+    let edge = pixels.get_pixel(8 * scale - 1, 8 * scale).0;
+    assert!(edge[3] > 0 && edge[3] < center[3], "soft edge: {edge:?}");
+    assert!(
+        edge[2] > edge[1] && edge[1] > edge[0],
+        "edge color: {edge:?}"
+    );
+    assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 0]);
+}
+
+#[test]
 fn quality_displacement_scale_is_applied_once_in_both_directions() {
     for (scale, inside, outside) in [(4, 22, 10), (-4, 30, 42)] {
         let svg = format!(

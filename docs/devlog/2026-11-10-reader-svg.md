@@ -105,6 +105,14 @@ roast 最终网格依次 880×400 / 1320×600 / 1760×800，逻辑盒仍 440×20
 
 第五轮 head `3bb24f51` 的 review `5857437716` 提出 P2 `4536852898`（shorthand 方向）与 `4536852909`（内嵌根半透明），均核实成立。按 2026-11-11 clean-continuation 检查点保留原 Pi 会话/分支/worktree，未因重复协调消息重做实现。方向 tokens 中 reverse/alternate/alternate-reverse 使用与 longhand 一致的静态回退；内嵌分数透明度通过仅服务已验证 Tree 的一次性内部 resolver、矢量 image 包装整体合成，保留分数固有尺寸，新增节点/隔离层仍计入预算。像素回归发现库前景已有根 opacity、根背景却在不同路径处理，因此先记录声明并中和库输入前景的根 opacity，再对整体应用一次；同时保留直接子元素显式 `opacity:inherit` 的原计算值，避免二次相乘或继承丢失。测试覆盖重叠路径、两层透明度相乘、顶层/内嵌一致性、分数尺寸及显式继承。本轮不新增桌面验收；原生捕获的构建/边界仍按上文原始记录，公开样本另作回归比对。最终 818 项 Reader 测试与上表检查通过。首次测试曾出现无关的 `length_is_only_a_hint_and_malformed_framing_cannot_bypass_bound` loopback `error sending request`；隔离重跑 `e63e48b0`、随后整组 `aca3d0d4` 和最终 `c6caa267` 均通过，按 L002 保留环境抖动记录，未修改网络模块。
 
+## 2026-11-12：验收后的编译警告清理
+
+负责人已确认 reader-svg 视觉验收通过，授权核查警告后合并。现有 app/example build 和 all-target clippy 日志均有三条来自 vendored resvg 的警告：`rgb::ComponentSlice` trait 与 `as_mut_slice` 方法弃用，以及该方法名与未来标准库的潜在冲突。它们没有导致当前构建失败，但该源码由本任务 vendoring，采用现有等价 API 即可消除，未使用 lint suppression。
+
+`iir_blur.rs` 改用锁定的 rgb 0.8.53 已通过默认 feature 导出的 `rgb::bytemuck::cast_slice_mut`，仍将同一 packed RGBA8 像素存储解释为可变字节；不增加依赖、不改算法或颜色通道。源文件注明本地修改，并更新 vendored PATCH 与 notices。新增小 sigma 的实际 SVG 模糊回归，覆盖 IIR 路径、RGB 通道、部分透明边缘和透明角落。
+
+同步 main `daf9f68` 的工作流改动后验证。此前 PR 已含多次主线/图片布局合并及冲突处理；普通 rebase 会重放这些历史冲突，因此撤回后以正常基线合并保留已验收渲染，最终 PR 仍 squash 合入 main。本轮检查均通过：`cargo test --locked --test reader_images -- --test-threads=1`（`6f6af319-21e2-44cf-ba43-207df7fc5148`）842 通过、0 失败、1 个 opt-in 忽略；`cargo clippy --locked --all-targets -- -D warnings`（`9fc632e7-2cf0-4bdb-ac8e-757a65115e04`）、app/example build（`8a24c6c2-ac66-4f4b-9c04-d88f2cdd7416`）与 fmt check（`c4ead252-25a4-4136-8b1b-7e81efcae268`）均成功。三份编译日志均无 warning/error。测试实际运行约 110 秒；包含依赖重编译共 590 秒，构建槽等待分别为约 0.15、12.8、66.5 秒，区分排队与编译。随后新 head 重新 CI/review，通过后由协调者合并，不沿用旧 head 的放行。
+
 ## 初次静态交付的改动与决定（历史）
 
 ### 1. 光栅化库选型与依赖
