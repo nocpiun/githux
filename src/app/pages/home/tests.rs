@@ -459,6 +459,34 @@ fn open_page_with_navigation<'a>(
     (page, cx)
 }
 
+/// Pump the page until `done` holds or a generous deadline passes.
+///
+/// A wall-clock deadline rather than a fixed iteration count: the shared test binary runs many
+/// suites in parallel, so background reads can be starved for a while and a fixed budget would fail
+/// a test that is only waiting for its own replies.
+fn pump_until(
+    page: &Entity<HomePage>,
+    cx: &mut VisualTestContext,
+    mut done: impl FnMut(&Entity<HomePage>, &mut VisualTestContext) -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        page.update(cx, |page, cx| page.drain_for_test(cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        if done(page, cx) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Home page did not reach the expected state: home={:?} feed={:?}",
+            page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone()),
+            page.read_with(cx, |page, cx| page.view.read(cx).feed_state().clone()),
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn settle(page: &Entity<HomePage>, cx: &mut VisualTestContext) {
     // Deadline-based, not a fixed iteration count: a loaded machine must not fail a test that is
     // only waiting for its own reads to be drained.
@@ -573,12 +601,9 @@ fn online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page(
     cx.update_window_entity(&page, |page, window, cx| {
         page.load_more_for_test(window, cx)
     });
-    for _ in 0..100 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(feed_ids(&page, cx), ["first", "second"]);
+    pump_until(&page, cx, |page, cx| {
+        feed_ids(page, cx) == ["first", "second"]
+    });
     assert!(page.read_with(cx, |page, cx| {
         page.view.read(cx).provenance(Column::Feed).is_some()
     }));
@@ -604,20 +629,20 @@ fn offline_miss_partial_and_refresh_replacement_are_distinct(cx: &mut TestAppCon
     cx.update_window_entity(&page, |page, window, cx| {
         page.load_more_for_test(window, cx)
     });
-    for _ in 0..100 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(feed_ids(&page, cx), ["first", "second"]);
+    pump_until(&page, cx, |page, cx| {
+        feed_ids(page, cx) == ["first", "second"]
+    });
     cx.update_window_entity(&page, |page, window, cx| {
         page.load_more_for_test(window, cx)
     });
-    for _ in 0..100 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    pump_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, cx| {
+            matches!(
+                page.view.read(cx).feed_append_state(),
+                FeedAppendState::NotCached { page: 3 }
+            )
+        })
+    });
     assert!(
         page.read_with(cx, |page, cx| matches!(
             page.view.read(cx).feed_append_state(),
@@ -848,15 +873,11 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
                 .all(|job| !job.work.token.is_cancelled())
         );
     });
-    for _ in 0..300 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        if page.read_with(cx, |page, _| {
+    pump_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, _| {
             page.description_for_test("octo/later").is_some()
-        }) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        })
+    });
     assert_eq!(
         page.read_with(cx, |page, _| page.description_for_test("octo/later"))
             .as_deref(),
@@ -867,15 +888,11 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
         None
     );
     gate.release.notify_one();
-    for _ in 0..300 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        if page.read_with(cx, |page, _| {
+    pump_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, _| {
             page.description_for_test("octo/repo").is_some()
-        }) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        })
+    });
     assert_eq!(
         page.read_with(cx, |page, _| page.description_for_test("octo/repo"))
             .as_deref(),
@@ -966,15 +983,7 @@ fn offline_filtered_empty_first_page_continues_to_merged_pr_and_read_more_routes
         cx,
     );
     settle(&page, cx);
-    for _ in 0..200 {
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        if feed_ids(&page, cx) == ["merged-pr"] {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    pump_until(&page, cx, |page, cx| feed_ids(page, cx) == ["merged-pr"]);
     assert_eq!(
         feed_ids(&page, cx),
         ["merged-pr"],
@@ -1472,11 +1481,14 @@ fn acceptance_replaced_first_page_never_appends_older_generation_continuation_of
     cx.update_window_entity(&page, |page, window, cx| {
         page.load_more_for_test(window, cx);
     });
-    for _ in 0..100 {
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    pump_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, cx| {
+            matches!(
+                page.view.read(cx).feed_append_state(),
+                FeedAppendState::NotCached { page: 2 }
+            )
+        })
+    });
     assert_eq!(
         feed_ids(&page, cx),
         ["fresh-first-b"],

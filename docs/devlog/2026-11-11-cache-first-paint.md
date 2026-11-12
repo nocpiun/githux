@@ -217,6 +217,15 @@ Codex 对 `4d2c729`（合并 `a2c5ade` 后的 head）提出 1 项 P2，成立。
 
 本轮验证（同一提交）：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（bin 1343、home 116、notifications 642、profile 344、reader 309、reader_images 846、repository 953、repository_overview 44、scroll_viewports 1344，0 失败）、`cargo build --locked`。
 
+## 测试等待方式与 CI 稳定性（同一提交）
+
+新 head 的 CI 在 `--test scroll_viewports` 里失败过一次：`app::pages::profile::tests::account_switch_pat_replace_removal_and_revocation_isolate_cache_and_stop_slow_pictures` 在“离线 + 已换 PAT”阶段等不到 `profile-page-basic-error`。
+
+- 复现：本地连续跑该套件，约每 3–6 次出现一次。诊断打印显示失败时**主机状态已正确**（`view=None`、`unavailable=Some(Unauthorized)`、`request=false`），但渲染出的 `profile-page-basic-error` 标记在该帧不存在，于是等待一直不结束。
+- 判断：该断言等的是渲染标记（几何/帧时机），而这一阶段的合同是“旧视图被清除 + 主机发布失败”。二者在并发负载下不总在同一帧对齐，属测试等待方式问题，非 cache-first 行为变化（该路径在 base `f9e31a0` 已存在，且本地单跑/全量多次通过）。
+- 修复：该处改为等待主机状态（`view_for_test().is_none() && unavailable.is_some()`），与同文件其他断言一致；`Home` 套件里若干固定迭代次数（100/200/300 次）的等待改为统一的 `pump_until` 截止时间等待（60s），`settle`/`wait_for_profile`/`offline_tests::settle` 早已是截止时间等待。
+- 结果：`--test scroll_viewports` 连续 3 次全量通过，`, full cargo test --locked` 一次通过（1343+116+642+344+309+846+953+44+1344，0 失败）。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。

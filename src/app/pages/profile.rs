@@ -3515,11 +3515,12 @@ mod tests {
             let services = harness.controller.read(cx).services();
             page.rebind(services, cx);
         });
+        // The host state is the contract here: the replaced PAT retires the old view and shows a
+        // failure. Waiting on the rendered mark instead made this wait depend on frame timing.
         wait_for_profile(&harness, cx, |cx| {
-            cx.debug_bounds("profile-page-basic-error").is_some()
-                && harness
-                    .page
-                    .read_with(cx, |page, _| page.view_for_test().is_none())
+            harness.page.read_with(cx, |page, _| {
+                page.view_for_test().is_none() && page.unavailable.is_some()
+            })
         });
 
         // Remove account (C2): immediately clears/blocks.
