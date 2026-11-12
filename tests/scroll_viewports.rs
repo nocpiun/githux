@@ -204,6 +204,10 @@ fn production_scroll_viewports_keep_headers_first_rows_and_keyboard_reveal_insid
                 first.top() >= rows.top() && first.bottom() <= rows.bottom(),
                 "{name}: first={first:?} rows={rows:?}"
             );
+            assert!(
+                (first.top() - header.bottom() - px(8.0)).abs() < px(0.01),
+                "the mounted view preserves initial breathing room"
+            );
             assert!((rows.top() - header.bottom()).abs() < px(0.01));
             assert!((rows.bottom() - page.bottom()).abs() < px(0.01));
             let focus_point = gpui::point(rows.right() - px(0.5), rows.top() + px(2.0));
@@ -313,7 +317,9 @@ fn production_scroll_viewports_keep_headers_first_rows_and_keyboard_reveal_insid
     let viewport = bounds(cx, "repository-tree-scroll-viewport");
     let header = bounds(cx, "repository-tree-header");
     assert!(viewport.top() >= header.bottom());
-    assert_eq!(first.top(), viewport.top());
+    assert!(
+        (first.top() - viewport.top() - cx.update(|w, _| w.pixel_snap(px(7.0)))).abs() < px(0.02)
+    );
     assert!(first.bottom() <= viewport.bottom());
     cx.simulate_click(first.center(), gpui::Modifiers::none());
     cx.simulate_keystrokes("end");
@@ -322,9 +328,12 @@ fn production_scroll_viewports_keep_headers_first_rows_and_keyboard_reveal_insid
     assert!(last.top() >= viewport.top() && last.bottom() <= viewport.bottom());
     cx.simulate_keystrokes("home");
     frames(cx);
-    assert_eq!(
-        bounds(cx, "repository-row-file-0000.txt").top(),
-        viewport.top()
+    assert!(
+        (bounds(cx, "repository-row-file-0000.txt").top()
+            - viewport.top()
+            - cx.update(|w, _| w.pixel_snap(px(7.0))))
+        .abs()
+            < px(0.02)
     );
     // The fixed sidebar has a separate scroll handle and must reveal both edges
     // without moving its heading or footer, including the collapsed rail.

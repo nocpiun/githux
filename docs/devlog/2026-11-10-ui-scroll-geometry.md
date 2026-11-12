@@ -2,9 +2,32 @@
 
 - 日期：2026-11-10；续作：2026-11-11（Asia/Shanghai）。任务：`ui-scroll-geometry`，执行者：Codex。
 - 原始 UI 反馈：7（首行裁切）与 9（Home 条覆盖底色/文字），不是 GitHub issue 自动关闭声明。
-- 状态：实现与本地检查；负责人原生 Windows 验收待完成。提交日志时尚未创建 PR，最终检查与审查收据以此分支的 GitHub PR 为准。合并执行者为协调者。
+- 状态：PR #84 保留 `pending`，按负责人纠正继续返工；`cc387aa` 删除视觉留白的结果已被拒收。最终原生验收和合并仍由负责人/协调者处理。
 
-## 原始反馈 7 返工：负责人拒收后的坐标修复
+## 保留必需留白的再次返工（2026-11-12）
+
+负责人明确：Files 上下 7px、页底 8px、Home/Feed 标题及 Partial 提示间距是必需行为。上一轮 `cc387aa` 虽扩展了 clip，却删除了视觉间距，不能以当时 CI/Codex 或中间 paint 测试代替验收。以下旧记录保留为被拒方案的历史，不再代表当前约定。
+
+先补正向端点断言，在 `cc387aa` 上 run `5e5e018d-f6b2-44c6-a739-6580e37600bb` 如预期失败：Home 首背景 y=56 与 header.bottom=56 相接；长列表末背景到面板边缘 gap=0，均缺少必需 8px。新测试要求正常/放大字体、宽/窄、短/长/空数据、Complete/Partial、键盘首尾与 scrollbar maximum 同时保持留白；原中间偏移 quad/content-mask 探针保留。
+
+当前布局将视觉间距和绘制 mask 分开：
+
+| 表面 | 起点/末尾视觉间距 | 中间偏移的真实 clip |
+| --- | --- | --- |
+| Home/Feed | 首项 envelope 顶部 8px；Partial 提示前后各 8px；末尾原生 content padding 8px | 固定 header/实际提示下沿至面板底边 |
+| Files | 原生 uniform-list 上下 content padding 7px；左右对齐及 bar track 上下 7px 保留 | 完整纵向 pane |
+| 全局 Issues/PR | 保留原 filter/status 间距，无 status 时两段 8px、有 status 时其后 8px；末尾 content padding 8px | 固定区下沿至页底/真实分页控件上沿 |
+| Notifications | 保持原起点；无分页控件时末尾 content padding 8px，有控件时保留控件后的页底 8px | 固定区下沿至页底/真实分页控件上沿 |
+
+`PAGE_BOTTOM` 恢复语义值 8；未恢复会收窄 clip 的外层固定 padding。GPUI List 的 top style padding 会影响每个 logical anchor，因此只给第一项布局 envelope 加起点间距，真实 56px 行不变，业务 count/index 没有 spacer 行。底部采用原生 padding，追加不改变旧末项的高度。`InsetListTarget` 补足原生 scrollbar maximum 漏算的 bottom padding，写入走公开 `scroll_by`，拖动冻结继续委托原生 hooks；专门覆盖尚未测量末项就拖到最大位置，避免留白被漏算。该用例还暴露 GPUI 在首次宽度确定时丢弃 uniform hints、导致最大范围仅覆盖已测量前缀的问题；运行路径按新宽度/数量从已测量项补齐估值，保留已有测量和 anchor，不全量测量。测试不再专门补值，直接验证真实 view 的未测量末项。Feed 预取回归也改为小步真实 wheel 进入末三项区域：将第 37/40 项直接定位到顶部会触发原生末尾回填，旧断言依赖 unknown-height 的 `None` 才通过；新路径仍要求到真正末尾前只发一次追加请求，没有改变分页实现。
+
+uniform-list 虽支持 content padding，其可见尾范围仍按 padded height 计算。共享 helper 在范围尾后最多多渲染一个真实行，布局高度和 native item count 不变；最后仅露出 3px 的真实行必须有实际 quad、继承完整 clip 并能点击选择。Notifications 的键盘 reveal 延至 motion tick 后，未测量目标以业务索引交给原生列表布局，避免按 End 时按旧高度丢失目标；已测量目标继续 nearest reveal，方向键选中可见行不额外跳动。
+
+最终本地 runner 已通过：114 项相关组件回归（`a9d349ec-4202-4958-92a2-a2fc5e1d6d6e`）、1 项正式 Shell 组合回归（`817035c2-c115-433f-a230-bae2af0f8a58`，含中间 paint mask、Home/Feed、Files、sidebar 与 reveal）、fmt（`d9a03032-cb79-4543-9e59-6e39c11d69d1`）及 all-target clippy（`3ecd947f-0d51-4e82-9318-817502bbff05`）。聚焦的无测试补值 thumb-max 回归亦通过（`382b1504-e9a7-46f0-850a-a9db0719ddbc`）。检查按实际修改/失败集中收尾，全部通过共享 runner，dev/test debug=0、incremental=0；构建槽等待与执行时长分别保存在收据。
+
+本地 Rust/app 基线为 `f9e31a0`。期间 main 前进到 `daf9f68`（#87，仅工作流/runner/派发文档与脚本），Cargo、Rust/app/test/CI-workflow 文件均无变化；保留现有提交历史，当前 head 的 CI 集成基线仍由审查收据核验。最终 clean-head 预览、CI/Codex 结果放 PR 和本地交付状态，避免为补自身 SHA 再造未审查提交。`pending` 与负责人管理的 `blocked` 均保留；旧 exe/旧收据和测试平台结果都不代替本轮 Windows 原生验收。不终止、不覆盖用户启动的 app 窗口。
+
+## 原始反馈 7 前次返工（历史：cc387aa 的留白删除已被拒收）
 
 前轮 `bd73a9f` 的首尾/reveal 验证和字号修复没有证明原始 padding 遮挡消失；负责人已撤回验收。继续使用同一 PR #84/worktree/session，恢复 `pending`，不修改 `blocked`，合并仍由协调者执行。先前通过的通道与字号修复保留。
 
@@ -12,7 +35,7 @@
 
 默认字号、中间偏移下，渲染场景的实测几何（logical px）：
 
-| 场景 | 当前候选的真实 paint clip | 正确边界 |
+| 场景 | 历史外层 inset 的真实 paint clip | 正确 clip 边界（仍须另保留内容留白） |
 | --- | --- | --- |
 | Home 顶部 | y=64；header 底边 y=56 | y=56，去掉固定 8px 带 |
 | Home 底部 | bottom=992；外面板 bottom=1000 | bottom=1000 |

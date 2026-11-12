@@ -11,6 +11,7 @@
 //! ends; a tab reorder keeps it visible through [`Bars::hold`] instead, so an
 //! unrelated drag is never mistaken for a thumb drag.
 
+mod content_insets;
 mod fade;
 mod geometry;
 mod motion;
@@ -19,6 +20,7 @@ mod target;
 #[cfg(test)]
 mod tests;
 
+pub use content_insets::{ContentInsets, InsetListTarget, ListInsets, with_trailing_overdraw};
 pub use fade::Fade;
 pub use geometry::Thumb;
 pub use motion::{Motion, WheelAxes, cancel_region, wheel_overlay, wheel_overlay_with};

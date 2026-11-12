@@ -68,7 +68,7 @@ pub(super) fn render(
                     failure_panel("repository-error", &error, page.is_active(), false, cx)
                 }
                 _ => {
-                    let tree = tree_column(page, rows, cx);
+                    let tree = tree_column(page, rows, window, cx);
                     let reader = reader_column(page, cx);
                     div()
                         .debug_selector(|| "repository-body".to_string())
@@ -693,6 +693,7 @@ fn code_header(cx: &App) -> gpui::Div {
 fn tree_column(
     page: &mut RepositoryPage,
     rows: Rc<Vec<TreeRow>>,
+    window: &mut Window,
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -706,15 +707,33 @@ fn tree_column(
     let empty = page
         .tree("")
         .is_some_and(|tree| tree.entries.is_empty() && !tree_incomplete(tree));
+    let edge_gap = window.pixel_snap(px(7.0));
     let list = uniform_list(
         "repository-tree",
         count,
         cx.processor(
             move |page: &mut RepositoryPage, range: std::ops::Range<usize>, window, cx| {
+                let end = range.end;
                 range
                     .map(|index| match rows.get(index).cloned() {
                         Some(row) => {
-                            tree_row(page, row, selected.clone(), cursor.clone(), window, cx)
+                            let row =
+                                tree_row(page, row, selected.clone(), cursor.clone(), window, cx);
+                            let following = if index + 1 == end {
+                                rows.get(end).cloned().map(|next| {
+                                    tree_row(
+                                        page,
+                                        next,
+                                        selected.clone(),
+                                        cursor.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            scroll::with_trailing_overdraw(row, following)
                         }
                         None => div().into_any_element(),
                     })
@@ -723,7 +742,8 @@ fn tree_column(
         ),
     )
     .track_scroll(&page.tree_scroll)
-    .size_full();
+    .size_full()
+    .py(edge_gap);
 
     let now = page.now_ms();
     let reduce = cx.reduce_motion();
@@ -830,8 +850,8 @@ fn tree_column(
                 }))
                 .overflow_hidden()
                 .child(
-                    // Only horizontal alignment is inset. Vertical inset would permanently
-                    // clip partially scrolled rows below the header and above the pane edge.
+                    // Horizontal alignment stays fixed; vertical breathing room belongs
+                    // to the native list's scroll content, whose clip covers this full pane.
                     div().size_full().px(px(7.0)).child(
                         div()
                             .relative()
@@ -848,8 +868,8 @@ fn tree_column(
                     div()
                         .debug_selector(|| "repository-tree-bar-region".into())
                         .absolute()
-                        .top_0()
-                        .bottom_0()
+                        .top(edge_gap)
+                        .bottom(edge_gap)
                         .left_0()
                         .right_0()
                         .child(bar),

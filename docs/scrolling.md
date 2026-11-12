@@ -14,6 +14,7 @@
 | [`src/ui/scroll/motion.rs`](../src/ui/scroll/motion.rs) | 唯一的约 130ms wheel easing、轴选择、输入适配与 thumb/程序滚动协作（`Motion<T>`、`wheel_overlay`） |
 | [`src/ui/scroll/target.rs`](../src/ui/scroll/target.rs) | 真实滚动目标契约（`ScrollTarget`）与 `gpui::ScrollHandle`、`gpui::ListState` 实现 |
 | [`src/ui/tabs.rs`](../src/ui/tabs.rs) | 标签条自身布局；只保留 `TAB_*` 布局常量与预留 band |
+| [`src/ui/scroll/content_insets.rs`](../src/ui/scroll/content_insets.rs) | 必需的可滚动首尾间距、带原生底部 padding 的 List target，以及 uniform-list 有界尾部 overdraw |
 | [`src/ui/geometry.rs`](../src/ui/geometry.rs) | `TAB_SCROLLBAR_BAND = scroll::THICKNESS + 2`，其余标签间距/高度仍在原处 |
 
 `src/ui/tab_scrollbar.rs` 已删除。不得再新增第二份项目自绘的几何、拖动或 Fade 实现；缺口应在此模块补齐，而不是在消费者里复制。
@@ -71,15 +72,15 @@
 
 前轮文件树测量选错基准：`repository-tree-scroll-viewport` 位于 `.p(7)` 内，所以其“2 物理 px”并不表示到 Files/Reader 分隔线只有 2px；实际 gap 为内容 padding 7 + overlay 1.5 = 8.5 逻辑 px。此前日志/PR 中将其称为 pane 尾侧距离的结论作废，保留为测量错误的历史证据。
 
-该轮曾把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是无 padding 的 pane，内部列表保留四侧 7px，bar region 也保留上下 7px。**此次负责人拒收后，纵向 7px 策略作废**：它在中间滚动位置形成永久遮挡带，旧首尾/拖动检查不能证明原始问题解决。横向结论保留：`overlay(2.5, 8.0)` 锚定 pane 右缘，内容保留左右 7px，不能把内容 inset 再算到可见条的尾侧距离里。此前 144 DPI 帧中边框 x=773、可见 thumb x=765..768 的记录只支持这一横向距离结论。当前纵向 viewport 与 track 必须共用 pane 顶/底边，详见下节。
+该轮把列表内容与 scrollbar 锚点分开：`repository-tree-viewport` 是 pane，`overlay(2.5, 8.0)` 锚定其右缘。左右 7px 对齐和上下 7px 呼吸留白均须保留。返工改正的是纵向留白的归属：将上下 7px 放进原生 uniform-list 的滚动内容，paint clip 覆盖完整 pane；bar track 仍上下缩进 7px。不能把内容 inset 再算到可见条的尾侧距离里。此前 144 DPI 帧中边框 x=773、可见 thumb x=765..768 的记录只支持横向距离结论。
 
 ## 列表 viewport 与尾侧通道（2026-11-11）
 
 Home/Feed、全局 Issues/PR 与 Notifications 的纵向列表为滚动条保留独立的 **8 logical px** 尾侧通道（`scroll::LIST_BAR_LANE`）。列表的真实布局宽度在通道之前结束，行的选中/未读背景和链接也在此前结束；不是在全宽行上盖一条背景色。`overlay(1.5, 8)` 的 3px 线与行边缘相距 3.5px，线到区域外缘为 1.5px，完整命中区位于通道内。通道在条隐藏时继续保留，避免淡入淡出导致换行和虚拟列表高度变化。
 
-调用方用无 padding 的独立内容 wrapper 限定真实 List 宽高，Bar 与 wheel 仍锚定外层区域。不要直接给 GPUI `List` 添加横向 padding 预留通道：该版本 List 测量行时使用整个 bounds 宽度，不能靠 padding 让行背景避开条。滚动范围、reveal 与 Feed 分页继续读取原生 handle，不另减一次 padding 或构造第二份 offset。
+调用方用独立内容 wrapper 在尾侧通道前限定真实 List 宽度，Bar 与 wheel 仍锚定外层区域。不要直接给 GPUI `List` 添加横向 padding 预留通道：该版本 List 测量行时使用整个 bounds 宽度，不能靠 padding 让行背景避开条。
 
-文件树仅保留左右 7px 对齐；纵向 native viewport 和 bar region 直接接续固定 header/实际告警区下沿，并延伸至 pane 底边。树行的 26px 最小高度与原生 uniform list 测量策略继续保留；这项字体修复不替代中间偏移遮挡验证。
+文件树保留左右 7px 对齐，原生 uniform-list 的上下 content padding 为 7px（按显示比例对齐像素）；native viewport/paint clip 接续固定 header/实际告警区下沿并覆盖到 pane 底边。bar track 独立保留上下 7px。树行的 26px 最小高度与字体放大修复继续保留。
 
 ### 纵向 clip 的归属（原始反馈 7 返工）
 
@@ -92,7 +93,11 @@ GPUI `List` 的 prepaint/paint 以真实 list bounds 建立 `ContentMask`，`uni
 | 全局 Issues/PR | 固定区之后的 flex gap、空 status 节点及页底 8px | header/filter/非空状态构成固定区，列表直接接续；有分页控件时截止于控件上沿 |
 | Notifications | 页底 8px | 固定 header/实际状态区至页底或分页控件上沿 |
 
-固定 header、工具条和实际分页状态可以占用空间；纯首尾呼吸留白如需保留，应属于会随内容移动的部分，不能在预期 viewport 内永久截出一条带。此版不新增首尾 spacer，不修改行内外观。也不能直接用 `List` 样式的纵向 padding 代替内容 spacer：固定版本在每个 logical anchor 的 item origin 上都加 `padding.top`，不能假定它具有普通 Div scroll 内容 padding 的语义。
+固定 header、工具条和实际分页状态保留其占用空间。**初始/末尾呼吸留白是必需行为**：Files 上下 7px，页面底部 `PAGE_BOTTOM=8`，Home/Feed 标题到内容 8px，Partial 提示前后各 8px。上述数据留白随内容滚动，不能在 viewport 内永久截出空白带。全局列表保留原有 filter/status 间距：无 status 时起点为原来的两段 8px，有实际 status 时其后为 8px；分页按钮仍保留页底 8px。Notifications 无新增起点间距，末尾 8px 在无分页控件时属于列表内容，有分页控件时保留在控件之后。
+
+固定 GPUI `List` 的 `padding.top` 会加到每个 logical anchor 的 item origin，不能表达只在内容起点出现的间距。因此仅给第一个数据项的布局 envelope 加起点空间，真实行样式、高度和业务索引不变；空列表用普通空态布局，不创建假数据行。末尾直接用原生 `List` 的 bottom padding，追加不会把旧末项变成带额外间距的中间行。该版本原生 scrollbar maximum 漏算 bottom padding；`InsetListTarget` 在真实 native viewport、offset 和冻结的内容高度上补齐这一已知范围，并通过公开 `scroll_by` 写入，drag hooks 仍委托原生。未测量末项时也能到达正确末尾，不全量测量或重置数据列表。GPUI 首次布局及宽度变化会清掉显式高度 hint，view 在已测量项可用后、每个新宽度/数量下通过公开 API 补齐未测量项的高度估值；已有测量、focus 和 anchor 保留。这是估值元数据更新，不对全部行执行 layout。
+
+`uniform_list` 原生 padding 可正确表达 Files 留白，但尾部可见范围使用扣除 padding 的高度，可能漏画落在最后 7px 内的真实行。共享 helper 仅在该范围尾项之后 overdraw 最多一个真实行，沿用数据 ID、事件和完整 native clip，不增加 native item count 或改变统一行高。测试同时核对该行的真实 paint mask 与点击，而非用填色模拟内容。
 
 中间偏移回归通过连续真实 wheel 建立位置，检查渲染场景中行背景 quad 的**继承 content mask**，以及紧邻 header/面板边缘、位于行中部的半像素探针是否被实际可见矩形覆盖；同时在原空白带发送 wheel，核对列内只消费一次。普通/放大字体、宽/窄布局和显示缩放均参与验证。树正常半行裁切仍限于真实边界；0 高度 pane 不可要求容纳完整一行。首尾 reveal、thumb 与 Feed append 仍独立保留，不能代替这些中间位置证据。
 

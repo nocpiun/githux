@@ -43,10 +43,12 @@ pub struct NotificationsView {
     executor: Arc<BackgroundExecutor>,
     snapshot: InboxSnapshot,
     list: ListState,
-    motion: Motion<ListState>,
+    motion: Motion<scroll::InsetListTarget>,
     bars: Bars,
+    content_insets: scroll::ListInsets,
     focus: FocusHandle,
     selected: Option<usize>,
+    pending_reveal: Option<usize>,
     clock: Instant,
     now: std::time::SystemTime,
     fixed_now: bool,
@@ -68,6 +70,7 @@ impl NotificationsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let content_insets = scroll::ListInsets::default();
         let list = ListState::new(0, ListAlignment::Top, px(160.0));
         let activation = cx.observe_window_activation(window, |view: &mut Self, window, cx| {
             if !window.is_window_active() {
@@ -87,11 +90,16 @@ impl NotificationsView {
             controller,
             executor,
             snapshot: InboxSnapshot::default(),
-            motion: Motion::new(list.clone()),
+            motion: Motion::new(scroll::InsetListTarget::new(
+                list.clone(),
+                content_insets.clone(),
+            )),
             list,
             bars: Bars::new(),
+            content_insets,
             focus: cx.focus_handle().tab_stop(true),
             selected: None,
+            pending_reveal: None,
             clock: Instant::now(),
             now: std::time::SystemTime::now(),
             fixed_now: false,
@@ -247,6 +255,8 @@ impl NotificationsView {
                 self.list.splice(old_len..old_len, len - old_len);
             }
         } else {
+            self.pending_reveal = None;
+            self.content_insets.invalidate_hint();
             self.list.splice(0..old_len, len);
         }
         self.selected = self.selected.filter(|index| *index < len);
@@ -388,7 +398,7 @@ impl NotificationsView {
         if let Some(index) = index {
             self.selected = Some(index);
             self.motion.cancel();
-            self.list.scroll_to_reveal_item(index);
+            self.pending_reveal = Some(index);
             cx.stop_propagation();
             cx.notify();
         }
@@ -712,6 +722,23 @@ impl Render for NotificationsView {
         if self.motion.tick(Instant::now(), reduced) {
             window.request_animation_frame();
         }
+        if let Some(index) = self
+            .pending_reveal
+            .take()
+            .filter(|index| *index < self.snapshot.items.len())
+        {
+            if self.list.bounds_for_item(index).is_some() {
+                self.list.scroll_to_reveal_item(index);
+            } else {
+                // An unmeasured tail has no usable pixel bottom yet. Let native
+                // layout start at the target and backfill; measured rows retain
+                // nearest reveal so arrows do not jump an already visible row.
+                self.list.scroll_to(gpui::ListOffset {
+                    item_ix: index,
+                    offset_in_item: px(0.0),
+                });
+            }
+        }
         if !cx.has_active_drag() {
             self.bars.settle(&self.motion, now, reduced);
         }
@@ -720,6 +747,19 @@ impl Render for NotificationsView {
             window.request_animation_frame();
         }
         let colors = cx.theme().colors.clone();
+        let insets = scroll::ContentInsets::new(
+            px(0.0),
+            if self.snapshot.has_more {
+                px(0.0)
+            } else {
+                px(crate::ui::page_layout::PAGE_BOTTOM)
+            },
+        );
+        insets.sync(
+            &self.list,
+            self.snapshot.items.len(),
+            &mut self.content_insets,
+        );
         let snapshot = &self.snapshot;
         let busy = snapshot.busy.is_some();
         let loaded = snapshot.items.len();
@@ -807,18 +847,20 @@ impl Render for NotificationsView {
         let empty = snapshot.is_empty();
         let no_rows = snapshot.items.is_empty();
         let has_more = snapshot.has_more;
+        let count = snapshot.items.len();
         let list = gpui::list(
             self.list.clone(),
-            cx.processor(|view, index, _, cx| {
+            cx.processor(move |view, index, _, cx| {
                 view.snapshot
                     .items
                     .get(index)
                     .cloned()
-                    .map(|item| view.row(&item, index, cx))
+                    .map(|item| insets.item(index, count, view.row(&item, index, cx)))
                     .unwrap_or_else(|| div().into_any_element())
             }),
         )
-        .size_full();
+        .size_full()
+        .pb(insets.bottom);
         let weak = cx.entity().downgrade();
         let on_drag: scroll::OnDragging = Rc::new(move |axis, active, _, cx| {
             let _ = weak.update(cx, |view, cx| {
@@ -884,7 +926,15 @@ impl Render for NotificationsView {
                 self.motion.clone(),
                 Instant::now,
             ))
-            .child(bar)
+            .child(
+                div()
+                    .absolute()
+                    .top(insets.top)
+                    .bottom(insets.bottom)
+                    .left_0()
+                    .right_0()
+                    .child(bar),
+            )
             .on_hover(cx.listener(|view, hovered, _, cx| {
                 if view.bars.hover(
                     *hovered,
@@ -907,7 +957,9 @@ impl Render for NotificationsView {
             // the bottom edge instead of reserving a fixed blank strip there.
             .px(px(crate::ui::page_layout::PAGE_GUTTER))
             .pt(px(crate::ui::page_layout::PAGE_TOP))
-            .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
+            .when(has_more, |element| {
+                element.pb(px(crate::ui::page_layout::PAGE_BOTTOM))
+            })
             .bg(colors.surface)
             .text_color(colors.fg)
             .child(visible_lifetime(cx))
@@ -939,18 +991,23 @@ impl Render for NotificationsView {
             .child(viewport)
             .when(has_more, |element| {
                 element.child(
-                    div().flex_none().py_2().child(
-                        Button::new("notifications-more", "Load more")
-                            .size(ControlSize::Sm)
-                            .disabled(busy)
-                            .on_click({
-                                let weak = cx.entity().downgrade();
-                                move |_, _, cx| {
-                                    let _ = weak
-                                        .update(cx, |view, cx| view.request(RequestKind::More, cx));
-                                }
-                            }),
-                    ),
+                    div()
+                        .debug_selector(|| "notifications-more-footer".into())
+                        .flex_none()
+                        .py_2()
+                        .child(
+                            Button::new("notifications-more", "Load more")
+                                .size(ControlSize::Sm)
+                                .disabled(busy)
+                                .on_click({
+                                    let weak = cx.entity().downgrade();
+                                    move |_, _, cx| {
+                                        let _ = weak.update(cx, |view, cx| {
+                                            view.request(RequestKind::More, cx)
+                                        });
+                                    }
+                                }),
+                        ),
                 )
             })
     }

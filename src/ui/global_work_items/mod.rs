@@ -52,9 +52,10 @@ pub struct WorkItemsView {
     limits: WorkItemLimits,
     receiver: Option<Task<()>>,
     row_count: usize,
+    content_insets: scroll::ListInsets,
     focus: FocusHandle,
     list: ListState,
-    motion: Motion<ListState>,
+    motion: Motion<scroll::InsetListTarget>,
     bars: Bars,
     selected: Option<u64>,
     pending_reveal: Option<usize>,
@@ -76,6 +77,7 @@ impl WorkItemsView {
         cx: &mut Context<Self>,
     ) -> Result<Self, WorkItemError> {
         let session = repos.work_item_session()?;
+        let content_insets = scroll::ListInsets::default();
         let list = ListState::new(0, ListAlignment::Top, px(rows::ROW_HEIGHT));
         let activation = cx.observe_window_activation(window, |view, _, cx| {
             scroll::cancel_region(&mut view.bars, &view.motion);
@@ -94,8 +96,9 @@ impl WorkItemsView {
             limits: WorkItemLimits::default(),
             receiver: None,
             row_count: 0,
+            content_insets: content_insets.clone(),
             focus: cx.focus_handle().tab_stop(true),
-            motion: Motion::new(list.clone()),
+            motion: Motion::new(scroll::InsetListTarget::new(list.clone(), content_insets)),
             list,
             bars: Bars::new(),
             selected: None,
@@ -123,6 +126,7 @@ impl WorkItemsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let count = controller.rows.len();
+        let content_insets = scroll::ListInsets::default();
         let list = ListState::new(count, ListAlignment::Top, px(rows::ROW_HEIGHT));
         let activation = cx.observe_window_activation(window, |view, _, cx| {
             scroll::cancel_region(&mut view.bars, &view.motion);
@@ -141,8 +145,9 @@ impl WorkItemsView {
             limits: WorkItemLimits::default(),
             receiver: None,
             row_count: count,
+            content_insets: content_insets.clone(),
             focus: cx.focus_handle().tab_stop(true),
-            motion: Motion::new(list.clone()),
+            motion: Motion::new(scroll::InsetListTarget::new(list.clone(), content_insets)),
             list,
             bars: Bars::new(),
             selected: None,
@@ -264,7 +269,11 @@ impl WorkItemsView {
         self.pending_reveal = None;
         self.row_count = 0;
         self.list = ListState::new(0, ListAlignment::Top, px(rows::ROW_HEIGHT));
-        self.motion = Motion::new(self.list.clone());
+        self.content_insets = scroll::ListInsets::default();
+        self.motion = Motion::new(scroll::InsetListTarget::new(
+            self.list.clone(),
+            self.content_insets.clone(),
+        ));
     }
     fn request(&mut self, mode: RequestMode, cx: &mut Context<Self>) {
         if !self.active {
@@ -544,8 +553,30 @@ impl Render for WorkItemsView {
                 current && (self.controller.error.is_some() || !self.controller.partial.is_empty()),
                 |header| header.child(status),
             );
+        let insets = scroll::ContentInsets::new(
+            px(
+                if current
+                    && (self.controller.error.is_some() || !self.controller.partial.is_empty())
+                {
+                    8.0
+                } else {
+                    16.0
+                },
+            ),
+            px(crate::ui::page_layout::PAGE_BOTTOM),
+        );
+        insets.sync(
+            &self.list,
+            self.controller.rows.len(),
+            &mut self.content_insets,
+        );
         let body = if !current {
-            div().flex_1().child("Account changed").into_any_element()
+            div()
+                .flex_1()
+                .pt(insets.top)
+                .pb(insets.bottom)
+                .child("Account changed")
+                .into_any_element()
         } else if self.controller.is_empty() {
             div()
                 .debug_selector(|| "work-empty".into())
@@ -553,6 +584,8 @@ impl Render for WorkItemsView {
                 .flex()
                 .items_center()
                 .justify_center()
+                .pt(insets.top)
+                .pb(insets.bottom)
                 .text_color(colors.fg_subtle)
                 .child("No results")
                 .into_any_element()
@@ -591,7 +624,6 @@ impl Render for WorkItemsView {
             // reaches the page bottom without a permanently masked padding band.
             .px(px(crate::ui::page_layout::PAGE_GUTTER))
             .pt(px(crate::ui::page_layout::PAGE_TOP))
-            .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
             .bg(colors.surface)
             .text_color(colors.fg)
             .text_size(cx.theme().text_size(TextSize::Sm))
@@ -601,11 +633,17 @@ impl Render for WorkItemsView {
             .child(lease)
             .when(more, |view| {
                 view.child(
-                    Button::new("work-more", "Load more")
-                        .size(ControlSize::Sm)
-                        .disabled(busy)
-                        .on_click(
-                            cx.listener(|view, _, _, cx| view.request(RequestMode::Append, cx)),
+                    div()
+                        .debug_selector(|| "work-more-footer".into())
+                        .flex_none()
+                        .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
+                        .child(
+                            Button::new("work-more", "Load more")
+                                .size(ControlSize::Sm)
+                                .disabled(busy)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.request(RequestMode::Append, cx)
+                                })),
                         ),
                 )
             })
@@ -613,18 +651,25 @@ impl Render for WorkItemsView {
 }
 impl WorkItemsView {
     fn render_list(&self, opacity: f32, cx: &mut Context<Self>) -> AnyElement {
+        let insets = self.content_insets.get();
+        let count = self.controller.rows.len();
         let list = gpui::list(
             self.list.clone(),
-            cx.processor(|view: &mut WorkItemsView, index: usize, _, cx| {
+            cx.processor(move |view: &mut WorkItemsView, index: usize, _, cx| {
                 if !view.controller.current() {
                     return div().into_any_element();
                 }
                 let item = view.controller.rows[index].clone();
                 let context = Some(view.controller.context().clone());
-                rows::row(&item, view.selected == Some(item.id), context, view.now, cx)
+                insets.item(
+                    index,
+                    count,
+                    rows::row(&item, view.selected == Some(item.id), context, view.now, cx),
+                )
             }),
         )
-        .size_full();
+        .size_full()
+        .pb(insets.bottom);
         let weak = cx.entity().downgrade();
         let on_drag: scroll::OnDragging = Rc::new(move |axis, active, _, cx| {
             let _ = weak.update(cx, |view, cx| {
@@ -677,7 +722,15 @@ impl WorkItemsView {
                 self.motion.clone(),
                 Instant::now,
             ))
-            .child(bar)
+            .child(
+                div()
+                    .absolute()
+                    .top(insets.top)
+                    .bottom(insets.bottom)
+                    .left_0()
+                    .right_0()
+                    .child(bar),
+            )
             .on_hover(cx.listener(|view, hovered, _, cx| {
                 if view.bars.hover(
                     *hovered,

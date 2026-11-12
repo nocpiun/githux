@@ -293,6 +293,229 @@ fn intermediate_home_feed_paint_reaches_partial_notice(cx: &mut TestAppContext) 
     intermediate_home_feed_edge(cx, true, true);
 }
 
+fn endpoint_spacing(cx: &mut TestAppContext, end: bool, partial: bool) {
+    let (view, cx) = open(cx);
+    for (width, height, font_scale) in [
+        (1180.0, 1000.0, 1.0),
+        (640.0, 1400.0, 1.0),
+        (1180.0, 1400.0, 1.5),
+        (640.0, 1800.0, 1.5),
+    ] {
+        cx.update(|_, cx| {
+            ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale)
+        });
+        cx.simulate_resize(size(px(width), px(height)));
+        for count in [1, 80, 0] {
+            populate(&view, count, cx);
+            if partial {
+                view.update(cx, |v, cx| {
+                    let binding = v.binding.clone();
+                    let mut home = v.home.state.data().unwrap().clone();
+                    home.readiness = HomeReadiness::Partial {
+                        reasons: vec![HomePartialReason::ResultLimit],
+                    };
+                    v.apply_home(&binding, 1, home, cx);
+                    let mut feed = v.feed.state.data().unwrap().clone();
+                    feed.readiness = FeedReadiness::Partial {
+                        reasons: vec![FeedPartialReason::PageLimit],
+                    };
+                    v.apply_feed(&binding, 1, feed, cx);
+                });
+                frames(cx);
+            }
+            for (column, name, row_name) in [
+                (Column::Home, "home", "home-item-row"),
+                (Column::Feed, "feed", "feed-event-row"),
+            ] {
+                let header = bounds(cx, format!("{name}-header"));
+                let content_start = if partial {
+                    let notice = bounds(cx, format!("{name}-partial"));
+                    assert!((notice.top() - header.bottom() - px(8.0)).abs() < px(0.01));
+                    notice.bottom()
+                } else {
+                    header.bottom()
+                };
+                let panel = bounds(cx, format!("{name}-panel"));
+                if count == 0 {
+                    let empty = bounds(cx, format!("{name}-empty"));
+                    assert_eq!(view.read_with(cx, |v, _| v.item_count(column)), 0);
+                    assert!(
+                        cx.debug_bounds(Box::leak(format!("{row_name}-0").into_boxed_str()))
+                            .is_none()
+                    );
+                    assert!((empty.top() - content_start - px(8.0)).abs() < px(0.01));
+                    assert!((panel.bottom() - empty.bottom() - px(8.0)).abs() < px(0.01));
+                    continue;
+                }
+                cx.update(|window, cx| view.update(cx, |v, cx| v.select(column, 0, window, cx)));
+                frames(cx);
+                let first = bounds(cx, format!("{row_name}-0"));
+                if !end {
+                    assert!(
+                        (first.top() - content_start - px(8.0)).abs() < px(0.01),
+                        "mandatory initial spacing: {name} first={first:?} header={header:?}"
+                    );
+                    if column == Column::Home {
+                        assert_eq!(first.size.height, px(rows::HOME_ROW_HEIGHT));
+                    }
+                } else {
+                    cx.update(|window, cx| {
+                        view.update(cx, |v, cx| v.panel_mut(column).focus.focus(window, cx))
+                    });
+                    cx.simulate_keystrokes("end");
+                    frames(cx);
+                    let native = view.read_with(cx, |v, _| match column {
+                        Column::Home => v.home_view.scroll.viewport_bounds(),
+                        Column::Feed => v.feed_view.scroll.viewport_bounds(),
+                    });
+                    let last = bounds(cx, format!("{row_name}-{}", count - 1));
+                    let gap = native.bottom() - last.bottom();
+                    if count > 1 {
+                        assert!(
+                            (gap - px(8.0)).abs() < px(0.02),
+                            "mandatory end spacing: {name} gap={gap:?}"
+                        );
+                    } else {
+                        assert!(gap >= px(8.0));
+                    }
+                    view.update(cx, |v, cx| {
+                        let p = v.panel_mut(column);
+                        p.motion.cancel();
+                        p.scroll.scroll_to_end();
+                        cx.notify();
+                    });
+                    frames(cx);
+                    let last = bounds(cx, format!("{row_name}-{}", count - 1));
+                    assert!(native.bottom() - last.bottom() >= px(7.98));
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn endpoint_initial_spacing_is_preserved(cx: &mut TestAppContext) {
+    endpoint_spacing(cx, false, false);
+}
+
+#[gpui::test]
+fn endpoint_final_spacing_is_preserved(cx: &mut TestAppContext) {
+    endpoint_spacing(cx, true, false);
+}
+
+#[gpui::test]
+fn endpoint_partial_initial_spacing_is_preserved(cx: &mut TestAppContext) {
+    endpoint_spacing(cx, false, true);
+}
+#[gpui::test]
+fn endpoint_partial_final_spacing_is_preserved(cx: &mut TestAppContext) {
+    endpoint_spacing(cx, true, true);
+}
+
+#[gpui::test]
+fn endpoint_thumb_max_keeps_unmeasured_tail_spacing(cx: &mut TestAppContext) {
+    use crate::ui::scroll::ScrollTarget;
+    use gpui::Axis;
+    let (view, cx) = open(cx);
+    cx.simulate_resize(size(px(1180.0), px(1000.0)));
+    populate(&view, 80, cx);
+    assert!(view.read_with(cx, |v, _| v.home_view.scroll.bounds_for_item(79).is_none()));
+    view.update(cx, |v, cx| {
+        let motion = &v.home_view.motion;
+        motion.drag_started(Axis::Vertical);
+        motion.set_axis_offset(Axis::Vertical, -motion.max_offset().y);
+        cx.notify();
+    });
+    frames(cx);
+    let last = cx.debug_bounds("home-item-row-79").unwrap_or_else(|| {
+        panic!(
+            "tail missing after max drag: {:?}",
+            view.read_with(cx, |v, _| (
+                v.home_view.scroll.logical_scroll_top(),
+                v.home_view.motion.offset(),
+                v.home_view.motion.max_offset(),
+                v.home_view.scroll.max_offset_for_scrollbar(),
+                v.home_view.scroll.viewport_bounds()
+            ))
+        )
+    });
+    let viewport = view.read_with(cx, |v, _| v.home_view.scroll.viewport_bounds());
+    assert!(
+        (viewport.bottom() - last.bottom() - px(8.0)).abs() < px(0.02),
+        "a frozen scrollbar range must include the required tail gap"
+    );
+    view.update(cx, |v, cx| {
+        v.home_view.motion.drag_ended(Axis::Vertical);
+        cx.notify();
+    });
+    frames(cx);
+    assert!(
+        (viewport.bottom() - bounds(cx, "home-item-row-79".into()).bottom() - px(8.0)).abs()
+            < px(0.02)
+    );
+}
+
+#[gpui::test]
+fn endpoint_append_moves_only_the_content_tail_gap(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    cx.simulate_resize(size(px(1180.0), px(1000.0)));
+    populate(&view, 3, cx);
+    let old = bounds(cx, "feed-event-row-2".into());
+    let measured = view.read_with(cx, |v, _| v.feed_view.scroll.bounds_for_item(2).unwrap());
+    assert!((measured.size.height - old.size.height).abs() < px(0.01));
+    let anchor = view.read_with(cx, |v, _| v.feed_view.scroll.logical_scroll_top());
+    view.update(cx, |v, cx| {
+        let mut out = v.feed.state.data().unwrap().clone();
+        for i in 3..30 {
+            let mut item = out.activities[0].clone();
+            item.event.id = format!("append-{i}");
+            out.activities.push(item);
+        }
+        assert!(v.apply_feed_page(&v.binding.clone(), 1, out, cx));
+    });
+    frames(cx);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.feed_view.scroll.logical_scroll_top()),
+        anchor
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.feed_view.scroll.item_count()),
+        30
+    );
+    let row = bounds(cx, "feed-event-row-2".into());
+    let measured = view.read_with(cx, |v, _| v.feed_view.scroll.bounds_for_item(2).unwrap());
+    assert!(
+        (measured.size.height - row.size.height).abs() < px(0.01),
+        "the former tail must become an ordinary interior item"
+    );
+    cx.update(|w, cx| view.update(cx, |v, cx| v.select(Column::Feed, 29, w, cx)));
+    frames(cx);
+    let last = bounds(cx, "feed-event-row-29".into());
+    let viewport = view.read_with(cx, |v, _| v.feed_view.scroll.viewport_bounds());
+    assert!((viewport.bottom() - last.bottom() - px(8.0)).abs() < px(0.02));
+}
+
+#[gpui::test]
+fn endpoint_feed_footer_keeps_its_original_spacing(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    cx.simulate_resize(size(px(1180.0), px(1000.0)));
+    populate(&view, 80, cx);
+    view.update(cx, |v, cx| {
+        assert!(v.feed_append_loading(&v.binding.clone(), 1, cx));
+    });
+    frames(cx);
+    let footer = bounds(cx, "feed-append-loading".into());
+    let panel = bounds(cx, "feed-panel".into());
+    assert!((panel.bottom() - footer.bottom() - px(8.0)).abs() < px(0.01));
+    cx.update(|w, cx| view.update(cx, |v, cx| v.select(Column::Feed, 79, w, cx)));
+    frames(cx);
+    let last = bounds(cx, "feed-event-row-79".into());
+    assert!(
+        (footer.top() - last.bottom()).abs() < px(0.02),
+        "real footer spacing must not be doubled by a second end inset"
+    );
+}
+
 #[gpui::test]
 fn first_and_last_rows_fit_the_real_viewport_at_both_layout_widths(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
@@ -316,8 +539,8 @@ fn first_and_last_rows_fit_the_real_viewport_at_both_layout_widths(cx: &mut Test
                 );
                 assert_eq!(
                     first.top(),
-                    viewport.top(),
-                    "offset zero must show the complete first row"
+                    viewport.top() + px(8.0),
+                    "offset zero preserves the original heading-to-content spacing"
                 );
                 assert!(
                     first.bottom() <= viewport.bottom(),
@@ -347,7 +570,10 @@ fn first_and_last_rows_fit_the_real_viewport_at_both_layout_widths(cx: &mut Test
                 );
                 cx.simulate_keystrokes("home");
                 frames(cx);
-                assert_eq!(bounds(cx, format!("{row_name}-0")).top(), viewport.top());
+                assert_eq!(
+                    bounds(cx, format!("{row_name}-0")).top(),
+                    viewport.top() + px(8.0)
+                );
             }
         }
     }

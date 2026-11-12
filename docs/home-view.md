@@ -78,7 +78,7 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
   - 没有 branch/ref/SHA/commit 数等技术噪声 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
 - 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。
-- 双列模式使用约 32 logical px 的间距、等宽列；窗口较窄（小于 760 logical px）时上下堆叠，纵向间距保持约 16px。顶部/左右留白不变；数据 viewport 从固定 header 或可见提示区的下沿延伸至所属面板底边，移除 header 下固定 gap、Partial 提示外部 margin 与页面底部 8px 空白带。实际追加状态/分页控件显示时，viewport 截止于控件上沿。行内留白随内容滚动；生命周期 canvas 仍为绝对定位零尺寸，不贡献 flex gap。
+- 双列模式使用约 32 logical px 的间距、等宽列；窗口较窄（小于 760 logical px）时上下堆叠，纵向间距保持约 16px。顶部/左右留白不变；标题到首内容 8px、Partial 提示前后各 8px、页面末尾 8px 均为必需间距。起点间距属于首项的滚动布局，末尾使用原生 content padding；数据 viewport/paint clip 覆盖固定 header/提示区下沿至所属面板底边，中间偏移不会被额外空白带遮挡。实际追加状态显示时保留其内部间距及页底 8px，数据区域截止于控件上沿。生命周期 canvas 仍为绝对定位零尺寸，不贡献 flex gap。
 - Feed 头像使用 `AvatarSize::Lg`（40 logical px），圆形且不收缩，与 actor/action + 相对时间组成的 header 整体居中；保留原 Profile 点击和键盘动作，无网络图片。
 
 ## 滚动与键盘
