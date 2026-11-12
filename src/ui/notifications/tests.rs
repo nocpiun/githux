@@ -112,6 +112,78 @@ fn notifications_heading_and_content_edges_match_home_in_empty_and_populated_sta
 }
 
 #[gpui::test]
+fn notification_edge_rows_and_background_stay_outside_scrollbar_lane(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx)
+    });
+    cx.update(|window, _| window.activate_window());
+    view.update(cx, |view, cx| {
+        view.snapshot.has_more = false;
+        cx.notify();
+    });
+    for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(550.0))] {
+        cx.simulate_resize(dimensions);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus.focus(window, cx);
+                cx.notify();
+            })
+        });
+        cx.simulate_keystrokes("home");
+        for _ in 0..3 {
+            cx.update(|w, _| w.refresh());
+            cx.run_until_parked();
+        }
+        view.update(cx, |view, cx| {
+            view.bars.snap(true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let viewport = view.read_with(cx, |view, _| view.list.viewport_bounds());
+        let first = cx.debug_bounds("notification-row-0").unwrap();
+        let page = cx.debug_bounds("notifications-view").unwrap();
+        assert!((viewport.bottom() - page.bottom()).abs() < px(0.01));
+        assert_eq!(first.top(), viewport.top());
+        assert!(first.bottom() <= viewport.bottom());
+        let hit = cx.debug_bounds("notifications-y-thumb").unwrap();
+        assert!(
+            first.right() <= hit.left(),
+            "unread and selected backgrounds end before the hit lane"
+        );
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        let last = cx.debug_bounds("notification-row-13").unwrap();
+        assert!((viewport.bottom() - last.bottom() - px(8.0)).abs() < px(0.02));
+    }
+}
+
+#[gpui::test]
+fn endpoint_notification_footer_spacing_is_preserved(cx: &mut TestAppContext) {
+    let (controller, executor, _) = setup(cx);
+    let (view, cx) = cx.add_window_view(|w, cx| {
+        NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), w, cx)
+    });
+    cx.update(|w, _| w.activate_window());
+    view.update(cx, |v, cx| {
+        v.snapshot.has_more = true;
+        cx.notify();
+    });
+    cx.simulate_resize(size(px(960.0), px(740.0)));
+    cx.run_until_parked();
+    let root = cx.debug_bounds("notifications-view").unwrap();
+    let footer = cx.debug_bounds("notifications-more-footer").unwrap();
+    assert!((root.bottom() - footer.bottom() - px(8.0)).abs() < px(0.01));
+    cx.update(|w, cx| view.update(cx, |v, cx| v.focus.focus(w, cx)));
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let last = cx.debug_bounds("notification-row-13").unwrap();
+    let viewport = view.read_with(cx, |v, _| v.list.viewport_bounds());
+    assert!((viewport.bottom() - footer.top()).abs() < px(0.01));
+    assert!((last.bottom() - footer.top()).abs() < px(0.02));
+}
+
+#[gpui::test]
 fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext) {
     let (controller, executor, fixture) = setup(cx);
     let expected = controller.snapshot().items[0].repository.clone();
@@ -148,6 +220,14 @@ fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext
     assert_eq!(captured.borrow().len(), 1);
     assert_eq!(captured.borrow()[0].repository, expected);
     assert_eq!(captured.borrow()[0].context, *controller.context());
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |view, _| view.selected), Some(1));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.list.scroll_px_offset_for_scrollbar().y),
+        px(0.0),
+        "selecting a fully visible row keeps nearest reveal"
+    );
     cx.simulate_keystrokes("end");
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |view, _| view.selected), Some(13));

@@ -1591,12 +1591,30 @@ fn feed_prefetches_before_the_end_but_does_not_drain_a_tall_initial_page(cx: &mu
         actions.borrow().is_empty(),
         "layout must not treat a tall new list as empty"
     );
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| {
-            view.select(Column::Feed, 37, window, cx);
+    // Pinning the third-last card to the top can backfill to the actual end.
+    // Enter the prefetch region with real wheel input instead, stopping on the
+    // first request so this assertion tests prefetch rather than reveal layout.
+    let position = cx.debug_bounds("feed-rows").unwrap().center();
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    for _ in 0..200 {
+        if actions
+            .borrow()
+            .iter()
+            .any(|a| matches!(a, HomeAction::LoadMoreFeed(_)))
+        {
+            break;
+        }
+        cx.simulate_event(ScrollEvent {
+            position,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-48.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: Default::default(),
+            source: ScrollSource::Pointer,
         });
-    });
-    cx.run_until_parked();
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
     assert_ne!(
         view.read_with(cx, |view, _| view.feed_view.scroll.is_scrolled_to_end()),
         Some(true),

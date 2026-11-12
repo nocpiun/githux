@@ -1810,7 +1810,7 @@ fn uncertain_readme_retry_only_restarts_discovery(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestAppContext) {
+fn inset_tree_reveals_last_row_and_keeps_horizontal_alignment(cx: &mut TestAppContext) {
     let fixture = Fixture::new(Scene::LongTree);
     fixture.login(1);
     let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
@@ -1828,7 +1828,8 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
                 page.read_with(cx, |p, _| p.tree_base_handle().offset())
             )
         });
-    assert!(first.origin.x > outer.origin.x && first.origin.y > outer.origin.y);
+    assert!(first.origin.x > outer.origin.x);
+    assert!((first.top() - outer.top() - px(7.0)).abs() < px(0.01));
     assert!(first.right() < outer.right());
     cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
     cx.simulate_mouse_move(outer.center(), None, Modifiers::none());
@@ -1875,9 +1876,302 @@ fn inset_tree_reveals_last_row_and_keeps_padding_after_collapse(cx: &mut TestApp
     let last = cx
         .debug_bounds("repository-row-file-0399.txt")
         .expect("End reveals last row");
-    assert!(last.bottom() < outer.bottom());
+    assert!(last.bottom() <= outer.bottom() + px(0.01));
     assert!(last.origin.y >= outer.origin.y);
     cx.simulate_keystrokes("home");
     frames(cx);
     assert!(cx.debug_bounds("repository-row-file-0000.txt").is_some());
+}
+
+fn intermediate_tree_paint_edge(cx: &mut TestAppContext, top: bool) {
+    let fixture = Fixture::new(Scene::LongTree);
+    fixture.login(1);
+    let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+    activate(&page, cx);
+    settle(&page, cx, |page| page.tree("").is_some());
+    for (width, font_scale, display_scale) in [
+        (1180.0, 1.0, 1.0),
+        (560.0, 1.0, 1.0),
+        (1180.0, 1.5, 1.5),
+        (560.0, 1.5, 1.5),
+    ] {
+        cx.simulate_scale_factor_change(display_scale);
+        cx.update(|_, cx| {
+            ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale);
+        });
+        cx.simulate_resize(gpui::size(px(width), px(1400.0)));
+        page.update(cx, |page, cx| {
+            page.tree_motion.cancel();
+            page.tree_base_handle()
+                .set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+        frames(cx);
+        let first = cx.debug_bounds("repository-row-file-0000.txt").unwrap();
+        page.update(cx, |page, cx| {
+            page.selection = Selection::File("file-0010.txt".into());
+            page.tree_base_handle()
+                .set_offset(gpui::point(px(0.0), -(first.size.height * 10.0 + px(13.0))));
+            cx.notify();
+        });
+        frames(cx);
+        let pane = cx.debug_bounds("repository-tree-viewport").unwrap();
+        let header = cx.debug_bounds("repository-tree-header").unwrap();
+        assert!(
+            (pane.top() - header.bottom()).abs() < px(0.01),
+            "header and pane share an edge, allowing only float conversion error"
+        );
+        let native = page.read_with(cx, |page, _| page.tree_base_handle().bounds());
+        let index = if top {
+            10
+        } else {
+            (10..400)
+                .find(|index| {
+                    cx.debug_bounds(Box::leak(
+                        format!("repository-row-file-{index:04}.txt").into_boxed_str(),
+                    ))
+                    .is_some_and(|row| {
+                        row.top() < native.bottom() && row.bottom() >= native.bottom()
+                    })
+                })
+                .expect("a row crosses the intermediate viewport bottom")
+        };
+        let selector: &'static str =
+            Box::leak(format!("repository-row-file-{index:04}.txt").into_boxed_str());
+        let edge = if top { header.bottom() } else { pane.bottom() };
+        if !top {
+            let row = cx.debug_bounds(selector).unwrap();
+            page.update(cx, |page, cx| {
+                page.selection = Selection::File(format!("file-{index:04}.txt"));
+                let handle = page.tree_base_handle();
+                handle.set_offset(handle.offset() + gpui::point(px(0.0), edge - row.center().y));
+                cx.notify();
+            });
+            frames(cx);
+        }
+        let row = cx.debug_bounds(selector).unwrap();
+        assert!(
+            row.top() < edge && row.bottom() > edge,
+            "the selected row must cross the real pane boundary"
+        );
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let quad = window.painted_quads().into_iter().find(|quad| {
+                quad.bounds == row.scale(scale) && !quad.background.is_transparent()
+            }).expect("selected tree row submits its background");
+            let visible = quad.bounds.intersect(&quad.content_mask.bounds);
+            let probe = gpui::Bounds::new(
+                gpui::point(row.center().x - px(1.0), edge + if top { px(0.25) } else { px(-0.75) }),
+                gpui::size(px(2.0), px(0.5)),
+            ).scale(scale);
+            assert!(visible.contains(&probe.origin) && visible.contains(&probe.bottom_right()),
+                "fixed padding occludes scrolling content: row={:?}, clip={:?}, visible={visible:?}, probe={probe:?}",
+                quad.bounds, quad.content_mask.bounds);
+        });
+        if !top {
+            // Exercise a real row visible only in the final padded-height strip.
+            let row = cx.debug_bounds(selector).unwrap();
+            page.update(cx, |p, cx| {
+                let h = p.tree_base_handle();
+                h.set_offset(
+                    h.offset() + gpui::point(px(0.0), pane.bottom() - px(3.0) - row.top()),
+                );
+                cx.notify();
+            });
+            frames(cx);
+            let row = cx
+                .debug_bounds(selector)
+                .expect("trailing overdraw retains the real boundary row");
+            cx.update(|w, _| {
+                let scale = w.scale_factor();
+                let q = w
+                    .painted_quads()
+                    .into_iter()
+                    .find(|q| q.bounds == row.scale(scale) && !q.background.is_transparent())
+                    .expect("last 3px row is painted");
+                let v = q.bounds.intersect(&q.content_mask.bounds);
+                let probe = gpui::Bounds::new(
+                    gpui::point(row.center().x, pane.bottom() - px(0.5)),
+                    gpui::size(px(0.0), px(0.0)),
+                )
+                .scale(scale)
+                .origin;
+                assert!(v.contains(&probe));
+            });
+            // The extra real row is interactive, not a painted spacer/fill.
+            page.update(cx, |p, cx| {
+                p.selection = Selection::Readme;
+                cx.notify();
+            });
+            frames(cx);
+            cx.simulate_click(
+                gpui::point(row.center().x, pane.bottom() - px(1.0)),
+                Modifiers::none(),
+            );
+            frames(cx);
+            assert_eq!(
+                page.read_with(cx, |p, _| p.current_path().map(str::to_string)),
+                Some(format!("file-{index:04}.txt"))
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn intermediate_tree_paint_reaches_fixed_header(cx: &mut TestAppContext) {
+    intermediate_tree_paint_edge(cx, true);
+}
+
+#[gpui::test]
+fn intermediate_tree_paint_reaches_pane_bottom(cx: &mut TestAppContext) {
+    intermediate_tree_paint_edge(cx, false);
+}
+
+#[gpui::test]
+fn endpoint_tree_spacing_is_preserved(cx: &mut TestAppContext) {
+    for scene in [Scene::Normal, Scene::LongTree, Scene::NoReadme] {
+        let fixture = Fixture::new(scene);
+        fixture.login(1);
+        let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+        activate(&page, cx);
+        settle(&page, cx, |p| p.tree("").is_some());
+        for (width, font_scale, scale) in [
+            (1180.0, 1.0, 1.0),
+            (560.0, 1.0, 1.0),
+            (1180.0, 1.5, 1.5),
+            (560.0, 1.5, 1.5),
+        ] {
+            cx.simulate_scale_factor_change(scale);
+            cx.update(|_, cx| ely_core::theme::Theme::update(cx, |t| t.font_scale = font_scale));
+            cx.simulate_resize(gpui::size(px(width), px(1600.0)));
+            page.update(cx, |p, cx| {
+                p.tree_motion.cancel();
+                p.tree_base_handle()
+                    .set_offset(gpui::point(px(0.0), px(0.0)));
+                cx.notify();
+            });
+            frames(cx);
+            let pane = cx.debug_bounds("repository-tree-viewport").unwrap();
+            let paths = page.read_with(cx, |p, _| {
+                p.rows().iter().map(|r| r.path.clone()).collect::<Vec<_>>()
+            });
+            if paths.is_empty() {
+                assert_eq!(
+                    page.read_with(cx, |p, _| p.tree_base_handle().max_offset().y),
+                    px(0.0)
+                );
+                continue;
+            }
+            let expected = cx.update(|w, _| w.pixel_snap(px(7.0)));
+            page.update(cx, |p, cx| {
+                p.selection = Selection::File(paths[0].clone());
+                cx.notify();
+            });
+            frames(cx);
+            let first = cx
+                .debug_bounds(Box::leak(
+                    format!("repository-row-{}", paths[0]).into_boxed_str(),
+                ))
+                .unwrap();
+            assert!(
+                (first.top() - pane.top() - expected).abs() < px(0.02),
+                "original tree start gap: {first:?} {pane:?}"
+            );
+            page.update(cx, |p, cx| {
+                p.selection = Selection::File(paths.last().unwrap().clone());
+                p.tree_scroll.scroll_to_bottom();
+                cx.notify();
+            });
+            frames(cx);
+            let last = cx
+                .debug_bounds(Box::leak(
+                    format!("repository-row-{}", paths.last().unwrap()).into_boxed_str(),
+                ))
+                .unwrap();
+            let reach = page.read_with(cx, |p, _| p.tree_base_handle().max_offset().y);
+            if reach > px(0.0) {
+                assert!(
+                    (pane.bottom() - last.bottom() - expected).abs() < px(0.02),
+                    "original tree end gap: {last:?} {pane:?}"
+                );
+            } else {
+                assert!(pane.bottom() - last.bottom() >= expected - px(0.02));
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn tree_viewport_insets_and_complete_edge_rows_survive_resize_and_scale(cx: &mut TestAppContext) {
+    for scene in [Scene::Normal, Scene::LongTree] {
+        let fixture = Fixture::new(scene);
+        fixture.login(1);
+        let (page, cx) = open(cx, &fixture, RepositoryNavigation::default());
+        activate(&page, cx);
+        settle(&page, cx, |page| page.tree("").is_some());
+        for (scale, font_scale, height) in
+            [(1.0, 1.0, 720.0), (1.5, 1.0, 720.0), (1.0, 2.0, 1100.0)]
+        {
+            cx.update(|window, cx| {
+                window.set_scale_factor(scale);
+                ely_core::theme::Theme::update(cx, |theme| theme.font_scale = font_scale);
+            });
+            for width in [1180.0, 560.0] {
+                // Large text needs room for the wrapped repository header as well as rows.
+                cx.simulate_resize(gpui::size(px(width), px(height)));
+                page.update_in(cx, |page, window, cx| window.focus(&page.tree_focus, cx));
+                cx.simulate_keystrokes("home");
+                frames(cx);
+                let outer = cx.debug_bounds("repository-tree-viewport").unwrap();
+                let viewport = cx.debug_bounds("repository-tree-scroll-viewport").unwrap();
+                let native = page.read_with(cx, |page, _| page.tree_base_handle().bounds());
+                assert_eq!(
+                    native, viewport,
+                    "clipping and scroll extent use the same viewport"
+                );
+                assert!((viewport.top() - outer.top()).abs() < px(0.01));
+                assert_eq!(
+                    outer.bottom() - viewport.bottom(),
+                    px(0.0),
+                    "pane={outer:?}, viewport={viewport:?}, display scale={scale}, font scale={font_scale}, width={width}",
+                );
+                let paths = page.read_with(cx, |page, _| {
+                    (
+                        page.rows().first().unwrap().path.clone(),
+                        page.rows().last().unwrap().path.clone(),
+                    )
+                });
+                let first = cx
+                    .debug_bounds(Box::leak(
+                        format!("repository-row-{}", paths.0).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert!(
+                    (first.top() - viewport.top() - cx.update(|w, _| w.pixel_snap(px(7.0)))).abs()
+                        < px(0.02)
+                );
+                let label = cx
+                    .debug_bounds(Box::leak(
+                        format!("repository-row-label-{}", paths.0).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert!(
+                    label.top() >= first.top() && label.bottom() <= first.bottom(),
+                    "first row text box fits below its header: {label:?} {first:?}"
+                );
+                assert!(first.bottom() <= viewport.bottom());
+                cx.simulate_keystrokes("end");
+                frames(cx);
+                let last = cx
+                    .debug_bounds(Box::leak(
+                        format!("repository-row-{}", paths.1).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert!(
+                    last.top() >= viewport.top() && last.bottom() <= viewport.bottom(),
+                    "last={last:?}, viewport={viewport:?}"
+                );
+            }
+        }
+    }
 }

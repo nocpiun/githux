@@ -13,6 +13,8 @@ mod presentation;
 mod rows;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod viewport_tests;
 
 use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;
@@ -309,11 +311,12 @@ impl<T> PanelModel<T> {
 /// One panel's virtualized rows, selection and isolated scroll/focus state.
 struct PanelView {
     scroll: ListState,
-    motion: Motion<ListState>,
+    motion: Motion<scroll::InsetListTarget>,
     bars: Bars,
     focus: FocusHandle,
     selected: Option<usize>,
     pending_reveal: Option<usize>,
+    content_insets: scroll::ListInsets,
     clock: Instant,
     #[cfg(test)]
     pinned_clock: Option<u64>,
@@ -322,7 +325,11 @@ struct PanelView {
 impl PanelView {
     fn new(cx: &mut Context<HomeView>) -> Self {
         let scroll = ListState::new(0, ListAlignment::Top, px(200.0));
-        let motion = Motion::new(scroll.clone());
+        let content_insets = scroll::ListInsets::default();
+        let motion = Motion::new(scroll::InsetListTarget::new(
+            scroll.clone(),
+            content_insets.clone(),
+        ));
         Self {
             scroll,
             motion,
@@ -330,6 +337,7 @@ impl PanelView {
             focus: cx.focus_handle().tab_stop(true),
             selected: None,
             pending_reveal: None,
+            content_insets,
             clock: Instant::now(),
             #[cfg(test)]
             pinned_clock: None,
@@ -346,7 +354,11 @@ impl PanelView {
         // Replacing the handle also drops native deferred reveal/drag state.
         // The new Motion wraps exactly the new list's real base handle.
         self.scroll = ListState::new(0, ListAlignment::Top, px(200.0));
-        self.motion = Motion::new(self.scroll.clone());
+        self.content_insets = scroll::ListInsets::default();
+        self.motion = Motion::new(scroll::InsetListTarget::new(
+            self.scroll.clone(),
+            self.content_insets.clone(),
+        ));
     }
 
     fn now_ms(&self) -> u64 {
@@ -366,6 +378,7 @@ impl PanelView {
             scroll: self.scroll.clone(),
             motion: self.motion.clone(),
             focus: self.focus.clone(),
+            insets: self.content_insets.get(),
         }
     }
 
@@ -378,8 +391,9 @@ impl PanelView {
 /// Cloneable real handles for one panel, sampled once per frame.
 struct PanelHandles {
     scroll: ListState,
-    motion: Motion<ListState>,
+    motion: Motion<scroll::InsetListTarget>,
     focus: FocusHandle,
+    insets: scroll::ContentInsets,
 }
 
 /// A reusable two-column Home/Feed view. Construct one per page session and
@@ -1302,6 +1316,28 @@ impl Render for HomeView {
         let narrow = window.viewport_size().width < px(760.0);
         let home_opacity = self.home_view.bars.opacity(self.home_view.now_ms());
         let feed_opacity = self.feed_view.bars.opacity(self.feed_view.now_ms());
+        let home_count = self.item_count(Column::Home);
+        let feed_count = self.item_count(Column::Feed);
+        let end_gap = px(crate::ui::page_layout::PAGE_BOTTOM);
+        let home_insets = scroll::ContentInsets::new(px(8.0), end_gap);
+        let feed_insets = scroll::ContentInsets::new(
+            px(8.0),
+            if matches!(self.feed_append, FeedAppendState::Idle) {
+                end_gap
+            } else {
+                px(0.0)
+            },
+        );
+        home_insets.sync(
+            &self.home_view.scroll,
+            home_count,
+            &mut self.home_view.content_insets,
+        );
+        feed_insets.sync(
+            &self.feed_view.scroll,
+            feed_count,
+            &mut self.feed_view.content_insets,
+        );
         let home_handles = self.home_view.handles();
         let feed_handles = self.feed_view.handles();
         let feed_append_binding = self.binding.clone();
@@ -1343,7 +1379,6 @@ impl Render for HomeView {
             .relative()
             .px_4()
             .pt_4()
-            .pb_2()
             .bg(colors.surface)
             .text_size(body_size)
             .text_color(colors.fg)
@@ -1466,7 +1501,6 @@ fn render_panel_with<T: PanelRows + 'static>(
         .min_w_0()
         .min_h_0()
         .overflow_hidden()
-        .gap_2()
         .child(
             div()
                 .debug_selector(move || format!("{}-header", column_name(column)))
@@ -1696,10 +1730,19 @@ fn panel_body_with<T: PanelRows + 'static>(
     let empty = data.len() == 0;
     let summary = T::summary(data);
     let partial = summary.notice;
-    let list = list_rows::<T>(column, opacity, handles, cx);
+    let list = list_rows::<T>(column, opacity, handles, data.len(), cx);
     let append_footer = if column == Column::Feed {
         let state = append_state.unwrap_or(&FeedAppendState::Idle);
-        feed_append_footer(state, append_binding, append_generation, cx)
+        let footer = feed_append_footer(state, append_binding, append_generation, cx);
+        if matches!(state, FeedAppendState::Idle) {
+            footer
+        } else {
+            div()
+                .flex_none()
+                .pb(px(crate::ui::page_layout::PAGE_BOTTOM))
+                .child(footer)
+                .into_any_element()
+        }
     } else {
         div().into_any_element()
     };
@@ -1729,7 +1772,7 @@ fn panel_body_with<T: PanelRows + 'static>(
                 .debug_selector(move || format!("{}-partial", column_name(column)))
                 .flex_none()
                 .mx_3()
-                .mb_2()
+                .mt_2()
                 .p_2()
                 .rounded(radius)
                 .bg(colors.warning_subtle)
@@ -1737,7 +1780,19 @@ fn panel_body_with<T: PanelRows + 'static>(
                 .text_color(colors.warning)
                 .child(text)
         }))
-        .child(if empty { empty_panel } else { list })
+        .child(if empty {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .pt(handles.insets.top)
+                .pb(handles.insets.bottom)
+                .child(empty_panel)
+                .into_any_element()
+        } else {
+            list
+        })
         .child(append_footer)
         .into_any_element()
 }
@@ -1887,18 +1942,21 @@ fn list_rows<T: PanelRows + 'static>(
     column: Column,
     opacity: f32,
     handles: &PanelHandles,
+    count: usize,
     cx: &mut Context<HomeView>,
 ) -> AnyElement {
     let scroll = handles.scroll.clone();
     let motion = handles.motion.clone();
     let focus = handles.focus.clone();
+    let insets = handles.insets;
     let list = gpui::list(
         scroll,
         cx.processor(move |view: &mut HomeView, index: usize, window, cx| {
-            T::row(view, index, window, cx)
+            insets.item(index, count, T::row(view, index, window, cx))
         }),
     )
-    .size_full();
+    .size_full()
+    .pb(insets.bottom);
     let this = cx.entity().downgrade();
     let on_drag: scroll::OnDragging = Rc::new(move |axis, dragging, _window, cx| {
         let _ = this.update(cx, |view, cx| {
@@ -1923,7 +1981,8 @@ fn list_rows<T: PanelRows + 'static>(
             },
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(1.5, 8.0),
+        placement: scroll::Placement::overlay(1.5, scroll::LIST_BAR_LANE)
+            .with_track_insets(insets.top, insets.bottom),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,
@@ -1941,7 +2000,17 @@ fn list_rows<T: PanelRows + 'static>(
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
-        .child(list)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .right(px(scroll::LIST_BAR_LANE))
+                .overflow_hidden()
+                .debug_selector(move || format!("{}-list-viewport", column_name(column)))
+                .child(list),
+        )
         .when(column == Column::Feed, |container| {
             let owner = cx.entity().downgrade();
             container.child(
