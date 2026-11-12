@@ -318,6 +318,17 @@ export function parseRunArgs(rawArgs) {
   return { flags, command: commandArgs[0], args: commandArgs.slice(1) };
 }
 
+// Only direct cargo fmt is known not to compile. Wrappers and other commands
+// remain serialized; formatting still requires exclusive source ownership.
+export function buildSlotPolicy(command, args = [], noLock = false) {
+  if (noLock) return 'explicitly_disabled';
+  const executable = path.win32.basename(command).toLowerCase();
+  const subcommand = args[0]?.startsWith('+') && args[0].length > 1 ? args[1] : args[0];
+  return (executable === 'cargo' || executable === 'cargo.exe') && subcommand === 'fmt'
+    ? 'cargo_fmt'
+    : 'serialized';
+}
+
 export async function executeVerifiedCommand({
   command,
   args = [],
@@ -355,6 +366,7 @@ export async function executeVerifiedCommand({
     started_at: startedAtIso,
     finished_at: null,
     status: 'running',
+    build_slot_policy: buildSlotPolicy(command, args, noLock),
     waiting_for_slot_ms: 0,
     running_duration_ms: 0,
     wall_duration_ms: 0,
@@ -369,7 +381,7 @@ export async function executeVerifiedCommand({
   atomicWriteJson(recordFile, record);
 
   let slot = null;
-  if (!noLock) {
+  if (record.build_slot_policy === 'serialized') {
     try {
       slot = await acquireBuildSlot({
         platform,
@@ -566,6 +578,10 @@ Options:
   --no-lock         Do not acquire the shared Rust build slot mutex
   --json            Output complete run record JSON
   --help, -h        Show this help
+
+Direct cargo [ +toolchain ] fmt skips the build slot automatically; logs and exit
+codes are still recorded. Format before building in the same worktree. Other
+commands remain serialized by default.
 `);
     return;
   }

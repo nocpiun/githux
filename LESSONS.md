@@ -162,3 +162,12 @@
 - **原因**：PR #73 原实现用 2 秒节流的门禁探测喂 `gate_denied`，`revoke_repository(scope, Some(id))` 更新账户代次之外只翻转仓库授权，页面因此在撤权后继续显示私有内容，`revoke + revalidate` 同窗口时永不生效。缩短间隔只是缩小窗口，不能消除漏判。
 - **证据**：确定性回归 `repository_revocation_clears_the_displayed_page_in_one_drain`（单次 drain、不睡眠即要求清空，交付 head 上失败 run `653e5a3f`，把校验改回恒真再次失败 run `d2603345`，恢复后通过 `af02e39b`）与 `reply_captured_before_revocation_is_rejected_afterwards_and_never_revived`（撤权前完成的回复不得回填，重新授权不得复活旧令牌）；见[开发日志](docs/devlog/2026-11-03-repository-offline.md)与[仓库浏览](docs/repository-browser.md)。
 - **范围**：任何“显示/发布已缓存或已授权内容”的消费方（页面、图片 provider、内嵌聚合区）。不适用于纯展示性、无授权语义的轮询状态刷新。
+
+
+## L023：有效图片字节不能证明 SVG 内容已经正确显示
+
+- **规则**：第三方 SVG 接入先检查实际响应的 CSS、时间线、字体与嵌入资源，再用原创最小 fixture 覆盖这些语义；验证要检查内容区域、必要图标与中间/最终时刻，并在真实组合页面核对布局。仅证明有效 PNG、尺寸、边框像素或 Ready 状态不足以验收。
+- **原因**：`reader-svg` 初次静态实现通过 decoder/provider/cache 与 CI/review，但真实 Stats 的行依赖延迟 CSS fade-in，resvg 忽略时间线后始终 opacity=0；badge 的嵌套 SVG data logo 被 resolver 丢弃，背景和文字仍然让弱断言通过。图片布局独立交付也没有修正 AST 将同段徽章拆成多块的问题。2026-11-11 负责人据真实 Profile 否决 PR #82。
+- **证据**：[返工记录](docs/devlog/2026-11-10-reader-svg.md#2026-11-11-负责人反馈后的集成返工) 与内容像素/延迟帧/分组几何回归。公开原始响应留在本地调查目录，没有因其公开可读就当作已获分发许可的 committed fixture。此前静态交付的通过记录保留为历史，不改写成人工验收成功。
+- **补充（同字节与物理网格）**：品质排查要让参考浏览器和解码器消费同一响应，并区分作者风格、字体缺失、渲染器算术与设备像素不足。Star History 本来有手绘位移，但 resvg 重复乘 scale 和忽略内嵌字体是实际偏差；修几何前先定位这条差异。动画帧、保留最终图与逻辑盒可以有不同网格，成本须按各自真实像素累计；只给静态图 2× 不代表高 DPI 动画/收尾清晰。见[品质返工](docs/devlog/2026-11-10-reader-svg.md#2026-11-11-再次品质返工同字节参考设备密度与静默加载)。
+- **范围**：SVG、图表、文档图片、动画及组合页面渲染；补充 L002/L012，不要求测试依赖实时外部网络。

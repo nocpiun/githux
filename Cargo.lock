@@ -1996,15 +1996,19 @@ dependencies = [
  "dirs 7.0.0",
  "ely-core",
  "ely-settings",
+ "flate2",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
  "pulldown-cmark",
  "raw-window-handle",
  "reqwest",
+ "resvg",
  "rusqlite",
  "serde",
  "serde_json",
+ "simplecss",
+ "svgtypes",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4996,8 +5000,6 @@ dependencies = [
 [[package]]
 name = "resvg"
 version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b563218631706d614e23059436526d005b50ab5f2d506b55a17eb65c5eb83419"
 dependencies = [
  "gif",
  "image-webp",

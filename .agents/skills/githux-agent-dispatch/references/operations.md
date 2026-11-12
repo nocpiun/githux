@@ -63,6 +63,10 @@ node .agents/skills/githux-agent-dispatch/scripts/dispatch.mjs status --worktree
 
 确认本次测试或任务 CLI 已退出、无需保留终端后，才可 `kero close SESSION_ID` 关闭自己创建的会话；不使用 force，不删除 worktree，不关闭负责人正在使用的终端。若继承的是旧 CMD 会话，先在旧终端正常退出 CLI；既有状态文件仍可读取，下一次 dispatch resume 自动进入 Kero。启动失败可能已创建 Kero 会话：保留锁和回执，按下方恢复步骤核验，禁止盲目重复 new/start。
 
+## 启动与恢复时的执行检查点
+
+每次 start/resume 的 KERO-TOKEN.md 除项目 ID 外，还附带最小复现、保留行为、无新证据时退出空转、复用/合并验证及统一收尾的简短约束，详见[共享工作流](../../../../docs/agent-workflow.md#先验证问题再扩大检查)。恢复时新建该上下文文件，不覆盖原 TASK、follow-up 或历史上下文；原验收与裁决记录继续有效。它不是运行期工具循环监控器，也不会因耗时自动换模型或终止子进程。
+
 ## 执行过程中的辅助会话
 
 统一项目规则覆盖 Pi 主会话之外的检查、构建、测试、探针和程序运行。优先在已有任务终端调用验证 runner；如果确需独立会话，使用本次 KERO-TOKEN.md 中已核验的 project ID：

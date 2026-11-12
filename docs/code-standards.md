@@ -14,7 +14,7 @@
 
 - 检查应能说明改动的实际行为，围绕触发条件、错误路径和受影响的边界；修复逻辑缺陷时优先提供能复现原问题的回归验证。纯文案等低影响改动不堆镜像实现的测试。
 - 单元测试使用明确 fixture 或模拟外部服务，不依赖实时 GitHub；真正的集成验证单独说明账户、环境与影响。测试用临时目录，结束时清理所启动的任务，不改真实用户配置。
-- 运行与改动相称的检查，记录实际命令、结果和未覆盖部分。源码推断、模拟结果与真实 GUI/PR 验证分别说明。
+- 运行与改动相称的检查，按[先验证问题，再扩大检查](agent-workflow.md#先验证问题再扩大检查)复用现有验证并集中收尾，记录实际命令、结果和未覆盖部分。源码推断、模拟结果与真实 GUI/PR 验证分别说明。
 - UI 改动在真实 Ely 窗口核验，涉及字体、IME、滚动和窗口状态时包含对应交互；跨平台支持不能仅由 Windows 编译成功推断。
 - CI 根据变更范围选择任务，末尾显示名称仍为 `CI`（job ID `ci`），作为分支规则的 required check。范围判断必须成功；需要运行的任务必须成功，仅允许由范围策略明确排除的任务为 skipped。失败、取消、意外跳过、缺失输出均不通过。新增上游同时更新 `ci.needs` 和汇总校验，详见下方范围约定。Codex 审查独立按 [工作流](agent-workflow.md#合并前的门槛) 核验。
 
@@ -51,7 +51,7 @@ git diff --check
 git diff --cached --check
 ```
 
-Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发测试在系统临时目录建立一次性 Git 仓库和假 CLI，不访问模型、不打开可见窗口；Windows 进程身份与编码桥有专项覆盖。验证 runner 测试覆盖真实 Cargo 失败/成功调用、exit code 保留、stdout/stderr 捕获、空格/Unicode 参数、超时与 Windows mutex 串行化，全部离线运行，不依赖网络或真实构建产物。这三项 Agent 测试已从 Rust 检查拆为独立 Windows `script-check`；纯文档不触发。涉及真实 CLI、Kero 会话/TTY 接管或会话恢复的改动仍需相应真实验证，模拟测试不能替代；当前实现的本机实测证据见 [派发开发日志](devlog/2026-11-03-agent-dispatch-kero.md)。
+Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发测试在系统临时目录建立一次性 Git 仓库和假 CLI，不访问模型、不打开可见窗口；Windows 进程身份与编码桥有专项覆盖。验证 runner 测试覆盖真实 Cargo 失败/成功调用、exit code 保留、stdout/stderr 捕获、空格/Unicode 参数、超时、独立 Windows 测试 mutex 串行化，以及持锁期间直接 Cargo fmt 的失败/修正/成功记录；测试不占用真实构建槽，全部离线运行，不依赖网络或真实构建产物。这三项 Agent 测试已从 Rust 检查拆为独立 Windows `script-check`；纯文档不触发。涉及真实 CLI、Kero 会话/TTY 接管或会话恢复的改动仍需相应真实验证，模拟测试不能替代；当前实现的本机实测证据见 [派发开发日志](devlog/2026-11-03-agent-dispatch-kero.md)。
 
 正式应用是单 Cargo package，固定 Rust 1.98.1。Windows 应用检查如下，CI 配置见 [ci.yml](../.github/workflows/ci.yml)：
 

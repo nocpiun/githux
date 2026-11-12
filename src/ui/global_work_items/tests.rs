@@ -260,6 +260,83 @@ fn load(view: &Entity<WorkItemsView>, cx: &mut VisualTestContext, mode: RequestM
     cx.run_until_parked();
 }
 #[gpui::test]
+fn list_edges_and_scrollbar_lane_survive_narrow_resize(cx: &mut TestAppContext) {
+    let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    // Exercise the content edge with no visible pagination footer.
+    view.update(cx, |view, cx| {
+        view.controller.next = None;
+        cx.notify();
+    });
+    for dimensions in [size(px(960.0), px(740.0)), size(px(420.0), px(550.0))] {
+        cx.simulate_resize(dimensions);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus.focus(window, cx);
+                cx.notify();
+            })
+        });
+        cx.simulate_keystrokes("home");
+        for _ in 0..3 {
+            cx.update(|w, _| w.refresh());
+            cx.run_until_parked();
+        }
+        view.update(cx, |view, cx| {
+            view.bars.snap(true);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let viewport = view.read_with(cx, |view, _| view.list.viewport_bounds());
+        let first = cx.debug_bounds("work-item-10000").unwrap();
+        let page = cx.debug_bounds("global-work-items").unwrap();
+        let fixed_header = cx.debug_bounds("work-fixed-header").unwrap();
+        assert!((viewport.top() - fixed_header.bottom()).abs() < px(0.01));
+        assert!((viewport.bottom() - page.bottom()).abs() < px(0.01));
+        let expected_start = view.read_with(cx, |v, _| {
+            if v.controller.error.is_some() || !v.controller.partial.is_empty() {
+                px(8.0)
+            } else {
+                px(16.0)
+            }
+        });
+        assert!((first.top() - viewport.top() - expected_start).abs() < px(0.01));
+        assert!(first.bottom() <= viewport.bottom());
+        let hit = cx.debug_bounds("work-scrollbar-thumb").unwrap();
+        let line = cx.debug_bounds("work-scrollbar-line").unwrap();
+        assert!(first.right() <= hit.left());
+        assert!(line.left() - first.right() <= px(4.0));
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        let last_id = view.read_with(cx, |view, _| view.controller.rows.last().unwrap().id);
+        let last = cx
+            .debug_bounds(Box::leak(format!("work-item-{last_id}").into_boxed_str()))
+            .unwrap();
+        assert!((viewport.bottom() - last.bottom() - px(8.0)).abs() < px(0.02));
+    }
+}
+
+#[gpui::test]
+fn endpoint_global_footer_spacing_is_preserved(cx: &mut TestAppContext) {
+    let (_fixture, view, cx) = open(cx, Scene::Mixed);
+    cx.simulate_resize(size(px(960.0), px(740.0)));
+    cx.run_until_parked();
+    let footer = cx
+        .debug_bounds("work-more-footer")
+        .expect("mixed fixture has a continuation");
+    let root = cx.debug_bounds("global-work-items").unwrap();
+    assert!((footer.bottom() - root.bottom()).abs() < px(0.01));
+    cx.update(|w, cx| view.update(cx, |v, cx| v.focus.focus(w, cx)));
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let viewport = view.read_with(cx, |v, _| v.list.viewport_bounds());
+    let last_id = view.read_with(cx, |v, _| v.controller.rows.last().unwrap().id);
+    let last = cx
+        .debug_bounds(Box::leak(format!("work-item-{last_id}").into_boxed_str()))
+        .unwrap();
+    assert!((viewport.bottom() - footer.top()).abs() < px(0.01));
+    assert!((footer.top() - last.bottom() - px(8.0)).abs() < px(0.02));
+}
+
+#[gpui::test]
 fn real_rows_repository_callback_and_unconnected_title(cx: &mut TestAppContext) {
     let (_fixture, view, cx) = open(cx, Scene::Mixed);
     cx.simulate_resize(size(px(900.0), px(650.0)));
