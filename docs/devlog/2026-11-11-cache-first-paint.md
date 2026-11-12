@@ -187,6 +187,21 @@ Codex 对 `3b56e12` 提出 1 项 P2，成立。
 
 - **P2 复核未验证时缺失资源永久 Loading**：摘要与分支列表都回落到缓存（`network_verified` 为假）时，`apply_branches` 既不重新解析也不补读，快照里缺失的根树、README 发现与正文就一直是加载态。修复：该情形清掉 preview 标记并走离线路径补读（根树、README 发现、展开目录与选择解析），让每个资源到达确定状态（内容或可重试错误），保留下来的可读部分与历史标记不变。回归 `an_unverified_revalidation_settles_the_missing_snapshot_resources`（关闭该分支后失败）。
 
+## 基线整合（2026-11-12）
+
+负责人于 2026-11-12 接受 head `54f5632`，`pending` 已移除；本轮只做基线整合，不重做实现、不改已接受的呈现。
+
+- 用普通 `--no-ff` merge 合入 `origin/main` = `a2c5ade`（#82 reader-svg、#84 scroll geometry、#87 workflow），保留已审查历史，未 cherry-pick 任何兄弟分支 WIP，未强推。合并提交 `9f48c4f`，无代码冲突；唯一同文件改动是 `docs/home-view.md`（两侧分别新增 cache-first 与滚动几何段落，自动合并后两段都在）。
+- 组合面核查：
+  - `src/ui/home/mod.rs`（main 侧新增 `ContentInsets`/`InsetListTarget`/尾侧 8px 通道）与 `src/app/pages/home.rs` 的发布顺序互不相干：快照/网络仍在 host 内按 `PublishMark` 决定覆盖，UI 只负责几何。`apply_feed_page` 仍然只在“更长”时 `splice`，因此第十轮“去重不得截断已追加集合”的守卫依旧必要且有效。
+  - `src/ui/repository/view.rs` 的 tree 行尾侧 overdraw 不改行内容与选择语义；快照整包发布仍按同一 commit 同时更新 header/tree/reader。
+  - `src/ui/reader/**`、`src/content/images/**`、`src/data/reader_images.rs`（SVG/质量/时间线、`start_with_options`）未改动；固定对象缓存读取与同 commit 保留 reader 实体、回调身份的逻辑不受影响。
+- 组合验证（同一合并提交）：`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`、`cargo build --locked`。
+  - `--bin githux` 1342 通过；`--test home` 116；`--test repository` 952；`--test repository_overview` 44；`--test profile` 344；`--test reader` 309；`--test scroll_viewports` 1343；`--test notifications` 全通过。
+  - cache-first 关键用例在合并后逐一复跑并通过：Home/Feed 快照先行→网络替换、迟到缓存不回滚、Profile 分节快照先行、侧栏预发布（含撤权清理）、Repository 快照整包（同 commit 复核/缺 README 发现恢复文件解析/缓存阶段失败重试/复核未验证时补读）、`offline_replay_does_not_wait_for_a_network_permit`。
+- 一个非本任务失败：`network::transport::bounded_tests::chunked_and_no_length_stop_before_eof_on_success_and_errors` 在一次全量并发运行中报 `Err(Network{"error sending request"})` 而非 `ResponseTooLarge`（本地 HTTP 测试服务在高并发下连接失败），单独运行该模块通过；与 cache-first 无交集（transport 未改动）。
+- 无新增语义选择：合并没有改变已接受行为，因此不改 UI 呈现、不重写 Reader/SVG/表格图片，也不改 `merge_owner`。
+
 ## 顺序/边界说明
 
 - 未新增毫秒级性能指标；验证依据是“网络未释放时已渲染缓存内容”和“释放后替换”的可观察顺序，而非合成计时。
