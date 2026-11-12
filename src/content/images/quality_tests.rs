@@ -454,3 +454,90 @@ fn quality_explicit_none_and_pixel_dashoffset_reach_their_final_values() {
     assert_eq!(first.get_pixel(6, 3).0, [255, 0, 0, 255]);
     assert_eq!(first.get_pixel(15, 14).0[3], 0);
 }
+
+#[test]
+fn quality_nested_clip_groups_use_destination_sized_surfaces() {
+    // A clipped shape becomes a group in usvg. Literal <g> children of a
+    // clipPath are invalid SVG and would not exercise clip_group.
+    let mut defs = String::new();
+    for i in 0..20 {
+        let clip = if i < 19 {
+            format!(r#" clip-path="url(#c{})""#, i + 1)
+        } else {
+            String::new()
+        };
+        defs.push_str(&format!(
+            r#"<clipPath id="c{i}"><rect width="2" height="2"{clip}/></clipPath>"#
+        ));
+    }
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><defs>{defs}</defs><rect width="1000" height="1000" fill="blue" clip-path="url(#c0)"/></svg>"#
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { .. })
+    ));
+}
+
+fn chained_resource_svg(kind: &str, size: u32, count: usize, deep_content: bool) -> Vec<u8> {
+    let (element, attribute) = match kind {
+        "mask" => ("mask", "mask"),
+        "clip" => ("clipPath", "clip-path"),
+        _ => unreachable!(),
+    };
+    let mut defs = String::new();
+    for i in 0..count {
+        let next = if i + 1 < count {
+            format!(r#" {attribute}="url(#r{})""#, i + 1)
+        } else {
+            String::new()
+        };
+        let mut shape = format!(r#"<rect width="{size}" height="{size}" fill="white"/>"#);
+        if deep_content && i + 1 == count {
+            for _ in 0..10 {
+                shape = format!(
+                    r#"<g opacity=".5">{shape}<rect width="{size}" height="{size}" fill="white"/></g>"#
+                );
+            }
+        }
+        defs.push_str(&format!(
+            r#"<{element} id="r{i}"{next}>{shape}</{element}>"#
+        ));
+    }
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}"><defs>{defs}</defs><g {attribute}="url(#r0)"><rect width="{size}" height="{size}" fill="blue"/></g></svg>"#).into_bytes()
+}
+
+#[test]
+fn quality_chained_masks_and_clips_budget_retained_destinations() {
+    let limits = ImageLimits::default();
+    for kind in ["mask", "clip"] {
+        assert!(
+            matches!(
+                decode_image(chained_resource_svg(kind, 1000, 20, false), &limits),
+                Err(ImageFailure::TooLarge { .. })
+            ),
+            "{kind} references retain every parent destination until recursion returns"
+        );
+        let decoded = decode_image(chained_resource_svg(kind, 400, 20, false), &limits).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        let retained_bytes = u64::from(pixels.width()) * u64::from(pixels.height()) * 20 * 4;
+        assert!(retained_bytes <= limits.max_decoded_bytes as u64);
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0,
+            [0, 0, 255, 255]
+        );
+    }
+}
+
+#[test]
+fn quality_deep_mask_content_is_budgeted_beyond_the_first_reference() {
+    // usvg Node::subroots only visits the first two masks. The third contains
+    // additional isolated groups that must count alongside retained masks.
+    assert!(matches!(
+        decode_image(
+            chained_resource_svg("mask", 800, 3, true),
+            &ImageLimits::default()
+        ),
+        Err(ImageFailure::TooLarge { .. })
+    ));
+}

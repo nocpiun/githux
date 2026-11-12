@@ -113,6 +113,14 @@ roast 最终网格依次 880×400 / 1320×600 / 1760×800，逻辑盒仍 440×20
 
 同步 main `daf9f68` 的工作流改动后验证。此前 PR 已含多次主线/图片布局合并及冲突处理；普通 rebase 会重放这些历史冲突，因此撤回后以正常基线合并保留已验收渲染，最终 PR 仍 squash 合入 main。本轮检查均通过：`cargo test --locked --test reader_images -- --test-threads=1`（`6f6af319-21e2-44cf-ba43-207df7fc5148`）842 通过、0 失败、1 个 opt-in 忽略；`cargo clippy --locked --all-targets -- -D warnings`（`9fc632e7-2cf0-4bdb-ac8e-757a65115e04`）、app/example build（`8a24c6c2-ac66-4f4b-9c04-d88f2cdd7416`）与 fmt check（`c4ead252-25a4-4136-8b1b-7e81efcae268`）均成功。三份编译日志均无 warning/error。测试实际运行约 110 秒；包含依赖重编译共 590 秒，构建槽等待分别为约 0.15、12.8、66.5 秒，区分排队与编译。随后新 head 重新 CI/review，通过后由协调者合并，不沿用旧 head 的放行。
 
+### 本轮审查：mask/clip 引用链工作面
+
+警告清理 head `b48f2f5` 的审查 `5867305889` 提出 P2 `4544870831`，核实成立。resvg 的 mask/clip apply 在递归引用期间保留父画布，而预算先前只加固定份数；usvg 0.46.0 的通用 subroots visitor 还只列出前两级引用，无法计入更深 mask 内容。旧实现精确回归 `51da9981-af9f-46c8-b495-43be8dd5e8c0` 失败，确认 1000×1000、20 级 mask 未被 32 MiB 预算拒绝。此前一次短名配合 `--exact` 没匹配测试，不作为验证证据。
+
+现在对每个后续引用累计同时保留的目标画布，保留单层原有余量；链遍历有 256 级上限，所有引用的内容纳入已有节点/深度计数。显式遍历 Group 的完整 mask/clip 链及 filter image 子根，不再依赖只能看到两级的 visitor。clip 里的嵌套裁剪组按 renderer 实际使用的完整目标画布计费，透传该绘制上下文；普通未裁剪 clip 子组不计不存在的隔离层。
+
+回归覆盖超限 mask/clip 链、可在降采样后正常显示的预算内链、第三层 mask 的隔离内容，以及小形状但大目标画布的嵌套裁剪组。已验收的正常 SVG 外观不改，预算不足时仍遵循先降低超采样、固有网格仍超限则拒绝的原契约。最终源码的完整图片组 `50bde8bc-065e-4cdb-a0cf-2a5604ea6439` 有 844 项通过、1 项新增裁剪样例失败、1 项 opt-in 忽略；失败样例使用了 clipPath 不支持的 `<g>` 子元素，修正为实际会生成裁剪组的带 clip-path 图形后，`9737c0f2-f7c2-46bb-93af-e551eee909e4` 的 27 项品质回归全部通过。两次之间只修正该测试输入，未改生产代码，不把前次失败描述为全组通过。最终 all-target clippy `-D warnings`（`123c7f77-cac7-42cb-be98-30beadd4aed8`）、app/example build（`f1e3094f-7b51-40d0-b142-e89e1c600eaa`）通过且日志无编译警告；fmt（`9b4e34f9-d241-49fe-a1ab-9c6f1c9df1b9`）通过。
+
 ## 初次静态交付的改动与决定（历史）
 
 ### 1. 光栅化库选型与依赖

@@ -19,9 +19,14 @@ struct Space {
     transform: usvg::Transform,
     limit: Canvas,
     target: Canvas,
+    // clip::draw_children uses full-destination layers for clipped groups.
+    clip_content: bool,
 }
 
 fn surface(group: &usvg::Group, space: Space) -> Option<(Canvas, u64)> {
+    if space.clip_content && group.clip_path().is_none() {
+        return Some((space.target, 0));
+    }
     if !group.should_isolate() {
         return Some((space.target, 0));
     }
@@ -34,7 +39,11 @@ fn surface(group: &usvg::Group, space: Space) -> Option<(Canvas, u64)> {
     let height = full_height
         .min(f64::from(space.limit.height) * 5.0 + 4.0)
         .max(1.0) as u32;
-    let canvas = Canvas { width, height };
+    let canvas = if space.clip_content {
+        space.target
+    } else {
+        Canvas { width, height }
+    };
     let primitives = group
         .filters()
         .iter()
@@ -55,14 +64,26 @@ fn surface(group: &usvg::Group, space: Space) -> Option<(Canvas, u64)> {
                     _ => false,
                 }
         };
+    // mask::apply and clip::apply retain their pixmap across recursive
+    // references. Preserve the existing allowance for the first resource and
+    // add one destination-sized RGBA surface for every further reference.
+    let masks = std::iter::successors(group.mask(), |mask| mask.mask())
+        .take(257)
+        .count();
+    let clips = std::iter::successors(group.clip_path(), |clip| clip.clip_path())
+        .take(257)
+        .count();
+    if masks > 256 || clips > 256 {
+        return None;
+    }
     let factor = if group.filters().is_empty() {
         1
     } else if displacement_chain {
         5
     } else {
         8 + primitives.saturating_mul(4)
-    } + if group.clip_path().is_some() { 3 } else { 0 }
-        + if group.mask().is_some() { 4 } else { 0 };
+    } + if clips > 0 { clips as u64 + 2 } else { 0 }
+        + if masks > 0 { masks as u64 + 3 } else { 0 };
     // The group layer is clipped to the render context. Filter primitives
     // allocate their full transformed region separately (filter::apply_inner),
     // so their working surfaces must not inherit that layer-size clamp.
@@ -101,6 +122,7 @@ fn group_cost(group: &usvg::Group, space: Space, depth: usize, nodes: &mut usize
                 transform: space.transform.pre_concat(image.abs_transform()),
                 limit: target,
                 target,
+                clip_content: false,
             };
             child_cost = child_cost.max(target.pixels().saturating_add(group_cost(
                 tree.root(),
@@ -148,10 +170,53 @@ fn group_cost(group: &usvg::Group, space: Space, depth: usize, nodes: &mut usize
             },
             limit: resource_target,
             target: resource_target,
+            clip_content: matches!(node, usvg::Node::Text(_)) && space.clip_content,
         };
-        node.subroots(|root| {
-            resources = resources.max(group_cost(root, resource_space, depth + 1, nodes));
-        });
+        if let usvg::Node::Group(group) = node {
+            // usvg's generic subroots visitor only includes the first two
+            // linked masks/clips. Inspect every retained resource's content;
+            // surface() already rejects chains longer than the depth budget.
+            for (level, mask) in std::iter::successors(group.mask(), |mask| mask.mask()).enumerate()
+            {
+                resources = resources.max(group_cost(
+                    mask.root(),
+                    resource_space,
+                    depth + level + 1,
+                    nodes,
+                ));
+            }
+            for (level, clip) in
+                std::iter::successors(group.clip_path(), |clip| clip.clip_path()).enumerate()
+            {
+                let clip_space = Space {
+                    transform: resource_space.transform.pre_concat(clip.transform()),
+                    clip_content: true,
+                    ..resource_space
+                };
+                resources = resources.max(group_cost(
+                    clip.root(),
+                    clip_space,
+                    depth + level + 1,
+                    nodes,
+                ));
+            }
+            for filter in group.filters() {
+                for primitive in filter.primitives() {
+                    if let usvg::filter::Kind::Image(image) = primitive.kind() {
+                        resources = resources.max(group_cost(
+                            image.root(),
+                            resource_space,
+                            depth + 1,
+                            nodes,
+                        ));
+                    }
+                }
+            }
+        } else {
+            node.subroots(|root| {
+                resources = resources.max(group_cost(root, resource_space, depth + 1, nodes));
+            });
+        }
         child_cost = child_cost.max(cost.saturating_add(resources));
     }
     if *nodes > 50_000 {
@@ -170,6 +235,7 @@ pub(super) fn pixels(tree: &usvg::Tree, width: u32, height: u32, embedded: u64) 
         ),
         limit: canvas,
         target: canvas,
+        clip_content: false,
     };
     canvas
         .pixels()
