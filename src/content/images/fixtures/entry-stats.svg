@@ -1,0 +1,21 @@
+<!-- Minimal original fixture reproducing the CSS shape of github-stats-extended,
+     inspected 2026-11-11. No copied user profile text or icon artwork. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="100">
+<style>
+.header { fill:#4493f8; animation:fadeInAnimation .8s ease-in-out forwards }
+.stagger { opacity:0; animation:fadeInAnimation .3s ease-in-out forwards }
+.rank { animation:scaleInAnimation .3s ease-in-out forwards; fill:#ff7700 }
+.ring { fill:none; stroke:#ff0000; stroke-width:3; stroke-dasharray:125; animation:rankAnimation 1s forwards ease-in-out }
+@keyframes rankAnimation { from {stroke-dashoffset:126} to {stroke-dashoffset:25} }
+/* Deliberately precede keyframes by a real CSS comment. */
+@keyframes scaleInAnimation { from {transform:translate(-5px,5px) scale(0)} to {transform:translate(-5px,5px) scale(1)} }
+@keyframes fadeInAnimation { from {opacity:0} to {opacity:1} }
+</style>
+<rect width="240" height="100" fill="#0d1117"/>
+<text class="header" x="10" y="18" font-size="14">Statistics</text>
+<g class="stagger" style="animation-delay:450ms" transform="translate(10,30)"><path fill="#00ff00" d="M0 0h10v10H0z"/><text x="18" y="10" fill="#00ff00" font-size="12">Stars: 42</text></g>
+<g class="stagger" style="animation-delay:1050ms" transform="translate(10,70)"><path fill="#00ffff" d="M0 0h10v10H0z"/><text x="18" y="10" fill="#00ffff" font-size="12">Commits: 7596</text></g>
+<g transform="translate(200,50)"><circle class="ring" r="20"/><g class="rank"><path d="M-4 -4h8v8h-8z"/></g></g>
+<!-- Legitimately hidden static geometry must stay hidden. -->
+<rect x="100" y="30" width="20" height="20" fill="#ff00ff" opacity="0"/>
+</svg>

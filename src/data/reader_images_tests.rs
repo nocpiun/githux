@@ -333,6 +333,24 @@ impl Fixture {
         self.accounts.repo_service().session().expect("session")
     }
 
+    /// Reopens a cache store after the previous instance was dropped. A
+    /// background cache writer may still hold a `CacheStore` clone for a few
+    /// milliseconds after the service is dropped, and the exclusive lock file
+    /// then reports `InUse`. Under a loaded full test suite that window is not
+    /// reliably 50 ms, so wait for the writer to finish instead of flaking.
+    fn reopen_cache_store(cache_cfg: crate::storage::cache::CacheConfig) -> CacheStore {
+        for _ in 0..200 {
+            match CacheStore::open(cache_cfg.clone()) {
+                Ok(store) => return store,
+                Err(crate::storage::cache::CacheError::InUse) => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => panic!("reopen cache store: {error:?}"),
+            }
+        }
+        panic!("cache store stayed InUse after 5s of background writers");
+    }
+
     async fn login(&self, id: u64) {
         self.transport
             .push(200, json!({"id": id, "login": format!("user{id}")}));
@@ -942,7 +960,7 @@ async fn fixed_revision_images_persist_across_reopened_store_and_service() {
     drop(service);
     drop(store);
 
-    let store2 = CacheStore::open(cache_cfg).expect("reopen cache store");
+    let store2 = Fixture::reopen_cache_store(cache_cfg);
     let scope2 = store2.saved_account(account_key).expect("saved scope");
 
     // Second service is completely offline: ZERO responses are pushed to transport!
@@ -1281,4 +1299,214 @@ async fn missing_image_reuses_resolution_while_good_image_is_still_in_flight() {
         urls.iter().filter(|url| url.ends_with(&blob_path)).count(),
         2
     );
+}
+
+#[tokio::test]
+async fn svg_badge_stats_card_and_chart_load_through_provider_and_cache() {
+    use crate::content::images::ImageFormat;
+    use crate::domain::{AccountKey, HostId};
+    use crate::storage::cache::{CacheConfig, CacheStore};
+
+    let cache_dir = tempfile::tempdir().expect("cache temp dir");
+    let cache_cfg = CacheConfig::at(cache_dir.path().join("cache"));
+    let store = CacheStore::open(cache_cfg.clone()).expect("open cache store");
+    let account_key = AccountKey::new(1, HostId::github());
+    let scope = store
+        .saved_account(account_key.clone())
+        .expect("saved scope");
+
+    let fixture = fixture().await;
+    fixture.login(1).await;
+    let session = fixture.session();
+
+    let badge_svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="88" height="20"><rect width="37" height="20" fill="#555"/><rect x="37" width="51" height="20" fill="#4b0"/><text x="19" y="14" fill="#fff" font-size="11">build</text></svg>"##.to_vec();
+    let stats_svg = include_bytes!("../content/images/fixtures/entry-stats.svg").to_vec();
+    let chart_svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="533"><path d="M 10 500 L 780 30" stroke="#dd4528" stroke-width="3" fill="none"/><text x="400" y="30" font-size="20">Star History</text></svg>"##.to_vec();
+
+    fixture
+        .transport
+        .serve(&format!("/repos/octo/repo/commits/{COMMIT}"), commit_json());
+    fixture.transport.serve(
+        &format!("/repos/octo/repo/git/trees/{ROOT}"),
+        tree(
+            ROOT,
+            json!([
+                {"path": "chart.svg", "type": "blob", "mode": "100644", "sha": IMAGE_BLOB, "size": chart_svg.len()},
+            ]),
+        ),
+    );
+    fixture.transport.serve(
+        &format!("/repos/octo/repo/git/blobs/{IMAGE_BLOB}"),
+        blob_json(IMAGE_BLOB, &chart_svg),
+    );
+
+    let external_source = Arc::new(MemoryExternal::default());
+    external_source.serve("https://badge.invalid/build.svg", badge_svg);
+    external_source.serve("https://stats.invalid/card.svg", stats_svg);
+
+    let service = fixture.service_with_cache(
+        session.clone(),
+        external_source.clone(),
+        ImageLimits::default(),
+        Some((store.clone(), scope.clone(), true)),
+    );
+
+    let badge_sink = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("badge-svg"),
+            target: ImageTarget::External {
+                url: "https://badge.invalid/build.svg".into(),
+            },
+        },
+        badge_sink.clone(),
+    );
+    let badge = next_completion(&badge_sink)
+        .await
+        .result
+        .expect("badge svg decodes");
+    assert_eq!(badge.format, ImageFormat::Png);
+    assert_eq!((badge.width, badge.height), (88, 20));
+    assert!(image::load_from_memory(&badge.bytes).is_ok());
+
+    let stats_sink = ImageSink::new();
+    service.start_with_options(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("stats-svg"),
+            target: ImageTarget::External {
+                url: "https://stats.invalid/card.svg".into(),
+            },
+        },
+        stats_sink.clone(),
+        ImageRenderOptions::for_device_scale(1.5),
+    );
+    let stats = next_completion(&stats_sink)
+        .await
+        .result
+        .expect("stats svg decodes");
+    assert_eq!(stats.format, ImageFormat::Png);
+    assert_eq!((stats.width, stats.height), (240, 100));
+    assert!(
+        stats
+            .animation
+            .as_ref()
+            .is_some_and(|a| a.duration_ms == 1350)
+    );
+    let final_pixels = image::load_from_memory(&stats.bytes).unwrap().to_rgba8();
+    assert_eq!(
+        final_pixels.dimensions(),
+        (720, 300),
+        "provider retains a supersampled final grid"
+    );
+    assert_eq!(
+        final_pixels.get_pixel(36, 216).0,
+        [0, 255, 255, 255],
+        "provider returns visible final row values"
+    );
+
+    let first = &stats.animation.as_ref().unwrap().frames[0].pixels;
+    assert_eq!(
+        (first.width, first.height),
+        (360, 150),
+        "provider receives physical display options"
+    );
+    let chart_sink = ImageSink::new();
+    service.start(
+        ImageRequest {
+            scope: test_scope(1),
+            key: ImageKey::new("chart-svg"),
+            target: repository_request(COMMIT, "chart.svg"),
+        },
+        chart_sink.clone(),
+    );
+    let chart = next_completion(&chart_sink)
+        .await
+        .result
+        .expect("repo chart svg decodes");
+    assert_eq!(chart.format, ImageFormat::Png);
+    assert_eq!((chart.width, chart.height), (800, 533));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(service);
+    drop(store);
+
+    // Reopen cache store offline and verify cached repository SVG bytes decode
+    // with zero network requests and preserve account/cache authorization.
+    let store2 = Fixture::reopen_cache_store(cache_cfg);
+    let scope2 = store2.saved_account(account_key).expect("saved scope");
+    let external_reads = external_source.reads.lock().unwrap().len();
+    external_source.bodies.lock().unwrap().clear();
+    let offline_external = external_source.clone();
+    let service2 = fixture.service_with_cache(
+        session,
+        external_source,
+        ImageLimits::default(),
+        Some((store2.clone(), scope2.clone(), true)),
+    );
+    let chart_offline_sink = ImageSink::new();
+    service2.start(
+        ImageRequest {
+            scope: test_scope(2),
+            key: ImageKey::new("chart-svg-offline"),
+            target: repository_request(COMMIT, "chart.svg"),
+        },
+        chart_offline_sink.clone(),
+    );
+    let chart_offline = next_completion(&chart_offline_sink)
+        .await
+        .result
+        .expect("cached svg offline");
+    assert_eq!((chart_offline.width, chart_offline.height), (800, 533));
+    let stats_offline_sink = ImageSink::new();
+    service2.start_with_options(
+        ImageRequest {
+            scope: test_scope(2),
+            key: ImageKey::new("stats-svg-offline"),
+            target: ImageTarget::External {
+                url: "https://stats.invalid/card.svg".into(),
+            },
+        },
+        stats_offline_sink.clone(),
+        ImageRenderOptions::for_device_scale(2.0),
+    );
+    let stats_offline = next_completion(&stats_offline_sink)
+        .await
+        .result
+        .expect("cached animation re-evaluates offline");
+    assert!(stats_offline.animation.is_some());
+    let offline_pixels = image::load_from_memory(&stats_offline.bytes)
+        .unwrap()
+        .to_rgba8();
+    assert_eq!(
+        offline_pixels.dimensions(),
+        (960, 400),
+        "raw cached SVG rerasterizes at the new density offline"
+    );
+    assert_eq!(offline_pixels.get_pixel(48, 288).0, [0, 255, 255, 255]);
+    assert_eq!(
+        offline_external.reads.lock().unwrap().len(),
+        external_reads,
+        "fresh cache avoids external network"
+    );
+
+    // Credential rejection quarantines private repository SVG cache reads too.
+    store2
+        .access_event(
+            &scope2,
+            crate::storage::cache::AccessEvent::CredentialRejected,
+        )
+        .unwrap();
+    let denied_sink = ImageSink::new();
+    service2.start(
+        ImageRequest {
+            scope: test_scope(3),
+            key: ImageKey::new("chart-svg-denied"),
+            target: repository_request(COMMIT, "chart.svg"),
+        },
+        denied_sink.clone(),
+    );
+    let denied = next_completion(&denied_sink).await;
+    assert_eq!(denied.result, Err(ImageFailure::StaleContext));
 }

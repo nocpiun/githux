@@ -1,0 +1,543 @@
+use super::*;
+use base64::Engine;
+use image::GenericImageView;
+
+#[test]
+fn quality_small_sigma_blur_preserves_channels_and_alpha() {
+    // The final 2x grid keeps sigma below resvg's box-blur threshold of 2.
+    // This therefore exercises the IIR path and its packed RGBA byte view.
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="16"><defs><filter id="blur" x="0" y="0" width="24" height="16" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="0.4"/></filter></defs><rect x="8" y="4" width="8" height="8" fill="#2040c0" fill-opacity="0.75" filter="url(#blur)"/></svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    let scale = pixels.width() / 24;
+    let center = pixels.get_pixel(12 * scale, 8 * scale).0;
+    for (actual, expected) in center[..3].iter().zip([32_u8, 64, 192]) {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "blur must preserve RGBA channel order"
+        );
+    }
+    assert!(
+        (188..=192).contains(&center[3]),
+        "interior alpha: {center:?}"
+    );
+    let edge = pixels.get_pixel(8 * scale - 1, 8 * scale).0;
+    assert!(edge[3] > 0 && edge[3] < center[3], "soft edge: {edge:?}");
+    assert!(
+        edge[2] > edge[1] && edge[1] > edge[0],
+        "edge color: {edge:?}"
+    );
+    assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 0]);
+}
+
+#[test]
+fn quality_displacement_scale_is_applied_once_in_both_directions() {
+    for (scale, inside, outside) in [(4, 22, 10), (-4, 30, 42)] {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><defs><filter id="d" x="0" y="0" width="32" height="16" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feFlood flood-color="rgb(255,128,128)" result="map"/><feDisplacementMap in="SourceGraphic" in2="map" scale="{scale}" xChannelSelector="R" yChannelSelector="G"/></filter></defs><rect x="12" y="4" width="4" height="8" fill="#f00" filter="url(#d)"/></svg>"##
+        );
+        let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(inside, 12).0,
+            [255, 0, 0, 255],
+            "declared displacement {scale}"
+        );
+        assert_eq!(
+            pixels.get_pixel(outside, 12).0[3],
+            0,
+            "scale must not be squared"
+        );
+    }
+}
+
+#[test]
+fn quality_fractional_filter_grids_clip_transparent_edges_without_panicking() {
+    for (x, y, width, height) in [
+        (0.1, 0.1, 97.5, 62.5),
+        (7.3, 11.3, 97.5, 62.5),
+        (3.375, 5.125, 99.999, 61.25),
+    ] {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><defs><filter id="hand"><feTurbulence baseFrequency=".05" numOctaves="2" result="noise"/><feDisplacementMap in="SourceGraphic" in2="noise" scale="5" xChannelSelector="R" yChannelSelector="G"/></filter></defs><rect x="{x}" y="{y}" width="{width}" height="{height}" fill="#f00" filter="url(#hand)"/></svg>"##
+        );
+        for density in [1.0, 1.5, 2.0] {
+            let decoded = decode_image_with_options_checked(
+                svg.as_bytes().to_vec(),
+                &ImageLimits::default(),
+                ImageRenderOptions::for_device_scale(density),
+                &|| Ok(()),
+            )
+            .unwrap();
+            let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+            let center = pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0;
+            assert_eq!(
+                center,
+                [255, 0, 0, 255],
+                "fractional clipped filter must retain the center at density {density}"
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_displacement_accepts_canvas_clipped_source_and_full_map_grids() {
+    // The filter exceeds resvg's five-canvas layer clip but remains well inside
+    // the decoder budget. SourceGraphic is consequently smaller than the map;
+    // the old equal-size assertion panicked even at integral display scales.
+    let svg=br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="9"><defs><filter id="hand" x="-1000%" y="-1000%" width="2100%" height="2100%"><feTurbulence baseFrequency=".05" numOctaves="2" result="noise"/><feDisplacementMap in="SourceGraphic" in2="noise" scale="5" xChannelSelector="R" yChannelSelector="G"/></filter></defs><rect x="1.1" y="1.3" width="9.75" height="6.25" fill="#f00" filter="url(#hand)"/></svg>"##;
+    for density in [1.0, 1.5, 2.0] {
+        let decoded = decode_image_with_options_checked(
+            svg.to_vec(),
+            &ImageLimits::default(),
+            ImageRenderOptions::for_device_scale(density),
+            &|| Ok(()),
+        )
+        .unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0,
+            [255, 0, 0, 255]
+        );
+    }
+}
+
+#[test]
+fn quality_full_filter_regions_are_bounded_even_when_the_layer_is_clipped() {
+    let svg=br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="9"><defs><filter id="hand" x="-50000%" y="-50000%" width="100000%" height="100000%"><feTurbulence baseFrequency=".05" result="noise"/><feDisplacementMap in="SourceGraphic" in2="noise" scale="5"/></filter></defs><rect width="10" height="6" fill="#f00" filter="url(#hand)"/></svg>"##;
+    assert!(
+        matches!(
+            decode_image(svg.to_vec(), &ImageLimits::default()),
+            Err(ImageFailure::TooLarge { .. })
+        ),
+        "filter primitives allocate their uncropped region even though the source layer is clipped"
+    );
+}
+
+#[test]
+fn quality_nested_vectors_charge_the_destination_canvas_at_every_level() {
+    fn document(size: u32, opacity: &str) -> Vec<u8> {
+        let mut svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><g opacity="{opacity}"><rect width="1" height="1" fill="blue"/></g></svg>"#
+        );
+        for _ in 0..3 {
+            let data = base64::engine::general_purpose::STANDARD.encode(svg);
+            svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><image width="1" height="1" preserveAspectRatio="none" href="data:image/svg+xml;base64,{data}"/></svg>"#
+            );
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(svg);
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}"><image width="{size}" height="{size}" preserveAspectRatio="none" href="data:image/svg+xml;base64,{data}"/></svg>"#).into_bytes()
+    }
+    let limits = ImageLimits::default();
+    assert!(
+        matches!(
+            decode_image(document(1400, "1"), &limits),
+            Err(ImageFailure::TooLarge { .. })
+        ),
+        "four intrinsic 1x1 resources retain five destination canvases, even at native output"
+    );
+    for opacity in ["1", ".5"] {
+        let decoded = decode_image(document(1000, opacity), &limits).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        let bank = u64::from(pixels.width()) * u64::from(pixels.height()) * 5 * 4;
+        assert!(
+            bank <= limits.max_decoded_bytes as u64,
+            "pre-render grid must fit all five retained destinations"
+        );
+        let center = pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0;
+        assert_eq!(center[2], 255);
+        assert_eq!(center[3], if opacity == "1" { 255 } else { 128 });
+        assert_eq!((decoded.width, decoded.height), (1000, 1000));
+    }
+}
+
+#[test]
+fn quality_root_pseudo_class_keeps_specificity_and_compound_matching() {
+    for (css, alpha) in [
+        (":root{opacity:1}svg{opacity:0}", 255),
+        ("svg{opacity:0}:root{opacity:1}", 255),
+        ("svg:root{opacity:1}svg{opacity:0}", 255),
+        (":ROOT{opacity:1}svg{opacity:0}", 255),
+        (":root{opacity:1}.theme{opacity:0}", 0),
+        (".theme{opacity:0}:root{opacity:1}", 255),
+        ("#doc{opacity:0}:root{opacity:1}", 0),
+        (":root{opacity:1!important}svg{opacity:0}", 255),
+        ("svg{opacity:0!important}:root{opacity:1}", 0),
+        ("svg[data-label=\":root\"]{opacity:1}svg{opacity:0}", 255),
+        ("rect:root{opacity:0}", 255),
+    ] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" id="doc" class="theme" data-label=":root" width="10" height="10"><style>{css}</style><rect width="10" height="10" fill="red"/></svg>"#
+        );
+        let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0[3],
+            alpha,
+            "{css}"
+        );
+    }
+}
+
+#[test]
+fn quality_root_rewrite_preserves_declaration_payloads_and_descendant_priority() {
+    let svg=br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><linearGradient id=":root"><stop stop-color="red"/></linearGradient></defs><style>:root rect{fill:url(#:root)}rect{fill:blue}</style><rect width="10" height="10"/></svg>"##;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    assert_eq!(
+        pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0,
+        [255, 0, 0, 255]
+    );
+}
+
+#[test]
+fn quality_animation_shorthand_components_obey_order_specificity_and_importance() {
+    for (sheet, inline, alpha) in [
+        (
+            "",
+            "animation:hide .2s linear forwards;animation-name:show",
+            255,
+        ),
+        (
+            "",
+            "animation-name:show;animation:hide .2s linear forwards",
+            0,
+        ),
+        (
+            "#entry{animation-name:show}.entry{animation:hide .2s linear forwards}",
+            "",
+            255,
+        ),
+        (
+            "",
+            "animation:hide .2s linear forwards!important;animation-name:show",
+            0,
+        ),
+        (
+            "",
+            "animation-name:show!important;animation:hide .2s linear forwards",
+            255,
+        ),
+        (
+            "",
+            "animation:hide .2s linear forwards!important;animation-name:show!important",
+            255,
+        ),
+        (
+            "",
+            "--entry:hide .2s linear forwards;animation:var(--entry);animation-name:show",
+            255,
+        ),
+        (
+            "",
+            "animation:show .2s linear forwards;animation-fill-mode:none",
+            0,
+        ),
+        (
+            "",
+            "animation-fill-mode:none;animation:show .2s linear forwards",
+            255,
+        ),
+        (
+            "",
+            "animation:show .2s linear reverse forwards;animation-direction:normal",
+            255,
+        ),
+        (
+            "",
+            "animation:show .2s linear 2 forwards;animation-iteration-count:1",
+            255,
+        ),
+        (
+            "",
+            "animation-duration:.2s;animation:show forwards;animation-name:show",
+            255,
+        ),
+    ] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>{sheet}@keyframes hide{{from{{opacity:0}}to{{opacity:0}}}}@keyframes show{{from{{opacity:0}}to{{opacity:1}}}}</style><rect id="entry" class="entry" style="opacity:0;{inline}" width="10" height="10" fill="red"/></svg>"#
+        );
+        let decoded = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0[3],
+            alpha,
+            "{sheet} / {inline}"
+        );
+        if inline.starts_with("animation-duration") {
+            assert!(
+                decoded.animation.is_none(),
+                "a later shorthand resets omitted duration to zero"
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_shorthand_component_copies_are_bounded_before_allocation() {
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" style="animation:{}"/></svg>"#,
+        "x".repeat(300_000)
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { limit: 2_097_152 })
+    ));
+}
+
+#[test]
+fn quality_duplicate_keyframe_offsets_merge_properties_in_source_order() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>rect{opacity:0;animation:show .2s linear forwards}@keyframes show{from{opacity:1;fill-opacity:1}-0%{opacity:0}50%{opacity:.1}50%{fill-opacity:.5;opacity:.8}to{opacity:0;fill-opacity:.8}100%{opacity:1}}</style><rect width="10" height="10" fill="red"/></svg>"#;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let animation = decoded.animation.as_ref().unwrap();
+    let alpha = |bytes: &[u8]| {
+        let p = image::load_from_memory(bytes).unwrap().to_rgba8();
+        p.get_pixel(p.width() / 2, p.height() / 2).0[3]
+    };
+    assert_eq!(
+        alpha(&animation.frames[0].bytes),
+        0,
+        "equivalent zero offsets retain source order"
+    );
+    assert_eq!(
+        alpha(
+            &animation
+                .frames
+                .iter()
+                .find(|frame| frame.at_ms == 100)
+                .unwrap()
+                .bytes
+        ),
+        102,
+        "later same-offset declarations override only their properties"
+    );
+    assert_eq!(
+        alpha(&decoded.bytes),
+        204,
+        "100% overrides to while preserving its other properties"
+    );
+}
+
+#[test]
+fn quality_embedded_woff_alias_renders_the_supplied_glyphs() {
+    let data = base64::engine::general_purpose::STANDARD
+        .encode(include_bytes!("fixtures/embedded-font.woff"));
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="150" height="32"><style>@font-face{{font-family:DiagramFace;src:url(data:application/font-woff;base64,{data})}}</style><text x="2" y="24" font-size="20" font-family="DiagramFace">IWIWAB0123</text></svg>"#
+    );
+    let control=br#"<svg xmlns="http://www.w3.org/2000/svg" width="150" height="32"><text x="2" y="24" font-size="20" font-family="Google Sans Code">IWIWAB0123</text></svg>"#;
+    let actual = decode_image(svg.into_bytes(), &ImageLimits::default()).unwrap();
+    let expected = decode_image(control.to_vec(), &ImageLimits::default()).unwrap();
+    assert_eq!(
+        actual.bytes, expected.bytes,
+        "embedded face aliases must select its glyphs instead of falling back to the UI face"
+    );
+}
+
+#[test]
+fn quality_woff_expanded_size_is_bounded_before_table_allocation() {
+    let mut font = include_bytes!("fixtures/embedded-font.woff").to_vec();
+    font[16..20].copy_from_slice(&(512u32 * 1024 * 1024).to_be_bytes());
+    let data = base64::engine::general_purpose::STANDARD.encode(font);
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>@font-face{{font-family:Face;src:url(data:application/font-woff;base64,{data})}}</style><text y="8" font-family="Face">A</text></svg>"#
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn quality_unbounded_font_collection_face_counts_are_not_walked() {
+    let mut disguised = include_bytes!("fixtures/embedded-font.woff").to_vec();
+    disguised[4..8].copy_from_slice(b"ttcf");
+    for font in [b"ttcf\0\x01\0\0\xff\xff\xff\xff".to_vec(), disguised] {
+        let data = base64::engine::general_purpose::STANDARD.encode(font);
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>@font-face{{font-family:Face;src:url(data:font/ttf;base64,{data})}}</style><text y="8" font-family="Face">A</text></svg>"#
+        );
+        assert!(matches!(
+            decode_image(svg.into_bytes(), &ImageLimits::default()),
+            Err(ImageFailure::Unsupported)
+        ));
+    }
+}
+
+#[test]
+fn quality_sfnt_name_records_have_a_work_limit_independent_of_font_bytes() {
+    // A compact directory can describe many overlapping name strings. Bound
+    // that metadata before fontdb builds owned family names.
+    let count = 257usize;
+    let mut font = vec![0u8; 28 + 6 + count * 12];
+    font[..4].copy_from_slice(b"OTTO");
+    font[4..6].copy_from_slice(&1u16.to_be_bytes());
+    font[12..16].copy_from_slice(b"name");
+    font[20..24].copy_from_slice(&28u32.to_be_bytes());
+    font[24..28].copy_from_slice(&((6 + count * 12) as u32).to_be_bytes());
+    font[30..32].copy_from_slice(&(count as u16).to_be_bytes());
+    let data = base64::engine::general_purpose::STANDARD.encode(font);
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>@font-face{{font-family:Face;src:url(data:font/otf;base64,{data})}}</style><text y="8" font-family="Face">A</text></svg>"#
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn quality_svg_device_density_preserves_animation_and_crisp_final_grid() {
+    for scale in [1.0, 1.5, 2.0, 3.0, 4.0] {
+        let limits = ImageLimits::default();
+        let decoded = decode_image_with_options_checked(
+            include_bytes!("fixtures/entry-stats.svg").to_vec(),
+            &limits,
+            ImageRenderOptions::for_device_scale(scale),
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!((decoded.width, decoded.height), (240, 100));
+        let animation = decoded
+            .animation
+            .as_ref()
+            .expect("density must not silently disable all entry animation");
+        assert!(animation.frames.len() >= 2);
+        let first = &animation.frames[0].pixels;
+        assert!(
+            first.width >= (240.0 * scale) as u32 && first.height >= (100.0 * scale) as u32,
+            "physical density {scale}: {}x{}",
+            first.width,
+            first.height
+        );
+        assert!(
+            animation
+                .frames
+                .iter()
+                .all(|frame| (frame.pixels.width, frame.pixels.height)
+                    == (first.width, first.height)),
+            "the entry grid stays stable"
+        );
+        assert!(
+            animation.final_pixels.width >= first.width
+                && animation.final_pixels.height >= first.height
+        );
+        let sum = animation.final_pixels.bgra.len()
+            + animation
+                .frames
+                .iter()
+                .map(|frame| frame.pixels.bgra.len())
+                .sum::<usize>();
+        assert_eq!(decoded.decoded_bytes(), sum);
+        assert!(sum <= limits.max_decoded_bytes);
+        let png = image::load_from_memory(&decoded.bytes).unwrap();
+        assert_eq!(
+            png.dimensions(),
+            (animation.final_pixels.width, animation.final_pixels.height)
+        );
+    }
+}
+
+#[test]
+fn quality_explicit_none_and_pixel_dashoffset_reach_their_final_values() {
+    let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="20"><style>rect{transform:translateX(-15px);animation:move .2s linear forwards}path{stroke-dashoffset:20;animation:draw .2s linear forwards}@keyframes move{from{transform:translateX(-15px)}to{transform:none}}@keyframes draw{from{stroke-dashoffset:20px}to{stroke-dashoffset:0px}}</style><rect x="20" width="5" height="6" fill="red"/><path d="M5 14H25" stroke="blue" stroke-width="4" stroke-dasharray="20"/></svg>"#;
+    let decoded = decode_image(svg.to_vec(), &ImageLimits::default()).unwrap();
+    let final_pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+    let sx = final_pixels.width() / decoded.width;
+    assert_eq!(final_pixels.get_pixel(22 * sx, 3 * sx).0, [255, 0, 0, 255]);
+    assert_eq!(final_pixels.get_pixel(6 * sx, 3 * sx).0[3], 0);
+    assert_eq!(final_pixels.get_pixel(15 * sx, 14 * sx).0, [0, 0, 255, 255]);
+    let first = image::load_from_memory(&decoded.animation.unwrap().frames[0].bytes)
+        .unwrap()
+        .to_rgba8();
+    assert_eq!(first.get_pixel(6, 3).0, [255, 0, 0, 255]);
+    assert_eq!(first.get_pixel(15, 14).0[3], 0);
+}
+
+#[test]
+fn quality_nested_clip_groups_use_destination_sized_surfaces() {
+    // A clipped shape becomes a group in usvg. Literal <g> children of a
+    // clipPath are invalid SVG and would not exercise clip_group.
+    let mut defs = String::new();
+    for i in 0..20 {
+        let clip = if i < 19 {
+            format!(r#" clip-path="url(#c{})""#, i + 1)
+        } else {
+            String::new()
+        };
+        defs.push_str(&format!(
+            r#"<clipPath id="c{i}"><rect width="2" height="2"{clip}/></clipPath>"#
+        ));
+    }
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><defs>{defs}</defs><rect width="1000" height="1000" fill="blue" clip-path="url(#c0)"/></svg>"#
+    );
+    assert!(matches!(
+        decode_image(svg.into_bytes(), &ImageLimits::default()),
+        Err(ImageFailure::TooLarge { .. })
+    ));
+}
+
+fn chained_resource_svg(kind: &str, size: u32, count: usize, deep_content: bool) -> Vec<u8> {
+    let (element, attribute) = match kind {
+        "mask" => ("mask", "mask"),
+        "clip" => ("clipPath", "clip-path"),
+        _ => unreachable!(),
+    };
+    let mut defs = String::new();
+    for i in 0..count {
+        let next = if i + 1 < count {
+            format!(r#" {attribute}="url(#r{})""#, i + 1)
+        } else {
+            String::new()
+        };
+        let mut shape = format!(r#"<rect width="{size}" height="{size}" fill="white"/>"#);
+        if deep_content && i + 1 == count {
+            for _ in 0..10 {
+                shape = format!(
+                    r#"<g opacity=".5">{shape}<rect width="{size}" height="{size}" fill="white"/></g>"#
+                );
+            }
+        }
+        defs.push_str(&format!(
+            r#"<{element} id="r{i}"{next}>{shape}</{element}>"#
+        ));
+    }
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}"><defs>{defs}</defs><g {attribute}="url(#r0)"><rect width="{size}" height="{size}" fill="blue"/></g></svg>"#).into_bytes()
+}
+
+#[test]
+fn quality_chained_masks_and_clips_budget_retained_destinations() {
+    let limits = ImageLimits::default();
+    for kind in ["mask", "clip"] {
+        assert!(
+            matches!(
+                decode_image(chained_resource_svg(kind, 1000, 20, false), &limits),
+                Err(ImageFailure::TooLarge { .. })
+            ),
+            "{kind} references retain every parent destination until recursion returns"
+        );
+        let decoded = decode_image(chained_resource_svg(kind, 400, 20, false), &limits).unwrap();
+        let pixels = image::load_from_memory(&decoded.bytes).unwrap().to_rgba8();
+        let retained_bytes = u64::from(pixels.width()) * u64::from(pixels.height()) * 20 * 4;
+        assert!(retained_bytes <= limits.max_decoded_bytes as u64);
+        assert_eq!(
+            pixels.get_pixel(pixels.width() / 2, pixels.height() / 2).0,
+            [0, 0, 255, 255]
+        );
+    }
+}
+
+#[test]
+fn quality_deep_mask_content_is_budgeted_beyond_the_first_reference() {
+    // usvg Node::subroots only visits the first two masks. The third contains
+    // additional isolated groups that must count alongside retained masks.
+    assert!(matches!(
+        decode_image(
+            chained_resource_svg("mask", 800, 3, true),
+            &ImageLimits::default()
+        ),
+        Err(ImageFailure::TooLarge { .. })
+    ));
+}

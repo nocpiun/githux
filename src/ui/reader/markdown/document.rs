@@ -353,6 +353,7 @@ impl MarkdownView {
         }
         self.motion.cancel();
         read.blocks = flatten(read.blocks);
+        read.headings = ast::headings(&read.blocks);
         read.doctext = DocText::build(&read.blocks);
         #[cfg(test)]
         if std::env::var_os("GITHUX_MD_DEBUG").is_some() {
@@ -722,6 +723,13 @@ impl MarkdownView {
         let Some(block) = self.parsed.blocks.get(ix) else {
             return div().into_any_element();
         };
+        let centered = matches!(block, Block::Centered(_));
+        // Centering must preserve the normal heading/prose renderer, including
+        // its typography and spacing. `flatten` leaves one child per wrapper.
+        let block = match block {
+            Block::Centered(body) if body.len() == 1 => &body[0],
+            _ => block,
+        };
         // Consumed in exactly the order `DocText` registered units, so nested
         // containers map to the right document offsets without path matching.
         let unit_cursor = std::cell::Cell::new(0usize);
@@ -738,6 +746,11 @@ impl MarkdownView {
             mono: &mono,
             radius,
         };
+        if let Block::Image { alt, .. } = block
+            && !alt.is_empty()
+        {
+            let _ = self.next_unit(ix, &unit_cursor);
+        }
         let element = match block {
             Block::Paragraph(inline) => div()
                 .debug_selector(move || format!("markdown-paragraph-{ix}"))
@@ -1002,6 +1015,25 @@ impl MarkdownView {
                 .text_size(gpui::px(sm))
                 .child(tex.clone())
                 .into_any_element(),
+            Block::ImageRow(pictures) => {
+                self.picture_row(ix, &unit_cursor, pictures, &colors, xs, radius)
+            }
+            Block::Centered(blocks) => div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .children(blocks.iter().enumerate().map(|(at, block)| {
+                    self.nested(
+                        ix,
+                        &unit_cursor,
+                        ("center", format!("{ix}-{at}")),
+                        block,
+                        nested_style,
+                    )
+                }))
+                .into_any_element(),
             Block::Image { alt, url, hints } => self.picture_unit(
                 ix,
                 alt,
@@ -1052,10 +1084,17 @@ impl MarkdownView {
         // Flow mode uses the same real first/last block inset; the host scrolls
         // it, so the document does not need list-level padding tricks.
         let vertical = window.rem_size() * 0.75;
+        let pending_images = self.only_pending_images(block);
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
+            .when(centered, |block| {
+                block.w_full().flex().flex_col().items_center()
+            })
             .px_3()
-            .py_1()
+            .when(!pending_images, |block| block.py_1())
+            .when(pending_images, |block| {
+                block.h(gpui::px(0.0)).overflow_hidden()
+            })
             // Include real content insets in first/last block measurements.
             // ListState's scrollbar reach excludes list-level padding, so using
             // list.py here would let Motion/thumb clamp away the bottom inset.
@@ -1104,6 +1143,11 @@ impl MarkdownView {
             radius,
         } = style;
         let key = gpui::ElementId::Name(format!("reader-{}-{}", id.0, id.1).into());
+        if let Block::Image { alt, .. } = block
+            && !alt.is_empty()
+        {
+            let _ = self.next_unit(ix, units);
+        }
         match block {
             Block::Paragraph(inline) => div()
                 .text_size(gpui::px(body))
@@ -1303,6 +1347,19 @@ impl MarkdownView {
                     .child(view)
                     .into_any_element()
             }
+            Block::ImageRow(pictures) => {
+                self.picture_row(ix, units, pictures, colors, body, radius)
+            }
+            Block::Centered(blocks) => div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .children(blocks.iter().enumerate().map(|(at, block)| {
+                    self.nested(ix, units, ("center", format!("{ix}-{at}")), block, style)
+                }))
+                .into_any_element(),
             Block::Image { alt, url, hints } => self.picture_unit(
                 ix,
                 alt,
@@ -1389,27 +1446,21 @@ impl MarkdownView {
                         // keeps the description while the cell paints pixels.
                         let unit = self.next_unit(ix, units);
                         let link = image.link.clone();
-                        let (picture, display_width) =
-                            self.cell_picture(ix, image, format!("{key}-picture-{at}"), picture);
+                        let Some(picture) =
+                            self.cell_picture(ix, image, format!("{key}-picture-{at}"), picture)
+                        else {
+                            // Pending demand stays invisible and adds no cell
+                            // row; the board still has the request and remeasures
+                            // this block when the picture lands.
+                            continue;
+                        };
                         let mut frame = div()
                             .w_full()
                             .min_w_0()
                             .flex()
                             .when(align == TextAlign::Center, |row| row.justify_center())
-                            .when(align == TextAlign::Right, |row| row.justify_end());
-                        // The shared presenter's wrapper is full width, so
-                        // justify alone cannot move a narrow picture. Bound the
-                        // row to the picture's displayed width (the presenter
-                        // still sizes and clips the frame itself) so column
-                        // alignment applies to the pixels.
-                        frame = frame.child(match display_width {
-                            Some(width) => div()
-                                .w(gpui::px(width))
-                                .max_w_full()
-                                .child(picture)
-                                .into_any_element(),
-                            None => picture,
-                        });
+                            .when(align == TextAlign::Right, |row| row.justify_end())
+                            .child(picture);
                         if !presentation {
                             // The painted picture is the hit target for its own
                             // document unit, so a selection drag starts here
@@ -1476,16 +1527,16 @@ impl MarkdownView {
     /// One picture inside a table cell, sized within the cell.
     ///
     /// It draws through the same picture presenter as every other picture, so
-    /// the pending/failed/ready states are the reader's, not a table-only copy.
-    /// The returned width is the size the presenter gives a landed picture, so
-    /// the cell can bound the alignment row to the pixels.
+    /// pending demand stays invisible, failures keep their diagnostic, and a
+    /// landed picture keeps its logical size. `None` means the picture is still
+    /// pending: the board already has the request, so the cell adds no row.
     fn cell_picture(
         &self,
         ix: usize,
         picture: &CellImage,
         key: String,
         style: images::PictureStyle<'_>,
-    ) -> (AnyElement, Option<f32>) {
+    ) -> Option<AnyElement> {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(&picture.url, context) {
                 Ok(target) => board.borrow_mut().want(ix, target),
@@ -1493,32 +1544,135 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
-        let display_width = ready_picture_width(&state, picture.hints);
+        if self.pending_image(&picture.url) {
+            return None;
+        }
         // A landed picture is the cell's content, and the surrounding row may
         // already be its caption; its description stays in the copy model and
-        // in every not-yet/never-loaded state, where it is the only readable
-        // thing. The shared presenter still decides how those states look.
-        let alt = if display_width.is_some() {
+        // in every failed state, where it is the only readable thing.
+        let alt = if state.is_ready() {
             ""
         } else {
             picture.alt.as_str()
         };
-        (
-            images::image_element(
-                gpui::ElementId::Name(format!("reader-{key}").into()),
-                format!("markdown-{key}-note"),
-                alt,
-                &state,
-                picture.hints,
-                style,
-                format!("markdown-{key}-frame"),
-            ),
-            display_width,
-        )
+        let element = images::image_element(
+            gpui::ElementId::Name(format!("reader-{key}").into()),
+            format!("markdown-{key}-note"),
+            alt,
+            &state,
+            picture.hints,
+            style,
+            format!("markdown-{key}-frame"),
+        );
+        Some(images::painted_when_visible(
+            element,
+            self.picture_visibility(&picture.url),
+        ))
     }
 
     /// One picture block: the resolved state of its source, or the honest
     /// reason it cannot be shown. The alt text stays visible in every state.
+    fn picture_row(
+        &self,
+        ix: usize,
+        units: &std::cell::Cell<usize>,
+        pictures: &[(String, String, ImageHints)],
+        colors: &ely_core::theme::Palette,
+        size: f32,
+        radius: gpui::Rems,
+    ) -> AnyElement {
+        div()
+            .debug_selector(move || format!("markdown-picture-row-{ix}"))
+            .max_w_full()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .when(
+                self.parsed
+                    .blocks
+                    .get(ix)
+                    .is_some_and(|block| matches!(block, Block::Centered(_))),
+                |row| row.justify_center(),
+            )
+            .gap_1()
+            .children(
+                pictures
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, (alt, url, hints))| {
+                        if !alt.is_empty() {
+                            let _ = self.next_unit(ix, units);
+                        }
+                        // Different pictures in one paragraph must keep independent element IDs.
+                        let picture = self.picture_unit(
+                            ix,
+                            alt,
+                            url,
+                            *hints,
+                            images::PictureStyle {
+                                colors,
+                                small_text: size,
+                                radius,
+                            },
+                        );
+                        if self.pending_image(url) {
+                            return None;
+                        }
+                        Some(
+                            div()
+                                .debug_selector(move || {
+                                    format!("markdown-inline-picture-{ix}-{at}")
+                                })
+                                .id(gpui::ElementId::Name(
+                                    format!("picture-row-{ix}-{at}").into(),
+                                ))
+                                .child(picture),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The board and source key a picture's animation visibility belongs to.
+    fn picture_visibility(
+        &self,
+        url: &str,
+    ) -> Option<(Rc<RefCell<ImageBoard>>, crate::content::images::ImageKey)> {
+        self.image_board.clone().zip(
+            self.resource_context
+                .as_ref()
+                .and_then(|context| images::resolve_target(url, context).ok())
+                .map(|target| target.key()),
+        )
+    }
+
+    fn pending_image(&self, url: &str) -> bool {
+        self.image_board
+            .as_ref()
+            .zip(self.resource_context.as_ref())
+            .is_some_and(|(board, context)| {
+                images::resolve_target(url, context)
+                    .ok()
+                    .is_some_and(|target| board.borrow().is_loading(&target.key()))
+            })
+    }
+
+    fn only_pending_images(&self, block: &Block) -> bool {
+        let loading = |url: &str| self.pending_image(url);
+        match block {
+            Block::Image { url, .. } => loading(url),
+            Block::ImageRow(pictures) => {
+                !pictures.is_empty() && pictures.iter().all(|(_, url, _)| loading(url))
+            }
+            Block::Centered(body) => {
+                !body.is_empty() && body.iter().all(|block| self.only_pending_images(block))
+            }
+            _ => false,
+        }
+    }
+
+    /// One picture block: pending demand is visually collapsed; failures retain
+    /// diagnostics, and successful pixels retain their author dimensions.
     fn picture_unit(
         &self,
         ix: usize,
@@ -1534,15 +1688,16 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
-        images::image_element(
-            gpui::ElementId::Name(format!("reader-picture-{ix}").into()),
+        let picture = images::image_element(
+            gpui::ElementId::Name(format!("reader-picture-{ix}-{url}").into()),
             images::image_selector(ix),
             alt,
             &state,
             hints,
             style,
             images::frame_selector(ix),
-        )
+        );
+        images::painted_when_visible(picture, self.picture_visibility(url))
     }
 
     /// A paragraph drawn from one unit of the document model.
@@ -1567,7 +1722,17 @@ impl MarkdownView {
             .entry(index)
             .or_insert_with(|| Rc::new(RefCell::new(LocalLayout::default())))
             .clone();
-        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout)
+        let centered = self
+            .parsed
+            .doctext
+            .unit(index)
+            .and_then(|unit| self.parsed.blocks.get(unit.block))
+            .is_some_and(|block| matches!(block, Block::Centered(_)));
+        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout).align(if centered {
+            TextAlign::Center
+        } else {
+            TextAlign::Left
+        })
     }
 
     /// The next unit of block `ix`: its global unit index and document range.
@@ -1591,33 +1756,6 @@ impl MarkdownView {
 
 /// Split only over-large containers into several virtualized blocks. A list
 /// keeps its own numbering by carrying the original first number and index.
-/// The displayed width of a landed cell picture.
-///
-/// Mirrors the shared presenter's rule (intrinsic width, or a smaller HTML
-/// `width`/`height` hint, never upscaled) so a cell can bound its alignment row
-/// to the actual pixels. The presenter remains the owner of the real frame
-/// size and aspect ratio; this is only the upper bound for alignment.
-fn ready_picture_width(state: &ImageState, hints: ImageHints) -> Option<f32> {
-    let ImageState::Ready(_, width, height) = state else {
-        return None;
-    };
-    let intrinsic_width = *width as f32;
-    let intrinsic_height = (*height as f32).max(1.0);
-    let ratio = intrinsic_width / intrinsic_height;
-    let requested_width = hints
-        .width
-        .map(|w| (w as f32).min(intrinsic_width).max(1.0));
-    let requested_height = hints
-        .height
-        .map(|h| (h as f32).min(intrinsic_height).max(1.0));
-    Some(match (requested_width, requested_height) {
-        (Some(width), Some(_)) => width,
-        (Some(width), None) => width,
-        (None, Some(height)) => height * ratio,
-        (None, None) => intrinsic_width,
-    })
-}
-
 /// The text alignment a table column asks for.
 fn table_align(aligns: &[Align], column: usize) -> TextAlign {
     match aligns.get(column) {
@@ -1631,6 +1769,16 @@ fn flatten(blocks: Vec<Block>) -> Vec<Block> {
     let mut out = Vec::with_capacity(blocks.len());
     for block in blocks {
         match block {
+            Block::Centered(body) => {
+                // Centering is presentation, not one unbounded virtual-list row.
+                for child in flatten(body) {
+                    if matches!(child, Block::Centered(_)) {
+                        out.push(child);
+                    } else {
+                        out.push(Block::Centered(vec![child]));
+                    }
+                }
+            }
             Block::List { start, items } if items.len() > LAZY_CHILDREN => {
                 for (chunk, group) in items.chunks(LAZY_CHILDREN).enumerate() {
                     let first = chunk * LAZY_CHILDREN;

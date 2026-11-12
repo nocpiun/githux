@@ -104,11 +104,17 @@ pub enum Scene {
     Switch,
     /// The whole document expands to its natural height inside the host's own
     /// page scroll (the profile-README case), with a picture that widens it.
+    SvgProfile,
     Flow,
+    /// The OPanel-style Screenshots table: two centred columns of pictures
+    /// followed by caption rows, including a delayed raster and a finite SVG.
+    Table,
 }
 
 impl Scene {
-    pub const ALL: [Scene; 7] = [
+    pub const ALL: [Scene; 9] = [
+        Scene::Table,
+        Scene::SvgProfile,
         Scene::Healthy,
         Scene::Extremes,
         Scene::Failure,
@@ -120,6 +126,8 @@ impl Scene {
 
     pub fn label(self) -> &'static str {
         match self {
+            Scene::Table => "Screenshots table",
+            Scene::SvgProfile => "SVG profile",
             Scene::Healthy => "Healthy",
             Scene::Extremes => "Extremes",
             Scene::Failure => "Failure",
@@ -132,6 +140,12 @@ impl Scene {
 
     pub fn description(self) -> &'static str {
         match self {
+            Scene::Table => {
+                "A two-column Screenshots table: raster, wide, delayed and SVG cells with captions."
+            }
+            Scene::SvgProfile => {
+                "Finite SVG entry animation, CSS variable card details and inline SVG badge logos."
+            }
             Scene::Healthy => {
                 "A relative picture, a root path, a public HTTPS picture and a delayed one."
             }
@@ -154,7 +168,7 @@ impl Scene {
 
     /// Whether this scene lays the reader out at its natural height.
     pub fn is_flow(self) -> bool {
-        matches!(self, Scene::Flow)
+        matches!(self, Scene::Flow | Scene::SvgProfile)
     }
 
     /// The picture budgets a scene is opened with. The Oversize scene uses a
@@ -299,6 +313,8 @@ impl FixtureTransport {
             (README_PATH, Scene::Extremes) => extremes_readme(),
             (README_PATH, Scene::Failure) => failure_readme(),
             (README_PATH, Scene::Oversize) => oversize_readme(),
+            (README_PATH, Scene::Table) => table_readme(),
+            (README_PATH, Scene::SvgProfile) => svg_profile_readme(),
             (README_PATH, Scene::Flow) => flow_readme(),
             (README_PATH, _) => long_readme(),
             (ALT_README_PATH, _) => alt_readme(),
@@ -397,6 +413,24 @@ impl FixtureTransport {
             .to_string(),
         )
     }
+}
+
+/// The OPanel README's Screenshots section shape: two centred columns with
+/// picture rows and bold caption rows. Uses the fixture's own deterministic
+/// blobs, including a delayed picture and a finite SVG.
+fn table_readme() -> String {
+    "## Screenshots
+
+|||
+|:---:|:---:|
+|![Dashboard](images/diagram.png)|![Monitor](images/banner.png)|
+|**Dashboard**|**Monitor**|
+|![Map](images/slow.png)|![Stats](https://images.invalid/stats.svg)|
+|**Map**|**Stats**|
+|![Terminal](images/huge.png)||
+|**Terminal**||
+"
+    .to_string()
 }
 
 fn healthy_readme() -> String {
@@ -610,6 +644,31 @@ impl MemoryExternalImages {
         bodies.insert(LOGO_URL.to_string(), pictures.logo);
         bodies.insert(SLOW_URL.to_string(), pictures.slow);
         bodies.insert(OVERSIZE_URL.to_string(), pictures.oversize_external);
+        bodies.insert(
+            "https://images.invalid/stats.svg".into(),
+            include_bytes!("../content/images/fixtures/entry-stats.svg").to_vec(),
+        );
+        bodies.insert(
+            "https://images.invalid/roast.svg".into(),
+            include_bytes!("../content/images/fixtures/variable-card.svg").to_vec(),
+        );
+        bodies.insert(
+            "https://images.invalid/badge.svg".into(),
+            include_bytes!("../content/images/fixtures/data-logo-badge.svg").to_vec(),
+        );
+        if let Some(dir) = std::env::var_os("GITHUX_SVG_PUBLIC_SAMPLE_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            if let Ok(manifest) = std::fs::read_to_string(dir.join("public-manifest.json")) {
+                let manifest: HashMap<String, String> =
+                    serde_json::from_str(&manifest).expect("public sample manifest");
+                for (url, file) in manifest {
+                    bodies.insert(
+                        url,
+                        std::fs::read(dir.join(file)).expect("public response sample"),
+                    );
+                }
+            }
+        }
         Self {
             bodies,
             reads: Mutex::new(Vec::new()),
@@ -936,3 +995,34 @@ pub fn open_reader(
 #[cfg(test)]
 #[path = "reader_images_fixture_tests.rs"]
 mod tests;
+
+fn svg_profile_readme() -> String {
+    if let Some(dir) = std::env::var_os("GITHUX_SVG_PUBLIC_SAMPLE_DIR") {
+        return std::fs::read_to_string(
+            std::path::PathBuf::from(dir).join("profile-readme-public.md"),
+        )
+        .expect("local public README sample");
+    }
+    "<div align=\"center\">
+
+# Developer profile
+
+A centered profile README
+
+![Card](https://images.invalid/roast.svg)
+
+![Statistics](https://images.invalid/stats.svg)
+
+[![A](https://images.invalid/badge.svg)](https://a.invalid)
+[![B](https://images.invalid/badge.svg)](https://b.invalid)
+[![C](https://images.invalid/badge.svg)](https://c.invalid)
+
+![D](https://images.invalid/badge.svg) ![E](https://images.invalid/badge.svg)
+
+</div>
+
+## Links
+
+After the centered container."
+        .to_string()
+}

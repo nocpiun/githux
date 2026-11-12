@@ -2577,7 +2577,16 @@ impl TableImages {
         }
     }
 
+    /// Answers `.svg` paths from a real bounded-SVG fixture instead of a
+    /// generated raster, so table cells exercise the shared SVG pipeline.
     fn decode(&self, path: &str) -> crate::content::images::DecodedImage {
+        if path.ends_with(".svg") {
+            return crate::content::images::decode_image(
+                include_bytes!("../../content/images/fixtures/entry-stats.svg").to_vec(),
+                &crate::content::images::ImageLimits::default(),
+            )
+            .expect("decode the SVG fixture");
+        }
         let (width, height) = self
             .sizes
             .iter()
@@ -2922,16 +2931,21 @@ Dashboard	Monitor"
 }
 
 #[gpui::test]
-fn a_table_cell_picture_without_a_provider_stays_honest(cx: &mut TestAppContext) {
+fn a_pending_table_picture_is_silent_and_loads_when_a_provider_attaches(cx: &mut TestAppContext) {
     let (reader, cx) = open(cx, fixtures::screenshot_table(), DocumentKind::Markdown);
     cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
     frames(cx);
-    // No provider is attached: the shared presenter keeps its honest
-    // "no image service" note, and the cell still takes part in copy.
+    // No provider is attached: pending demand stays invisible. No placeholder
+    // box, no visible alt, and no picture row.
     assert!(
         cx.debug_bounds("markdown-cell-1-1-0-picture-0-note")
-            .is_some(),
-        "the cell picture keeps the shared placeholder"
+            .is_none(),
+        "a pending cell picture must not show a placeholder"
+    );
+    assert!(
+        cx.debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+            .is_none(),
+        "a pending cell picture must not reserve a frame"
     );
     let text = reader.read_with(cx, |reader, cx| {
         reader
@@ -2944,6 +2958,20 @@ fn a_table_cell_picture_without_a_provider_stays_honest(cx: &mut TestAppContext)
     assert!(
         text.contains("Dashboard	Monitor"),
         "the alt text is still the copy model: {text:?}"
+    );
+
+    // Attaching a provider schedules the demand that was registered while the
+    // picture was invisible; the landed picture remeasures its row.
+    let images = std::sync::Arc::new(TableImages::new(&[("preview-dashboard.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    settle_pictures(&reader, cx);
+    frames(cx);
+    assert!(
+        cx.debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+            .is_some(),
+        "the late provider paints the pending cell picture"
     );
 }
 
@@ -3120,6 +3148,93 @@ fn a_narrow_cell_picture_follows_the_column_alignment(cx: &mut TestAppContext) {
     assert!(
         (right.right() - (right_cell.right() - px(12.0))).abs() <= px(2.0),
         "a right column ends the picture at the cell's inner right edge: {right:?} vs {right_cell:?}"
+    );
+}
+
+/// Advances both the virtual executor clock and real time, so the reader's
+/// 20ms picture pump and the finite-animation wall clock both make progress
+/// while prepaint keeps reporting the picture as visible.
+fn frames_over_real_time(reader: &Entity<ReaderView>, cx: &mut VisualTestContext, steps: usize) {
+    for _ in 0..steps {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(25));
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        cx.run_until_parked();
+    }
+    let _ = reader;
+}
+
+#[gpui::test]
+fn a_table_cell_svg_uses_logical_size_and_plays_its_visible_animation(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| stats |
+|---|
+| ![Stats](stats.svg) |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.update(|_, cx| {
+        ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false);
+    });
+    let images = std::sync::Arc::new(TableImages::new(&[]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    let key = crate::content::images::ImageTarget::Repository {
+        owner: fixtures::OWNER.into(),
+        name: fixtures::NAME.into(),
+        commit: fixtures::COMMIT.into(),
+        path: "docs/stats.svg".into(),
+    }
+    .key();
+    for _ in 0..200 {
+        frames_over_real_time(&reader, cx, 1);
+        if reader.read_with(cx, |reader, _| reader.image_state(&key)) == Some("ready".into()) {
+            break;
+        }
+    }
+    assert_eq!(
+        reader.read_with(cx, |reader, _| reader.image_state(&key)),
+        Some("ready".into()),
+        "the table SVG loads through the shared pipeline"
+    );
+    // The SVG is 240x100 logical but its final PNG is supersampled; layout must
+    // use the logical size, not the pixel grid.
+    let frame = cx
+        .debug_bounds("markdown-cell-0-1-0-picture-0-frame")
+        .expect("the table SVG frame is laid out");
+    assert!(
+        (frame.size.width - px(240.0)).abs() < px(1.0),
+        "a table SVG keeps its logical width: {frame:?}"
+    );
+
+    // Keep prepainting the visible picture for longer than the presenter's
+    // ~150ms not-visible fallback. A picture that never reported `painted`
+    // would have finished by now.
+    frames_over_real_time(&reader, cx, 24);
+    assert!(
+        reader.read_with(cx, |reader, _| reader.has_pending_images()),
+        "a visible table SVG keeps its finite animation running"
+    );
+    // It still has to finish: no permanent frame work.
+    for _ in 0..200 {
+        frames_over_real_time(&reader, cx, 1);
+        if !reader.read_with(cx, |reader, _| reader.has_pending_images()) {
+            break;
+        }
+    }
+    assert!(
+        !reader.read_with(cx, |reader, _| reader.has_pending_images()),
+        "the finite table animation settles"
     );
 }
 

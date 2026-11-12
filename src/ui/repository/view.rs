@@ -68,7 +68,7 @@ pub(super) fn render(
                     failure_panel("repository-error", &error, page.is_active(), false, cx)
                 }
                 _ => {
-                    let tree = tree_column(page, rows, cx);
+                    let tree = tree_column(page, rows, window, cx);
                     let reader = reader_column(page, cx);
                     div()
                         .debug_selector(|| "repository-body".to_string())
@@ -693,6 +693,7 @@ fn code_header(cx: &App) -> gpui::Div {
 fn tree_column(
     page: &mut RepositoryPage,
     rows: Rc<Vec<TreeRow>>,
+    window: &mut Window,
     cx: &mut Context<RepositoryPage>,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -706,15 +707,33 @@ fn tree_column(
     let empty = page
         .tree("")
         .is_some_and(|tree| tree.entries.is_empty() && !tree_incomplete(tree));
+    let edge_gap = window.pixel_snap(px(7.0));
     let list = uniform_list(
         "repository-tree",
         count,
         cx.processor(
             move |page: &mut RepositoryPage, range: std::ops::Range<usize>, window, cx| {
+                let end = range.end;
                 range
                     .map(|index| match rows.get(index).cloned() {
                         Some(row) => {
-                            tree_row(page, row, selected.clone(), cursor.clone(), window, cx)
+                            let row =
+                                tree_row(page, row, selected.clone(), cursor.clone(), window, cx);
+                            let following = if index + 1 == end {
+                                rows.get(end).cloned().map(|next| {
+                                    tree_row(
+                                        page,
+                                        next,
+                                        selected.clone(),
+                                        cursor.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            scroll::with_trailing_overdraw(row, following)
                         }
                         None => div().into_any_element(),
                     })
@@ -723,7 +742,8 @@ fn tree_column(
         ),
     )
     .track_scroll(&page.tree_scroll)
-    .size_full();
+    .size_full()
+    .py(edge_gap);
 
     let now = page.now_ms();
     let reduce = cx.reduce_motion();
@@ -756,7 +776,7 @@ fn tree_column(
             name: "repository-tree-scrollbar",
             axis: gpui::Axis::Vertical,
         },
-        placement: scroll::Placement::overlay(2.5, 8.0),
+        placement: scroll::Placement::overlay(2.5, 8.0).with_track_insets(edge_gap, edge_gap),
         style: scroll::Style::DEFAULT,
         opacity,
         on_drag,
@@ -830,8 +850,9 @@ fn tree_column(
                 }))
                 .overflow_hidden()
                 .child(
-                    // Row whitespace belongs to the content, not to the scrollbar's anchor.
-                    div().size_full().p(px(7.0)).child(
+                    // Horizontal alignment stays fixed; vertical breathing room belongs
+                    // to the native list's scroll content, whose clip covers this full pane.
+                    div().size_full().px(px(7.0)).child(
                         div()
                             .relative()
                             .size_full()
@@ -847,8 +868,8 @@ fn tree_column(
                     div()
                         .debug_selector(|| "repository-tree-bar-region".into())
                         .absolute()
-                        .top(px(7.0))
-                        .bottom(px(7.0))
+                        .top_0()
+                        .bottom_0()
                         .left_0()
                         .right_0()
                         .child(bar),
@@ -954,6 +975,7 @@ fn tree_row(
     let name = row.name.clone();
     let tooltip_path = row.path.clone();
     let debug_path = row.path.clone();
+    let label_path = row.path.clone();
     let depth = row.depth;
     let kind = row.kind;
     let state = row.state.clone();
@@ -1080,7 +1102,9 @@ fn tree_row(
         .gap_1p5()
         .flex_none()
         .w_full()
-        .h(px(TREE_ROW_HEIGHT))
+        // Let the uniform list measure a full text line at the current font scale.
+        // A fixed 26px height clips the first label against the viewport mask.
+        .min_h(px(TREE_ROW_HEIGHT))
         .pl(px(6.0 + INDENT * depth as f32))
         .pr_2()
         .rounded(radius)
@@ -1096,6 +1120,7 @@ fn tree_row(
         .child(Icon::new(icon).size(IconSize::Xs).color(icon_color))
         .child(
             div()
+                .debug_selector(move || format!("repository-row-label-{label_path}"))
                 .min_w_0()
                 .flex_1()
                 .overflow_hidden()

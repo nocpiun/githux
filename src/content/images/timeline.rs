@@ -1,0 +1,1294 @@
+//! A finite, script-free CSS timeline evaluated before resvg rasterization.
+//! Unsupported animation values leave the underlying presentation intact.
+use resvg::usvg::roxmltree::{Document, Node};
+use simplecss::{AttributeOperator, Element, PseudoClass};
+use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_TRACKS: usize = 128;
+const MAX_EXPANSION_STEPS: usize = 100_000;
+struct ExpansionWork<'a> {
+    remaining: usize,
+    check: &'a dyn Fn() -> Result<(), super::ImageFailure>,
+}
+impl ExpansionWork<'_> {
+    fn step(&mut self) -> Result<(), super::ImageFailure> {
+        if self.remaining == 0 {
+            return Err(super::ImageFailure::TooLarge {
+                limit: MAX_EXPANSION_STEPS,
+            });
+        }
+        self.remaining -= 1;
+        if self.remaining.is_multiple_of(128) {
+            (self.check)()?;
+        }
+        Ok(())
+    }
+}
+pub(super) const MAX_DURATION_MS: f64 = 5_000.0;
+type Properties = BTreeMap<String, String>;
+
+#[derive(Clone, Copy)]
+struct CssNode<'a, 'input>(Node<'a, 'input>);
+impl Element for CssNode<'_, '_> {
+    fn parent_element(&self) -> Option<Self> {
+        self.0.parent_element().map(Self)
+    }
+    fn prev_sibling_element(&self) -> Option<Self> {
+        self.0.prev_sibling_element().map(Self)
+    }
+    fn has_local_name(&self, name: &str) -> bool {
+        self.0.tag_name().name() == name
+    }
+    fn attribute_matches(&self, name: &str, op: AttributeOperator<'_>) -> bool {
+        if name == "__githux_root" && matches!(op, AttributeOperator::Exists) {
+            return self.0.parent_element().is_none();
+        }
+        self.0.attribute(name).is_some_and(|v| op.matches(v))
+    }
+    fn pseudo_class_matches(&self, class: PseudoClass<'_>) -> bool {
+        matches!(class, PseudoClass::FirstChild) && self.0.prev_sibling_element().is_none()
+    }
+}
+
+#[derive(Clone)]
+struct Track {
+    delay: f64,
+    duration: f64,
+    fill: String,
+    easing: String,
+    stops: Vec<(f64, Properties)>,
+}
+struct NodeStyle {
+    at: usize,
+    remove: Vec<std::ops::Range<usize>>,
+    properties: Properties,
+    tracks: Vec<Track>,
+}
+pub(super) struct Timeline {
+    nodes: Vec<NodeStyle>,
+    styles: Vec<std::ops::Range<usize>>,
+    pub duration_ms: f64,
+}
+
+/// Split top-level CSS blocks, respecting strings, comments and nested braces.
+fn blocks(css: &str) -> Vec<(&str, &str)> {
+    let b = css.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut open = 0;
+    let mut depth = 0;
+    let mut quote = 0;
+    let mut i = 0;
+    while i < b.len() {
+        if quote != 0 {
+            if b[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b[i] == quote {
+                quote = 0;
+            }
+        } else if b[i..].starts_with(b"/*") {
+            i += 2;
+            while i + 1 < b.len() && !b[i..].starts_with(b"*/") {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        } else if b[i] == b'\'' || b[i] == b'"' {
+            quote = b[i];
+        } else if b[i] == b'{' {
+            if depth == 0 {
+                open = i;
+            }
+            depth += 1;
+        } else if b[i] == b'}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                out.push((css[start..open].trim(), &css[open + 1..i]));
+                start = i + 1;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+// An attribute selector has the same specificity as :root. Rewrite only
+// pseudo-class tokens in selector headers, leaving quoted values, escapes and
+// declaration payloads untouched. Compound svg:root selectors remain valid.
+fn root_selector(selector: &str) -> String {
+    let bytes = selector.as_bytes();
+    let mut out = String::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote = 0;
+    let mut brackets = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if matches!(c, b'\'' | b'\"') {
+            quote = c;
+        } else if c == b'[' {
+            brackets += 1;
+        } else if c == b']' {
+            brackets = brackets.saturating_sub(1);
+        } else if brackets == 0
+            && c == b':'
+            && (i == 0 || bytes[i - 1] != b':')
+            && bytes
+                .get(i..i + 5)
+                .is_some_and(|v| v.eq_ignore_ascii_case(b":root"))
+            && bytes.get(i + 5).is_none_or(|v| {
+                !v.is_ascii_alphanumeric() && !matches!(*v, b'_' | b'-' | b'\\') && v.is_ascii()
+            })
+        {
+            out.push_str(&selector[start..i]);
+            out.push_str("[__githux_root]");
+            i += 5;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&selector[start..]);
+    out
+}
+fn root_rules(css: &str) -> String {
+    let mut out = String::new();
+    for (header, body) in blocks(css) {
+        out.push_str(&if header.starts_with('@') {
+            header.to_string()
+        } else {
+            root_selector(header)
+        });
+        out.push('{');
+        out.push_str(body);
+        out.push('}');
+    }
+    out
+}
+
+struct Declaration {
+    name: String,
+    value: String,
+    important: bool,
+}
+fn split_css(css: &str, delimiter: u8) -> Vec<&str> {
+    let bytes = css.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut quote = 0;
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if quote != 0 {
+            if byte == b'\\' {
+                i += 2;
+                continue;
+            }
+            if byte == quote {
+                quote = 0;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = byte,
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if byte == delimiter && depth == 0 {
+                out.push(&css[start..i]);
+                start = i + 1;
+            }
+        }
+        i += 1;
+    }
+    out.push(&css[start..]);
+    out
+}
+fn css_declarations(css: &str) -> Vec<Declaration> {
+    split_css(css, b';')
+        .into_iter()
+        .filter_map(|decl| {
+            let (name, value) = decl.split_once(':')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let mut value = value.trim();
+            let important = value
+                .rsplit_once('!')
+                .is_some_and(|(_, tail)| tail.trim().eq_ignore_ascii_case("important"));
+            if important {
+                value = value.rsplit_once('!')?.0.trim();
+            }
+            Some(Declaration {
+                name: if name.starts_with("--") {
+                    name.to_string()
+                } else if name.eq_ignore_ascii_case("background") {
+                    "background-color".to_string()
+                } else {
+                    name.to_ascii_lowercase()
+                },
+                value: value.to_string(),
+                important,
+            })
+        })
+        .collect()
+}
+const ANIMATION_COMPONENTS: [&str; 8] = [
+    "animation-name",
+    "animation-duration",
+    "animation-delay",
+    "animation-timing-function",
+    "animation-fill-mode",
+    "animation-iteration-count",
+    "animation-direction",
+    "animation-play-state",
+];
+
+// Keep the raw shorthand until custom properties resolve on the element. Its
+// components still participate independently in source order and importance.
+fn cascade_declaration(
+    d: &Declaration,
+    props: &mut Properties,
+    shorthands: &mut BTreeSet<String>,
+) -> Result<(), super::ImageFailure> {
+    if d.name == "animation" {
+        if d.value.len().saturating_mul(ANIMATION_COMPONENTS.len()) > 2 * 1024 * 1024 {
+            return Err(super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            });
+        }
+        for key in ANIMATION_COMPONENTS {
+            props.insert(key.into(), d.value.clone());
+            shorthands.insert(key.into());
+        }
+    } else {
+        props.insert(d.name.clone(), d.value.clone());
+        shorthands.remove(&d.name);
+    }
+    Ok(())
+}
+fn animation_components(value: &str) -> Properties {
+    let mut props = Properties::from([
+        ("animation-name".into(), "none".into()),
+        ("animation-duration".into(), "0s".into()),
+        ("animation-delay".into(), "0s".into()),
+        ("animation-timing-function".into(), "ease".into()),
+        ("animation-fill-mode".into(), "none".into()),
+        ("animation-iteration-count".into(), "1".into()),
+        ("animation-direction".into(), "normal".into()),
+        ("animation-play-state".into(), "running".into()),
+    ]);
+    if value.contains(',') {
+        for key in ANIMATION_COMPONENTS {
+            props.insert(key.into(), value.into());
+        }
+        return props;
+    }
+    let mut times = 0;
+    for token in value.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let key = if milliseconds(&lower).is_some() {
+            times += 1;
+            if times == 1 {
+                "animation-duration"
+            } else {
+                "animation-delay"
+            }
+        } else if matches!(
+            lower.as_str(),
+            "linear" | "ease" | "ease-in" | "ease-out" | "ease-in-out"
+        ) {
+            "animation-timing-function"
+        } else if matches!(lower.as_str(), "forwards" | "backwards" | "both" | "none") {
+            "animation-fill-mode"
+        } else if matches!(
+            lower.as_str(),
+            "normal" | "reverse" | "alternate" | "alternate-reverse"
+        ) {
+            "animation-direction"
+        } else if matches!(lower.as_str(), "running" | "paused") {
+            "animation-play-state"
+        } else if lower == "infinite" || token.parse::<f64>().is_ok() {
+            "animation-iteration-count"
+        } else {
+            "animation-name"
+        };
+        props.insert(
+            key.into(),
+            if key == "animation-name" {
+                token.into()
+            } else {
+                lower
+            },
+        );
+    }
+    props
+}
+
+/// Capture outer surface effects; foreground root opacity is neutralized before
+/// usvg conversion so it can composite once together with the root background.
+pub(super) fn root_opacity(doc: &Document<'_>) -> f32 {
+    let root = doc.root_element();
+    let props = declarations(root.attribute("style").unwrap_or_default());
+    if props
+        .get("display")
+        .map(String::as_str)
+        .or_else(|| root.attribute("display"))
+        == Some("none")
+    {
+        return 0.0;
+    }
+    let value = props
+        .get("opacity")
+        .map(String::as_str)
+        .or_else(|| root.attribute("opacity"))
+        .unwrap_or("1");
+    let opacity = if let Some(value) = value.strip_suffix('%') {
+        value.parse::<f32>().ok().map(|v| v / 100.0)
+    } else {
+        value.parse::<f32>().ok()
+    };
+    opacity
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0)
+}
+
+pub(super) fn without_root_opacity(xml: &str, doc: &Document<'_>) -> String {
+    let root = doc.root_element();
+    let mut edits = Vec::new();
+    for attr in root.attributes() {
+        if attr.name() == "opacity" {
+            edits.push((attr.range(), String::new()));
+        }
+        if attr.name() == "style" {
+            let style = css_declarations(attr.value())
+                .into_iter()
+                .filter(|d| d.name != "opacity")
+                .map(|d| {
+                    format!(
+                        "{}:{}{};",
+                        d.name,
+                        d.value,
+                        if d.important { "!important" } else { "" }
+                    )
+                })
+                .collect::<String>();
+            edits.push((attr.range(), format!("style=\"{}\"", escape(&style))));
+        }
+    }
+    // Preserve explicit inheritance from the original root before neutralizing
+    // that root for whole-surface compositing. Opacity normally does not inherit.
+    let inherited_opacity = root_opacity(doc).to_string();
+    for child in root.children().filter(Node::is_element) {
+        for attr in child.attributes() {
+            if attr.name() == "opacity" && attr.value().eq_ignore_ascii_case("inherit") {
+                edits.push((attr.range(), format!("opacity=\"{inherited_opacity}\"")));
+            }
+            if attr.name() == "style" {
+                let mut declarations = css_declarations(attr.value());
+                if declarations
+                    .iter()
+                    .any(|d| d.name == "opacity" && d.value.eq_ignore_ascii_case("inherit"))
+                {
+                    for declaration in &mut declarations {
+                        if declaration.name == "opacity"
+                            && declaration.value.eq_ignore_ascii_case("inherit")
+                        {
+                            declaration.value = inherited_opacity.clone();
+                        }
+                    }
+                    let style = declarations
+                        .into_iter()
+                        .map(|d| {
+                            format!(
+                                "{}:{}{};",
+                                d.name,
+                                d.value,
+                                if d.important { "!important" } else { "" }
+                            )
+                        })
+                        .collect::<String>();
+                    edits.push((attr.range(), format!("style=\"{}\"", escape(&style))));
+                }
+            }
+        }
+    }
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut result = xml.to_string();
+    for (range, value) in edits {
+        result.replace_range(range, &value);
+    }
+    result
+}
+
+pub(super) fn font_faces(doc: &Document<'_>) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for node in doc.descendants().filter(|node| node.has_tag_name("style")) {
+        let css = strip_comments(node.text().unwrap_or_default());
+        for (header, body) in blocks(&css) {
+            if header.trim().eq_ignore_ascii_case("@font-face") {
+                let declarations = declarations(body);
+                if let (Some(family), Some(source)) =
+                    (declarations.get("font-family"), declarations.get("src"))
+                {
+                    if family.len() > 128 || result.len() >= 8 {
+                        continue;
+                    }
+                    if let Some(url) = source.trim().strip_prefix("url(").and_then(|source| {
+                        source
+                            .split_once(')')
+                            .map(|(url, _)| url.trim().trim_matches(['\"', '\'']))
+                    }) && url.starts_with("data:")
+                    {
+                        result.push((
+                            family.trim().trim_matches(['\"', '\'']).to_string(),
+                            url.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+fn declarations(css: &str) -> Properties {
+    css_declarations(css)
+        .into_iter()
+        .filter(|d| !d.important)
+        .map(|d| (d.name, d.value))
+        .collect()
+}
+fn milliseconds(s: &str) -> Option<f64> {
+    let v = if let Some(n) = s.strip_suffix("ms") {
+        n.parse().ok()?
+    } else {
+        s.strip_suffix('s')?.parse::<f64>().ok()? * 1000.0
+    };
+    v.is_finite().then_some(v)
+}
+fn expand_vars_into(
+    value: &str,
+    vars: &Properties,
+    depth: usize,
+    out: &mut String,
+    limit: usize,
+    work: &mut ExpansionWork<'_>,
+) -> Result<bool, super::ImageFailure> {
+    work.step()?;
+    if depth > 16 {
+        return Ok(false);
+    }
+    let append = |out: &mut String, part: &str| -> Result<(), super::ImageFailure> {
+        if part.len() > limit.saturating_sub(out.len()) {
+            return Err(super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            });
+        }
+        out.try_reserve_exact(part.len())
+            .map_err(|_| super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            })?;
+        out.push_str(part);
+        Ok(())
+    };
+    let mut rest = value;
+    while let Some(start) = rest.find("var(") {
+        work.step()?;
+        append(out, &rest[..start])?;
+        let mut level = 1;
+        let mut end = None;
+        for (i, c) in rest[start + 4..].char_indices() {
+            match c {
+                '(' => level += 1,
+                ')' => level -= 1,
+                _ => {}
+            }
+            if level == 0 {
+                end = Some(start + 4 + i);
+                break;
+            }
+        }
+        let Some(end) = end else {
+            return Ok(false);
+        };
+        let (name, fallback) = rest[start + 4..end]
+            .split_once(',')
+            .map_or((&rest[start + 4..end], None), |(a, b)| (a, Some(b)));
+        let Some(replacement) = vars.get(name.trim()).map(String::as_str).or(fallback) else {
+            return Ok(false);
+        };
+        if !expand_vars_into(replacement, vars, depth + 1, out, limit, work)? {
+            return Ok(false);
+        }
+        rest = &rest[end + 1..];
+    }
+    append(out, rest)?;
+    Ok(true)
+}
+fn resolve_vars(
+    value: &str,
+    vars: &Properties,
+    limit: usize,
+    work: &mut ExpansionWork<'_>,
+) -> Result<Option<String>, super::ImageFailure> {
+    let mut out = String::new();
+    Ok(expand_vars_into(value, vars, 0, &mut out, limit, work)?.then_some(out))
+}
+fn resolve_properties(
+    properties: Properties,
+    vars: &Properties,
+    expanded: &mut usize,
+    work: &mut ExpansionWork<'_>,
+) -> Result<Properties, super::ImageFailure> {
+    let mut resolved = Properties::new();
+    for (key, value) in properties {
+        let limit = (2usize * 1024 * 1024)
+            .checked_sub(*expanded)
+            .and_then(|n| n.checked_sub(key.len()))
+            .ok_or(super::ImageFailure::TooLarge {
+                limit: 2 * 1024 * 1024,
+            })?;
+        if let Some(value) = resolve_vars(&value, vars, limit, work)? {
+            *expanded = expanded
+                .saturating_add(key.len())
+                .saturating_add(value.len());
+            if *expanded > 2 * 1024 * 1024 {
+                return Err(super::ImageFailure::TooLarge {
+                    limit: 2 * 1024 * 1024,
+                });
+            }
+            resolved.insert(key, value);
+        }
+    }
+    Ok(resolved)
+}
+
+fn underlying_value(
+    node: Node<'_, '_>,
+    props: &Properties,
+    key: &str,
+    nodes: &[NodeStyle],
+    indices: &std::collections::HashMap<resvg::usvg::roxmltree::NodeId, usize>,
+    work: &mut ExpansionWork<'_>,
+) -> Result<String, super::ImageFailure> {
+    let default = match key {
+        "transform" => "matrix(1 0 0 1 0 0)",
+        "stroke-dashoffset" => "0",
+        _ => "1",
+    };
+    let normalize = |value: &str| {
+        if value == "initial" || (key == "transform" && value == "none") {
+            default.to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let local = props
+        .get(key)
+        .map(String::as_str)
+        .or_else(|| node.attribute(key));
+    if let Some(value) = local.filter(|v| !matches!(*v, "inherit" | "unset")) {
+        return Ok(normalize(value));
+    }
+    if local == Some("inherit")
+        || matches!(key, "fill-opacity" | "stroke-opacity" | "stroke-dashoffset")
+    {
+        for ancestor in node.ancestors().skip(1).filter(Node::is_element) {
+            work.step()?;
+            let value = indices
+                .get(&ancestor.id())
+                .and_then(|index| nodes[*index].properties.get(key))
+                .map(String::as_str)
+                .or_else(|| ancestor.attribute(key));
+            if let Some(value) = value.filter(|v| !matches!(*v, "inherit" | "unset")) {
+                return Ok(normalize(value));
+            }
+        }
+    }
+    Ok(default.into())
+}
+
+fn strip_comments(css: &str) -> String {
+    let b = css.as_bytes();
+    let mut out = String::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote = 0;
+    while i < b.len() {
+        if quote != 0 {
+            if b[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b[i] == quote {
+                quote = 0;
+            }
+        } else if matches!(b[i], b'\'' | b'"') {
+            quote = b[i];
+        } else if b[i..].starts_with(b"/*") {
+            out.push_str(&css[start..i]);
+            i += 2;
+            while i + 1 < b.len() && !b[i..].starts_with(b"*/") {
+                i += 1;
+            }
+            i = (i + 2).min(b.len());
+            start = i;
+            out.push(' ');
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&css[start..]);
+    out
+}
+impl Timeline {
+    pub fn new(
+        doc: &Document<'_>,
+        check: &dyn Fn() -> Result<(), super::ImageFailure>,
+    ) -> Result<Self, super::ImageFailure> {
+        check()?;
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check,
+        };
+        let all_css = strip_comments(
+            &doc.descendants()
+                .filter(|n| n.has_tag_name("style"))
+                .filter_map(|n| n.text())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        // Web-font payloads and conditional/browser-specific rules are not
+        // evaluated. In particular an ignored WOFF data URL must not consume
+        // the small budget for the declarations we actually evaluate.
+        let mut css = String::new();
+        for (header, body) in blocks(&all_css) {
+            if !header.starts_with('@') || header.starts_with("@keyframes ") {
+                if css
+                    .len()
+                    .saturating_add(header.len())
+                    .saturating_add(body.len())
+                    > 128 * 1024
+                {
+                    return Err(super::ImageFailure::TooLarge { limit: 128 * 1024 });
+                }
+                css.push_str(header);
+                css.push('{');
+                css.push_str(body);
+                css.push('}');
+            }
+        }
+        if css.len() > 128 * 1024 {
+            return Err(super::ImageFailure::TooLarge { limit: 128 * 1024 });
+        }
+        let mut key_bytes = 0usize;
+        let mut keys = BTreeMap::new();
+        for (header, body) in blocks(&css) {
+            if let Some(name) = header.strip_prefix("@keyframes ") {
+                let mut stops = Vec::new();
+                for (positions, body) in blocks(body) {
+                    for pos in positions.split(',') {
+                        let pos = match pos.trim() {
+                            "from" => Some(0.0),
+                            "to" => Some(1.0),
+                            p => p
+                                .strip_suffix('%')
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .map(|v| v / 100.0),
+                        };
+                        if let Some(pos) = pos.filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                        {
+                            key_bytes = key_bytes.saturating_add(body.len());
+                            if key_bytes > 2 * 1024 * 1024 || stops.len() >= 256 {
+                                return Err(super::ImageFailure::TooLarge {
+                                    limit: 2 * 1024 * 1024,
+                                });
+                            }
+                            stops.push((if pos == 0.0 { 0.0 } else { pos }, declarations(body)));
+                        }
+                    }
+                }
+                stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut merged: Vec<(f64, Properties)> = Vec::new();
+                for (at, values) in stops {
+                    if let Some((last, properties)) = merged.last_mut()
+                        && *last == at
+                    {
+                        properties.extend(values);
+                    } else {
+                        merged.push((at, values));
+                    }
+                }
+                keys.insert(name.trim().to_string(), merged);
+            }
+        }
+        let css = root_rules(&css);
+        let mut rules = Vec::new();
+        let mut rule_bytes = 0usize;
+        for (selectors, body) in blocks(&css) {
+            if selectors.starts_with('@') {
+                continue;
+            }
+            for selector in split_css(selectors, b',') {
+                if let Some(selector) = simplecss::Selector::parse(selector.trim()) {
+                    rule_bytes = rule_bytes.saturating_add(body.len());
+                    if rule_bytes > 2 * 1024 * 1024 {
+                        return Err(super::ImageFailure::TooLarge {
+                            limit: 2 * 1024 * 1024,
+                        });
+                    }
+                    rules.push((selector, css_declarations(body)));
+                }
+            }
+        }
+        rules.sort_by_key(|(selector, _)| selector.specificity());
+        if rules
+            .len()
+            .saturating_mul(doc.descendants().filter(Node::is_element).count())
+            > 2_000_000
+        {
+            return Err(super::ImageFailure::TooLarge { limit: 2_000_000 });
+        }
+        let mut expanded_bytes = 0usize;
+        let mut inherited = std::collections::HashMap::<_, Properties>::new();
+        let mut nodes = Vec::new();
+        let mut node_indices = std::collections::HashMap::new();
+        let mut duration_ms: f64 = 0.0;
+        let mut tracks_count = 0;
+        for node in doc.descendants().filter(Node::is_element) {
+            check()?;
+            if node.ancestors().any(|n| n.has_tag_name("style")) {
+                continue;
+            }
+            let mut props = Properties::new();
+            let mut important = Properties::new();
+            let mut shorthands = BTreeSet::new();
+            let mut important_shorthands = BTreeSet::new();
+            for attr in node.attributes() {
+                if attr.name() == "transform"
+                    || (attr.name() != "style" && attr.value().contains("var("))
+                {
+                    props.insert(attr.name().to_string(), attr.value().to_string());
+                }
+            }
+            for (selector, declarations) in &rules {
+                if selector.matches(&CssNode(node)) {
+                    for d in declarations {
+                        if d.important {
+                            cascade_declaration(d, &mut important, &mut important_shorthands)?;
+                        } else {
+                            cascade_declaration(d, &mut props, &mut shorthands)?;
+                        }
+                    }
+                }
+            }
+            for d in css_declarations(&strip_comments(node.attribute("style").unwrap_or_default()))
+            {
+                if d.important {
+                    cascade_declaration(&d, &mut important, &mut important_shorthands)?;
+                } else {
+                    cascade_declaration(&d, &mut props, &mut shorthands)?;
+                }
+            }
+            for key in important.keys() {
+                if important_shorthands.contains(key) {
+                    shorthands.insert(key.clone());
+                } else {
+                    shorthands.remove(key);
+                }
+            }
+            props.extend(important.clone());
+            let mut vars = node
+                .parent_element()
+                .and_then(|p| inherited.get(&p.id()))
+                .cloned()
+                .unwrap_or_default();
+            let local_vars: Properties = props
+                .iter()
+                .filter(|(key, _)| key.starts_with("--"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            vars.extend(local_vars.clone());
+            expanded_bytes = expanded_bytes
+                .saturating_add(vars.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>());
+            if expanded_bytes > 2 * 1024 * 1024 {
+                return Err(super::ImageFailure::TooLarge {
+                    limit: 2 * 1024 * 1024,
+                });
+            }
+            // Custom properties inherit their computed value. Descendant
+            // overrides must not rebind references declared on an ancestor.
+            let computed_vars =
+                resolve_properties(local_vars.clone(), &vars, &mut expanded_bytes, &mut work)?;
+            for key in local_vars.keys() {
+                vars.remove(key);
+            }
+            vars.extend(computed_vars);
+            inherited.insert(node.id(), vars.clone());
+            props.retain(|key, _| !key.starts_with("--"));
+            props = resolve_properties(props, &vars, &mut expanded_bytes, &mut work)?;
+            for key in shorthands {
+                if let Some(raw) = props.get(&key) {
+                    let components = animation_components(raw);
+                    if let Some(value) = components.get(&key) {
+                        props.insert(key, value.clone());
+                    }
+                }
+            }
+            // The SVG root's background is a box paint, not a visible child
+            // that may override inherited visibility.
+            if node.parent_element().is_none()
+                && matches!(
+                    props
+                        .get("visibility")
+                        .map(String::as_str)
+                        .or_else(|| node.attribute("visibility")),
+                    Some("hidden" | "collapse")
+                )
+            {
+                let value = "transparent!important";
+                expanded_bytes =
+                    expanded_bytes.saturating_add("background-color".len() + value.len());
+                props.insert("background-color".into(), value.into());
+            }
+            let mut tracks = Vec::new();
+            let animation = props.get("animation-name");
+            if tracks_count < MAX_TRACKS
+                && let Some(name) = animation
+            {
+                // Only the winning cascaded longhands select this finite track.
+                let iterations_ok = props
+                    .get("animation-iteration-count")
+                    .is_none_or(|v| v.parse::<f64>().ok() == Some(1.0))
+                    && props
+                        .get("animation-direction")
+                        .is_none_or(|v| v.eq_ignore_ascii_case("normal"))
+                    && props
+                        .get("animation-play-state")
+                        .is_none_or(|v| v.eq_ignore_ascii_case("running"));
+                if !name.contains(',') && iterations_ok && keys.contains_key(name) {
+                    let duration = props
+                        .get("animation-duration")
+                        .and_then(|v| milliseconds(v))
+                        .unwrap_or(0.0);
+                    let delay = props
+                        .get("animation-delay")
+                        .and_then(|v| milliseconds(v))
+                        .unwrap_or(0.0);
+                    if duration >= 0.0 && (duration + delay).is_finite() {
+                        let fill = props
+                            .get("animation-fill-mode")
+                            .map_or_else(|| "none".into(), |v| v.to_ascii_lowercase());
+                        let easing = props
+                            .get("animation-timing-function")
+                            .map_or_else(|| "ease".into(), |v| v.to_ascii_lowercase());
+                        let mut stops = keys[name].clone();
+                        for (_, values) in &mut stops {
+                            values.retain(|key, _| {
+                                !important.contains_key(key)
+                                    && matches!(
+                                        key.as_str(),
+                                        "opacity"
+                                            | "fill-opacity"
+                                            | "stroke-opacity"
+                                            | "stroke-dashoffset"
+                                            | "transform"
+                                    )
+                            });
+                            *values = resolve_properties(
+                                std::mem::take(values),
+                                &vars,
+                                &mut expanded_bytes,
+                                &mut work,
+                            )?;
+                        }
+                        let animated_keys = stops
+                            .iter()
+                            .flat_map(|(_, values)| values.keys())
+                            .filter(|key| {
+                                matches!(
+                                    key.as_str(),
+                                    "opacity"
+                                        | "fill-opacity"
+                                        | "stroke-opacity"
+                                        | "stroke-dashoffset"
+                                        | "transform"
+                                )
+                            })
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let mut base = Properties::new();
+                        for key in animated_keys {
+                            base.insert(
+                                key.clone(),
+                                underlying_value(
+                                    node,
+                                    &props,
+                                    &key,
+                                    &nodes,
+                                    &node_indices,
+                                    &mut work,
+                                )?,
+                            );
+                        }
+                        // Missing boundary values use the computed underlying
+                        // presentation, including single `to` / `from` rules.
+                        for endpoint in [0.0, 1.0] {
+                            if let Some((_, values)) =
+                                stops.iter_mut().find(|(at, _)| *at == endpoint)
+                            {
+                                let missing = base
+                                    .iter()
+                                    .filter(|(key, _)| !values.contains_key(*key))
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect();
+                                values.extend(resolve_properties(
+                                    missing,
+                                    &vars,
+                                    &mut expanded_bytes,
+                                    &mut work,
+                                )?);
+                            } else if !base.is_empty() {
+                                stops.push((
+                                    endpoint,
+                                    resolve_properties(
+                                        base.clone(),
+                                        &vars,
+                                        &mut expanded_bytes,
+                                        &mut work,
+                                    )?,
+                                ));
+                            }
+                        }
+                        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        if stops.len() >= 2 {
+                            tracks.push(Track {
+                                delay,
+                                duration,
+                                fill,
+                                easing,
+                                stops,
+                            });
+                            tracks_count += 1;
+                            duration_ms = duration_ms.max(duration + delay);
+                        }
+                    }
+                }
+            }
+            props.retain(|k, _| !k.starts_with("animation"));
+            if expanded_bytes > 2 * 1024 * 1024 {
+                return Err(super::ImageFailure::TooLarge {
+                    limit: 2 * 1024 * 1024,
+                });
+            }
+            if !props.is_empty() || !tracks.is_empty() {
+                let remove = node
+                    .attributes()
+                    .filter(|a| {
+                        a.name() == "style"
+                            || (a.name() == "transform"
+                                && (props.contains_key("transform")
+                                    || tracks.iter().any(|t| {
+                                        t.stops.iter().any(|(_, s)| s.contains_key("transform"))
+                                    })))
+                    })
+                    .map(|a| a.range())
+                    .collect();
+                node_indices.insert(node.id(), nodes.len());
+                nodes.push(NodeStyle {
+                    at: node.range().start
+                        + 1
+                        + doc.input_text().as_bytes()[node.range().start + 1..]
+                            .iter()
+                            .position(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+                            .unwrap_or(node.tag_name().name().len()),
+                    remove,
+                    properties: props,
+                    tracks,
+                });
+            }
+        }
+        let styles = doc
+            .descendants()
+            .filter(|n| {
+                n.has_tag_name("style") && !n.ancestors().skip(1).any(|p| p.has_tag_name("style"))
+            })
+            .map(|n| n.range())
+            .collect();
+        Ok(Self {
+            nodes,
+            styles,
+            duration_ms,
+        })
+    }
+    pub fn sample(&self, xml: &str, time_ms: f64) -> String {
+        // All supported declarations have already been cascaded and are inline.
+        // Keeping the original sheets would let usvg recascade !important with
+        // its different inline priority and undo sampled/visibility values.
+        let mut edits = self
+            .styles
+            .iter()
+            .map(|range| (range.clone(), String::new()))
+            .collect::<Vec<_>>();
+        for node in &self.nodes {
+            let mut props = node.properties.clone();
+            for track in &node.tracks {
+                let elapsed = time_ms - track.delay;
+                if (elapsed < 0.0 && !matches!(track.fill.as_str(), "backwards" | "both"))
+                    || (elapsed >= track.duration
+                        && !matches!(track.fill.as_str(), "forwards" | "both"))
+                {
+                    continue;
+                }
+                let progress = if track.duration == 0.0 {
+                    if elapsed < 0.0 { 0.0 } else { 1.0 }
+                } else {
+                    (elapsed / track.duration).clamp(0.0, 1.0)
+                };
+                for key in track
+                    .stops
+                    .iter()
+                    .flat_map(|(_, values)| values.keys())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    let stops = track
+                        .stops
+                        .iter()
+                        .filter_map(|(at, values)| values.get(key).map(|value| (*at, value)))
+                        .collect::<Vec<_>>();
+                    if stops.len() < 2 {
+                        continue;
+                    }
+                    let pair = stops
+                        .windows(2)
+                        .find(|s| progress <= s[1].0)
+                        .unwrap_or(&stops[stops.len() - 2..]);
+                    let p = ((progress - pair[0].0) / (pair[1].0 - pair[0].0)).clamp(0.0, 1.0);
+                    if let Some(value) =
+                        interpolate(key, pair[0].1, pair[1].1, ease(p, &track.easing))
+                    {
+                        props.insert(key.clone(), value);
+                    }
+                }
+            }
+            let transform = props.remove("transform").map(|value| {
+                let origin = props.remove("transform-origin").unwrap_or_default();
+                let origin = origin.replace("px", "");
+                let parts = origin.split_whitespace().collect::<Vec<_>>();
+                let value = transform_value(&value);
+                if parts.len() == 2
+                    && let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
+                {
+                    format!("translate({x} {y}) {value} translate({} {})", -x, -y)
+                } else {
+                    value
+                }
+            });
+            let style = props
+                .iter()
+                .map(|(k, v)| format!("{k}:{v};"))
+                .collect::<String>();
+            let mut attrs = format!(" style=\"{}\"", escape(&style));
+            if let Some(transform) = transform {
+                attrs.push_str(&format!(" transform=\"{}\"", escape(&transform)));
+            }
+            edits.push((node.at..node.at, attrs));
+            for range in &node.remove {
+                edits.push((range.clone(), String::new()));
+            }
+        }
+        edits.sort_by_key(|(range, _)| range.start);
+        let mut result = String::with_capacity(xml.len());
+        let mut cursor = 0;
+        for (range, text) in edits {
+            result.push_str(&xml[cursor..range.start]);
+            result.push_str(&text);
+            cursor = range.end;
+        }
+        result.push_str(&xml[cursor..]);
+        result
+    }
+}
+fn escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+}
+fn transform_value(value: &str) -> String {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return "matrix(1 0 0 1 0 0)".into();
+    }
+    let clean = value.replace("px", "").replace("deg", "");
+    let mut rest = clean.trim();
+    let mut result = String::new();
+    while let Some(open) = rest.find('(') {
+        let Some(close) = rest[open + 1..].find(')').map(|n| open + 1 + n) else {
+            return clean;
+        };
+        let name = rest[..open].trim();
+        let args = &rest[open + 1..close];
+        let part = match name {
+            "translateX" => format!("translate({args} 0)"),
+            "translateY" => format!("translate(0 {args})"),
+            "scaleX" => format!("scale({args} 1)"),
+            "scaleY" => format!("scale(1 {args})"),
+            _ => format!("{name}({args})"),
+        };
+        result.push_str(&part);
+        result.push(' ');
+        rest = rest[close + 1..].trim_start();
+    }
+    if rest.is_empty() { result } else { clean }
+}
+
+fn interpolate(key: &str, a: &str, b: &str, p: f64) -> Option<String> {
+    if key == "transform" {
+        let parse = |s: &str| transform_value(s).parse::<svgtypes::Transform>().ok();
+        let a = parse(a)?;
+        let b = parse(b)?;
+        let mix = |a, b| a + (b - a) * p;
+        return Some(format!(
+            "matrix({} {} {} {} {} {})",
+            mix(a.a, b.a),
+            mix(a.b, b.b),
+            mix(a.c, b.c),
+            mix(a.d, b.d),
+            mix(a.e, b.e),
+            mix(a.f, b.f)
+        ));
+    }
+    if !matches!(
+        key,
+        "opacity" | "fill-opacity" | "stroke-opacity" | "stroke-dashoffset"
+    ) {
+        return None;
+    }
+    let scalar = |value: &str| {
+        let number = if key != "stroke-dashoffset" {
+            value
+                .strip_suffix('%')
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(|value| value / 100.0)
+                .or_else(|| value.parse::<f64>().ok())
+        } else {
+            value
+                .trim()
+                .strip_suffix("px")
+                .unwrap_or(value.trim())
+                .parse::<f64>()
+                .ok()
+        }?;
+        number.is_finite().then(|| {
+            if key == "stroke-dashoffset" {
+                number
+            } else {
+                number.clamp(0.0, 1.0)
+            }
+        })
+    };
+    let a = scalar(a)?;
+    let b = scalar(b)?;
+    Some((a + (b - a) * p).to_string())
+}
+fn ease(x: f64, name: &str) -> f64 {
+    let (x1, y1, x2, y2) = match name {
+        "ease-in-out" => (0.42, 0.0, 0.58, 1.0),
+        "ease-in" => (0.42, 0.0, 1.0, 1.0),
+        "ease-out" => (0.0, 0.0, 0.58, 1.0),
+        "linear" => return x,
+        _ => (0.25, 0.1, 0.25, 1.0),
+    };
+    let curve = |t: f64, a: f64, b: f64| {
+        3.0 * (1.0 - t).powi(2) * t * a + 3.0 * (1.0 - t) * t * t * b + t * t * t
+    };
+    let (mut low, mut high) = (0.0, 1.0);
+    for _ in 0..24 {
+        let t = (low + high) / 2.0;
+        if curve(t, x1, x2) < x {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    curve((low + high) / 2.0, y1, y2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_variable_expansions_exhaust_a_shared_work_budget_and_observe_cancellation() {
+        let mut vars = Properties::from([("--v0".into(), String::new())]);
+        for i in 1..=10 {
+            vars.insert(format!("--v{i}"), format!("var(--v{})", i - 1).repeat(10));
+        }
+        let mut output = String::new();
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check: &|| Ok(()),
+        };
+        assert!(matches!(
+            expand_vars_into("var(--v10)", &vars, 0, &mut output, 8192, &mut work),
+            Err(super::super::ImageFailure::TooLarge { .. })
+        ));
+        assert!(output.is_empty());
+        assert_eq!(work.remaining, 0);
+        let checks = std::cell::Cell::new(0);
+        let check = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Err(super::super::ImageFailure::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check: &check,
+        };
+        assert!(matches!(
+            expand_vars_into("var(--v10)", &vars, 0, &mut output, 8192, &mut work),
+            Err(super::super::ImageFailure::Cancelled)
+        ));
+        assert_eq!(checks.get(), 3);
+        assert!(work.remaining > 0);
+    }
+    #[test]
+    fn variable_expansion_never_builds_an_oversized_intermediate_string() {
+        let mut vars = Properties::from([("--v0".into(), "a".repeat(4096))]);
+        for i in 1..=5 {
+            vars.insert(
+                format!("--v{i}"),
+                format!("var(--v{})var(--v{})var(--v{})", i - 1, i - 1, i - 1),
+            );
+        }
+        let mut output = String::new();
+        let mut work = ExpansionWork {
+            remaining: MAX_EXPANSION_STEPS,
+            check: &|| Ok(()),
+        };
+        assert!(matches!(
+            expand_vars_into("var(--v5)", &vars, 0, &mut output, 8192, &mut work),
+            Err(super::super::ImageFailure::TooLarge { .. })
+        ));
+        assert_eq!(output.len(), 8192);
+        assert!(
+            output.capacity() <= 8192,
+            "only the bounded output is allocated, with no recursive concatenation buffers"
+        );
+    }
+}

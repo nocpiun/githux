@@ -70,7 +70,7 @@ cargo metadata --locked --offline --format-version 1
 
 - 上游 Ely 工作区 `LICENSE`（MIT）原文已复制到 [`assets/licenses/ely-mit.txt`](../assets/licenses/ely-mit.txt)（SHA-256 `c69028b5957f4ded637dc55a4a412b209c014414ece49efefa60fa811a4c0312`）。
 - `gpui-pre` 的 `LICENSE-APACHE`（含 Zed 版权行 + Apache 2.0 全文）原文已复制到 [`assets/licenses/gpui-pre-apache-2.0.txt`](../assets/licenses/gpui-pre-apache-2.0.txt)（SHA-256 `752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a`）。
-- 没有整库/单 crate vendor、Cargo patch、fork 或缓存修改；`ely-documents` / `ely-editor` **不是**依赖（Markdown 组件已提取，见第 4 节）。
+- 2026-10-29 基线没有 vendor/patch；当前 resvg 的精确发布包补丁见下文 SVG 补充。`ely-documents` / `ely-editor` **不是**依赖（Markdown 组件已提取，见第 4 节）。
 - 观察到的文档不一致：根 `README.md` 仍写“当前外壳直接依赖 `ely-core 0.2.0`”，但本基线同时直接依赖 `ely-settings`（账户表单使用）。本任务不修改根 README，仅在此记录。
 
 ## 4. 复制的 Markdown 源码
@@ -101,6 +101,8 @@ cargo metadata --locked --offline --format-version 1
 | `gpui-pre` | 0.3.10 | Apache-2.0 | 编译进 binary | `assets/licenses/gpui-pre-apache-2.0.txt` |
 | `gpui-pre-platform` | 0.3.10 | Apache-2.0 | 编译进 binary | 同上 |
 | `image` | 0.25.10 | MIT OR Apache-2.0 | 编译进 binary | registry |
+| `resvg` | 0.46.0 | Apache-2.0 OR MIT | 编译进 binary；原先由 GPUI 传递引入，现在 Reader 直接使用 | [`MIT`](../assets/licenses/resvg-0.46.0-license-mit.txt)、[`Apache-2.0`](../assets/licenses/resvg-0.46.0-license-apache.txt) |
+| `simplecss` / `svgtypes` | 0.2.2 / 0.16.1 | Apache-2.0 OR MIT | 已由 usvg 传递引入；Reader timeline 直接使用 | registry `LICENSE-MIT` / `LICENSE-APACHE` |
 | `pulldown-cmark` | 0.13.5 | MIT | 编译进 binary | `assets/licenses/pulldown-cmark-mit.txt` |
 | `reqwest` | 0.13.5 | MIT OR Apache-2.0 | 编译进 binary | registry（`native-tls`/`http2`/`system-proxy`，关闭默认 feature） |
 | `rusqlite` | 0.37.0 | MIT | 编译进 binary | registry `LICENSE`；`bundled` 另含公有领域 SQLite，见 [`assets/licenses/sqlite-public-domain.txt`](../assets/licenses/sqlite-public-domain.txt) |
@@ -118,6 +120,20 @@ cargo metadata --locked --offline --format-version 1
 
 - 传递依赖 `libsqlite3-sys 0.35.0`（MIT）随 `rusqlite` 的 `bundled` feature 把 SQLite amalgamation 编译进 binary；SQLite 为公有领域，`libsqlite3-sys` 包装层为 MIT。
 - 多项是 **MIT OR Apache-2.0 双许可**：本清单同时记录两个选项，**未替项目选择其一**。发布时需决定并随附对应文本（见第 9 节）。
+
+### SVG 渲染依赖补充（2026-11-11，reader-svg）
+
+`resvg 0.46.0`（直接依赖）、`usvg 0.46.0`（通过 resvg）与 `tiny-skia 0.11.4`（通过 resvg）原本就在 GPUI 的解析图中；品质返工为修正 displacement scale 重复相乘及小数/裁切输入网格不等造成的断言，现将精确 resvg 发布包源码 vendoring 到 `vendor/resvg`，通过根 Cargo patch 让 GPUI 与 Reader 统一使用该修补版本，原包 metadata、源码/示例及 MIT/Apache 文本保留，修改边界见 `vendor/resvg/PATCH.md`，没有升级版本。Reader 启用 resvg 的 `text` 与 `raster-images`，禁用默认 feature，不启用系统字体扫描。`simplecss 0.2.2` / `svgtypes 0.16.1` / `flate2 1.1.10` 复用已锁定版本；新增 flate2 直接边用于有界 WOFF1 解包（MIT OR Apache-2.0，原 registry 许可文件）。
+
+精确 registry 发布包的许可原文已保存在 `assets/licenses/`：
+
+| 文件 | SPDX / 版权 | SHA-256 |
+| --- | --- | --- |
+| `resvg-0.46.0-license-mit.txt`、`usvg-0.46.0-license-mit.txt` | MIT；Copyright 2017 the Resvg Authors | `f5d934dc281b44e0003ee461ac740b18b6629a454decd872c774d34e4ee0b21d`（两份相同） |
+| `resvg-0.46.0-license-apache.txt`、`usvg-0.46.0-license-apache.txt` | Apache-2.0 | `a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9`（两份相同） |
+| `tiny-skia-0.11.4-license.txt` | BSD-3-Clause；Copyright (c) 2011 Google Inc.; Copyright (c) 2020 Yevhenii Reizner | `6d41e05f1d54fe726997cb0334ec539f1dff50600b1d5d90462ec2b392770ced` |
+
+随发布携带上述文本；resvg/usvg 保留双许可选项，此处不替项目选择其一。测试专用 `src/content/images/fixtures/embedded-font.woff` 为既有 Google Sans Code v7.001 的 OFL 子集，改名为 Githux SVG Fixture（5,312 B，SHA-256 `20de0d77199053950d57640b4ce7a4b2063a0532a5f7f57d7ce7369958c6b7aa`），保留版权/许可 name 记录；只在 cfg(test) 中使用，不进入应用字体集，源码再分发仍随附既有 Google Sans Code OFL，来源说明见相邻 README。远程 README 返回的用户 SVG 仅为本地调查证据，不因获取公开响应而被纳入可分发素材；提交的动画回归使用原创最小几何与示例文案，并注明观测的 CSS 形状来源。
 
 ## 6. 传递依赖清单
 

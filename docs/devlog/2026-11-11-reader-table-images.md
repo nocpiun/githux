@@ -61,6 +61,23 @@
 - 当前 main 的 presenter 在 Ready 时会把 alt 作为图注画出，Pending 时仍画 140px 占位框。表格代码不依赖这两点：Ready 传空 alt 避免与 README 自己的 caption 行重复，Pending/失败仍传 alt。PR82 合入后这两处表现会随之变化，表格侧无需改动。
 - PR82 的 `picture_unit` 额外用 `on_children_prepainted` 上报 `painted(key)`（用于有限 SVG 动画起播）。本任务的 `cell_picture` 不做这层包装，因此表格内的 SVG 动画在集成后不会起播。已在 `.agents/task/cross-task-findings.md` 记录精确的集成请求：由图片任务把「可见性上报 + 通用 presenter」抽成可复用函数，或让表格直接调用它。
 
+## 2026-11-12 同步最新 main（reader-svg #82 / scroll geometry #84 / workflow #87）
+
+- 以普通 merge 合入已发布的 `origin/main` `a2c5ade`（base 仍为 `f9e31a0`），保留原分支已审查历史，不 cherry-pick 兄弟 WIP、不 force-push。
+- 冲突处理：`ast.rs` 保留 main 的 `ImageRow`/`Centered`/`headings` 与 `append_picture_notes`，并保留本任务的 `CellImage`/`cell_parts`；`document.rs` 同时保留本任务的 `table_cell`/`cell_picture` 与 main 的 `picture_row`/`pending_image`/`only_pending_images`；`docs/*` 把「表格内图片不加载」等旧边界改写为已实现，并保留 SVG/品质/静默加载的新边界；`LESSONS` 保留 main 的 L023（SVG 有效字节不等于正确显示），本任务的条目改为 L024。
+- 表格侧适配 main 的实际图片 API：
+  - **pending 静默**：main 的 `ImageState::Loading` 是 0×0 且 `want` 在无 provider 时返回 Loading。`cell_picture` 在 pending 时返回 `None`，cell 不生成子元素（不占行、不显示 alt/占位），但 `want` 已登记需求；provider 之后附加时自动重新请求，落地时按顶层块重测。`picture_hits` 只登记已绘制图片。
+  - **SVG 可见动画**：把 main `picture_unit` 里的可见性上报抽成 `images::painted_when_visible`（共享 presenter 旁的小 helper），普通图片和表格图片都用它；表格内可见的 SVG 会经真实可见交集上报 `painted`，起播有限时间线，动画结束后 pump 结清。
+  - **逻辑尺寸/DPI**：删除本任务上一版的 `ready_picture_width` 复算。main 的 Ready presenter 已按 `ImageState` 的逻辑 `width`/`height` 收缩并 `max_w_full`，表格列对齐直接作用于 presenter 的根节点；SVG 最终 PNG 可以超采样，但布局宽度仍是作者逻辑尺寸。窗口 density 变化由 main 的 scope/重请求路径处理，表格图片跟随。
+  - `ImageRow`/`Centered` 与表格互不干扰；表格仍注册每 piece 一个 `DocText` 单元、真实命中目标、`CellImage::link` 链接归属与列对齐。
+- 复用并扩展了预览/测试装配：`reader_images` fixture 新增 `Scene::Table`（OPanel 形态两列表格：普通栅格、宽图、延迟图、SVG、caption 行），`reader_images_view_tests` 用真实 provider/pipeline 断言 cell 内逻辑宽度、宽图比例、SVG 逻辑比例、caption 行与复制；`ui::reader` 新增表格内 SVG 逻辑尺寸 + 可见有限动画起播/结束、pending 静默后附加 provider 仍加载的回归，并把无 provider 的旧断言改为静默语义。
+- 验证（均为当前工作树、共享 build slot；`TEMP`/`TMP` 指向本 worktree 的 `.agents/task/tmp`，进程内 `CARGO_PROFILE_DEV_DEBUG=0`、`CARGO_PROFILE_TEST_DEBUG=0`、`CARGO_INCREMENTAL=0`）：
+  - `cargo check --locked --all-targets`、`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings` 通过。
+  - `cargo test --locked --bin githux -- ui::reader` 通过。
+  - `cargo test --locked --test reader --test reader_images --test repository --test scroll_viewports`：reader/reader_images/repository 全部通过；scroll_viewports 中只有既有负载敏感抖动 `app::pages::home::tests::append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches`，单独重跑通过，属 cache-first-paint 区域、与本改动无关（按 L002）。
+  - `cargo build --locked` 与 `cargo build --locked --example reader_images` 通过；清洁 head 上的预览产物与收据记录在 `.agents/task/preview/`。
+- 未重复运行无关的整套测试；新的图片/表格组合行为由上述针对性目标与 CI 覆盖。
+
 ## 后续
 
 - 需要负责人原生窗口视觉验收（真实截图表格、窄窗口、缩放比例）。

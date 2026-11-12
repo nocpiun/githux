@@ -13,12 +13,15 @@
 use std::time::Duration;
 
 use gpui::{
-    AppContext, Context, Entity, IntoElement, ParentElement, Styled, TestAppContext,
-    VisualTestContext, Window, div, px, size,
+    AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 
 use crate::fixture::{BANNER_URL, COMMIT, LOGO_URL, OVERSIZE_URL, Pipeline, Scene};
 use crate::reader::{ImageKey, ImageTarget, ReaderView};
+
+#[path = "reader_images_quality_view_tests.rs"]
+mod quality;
 
 pub(super) fn setup(cx: &mut TestAppContext) {
     cx.update(ely_core::init_for_tests);
@@ -338,7 +341,7 @@ fn switching_documents_discards_a_picture_that_is_still_in_flight(cx: &mut TestA
 }
 
 #[gpui::test]
-fn a_reader_without_a_provider_keeps_an_honest_placeholder(cx: &mut TestAppContext) {
+fn a_reader_before_provider_attachment_keeps_pending_pictures_collapsed(cx: &mut TestAppContext) {
     setup(cx);
     let pipeline = Pipeline::new(Scene::Healthy);
     let opened = pipeline.open(Scene::Healthy, Scene::limits(Scene::Healthy));
@@ -357,9 +360,16 @@ fn a_reader_without_a_provider_keeps_an_honest_placeholder(cx: &mut TestAppConte
             .is_none(),
         "without a provider nothing is requested"
     );
-    // The placeholder is still drawn and says so.
     let painted = painted_picture_blocks(&reader, cx);
-    assert!(!painted.is_empty(), "the placeholder blocks still draw");
+    for index in painted {
+        let selector: &'static str =
+            Box::leak(format!("markdown-picture-note-{index}").into_boxed_str());
+        assert_eq!(
+            cx.debug_bounds(selector).unwrap().size.height,
+            px(0.0),
+            "unrequested valid images have no panel or label"
+        );
+    }
     assert!(cx.debug_bounds("reader-markdown").is_some());
 }
 
@@ -827,5 +837,192 @@ fn replacing_image_limits_cancels_the_old_board_scope(cx: &mut TestAppContext) {
         cancelled.lock().unwrap().contains(&old_scope),
         "the replaced board's scope was cancelled: {:?}",
         cancelled.lock().unwrap()
+    );
+}
+
+#[gpui::test]
+fn profile_svg_badges_share_rows_and_center_without_captions_or_large_gaps(
+    cx: &mut TestAppContext,
+) {
+    struct FlowHost {
+        reader: Entity<ReaderView>,
+    }
+    impl gpui::Render for FlowHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(80.0)))
+                .child(
+                    div()
+                        .id("profile-svg-page-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .child(self.reader.clone()),
+                )
+        }
+    }
+    setup(cx);
+    let pipeline = Pipeline::new(Scene::SvgProfile);
+    let opened = pipeline.open(Scene::SvgProfile, Scene::SvgProfile.limits());
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let reader = cx.new(|cx| crate::fixture::open_reader(opened, window, cx).0);
+        FlowHost { reader }
+    });
+    let reader = host.read_with(cx, |host, _| host.reader.clone());
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(900.0), px(700.0)));
+    frames(cx);
+    let keys = [
+        "https://images.invalid/roast.svg",
+        "https://images.invalid/stats.svg",
+        "https://images.invalid/badge.svg",
+    ]
+    .map(external_key);
+    settle(&reader, cx, |r| {
+        keys.iter()
+            .all(|k| r.image_state(k).as_deref() == Some("ready"))
+            && !r.has_pending_images()
+    });
+    frames(cx);
+    let first = cx
+        .debug_bounds("markdown-inline-picture-4-0")
+        .expect("first badge");
+    let second = cx
+        .debug_bounds("markdown-inline-picture-4-1")
+        .expect("second badge");
+    let third = cx
+        .debug_bounds("markdown-inline-picture-4-2")
+        .expect("third badge");
+    let next = cx
+        .debug_bounds("markdown-inline-picture-5-0")
+        .expect("next paragraph badge");
+    assert!(
+        (first.size.width - px(83.0)).abs() < px(1.0),
+        "native badge width: {first:?}"
+    );
+    assert!(
+        (first.size.height - px(20.0)).abs() < px(1.0),
+        "no forced alt caption: {first:?}"
+    );
+    assert!(
+        (first.origin.y - second.origin.y).abs() < px(1.0)
+            && (first.origin.y - third.origin.y).abs() < px(1.0),
+        "badges stay on one line: {first:?} {second:?} {third:?}"
+    );
+    assert!(second.origin.x > first.right() && third.origin.x > second.right());
+    let row_center = (first.left() + third.right()) / 2.0;
+    assert!(
+        (row_center - px(450.0)).abs() < px(30.0),
+        "center container controls badge row: {row_center:?}"
+    );
+    let paragraph_gap = next.top() - first.bottom();
+    assert!(
+        paragraph_gap >= px(0.0) && paragraph_gap <= px(24.0),
+        "normal paragraph gap, not image placeholder height: {paragraph_gap:?}"
+    );
+    let before = first;
+    frames(cx);
+    assert_eq!(
+        cx.debug_bounds("markdown-inline-picture-4-0").unwrap(),
+        before,
+        "settled images keep stable layout"
+    );
+    let heading = cx
+        .debug_bounds("markdown-heading-0")
+        .expect("centering preserves the normal heading renderer");
+    let links_heading = cx
+        .debug_bounds("markdown-heading-6")
+        .expect("ordinary heading after center scope");
+    assert!(
+        heading.size.height > links_heading.size.height,
+        "H1 hierarchy is preserved when centered"
+    );
+    cx.simulate_resize(size(px(220.0), px(700.0)));
+    frames(cx);
+    let first = cx.debug_bounds("markdown-inline-picture-4-0").unwrap();
+    let last = cx.debug_bounds("markdown-inline-picture-4-2").unwrap();
+    assert!(
+        last.top() > first.top(),
+        "a narrow column wraps the badge paragraph"
+    );
+    assert!(
+        ((last.left() + last.right()) / 2.0 - px(110.0)).abs() < px(4.0),
+        "the wrapped final line is also centered: {last:?}"
+    );
+}
+
+// ---- the OPanel-shaped Screenshots table ----
+
+#[gpui::test]
+fn the_screenshots_table_draws_raster_svg_and_delayed_cells_with_captions(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_pipeline, reader, cx) = open(cx, Scene::Table);
+    let dashboard = repository_key("docs/images/diagram.png");
+    let monitor = repository_key("docs/images/banner.png");
+    let map = repository_key("docs/images/slow.png");
+    let stats = external_key("https://images.invalid/stats.svg");
+    settle(&reader, cx, |reader| {
+        [&dashboard, &monitor, &map, &stats]
+            .iter()
+            .all(|key| reader.image_state(key).as_deref() == Some("ready"))
+    });
+    cx.simulate_resize(size(px(900.0), px(1600.0)));
+    frames(cx);
+
+    let cell_frame = |cx: &mut VisualTestContext, row: usize, column: usize| {
+        let selector: &'static str =
+            Box::leak(format!("markdown-cell-1-{row}-{column}-picture-0-frame").into_boxed_str());
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("cell {row}-{column} picture frame is laid out"))
+    };
+    // Heading is block 0, the table block 1; body row 1 is the first picture row.
+    let dashboard_frame = cell_frame(cx, 1, 0);
+    let monitor_frame = cell_frame(cx, 1, 1);
+    assert!(
+        (dashboard_frame.size.width - px(320.0)).abs() < px(1.0)
+            && (dashboard_frame.size.height - px(180.0)).abs() < px(1.0),
+        "a cell raster keeps its intrinsic size: {dashboard_frame:?}"
+    );
+    assert!(
+        (monitor_frame.size.width / monitor_frame.size.height - 8.0).abs() < 0.1,
+        "a wide cell picture keeps its ratio while scaling to the cell: {monitor_frame:?}"
+    );
+    // The SVG keeps its 240x100 logical size even though its final PNG is
+    // supersampled for the device, and it is laid out inside its cell.
+    let stats_frame = cell_frame(cx, 3, 1);
+    assert!(
+        (stats_frame.size.width - px(240.0)).abs() < px(2.0),
+        "a table SVG uses its logical width: {stats_frame:?}"
+    );
+    assert!(
+        (stats_frame.size.width / stats_frame.size.height - 2.4).abs() < 0.1,
+        "a table SVG keeps its logical ratio: {stats_frame:?}"
+    );
+
+    // The caption rows are real text rows under each picture row.
+    let caption = cx
+        .debug_bounds("markdown-cell-1-2-0")
+        .expect("the Dashboard caption row is laid out");
+    assert!(
+        caption.top() >= dashboard_frame.bottom(),
+        "the caption row sits below the picture row: {caption:?} vs {dashboard_frame:?}"
+    );
+
+    let text = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .expect("markdown")
+            .read(cx)
+            .document_text()
+            .to_string()
+    });
+    assert!(
+        text.contains("Dashboard\tMonitor\nDashboard\tMonitor"),
+        "the table copies its alt text in place with its caption rows: {text:?}"
     );
 }
