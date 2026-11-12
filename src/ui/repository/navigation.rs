@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::data::repository_cache::RepositoryCacheError;
+use crate::data::repository_cache::{RepositoryCacheError, RepositoryCacheMode};
 use crate::domain::cache::CacheMiss;
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
@@ -526,7 +526,9 @@ impl TreeRowKind {
 pub struct TreeModel {
     root: Option<DirectoryTree>,
     children: BTreeMap<String, DirectoryTree>,
-    loading: BTreeSet<String>,
+    /// Pending directory reads with the mode they were requested in, so a reply is only applied to
+    /// the read the page is still waiting for.
+    loading: BTreeMap<String, RepositoryCacheMode>,
     failed: BTreeMap<String, PageError>,
     /// Set when the flattened row cap cut the list.
     capped: bool,
@@ -551,9 +553,24 @@ impl TreeModel {
         self.children.insert(key, tree);
     }
 
-    pub fn begin_load(&mut self, path: &str) {
-        self.loading.insert(path.to_string());
+    pub fn begin_load(&mut self, path: &str, mode: RepositoryCacheMode) {
+        self.loading.insert(path.to_string(), mode);
         self.failed.remove(path);
+    }
+
+    /// Whether the page is still waiting for `path` in exactly this mode. A reply that does not
+    /// match belongs to a superseded read (for example a cache-only pass replaced by the verified
+    /// online chain) and must be dropped instead of publishing content or a failure.
+    pub fn matches_pending(&self, path: &str, mode: RepositoryCacheMode) -> bool {
+        self.loading.get(path) == Some(&mode)
+    }
+
+    /// Drops every pending load and reports the paths, so the caller can request them again
+    /// through the verified online chain. Late results for them are discarded.
+    pub fn supersede_pending_loads(&mut self) -> Vec<String> {
+        let paths: Vec<String> = self.loading.keys().cloned().collect();
+        self.loading.clear();
+        paths
     }
 
     pub fn fail_load(&mut self, path: &str, error: PageError) {
@@ -563,6 +580,14 @@ impl TreeModel {
 
     pub fn clear_failure(&mut self, path: &str) {
         self.failed.remove(path);
+    }
+
+    /// Clears every recorded directory failure so the same paths are requested again.
+    ///
+    /// Used when a cache-only first pass reported "not cached" for a directory that the now
+    /// verified online revision can read.
+    pub fn clear_failures(&mut self) {
+        self.failed.clear();
     }
 
     pub fn root(&self) -> Option<&DirectoryTree> {
@@ -577,7 +602,7 @@ impl TreeModel {
     }
 
     pub fn is_loading(&self, path: &str) -> bool {
-        self.loading.contains(path)
+        self.loading.contains_key(path)
     }
 
     pub fn failure(&self, path: &str) -> Option<&PageError> {
@@ -708,7 +733,7 @@ impl TreeModel {
             };
             let state = if !kind.is_directory() || !expanded.contains(&path) {
                 RowState::Normal
-            } else if self.loading.contains(&path) {
+            } else if self.loading.contains_key(&path) {
                 RowState::Loading
             } else if let Some(error) = self.failed.get(&path) {
                 RowState::Failed(error.clone())

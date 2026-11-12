@@ -286,7 +286,13 @@ impl CachedPageReadSession {
             self.session.page_client().config().clone(),
             transport.clone(),
         ));
-        let result = read(self.session.with_page_client(client)).await;
+        // An offline replay answers from local storage, so it must not wait for a network permit:
+        // the cache-first paint has to stay available while the network reads it runs beside hold
+        // every request slot.
+        let result = match mode {
+            PageReadMode::Offline => read(self.session.with_local_page_client(client)).await,
+            PageReadMode::Online => read(self.session.with_page_client(client)).await,
+        };
         if !authorization.is_current() {
             return Err(PageCacheError::Cache(CacheError::Stale));
         }

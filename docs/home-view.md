@@ -95,6 +95,16 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 本组件已由 `app::pages::HomePage` 挂到正式 Shell 的 Home 路由。host 使用 `PageReadSession::home(None, …)` 与 `feed(…)`，固定当前认证 login、无时间窗口、updated 降序，不自动轮询；Feed 的数据层负责源事件、`/user/following` 与有界 PR 作者详情读取，并在发布前完成策略过滤（`FEED_AUTHOR_LOOKUP_LIMIT = 30`、关注列表最多 1,000 账户/10 页）；`FeedOutcome` 带 `next_page` 游标，host 在 `LoadMoreFeed` 时按游标逐页追加，而不是预先读完整条（至多 300 条/30 天）时间线。两栏分别按服务上下文、TabId/incarnation 和请求代次发布。登录前或授权不可用时显示无当前数据，不注入 synthetic items。Feed 的 Poll-Interval 由 host 转成刷新禁用窗口。头像由 `app::avatar` 解析后经 `set_avatar_renderer` 只传入已解码元素；renderer 接收的是 credited subject（合并 PR 时为 PR 作者）。`FeedOutcome` 只含已通过策略的 `FeedActivity`，视图不会再自行过滤，也无法从显示字符串推断关注状态。接入与验证边界见 [Shell 页面接入](shell-page-integration.md)。
 
+## 2026-11-11 Cache-first 首次内容呈现
+
+- `HomePage` 在 `start` 时为每个栏目额外启动一个**只读本地快照**的作业（`read_cached_first`，`PageReadMode::Offline`），与原有在线读取并发；在线读取先开始，缓存 I/O 不前置。
+- 快照命中时以历史快照（`Saved` 标记 + 原 fetched 时间）立即发布，但**不释放**该栏的 work 槽、不恢复刷新可用性、不触发 Feed 轮询冷却——这些仍由在线结果收尾，因此快照期间刷新保持不可用、不会重复刷新。
+- 前台用 `PublishMark`（Empty/Historical/Network）决定覆盖顺序：网络结果永远覆盖快照，迟到的缓存完成不会回滚更新的网络内容；同一快照不重复发布（重复发布只会重置滚动与选择）。
+- 缓存未命中、损坏、权限拒绝或存储故障不发布任何内容，保持原有 online loading（不伪装成空页/错误页）。
+- Feed 快照同样设置集合代次（`CollectionGeneration`）与 seen ids，快照期间的续页属于同一集合；网络首页到达后整体替换，不混排不同代次的分页。
+- 去重只用于“同一历史快照”的重复回放：若屏上已是同一代际、已追加过的集合，重放的第一页不会替换它（`apply_feed_page` 只扩不缩虚拟列表，缩短内容会让保留行越界）。此规则与滚动几何无关，改动 `src/ui/home/mod.rs` 的 insets/通道不影响它。
+- 未新增“快照 + 进行中”专用呈现 API：`src/ui/home/mod.rs` 未改动，缓存的“历史在屏”状态由既有 `Saved` 标记与禁用刷新共同表达。
+
 ## 2026-11-03 离线页面缓存与历史快照呈现
 
 `HomePage` 现已消费 `data::page_cache::CachedPageReadSession`：

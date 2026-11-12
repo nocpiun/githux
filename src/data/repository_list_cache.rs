@@ -243,12 +243,20 @@ impl RepoService {
         // is swapped for recording/replay. Offline replay therefore observes the
         // exact same staleness/cancellation gates as an online read.
         let read_client = Arc::new(GitHubClient::new(config.clone(), transport.clone()));
-        let outcome = self
-            .read_authenticated(&context, cancel.clone(), {
-                let read_client = read_client.clone();
-                async move |token, cancel| fetch_user_repos(&read_client, &token, cancel).await
-            })
-            .await;
+        // An offline replay performs no HTTP request, so it must not hold one of the bounded
+        // network permits that the concurrent revalidation needs.
+        let local = matches!(mode, PageReadMode::Offline);
+        let read = {
+            let read_client = read_client.clone();
+            async move |token, cancel| fetch_user_repos(&read_client, &token, cancel).await
+        };
+        let outcome = if local {
+            self.read_authenticated_local(&context, cancel.clone(), read)
+                .await
+        } else {
+            self.read_authenticated(&context, cancel.clone(), read)
+                .await
+        };
 
         if !self.is_current(&context) {
             return Err(PageCacheError::Context(GitHubError::StaleContext));

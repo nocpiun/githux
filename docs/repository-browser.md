@@ -154,6 +154,16 @@ Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：
 边界说明：这是绘制层补偿，不是真正的几何裁切——若将来升级到支持非矩形 mask 的 GPUI，应换成真实 mask 并删除角擦除。开发预览 `cargo run --example repository` 另有一个**仅预览**的 `Corner clip: on/off` 开关，用于在同一真实窗口对比修复前后；产品始终开启。原生对照与像素边界见 [开发日志](devlog/2026-10-29-repository-language-clip.md)。
 
 
+## Cache-first 入口呈现（2026-11-11）
+
+- `RepositoryPage::activate`/`refresh_repository` 除既有在线链外再启动一个 `Job::Snapshot`：用 `RepositoryCacheMode::OfflineOnly` 经 locator index 读完整快照（摘要 → 分支 → ref revision → 根树 → README discovery → 初始正文），作为**单个** `Body::Snapshot` 发布，header/tree/README 因此永远指向同一 fixed commit。
+- 该消息带 `preliminary` 标记，只在页面仍为空（`details.is_none()`）时应用；摘要/分支/revision 保留 `Snapshot` provenance（既有 `Cached` 胶囊与 `Refresh`），固定对象沿用既有缓存语义。extras 以同一次快照读取，缓存未命中的 section 保持 Loading 而非报“未缓存”。
+- 在线链完全不变并在同一 generation 内继续：网络摘要证明可达后分支列表改用在线模式；若屏上 revision 仍是快照，则对最新 `default_branch`/保存意图重新执行 `branch_choice`——仍是同一分支时以原 `branch_request` 身份在线重解析该 ref，默认分支已迁移时才切换。**同一 commit 时保留已加载的 tree/README/reader（含滚动位置）**，仅在 commit 变化时整体替换，因此不会把缓存 A 标成网络验证的 B。快照的隐式分支选择不写入导航意图。
+- 迟到的缓存消息不会覆盖在线结果（`preliminary && details.is_some()` 直接丢弃）。
+- 保存的嵌套文件选择（如 `src/main.rs`）在快照中按 `RepositoryNavigation::ancestors` 逐级离线读取祖先目录，能解析时直接打开该文件；解析不到时保留 `Selection::File(path)` 交给在线链，而不是静默退回 README。
+- 已知限制：快照还原根树、保存选择所需祖先目录与初始文档；其他从未展开的目录仍由在线链在后续读取补齐。
+- 预览阶段的目录/文件读取是 `OfflineOnly`，未命中会留下可重试的“未缓存”错误；同 commit 在线复核成功后这些缓存阶段错误会被清除并重试。仍在途的缓存阶段读取同样会被作废：目录读取按“路径 + 读取模式”匹配回复，作废后的迟到结果被丢弃并按在线模式重新请求；正文读取作废时推进 `selection_request`，迟到回复身份不符被丢弃。该 generation 的修订一旦经网络验证，后续用户发起的目录/文件读取即走 `OnlinePreferred`，即使摘要或分支列表仍来自缓存。若在线尝试最终只拿到缓存数据（摘要与分支都回落），缺失的根树/README/正文改用离线路径补读，使每项资源到达确定状态而不是永久 Loading。
+
 ## 持久缓存与跨重启离线阅读（2026-11-03）
 
 `RepositoryPageServices::new(accounts, executor)` 保持原有构造兼容，不新增数据库打开或凭据路径。`RepositoryPage::activate` 在捕获 `RepositorySession` 后通过 `RepoService::cache(session.context())` 获取当前账户的 `(CacheStore, CacheScope)` 绑定：

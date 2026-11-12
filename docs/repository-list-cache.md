@@ -65,4 +65,8 @@ if repos.cache(&context).is_none() {
 
 已复制到消费者的值仍须由宿主在移除/撤权时清空；本适配器不修改 UI，也不提供持续有效的展示许可。
 
+## Cache-first 侧栏（2026-11-11）
+
+正式侧栏在 `Operation::Repositories` 中额外启动一个只读快照作业（`read_cached_repositories`，`list_repos_cached(Offline)`）：命中即以 `RepositoryListOrigin::Historical` 发布既有历史行，`Reply.preliminary` 使该回复不结束操作、不解锁输入、不改自动加载标记；在线读取的结果随后覆盖为 `Network`。未命中、损坏或缓存故障不发布内容，侧栏保持原有 loading。历史行提示与 scoped Retry 沿用 `historical_status()`，未新增文案类型。回放分支使用 `read_authenticated_local`，不占网络并发配额。若在在途读取期间发生明确撤权/隔离，已显示的缓存先行列表会立即被清理（不结束在途操作），最终在线回复仍按自己的票据与上下文校验。
+
 `list_repos_cached` 对在线与历史读取都捕获并校验 `CacheAuthorization`。正式侧栏还在请求前捕获自己的票据，在 UI apply 前复核并在 drain 清掉已显示的失效副本；单仓库撤权不推进 AuthEpoch 也会清旧行，新 gate 恢复不让旧 reply 混入。接口线程与消费要求见 [cache-core](cache-core.md#已显示副本的权限失效接口)。
