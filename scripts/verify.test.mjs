@@ -4,12 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   computeSourceIdentity,
   parseRunArgs,
   executeVerifiedCommand,
   acquireBuildSlot,
+  buildSlotPolicy,
 } from './verify.mjs';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
@@ -73,6 +75,21 @@ test('parseRunArgs parses flags and command correctly', () => {
   assert.throws(() => parseRunArgs([]));
   assert.throws(() => parseRunArgs(['--timeout']));
   assert.throws(() => parseRunArgs(['--unknown-flag']));
+});
+
+test('only direct cargo fmt automatically bypasses the build slot', () => {
+  for (const command of ['cargo', 'cargo.exe', 'C:\\Program Files\\Rust\\cargo.exe', '/opt/rust/bin/cargo']) {
+    for (const args of [['fmt'], ['fmt', '--all', '--', '--check'], ['+stable', 'fmt', '--all']]) {
+      assert.equal(buildSlotPolicy(command, args), 'cargo_fmt');
+    }
+  }
+  for (const args of [[], ['check'], ['test'], ['build'], ['clippy'], ['format'], ['+stable', 'check'], ['--offline', 'fmt'], ['--config', 'x=y', 'fmt']]) {
+    assert.equal(buildSlotPolicy('cargo', args), 'serialized');
+  }
+  for (const command of ['cargo-fmt', 'my-cargo.exe', 'cargo.cmd', 'powershell.exe', 'node']) {
+    assert.equal(buildSlotPolicy(command, ['fmt']), 'serialized');
+  }
+  assert.equal(buildSlotPolicy('cargo', ['build'], true), 'explicitly_disabled');
 });
 
 test('executeVerifiedCommand captures stdout, stderr, and exit code', async t => {
@@ -234,6 +251,7 @@ test('executeVerifiedCommand serializes runs with Windows mutex using harmless f
   const root = makeFixtureRoot(t);
   initGitRepo(root);
 
+  const mutexName = `Local\\Githux-Verify-Test-${randomUUID()}`;
   const cmd = process.execPath;
   const nodeScript = `setTimeout(() => { console.log('done'); }, 300);`;
 
@@ -241,10 +259,12 @@ test('executeVerifiedCommand serializes runs with Windows mutex using harmless f
     command: cmd,
     args: ['-e', nodeScript],
     worktreeRoot: root,
-    noLock: false, // use the real Windows mutex
+    mutexName, // private test mutex, never queue behind live agent builds
+    noLock: false,
   });
 
   const run2 = executeVerifiedCommand({
+    mutexName,
     command: cmd,
     args: ['-e', nodeScript],
     worktreeRoot: root,
@@ -255,6 +275,9 @@ test('executeVerifiedCommand serializes runs with Windows mutex using harmless f
 
   assert.strictEqual(r1.record.status, 'success');
   assert.strictEqual(r2.record.status, 'success');
+
+  assert.equal(r1.record.build_slot_policy, 'serialized');
+  assert.equal(r2.record.build_slot_policy, 'serialized');
 
   // At least one of the two should have waited for the mutex
   const hasWait = r1.record.waiting_for_slot_ms > 0 || r2.record.waiting_for_slot_ms > 0;
@@ -313,4 +336,51 @@ test('Real Cargo invocation: small successful check yields truthful record', asy
   assert.strictEqual(record.exit_code, 0);
   const logContent = fs.readFileSync(record.log_path, 'utf8');
   assert.match(logContent, /cargo \d+\.\d+\.\d+/i);
+});
+
+test('real cargo fmt records failure and success while the Windows build slot is held', async t => {
+  if (process.platform !== 'win32') {
+    t.skip('Held Windows mutex test only applies on Windows');
+    return;
+  }
+  const root = makeFixtureRoot(t);
+  initGitRepo(root);
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'Cargo.toml'), '[package]\nname = "fmt-fixture"\nversion = "0.1.0"\nedition = "2024"\n');
+  fs.writeFileSync(path.join(root, 'src/main.rs'), 'fn main(){println!("fixture");}\n');
+  const mutexName = `Local\\Githux-Verify-Fmt-Test-${randomUUID()}`;
+  const holder = await acquireBuildSlot({ mutexName });
+  let releasePromise;
+  let watchdogReleased = false;
+  const release = () => releasePromise ??= holder.release();
+  // Bound a regression that queues fmt behind the held slot instead of bypassing it.
+  const watchdog = setTimeout(() => { watchdogReleased = true; void release(); }, 20000);
+  try {
+    for (const [args, expectedStatus] of [
+      [['fmt', '--all', '--', '--check'], 'failed'],
+      [['fmt', '--all'], 'success'],
+      [['fmt', '--all', '--', '--check'], 'success'],
+    ]) {
+      const { record } = await executeVerifiedCommand({
+        command: 'cargo', args, worktreeRoot: root, mutexName, timeoutMs: 10000,
+      });
+      assert.equal(watchdogReleased, false, 'fmt must finish before the build slot is released');
+      assert.equal(record.status, expectedStatus);
+      assert.equal(record.timed_out, false);
+      assert.equal(record.build_slot_policy, 'cargo_fmt');
+      assert.equal(record.waiting_for_slot_ms, 0);
+      if (expectedStatus === 'success') assert.equal(record.exit_code, 0);
+      else {
+        assert.ok(record.exit_code > 0);
+        assert.match(fs.readFileSync(record.log_path, 'utf8'), /Diff in/);
+      }
+      const saved = JSON.parse(fs.readFileSync(record.log_path.replace('.log', '.json'), 'utf8'));
+      assert.equal(saved.build_slot_policy, record.build_slot_policy);
+      assert.equal(saved.exit_code, record.exit_code);
+      assert.equal(saved.status, expectedStatus);
+    }
+  } finally {
+    clearTimeout(watchdog);
+    await release();
+  }
 });

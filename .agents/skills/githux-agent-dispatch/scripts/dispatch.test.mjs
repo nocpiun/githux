@@ -172,6 +172,9 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.equal(path.dirname(firstContextPath), dir);
   const firstContext = fs.readFileSync(firstContextPath, 'utf8');
   assert.match(firstContext, /Shared project ID: fixture-project-one/);
+  assert.match(firstContext, /## Execution checkpoints/);
+  assert.match(firstContext, /minimal reproduction/);
+  assert.match(firstContext, /3 consecutive investigation rounds/);
   assert.match(firstContext, /checks, builds, tests, probes and application runs/);
   assert.ok(firstContext.includes('--dir "' + s.worktree + '"'));
   assert.match(firstContext, /kero new --project fixture-project-one/);
@@ -219,6 +222,7 @@ test('real child lifecycle, repeat launch refused, exact resume preserves origin
   assert.equal(fs.readFileSync(firstContextPath, 'utf8'), firstContext);
   assert.match(fs.readFileSync(resumedContextPath, 'utf8'), /kero new --project fixture-project-two/);
   assert.doesNotMatch(fs.readFileSync(resumedContextPath, 'utf8'), /fixture-project-one/);
+  assert.match(fs.readFileSync(resumedContextPath, 'utf8'), /## Execution checkpoints/);
   fs.writeFileSync(path.join(s.session_dir, 'exit-gate'), 'exit');
   assert.equal((await f.children[1].done).code, 0);
   exited = taskStatus(s.worktree);
