@@ -63,6 +63,8 @@ pub enum ExternalImageError {
     Refused(ExternalRefusal),
     /// A non-success HTTP status.
     Status(u16),
+    /// An error response/redirect explicitly forbids retaining an old entry.
+    NoStore(Box<ExternalImageError>),
     Timeout,
     Network,
     /// The streamed body exceeded the byte budget.
@@ -311,6 +313,8 @@ impl ExternalImageBytes for ReqwestExternalImages {
     ) -> Pin<Box<dyn Future<Output = Result<ExternalImageResponse, ExternalImageError>> + Send + 'a>>
     {
         Box::pin(async move {
+            let mut no_store = false;
+            let result = async {
             if cancel.is_cancelled() {
                 return Err(ExternalImageError::Cancelled);
             }
@@ -334,6 +338,7 @@ impl ExternalImageBytes for ReqwestExternalImages {
                         request = request.header("If-Modified-Since", ims);
                     }
                 }
+                let sent_at = std::time::Instant::now();
                 let response = tokio::select! {
                     biased;
                     _ = cancel.clone().cancelled() => return Err(ExternalImageError::Cancelled),
@@ -345,8 +350,10 @@ impl ExternalImageBytes for ReqwestExternalImages {
                 };
 
                 let status = response.status().as_u16();
+                no_store |= response.headers().get_all(reqwest::header::CACHE_CONTROL).iter().filter_map(|v| v.to_str().ok()).any(|cc| cc.split(',').any(|part| part.trim().split('=').next().is_some_and(|name| name.trim().eq_ignore_ascii_case("no-store"))));
                 if status == 304 {
                     let mut metadata = extract_metadata(&response);
+                    metadata.age_secs = Some(metadata.age_secs.unwrap_or(0).saturating_add(sent_at.elapsed().as_secs_f64().ceil() as u64));
                     if let Some(ref r_cc) = redirect_cache_control {
                         metadata.cache_control = match metadata.cache_control {
                             Some(cc) => Some(format!("{r_cc}, {cc}")),
@@ -429,11 +436,20 @@ impl ExternalImageBytes for ReqwestExternalImages {
                     }
                     body.extend_from_slice(&chunk);
                 }
+                metadata.age_secs = Some(metadata.age_secs.unwrap_or(0).saturating_add(sent_at.elapsed().as_secs_f64().ceil() as u64));
                 return Ok(ExternalImageResponse::Fetched {
                     bytes: body,
                     metadata,
                 });
             }
+            }.await;
+            result.map_err(|error| {
+                if no_store {
+                    ExternalImageError::NoStore(Box::new(error))
+                } else {
+                    error
+                }
+            })
         })
     }
 }
@@ -460,10 +476,20 @@ fn extract_metadata(response: &reqwest::Response) -> ExternalImageMetadata {
             Some(values.join(", "))
         }
     };
-    let age_secs = headers
-        .get(reqwest::header::AGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok());
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let age_secs = Some(corrected_age_secs(
+        headers
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok()),
+        headers
+            .get(reqwest::header::AGE)
+            .and_then(|v| v.to_str().ok()),
+        now_ms,
+    ));
     ExternalImageMetadata {
         etag,
         last_modified,
@@ -472,6 +498,25 @@ fn extract_metadata(response: &reqwest::Response) -> ExternalImageMetadata {
     }
 }
 
+fn corrected_age_secs(date: Option<&str>, age: Option<&str>, now_ms: i64) -> u64 {
+    let age = match age {
+        Some(age) => match age.trim().parse::<u64>() {
+            Ok(age) => age,
+            Err(_) => return u64::MAX,
+        },
+        None => 0,
+    };
+    let apparent_ms = date
+        .and_then(|date| chrono::DateTime::parse_from_rfc2822(date).ok())
+        .map_or(0, |date| {
+            now_ms.saturating_sub(date.timestamp_millis()).max(0) as u64
+        });
+    apparent_ms.div_ceil(1000).max(age)
+}
+
+#[cfg(test)]
+#[path = "reader_image_policy_tests.rs"]
+mod policy_tests;
 #[cfg(test)]
 #[path = "reader_images_tests.rs"]
 mod tests;

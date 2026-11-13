@@ -1597,6 +1597,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
+name = "fast_image_resize"
+version = "5.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d372ab3252d8f162d858d675a3d88a8c33ba24a6238837c50c8851911c7e89cd"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1993,10 +2005,12 @@ name = "githux"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "dirs 7.0.0",
  "ely-core",
  "ely-settings",
  "flate2",
+ "githux-image-resize",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
@@ -2007,6 +2021,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1_smol",
  "simplecss",
  "svgtypes",
  "tempfile",
@@ -2017,6 +2032,13 @@ dependencies = [
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-future 0.3.2",
+]
+
+[[package]]
+name = "githux-image-resize"
+version = "0.1.0"
+dependencies = [
+ "fast_image_resize",
 ]
 
 [[package]]

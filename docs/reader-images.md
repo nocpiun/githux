@@ -1,6 +1,6 @@
 # README 图片加载与显示
 
-更新：2026-11-11（`reader-svg` 返工）。README 图片通过既有账户/provider/cache 通路读取；SVG 支持有界静态渲染与有限的一次性 CSS 入场时间线。正式 Repository 与 Profile 的接线见[正式页面接入](shell-page-integration.md)。本文记录解码、授权、预算、缓存及 Reader 呈现的实际边界；人工原生验收不由自动化通过替代。
+更新：2026-11-12（图片性能核心；Reader/table/Flow 的需求探针接线仍待 #86 稳定 checkpoint）。README 图片通过既有账户/provider/cache 通路读取；SVG 支持有界静态渲染与有限的一次性 CSS 入场时间线。正式 Repository 与 Profile 的接线见[正式页面接入](shell-page-integration.md)。本文记录解码、授权、预算、缓存及 Reader 呈现的实际边界；人工原生验收不由自动化通过替代。
 
 ## 分层与文件
 
@@ -49,7 +49,7 @@ let reader = cx.new(|cx| {
 - **更换文档/账户/选择**：与现有 reader 规则一致，推荐换实体（或至少调 `show`）。`show` 推进图片代次、取消在途、清空旧图片与旧错误。账户失效时宿主在 `cancel_interactions` 的同时移除 reader；图片服务自己的 `verify()` 复核 session，旧授权下的字节不会变成当前文档的图片。
 - **隐藏窗口**：`observe_window_visibility` 取消当前 scope 的在途工作、保留已完成的图片；恢复可见时下一帧按需重新请求。
 - **显示密度**：`ImageProvider::start_with_options(request, sink, ImageRenderOptions)` 默认委托旧 `start`，现有 provider/`ImageRequest`/页面接口继续兼容；生产 `RepositoryImageService` 将 options 传入后台解码。Reader 初始化和每次绘制读取 `Window::scale_factor()`，有限有效比例归一到 1–4。已保留超采样网格或有限帧组的 SVG 在更高密度时取消旧 scope 并保留 Ready 图，按原始来源后台重建；原始栅格的网格不随 options 变化，不因密度刷新重载 PNG 或重启 GIF。完成后替换成本，不重播已展示的时间线；失败只释放旧图，不显示任何诊断。降回较低密度复用已有清晰网格。持久缓存仍存原始响应；原有新鲜度、授权、取消与 `no-store` 规则照常复核。
-- **解码与绘制**：解码在 provider 的后台线程完成，UI render 不做网络、不做解码、不做阻塞 I/O。普通静态图片以 `gpui::Image`（原始已验证字节）绘制；有限 SVG 时间线的 BGRA8 缓冲由后台预备并移交给单帧 `RenderImage`，按保留预算计费，收尾只保留最终帧。
+- **解码与绘制**：解码在 provider 的后台线程完成，UI render 不做网络、解码或阻塞 I/O。生产路径直接移交已验证的 straight-alpha BGRA 给 `gpui::RenderImage`；静态 PNG/JPEG/WebP 与静态 SVG 不再由 GPUI 重复解码，SVG 不再为生产绘制编码中间 PNG。GIF 与动画 WebP 在同一有界解码侧保留全部帧及原 delay，仍走 GPUI 的循环多帧播放，按所有帧真实像素计费；不会静默压成首帧。保留 GPUI 锁定实现的 EXIF 方向处理及原 reader 逻辑 header 尺寸。非 UI 的兼容 `decode_image*` 仍提供 encoded fixture 输出；持久缓存始终保存原始响应。
 
 ## 地址解析与边界
 
@@ -72,7 +72,7 @@ let reader = cx.new(|cx| {
 1. `RevisionSpec::Commit(sha)` → `RepoSnapshot`（响应 SHA 必须等于请求 SHA）；
 2. `SnapshotDirectory::root` → 按路径段逐级 `session.directory`（每个 tree 的 SHA 与请求一致）；
 3. 末段必须是 `TreeEntryKind::File`，`BlobIdentity::from_file` 得到同 commit 的 blob 身份；**符号链接、submodule 不解引用**，返回 NotFound；
-4. `session.blob` 取原始字节（`BlobLimits` 由图片预算推导），再到 `content::images::decode_image`。
+4. 图片专用 `session.image_blob` 使用固定 Git Blobs API 的 `application/vnd.github.raw+json` 二进制表示，验证实际 Git blob SHA 与 descriptor size；通用 `session.blob`、text/content 消费方继续 JSON/Base64。注入 transport 不支持有界二进制或响应为 406/415 时回退原有有界 JSON；其余错误保留原分类，不换 host、branch 或源图。代表真实响应的媒体契约证据见[性能日志](devlog/2026-11-12-reader-image-performance.md)。
 
 因此：不会读当前默认分支，不会用 contents API 的 UTF-8 `content` 当图片，不会请求或持久化 `download_url`，不会把固定 commit 的图片当成跨账户的缓存授权。请求到的 owner/name 必须与 session 的仓库一致（大小写不敏感比较），否则 StaleContext；目标路径与仓库不匹配直接 NotFound。目录快照与目录树的小缓存只在服务实例内，最多 4 个 snapshot、8 棵目录树、4096 个目录条目，并随服务销毁。
 
@@ -100,11 +100,11 @@ let reader = cx.new(|cx| {
 | `max_decoded_bytes` | 32 MiB | 解码前按 `width*height*4` 预算，另作为 `image::Limits::max_alloc`（SVG 同时约束光栅化 pixmap 尺寸；编码后的 PNG 输出字节也受 `max_response_bytes` 约束） |
 | `max_pixels` | 8,000,000 | 先读 header 或 SVG `width`/`height`/`viewBox` 得到尺寸，超过即 `TooManyPixels`，在危险分配之前 |
 | `max_dimension` | 8192 | 同上，单边上限，同时设置 decoder 严格维度上限 |
-| `total_timeout` | 20 s | 一次完整加载的**总**截止时间：覆盖提交/每一级目录/blob 多个请求、外链重定向与 body，以及解码/光栅化；超时 `Timeout` |
-| `max_concurrent` | 3 | 每个 provider 同时执行的加载数，semaphore 限制 |
-| `max_in_flight` | 12 | reader 已交给 provider 但未完成的请求上限；其余按可见顺序排队 |
-| `max_ready_images` | 32 | 每个 reader 当前文档保留的已解码图片数，超出按最老释放 |
-| `max_ready_bytes` | 64 MiB | 按 `w*h*4` 估计的保留预算，超出同样释放 |
+| `total_timeout` | 20 s | `start` 时固定完整截止时间，覆盖 admission/网络/CPU 队列、metadata、body、解码和有限 SVG 后续批次；取消覆盖排队 |
+| `max_concurrent` | 3 | 同时远程读取数；本地缓存 I/O 与解码分别独立限制为 2，不占网络许可 |
+| `max_in_flight` | 12 | reader 已交给 provider、尚未终结的请求上限；首帧发布不提前归还此计数，provider 同时限制有字节的完整加载数 |
+| `max_ready_images` | 32 | 每个 reader 当前文档保留的图片数；优先保留实际可见/近可见及最近使用的资源 |
+| `max_ready_bytes` | 64 MiB | 按实际 BGRA 缓冲累计静态网格、动画帧和最终图；临时解码/重采样、等待发布与 GPU atlas 回收另列成本 |
 | `max_redirects` | 5 | 外链重定向上限 |
 
 拒绝发生在危险分配之前：`decode_image` 先嗅探栅格格式，再只读 header 的尺寸，预算检查通过后才在 `image::Limits` 下完整解码验证；PNG/JPEG/WebP/GIF 由固定 `image` 依赖支持。对 SVG/XML 负载，由 `is_svg_like` 识别后走有界静态 SVG 光栅化：
@@ -113,7 +113,7 @@ let reader = cx.new(|cx| {
 - 内嵌 `<image>` 只允许 `data:`。SVG logos 经过与顶层相同的 XML/主动内容校验，最多四层资源解析；内嵌 SVG 自身的时间线只取最终值，不另开子资源播放器；节点总额 50,000、输入数据总额 2 MiB，光栅资源先检查真实文件头尺寸，并累计像素及解码/绘制缓冲成本。GIF 先在 `image::Limits` 下解码首帧并转为 PNG，防止首帧网格大于逻辑屏幕头时绕过预算。超限或无效内嵌资源跳过，外层可独立呈现的内容保留。
 - 禁用 XML DTD（`allow_dtd: false`，阻止实体展开炸弹）、限制 XML 节点数（`50,000`），并在调用递归 XML 解析器之前用有界扫描拒绝超过 `256` 层的嵌套（XML 没有隐式 void 元素：`<rect>` 只有写成 `<rect/>` 才算自闭合；扫描会跳过注释、CDATA、处理指令与 DOCTYPE，并尊重引号内的属性值，因此 `a="/>">` 之类的值不会被误判为自闭合），避免深度树在解析阶段栈溢出；同时禁用 `<image>` 外链文件/网络解析（`resources_dir = None`，`resolve_string` 恒返回 `None`，仅允许上述有界内嵌 data URI）。
 - 显式拒绝 `<script>`、事件属性（`on*`）、`<foreignObject>`、`@import` 样式与 SMIL 动画元素（`<animate>`/`<animateTransform>`/`<animateMotion>`/`<set>`），返回 `ImageFailure::Unsupported`；畸形 XML、零尺寸或缺少固有尺寸/`viewBox` 的 SVG 返回 `ImageFailure::Malformed`。
-- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算。SVG 最终图目标为设备比例的 2 倍，入场帧目标为设备比例本身；受像素/单边/绘制工作面上限逐步钳制。输出仍是 `format: ImageFormat::Png`，`width`/`height` 保留作者逻辑尺寸，`bytes` 是真实高分辨率 PNG，`animation` 携带有限帧、预解码 BGRA8 与时间戳；不通过放大旧像素模拟密度。`DecodedImage::decoded_bytes()` 分别累计最终网格和每帧实际 BGRA 长度，结束、替换与淘汰使用同一真实成本。
+- 在分配像素缓冲前按 `ImageLimits` 检查逻辑尺寸、像素数与解码字节预算。SVG 最终图目标为设备比例的 2 倍，入场帧目标为设备比例本身；受像素/单边/绘制工作面上限逐步钳制。`format: ImageFormat::Png` 保留 raster family 身份，`width`/`height` 是作者逻辑尺寸；生产输出为 `pixels` 或 `animation` 中的已解码 BGRA，兼容解码入口另提供真实高分辨率 PNG bytes。`DecodedImage::decoded_bytes()` 累计实际最终网格、静态缓冲或全部帧长度，结束、替换与淘汰使用同一成本；没有用逻辑尺寸低估 SVG 超采样或 GIF/WebP 帧组。
 - 外部 HTTPS 请求 `Accept` 头包含 `image/svg+xml`（`image/png,image/jpeg,image/webp,image/gif,image/svg+xml,*/*;q=0.8`），不附加凭据或代理。
 
 ## 字体、滤镜与物理分辨率（2026-11-11 品质返工）
@@ -136,7 +136,7 @@ Star History 的手绘噪声保留。根 `[patch.crates-io]` 统一使用 `vendo
 - `workspace.rs` 在绘制前估算 resvg 的画布、内嵌图片、隔离层和滤镜工作面；矢量 `<image>` 每级按当前目标画布计入额外表面，向内传播祖先缩放与隔离后的目标大小，不按资源固有 1×1 尺寸代替。滤镜 primitive 的完整区域与被 renderer 裁切的 group layer 分开计费，不能沿用 layer 的内部画布裁切来低估滤镜分配；mask/clip 引用链按同时保留的目标画布逐级累加，遍历所有引用内容并受节点/深度上限约束；clip 子组的裁剪工作面按完整目标大小计费。超采样不满足预算时退回固有网格，再超限则拒绝。会分配未受 resvg 画布约束的 pattern tiles 暂不支持。
 - Provider 在每帧准备之间检查取消与总截止时间；账户/session 发布复核及 `no-store` 路径保持原有约束。持久缓存仍存原始响应，不存由当前账户以外继承的动画授权。
 
-Reader 复用既有 pump 选择单帧、已解码的 `gpui::RenderImage`，从实际可见绘制开始计时；只重绘，不因中间帧重测尺寸。最终帧到达后释放其他帧并停止计时；reduced motion、窗口/页面暂停及超过 150ms 未绘制可见交集时同样收尾为最终 PNG。文档/账户替换按代次丢弃整组旧帧。静态图片不产生新的持续工作。
+Reader 复用既有 pump 选择单帧、已解码的 `gpui::RenderImage`，从实际可见绘制开始计时；只重绘，不因中间帧重测尺寸。首帧到达后即可开始，后续批次按原时间戳加入而不重启时钟。最终帧到达后释放其他帧与 atlas tiles 并停止计时；reduced motion、窗口/页面暂停及超过 150ms 未绘制可见交集时同样收尾为清晰最终像素。文档/账户替换按代次丢弃整组旧帧。静态图片不产生持续工作；仅错误后仍有明确 SWR 许可的可见旧图保留一次到期唤醒。
 
 GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会持续循环的多帧 `Img` 路径。
 
@@ -144,14 +144,14 @@ GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会
 ## 显示、尺寸与滚动
 
 - 保留 #81 的固有/作者请求尺寸、列宽适配和透明成功路径：不放大、不强加背景或圆角；图片绝对定位在其实际比例盒内。小徽章的外盒按图片本身宽度参与行布局，高图保持原有尺寸语义，不恢复旧的 640px / 比例钳制。
-- Ready 图片不强制显示 alt 图注；alt 保留在文档文本中。**非 Ready 状态一律不绘制**：未请求、排队、Loading、Failed/Refused、Unavailable 与 Released（淘汰释放）都不产生可见图片元素、alt/诊断标签、占位样式或图片专属的预留尺寸/外边距/gap。失败原因只作为内部状态用于测试与调度，不再成为用户可见文案。
-- 请求需求在构建可见块时登记，随后从纯图片 flex 行中移除所有非 Ready 子项，避免零宽子项仍产生 gap；全部不可见的图片块高度归零。调度依赖 Reader 的既有布局/pump，不能依赖图片自身的正面积可见交集；后者只控制 Ready 动画开始计时。
+- Ready 图片不强制显示 alt 图注；alt 保留在文档文本中。**非 Ready 状态一律不绘制图片 UI**：未请求、排队、Loading、Failed/Refused、Unavailable 与 Released 都没有图片、alt/诊断标签、占位面板或背景。非 Ready（包括 Released）不预留图片尺寸/外边距/gap；淘汰后只保留原图尺寸元数据供恢复网格计算，不生成文档布局盒。失败原因只作为内部状态用于测试与调度。
+- 需求由实际布局交集收集：Ready 上报图片几何，非 Ready（包括 Released）通过不增加子项/gap 的探针上报插入点和可用列宽。visible 优先于 near-visible，构建 table cell 不等于可见；实际测得离开范围时取消无用工作。虚拟列表缺少本帧测量不等于已离屏：已准入、几何仍未知的 Loading 请求保持有界需求，直到实际测得离开范围或 scope 失效。初次纯图片块仍高度归零，不能以正面积交集作为初次加载前提。
 - 不再为 pending 状态预留 140px；图片完成后对该顶层块调用真实 `ListState::remeasure_items`，以**锚定当前滚动位置**的方式重测，不重排版整篇文档，不插入假 AST 项，不把文末 inset 挤出测量范围，不因图片落地产生全文档高频重绘。在 `MarkdownLayout::Flow`（自然高度）下改为请求一次重绘并由 `on_layout_changed` 通知宿主，宿主的页面容器随之增长。
 - 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
 - 同一纯图片段落（包括软换行间隔的链接徽章）保留为可换行的 `ImageRow`，空行另起段落；极长图片段落按最多 64 张图片切成有界组，跨片段居中 wrapper 最多保留 256 层。居中容器中的段落/图片行使用占满可用列宽的作用域，保留普通标题与正文的字号/间距，渲染前仍按原段落拆成独立虚拟项，不让整篇 Profile 成为一个无界行。混合文字和图片的段落仍将图片提取到文字后，未声称支持文字行盒中原位置嵌图。
 - **表格单元格图片**：AST 在 cell 内没有块列表，图片不能像段落图片那样移到块后。单元格记录 `CellImage`（alt、URL、`width`/`height` 提示、alt 在 cell 文本中的字节范围、包住图片自己的链接）；`cell_parts` 把单元格拆成「文本段 / 图片」的阅读顺序，`DocText` 与渲染器遍历同一份拆分，因此一个 cell 可能登记多个单元而复制文本仍是原来的 cell 文本（alt 保留原位）。
   - 渲染复用同一 `ImageBoard`/`images::image_element` 状态与预算：仓库相对路径仍按固定 commit 解析，外链走同一条无凭据通路，SVG 同样经有界光栅化与有限时间线；图片按 cell 内容宽等比缩放（以逻辑尺寸为准，不用超采样像素网格），比 cell 窄时按列对齐落在内左/居中/内右。
-  - 非 Ready 的 cell 图片不生成子元素（不占行、不显示 alt 或占位面板），但 `want` 已登记需求；落地时对该顶层块（表格行所在的虚拟化块）重测，不改变滚动锚点。失败/拒绝/Unavailable/Released 同样什么都不画，表头、边框与作者写的图注行照常保留。
+  - 非 Ready（包括 Released）的 cell 图片不生成可见子元素、布局盒或额外行/gap，但插入点探针保留需求；落地时重测表格顶层块。恢复仅由新的实际需求 epoch 触发，不因每帧 `want` 重载。表头、边框与作者写的图注行照常保留。
   - 可见的表格 SVG 通过 `painted_when_visible` 上报 `painted`，与普通图片一样只有在真实可见交集时才起播并保持有限动画。
   - 图片绘制区域登记为该单元的真实命中目标，从图片起手的拖选从图片所在 cell 开始，而不是从文档起点；`[![alt](img)](link)` 的归属链接在解析时记录在 `CellImage::link`（空 alt 图片不能靠字节包含关系区分相邻链接），点击图片会像点击那段文字一样报告 `ReaderAction::Link`，而拖选经过图片会取消这次点击。
 
@@ -190,17 +190,32 @@ RepositoryImageService::with_cache(
 
 1. **账户验证隔离**：注入的 `CacheScope` 会与 `session.context().auth().account` 进行一致性校验，不匹配则拒绝挂载持久缓存；私有属性 `is_private` 由调用方明确提供，不凭 SHA 穿透鉴权。
 2. **仓库图片对象缓存**：固定 commit 的图片按 `BlobIdentity` 解析得到的 blob SHA 存入固定对象缓存命名空间 `reader-image-bytes-v1`。重启 store 后离线读取直接命中；新分支新图使用独立对象 SHA，互不干扰。
-3. **外部图片与徽章重验证**：外部图片按 URL 建立可变条目。包含 `Cache-Control: max-age=...` 的资产在新鲜期内本地命中，过期或 `no-cache` 时携带 `If-None-Match` / `If-Modified-Since` 发送条件请求；服务端返回 304 时原子更新验证时间并复用原字节；返回 `no-store` 时立即删除旧缓存并阻止落盘。
+3. **外部图片与徽章重验证**：外部图片按 URL 与既有图片表示建立可变条目。新鲜期内本地命中；过期后仅在响应明确给出尚未结束的 `stale-while-revalidate` 且无 `no-cache`/`no-store`/`must-revalidate`/`proxy-revalidate` 禁止时先发布旧像素，并在后台重验证。没有该许可则等待。计入 Age、Date apparent age 与响应耗时，不另加 TTL；旧版未记录这套 age 语义的条目保留原字节和 validator，先验证一次后再恢复 fresh/SWR 快速命中。304 必须仍对应本地同字节/validator/政策表示，否则一次不带旧 validator 的重取；可选 SWR 旧像素在解码排队/处理期间到期，或旧内容 malformed/unsupported/超出解码预算时，只要原始授权、取消和总截止仍允许，跳过旧像素并沿原总截止继续重验证；真正撤权仍终止。相同字节验证成功直接确认仍存在的像素和时间线；若 SWR 到期已撤回像素，则结束旧请求并按实际需求从已验证缓存恢复绘制，迟到的旧 terminal 不影响新请求计数。新 200 替换原始字节与元数据；`no-store`（包括失败响应/重定向）删除旧条目。SWR 错误仅保留至原许可到期，届时清掉可见副本；账户、授权和 clear 的失效票据可立即撤回已发布图。
 4. **缺失降级与错误处理**：缺失图片直接以 `ImageFailure::NotFound` 返回，其余图片和正文文档正常解码并渲染；`CredentialRejected` / `AccessDenied` 时安全降级。失败只影响该图片是否绘制（不绘制），不影响正文排版与其它图片。
 5. **正式 Shell 接线**：后续由协调者安排正式 Shell 离线接线任务，统一在 `RepositoryPage` 创建 `RepositoryImageService` 时将账户管理层获取的 `CacheStore` 与当前激活账户的 `CacheScope` 注入。
+
+## 性能发布协议与接线检查点（2026-11-12）
+
+`ImageSink::for_request` 分配本 board 内唯一请求 id；`ImageEvent` 同时带 scope、request、单调 phase 与 terminal。真实 provider 通过 `publish_next` 在同一个队列锁内分配 phase 并入队；blocking decoder 与异步超时终结不能互相抢先，已取消的 sink 不分配新 phase。Reader 仅接受当前请求的下一个阶段，首个 Ready 不归还在途计数；正常终结或取消只归还一次。有限 SVG 先交付正确初始帧与已准备的最终备用图，随后每批至多两帧；更高 DPI、隐藏、取消及迟到事件不重启同一文档已结束的时间线。生产路径不编码中间 PNG。空间网格先与单帧可接受网格核对，预算不足优先减少时间采样，不能以分批发布为由降低接受的 SVG 清晰度。
+
+解码许可随已排队的像素事件保留到 UI 消费，限制生产者跑在隐藏/繁忙 UI 前面继续堆积大缓冲；取消 sink 会移除该请求的排队事件并拒绝迟到发布。缓存 I/O 与 decode 的许可都移入实际 blocking worker，超时只结束 await，不会提前释放仍在运行的 worker 的配额。commit、directory、同源 bytes 及 blob 的在途合并只活在当前 `RepositoryImageService` 实例（已捕获 session）内；最后一个订阅退出才取消共享读，失败/取消不留永久条目。resolution 与 bytes 的 write ticket 都在相应远程工作前取得。
+
+GPUI 的 `ImageSource::Render` 绕过 asset cache，`paint_image` 借用已有 BGRA 上传；`RenderImage` Arc 释放不会自动清除 atlas。Reader 在动画结束、替换、淘汰、文档/预算替换、隐藏和实体释放时显式安排 window 侧 `drop_image`；临时 retirement 列表去重，最终图继续保留，旧 tiles 随前台回收释放。64 MiB 是 reader 的 retained pixel 起点，不是整个进程或 GPU 驱动的 RSS 上限；原始响应、解码/旋转/重采样工作面、等待 UI 消费的至多两个 decode 作业和一个前台回收间隔的旧资源都属于另列的瞬时成本。实际测量及限制见[性能日志](devlog/2026-11-12-reader-image-performance.md)。
+
+已在授权的 table/silent checkpoint `945698ddfe271979d3d95c2f2b3c7d6f16628983` 上连接普通行、table cell、Repository 与 Flow 的 prepaint 需求。测量包装转发原 layout id，不增加布局子项；静默探针不产生选择/链接命中区。Flow 根盒使用自然高度、禁止被固定滚动宿主压缩，viewport 取外层真实 mask；普通 Reader 使用自身与 mask 的交集。`options_for` 携带每张图的实际列宽与设备比例，逻辑尺寸继续来自原始 header/作者提示。
+
+静态 raster 从原始字节按实际显示网格重采样，保留 EXIF 和 straight BGRA；透明边缘先以 16-bit premultiplied 通道滤波，再恢复 straight alpha，避免暗边。私有 `crates/image-resize` 仅提供两个非泛型像素内核入口，内部使用锁定的 `fast_image_resize 5.1.4` Lanczos3；dev/test 仅将这两个内核包设为 opt-level 3，使泛型实例化落在优化边界内。应用、原始 image decoder 与验证 runner 配置保持原样。加宽/DPI 增大时补齐网格；布局稳定后若宽度缩小至少 25%，回收明显过大的静态网格，小幅抖动不反复解码。SVG 与 GIF/WebP 时间线不进入这条缩小路径。Released 在 scope/DPI/恢复切换时保留原图尺寸元数据，布局仍归零，并允许一个新的需求尝试；稳定 viewport 不运行回收/重载循环。联合验证和原生验收边界见性能日志，PR #86 与性能工作均未据此视为负责人验收。
 
 ## 运行与验证
 
 ```sh
-cargo run --example reader_images
-cargo test --locked --test reader_images
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+node scripts/verify.mjs -- cargo run --locked --example reader_images
+node scripts/verify.mjs -- cargo run --locked --example reader_image_performance
+node scripts/verify.mjs -- cargo test --locked --test reader_images
+node scripts/verify.mjs -- cargo check --locked --all-targets
+node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings
 ```
+
+原图压力预览 `reader_image_performance` 与联合测试共用九张生成的 2559×1520 原始 PNG、正文与真实账户/cache/provider/decoder fixture，不含实时网络或真实凭据。支持 Rows/Table × Reader/Flow、默认 64 MiB 与 retain-four 压力开关；可滚动返回、resize 或跨 DPI 拖动。关闭窗口在可执行文件旁写 `.metrics.json`，只含累计阶段计数、原图数量及 Windows 进程 working set/peak/private commit；明确不测独立显存。测试平台进程内存与原生 GPU 窗口的报告不能相互替代。
 
 预览场景：Healthy（默认，相对/根路径/公开 HTTPS/延迟图片）、Extremes（宽图与高图）、Failure（404/文本文件/file: 拒绝）、Oversize（编码超限与像素超限）、Long document（长文按需加载）、Switch（旧图片在途时切文档）。底部 action 栏显示当前文档与最近的 reader 事件；fixture 未建模的请求会显示为配置错误而不是假装权限结果。

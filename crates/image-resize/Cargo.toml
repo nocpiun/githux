@@ -1,0 +1,8 @@
+[package]
+name = "githux-image-resize"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+fast_image_resize = { version = "=5.1.4", default-features = false }

@@ -16,6 +16,8 @@ ely-settings = { default-features = false, git = "https://github.com/ELY-Open-So
 # Already in the graph through GPUI; declared directly so an avatar payload is fully decoded before
 # it is published, instead of only being sniffed by its signature. Only the formats avatars use.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# SIMD Lanczos3 avoids scalar display-grid resampling dominating original-image first paint.
+githux-image-resize = { path = "crates/image-resize" }
 # Already in the graph through GPUI; used for bounded static SVG rasterization in the Markdown
 # reader without adding an unmatched rasterizer version.
 resvg = { version = "0.46.0", default-features = false, features = ["text", "raster-images"] }
@@ -31,12 +33,30 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features =
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "=0.22.1"
+# Already locked through GPUI; verify raw image bodies against the requested Git object.
+sha1_smol = "=1.0.1"
+# Already locked through GPUI; parse HTTP Date when computing image current age.
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 thiserror = "2.0"
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 dirs = "=7.0.0"
 uuid = { version = "=1.28.0", features = ["v4"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+
+[profile.dev.package.fast_image_resize]
+# SIMD convolution needs compiler optimization; keep the application/decoder
+# profile unchanged and use the same resampler configuration in dev and test.
+opt-level = 3
+
+[profile.dev.package.githux-image-resize]
+opt-level = 3
+
+[profile.test.package.githux-image-resize]
+opt-level = 3
+
+[profile.test.package.fast_image_resize]
+opt-level = 3
 
 [patch.crates-io]
 # 0.46.0 applies feDisplacementMap scale twice; keep one shared renderer version.

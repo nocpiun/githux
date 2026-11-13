@@ -35,5 +35,8 @@ use reader_images_modules as fixture_root;
 #[allow(unused_imports)]
 use reader_images_modules::{fixture, reader};
 
+#[path = "../src/bin_support/reader_images_performance_fixture.rs"]
+mod performance_fixture;
+
 #[path = "../src/bin_support/reader_images_view_tests.rs"]
 mod view_tests;

@@ -2766,12 +2766,22 @@ mod tests {
         with_cache: bool,
         login: &str,
     ) -> (Harness, &'a mut VisualTestContext) {
+        build_harness_configured(cx, with_cache, login, |_| {})
+    }
+
+    fn build_harness_configured<'a>(
+        cx: &'a mut TestAppContext,
+        with_cache: bool,
+        login: &str,
+        configure: impl FnOnce(&ProfileFixtureTransport),
+    ) -> (Harness, &'a mut VisualTestContext) {
         setup_test_app(cx);
         let temp = tempfile::tempdir().unwrap();
         let account_db = temp.path().join("accounts.sqlite3");
         let cache_dir = temp.path().join("cache");
         let cred_store = Arc::new(InMemoryCredentialStore::new());
         let transport = Arc::new(ProfileFixtureTransport::new());
+        configure(&transport);
         let external = Arc::new(TestExternalImages::new());
         let executor = Arc::new(BackgroundExecutor::new(4));
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2856,6 +2866,7 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[track_caller]
     fn wait_for_profile(
         harness: &Harness,
         cx: &mut VisualTestContext,
@@ -2873,7 +2884,7 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "profile page did not reach expected state: view={:?} work={:?}",
+                "profile page did not reach expected state: view={:?} work={:?} unavailable={:?}",
                 harness.page.read_with(cx, |page, cx| {
                     page.view_for_test().map(|view| {
                         let v = view.read(cx);
@@ -2883,6 +2894,8 @@ mod tests {
                             format!("{:?}", v.contributions()),
                             format!("{:?}", v.readme_state()),
                             v.reader().is_some(),
+                            format!("{:?}", v.basic_provenance()),
+                            format!("{:?}", v.repositories_provenance()),
                         )
                     })
                 }),
@@ -2891,6 +2904,9 @@ mod tests {
                     .iter()
                     .map(Option::is_some)
                     .collect::<Vec<_>>()),
+                harness
+                    .page
+                    .read_with(cx, |page, _| format!("{:?}", page.unavailable)),
             );
 
             std::thread::sleep(Duration::from_millis(5));
@@ -3375,24 +3391,21 @@ mod tests {
     fn partial_pins_and_calendar_and_section_miss_preserve_distinct_states(
         cx: &mut TestAppContext,
     ) {
-        let (harness, cx) = build_harness(cx, true);
-        harness
-            .transport
-            .pinned_partial
-            .store(true, Ordering::SeqCst);
-        harness
-            .transport
-            .calendar_fail
-            .store(true, Ordering::SeqCst);
-        cx.update_window_entity(&harness.page, |page, _, cx| {
-            let services = harness.controller.read(cx).services();
-            page.rebind(services, cx);
+        let (harness, cx) = build_harness_configured(cx, true, "alice", |transport| {
+            transport.pinned_partial.store(true, Ordering::SeqCst);
+            transport.calendar_fail.store(true, Ordering::SeqCst);
         });
+        cx.simulate_resize(gpui::size(gpui::px(880.0), gpui::px(560.0)));
 
         wait_for_profile(&harness, cx, |cx| {
-            cx.debug_bounds("profile-repositories-provenance-partial")
-                .is_some()
-                && cx.debug_bounds("profile-section-error-mark").is_some()
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    let view = view.read(cx);
+                    view.repositories_provenance()
+                        .is_some_and(|p| p.is_partial())
+                        && matches!(view.contributions(), SectionState::Error(_))
+                }) && page.work.iter().all(Option::is_none)
+            })
         });
 
         // Now go offline and reopen: basic & partial pins & README come from cache, while calendar is NotCached!
@@ -3403,22 +3416,19 @@ mod tests {
         });
 
         wait_for_profile(&harness, cx, |cx| {
-            cx.debug_bounds("profile-basic-provenance-historical")
-                .is_some()
-                && cx
-                    .debug_bounds("profile-repositories-provenance-historical")
-                    .is_some()
-                && cx
-                    .debug_bounds("profile-repositories-provenance-partial")
-                    .is_some()
-                && harness.page.read_with(cx, |page, cx| {
-                    page.view_for_test().is_some_and(|v| {
-                        matches!(
-                            v.read(cx).contributions(),
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    let view = view.read(cx);
+                    view.basic_provenance().is_some_and(|p| p.is_historical())
+                        && view
+                            .repositories_provenance()
+                            .is_some_and(|p| p.is_historical() && p.is_partial())
+                        && matches!(
+                            view.contributions(),
                             SectionState::Error(PresentationError::NotCached)
                         )
-                    })
                 })
+            })
         });
 
         // Bring network back with complete calendar, and click retry on contributions section!
@@ -3427,7 +3437,30 @@ mod tests {
             .transport
             .calendar_fail
             .store(false, Ordering::SeqCst);
-        let retry_mark = cx.debug_bounds("profile-section-error-mark").unwrap();
+        // Flow README growth can move this section below a small viewport.
+        // Reveal it through the real page scroll route before clicking.
+        let mut retry_mark = None;
+        for _ in 0..16 {
+            let viewport = cx.debug_bounds("profile-overview").unwrap();
+            if let Some(mark) = cx.debug_bounds("profile-section-error-mark")
+                && mark.top() >= viewport.top()
+                && mark.bottom() <= viewport.bottom()
+            {
+                retry_mark = Some(mark);
+                break;
+            }
+            let position = gpui::point(viewport.left() + gpui::px(4.0), viewport.center().y);
+            cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+            cx.simulate_event(gpui::ScrollEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-200.0))),
+                modifiers: gpui::Modifiers::none(),
+                touch_phase: Default::default(),
+                source: gpui::ScrollSource::Pointer,
+            });
+            pump_page(&harness, cx);
+        }
+        let retry_mark = retry_mark.expect("contributions retry must be visible before click");
         cx.simulate_click(retry_mark.center(), gpui::Modifiers::none());
 
         wait_for_profile(&harness, cx, |cx| {
@@ -3446,14 +3479,10 @@ mod tests {
     fn account_switch_pat_replace_removal_and_revocation_isolate_cache_and_stop_slow_pictures(
         cx: &mut TestAppContext,
     ) {
-        let (harness, cx) = build_harness(cx, true);
         let (tx_slow, rx_slow) = tokio::sync::oneshot::channel();
-        *harness.transport.slow_gate.lock().unwrap() = Some(rx_slow);
-        harness.transport.set_readme_mode(ReadmeMode::SlowPicture);
-
-        cx.update_window_entity(&harness.page, |page, _, cx| {
-            let services = harness.controller.read(cx).services();
-            page.rebind(services, cx);
+        let (harness, cx) = build_harness_configured(cx, true, "alice", move |transport| {
+            transport.set_readme_mode(ReadmeMode::SlowPicture);
+            *transport.slow_gate.lock().unwrap() = Some(rx_slow);
         });
 
         // Wait until README is mounted and slow picture is in loading state.
@@ -3723,13 +3752,10 @@ mod tests {
     fn tab_suspension_preserves_readme_image_provider_across_deactivate_and_reactivate(
         cx: &mut TestAppContext,
     ) {
-        let (harness, cx) = build_harness(cx, true);
         let (tx_slow, rx_slow) = tokio::sync::oneshot::channel();
-        *harness.transport.slow_gate.lock().unwrap() = Some(rx_slow);
-        harness.transport.set_readme_mode(ReadmeMode::SlowPicture);
-        cx.update_window_entity(&harness.page, |page, _, cx| {
-            let services = harness.controller.read(cx).services();
-            page.rebind(services, cx);
+        let (harness, cx) = build_harness_configured(cx, true, "alice", move |transport| {
+            transport.set_readme_mode(ReadmeMode::SlowPicture);
+            *transport.slow_gate.lock().unwrap() = Some(rx_slow);
         });
 
         let slow_key = ImageKey::new(format!("repo:alice/alice@{COMMIT}:docs/slow.png"));

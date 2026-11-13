@@ -2,6 +2,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImageRenderOptions {
     device_scale_milli: u16,
+    display_width: u32,
 }
 impl ImageRenderOptions {
     pub fn for_device_scale(scale: f32) -> Self {
@@ -12,7 +13,20 @@ impl ImageRenderOptions {
         };
         Self {
             device_scale_milli: (scale * 1000.0).ceil() as u16,
+            display_width: 0,
         }
+    }
+    pub fn with_display_width(mut self, width: f32) -> Self {
+        self.display_width = if width.is_finite() && width > 0.0 {
+            width.ceil().min(8192.0) as u32
+        } else {
+            0
+        };
+        self
+    }
+    pub fn raster_width(self) -> Option<u32> {
+        (self.display_width > 0)
+            .then(|| (self.display_width as f32 * self.device_scale()).ceil() as u32)
     }
     pub fn device_scale(self) -> f32 {
         f32::from(self.device_scale_milli) / 1000.0

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::*;
 use crate::content::images::{DecodedImage, ImageCompletion, ImageFormat, ImageScope};
 
-fn target(path: &str) -> ImageTarget {
+pub(super) fn target(path: &str) -> ImageTarget {
     ImageTarget::Repository {
         owner: "o".into(),
         name: "n".into(),
@@ -16,21 +16,24 @@ fn target(path: &str) -> ImageTarget {
 
 /// A completion for the current scope of `board`, so only the fields each test
 /// is about are set by the test itself.
-fn ready_for(board: &ImageBoard, width: u32, height: u32) -> ImageCompletion {
+pub(super) fn ready_for(board: &ImageBoard, width: u32, height: u32) -> ImageCompletion {
     ImageCompletion {
         scope: board.scope(),
         key: ImageKey::new("unused"),
         result: Ok(DecodedImage {
             format: ImageFormat::Png,
+            source_svg: false,
             width,
             height,
             bytes: vec![0x89, b'P', b'N', b'G'],
             animation: None,
+            pixels: None,
+            raster_frames: Vec::new(),
         }),
     }
 }
 
-fn board() -> ImageBoard {
+pub(super) fn board() -> ImageBoard {
     let mut board = ImageBoard::new(ImageLimits::default());
     board.begin(1);
     board.set_attached(true);

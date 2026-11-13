@@ -1029,7 +1029,7 @@ impl MarkdownView {
                 .into_any_element(),
             Block::Image { url, hints, .. } => self
                 .picture_unit(ix, url, *hints)
-                .unwrap_or_else(|| div().into_any_element()),
+                .unwrap_or_else(|| self.picture_probe(url, *hints)),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
                 .font_family(mono)
@@ -1340,7 +1340,7 @@ impl MarkdownView {
                 .into_any_element(),
             Block::Image { url, hints, .. } => self
                 .picture_unit(ix, url, *hints)
-                .unwrap_or_else(|| div().into_any_element()),
+                .unwrap_or_else(|| self.picture_probe(url, *hints)),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
@@ -1405,6 +1405,8 @@ impl MarkdownView {
                 TextAlign::Right => content.items_end(),
                 TextAlign::Left => content.items_start(),
             };
+            let mut pending = Vec::new();
+            let mut visible_children = 0usize;
             let parts = ast::cell_parts(cell);
             for (at, part) in parts.iter().enumerate() {
                 match part.image {
@@ -1421,8 +1423,16 @@ impl MarkdownView {
                             // Pending demand stays invisible and adds no cell
                             // row; the board still has the request and remeasures
                             // this block when the picture lands.
+                            if let Some(demand) =
+                                self.pending_picture(&image.url, image.hints, visible_children)
+                            {
+                                pending.push(demand);
+                            }
                             continue;
                         };
+                        let drawable = self
+                            .picture_visibility(&image.url)
+                            .is_some_and(|(board, key)| board.borrow().is_ready(&key));
                         let mut frame = div()
                             .w_full()
                             .min_w_0()
@@ -1430,7 +1440,7 @@ impl MarkdownView {
                             .when(align == TextAlign::Center, |row| row.justify_center())
                             .when(align == TextAlign::Right, |row| row.justify_end())
                             .child(picture);
-                        if !presentation {
+                        if !presentation && drawable {
                             // The painted picture is the hit target for its own
                             // document unit, so a selection drag starts here
                             // instead of at document offset 0.
@@ -1450,7 +1460,7 @@ impl MarkdownView {
                                 }
                             });
                         }
-                        if link.is_some() {
+                        if link.is_some() && drawable {
                             frame = frame.cursor(gpui::CursorStyle::PointingHand);
                         }
                         content = content.child(frame.into_any_element());
@@ -1475,8 +1485,9 @@ impl MarkdownView {
                         }));
                     }
                 }
+                visible_children += 1;
             }
-            content.into_any_element()
+            images::pending_container(content, self.image_board.clone(), pending)
         };
         let mut cell = div()
             .debug_selector(move || selector)
@@ -1495,9 +1506,8 @@ impl MarkdownView {
     ///
     /// It draws through the same picture presenter as every other picture.
     /// `None` means nothing is drawn: still loading, failed/refused,
-    /// unavailable or released after eviction. The cell then adds neither a
-    /// row nor a gap for it, while its alt text stays in the copy model and a
-    /// landed picture keeps its logical size.
+    /// unavailable or released after eviction. Alt text stays in the copy
+    /// model; ready sizing and measured geometry survive resource eviction.
     fn cell_picture(&self, ix: usize, picture: &CellImage, key: String) -> Option<AnyElement> {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(&picture.url, context) {
@@ -1507,8 +1517,6 @@ impl MarkdownView {
             _ => ImageState::Unavailable,
         };
         if !state.is_ready() {
-            // Demand is registered; the shared presenter and the reader pump
-            // keep the state machine, budgets and remeasurement unchanged.
             return None;
         }
         let element = images::image_element(
@@ -1524,15 +1532,17 @@ impl MarkdownView {
         ))
     }
 
-    /// One picture block: the resolved state of its source, or the honest
-    /// reason it cannot be shown. The alt text stays visible in every state.
+    /// One picture row. Alt text remains in the document/copy model while
+    /// non-ready picture UI stays silent.
     fn picture_row(
         &self,
         ix: usize,
         units: &std::cell::Cell<usize>,
         pictures: &[(String, String, ImageHints)],
     ) -> AnyElement {
-        div()
+        let mut pending = Vec::new();
+        let mut visible_children = 0usize;
+        let content = div()
             .debug_selector(move || format!("markdown-picture-row-{ix}"))
             .max_w_full()
             .flex()
@@ -1557,7 +1567,15 @@ impl MarkdownView {
                         // Every non-ready picture is dropped from the row, so it
                         // cannot claim its own gap or keep an empty box. The
                         // shared presenter already reports only pixels.
-                        let picture = self.picture_unit(ix, url, *hints)?;
+                        let Some(picture) = self.picture_unit(ix, url, *hints) else {
+                            if let Some(demand) =
+                                self.pending_picture(url, *hints, visible_children)
+                            {
+                                pending.push(demand);
+                            }
+                            return None;
+                        };
+                        visible_children += 1;
                         // Different pictures in one paragraph must keep independent element IDs.
                         Some(
                             div()
@@ -1570,8 +1588,25 @@ impl MarkdownView {
                                 .child(picture),
                         )
                     }),
-            )
-            .into_any_element()
+            );
+        images::pending_container(content, self.image_board.clone(), pending)
+    }
+
+    fn pending_picture(
+        &self,
+        url: &str,
+        hints: ImageHints,
+        position: usize,
+    ) -> Option<images::PendingDemand> {
+        let (board, key) = self.picture_visibility(url)?;
+        if board.borrow().has_layout_geometry(&key) {
+            return None;
+        }
+        Some((key, hints, position))
+    }
+    fn picture_probe(&self, url: &str, hints: ImageHints) -> AnyElement {
+        let pending = self.pending_picture(url, hints, 0).into_iter().collect();
+        images::pending_container(div().w_full(), self.image_board.clone(), pending)
     }
 
     /// The board and source key a picture's animation visibility belongs to.
@@ -1592,7 +1627,7 @@ impl MarkdownView {
     /// Only `Ready` paints. Loading/unrequested, failed/refused, unavailable
     /// and released pictures all render nothing, so a block made only of them
     /// must not keep its image padding or an empty row around them.
-    fn picture_visible(&self, url: &str) -> bool {
+    fn picture_has_geometry(&self, url: &str) -> bool {
         let Some(board) = self.image_board.as_ref() else {
             // Without a board no picture can paint.
             return false;
@@ -1601,14 +1636,14 @@ impl MarkdownView {
             return false;
         };
         match images::resolve_target(url, context) {
-            Ok(target) => board.borrow().is_ready(&target.key()),
+            Ok(target) => board.borrow().has_layout_geometry(&target.key()),
             Err(_) => false,
         }
     }
 
     /// A block whose pictures are all invisible contributes no image row.
     fn only_hidden_images(&self, block: &Block) -> bool {
-        let hidden = |url: &str| !self.picture_visible(url);
+        let hidden = |url: &str| !self.picture_has_geometry(url);
         match block {
             Block::Image { url, .. } => hidden(url),
             Block::ImageRow(pictures) => {

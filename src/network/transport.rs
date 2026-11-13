@@ -134,6 +134,25 @@ pub struct HttpResponse {
     pub body: String,
 }
 
+/// A bounded binary representation. Used by image blob reads only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpBytesResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+impl HttpBytesResponse {
+    fn into_text(self) -> Result<HttpResponse, TransportError> {
+        Ok(HttpResponse {
+            status: self.status,
+            headers: self.headers,
+            body: String::from_utf8(self.body).map_err(|_| TransportError::Network {
+                message: "HTTP JSON body is not UTF-8".into(),
+            })?,
+        })
+    }
+}
+
 impl HttpResponse {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -178,6 +197,15 @@ pub enum TransportError {
 /// Trait-object-friendly transport. The returned future is `Send` so it can be
 /// driven by the background executor.
 pub trait Transport: Send + Sync {
+    fn execute_bytes_bounded<'a>(
+        &'a self,
+        _request: HttpRequest,
+        _cancel: CancellationToken,
+        _max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpBytesResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async { Err(TransportError::BoundedReadUnsupported) })
+    }
+
     fn execute<'a>(
         &'a self,
         request: HttpRequest,
@@ -257,7 +285,7 @@ impl ReqwestTransport {
         request: HttpRequest,
         cancel: CancellationToken,
         max_body_bytes: Option<usize>,
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<HttpBytesResponse, TransportError>> + Send + 'a>> {
         Box::pin(async move {
             // Deterministic early exit: an already-cancelled request must not
             // open a connection at all.
@@ -323,10 +351,10 @@ impl ReqwestTransport {
                     // re-send the original operation. Surface the 3xx so the
                     // caller rejects it; GET keeps same-origin follow behaviour.
                     if request.method != HttpMethod::Get {
-                        return Ok(HttpResponse {
+                        return Ok(HttpBytesResponse {
                             status,
                             headers,
-                            body: String::new(),
+                            body: Vec::new(),
                         });
                     }
                     let location = headers
@@ -337,10 +365,10 @@ impl ReqwestTransport {
                         let next = match Origin::resolve(&url, &location) {
                             Some(next) => next,
                             None => {
-                                return Ok(HttpResponse {
+                                return Ok(HttpBytesResponse {
                                     status,
                                     headers,
-                                    body: String::new(),
+                                    body: Vec::new(),
                                 });
                             }
                         };
@@ -348,10 +376,10 @@ impl ReqwestTransport {
                             // Do not follow cross-origin / downgraded / looping
                             // redirects: return the 3xx so the caller rejects it
                             // rather than leaking the credential.
-                            return Ok(HttpResponse {
+                            return Ok(HttpBytesResponse {
                                 status,
                                 headers,
-                                body: String::new(),
+                                body: Vec::new(),
                             });
                         }
                         redirects += 1;
@@ -391,15 +419,10 @@ impl ReqwestTransport {
                         bytes.reserve_exact(chunk.len());
                         bytes.extend_from_slice(&chunk);
                     }
-                    // JSON must be UTF-8. Reject invalid wire encoding instead
-                    // of introducing replacement characters into source data.
-                    let body = String::from_utf8(bytes).map_err(|_| TransportError::Network {
-                        message: "HTTP JSON body is not UTF-8".into(),
-                    })?;
-                    return Ok(HttpResponse {
+                    return Ok(HttpBytesResponse {
                         status,
                         headers,
-                        body,
+                        body: bytes,
                     });
                 }
 
@@ -424,10 +447,10 @@ impl ReqwestTransport {
                     })?,
                     _ = cancel.clone().cancelled() => return Err(TransportError::Cancelled),
                 };
-                return Ok(HttpResponse {
+                return Ok(HttpBytesResponse {
                     status,
                     headers,
-                    body,
+                    body: body.into_bytes(),
                 });
             }
         })
@@ -435,12 +458,25 @@ impl ReqwestTransport {
 }
 
 impl Transport for ReqwestTransport {
+    fn execute_bytes_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max_body_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpBytesResponse, TransportError>> + Send + 'a>> {
+        self.execute_with_limit(request, cancel, Some(max_body_bytes))
+    }
+
     fn execute<'a>(
         &'a self,
         request: HttpRequest,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
-        self.execute_with_limit(request, cancel, None)
+        Box::pin(async move {
+            self.execute_with_limit(request, cancel, None)
+                .await?
+                .into_text()
+        })
     }
 
     fn execute_bounded<'a>(
@@ -449,7 +485,11 @@ impl Transport for ReqwestTransport {
         cancel: CancellationToken,
         max_body_bytes: usize,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
-        self.execute_with_limit(request, cancel, Some(max_body_bytes))
+        Box::pin(async move {
+            self.execute_with_limit(request, cancel, Some(max_body_bytes))
+                .await?
+                .into_text()
+        })
     }
 }
 

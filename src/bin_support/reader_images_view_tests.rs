@@ -20,6 +20,8 @@ use gpui::{
 use crate::fixture::{BANNER_URL, COMMIT, LOGO_URL, OVERSIZE_URL, Pipeline, Scene};
 use crate::reader::{ImageKey, ImageTarget, ReaderView};
 
+#[path = "reader_images_performance_view_tests.rs"]
+mod performance;
 #[path = "reader_images_quality_view_tests.rs"]
 mod quality;
 

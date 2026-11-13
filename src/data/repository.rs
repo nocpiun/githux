@@ -439,6 +439,26 @@ impl RepositorySession {
         .await
     }
 
+    /// Image-only raw media; uses the same captured credential/context gates.
+    pub async fn image_blob(
+        &self,
+        identity: &BlobIdentity,
+        limits: &BlobLimits,
+        cancel: CancellationToken,
+    ) -> Result<
+        Scoped<(
+            BlobRead,
+            crate::domain::repository::RepositoryResponseMetadata,
+        )>,
+        RepositoryError,
+    > {
+        self.read(cancel, async move |pat, cancel| {
+            github::blob::fetch_image_blob(&self.service.client, &pat, identity, limits, cancel)
+                .await
+        })
+        .await
+    }
+
     /// Read and prepare in one call, on the caller-provided Tokio runtime.
     /// Classification runs on its blocking pool, outside the async/GUI thread.
     pub async fn content(

@@ -22,11 +22,25 @@ use gpui::{
 };
 
 use crate::content::images::{
-    ImageCompletion, ImageFailure, ImageFormat, ImageKey, ImageLimits, ImageRenderOptions,
-    ImageRequest, ImageScope, ImageSink, ImageTarget,
+    ImageCompletion, ImageEvent, ImageFailure, ImageFormat, ImageKey, ImageLimits,
+    ImageRenderOptions, ImageRequest, ImageScope, ImageSink, ImageTarget, ImageUpdate,
+    ImageValidity,
 };
 
 use super::{LinkTarget, ResourceContext, links};
+#[path = "image_demand.rs"]
+mod demand;
+#[path = "image_measurement.rs"]
+mod measurement;
+#[path = "image_viewport.rs"]
+mod viewport;
+pub(super) use measurement::{PendingDemand, pending_container};
+pub(super) use viewport::viewport;
+#[path = "image_resources.rs"]
+mod resources;
+pub(crate) use resources::release_retired;
+#[path = "image_publication.rs"]
+mod publication;
 
 /// Dimensions an author asked for through HTML `width`/`height` attributes, in
 /// CSS pixels. `None` means "use the picture's intrinsic size".
@@ -93,11 +107,13 @@ struct Playback {
 
 pub(crate) struct ImageBoard {
     animations: HashMap<ImageKey, Playback>,
+    settled_animations: HashSet<ImageKey>,
     limits: ImageLimits,
     render_options: ImageRenderOptions,
     completed_options: HashMap<ImageKey, ImageRenderOptions>,
     attempted_options: HashMap<ImageKey, ImageRenderOptions>,
     density_dependent: HashSet<ImageKey>,
+    static_rasters: HashSet<ImageKey>,
     /// This reader's own identity, so a shared provider never mixes two
     /// readers' work even when their document generations coincide.
     reader: u64,
@@ -106,6 +122,9 @@ pub(crate) struct ImageBoard {
     states: HashMap<ImageKey, ImageState>,
     ready_order: VecDeque<ImageKey>,
     ready_bytes: usize,
+    peak_pixel_bytes: usize,
+    evictions: u64,
+    reloads: u64,
     ready_costs: HashMap<ImageKey, usize>,
     pending: VecDeque<ImageRequest>,
     /// Requests handed to the provider that have not completed or been
@@ -116,32 +135,71 @@ pub(crate) struct ImageBoard {
     /// would drop the others and leave their rows at the wrong height.
     blocks: HashMap<ImageKey, Vec<usize>>,
     sink: ImageSink,
+    requests: HashMap<ImageKey, (u64, u32)>,
+    request_sinks: HashMap<ImageKey, ImageSink>,
+    next_request: u64,
+    validity: HashMap<ImageKey, ImageValidity>,
+    geometry_managed: bool,
+    viewport: Option<gpui::Bounds<gpui::Pixels>>,
+    targets: HashMap<ImageKey, ImageTarget>,
+    demand: HashMap<ImageKey, demand::Demand>,
+    observations: HashMap<ImageKey, (u8, f32)>,
+    observation_order: Vec<ImageKey>,
+    use_clock: u64,
+    sizes: HashMap<ImageKey, (u32, u32)>,
+    grids: HashMap<ImageKey, u32>,
+    requested_options: HashMap<ImageKey, ImageRenderOptions>,
+    retired: HashMap<gpui::ImageId, Arc<gpui::RenderImage>>,
+    retired_encoded: Vec<ImageSource>,
 }
 
 impl ImageBoard {
     pub(super) fn new(limits: ImageLimits) -> Self {
         Self {
             animations: HashMap::new(),
+            settled_animations: HashSet::new(),
             limits,
             render_options: ImageRenderOptions::default(),
             completed_options: HashMap::new(),
             attempted_options: HashMap::new(),
             density_dependent: HashSet::new(),
+            static_rasters: HashSet::new(),
             reader: crate::content::images::next_reader_id(),
             generation: 0,
             attached: false,
             states: HashMap::new(),
             ready_order: VecDeque::new(),
             ready_bytes: 0,
+            peak_pixel_bytes: 0,
+            evictions: 0,
+            reloads: 0,
             ready_costs: HashMap::new(),
             pending: VecDeque::new(),
             in_flight: 0,
             blocks: HashMap::new(),
             sink: ImageSink::new(),
+            requests: HashMap::new(),
+            request_sinks: HashMap::new(),
+            next_request: 0,
+            validity: HashMap::new(),
+            geometry_managed: false,
+            viewport: None,
+            targets: HashMap::new(),
+            demand: HashMap::new(),
+            observations: HashMap::new(),
+            observation_order: Vec::new(),
+            use_clock: 0,
+            sizes: HashMap::new(),
+            grids: HashMap::new(),
+            requested_options: HashMap::new(),
+            retired: HashMap::new(),
+            retired_encoded: Vec::new(),
         }
     }
 
     pub(super) fn painted(&mut self, key: &ImageKey) {
+        self.use_clock = self.use_clock.wrapping_add(1);
+        self.demand.entry(key.clone()).or_default().last_used = self.use_clock;
         if let Some(playback) = self.animations.get_mut(key) {
             let now = std::time::Instant::now();
             playback.started.get_or_insert(now);
@@ -196,8 +254,12 @@ impl ImageBoard {
     }
     fn finish_animation(&mut self, key: &ImageKey) {
         if let Some(playback) = self.animations.remove(key) {
+            self.settled_animations.insert(key.clone());
             if let Some(ImageState::Ready(image, ..)) = self.states.get_mut(key) {
                 *image = playback.final_image;
+            }
+            for (_, frame) in playback.frames {
+                self.retire_source(frame);
             }
             self.ready_bytes = self.ready_bytes.saturating_sub(playback.extra_bytes);
             if let Some(cost) = self.ready_costs.get_mut(key) {
@@ -219,8 +281,8 @@ impl ImageBoard {
     }
     /// Whether this generation already holds drawable pixels for `key`.
     ///
-    /// Only a `Ready` picture paints; loading, failed, unavailable and released
-    /// sources all draw nothing, so a block made only of them keeps no space.
+    /// Only a `Ready` picture paints. Layout remembers measured geometry for
+    /// evicted resources so scrolling stays stable while their pixels reload.
     pub(super) fn is_ready(&self, key: &ImageKey) -> bool {
         self.states.get(key).is_some_and(ImageState::is_ready)
     }
@@ -251,23 +313,39 @@ impl ImageBoard {
 
     /// Starts a new document generation, dropping every picture of the old one.
     pub(super) fn begin(&mut self, generation: u64) {
+        self.retire_all();
+        self.cancel_request_sinks();
         self.generation = generation;
         self.states.clear();
+        self.requests.clear();
+        self.validity.clear();
+        self.targets.clear();
+        self.demand.clear();
+        self.observations.clear();
+        self.observation_order.clear();
+        self.sizes.clear();
+        self.grids.clear();
+        self.requested_options.clear();
         self.completed_options.clear();
         self.attempted_options.clear();
         self.density_dependent.clear();
+        self.static_rasters.clear();
         self.animations.clear();
+        self.settled_animations.clear();
         self.ready_order.clear();
         self.ready_bytes = 0;
+        self.peak_pixel_bytes = 0;
+        self.evictions = 0;
+        self.reloads = 0;
         self.ready_costs.clear();
         self.pending.clear();
         self.in_flight = 0;
         self.blocks.clear();
     }
 
-    /// Records whether a provider is attached. Changing the attachment drops
-    /// every non-ready picture so the next frame requests it again. Use
-    /// [`Self::forget_unfinished`] when the provider changed but stays attached.
+    /// Records whether a provider is attached, dropping unfinished requests.
+    /// Measured geometry survives so reattachment does not shift the document.
+    /// Use [`Self::forget_unfinished`] when the provider stays attached.
     pub(super) fn set_attached(&mut self, attached: bool) {
         if self.attached == attached {
             return;
@@ -287,13 +365,15 @@ impl ImageBoard {
     /// and queues the request the first time this source is wanted.
     pub(super) fn want(&mut self, block: usize, target: ImageTarget) -> ImageState {
         let key = target.key();
+        self.targets.insert(key.clone(), target.clone());
         let blocks = self.blocks.entry(key.clone()).or_default();
         if !blocks.contains(&block) {
             blocks.push(block);
         }
         if let Some(state) = self.states.get(&key) {
             let state = state.clone();
-            if self.attached
+            if !self.geometry_managed
+                && self.attached
                 && state.is_ready()
                 && self.density_dependent.contains(&key)
                 && self
@@ -317,6 +397,9 @@ impl ImageBoard {
             return ImageState::Loading;
         }
         self.states.insert(key.clone(), ImageState::Loading);
+        if self.geometry_managed {
+            return ImageState::Loading;
+        }
         self.attempted_options
             .insert(key.clone(), self.render_options);
         self.pending.push_back(ImageRequest {
@@ -331,11 +414,32 @@ impl ImageBoard {
     /// taken request counts as in flight until it completes or a generation
     /// change drops it.
     pub(super) fn take_pending(&mut self, max: usize) -> Vec<ImageRequest> {
+        if self.geometry_managed {
+            let demand = &self.demand;
+            let pending = self.pending.make_contiguous();
+            pending.sort_by_key(|request| {
+                let priority = demand.get(&request.key).map_or(0, |d| d.priority);
+                let refinement = self
+                    .states
+                    .get(&request.key)
+                    .is_some_and(ImageState::is_ready);
+                (std::cmp::Reverse(priority), refinement)
+            });
+        }
         let free = max.saturating_sub(self.in_flight);
         let mut taken = Vec::new();
         while taken.len() < free {
             match self.pending.pop_front() {
-                Some(request) => taken.push(request),
+                Some(request) => {
+                    self.next_request = self.next_request.wrapping_add(1).max(1);
+                    self.requests
+                        .insert(request.key.clone(), (self.next_request, 0));
+                    self.request_sinks.insert(
+                        request.key.clone(),
+                        self.sink.for_request(self.next_request),
+                    );
+                    taken.push(request);
+                }
                 None => break,
             }
         }
@@ -351,22 +455,52 @@ impl ImageBoard {
     /// A block that still wants a picture asks again on the next frame.
     pub(super) fn forget_unfinished(&mut self) {
         self.finish_animations();
+        self.cancel_request_sinks();
         self.pending.clear();
+        self.requests.clear();
         self.in_flight = 0;
         self.blocks.clear();
-        self.states.retain(|_, state| state.is_ready());
+        let managed = self.geometry_managed;
+        self.states.retain(|_, state| {
+            state.is_ready() || (managed && matches!(state, ImageState::Released))
+        });
+        if managed {
+            // A new scope permits one fresh attempt without losing measured
+            // document positions (including on DPI change and resumption).
+            for demand in self.demand.values_mut() {
+                demand.priority = 0;
+            }
+        }
         self.attempted_options = self.completed_options.clone();
         self.ready_order.retain(|key| self.states.contains_key(key));
     }
 
     /// Whether anything is queued or outstanding. The pump stops when this is
     /// false, so a settled document runs no background timer.
-    pub(super) fn work_outstanding(&self) -> bool {
+    pub(super) fn active_work(&self) -> bool {
         self.in_flight > 0 || !self.pending.is_empty() || !self.animations.is_empty()
+    }
+    pub(super) fn work_outstanding(&self) -> bool {
+        self.active_work() || self.validity.values().any(|guard| guard.expires.is_some())
+    }
+    pub(super) fn next_wake(&self) -> std::time::Duration {
+        if self.active_work() {
+            return std::time::Duration::from_millis(20);
+        }
+        self.validity
+            .values()
+            .filter_map(|guard| guard.expires)
+            .min()
+            .map_or(std::time::Duration::from_millis(20), |at| {
+                at.saturating_duration_since(std::time::Instant::now())
+                    .max(std::time::Duration::from_millis(1))
+            })
     }
 
     pub(super) fn clear_pending(&mut self) {
+        self.cancel_request_sinks();
         self.pending.clear();
+        self.requests.clear();
         self.in_flight = 0;
     }
 
@@ -384,23 +518,42 @@ impl ImageBoard {
         let key = completion.key;
         if self.states.get(&key).is_some_and(ImageState::is_ready) {
             self.finish_animation(&key);
+            if let Some(ImageState::Ready(image, ..)) = self.states.get(&key) {
+                self.retire_source(image.clone());
+            }
         }
         let Some(state) = self.states.get_mut(&key) else {
             // The source was dropped by a document/attachment change.
             return Vec::new();
         };
-        let upgrading = state.is_ready();
+        let upgrading = state.is_ready() || self.settled_animations.contains(&key);
         match completion.result {
             Ok(decoded) => {
                 let format = gpui_format(decoded.format);
                 let mut bytes = decoded.decoded_bytes();
-                // Input rasters retain their header dimensions. Only a scaled
-                // SVG grid or finite frame bank can benefit from rerasterizing;
-                // do not refetch PNGs or restart GIF playback on a DPI change.
+                self.sizes
+                    .insert(key.clone(), (decoded.width, decoded.height));
+                let grid = decoded
+                    .pixels
+                    .as_ref()
+                    .map(|p| p.width)
+                    .or_else(|| decoded.animation.as_ref().map(|a| a.final_pixels.width))
+                    .unwrap_or(decoded.width);
+                if decoded.pixels.is_some() && !decoded.source_svg {
+                    self.static_rasters.insert(key.clone());
+                } else {
+                    self.static_rasters.remove(&key);
+                }
+                self.grids.insert(key.clone(), grid);
+                // Header dimensions remain logical layout dimensions. Display
+                // grids and finite SVG banks can be rebuilt from original data
+                // without changing that geometry or looping GIF/WebP playback.
                 let native = (decoded.width as usize)
                     .saturating_mul(decoded.height as usize)
                     .saturating_mul(4);
-                if decoded.animation.is_some() || bytes > native {
+                if decoded.raster_frames.is_empty()
+                    && (decoded.animation.is_some() || bytes != native)
+                {
                     self.density_dependent.insert(key.clone());
                 } else {
                     self.density_dependent.remove(&key);
@@ -434,18 +587,47 @@ impl ImageBoard {
                             },
                         );
                     }
+                } else if !decoded.raster_frames.is_empty() {
+                    let frames = decoded
+                        .raster_frames
+                        .into_iter()
+                        .map(|frame| {
+                            let pixels = frame.pixels;
+                            let buffer = image::RgbaImage::from_raw(
+                                pixels.width,
+                                pixels.height,
+                                pixels.bgra,
+                            )
+                            .expect("validated raster frame dimensions");
+                            image::Frame::from_parts(
+                                buffer,
+                                0,
+                                0,
+                                image::Delay::from_numer_denom_ms(frame.delay.0, frame.delay.1),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    displayed = ImageSource::Render(Arc::new(gpui::RenderImage::new(frames)));
+                } else if let Some(pixels) = decoded.pixels {
+                    displayed = decoded_pixels_source(pixels);
                 } else {
                     displayed =
                         ImageSource::Image(Arc::new(Image::from_bytes(format, decoded.bytes)));
                 }
                 *state = ImageState::Ready(displayed, decoded.width, decoded.height);
-                self.completed_options
-                    .insert(key.clone(), self.render_options);
+                self.completed_options.insert(
+                    key.clone(),
+                    self.requested_options
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(self.render_options),
+                );
                 self.ready_bytes = self
                     .ready_bytes
                     .saturating_sub(self.ready_costs.get(&key).copied().unwrap_or_default());
                 self.ready_costs.insert(key.clone(), bytes);
                 self.ready_bytes = self.ready_bytes.saturating_add(bytes);
+                self.peak_pixel_bytes = self.peak_pixel_bytes.max(self.ready_bytes);
                 self.ready_order.retain(|known| known != &key);
                 self.ready_order.push_back(key.clone());
             }
@@ -469,17 +651,44 @@ impl ImageBoard {
         while self.ready_order.len() > self.limits.max_ready_images
             || self.ready_bytes > self.limits.max_ready_bytes
         {
-            let Some(key) = self.ready_order.pop_front() else {
+            let candidate = self
+                .ready_order
+                .iter()
+                .enumerate()
+                .min_by_key(|(position, key)| {
+                    let demand = self.demand.get(*key);
+                    (
+                        demand.map_or(0, |d| d.priority),
+                        demand.map_or(0, |d| d.last_used),
+                        *position,
+                    )
+                })
+                .map(|(position, _)| position);
+            let Some(key) = candidate.and_then(|position| self.ready_order.remove(position)) else {
                 break;
             };
+            self.finish_animation(&key);
             let Some(state) = self.states.get_mut(&key) else {
                 continue;
             };
-            if let ImageState::Ready(..) = state {
+            if let ImageState::Ready(image, ..) = state {
+                match image.clone() {
+                    ImageSource::Render(image) => {
+                        self.retired.insert(image.id, image);
+                    }
+                    source => self.retired_encoded.push(source),
+                }
                 let bytes = self.ready_costs.remove(&key).unwrap_or_default();
                 self.animations.remove(&key);
                 self.ready_bytes = self.ready_bytes.saturating_sub(bytes);
                 *state = ImageState::Released;
+                self.evictions += 1;
+                if let Some(sink) = self.request_sinks.remove(&key) {
+                    sink.cancel();
+                }
+                if self.requests.remove(&key).is_some() {
+                    self.in_flight = self.in_flight.saturating_sub(1);
+                }
                 if let Some(blocks) = self.blocks.get(&key) {
                     affected.extend(blocks.iter().copied());
                 }
@@ -493,6 +702,20 @@ impl ImageBoard {
     #[cfg(test)]
     pub(super) fn state(&self, key: &ImageKey) -> Option<ImageState> {
         self.states.get(key).cloned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn memory_debug(&self) -> (usize, usize, u64, u64) {
+        (
+            self.ready_bytes,
+            self.peak_pixel_bytes,
+            self.evictions,
+            self.reloads,
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn grid_debug(&self, key: &ImageKey) -> Option<u32> {
+        self.grids.get(key).copied()
     }
 
     #[cfg(test)]
@@ -613,21 +836,7 @@ pub(super) fn image_element(
             // `height` hints are honoured but still bounded by the intrinsic
             // dimensions, so an author can shrink a picture without upscaling
             // or distorting it.
-            let intrinsic_width = *width as f32;
-            let intrinsic_height = (*height as f32).max(1.0);
-            let intrinsic_ratio = intrinsic_width / intrinsic_height;
-            let requested_width = hints
-                .width
-                .map(|w| (w as f32).min(intrinsic_width).max(1.0));
-            let requested_height = hints
-                .height
-                .map(|h| (h as f32).min(intrinsic_height).max(1.0));
-            let (display_width, display_ratio) = match (requested_width, requested_height) {
-                (Some(width), Some(height)) => (width, width / height),
-                (Some(width), None) => (width, intrinsic_ratio),
-                (None, Some(height)) => (height * intrinsic_ratio, intrinsic_ratio),
-                (None, None) => (intrinsic_width, intrinsic_ratio),
-            };
+            let (display_width, display_ratio) = measurement::dimensions(*width, *height, hints);
             let frame = div()
                 .debug_selector(move || frame_selector.clone())
                 .relative()
@@ -680,20 +889,7 @@ pub(super) fn painted_when_visible(
     picture: AnyElement,
     visibility: Option<(Rc<RefCell<ImageBoard>>, ImageKey)>,
 ) -> AnyElement {
-    div()
-        .max_w_full()
-        .child(picture)
-        .on_children_prepainted(move |bounds, window, _| {
-            if let Some((board, key)) = &visibility
-                && bounds.iter().any(|bounds| {
-                    let visible = window.content_mask().bounds.intersect(bounds);
-                    visible.size.width > px(0.0) && visible.size.height > px(0.0)
-                })
-            {
-                board.borrow_mut().painted(key);
-            }
-        })
-        .into_any_element()
+    measurement::measured(picture, visibility, true)
 }
 
 /// A debug selector for a drawn picture block, stable per top-level block.
@@ -709,6 +905,9 @@ pub(super) fn frame_selector(ix: usize) -> String {
     format!("markdown-picture-frame-{ix}")
 }
 
+#[cfg(test)]
+#[path = "image_performance_tests.rs"]
+mod performance_tests;
 #[cfg(test)]
 #[path = "images_tests.rs"]
 mod tests;

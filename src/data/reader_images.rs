@@ -17,12 +17,16 @@
 //! in-memory cache that dies with the service, and every request carries the
 //! document generation it belongs to so a stale completion can be dropped.
 
+#[path = "reader_image_flights.rs"]
+mod flights;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::content::images::{
-    DecodedImage, ImageCompletion, ImageFailure, ImageLimits, ImageProvider, ImageRefusal,
-    ImageRenderOptions, ImageRequest, ImageScope, ImageSink, ImageTarget,
+    DecodedImage, ImageCompletion, ImageFailure, ImageLimits, ImageMetrics, ImageProvider,
+    ImageRefusal, ImageRenderOptions, ImageRequest, ImageScope, ImageSink, ImageStage, ImageTarget,
+    ImageUpdate, ImageValidity, RenderUpdate, decode_for_renderer,
     decode_image_with_options_checked,
 };
 use crate::data::RepositorySession;
@@ -59,6 +63,7 @@ pub struct RepositoryImageService {
 }
 
 struct Inner {
+    metrics: ImageMetrics,
     session: RepositorySession,
     repository: RepositoryIdentity,
     executor: Arc<BackgroundExecutor>,
@@ -68,6 +73,13 @@ struct Inner {
     repository_limits: RepositoryLimits,
     blob_limits: BlobLimits,
     permits: Arc<tokio::sync::Semaphore>,
+    local_permits: Arc<tokio::sync::Semaphore>,
+    decode_permits: Arc<tokio::sync::Semaphore>,
+    load_permits: Arc<tokio::sync::Semaphore>,
+    snapshots: flights::Flights<RepoSnapshot>,
+    directories: flights::Flights<DirectoryTree>,
+    bytes: flights::Flights<Vec<u8>>,
+    blobs: flights::Flights<Vec<u8>>,
     persistent_cache: Option<ReaderImageCache>,
     /// Scope -> (token, source). One source per reader document generation, so
     /// cancelling one document stops only its own loads.
@@ -77,6 +89,8 @@ struct Inner {
     /// thread, so a test can change the account at exactly that boundary.
     #[cfg(test)]
     publish_probe: Mutex<Option<PublishProbe>>,
+    #[cfg(test)]
+    decode_queue_probe: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 /// Per-service test instrumentation for the decode -> publish boundary.
@@ -199,10 +213,18 @@ impl RepositoryImageService {
         });
         Self {
             inner: Arc::new(Inner {
+                metrics: ImageMetrics::default(),
                 session,
                 repository,
                 executor,
                 external,
+                local_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+                decode_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+                load_permits: Arc::new(tokio::sync::Semaphore::new(limits.max_in_flight.max(1))),
+                snapshots: flights::Flights::default(),
+                directories: flights::Flights::default(),
+                bytes: flights::Flights::default(),
+                blobs: flights::Flights::default(),
                 limits,
                 external_limits,
                 repository_limits: RepositoryLimits::default(),
@@ -213,8 +235,15 @@ impl RepositoryImageService {
                 cache: Mutex::new(ResolutionCache::default()),
                 #[cfg(test)]
                 publish_probe: Mutex::new(None),
+                #[cfg(test)]
+                decode_queue_probe: Mutex::new(None),
             }),
         }
+    }
+
+    /// Aggregate timing/counters contain no resource identifiers.
+    pub fn metrics(&self) -> ImageMetrics {
+        self.inner.metrics.clone()
     }
 
     /// The repository identity this service reads.
@@ -244,33 +273,93 @@ impl RepositoryImageService {
         (ready, release)
     }
 
+    #[allow(clippy::too_many_arguments)] // One bounded job's publication/cancellation context.
     async fn load(
         &self,
         request: &ImageRequest,
         cancel: CancellationToken,
         render_options: ImageRenderOptions,
-    ) -> Result<DecodedImage, ImageFailure> {
+        deadline: tokio::time::Instant,
+        sink: ImageSink,
+        phase: Arc<std::sync::atomic::AtomicU32>,
+        validity: ImageValidity,
+    ) -> Result<Option<DecodedImage>, ImageFailure> {
         // One deadline for the whole load, including decode. A repository
         // picture is several requests (commit, each directory, blob) whose own
         // transport timeouts are per-request; without this, a slow but
         // successful sequence could hold a concurrency permit far past the
         // advertised budget and a host-configured shorter timeout would have no
         // effect on this path at all.
-        let deadline = tokio::time::Instant::now() + self.inner.limits.total_timeout;
+        let mut stale_bytes = None;
+        if sink.supports_updates()
+            && let ImageTarget::External { url } = &request.target
+            && let Some(snapshot) = self.external_cached(url).await?
+            && let Some(remaining_ms) =
+                ExternalFreshness::from_snapshot(&snapshot).stale_window_remaining_ms(now_ms())
+        {
+            let mut stale_validity = validity.clone();
+            stale_validity.expires =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(remaining_ms));
+            let original = Arc::new(snapshot.bytes);
+            let decoded = self
+                .decode_bytes(
+                    request,
+                    cancel.clone(),
+                    render_options,
+                    deadline,
+                    sink.clone(),
+                    phase.clone(),
+                    stale_validity.clone(),
+                    original.clone(),
+                )
+                .await;
+            let may_revalidate = validity.is_current()
+                && !cancel.is_cancelled()
+                && !sink.is_cancelled()
+                && tokio::time::Instant::now() < deadline;
+            match decoded {
+                Ok(decoded) => {
+                    if let Some(decoded) = decoded {
+                        sink.publish_next(
+                            request.scope,
+                            request.key.clone(),
+                            &phase,
+                            false,
+                            Some(stale_validity),
+                            Ok(ImageUpdate::Ready(decoded)),
+                        );
+                    }
+                    stale_bytes = Some(original);
+                }
+                // Optional cache pixels may expire or be unusable without
+                // preventing revalidation while the original controls hold.
+                Err(ImageFailure::StaleContext)
+                    if may_revalidate && !stale_validity.is_current() => {}
+                Err(
+                    ImageFailure::Malformed
+                    | ImageFailure::Unsupported
+                    | ImageFailure::TooLarge { .. }
+                    | ImageFailure::TooManyPixels { .. },
+                ) if may_revalidate => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let service = self.clone();
+        let target = request.target.clone();
         let bytes = tokio::select! {
             biased;
             _ = cancel.clone().cancelled() => return Err(ImageFailure::Cancelled),
             _ = tokio::time::sleep_until(deadline) => return Err(ImageFailure::Timeout),
-            bytes = async {
-                match &request.target {
+            bytes = self.inner.bytes.read(request.target.key().as_str().to_string(), &self.inner.executor, cancel.clone(), self.inner.limits.total_timeout, move |shared_cancel| async move {
+                match &target {
                     ImageTarget::Repository { owner, name, commit, path } => {
-                        self.repository_bytes(owner, name, commit, path, cancel.clone()).await
+                        service.repository_bytes(owner, name, commit, path, shared_cancel).await
                     }
                     ImageTarget::External { url } => {
-                        self.external_bytes(url, cancel.clone()).await
+                        service.external_bytes(url, shared_cancel).await
                     }
                 }
-            } => bytes?,
+            }) => bytes?,
         };
         if cancel.is_cancelled() {
             return Err(ImageFailure::Cancelled);
@@ -278,19 +367,142 @@ impl RepositoryImageService {
         if !self.inner.session.verify() {
             return Err(ImageFailure::StaleContext);
         }
+        if stale_bytes
+            .as_ref()
+            .is_some_and(|original| **original == *bytes)
+        {
+            sink.publish_next(
+                request.scope,
+                request.key.clone(),
+                &phase,
+                false,
+                Some(validity),
+                Ok(ImageUpdate::Validated),
+            );
+            return Ok(None);
+        }
+        if stale_bytes.is_some()
+            && let ImageTarget::External { url } = &request.target
+            && self.external_cached(url).await?.is_none()
+        {
+            sink.publish_next(
+                request.scope,
+                request.key.clone(),
+                &phase,
+                false,
+                None,
+                Ok(ImageUpdate::Discard),
+            );
+        }
+        self.decode_bytes(
+            request,
+            cancel,
+            render_options,
+            deadline,
+            sink,
+            phase,
+            validity,
+            bytes,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // One bounded job's publication/cancellation context.
+    async fn decode_bytes(
+        &self,
+        request: &ImageRequest,
+        cancel: CancellationToken,
+        render_options: ImageRenderOptions,
+        deadline: tokio::time::Instant,
+        sink: ImageSink,
+        phase: Arc<std::sync::atomic::AtomicU32>,
+        validity: ImageValidity,
+        bytes: Arc<Vec<u8>>,
+    ) -> Result<Option<DecodedImage>, ImageFailure> {
+        #[cfg(test)]
+        if let Some(entered) = self
+            .inner
+            .decode_queue_probe
+            .lock()
+            .expect("decode queue probe lock")
+            .take()
+        {
+            let _ = entered.send(());
+        }
+        // Move the permit into the blocking worker: timing out its await must
+        // not release CPU admission while an uninterruptible raster decode runs.
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.clone().cancelled() => return Err(ImageFailure::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => return Err(ImageFailure::Timeout),
+            permit = self.inner.decode_permits.clone().acquire_owned() => permit.map_err(|_| ImageFailure::Cancelled)?,
+        };
         let limits = self.inner.limits.clone();
         let decode_cancel = cancel.clone();
         let decode_deadline = deadline.into_std();
+        let decode_validity = validity.clone();
+        let scope = request.scope;
+        let key = request.key.clone();
+        let metrics = self.inner.metrics.clone();
+        let started = deadline.into_std() - self.inner.limits.total_timeout;
         let decode = tokio::task::spawn_blocking(move || {
-            decode_image_with_options_checked(bytes, &limits, render_options, &|| {
-                if decode_cancel.is_cancelled() {
+            let _decode_timer = metrics.begin(ImageStage::Decode);
+            let sink = sink.with_admission(Arc::new(permit));
+            let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone());
+            let check = || {
+                if !decode_validity.is_current() {
+                    return Err(ImageFailure::StaleContext);
+                }
+                if decode_cancel.is_cancelled() || sink.is_cancelled() {
                     Err(ImageFailure::Cancelled)
                 } else if std::time::Instant::now() >= decode_deadline {
                     Err(ImageFailure::Timeout)
                 } else {
                     Ok(())
                 }
-            })
+            };
+            if sink.supports_updates() {
+                let mut animation_started = None;
+                let decoded =
+                    decode_for_renderer(bytes, &limits, render_options, &check, &mut |update| {
+                        check()?;
+                        let update = match update {
+                            RenderUpdate::First(decoded) => {
+                                metrics.record(ImageStage::FirstReady, started);
+                                animation_started = Some(std::time::Instant::now());
+                                ImageUpdate::Ready(decoded)
+                            }
+                            RenderUpdate::Frames(frames) => ImageUpdate::Frames(frames),
+                        };
+                        sink.publish_next(
+                            scope,
+                            key.clone(),
+                            &phase,
+                            false,
+                            Some(decode_validity.clone()),
+                            Ok(update),
+                        );
+                        Ok(())
+                    });
+                if let Some(started) = animation_started {
+                    metrics.record(ImageStage::Animation, started);
+                }
+                if let Some(decoded) = decoded? {
+                    check()?;
+                    metrics.record(ImageStage::FirstReady, started);
+                    sink.publish_next(
+                        scope,
+                        key,
+                        &phase,
+                        false,
+                        Some(decode_validity),
+                        Ok(ImageUpdate::Ready(decoded)),
+                    );
+                }
+                Ok(None)
+            } else {
+                decode_image_with_options_checked(bytes, &limits, render_options, &check).map(Some)
+            }
         });
         let decoded = tokio::select! {
             biased;
@@ -316,7 +528,7 @@ impl RepositoryImageService {
         // re-checked after the await — staleness outranks the decoded picture,
         // cancellation and worker errors, exactly as `RepositorySession::content`
         // does after its own preparation step.
-        if !self.inner.session.verify() {
+        if !validity.is_current() {
             return Err(ImageFailure::StaleContext);
         }
         if cancel.is_cancelled() {
@@ -349,21 +561,17 @@ impl RepositoryImageService {
             let cache_clone = cache.clone();
             let commit_clone = commit.clone();
             let path_clone = path.to_string();
-            let resolved_sha_res = tokio::task::spawn_blocking(move || {
-                cache_clone.read_resolved_blob(&commit_clone, &path_clone)
-            })
-            .await
-            .map_err(|_| ImageFailure::Network)?;
+            let resolved_sha_res = self
+                .local(move || cache_clone.read_resolved_blob(&commit_clone, &path_clone))
+                .await?;
 
             match resolved_sha_res {
                 Ok(Some(blob_sha)) => {
                     let cache_clone = cache.clone();
                     let sha_for_read = blob_sha.clone();
-                    let cached_bytes_res = tokio::task::spawn_blocking(move || {
-                        cache_clone.read_repository_blob(&sha_for_read)
-                    })
-                    .await
-                    .map_err(|_| ImageFailure::Network)?;
+                    let cached_bytes_res = self
+                        .local(move || cache_clone.read_repository_blob(&sha_for_read))
+                        .await?;
 
                     match cached_bytes_res {
                         Ok(Some(bytes)) => {
@@ -390,31 +598,59 @@ impl RepositoryImageService {
             }
         }
 
+        let resolution_ticket = if let Some(cache) = self.inner.persistent_cache.clone() {
+            let commit = commit.clone();
+            let path = path.to_string();
+            self.local(move || cache.begin_resolution(&commit, &path))
+                .await?
+                .ok()
+        } else {
+            None
+        };
         let snapshot = self.snapshot(&commit, cancel.clone()).await?;
         if snapshot.commit() != &commit {
             return Err(ImageFailure::StaleContext);
         }
         let identity = self.resolve_blob(&snapshot, path, cancel.clone()).await?;
 
-        // Cache resolution mapping in background
-        if let Some(ref cache) = self.inner.persistent_cache {
-            let cache_clone = cache.clone();
-            let commit_clone = commit.clone();
-            let path_clone = path.to_string();
+        // Resolution uses the ticket captured before metadata I/O too.
+        if let (Some(cache), Some(ticket)) =
+            (self.inner.persistent_cache.clone(), resolution_ticket)
+        {
             let blob_sha = identity.blob().clone();
-            tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                let _ = cache_clone.put_resolved_blob(&commit_clone, &path_clone, &blob_sha);
-            }));
+            let _ = self
+                .local(move || cache.put_resolved_blob_with_ticket(ticket, &blob_sha))
+                .await;
         }
 
+        let service = self.clone();
+        let key = identity.blob().as_str().to_string();
+        let bytes = self
+            .inner
+            .blobs
+            .read(
+                key,
+                &self.inner.executor,
+                cancel,
+                self.inner.limits.total_timeout,
+                move |cancel| async move { service.resolved_blob_bytes(identity, cancel).await },
+            )
+            .await?;
+        Ok(Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone()))
+    }
+
+    async fn resolved_blob_bytes(
+        &self,
+        identity: BlobIdentity,
+        cancel: CancellationToken,
+    ) -> Result<Vec<u8>, ImageFailure> {
         // Check persistent cache for blob bytes first
         if let Some(ref cache) = self.inner.persistent_cache {
             let cache_clone = cache.clone();
             let blob_sha = identity.blob().clone();
-            let cached_opt =
-                tokio::task::spawn_blocking(move || cache_clone.read_repository_blob(&blob_sha))
-                    .await
-                    .map_err(|_| ImageFailure::Network)?;
+            let cached_opt = self
+                .local(move || cache_clone.read_repository_blob(&blob_sha))
+                .await?;
 
             match cached_opt {
                 Ok(Some(bytes)) => {
@@ -438,7 +674,7 @@ impl RepositoryImageService {
         let blob_ticket_opt = if let Some(ref cache) = self.inner.persistent_cache {
             let cache_clone = cache.clone();
             let blob_sha = identity.blob().clone();
-            tokio::task::spawn_blocking(move || cache_clone.begin_write_repository_blob(&blob_sha))
+            self.local(move || cache_clone.begin_write_repository_blob(&blob_sha))
                 .await
                 .ok()
                 .and_then(|r| r.ok())
@@ -446,16 +682,21 @@ impl RepositoryImageService {
             None
         };
 
+        let network = self.network_permit(cancel.clone()).await?;
+        let fetch_started = std::time::Instant::now();
         let read = self
             .inner
             .session
-            .blob(&identity, &self.inner.blob_limits, cancel)
+            .image_blob(&identity, &self.inner.blob_limits, cancel)
             .await
             .map_err(map_repository_error)?;
         if !self.inner.session.verify() {
             return Err(ImageFailure::StaleContext);
         }
-        let (_, body) = read.value.into_parts();
+        drop(network);
+        self.inner.metrics.record(ImageStage::Fetch, fetch_started);
+        let (blob, metadata) = read.value;
+        let (_, body) = blob.into_parts();
         match body {
             BlobBody::Bytes(bytes) => {
                 // Persist to cache in background using pre-acquired ticket
@@ -464,9 +705,22 @@ impl RepositoryImageService {
                 {
                     let cache_clone = cache.clone();
                     let bytes_clone = bytes.clone();
-                    tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                        let _ = cache_clone.put_repository_blob_with_ticket(ticket, &bytes_clone);
-                    }));
+                    let outcome = self
+                        .local(move || {
+                            cache_clone.put_repository_blob_response(
+                                ticket,
+                                &bytes_clone,
+                                metadata.cache_control,
+                            )
+                        })
+                        .await?;
+                    if matches!(
+                        outcome,
+                        Err(crate::storage::cache::CacheError::Stale
+                            | crate::storage::cache::CacheError::AccessDenied)
+                    ) {
+                        return Err(ImageFailure::StaleContext);
+                    }
                 }
                 Ok(bytes)
             }
@@ -488,24 +742,39 @@ impl RepositoryImageService {
         {
             return Ok(snapshot);
         }
-        let scoped = self
-            .inner
-            .session
-            .revision(
-                &self.inner.repository,
-                RevisionSpec::Commit(commit.clone()),
-                &self.inner.repository_limits,
+        let service = self.clone();
+        let requested = commit.clone();
+        self.inner
+            .snapshots
+            .read(
+                commit.as_str().into(),
+                &self.inner.executor,
                 cancel,
+                self.inner.limits.total_timeout,
+                move |cancel| async move {
+                    let _network = service.network_permit(cancel.clone()).await?;
+                    let _metadata = service.inner.metrics.begin(ImageStage::Metadata);
+                    let scoped = service
+                        .inner
+                        .session
+                        .revision(
+                            &service.inner.repository,
+                            RevisionSpec::Commit(requested.clone()),
+                            &service.inner.repository_limits,
+                            cancel,
+                        )
+                        .await
+                        .map_err(map_repository_error)?;
+                    service
+                        .inner
+                        .cache
+                        .lock()
+                        .expect("image cache")
+                        .put_snapshot(requested, Arc::new(scoped.value.clone()));
+                    Ok(scoped.value)
+                },
             )
             .await
-            .map_err(map_repository_error)?;
-        let snapshot = Arc::new(scoped.value);
-        self.inner
-            .cache
-            .lock()
-            .expect("image cache")
-            .put_snapshot(commit.clone(), snapshot.clone());
-        Ok(snapshot)
     }
 
     async fn directory(
@@ -527,19 +796,34 @@ impl RepositoryImageService {
         {
             return Ok(tree);
         }
-        let scoped = self
-            .inner
-            .session
-            .directory(handle, &self.inner.repository_limits, cancel)
-            .await
-            .map_err(map_repository_error)?;
-        let tree = Arc::new(scoped.value);
+        let service = self.clone();
+        let handle = handle.clone();
         self.inner
-            .cache
-            .lock()
-            .expect("image cache")
-            .put_directory(key, tree.clone());
-        Ok(tree)
+            .directories
+            .read(
+                key.clone(),
+                &self.inner.executor,
+                cancel,
+                self.inner.limits.total_timeout,
+                move |cancel| async move {
+                    let _network = service.network_permit(cancel.clone()).await?;
+                    let _metadata = service.inner.metrics.begin(ImageStage::Metadata);
+                    let scoped = service
+                        .inner
+                        .session
+                        .directory(&handle, &service.inner.repository_limits, cancel)
+                        .await
+                        .map_err(map_repository_error)?;
+                    service
+                        .inner
+                        .cache
+                        .lock()
+                        .expect("image cache")
+                        .put_directory(key, Arc::new(scoped.value.clone()));
+                    Ok(scoped.value)
+                },
+            )
+            .await
     }
 
     /// Resolves a repository-relative picture path at the snapshot's commit.
@@ -585,155 +869,212 @@ impl RepositoryImageService {
         Err(ImageFailure::NotFound)
     }
 
+    fn validity(&self, target: &ImageTarget) -> Result<ImageValidity, ImageFailure> {
+        let authorization = self
+            .inner
+            .persistent_cache
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .store()
+                    .authorization(
+                        cache.scope(),
+                        match target {
+                            ImageTarget::Repository { .. } => cache.repo_numeric_id(),
+                            ImageTarget::External { .. } => None,
+                        },
+                    )
+                    .ok_or(ImageFailure::StaleContext)
+            })
+            .transpose()?;
+        let session = self.inner.session.clone();
+        Ok(ImageValidity::new(
+            move || {
+                session.verify()
+                    && authorization
+                        .as_ref()
+                        .is_none_or(|token| token.is_current())
+            },
+            None,
+        ))
+    }
+
+    async fn network_permit(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ImageFailure> {
+        let _queue = self.inner.metrics.begin(ImageStage::Queue);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(ImageFailure::Cancelled),
+            permit = self.inner.permits.clone().acquire_owned() => permit.map_err(|_| ImageFailure::Cancelled),
+        }
+    }
+
     async fn external_bytes(
         &self,
         url: &str,
         cancel: CancellationToken,
     ) -> Result<Vec<u8>, ImageFailure> {
-        let limits = self.inner.external_limits.clone();
-
-        if let Some(ref cache) = self.inner.persistent_cache {
-            let cache_clone = cache.clone();
-            let url_string = url.to_string();
-            let cached_snapshot =
-                tokio::task::spawn_blocking(move || cache_clone.read_external_image(&url_string))
-                    .await
-                    .map_err(|_| ImageFailure::Network)?;
-
-            if let Ok(Some(snapshot)) = cached_snapshot {
-                let age_secs = snapshot
-                    .metadata
-                    .cache_control
-                    .as_deref()
-                    .and_then(|cc| {
-                        cc.split(',').find_map(|p| {
-                            let p = p.trim();
-                            p.strip_prefix("githux-age=")
-                                .and_then(|v| v.trim().parse::<u64>().ok())
-                        })
-                    })
-                    .unwrap_or(0);
-
-                let freshness = ExternalFreshness {
-                    etag: snapshot.metadata.etag.clone(),
-                    last_modified: snapshot.metadata.last_modified.clone(),
-                    cache_control: snapshot.metadata.cache_control.clone(),
-                    fetched_at_ms: snapshot.metadata.fetched_at_ms,
-                    verified_at_ms: snapshot.metadata.verified_at_ms,
-                    age_secs,
-                };
-
-                let now = now_ms();
-                if freshness.is_fresh_at(now) {
-                    return Ok(snapshot.bytes);
-                }
-
-                // Stale or needs revalidation: capture write ticket BEFORE network await
-                let ticket_res = {
-                    let cache_clone = cache.clone();
-                    let url_string = url.to_string();
-                    tokio::task::spawn_blocking(move || {
-                        cache_clone.begin_write_external(&url_string)
-                    })
-                    .await
-                    .map_err(|_| ImageFailure::Network)?
-                };
-
-                let validation = ValidationHeaders {
-                    if_none_match: freshness.etag.as_deref(),
-                    if_modified_since: freshness.last_modified.as_deref(),
-                };
-
-                let response = self
-                    .inner
-                    .external
-                    .load_with_metadata(url, &limits, validation, cancel.clone())
-                    .await;
-
-                match response {
-                    Ok(ExternalImageResponse::NotModified { metadata }) => {
-                        let cache_clone = cache.clone();
-                        let snap = snapshot.clone();
-                        if let Ok(ticket) = ticket_res {
-                            tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                                let _ = cache_clone
-                                    .revalidate_external_image_with_ticket(ticket, snap, &metadata);
-                            }));
-                        }
-                        return Ok(snapshot.bytes);
-                    }
-                    Ok(ExternalImageResponse::Fetched { bytes, metadata }) => {
-                        let cache_clone = cache.clone();
-                        let bytes_clone = bytes.clone();
-                        let meta = metadata.clone();
-                        if let Ok(ticket) = ticket_res {
-                            tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                                let _ = cache_clone.put_external_image_with_ticket(
-                                    ticket,
-                                    &bytes_clone,
-                                    &meta,
-                                );
-                            }));
-                        }
-                        return Ok(bytes);
-                    }
-                    Err(ExternalImageError::Status(404)) => {
-                        let cache_clone = cache.clone();
-                        if let Ok(ticket) = ticket_res {
-                            tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                                let _ = cache_clone.invalidate_external_image_with_ticket(ticket);
-                            }));
-                        }
-                        return Err(ImageFailure::NotFound);
-                    }
-                    Err(e) => {
-                        return Err(map_external_error(e));
-                    }
-                }
+        self.external_bytes_attempt(url, cancel, true).await
+    }
+    fn external_bytes_attempt<'a>(
+        &'a self,
+        url: &'a str,
+        cancel: CancellationToken,
+        allow_cached: bool,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<u8>, ImageFailure>> + Send + 'a>> {
+        Box::pin(async move {
+            let cached = if allow_cached {
+                self.external_cached(url).await?
+            } else {
+                None
+            };
+            if let Some(snapshot) = &cached
+                && ExternalFreshness::from_snapshot(snapshot).is_fresh_at(now_ms())
+            {
+                return Ok(snapshot.bytes.clone());
             }
-        }
-
-        // Cache miss or no cache configured: capture write ticket before network load
-        let ticket_opt = if let Some(ref cache) = self.inner.persistent_cache {
-            let cache_clone = cache.clone();
-            let url_string = url.to_string();
-            tokio::task::spawn_blocking(move || cache_clone.begin_write_external(&url_string))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-        } else {
-            None
+            let ticket = if let Some(cache) = self.inner.persistent_cache.clone() {
+                let url = url.to_string();
+                self.local(move || cache.begin_write_external(&url))
+                    .await?
+                    .ok()
+            } else {
+                None
+            };
+            let freshness = cached.as_ref().map(ExternalFreshness::from_snapshot);
+            let validation = ValidationHeaders {
+                if_none_match: freshness.as_ref().and_then(|f| f.etag.as_deref()),
+                if_modified_since: freshness.as_ref().and_then(|f| f.last_modified.as_deref()),
+            };
+            let network = self.network_permit(cancel.clone()).await?;
+            let fetch_started = std::time::Instant::now();
+            let response = self
+                .inner
+                .external
+                .load_with_metadata(url, &self.inner.external_limits, validation, cancel.clone())
+                .await;
+            drop(network);
+            self.inner.metrics.record(ImageStage::Fetch, fetch_started);
+            match response {
+                Ok(ExternalImageResponse::Fetched { bytes, metadata }) => {
+                    if let (Some(cache), Some(ticket)) =
+                        (self.inner.persistent_cache.clone(), ticket)
+                    {
+                        let saved = bytes.clone();
+                        let outcome = self
+                            .local(move || {
+                                cache.put_external_image_with_ticket(ticket, &saved, &metadata)
+                            })
+                            .await?;
+                        if matches!(
+                            outcome,
+                            Err(crate::storage::cache::CacheError::Stale
+                                | crate::storage::cache::CacheError::AccessDenied)
+                        ) {
+                            return Err(ImageFailure::StaleContext);
+                        }
+                    }
+                    Ok(bytes)
+                }
+                Ok(ExternalImageResponse::NotModified { metadata }) => {
+                    let Some(snapshot) = cached else {
+                        if allow_cached {
+                            return Box::pin(self.external_bytes_attempt(url, cancel, false)).await;
+                        }
+                        return Err(ImageFailure::Network);
+                    };
+                    let current = self.external_cached(url).await?;
+                    if current.as_ref().is_none_or(|current| {
+                        current.bytes != snapshot.bytes
+                            || current.metadata.etag != snapshot.metadata.etag
+                            || current.metadata.last_modified != snapshot.metadata.last_modified
+                            || current.metadata.cache_control != snapshot.metadata.cache_control
+                    }) {
+                        if allow_cached {
+                            return Box::pin(self.external_bytes_attempt(url, cancel, false)).await;
+                        }
+                        return Err(ImageFailure::Network);
+                    }
+                    let bytes = snapshot.bytes.clone();
+                    if let (Some(cache), Some(ticket)) =
+                        (self.inner.persistent_cache.clone(), ticket)
+                    {
+                        let url = url.to_string();
+                        let outcome = self
+                            .local(move || {
+                                cache.revalidate_external_image_with_ticket(
+                                    ticket, &url, snapshot, &metadata,
+                                )
+                            })
+                            .await?;
+                        if matches!(
+                            outcome,
+                            Err(crate::storage::cache::CacheError::Stale
+                                | crate::storage::cache::CacheError::AccessDenied)
+                        ) {
+                            return Err(ImageFailure::StaleContext);
+                        }
+                    }
+                    Ok(bytes)
+                }
+                Err(ExternalImageError::Status(404)) => {
+                    if let (Some(cache), Some(ticket)) =
+                        (self.inner.persistent_cache.clone(), ticket)
+                    {
+                        let _ = self
+                            .local(move || cache.invalidate_external_image_with_ticket(ticket))
+                            .await;
+                    }
+                    Err(ImageFailure::NotFound)
+                }
+                Err(ExternalImageError::NoStore(_)) => {
+                    if let (Some(cache), Some(ticket)) =
+                        (self.inner.persistent_cache.clone(), ticket)
+                    {
+                        let _ = self
+                            .local(move || cache.invalidate_external_image_with_ticket(ticket))
+                            .await;
+                    }
+                    Err(ImageFailure::Invalidated)
+                }
+                Err(error) => Err(map_external_error(error)),
+            }
+        })
+    }
+    async fn external_cached(
+        &self,
+        url: &str,
+    ) -> Result<Option<crate::domain::cache::CacheSnapshot>, ImageFailure> {
+        let Some(cache) = self.inner.persistent_cache.clone() else {
+            return Ok(None);
         };
-
-        let response = self
-            .inner
-            .external
-            .load_with_metadata(url, &limits, ValidationHeaders::default(), cancel)
-            .await
-            .map_err(map_external_error)?;
-
-        match response {
-            ExternalImageResponse::Fetched { bytes, metadata } => {
-                if let Some(ref cache) = self.inner.persistent_cache
-                    && let Some(ticket) = ticket_opt
-                {
-                    let cache_clone = cache.clone();
-                    let bytes_clone = bytes.clone();
-                    tokio::task::spawn(tokio::task::spawn_blocking(move || {
-                        let _ = cache_clone.put_external_image_with_ticket(
-                            ticket,
-                            &bytes_clone,
-                            &metadata,
-                        );
-                    }));
-                }
-                Ok(bytes)
-            }
-            ExternalImageResponse::NotModified { .. } => {
-                // 304 without prior cached snapshot is an invalid condition
-                Err(ImageFailure::Network)
-            }
+        let url = url.to_string();
+        match self.local(move || cache.read_external_image(&url)).await? {
+            Ok(snapshot) => Ok(snapshot),
+            Err(crate::storage::cache::CacheError::AccessDenied) => Err(ImageFailure::StaleContext),
+            Err(_) => Ok(None),
         }
+    }
+    async fn local<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, ImageFailure> {
+        let _cache_timer = self.inner.metrics.begin(ImageStage::Cache);
+        let permit = self
+            .inner
+            .local_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ImageFailure::Cancelled)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+        .map_err(|_| ImageFailure::Network)
     }
 }
 
@@ -759,13 +1100,47 @@ impl ImageProvider for RepositoryImageService {
         let key = request.key.clone();
         let failure_sink = sink.clone();
         let failure_key = key.clone();
+        let deadline = tokio::time::Instant::now() + self.inner.limits.total_timeout;
+        let admission = self.inner.load_permits.clone();
+        let validity = self.validity(&request.target);
         let spawned = self.inner.executor.handle().spawn(async move {
-            let _permit = this.inner.permits.clone().acquire_owned().await;
-            let result = this.load(&request, token.clone(), options).await;
+            let phase = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let valid = validity.as_ref().ok().cloned();
+            let result = match validity {
+                Ok(validity) => tokio::select! {
+                    biased;
+                    _ = token.clone().cancelled() => Err(ImageFailure::Cancelled),
+                    _ = sink.cancelled() => Err(ImageFailure::Cancelled),
+                    result = tokio::time::timeout_at(deadline, async {
+                        let _admission = admission.acquire_owned().await.map_err(|_| ImageFailure::Cancelled)?;
+                        this.load(&request, token.clone(), options, deadline, sink.clone(), phase.clone(), validity).await
+                    }) => result.unwrap_or(Err(ImageFailure::Timeout)),
+                },
+                Err(error) => Err(error),
+            };
             if token.is_cancelled() {
                 return;
             }
-            sink.push(ImageCompletion { scope, key, result });
+            if sink.supports_updates() {
+                if matches!(result, Ok(Some(_))) { this.inner.metrics.record(ImageStage::FirstReady, deadline.into_std() - this.inner.limits.total_timeout); }
+                let result =
+                    result.map(|decoded| decoded.map_or(ImageUpdate::Finished, ImageUpdate::Ready));
+                let terminal_validity = result.is_ok().then_some(valid).flatten();
+                sink.publish_next(
+                    scope,
+                    key,
+                    &phase,
+                    true,
+                    terminal_validity,
+                    result,
+                );
+            } else {
+                sink.push(ImageCompletion {
+                    scope,
+                    key,
+                    result: result.and_then(|decoded| decoded.ok_or(ImageFailure::Malformed)),
+                });
+            }
         });
         if spawned.is_err() {
             failure_sink.push(ImageCompletion {
@@ -830,6 +1205,7 @@ fn map_external_error(error: ExternalImageError) -> ImageFailure {
         ExternalImageError::Timeout => ImageFailure::Timeout,
         ExternalImageError::Network => ImageFailure::Network,
         ExternalImageError::TooLarge { limit } => ImageFailure::TooLarge { limit },
+        ExternalImageError::NoStore(_) => ImageFailure::Invalidated,
         ExternalImageError::Cancelled => ImageFailure::Cancelled,
     }
 }

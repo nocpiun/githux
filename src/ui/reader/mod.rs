@@ -115,6 +115,7 @@ use ely_core::{
     primitives::{Icon, IconName},
     theme::{ActiveTheme, IconSize, TextSize},
 };
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, div,
@@ -288,11 +289,13 @@ pub struct ReaderView {
     /// Whether the pump loop is alive. The loop clears this when it settles
     /// instead of dropping its own `Task`, which would cancel it mid-poll.
     pump_running: bool,
+    pump_waiting_for_expiry: bool,
     /// Incremented for every document generation; a completion for any other
     /// generation is discarded. Paired with a per-reader id so two readers
     /// sharing one provider never cancel or accept each other's work.
     image_generation: u64,
     image_limits: ImageLimits,
+    image_window: gpui::AnyWindowHandle,
 }
 
 impl ReaderView {
@@ -315,6 +318,9 @@ impl ReaderView {
                 provider.cancel(view.image_scope());
             }
             view.stop_image_pump();
+            view.images.borrow_mut().retire_all();
+            view.images.borrow_mut().cancel_request_sinks();
+            view.flush_retired_images(cx);
         })
         .detach();
         let image_limits = ImageLimits::default();
@@ -333,6 +339,7 @@ impl ReaderView {
             scroll_clock: ScrollClock::new(),
             images: std::rc::Rc::new(std::cell::RefCell::new({
                 let mut board = images::ImageBoard::new(image_limits.clone());
+                board.manage_geometry();
                 board.set_render_options(ImageRenderOptions::for_device_scale(
                     window.scale_factor(),
                 ));
@@ -341,8 +348,10 @@ impl ReaderView {
             image_provider: None,
             image_pump: None,
             pump_running: false,
+            pump_waiting_for_expiry: false,
             image_generation: 0,
             image_limits,
+            image_window: window.window_handle(),
             _activation: cx.observe_window_activation(window, |view, window, cx| {
                 if !window.is_window_active() {
                     view.cancel_scroll(cx);
@@ -462,6 +471,7 @@ impl ReaderView {
             board.advance(generation);
             board.set_attached(attached);
         }
+        self.flush_retired_images(cx);
         cx.notify();
     }
 
@@ -478,9 +488,13 @@ impl ReaderView {
         }
         self.stop_image_pump();
         self.image_limits = limits.clone();
+        self.images.borrow_mut().retire_all();
+        self.images.borrow_mut().cancel_request_sinks();
+        self.flush_retired_images(cx);
         let attached = self.image_provider.is_some();
         let density = self.images.borrow().render_options();
         self.images = std::rc::Rc::new(std::cell::RefCell::new(images::ImageBoard::new(limits)));
+        self.images.borrow_mut().manage_geometry();
         self.images.borrow_mut().set_render_options(density);
         self.images.borrow_mut().set_attached(attached);
         self.image_generation = self.image_generation.wrapping_add(1);
@@ -510,6 +524,15 @@ impl ReaderView {
             .borrow()
             .state(key)
             .map(|state| state.label().to_string())
+    }
+
+    #[cfg(test)]
+    pub fn image_memory_debug(&self) -> (usize, usize, u64, u64) {
+        self.images.borrow().memory_debug()
+    }
+    #[cfg(test)]
+    pub fn image_grid_debug(&self, key: &ImageKey) -> Option<u32> {
+        self.images.borrow().grid_debug(key)
     }
 
     /// How many picture sources the current generation knows about.
@@ -778,19 +801,25 @@ impl ReaderView {
     fn ensure_image_pump(&mut self, cx: &mut Context<Self>) {
         if self.image_provider.is_none() {
             self.images.borrow_mut().clear_pending();
+            self.flush_retired_images(cx);
             self.stop_image_pump();
             return;
         }
         self.dispatch_images(cx);
+        if self.pump_waiting_for_expiry && self.images.borrow().active_work() {
+            self.stop_image_pump();
+        }
         if self.pump_running || !self.images.borrow().work_outstanding() {
             return;
         }
         self.pump_running = true;
+        self.pump_waiting_for_expiry = !self.images.borrow().active_work();
         self.image_pump = Some(cx.spawn(async move |view: WeakEntity<Self>, cx| {
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(20))
-                    .await;
+                let delay = view
+                    .update(cx, |view, _| view.images.borrow().next_wake())
+                    .unwrap_or(std::time::Duration::from_millis(20));
+                cx.background_executor().timer(delay).await;
                 let more = view
                     .update(cx, |view, cx| view.pump_images(cx))
                     .unwrap_or(false);
@@ -821,6 +850,7 @@ impl ReaderView {
         }
         self.dispatch_images(cx);
         let more = self.images.borrow().work_outstanding();
+        self.pump_waiting_for_expiry = more && !self.images.borrow().active_work();
         if !more {
             // Only the flag: the running loop reads it and exits on its own, so
             // dropping the `Task` can never cancel the future mid-poll.
@@ -834,18 +864,25 @@ impl ReaderView {
     fn stop_image_pump(&mut self) {
         self.image_pump = None;
         self.pump_running = false;
+        self.pump_waiting_for_expiry = false;
     }
 
     /// Applies finished loads. A completion from another generation, another
     /// reader or a replaced document is dropped without touching state.
     fn drain_images(&mut self, cx: &mut Context<Self>) {
-        let completions = self.images.borrow().sink().drain();
-        if completions.is_empty() {
+        let completions = self.images.borrow().sink().drain_events();
+        let invalid = self.images.borrow_mut().revoke_invalid();
+        if completions.is_empty() && invalid.is_empty() {
             return;
         }
-        let mut changed = false;
+        let mut changed = !invalid.is_empty();
+        if let Some(document) = self.markdown().cloned() {
+            for block in invalid {
+                document.update(cx, |document, cx| document.remeasure_block(block, cx));
+            }
+        }
         for completion in completions {
-            let blocks = self.images.borrow_mut().apply(completion);
+            let blocks = self.images.borrow_mut().apply_event(completion);
             if blocks.is_empty() {
                 continue;
             }
@@ -861,24 +898,44 @@ impl ReaderView {
         }
     }
 
+    fn flush_retired_images(&self, cx: &mut App) {
+        let retired = self.images.borrow_mut().take_retired();
+        if retired.is_empty() {
+            return;
+        }
+        let handle = self.image_window;
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, move |_, window, cx| {
+                images::release_retired(retired, window, cx)
+            });
+        });
+    }
+
     /// Hands queued requests to the provider, bounded by the in-flight budget.
     fn dispatch_images(&mut self, cx: &mut Context<Self>) {
         let Some(provider) = self.image_provider.clone() else {
             return;
         };
-        let (requests, sink, options) = {
+        let requests = {
             let mut board = self.images.borrow_mut();
             let max = board.limits().max_in_flight.max(1);
-            (
-                board.take_pending(max),
-                board.sink(),
-                board.render_options(),
-            )
+            board.take_pending(max)
         };
         for request in requests {
-            provider.start_with_options(request, sink.clone(), options);
+            let (sink, options) = {
+                let board = self.images.borrow();
+                (
+                    board.request_sink(&request.key),
+                    board.options_for(&request.key),
+                )
+            };
+            provider.start_with_options(request, sink, options);
         }
+        self.evict_images(cx);
+    }
+    fn evict_images(&mut self, cx: &mut Context<Self>) {
         let released = self.images.borrow_mut().evict();
+        self.flush_retired_images(cx);
         if !released.is_empty() {
             if let Some(document) = self.markdown().cloned() {
                 for block in released {
@@ -936,6 +993,9 @@ impl ReaderView {
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drain_images(cx);
+        self.evict_images(cx);
+        self.flush_retired_images(cx);
         let density = ImageRenderOptions::for_device_scale(window.scale_factor());
         if self.images.borrow().render_options() != density {
             let scope = self.images.borrow().scope();
@@ -1116,6 +1176,7 @@ impl Render for ReaderView {
         // provider without needing an unrelated redraw. It covers both the
         // bounded viewport and the natural-height presentation.
         let demand = cx.entity().downgrade();
+        let flow = self.markdown_layout.is_flow();
         // Flow means the reader is one section of a larger host page, so the host owns the page
         // background. Painting the reader surface there would show as an opaque slab inside an
         // otherwise transparent section; bounded and Repository layouts keep their existing
@@ -1128,6 +1189,7 @@ impl Render for ReaderView {
         let element = div()
             .debug_selector(|| "reader".to_string())
             .size_full()
+            .when(flow, |element| element.h_auto().flex_none())
             .min_h_0()
             .bg(background)
             .text_color(theme.colors.fg)
@@ -1148,12 +1210,6 @@ impl Render for ReaderView {
             .child(body)
             .child(lifetime)
             .into_any_element();
-        // Dispatch synchronously too: picture demand is complete by the time
-        // `body` was built above, so the request starts in this frame. Spawning
-        // a task is left to the deferred hook, because a draw must not spawn.
-        if self.image_provider.is_some() {
-            self.dispatch_images(cx);
-        }
-        element
+        images::viewport(element, self.images.clone(), flow)
     }
 }

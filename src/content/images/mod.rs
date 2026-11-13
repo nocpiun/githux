@@ -22,20 +22,27 @@
 //!   account/authorization check. A completion carries the generation it was
 //!   requested under so a stale result can never be published into a newer
 //!   document.
-//! * No cache is shared between readers. Two readers showing the same picture
-//!   have independent state, independent cancellation and independent memory.
+//! * Readers own independent decoded state, cancellation and retained pixels.
+//!   A captured provider may coalesce metadata/byte reads within its session;
+//!   it never shares decoded authorization or cancellation across readers.
 
 mod decode;
 mod fonts;
+mod metrics;
+mod publication;
+#[allow(unused_imports)]
+pub use metrics::{ImageMetrics, ImageStage};
 mod render_options;
+pub use publication::{ImageEvent, ImageUpdate, ImageValidity};
 pub use render_options::ImageRenderOptions;
 mod timeline;
 mod workspace;
 
 #[allow(unused_imports)]
 pub use decode::{
-    DecodedAnimation, DecodedFrame, DecodedImage, DecodedPixels, ImageFormat, decode_image,
-    decode_image_checked, decode_image_with_options_checked, detect_format, is_svg_like,
+    DecodedAnimation, DecodedFrame, DecodedImage, DecodedPixels, DecodedRasterFrame, ImageFormat,
+    RenderUpdate, decode_for_renderer, decode_image, decode_image_checked,
+    decode_image_with_options_checked, detect_format, is_svg_like,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,6 +142,8 @@ pub enum ImageFailure {
     NoProvider,
     /// The account/authorization this read started under is no longer current.
     StaleContext,
+    /// Cached representation was explicitly invalidated by response policy.
+    Invalidated,
     /// The object does not exist, or is not an ordinary file.
     NotFound,
     /// The read was cancelled (document replaced, reader hidden, window closed).
@@ -160,6 +169,7 @@ impl ImageFailure {
             Self::Refused(reason) => reason.label(),
             Self::NoProvider => "no image service attached",
             Self::StaleContext => "authorization changed",
+            Self::Invalidated => "picture invalidated",
             Self::NotFound => "picture not found",
             Self::Cancelled => "load cancelled",
             Self::Timeout => "picture timed out",
@@ -175,7 +185,11 @@ impl ImageFailure {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Network | Self::Timeout | Self::Cancelled | Self::StaleContext
+            Self::Network
+                | Self::Timeout
+                | Self::Cancelled
+                | Self::StaleContext
+                | Self::Invalidated
         )
     }
 }
@@ -263,9 +277,22 @@ pub struct ImageCompletion {
 /// beat. The queue is never awaited, so a completion that lands between two
 /// drains is simply picked up by the next one — it cannot be lost, and no
 /// cross-thread wake-up is needed.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ImageSink {
-    completions: Arc<Mutex<Vec<ImageCompletion>>>,
+    completions: Arc<Mutex<Vec<ImageEvent>>>,
+    request: u64,
+    admission: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    gate: Arc<tokio::sync::watch::Sender<bool>>,
+}
+impl Default for ImageSink {
+    fn default() -> Self {
+        Self {
+            completions: Arc::default(),
+            request: 0,
+            admission: None,
+            gate: Arc::new(tokio::sync::watch::channel(true).0),
+        }
+    }
 }
 
 impl ImageSink {
@@ -273,15 +300,129 @@ impl ImageSink {
         Self::default()
     }
 
-    pub fn push(&self, completion: ImageCompletion) {
-        self.completions
-            .lock()
-            .expect("image completion queue")
-            .push(completion);
+    pub fn for_request(&self, request: u64) -> Self {
+        Self {
+            completions: self.completions.clone(),
+            request,
+            admission: self.admission.clone(),
+            gate: Arc::new(tokio::sync::watch::channel(true).0),
+        }
     }
-
-    pub fn drain(&self) -> Vec<ImageCompletion> {
+    pub fn with_admission(&self, admission: Arc<tokio::sync::OwnedSemaphorePermit>) -> Self {
+        Self {
+            completions: self.completions.clone(),
+            request: self.request,
+            admission: Some(admission),
+            gate: self.gate.clone(),
+        }
+    }
+    pub fn is_cancelled(&self) -> bool {
+        !*self.gate.borrow()
+    }
+    pub fn cancel(&self) {
+        let mut queue = self.completions.lock().expect("image completion queue");
+        self.gate.send_replace(false);
+        queue.retain(|event| event.request != self.request);
+    }
+    pub async fn cancelled(&self) {
+        let mut gate = self.gate.subscribe();
+        loop {
+            if !*gate.borrow() {
+                return;
+            }
+            if gate.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+    pub fn supports_updates(&self) -> bool {
+        self.request != 0
+    }
+    pub fn publish(
+        &self,
+        scope: ImageScope,
+        key: ImageKey,
+        phase: u32,
+        terminal: bool,
+        validity: Option<ImageValidity>,
+        result: Result<ImageUpdate, ImageFailure>,
+    ) {
+        self.publish_with(scope, key, || phase, terminal, validity, result);
+    }
+    pub(crate) fn publish_next(
+        &self,
+        scope: ImageScope,
+        key: ImageKey,
+        phase: &std::sync::atomic::AtomicU32,
+        terminal: bool,
+        validity: Option<ImageValidity>,
+        result: Result<ImageUpdate, ImageFailure>,
+    ) {
+        self.publish_with(
+            scope,
+            key,
+            || phase.fetch_add(1, Ordering::Relaxed),
+            terminal,
+            validity,
+            result,
+        );
+    }
+    fn publish_with(
+        &self,
+        scope: ImageScope,
+        key: ImageKey,
+        phase: impl FnOnce() -> u32,
+        terminal: bool,
+        validity: Option<ImageValidity>,
+        result: Result<ImageUpdate, ImageFailure>,
+    ) {
+        let mut queue = self.completions.lock().expect("image completion queue");
+        if self.is_cancelled() {
+            return;
+        }
+        // Allocate only while holding the enqueue lock. A timeout publisher
+        // cannot overtake a decoder paused after reserving its phase.
+        let phase = phase();
+        queue.push(ImageEvent {
+            scope,
+            key,
+            request: self.request,
+            phase,
+            terminal,
+            validity,
+            _admission: self.admission.clone(),
+            result,
+        });
+    }
+    pub fn push(&self, completion: ImageCompletion) {
+        self.publish(
+            completion.scope,
+            completion.key,
+            0,
+            true,
+            None,
+            completion.result.map(ImageUpdate::Ready),
+        );
+    }
+    pub fn drain_events(&self) -> Vec<ImageEvent> {
         std::mem::take(&mut *self.completions.lock().expect("image completion queue"))
+    }
+    pub fn drain(&self) -> Vec<ImageCompletion> {
+        self.drain_events()
+            .into_iter()
+            .filter_map(|event| {
+                let result = match event.result {
+                    Ok(ImageUpdate::Ready(decoded)) => Ok(decoded),
+                    Err(error) => Err(error),
+                    _ => return None,
+                };
+                Some(ImageCompletion {
+                    scope: event.scope,
+                    key: event.key,
+                    result,
+                })
+            })
+            .collect()
     }
 }
 
@@ -312,6 +453,8 @@ pub trait ImageProvider: Send + Sync + 'static {
     fn cancel(&self, scope: ImageScope);
 }
 
+#[cfg(test)]
+mod performance_tests;
 #[cfg(test)]
 mod quality_tests;
 #[cfg(test)]

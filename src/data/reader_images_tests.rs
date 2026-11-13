@@ -24,6 +24,9 @@ use crate::network::transport::{
 };
 use serde_json::json;
 
+#[path = "reader_image_performance_tests.rs"]
+mod performance_tests;
+
 const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ROOT: &str = "1111111111111111111111111111111111111111";
 const DOCS_TREE: &str = "2222222222222222222222222222222222222222";
@@ -1200,20 +1203,17 @@ fn assert_good(completion: ImageCompletion) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_images_fail_without_blocking_other_images_or_context() {
-    // start() spawns independent tasks on the real background executor. Hold
-    // both commit reads before either can fill the shared resolution cache,
-    // then reverse their order at the tree boundary. Exercise both start orders.
+    // Both start orders share the gated commit and root reads. A missing
+    // sibling must not block the readable blob or invalidate the context.
     for first in ["missing", "good"] {
         let (fixture, service) = missing_image_fixture().await;
         let commit_path = format!("/repos/octo/repo/commits/{COMMIT}");
         let tree_path = format!("/repos/octo/repo/git/trees/{ROOT}");
-        let (commit1, release_commit1) = fixture.transport.gate(&commit_path);
-        let (commit2, release_commit2) = fixture.transport.gate(&commit_path);
-        let (tree1, release_tree1) = fixture.transport.gate(&tree_path);
-        let (tree2, release_tree2) = fixture.transport.gate(&tree_path);
+        let (commit, release_commit) = fixture.transport.gate(&commit_path);
+        let (tree, release_tree) = fixture.transport.gate(&tree_path);
 
         let first_sink = start_picture(&service, first);
-        request_entered(commit1).await;
+        request_entered(commit).await;
         let second_sink = start_picture(
             &service,
             if first == "missing" {
@@ -1222,16 +1222,27 @@ async fn missing_images_fail_without_blocking_other_images_or_context() {
                 "missing"
             },
         );
-        request_entered(commit2).await;
+        for _ in 0..500 {
+            if service.inner.snapshots.waiters(COMMIT) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(service.inner.snapshots.waiters(COMMIT), 2);
         assert!(first_sink.drain().is_empty());
         assert!(second_sink.drain().is_empty(), "both loads are in flight");
 
-        release_commit2.send(()).unwrap();
-        request_entered(tree1).await;
-        release_commit1.send(()).unwrap();
-        request_entered(tree2).await;
-        release_tree2.send(()).unwrap();
-        release_tree1.send(()).unwrap();
+        release_commit.send(()).unwrap();
+        request_entered(tree).await;
+        let directory_key = format!("{COMMIT}:");
+        for _ in 0..500 {
+            if service.inner.directories.waiters(&directory_key) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(service.inner.directories.waiters(&directory_key), 2);
+        release_tree.send(()).unwrap();
 
         let (missing, good) = if first == "missing" {
             (&first_sink, &second_sink)
@@ -1248,16 +1259,16 @@ async fn missing_images_fail_without_blocking_other_images_or_context() {
             "missing image preserves the account context"
         );
         let urls = fixture.transport.urls();
-        assert_eq!(urls.len(), 5, "two commits, two trees, one blob: {urls:?}");
+        assert_eq!(urls.len(), 3, "one shared commit, tree and blob: {urls:?}");
         assert_eq!(
             urls.iter()
                 .filter(|url| url.ends_with(&commit_path))
                 .count(),
-            2
+            1
         );
         assert_eq!(
             urls.iter().filter(|url| url.ends_with(&tree_path)).count(),
-            2
+            1
         );
     }
 }

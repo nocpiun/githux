@@ -178,3 +178,24 @@
 - **原因**：`reader-table-images` 修复前，`ast.rs` 的 `in_cell` 分支刻意保留 alt 文本，于是公开 README 的 Screenshots 表格只显示 “Dashboard/Monitor” 而看不到截图，负责人只能看到文字；主题文档也确实把“表格内图片不加载”写成边界，但没有阻止功能被当成“已支持表格图片”。修复时若只改渲染器、不让 `DocText` 用同一份切分，cell 内的图片会多出一个未登记单元，后续 cell 的选区与 Ctrl+C 都会错一截。
 - **证据**：2026-11-11 `reader-table-images` 的 `ast::CellImage` + `cell_parts` 同时被 `doctext::DocText::cell` 与 `document::MarkdownView::table_cell` 使用，回归 `a_picture_cell_registers_one_unit_per_piece`、`copying_a_table_with_pictures_keeps_the_cell_text_and_tabs` 与 `screenshot_table_cells_draw_their_pictures_and_keep_the_caption_rows` 覆盖单元数、复制文本和真实布局；见[开发日志](docs/devlog/2026-11-11-reader-table-images.md)。
 - **范围**：任何把“可读文本占位”用于暂不支持内容的地方（表格、列表、引用中的富内容、HTML 子集）；也适用于后续新增 cell/段落分段渲染的改动。
+
+## L025：像素直传要迁移完整的解码与回收契约
+
+- **规则**：从 encoded image/asset 路径改为直接 `RenderImage` 时，核对锁定框架实际执行的 EXIF 方向、RGBA/BGRA/alpha、帧 delay 与多帧行为，并同时迁移 atlas 回收和异步发布背压。不能把 CPU Arc 释放、首帧 Ready 或停止 await 当作所有资源与准入已经释放。
+- **原因**：`reader-image-performance` 核对 GPUI 0.3.10 发现静态路径会主动应用 decoder orientation，而 RenderImage 直接接受 BGRA；`paint_image` 上传借用像素，但 atlas 不随 RenderImage Arc 自动移除。仅取消解码 await 也不会停下运行中的 blocking worker；若队列事件不保留准入，后台还会继续解码并堆积待发布缓冲。迁移一半会出现照片方向、动画、CPU/GPU 预算或隐藏 reader 的回归。
+- **证据**：[性能开发日志](docs/devlog/2026-11-12-reader-image-performance.md)、`src/content/images/performance_tests.rs` 的 EXIF/alpha/GIF/WebP/取消回归，以及 `src/ui/reader/image_performance_tests.rs` 的有限动画收尾、请求阶段与资源退休回归。后端图片 target 已通过；真实 Windows 联合呈现仍待负责人验收，不把源码核对与状态测试说成原生 GPU 验收。
+- **范围**：任何绕过框架 asset loader 直接移交像素的优化，以及后台图像生成的取消、事件队列和资源生命周期。
+
+## L026：几何驱动优化要验证真实滚动范围与稳定布局
+
+- **规则**：自然高度组件放进外层滚动宿主后，要断言宿主真的有滚动范围并能抵达后续内容，不能只检查内部正文高度或回调。首次布局可能使用暂时较宽的列，基于测量的图片网格还要核对稳定后的实际显示尺寸，并用门槛抑制细小变化的重复解码。
+- **原因**：联合原图 fixture 中，Flow 正文高 3507px、reader 根盒却为 400px，外层 scroll reach 为零；Repository 可用并不能证明 Flow 可滚动。另一次首帧按暂时列宽保留 1822px，而稳定后的图片仅宽 271px（2× 需 542px），只允许网格增大就会长期保留多余内存。
+- **证据**：[性能开发日志](docs/devlog/2026-11-12-reader-image-performance.md) 与 `reader_images_performance_view_tests.rs` 的四宿主滚动、cache-backed recovery、列宽/DPI 联合回归；修正后测得 542 → 802 → 1203px 网格。原生视觉与独立显存仍是另一条验收边界。
+- **范围**：Flow/嵌套滚动宿主、虚拟列表中的测量探针，以及按显示几何派生的图像/图表资源。
+
+## L027：像素优化要测完整显示链，并核对泛型实例化位置
+
+- **规则**：新增显示网格重采样时，测量原始输入到实际显示网格的完整路径；native-grid decode 不能代表 resize 成本。按包优化 SIMD 依赖后仍慢时，核对泛型是否在未优化的调用方实例化；纯像素热循环可以用小型非泛型内核边界独立优化，业务状态、预算和取消仍留在调用方，并公开记录编译配置。
+- **原因**：原生九图预览揭示标量 Lanczos3 的 decode 阶段平均约 2.3s。更换 SIMD 并只优化依赖后，完整 display probe 仍为 1.11s，其中重采样约 915ms；将调用封入优化的私有内核后，该段约 9.8ms，完整原图→1200×713 为 203ms，应用和 decoder 保持原配置。
+- **证据**：[性能日志](docs/devlog/2026-11-12-reader-image-performance.md)，阶段 run `093d2989`，及透明边缘、EXIF、显示网格与原始 cache bytes 回归。数字为本机样本，不作跨机器性能保证。
+- **范围**：调试构建中的 SIMD/图像/数值计算依赖，以及热循环跨 crate 的泛型调用。

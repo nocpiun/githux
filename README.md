@@ -62,7 +62,7 @@ Runner 用法：`node scripts/verify.mjs [options] -- <executable> [args...]`。
 
 ## 依赖与字体
 
-- Rust edition 2024，工具链 1.98.1；单 Cargo package 与 binary，`Cargo.lock` 纳入版本控制。
+- Rust edition 2024，工具链 1.98.1；主应用为一个 Cargo package 与 binary，另有私有 `crates/image-resize` 像素内核 path 依赖；`Cargo.lock` 纳入版本控制。
 - `gpui-pre = 0.3.10`、`gpui-pre-platform = 0.3.10`，启用 `font-kit`；Linux 额外启用平台的 `x11` 与 `wayland` 窗口后端。
 - [Ely 上游](https://github.com/ELY-Open-Source/Ely-GPUI-Components) 固定 revision `30c66fe1d5d23db769a6c834b771d054d7f288cf`；当前外壳直接依赖 `ely-core 0.2.0`，使用 `ely_core::*`，不经过汇总所有组件的 facade，也不复制上游源码或应用本地补丁。关闭默认 `fonts`（保留上游必需的 IBM Plex Sans SVG 字体），启用 `runtime_shaders` 保持 macOS 构建方式。迁移范围、上游接口变化与保留的适配见 [迁移记录](docs/devlog/2026-10-27-ely-migration.md)。搜索浮层没有复用 Ely 的 `CommandPalette`（它在任何 Enter 上运行高亮行），改用自绘卡片并在按键绑定前拦截 Enter、检查查询框的 marked 区间；未来引入只读编辑器时仍先重现相关问题再决定补丁。
 - UI 拉丁字形为 Noto Sans，简体中文为应用自带 Noto Sans SC（私有组合字族 Githux UI，400/500/600/700）；代码为 Google Sans Code。来源、体积、许可和可复现生成见[字体清单](assets/fonts/README.md)，原生中文命中证据见[开发日志](docs/devlog/2026-10-29-ui-fonts.md)。多 DPI/IME 尚待负责人验收。
@@ -84,6 +84,7 @@ Runner 用法：`node scripts/verify.mjs [options] -- <executable> [args...]`。
 | `src/network/` | 预留传输、超时、代理、限流与调度 |
 | `src/storage/` | 预留设置、账户引用、缓存与迁移 |
 | `src/content/` | 预留 Markdown、源码与图片预处理 |
+| `crates/image-resize/` | 私有非泛型 Lanczos3 内核；dev/test 单独优化，调用方负责像素预算、取消与调度，见[图片约定](docs/reader-images.md) |
 | `src/diagnostics/` | 预留脱敏诊断与性能证据 |
 
 预留模块仅有职责说明，没有伪服务、模型或 trait 框架。架构约束与尚未确定的技术选择见 [架构文档](docs/architecture.md)，协作入口见 [AGENTS.md](AGENTS.md)。
