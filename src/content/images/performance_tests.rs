@@ -1,3 +1,81 @@
+#[test]
+fn performance_phase_allocation_and_terminal_enqueue_are_serialized() {
+    use std::sync::{atomic::AtomicU32, mpsc};
+    use std::time::Duration;
+    let sink = ImageSink::new().for_request(17);
+    let phase = Arc::new(AtomicU32::new(0));
+    let scope = ImageScope {
+        reader: 1,
+        generation: 1,
+    };
+    let key = ImageKey::new("timeout-race");
+    let (entered, at_allocation) = mpsc::sync_channel(1);
+    let (release, paused) = mpsc::sync_channel(1);
+    let worker_sink = sink.clone();
+    let worker_phase = phase.clone();
+    let worker_key = key.clone();
+    let worker = std::thread::spawn(move || {
+        worker_sink.publish_with(
+            scope,
+            worker_key,
+            || {
+                let next = worker_phase.fetch_add(1, Ordering::Relaxed);
+                entered.send(()).unwrap();
+                paused.recv_timeout(Duration::from_secs(5)).unwrap();
+                next
+            },
+            false,
+            None,
+            Ok(ImageUpdate::Finished),
+        );
+    });
+    at_allocation.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (started, terminal_started) = mpsc::sync_channel(1);
+    let (finished, terminal_finished) = mpsc::sync_channel(1);
+    let terminal_sink = sink.clone();
+    let terminal_phase = phase.clone();
+    let terminal_key = key.clone();
+    let timeout = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        terminal_sink.publish_next(
+            scope,
+            terminal_key,
+            &terminal_phase,
+            true,
+            None,
+            Err(ImageFailure::Timeout),
+        );
+        finished.send(()).unwrap();
+    });
+    terminal_started
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let terminal_overtook_worker = terminal_finished
+        .recv_timeout(Duration::from_millis(200))
+        .is_ok();
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    timeout.join().unwrap();
+    let events = sink.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (event.phase, event.terminal))
+            .collect::<Vec<_>>(),
+        [(0, false), (1, true)],
+        "deadline terminal overtook paused worker: {terminal_overtook_worker}"
+    );
+    assert!(matches!(events[1].result, Err(ImageFailure::Timeout)));
+    sink.cancel();
+    sink.publish_next(scope, key, &phase, true, None, Ok(ImageUpdate::Finished));
+    assert!(sink.drain_events().is_empty());
+    assert_eq!(
+        phase.load(Ordering::Relaxed),
+        2,
+        "cancelled streams allocate no further phases"
+    );
+}
+
 #[tokio::test]
 async fn performance_cancelled_sink_releases_queued_pixel_admission_and_rejects_late_events() {
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(2));

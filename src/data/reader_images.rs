@@ -320,10 +320,10 @@ impl RepositoryImageService {
             match decoded {
                 Ok(decoded) => {
                     if let Some(decoded) = decoded {
-                        sink.publish(
+                        sink.publish_next(
                             request.scope,
                             request.key.clone(),
-                            phase.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            &phase,
                             false,
                             Some(stale_validity),
                             Ok(ImageUpdate::Ready(decoded)),
@@ -371,10 +371,10 @@ impl RepositoryImageService {
             .as_ref()
             .is_some_and(|original| **original == *bytes)
         {
-            sink.publish(
+            sink.publish_next(
                 request.scope,
                 request.key.clone(),
-                phase.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                &phase,
                 false,
                 Some(validity),
                 Ok(ImageUpdate::Validated),
@@ -385,10 +385,10 @@ impl RepositoryImageService {
             && let ImageTarget::External { url } = &request.target
             && self.external_cached(url).await?.is_none()
         {
-            sink.publish(
+            sink.publish_next(
                 request.scope,
                 request.key.clone(),
-                phase.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                &phase,
                 false,
                 None,
                 Ok(ImageUpdate::Discard),
@@ -474,11 +474,10 @@ impl RepositoryImageService {
                             }
                             RenderUpdate::Frames(frames) => ImageUpdate::Frames(frames),
                         };
-                        let next = phase.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        sink.publish(
+                        sink.publish_next(
                             scope,
                             key.clone(),
-                            next,
+                            &phase,
                             false,
                             Some(decode_validity.clone()),
                             Ok(update),
@@ -491,10 +490,10 @@ impl RepositoryImageService {
                 if let Some(decoded) = decoded? {
                     check()?;
                     metrics.record(ImageStage::FirstReady, started);
-                    sink.publish(
+                    sink.publish_next(
                         scope,
                         key,
-                        phase.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        &phase,
                         false,
                         Some(decode_validity),
                         Ok(ImageUpdate::Ready(decoded)),
@@ -1127,10 +1126,10 @@ impl ImageProvider for RepositoryImageService {
                 let result =
                     result.map(|decoded| decoded.map_or(ImageUpdate::Finished, ImageUpdate::Ready));
                 let terminal_validity = result.is_ok().then_some(valid).flatten();
-                sink.publish(
+                sink.publish_next(
                     scope,
                     key,
-                    phase.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    &phase,
                     true,
                     terminal_validity,
                     result,

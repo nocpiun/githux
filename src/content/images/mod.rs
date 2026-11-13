@@ -347,10 +347,42 @@ impl ImageSink {
         validity: Option<ImageValidity>,
         result: Result<ImageUpdate, ImageFailure>,
     ) {
+        self.publish_with(scope, key, || phase, terminal, validity, result);
+    }
+    pub(crate) fn publish_next(
+        &self,
+        scope: ImageScope,
+        key: ImageKey,
+        phase: &std::sync::atomic::AtomicU32,
+        terminal: bool,
+        validity: Option<ImageValidity>,
+        result: Result<ImageUpdate, ImageFailure>,
+    ) {
+        self.publish_with(
+            scope,
+            key,
+            || phase.fetch_add(1, Ordering::Relaxed),
+            terminal,
+            validity,
+            result,
+        );
+    }
+    fn publish_with(
+        &self,
+        scope: ImageScope,
+        key: ImageKey,
+        phase: impl FnOnce() -> u32,
+        terminal: bool,
+        validity: Option<ImageValidity>,
+        result: Result<ImageUpdate, ImageFailure>,
+    ) {
         let mut queue = self.completions.lock().expect("image completion queue");
         if self.is_cancelled() {
             return;
         }
+        // Allocate only while holding the enqueue lock. A timeout publisher
+        // cannot overtake a decoder paused after reserving its phase.
+        let phase = phase();
         queue.push(ImageEvent {
             scope,
             key,

@@ -85,6 +85,14 @@ GPUI `RenderImage` 绕过 asset cache，Arc 释放不自动删除 atlas tiles。
 
 零空间实现另在 `bf5b3154abb63303a82716e292f0deb7b568e296` 的 clean build `c6c60285` 原生验证：144 DPI，16 张 PrintWindow 记录均 foreground=true；四模式向下/向上、retain-four 回收恢复和 900px resize 均完成，正常关闭 exit0，九个唯一原始身份共获取九次。进程关闭时 working set 183,422,976B、累计 peak 280,985,600B、private commit 228,057,088B，专用 GPU 内存未测。该原生全矩阵对应此布局 head；后续可选坏缓存修复只改 service 错误路径，仍需重建最终 artifact/source-head 冒烟核验。
 
+## 验收后的 main 整合与发布并发回归
+
+负责人于 2026-11-13 接受性能 head `e3771c48` 与表格 head `945698dd`，验收回执见 [PR #88 评论](https://github.com/nocpiun/githux/pull/88#issuecomment-6849881631)。#86 实际 squash 到 main 的 `dd5c0bda` tree 与 `945698dd` 一致。性能分支先整理为其上的 `a2040a2c`，完整 tree `753f0ce09a0cdfd661658417f2622f11c07f4af4` 与验收版逐字节相同，故复用既有本地/原生验证；新 head 和 main 组合另跑 CI/review。
+
+这轮 review 指出阻塞 decoder 在预分配 phase 后、入队前被抢占时，异步 timeout 可先发布下一个 terminal；Reader 会丢弃乱序 terminal，之后接收非终结帧而保留在途计数。新增受控双线程回归暂停 phase 0 的发布并并发发布 timeout。保留旧排序边界的基线 `0b205571-c54d-4c3f-9518-4a89501ea9bf` 明确得到 `[(1, terminal), (0, nonterminal)]` 并失败（运行 80,882ms，构建槽等待 564ms）。
+
+真实 provider 的所有 progressive、validation/discard、最终 terminal 现统一用 `ImageSink::publish_next`，在同一队列锁内分配 phase 和入队；取消检查也先于 phase 分配。公开显式 phase API 及 Reader 的乱序/陈旧事件拒绝语义保留。此修复只关闭发布竞态，视觉/尺寸/像素/缓存策略未变，不新增人工验收。修复后相同受控回归 `5923b381-8d94-4fe1-b891-939ae765c3f2` 通过（运行 71,090ms，槽等待 545ms），并要求取消后不再推进 phase。其余检查通过：fmt check `621cd83a`；all-target Clippy `87af14ad`（运行 159,815ms，槽等待 555ms）；应用/reader/image 的 `5b754d2e-734a-46d3-ba6c-a867c3d4f716` 合计 2659 passed、0 failed、12 ignored（运行 142,929ms，槽等待 567ms）；显式 ignored 原图/阶段探针 `a8beeb6c-bcc1-48e7-b03b-dc8d02100443` 七例通过（运行 39,453ms，槽等待 569ms）。
+
 ## 验证与原生预览交付
 
 此前独立 backend 完整目标 run `f7ee0b0e-ebf2-4a34-8869-3f5b15029522`：872 passed / 3 ignored；bin + image Clippy run `aabf03f8-4ad3-448f-a1e2-9765a4cd3bcd` 通过。这些不代替本次接线后的完整收尾检查。

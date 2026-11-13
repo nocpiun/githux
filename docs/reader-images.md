@@ -196,7 +196,7 @@ RepositoryImageService::with_cache(
 
 ## 性能发布协议与接线检查点（2026-11-12）
 
-`ImageSink::for_request` 分配本 board 内唯一请求 id；`ImageEvent` 同时带 scope、request、单调 phase 与 terminal。Reader 仅接受当前请求的下一个阶段，首个 Ready 不归还在途计数；正常终结或取消只归还一次。有限 SVG 先交付正确初始帧与已准备的最终备用图，随后每批至多两帧；更高 DPI、隐藏、取消及迟到事件不重启同一文档已结束的时间线。生产路径不编码中间 PNG。空间网格先与单帧可接受网格核对，预算不足优先减少时间采样，不能以分批发布为由降低接受的 SVG 清晰度。
+`ImageSink::for_request` 分配本 board 内唯一请求 id；`ImageEvent` 同时带 scope、request、单调 phase 与 terminal。真实 provider 通过 `publish_next` 在同一个队列锁内分配 phase 并入队；blocking decoder 与异步超时终结不能互相抢先，已取消的 sink 不分配新 phase。Reader 仅接受当前请求的下一个阶段，首个 Ready 不归还在途计数；正常终结或取消只归还一次。有限 SVG 先交付正确初始帧与已准备的最终备用图，随后每批至多两帧；更高 DPI、隐藏、取消及迟到事件不重启同一文档已结束的时间线。生产路径不编码中间 PNG。空间网格先与单帧可接受网格核对，预算不足优先减少时间采样，不能以分批发布为由降低接受的 SVG 清晰度。
 
 解码许可随已排队的像素事件保留到 UI 消费，限制生产者跑在隐藏/繁忙 UI 前面继续堆积大缓冲；取消 sink 会移除该请求的排队事件并拒绝迟到发布。缓存 I/O 与 decode 的许可都移入实际 blocking worker，超时只结束 await，不会提前释放仍在运行的 worker 的配额。commit、directory、同源 bytes 及 blob 的在途合并只活在当前 `RepositoryImageService` 实例（已捕获 session）内；最后一个订阅退出才取消共享读，失败/取消不留永久条目。resolution 与 bytes 的 write ticket 都在相应远程工作前取得。
 
