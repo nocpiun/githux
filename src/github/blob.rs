@@ -13,6 +13,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
 
+mod image;
+pub use image::fetch_image_blob;
+
 #[derive(Deserialize)]
 struct BlobResponse {
     sha: String,

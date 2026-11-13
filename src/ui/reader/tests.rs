@@ -2768,9 +2768,35 @@ fn a_delayed_cell_picture_remeasures_its_row_after_it_lands(cx: &mut TestAppCont
         },
         DocumentKind::Markdown,
     );
-    // A 900x300 picture is much taller than the loading placeholder, so a
-    // remeasure is visible as a taller row.
-    let images = std::sync::Arc::new(TableImages::new(&[("wide.png", 900, 300)]));
+    struct HeldImages {
+        inner: TableImages,
+        pending: std::sync::Mutex<
+            Vec<(
+                crate::content::images::ImageRequest,
+                crate::content::images::ImageSink,
+            )>,
+        >,
+    }
+    impl crate::content::images::ImageProvider for HeldImages {
+        fn start(
+            &self,
+            request: crate::content::images::ImageRequest,
+            sink: crate::content::images::ImageSink,
+        ) {
+            self.pending.lock().unwrap().push((request, sink));
+        }
+        fn cancel(&self, scope: crate::content::images::ImageScope) {
+            self.pending
+                .lock()
+                .unwrap()
+                .retain(|(request, _)| request.scope != scope);
+        }
+    }
+    // Hold the real completion until the pending geometry has been sampled.
+    let images = std::sync::Arc::new(HeldImages {
+        inner: TableImages::new(&[("wide.png", 900, 300)]),
+        pending: Default::default(),
+    });
     reader.update_in(cx, |reader, _, cx| {
         reader.set_image_provider(Some(images.clone()), cx)
     });
@@ -2789,6 +2815,18 @@ fn a_delayed_cell_picture_remeasures_its_row_after_it_lands(cx: &mut TestAppCont
         .size
         .height;
 
+    let pending = std::mem::take(&mut *images.pending.lock().unwrap());
+    assert!(
+        !pending.is_empty(),
+        "silent pending geometry still registers real demand"
+    );
+    assert!(
+        cx.debug_bounds("markdown-cell-0-1-0-picture-0-frame")
+            .is_none()
+    );
+    for (request, sink) in pending {
+        crate::content::images::ImageProvider::start(&images.inner, request, sink);
+    }
     settle_pictures(&reader, cx);
     frames(cx);
 
@@ -3123,6 +3161,55 @@ fn a_released_cell_picture_disappears_instead_of_reserving_its_box(cx: &mut Test
     // The author's caption row is untouched by the release.
     assert!(cx.debug_bounds("markdown-cell-0-2-0").is_some());
     assert!(cx.debug_bounds("markdown-cell-0-2-1").is_some());
+}
+
+#[gpui::test]
+fn performance_released_table_picture_removes_its_measured_space(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, PreparedBody::Utf8 { text: "| shot | notes |\n|---|---|\n| ![One](one.png) | First caption |\n| ![Two](two.png) | Second caption |\n".into(), has_bom: false }, DocumentKind::Markdown);
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_limits(
+            crate::content::images::ImageLimits {
+                max_ready_images: 1,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    let images = std::sync::Arc::new(TableImages::new(&[
+        ("one.png", 320, 480),
+        ("two.png", 120, 240),
+    ]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let mut released_rows = 0;
+    for row in [1, 2] {
+        let frame: &'static str =
+            Box::leak(format!("markdown-cell-0-{row}-0-picture-0-frame").into_boxed_str());
+        let cell: &'static str = Box::leak(format!("markdown-cell-0-{row}-0").into_boxed_str());
+        if cx.debug_bounds(frame).is_none() {
+            released_rows += 1;
+            let bounds = cx.debug_bounds(cell).unwrap();
+            assert!(
+                bounds.size.height < px(100.0),
+                "released row keeps only its caption/padding, no former image box: {bounds:?}"
+            );
+        }
+    }
+    assert_eq!(released_rows, 1);
+    assert!(
+        reader
+            .read_with(cx, |reader, cx| reader
+                .markdown()
+                .unwrap()
+                .read(cx)
+                .document_text()
+                .to_string())
+            .contains("First caption")
+    );
 }
 
 #[gpui::test]

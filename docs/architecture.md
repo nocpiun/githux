@@ -1,6 +1,6 @@
 # 架构方案与状态边界
 
-更新：2026-11-06。Rust + GPUI + Ely、Classic PAT 登录、多账户保存但单账户活动、离线阅读已确认。单 Cargo package 的正式 Shell 已挂载账户控制器与真实仓库侧栏、Notifications 与全局 Issues/PR，以及 Home/Feed、Profile 和 Repository 页面；生命周期见[正式页面接入](shell-page-integration.md)，认证接口见[认证与网络](auth-and-network.md)。rusqlite 账户目录与业务缓存存储核心已存在，且自 main `abae289` 起由正式启动组装唯一应用级 `CacheStore`，Home/Profile/Repository 页面已消费其快照；政策及参数边界见[缓存策略](cache-strategy.md)。Settings 当前仍是过渡账户入口，最终 Settings 设计与其挂载仍待独立交付。
+更新：2026-11-13。Rust + GPUI + Ely、Classic PAT 登录、多账户保存但单账户活动、离线阅读已确认。主应用 package 的正式 Shell 已挂载账户控制器与真实仓库侧栏、Notifications 与全局 Issues/PR，以及 Home/Feed、Profile 和 Repository 页面；生命周期见[正式页面接入](shell-page-integration.md)，认证接口见[认证与网络](auth-and-network.md)。rusqlite 账户目录与业务缓存存储核心已存在，且自 main `abae289` 起由正式启动组装唯一应用级 `CacheStore`，Home/Profile/Repository 页面已消费其快照；政策及参数边界见[缓存策略](cache-strategy.md)。Settings 当前仍是过渡账户入口，最终 Settings 设计与其挂载仍待独立交付。
 
 ## 建议的职责划分
 
@@ -66,6 +66,8 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 外壳按职责拆开，避免所有布局挤在一个视图里：`src/ui/chrome.rs` 画标题栏与搜索入口，`src/ui/sidebar.rs` 画固定列与有界的仓库组，`src/ui/page.rs` 画岛内页面，`src/ui/tabs.rs` 画应用级标签条，`src/ui/scroll/` 是唯一的滚动条外观、几何、拖动与淡入淡出实现（接口与接入步骤见 [统一滚动](scrolling.md)），`src/ui/palette.rs` 是本地导航浮层，`src/ui/geometry.rs` 集中放间距、宽度与圆角，`src/ui/fixtures.rs` 是确定性的本地面板数据。标题栏在所有平台绘制同一条品牌 + 搜索入口，只有 Windows 的三个窗口按钮由 `cfg!(target_os = "windows")` 控制；已确认行为（搜索入口固定在标题栏）不能挂在平台分支上。窗口拖动、双击最大化和边缘缩放使用 GPUI 的 `WindowControlArea` / `start_window_move`，由平台上已有的非客户区命中测试驱动，没有新增平台补丁。
 
 `storage` 已有真实 SQLite 账户目录，`content` 已有有界正文准备；它们不是业务内容磁盘缓存。`domain/auth/network/github/data/diagnostics` 均有真实实现，服务边界见[认证与网络](auth-and-network.md)、[仓库账户数据服务](repository-data-service.md)和[页面数据服务](page-data-service.md)。account-shell 已把 account 服务接入正式 Shell：`app::run` 启动时创建 app 级账户控制器（`app::accounts::Accounts`，装在 `AccountsHandle` 全局），后台线程恢复账户目录；`ui::Shell` 只持弱引用读它的快照。控制器复用 `AccountService`/`RepoService`/`AccountRuntime` 的既有 generation/`RepositoryReadContext` 复核/取消与对账行为，没有复制第二套登录、网络或存储。`data::AccountService` 等的模块级 `dead_code` 允许已随真实接入移除。HTTP 与运行时已选定 `reqwest` + `tokio`（理由见同文）；账户数据库使用 rusqlite（见[账户目录](account-persistence.md)）。现有依赖中曾出现的相关库是框架传递依赖，不作为采用依据。
+
+`crates/image-resize` 是不发布的私有 path 依赖，仅封装 opaque RGBA8 与 premultiplied RGBA16 的 Lanczos3 重采样。它与锁定的 `fast_image_resize` 在 dev/test 单独使用 opt-level 3，将泛型 SIMD 实例化放在优化边界内；主应用、解码器与验证 runner 配置保持原样。输入验证、像素预算、原始编码字节、账户/session、取消和发布由现有 reader/data/content 层持有，内核只接收拥有所有权的像素并返回目标像素。原生 profiling、配置和内存边界见[图片约定](reader-images.md)与[性能日志](devlog/2026-11-12-reader-image-performance.md)。
 
 账户和仓库 namespace 头像由 `app::avatar` 在既有后台执行器上无凭据下载并解码，按稳定身份 + URL 做有界内存复用；请求有 15 秒总超时，无磁盘图片缓存。`ui::avatar` 统一绘制真实圆形图片或同尺寸 initials，并在真实可见交集为空时跳过绘制，防止空 mask 取整产生离屏细条。真实头像路径不证明所有 Settings/footer 原生交互已验收，具体证据与边界见[账户接入](account-ui-preview.md)及 [account-shell 开发日志](devlog/2026-10-28-account-shell.md)。
 

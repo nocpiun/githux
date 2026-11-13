@@ -82,11 +82,16 @@ impl ImageFormat {
 #[derive(Debug, PartialEq, Eq)]
 pub struct DecodedImage {
     pub format: ImageFormat,
+    /// Original content is SVG; `format` describes its rendered raster.
+    pub source_svg: bool,
     pub width: u32,
     pub height: u32,
     pub bytes: Vec<u8>,
     /// Finite entry animation; `bytes` above is always the retained final PNG.
     pub animation: Option<DecodedAnimation>,
+    /// Validated static pixels; animated GIF/WebP retain their original stream.
+    pub pixels: Option<DecodedPixels>,
+    pub raster_frames: Vec<DecodedRasterFrame>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +109,19 @@ pub struct DecodedPixels {
     pub height: u32,
     pub bgra: Vec<u8>,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecodedRasterFrame {
+    pub pixels: DecodedPixels,
+    pub delay: (u32, u32),
+}
+
+#[derive(Clone, Copy)]
+enum SvgOutput {
+    Encoded,
+    Pixels,
+    Plan,
+}
+
 struct RenderedSvg {
     image: DecodedImage,
     pixels: DecodedPixels,
@@ -123,13 +141,30 @@ impl DecodedImage {
     /// supersampled to a larger pixel grid; GPUI decodes that grid, so the
     /// budget must charge the raster size rather than the logical one.
     pub fn decoded_bytes(&self) -> usize {
+        if !self.raster_frames.is_empty() {
+            return self
+                .raster_frames
+                .iter()
+                .map(|frame| frame.pixels.bgra.len())
+                .sum();
+        }
+        if let Some(pixels) = &self.pixels {
+            return pixels.bgra.len();
+        }
         let (width, height) = match self.format {
             ImageFormat::Png => png_pixel_size(&self.bytes).unwrap_or((self.width, self.height)),
             ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Gif => (self.width, self.height),
         };
-        (width as usize)
-            .saturating_mul(height as usize)
-            .saturating_mul(4)
+        self.animation
+            .as_ref()
+            .map_or_else(
+                || {
+                    (width as usize)
+                        .saturating_mul(height as usize)
+                        .saturating_mul(4)
+                },
+                |animation| animation.final_pixels.bgra.len(),
+            )
             .saturating_add(self.animation.as_ref().map_or(0, |animation| {
                 animation
                     .frames
@@ -250,7 +285,7 @@ pub fn decode_image_with_options_checked(
         });
     }
     if let Some(format) = detect_format(&bytes) {
-        return decode_raster(bytes, format, limits);
+        return decode_raster(bytes, format, limits, options, check);
     }
     if is_svg_like(&bytes) {
         return decode_svg(&bytes, limits, options, check);
@@ -262,6 +297,8 @@ fn decode_raster(
     bytes: Vec<u8>,
     format: ImageFormat,
     limits: &ImageLimits,
+    options: ImageRenderOptions,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
 ) -> Result<DecodedImage, ImageFailure> {
     if bytes.len() as u64 > limits.max_decoded_bytes as u64 {
         return Err(ImageFailure::TooLarge {
@@ -310,25 +347,198 @@ fn decode_raster(
         });
     }
 
-    // Full decode under the same limits. This is the step that rejects a
-    // truncated or malformed payload whose header merely looked valid; the
-    // decoded image is dropped immediately after validation.
+    use image::{AnimationDecoder, ImageDecoder};
+    if matches!(format, ImageFormat::Gif) {
+        let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(&bytes))
+            .map_err(|_| ImageFailure::Malformed)?;
+        decoder
+            .set_limits(decode_limits)
+            .map_err(|_| ImageFailure::Malformed)?;
+        let frames = decode_raster_frames(decoder.into_frames(), limits, check)?;
+        return Ok(DecodedImage {
+            format,
+            source_svg: false,
+            width,
+            height,
+            bytes,
+            pixels: None,
+            animation: None,
+            raster_frames: frames,
+        });
+    }
+    if matches!(format, ImageFormat::Webp) {
+        let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes))
+            .map_err(|_| ImageFailure::Malformed)?;
+        if decoder.has_animation() {
+            decoder
+                .set_limits(decode_limits)
+                .map_err(|_| ImageFailure::Malformed)?;
+            let _ = decoder.set_background_color(image::Rgba([0, 0, 0, 0]));
+            let frames = decode_raster_frames(decoder.into_frames(), limits, check)?;
+            return Ok(DecodedImage {
+                format,
+                source_svg: false,
+                width,
+                height,
+                bytes,
+                pixels: None,
+                animation: None,
+                raster_frames: frames,
+            });
+        }
+    }
+    check()?;
+    // Decode once under the same allocation limits and retain the validated
+    // pixels. Match GPUI's orientation and straight-alpha BGRA conversion.
     let mut reader =
         image::ImageReader::with_format(Cursor::new(bytes.as_slice()), format.image_format());
     reader.limits(decode_limits);
-    let decoded = reader.decode().map_err(|_| ImageFailure::Malformed)?;
+    let mut decoder = reader.into_decoder().map_err(|_| ImageFailure::Malformed)?;
+    let orientation = decoder.orientation().map_err(|_| ImageFailure::Malformed)?;
+    let mut decoded =
+        image::DynamicImage::from_decoder(decoder).map_err(|_| ImageFailure::Malformed)?;
     if decoded.width() != width || decoded.height() != height {
         return Err(ImageFailure::Malformed);
     }
-    drop(decoded);
+    check()?;
+    decoded.apply_orientation(orientation);
+    let mut rgba = decoded.into_rgba8();
+    check()?;
+    let (source_width, source_height) = rgba.dimensions();
+    if let Some(target) = options
+        .raster_width()
+        .filter(|target| *target < source_width)
+    {
+        let target_height = ((u64::from(source_height) * u64::from(target))
+            .div_ceil(u64::from(source_width)) as u32)
+            .max(1)
+            .min(source_height);
+        rgba = resize_straight_rgba(rgba, target, target_height, check)?;
+    }
+    check()?;
+    let (pixel_width, pixel_height) = rgba.dimensions();
+    let mut rgba = rgba.into_raw();
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let pixels = Some(DecodedPixels {
+        width: pixel_width,
+        height: pixel_height,
+        bgra: rgba,
+    });
 
     Ok(DecodedImage {
         format,
+        source_svg: false,
         width,
         height,
         bytes,
         animation: None,
+        pixels,
+        raster_frames: Vec::new(),
     })
+}
+
+/// Lanczos expects premultiplied channels. Use 16-bit intermediates for alpha
+/// edges, then return straight RGBA for GPUI; opaque screenshots keep the fast path.
+fn resize_straight_rgba(
+    rgba: image::RgbaImage,
+    width: u32,
+    height: u32,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
+) -> Result<image::RgbaImage, ImageFailure> {
+    let (source_w, source_h) = rgba.dimensions();
+    let mut opaque = true;
+    for (index, pixel) in rgba.as_raw().as_chunks::<4>().0.iter().enumerate() {
+        if index.is_multiple_of(16384) {
+            check()?;
+        }
+        if pixel[3] != 255 {
+            opaque = false;
+            break;
+        }
+    }
+    check()?;
+    if opaque {
+        let output =
+            githux_image_resize::opaque_rgba(source_w, source_h, rgba.into_raw(), width, height)
+                .map_err(|_| ImageFailure::Malformed)?;
+        check()?;
+        return image::RgbaImage::from_raw(width, height, output).ok_or(ImageFailure::Malformed);
+    }
+    let mut pixels = Vec::with_capacity(rgba.len() / 4);
+    for (index, pixel) in rgba.as_raw().as_chunks::<4>().0.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            check()?;
+        }
+        let alpha = u16::from(pixel[3]);
+        pixels.push([
+            u16::from(pixel[0]) * alpha,
+            u16::from(pixel[1]) * alpha,
+            u16::from(pixel[2]) * alpha,
+            alpha * 255,
+        ]);
+    }
+    drop(rgba);
+    let resized =
+        githux_image_resize::premultiplied_rgba16(source_w, source_h, pixels, width, height)
+            .map_err(|_| ImageFailure::Malformed)?;
+    let mut channels = Vec::with_capacity(resized.len() * 4);
+    for (index, pixel) in resized.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            check()?;
+        }
+        let alpha = u32::from(pixel[3]);
+        for channel in &pixel[..3] {
+            channels.push(
+                (u32::from(*channel) * 255 + alpha / 2)
+                    .checked_div(alpha)
+                    .unwrap_or(0)
+                    .min(255) as u8,
+            );
+        }
+        channels.push(((alpha + 127) / 255).min(255) as u8);
+    }
+    Ok(image::RgbaImage::from_raw(width, height, channels).expect("resampled raster dimensions"))
+}
+
+fn decode_raster_frames(
+    frames: image::Frames<'_>,
+    limits: &ImageLimits,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
+) -> Result<Vec<DecodedRasterFrame>, ImageFailure> {
+    let mut retained = 0usize;
+    let mut decoded = Vec::new();
+    for frame in frames {
+        check()?;
+        let frame = frame.map_err(|_| ImageFailure::Malformed)?;
+        let delay = frame.delay().numer_denom_ms();
+        let mut rgba = frame.into_buffer();
+        let (width, height) = rgba.dimensions();
+        retained = retained.saturating_add(rgba.len());
+        if retained > limits.max_decoded_bytes
+            || retained as u64 > limits.max_pixels.saturating_mul(4)
+        {
+            return Err(ImageFailure::TooLarge {
+                limit: limits.max_decoded_bytes,
+            });
+        }
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+        decoded.push(DecodedRasterFrame {
+            pixels: DecodedPixels {
+                width,
+                height,
+                bgra: rgba.into_raw(),
+            },
+            delay,
+        });
+    }
+    if decoded.is_empty() {
+        return Err(ImageFailure::Malformed);
+    }
+    Ok(decoded)
 }
 
 fn decode_svg(
@@ -360,12 +570,14 @@ fn decode_svg(
         animated.then_some(limits.max_decoded_bytes / 4),
         fonts.clone(),
         font_bytes,
+        SvgOutput::Encoded,
     )?;
+    let mut final_pixels = Some(final_pixels);
     check()?;
     if animated && timeline.duration_ms <= super::timeline::MAX_DURATION_MS {
         let duration_ms = timeline.duration_ms.ceil() as u32;
         let desired_count = (duration_ms.div_ceil(50) as usize).min(100);
-        let final_cost = final_pixels.bgra.len();
+        let final_cost = final_pixels.as_ref().expect("final pixels").bgra.len();
         let frame_cost = ((result.width as f64 * f64::from(options.device_scale())).ceil()
             as usize)
             .saturating_mul(
@@ -400,6 +612,7 @@ fn decode_svg(
                     None,
                     fonts.clone(),
                     font_bytes,
+                    SvgOutput::Encoded,
                 ) {
                     Ok(frame) => frame,
                     Err(ImageFailure::TooLarge { .. } | ImageFailure::TooManyPixels { .. }) => {
@@ -433,7 +646,7 @@ fn decode_svg(
                 result.animation = Some(DecodedAnimation {
                     duration_ms,
                     frames,
-                    final_pixels,
+                    final_pixels: final_pixels.take().expect("final pixels"),
                 });
                 break;
             }
@@ -441,6 +654,7 @@ fn decode_svg(
             count /= 2;
         }
     }
+    result.pixels = final_pixels;
     check()?;
     Ok(result)
 }
@@ -484,6 +698,7 @@ fn decode_svg_static(
     raster_cap: Option<usize>,
     fonts: Arc<fontdb::Database>,
     font_bytes: usize,
+    output: SvgOutput,
 ) -> Result<RenderedSvg, ImageFailure> {
     if count_svg_nesting_depth(bytes) > MAX_SVG_XML_DEPTH {
         return Err(ImageFailure::Malformed);
@@ -616,6 +831,25 @@ fn decode_svg_static(
         });
     }
 
+    if matches!(output, SvgOutput::Plan) {
+        return Ok(RenderedSvg {
+            image: DecodedImage {
+                format: ImageFormat::Png,
+                source_svg: true,
+                width,
+                height,
+                bytes: Vec::new(),
+                animation: None,
+                pixels: None,
+                raster_frames: Vec::new(),
+            },
+            pixels: DecodedPixels {
+                width: render_w,
+                height: render_h,
+                bgra: Vec::new(),
+            },
+        });
+    }
     let mut pixmap = tiny_skia::Pixmap::new(render_w, render_h).ok_or(ImageFailure::TooLarge {
         limit: limits.max_decoded_bytes,
     })?;
@@ -646,10 +880,12 @@ fn decode_svg_static(
     }
 
     let mut png_bytes = Vec::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-    encoder
-        .write_image(&rgba, render_w, render_h, image::ExtendedColorType::Rgba8)
-        .map_err(|_| ImageFailure::Malformed)?;
+    if matches!(output, SvgOutput::Encoded) {
+        let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+        encoder
+            .write_image(&rgba, render_w, render_h, image::ExtendedColorType::Rgba8)
+            .map_err(|_| ImageFailure::Malformed)?;
+    }
 
     if png_bytes.len() > limits.max_response_bytes {
         return Err(ImageFailure::TooLarge {
@@ -663,10 +899,13 @@ fn decode_svg_static(
     Ok(RenderedSvg {
         image: DecodedImage {
             format: ImageFormat::Png,
+            source_svg: true,
             width,
             height,
             bytes: png_bytes,
             animation: None,
+            pixels: None,
+            raster_frames: Vec::new(),
         },
         pixels: DecodedPixels {
             width: render_w,
@@ -1201,4 +1440,182 @@ fn map_usvg_error(error: usvg::Error) -> ImageFailure {
         | usvg::Error::InvalidSize
         | usvg::Error::ParsingFailed(_) => ImageFailure::Malformed,
     }
+}
+// Renderer path intentionally does not encode intermediate PNGs.
+// The compatibility decoder above still provides encoded fixtures to non-UI consumers.
+pub fn decode_for_renderer(
+    bytes: Vec<u8>,
+    limits: &ImageLimits,
+    options: ImageRenderOptions,
+    check: &dyn Fn() -> Result<(), ImageFailure>,
+    publish: &mut dyn FnMut(RenderUpdate) -> Result<(), ImageFailure>,
+) -> Result<Option<DecodedImage>, ImageFailure> {
+    check()?;
+    if bytes.len() > limits.max_response_bytes {
+        return Err(ImageFailure::TooLarge {
+            limit: limits.max_response_bytes,
+        });
+    }
+    if let Some(format) = detect_format(&bytes) {
+        let mut decoded = decode_raster(bytes, format, limits, options, check)?;
+        if decoded.pixels.is_some() || !decoded.raster_frames.is_empty() {
+            decoded.bytes.clear();
+            decoded.bytes.shrink_to_fit();
+        }
+        return Ok(Some(decoded));
+    }
+    if !is_svg_like(&bytes) {
+        return Err(ImageFailure::Unsupported);
+    }
+    let text = validated_svg(&bytes)?;
+    let doc = parse_svg(text)?;
+    let budget = Arc::new(std::sync::Mutex::new((
+        0usize,
+        0u64,
+        doc.descendants().count(),
+        0usize,
+    )));
+    let fonts = super::fonts::with_embedded(&doc, svg_fontdb(), &budget)?;
+    let font_bytes = budget.lock().map_err(|_| ImageFailure::Malformed)?.3;
+    let timeline = super::timeline::Timeline::new(&doc, check)?;
+    let animated =
+        timeline.duration_ms > 0.0 && timeline.duration_ms <= super::timeline::MAX_DURATION_MS;
+    let final_xml = timeline.sample(text, timeline.duration_ms);
+    let RenderedSvg {
+        image: mut result,
+        pixels: final_pixels,
+    } = decode_svg_static(
+        final_xml.as_bytes(),
+        limits,
+        options.final_scale(),
+        animated.then_some(limits.max_decoded_bytes / 4),
+        fonts.clone(),
+        font_bytes,
+        SvgOutput::Pixels,
+    )?;
+    check()?;
+    if !animated {
+        result.pixels = Some(final_pixels);
+        return Ok(Some(result));
+    }
+    let duration_ms = timeline.duration_ms.ceil() as u32;
+    let final_cost = final_pixels.bgra.len();
+    let first_xml = timeline.sample(text, 0.0);
+    let mut reference_limits = limits.clone();
+    reference_limits.max_decoded_bytes = limits.max_decoded_bytes.saturating_sub(final_cost);
+    reference_limits.max_pixels = limits.max_pixels.saturating_sub((final_cost / 4) as u64);
+    let reference = match decode_svg_static(
+        first_xml.as_bytes(),
+        &reference_limits,
+        options.device_scale(),
+        None,
+        fonts.clone(),
+        font_bytes,
+        SvgOutput::Plan,
+    ) {
+        Ok(reference) => reference,
+        Err(ImageFailure::TooLarge { .. } | ImageFailure::TooManyPixels { .. }) => {
+            result.pixels = Some(final_pixels);
+            return Ok(Some(result));
+        }
+        Err(error) => return Err(error),
+    };
+    let reference_grid = (reference.pixels.width, reference.pixels.height);
+    let frame_cost = (reference_grid.0 as usize)
+        .saturating_mul(reference_grid.1 as usize)
+        .saturating_mul(4)
+        .max(4);
+    let remaining = limits
+        .max_decoded_bytes
+        .min((limits.max_pixels as usize).saturating_mul(4))
+        .saturating_sub(final_cost);
+    let mut count = (duration_ms.div_ceil(50) as usize)
+        .min(100)
+        .min((remaining / frame_cost).saturating_sub(2));
+    // Reserve the entire eventual bank before rendering any entry frame. Every
+    // batch uses this same scratch allowance and physical grid; publication
+    // cannot force a later quality reduction or require retracting early frames.
+    let (first, frame_limits) = loop {
+        if count < 2 {
+            result.pixels = Some(final_pixels);
+            return Ok(Some(result));
+        }
+        let mut frame_limits = limits.clone();
+        let bank = final_cost.saturating_add(count.saturating_mul(frame_cost));
+        frame_limits.max_decoded_bytes = limits.max_decoded_bytes.saturating_sub(bank);
+        frame_limits.max_pixels = limits.max_pixels.saturating_sub((bank / 4) as u64);
+        match decode_svg_static(
+            first_xml.as_bytes(),
+            &frame_limits,
+            options.device_scale(),
+            None,
+            fonts.clone(),
+            font_bytes,
+            SvgOutput::Plan,
+        ) {
+            Ok(plan) if (plan.pixels.width, plan.pixels.height) == reference_grid => {
+                let first = decode_svg_static(
+                    first_xml.as_bytes(),
+                    &frame_limits,
+                    options.device_scale(),
+                    None,
+                    fonts.clone(),
+                    font_bytes,
+                    SvgOutput::Pixels,
+                )?;
+                break (first, frame_limits);
+            }
+            Ok(_) => count /= 2,
+            Err(ImageFailure::TooLarge { .. } | ImageFailure::TooManyPixels { .. }) => count /= 2,
+            Err(error) => return Err(error),
+        }
+        check()?;
+    };
+    let grid = (first.pixels.width, first.pixels.height);
+    result.animation = Some(DecodedAnimation {
+        duration_ms,
+        frames: vec![DecodedFrame {
+            at_ms: 0,
+            bytes: Vec::new(),
+            pixels: first.pixels,
+        }],
+        final_pixels,
+    });
+    publish(RenderUpdate::First(result))?;
+    let mut batch = Vec::with_capacity(2);
+    for ix in 1..count {
+        check()?;
+        let at_ms = (ix as u32 * duration_ms) / count as u32;
+        let xml = timeline.sample(text, f64::from(at_ms));
+        let frame = decode_svg_static(
+            xml.as_bytes(),
+            &frame_limits,
+            options.device_scale(),
+            None,
+            fonts.clone(),
+            font_bytes,
+            SvgOutput::Pixels,
+        )?;
+        if (frame.pixels.width, frame.pixels.height) != grid {
+            return Err(ImageFailure::Malformed);
+        }
+        batch.push(DecodedFrame {
+            at_ms,
+            bytes: Vec::new(),
+            pixels: frame.pixels,
+        });
+        if batch.len() == 2 {
+            publish(RenderUpdate::Frames(std::mem::take(&mut batch)))?;
+        }
+    }
+    if !batch.is_empty() {
+        publish(RenderUpdate::Frames(batch))?;
+    }
+    check()?;
+    Ok(None)
+}
+
+pub enum RenderUpdate {
+    First(DecodedImage),
+    Frames(Vec<DecodedFrame>),
 }

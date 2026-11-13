@@ -1183,7 +1183,13 @@ fn acceptance_confirmed_revocation_clears_already_rendered_home(cx: &mut TestApp
     let (page, cx) = open_page(&mut fixture, cx);
     settle(&page, cx);
     assert_eq!(home_title(&page, cx).as_deref(), Some("cached home"));
-    assert_eq!(feed_ids(&page, cx), ["first"]);
+    // The cached collection also contains its continuation; a loaded executor
+    // can restore it before this sample. Both cached items must be revocable.
+    let rendered = feed_ids(&page, cx);
+    assert!(
+        rendered == ["first"] || rendered == ["first", "second"],
+        "only the warmed collection may render: {rendered:?}"
+    );
     let context = page.read_with(cx, |page, _| {
         page.session.as_ref().unwrap().context().clone()
     });

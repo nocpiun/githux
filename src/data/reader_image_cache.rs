@@ -40,25 +40,116 @@ pub struct ExternalFreshness {
 impl ExternalFreshness {
     /// Evaluates if an external cached asset is fresh according to max-age directives.
     pub fn is_fresh_at(&self, now_ms: i64) -> bool {
-        if let Some(ref cc) = self.cache_control {
-            let lower = cc.to_ascii_lowercase();
-            if lower.contains("no-cache") {
-                return false;
-            }
-            for part in lower.split(',') {
-                let part = part.trim();
-                if let Some(rest) = part.strip_prefix("max-age=")
-                    && let Ok(max_age_secs) = rest.trim().parse::<u64>()
-                {
-                    let age_since_verified_secs =
-                        now_ms.saturating_sub(self.verified_at_ms).max(0) as u64 / 1000;
-                    let total_current_age_secs =
-                        self.age_secs.saturating_add(age_since_verified_secs);
-                    return total_current_age_secs <= max_age_secs;
+        let policy = CachePolicy::parse(self.cache_control.as_deref());
+        !policy.no_cache
+            && !policy.no_store
+            && policy
+                .max_age
+                .is_some_and(|max_age| self.current_age_ms(now_ms) < max_age.saturating_mul(1000))
+    }
+    fn current_age_ms(&self, now_ms: i64) -> u64 {
+        self.age_secs
+            .saturating_mul(1000)
+            .saturating_add(now_ms.saturating_sub(self.verified_at_ms).max(0) as u64)
+    }
+    /// RFC 5861 permission; revalidation prohibitions take precedence.
+    pub fn stale_window_remaining_ms(&self, now_ms: i64) -> Option<u64> {
+        let policy = CachePolicy::parse(self.cache_control.as_deref());
+        if policy.no_cache || policy.no_store || policy.must_revalidate || self.is_fresh_at(now_ms)
+        {
+            return None;
+        }
+        let end = policy
+            .max_age?
+            .saturating_add(policy.swr?)
+            .saturating_mul(1000);
+        let age = self.current_age_ms(now_ms);
+        (age < end).then_some(end.saturating_sub(age))
+    }
+    pub fn from_snapshot(snapshot: &CacheSnapshot) -> Self {
+        let age_secs = snapshot
+            .metadata
+            .cache_control
+            .as_deref()
+            .and_then(|cc| {
+                cc.split(',').find_map(|part| {
+                    let (key, value) = part.trim().split_once('=')?;
+                    key.eq_ignore_ascii_case("githux-age")
+                        .then(|| value.trim().parse().ok())
+                        .flatten()
+                })
+            })
+            .unwrap_or(0);
+        let age_policy_current = snapshot
+            .metadata
+            .cache_control
+            .as_deref()
+            .is_some_and(|cc| {
+                cc.split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("githux-age-v2"))
+            });
+        // Older entries did not include Date/response delay in current age.
+        // Keep their bytes and validators, but validate once before reuse.
+        let cache_control = if age_policy_current {
+            snapshot.metadata.cache_control.clone()
+        } else {
+            Some(format!(
+                "no-cache, {}",
+                snapshot.metadata.cache_control.as_deref().unwrap_or("")
+            ))
+        };
+        Self {
+            etag: snapshot.metadata.etag.clone(),
+            last_modified: snapshot.metadata.last_modified.clone(),
+            cache_control,
+            fetched_at_ms: snapshot.metadata.fetched_at_ms,
+            verified_at_ms: snapshot.metadata.verified_at_ms,
+            age_secs,
+        }
+    }
+}
+#[derive(Default)]
+struct CachePolicy {
+    no_cache: bool,
+    no_store: bool,
+    must_revalidate: bool,
+    max_age: Option<u64>,
+    swr: Option<u64>,
+}
+impl CachePolicy {
+    fn parse(value: Option<&str>) -> Self {
+        let mut policy = Self::default();
+        let mut seen_age = false;
+        let mut seen_swr = false;
+        for directive in value.unwrap_or("").split(',') {
+            let (name, value) = directive
+                .trim()
+                .split_once('=')
+                .map_or((directive.trim(), None), |(name, value)| {
+                    (name.trim(), Some(value.trim().trim_matches('"')))
+                });
+            match name.to_ascii_lowercase().as_str() {
+                "no-cache" => policy.no_cache = true,
+                "no-store" => policy.no_store = true,
+                "must-revalidate" | "proxy-revalidate" => policy.must_revalidate = true,
+                "max-age" => {
+                    if seen_age {
+                        policy.no_cache = true;
+                    }
+                    seen_age = true;
+                    policy.max_age = value.and_then(|s| s.parse().ok());
                 }
+                "stale-while-revalidate" => {
+                    if seen_swr {
+                        policy.no_cache = true;
+                    }
+                    seen_swr = true;
+                    policy.swr = value.and_then(|s| s.parse().ok());
+                }
+                _ => {}
             }
         }
-        false
+        policy
     }
 }
 
@@ -139,6 +230,13 @@ impl ReaderImageCache {
         path: &str,
         blob_sha: &ObjectSha,
     ) -> Result<WriteOutcome, CacheError> {
+        self.put_resolved_blob_with_ticket(self.begin_resolution(commit, path)?, blob_sha)
+    }
+    pub fn begin_resolution(
+        &self,
+        commit: &ObjectSha,
+        path: &str,
+    ) -> Result<crate::storage::cache::CacheWrite, CacheError> {
         let repo_id = self.repo_numeric_id.ok_or(CacheError::InvalidInput)?;
         let request = format!("commit={};path={}", commit.as_str(), path);
         let key = CacheKey::mutable(
@@ -149,7 +247,13 @@ impl ReaderImageCache {
             READER_IMAGE_REPRESENTATION,
             READER_IMAGE_REPRESENTATION_VERSION,
         )?;
-        let ticket = self.store.begin_write(&self.scope, &key)?;
+        self.store.begin_write(&self.scope, &key)
+    }
+    pub fn put_resolved_blob_with_ticket(
+        &self,
+        ticket: crate::storage::cache::CacheWrite,
+        blob_sha: &ObjectSha,
+    ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
@@ -221,6 +325,15 @@ impl ReaderImageCache {
         ticket: crate::storage::cache::CacheWrite,
         bytes: &[u8],
     ) -> Result<WriteOutcome, CacheError> {
+        self.put_repository_blob_response(ticket, bytes, None)
+    }
+
+    pub fn put_repository_blob_response(
+        &self,
+        ticket: crate::storage::cache::CacheWrite,
+        bytes: &[u8],
+        cache_control: Option<String>,
+    ) -> Result<WriteOutcome, CacheError> {
         let now_ms = now_ms();
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
@@ -229,7 +342,7 @@ impl ReaderImageCache {
             completeness: CacheCompleteness::Complete,
             etag: None,
             last_modified: None,
-            cache_control: None,
+            cache_control,
         };
         self.store.put(ticket, bytes, metadata)
     }
@@ -276,7 +389,7 @@ impl ReaderImageCache {
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
         let ticket = self.begin_write_external(url)?;
-        self.revalidate_external_image_with_ticket(ticket, cached, meta)
+        self.revalidate_external_image_with_ticket(ticket, url, cached, meta)
     }
 
     /// Begins a write ticket for an external image URL before making a network request.
@@ -297,13 +410,26 @@ impl ReaderImageCache {
     ) -> Result<WriteOutcome, CacheError> {
         let now = now_ms();
         // Pack age_secs into cache_control or separate representation without violating verified_at_ms >= fetched_at_ms invariant.
-        let cache_control = match (meta.cache_control.as_deref(), meta.age_secs) {
-            (Some(cc), Some(age)) if !cc.contains("githux-age=") => {
-                Some(format!("{cc}, githux-age={age}"))
-            }
-            (None, Some(age)) => Some(format!("githux-age={age}")),
-            (cc, _) => cc.map(str::to_string),
-        };
+        let mut directives = meta
+            .cache_control
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|part| {
+                !part.is_empty()
+                    && !part.split('=').next().is_some_and(|name| {
+                        name.trim().eq_ignore_ascii_case("githux-age")
+                            || name.trim().eq_ignore_ascii_case("githux-age-v2")
+                    })
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if let Some(age) = meta.age_secs {
+            directives.push(format!("githux-age={age}"));
+        }
+        directives.push("githux-age-v2".into());
+        let cache_control = Some(directives.join(", "));
 
         let metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
@@ -321,9 +447,18 @@ impl ReaderImageCache {
     pub fn revalidate_external_image_with_ticket(
         &self,
         ticket: crate::storage::cache::CacheWrite,
+        url: &str,
         cached: CacheSnapshot,
         meta: &ExternalImageMetadata,
     ) -> Result<WriteOutcome, CacheError> {
+        let current = self.read_external_image(url)?.ok_or(CacheError::Stale)?;
+        if current.bytes != cached.bytes
+            || current.metadata.etag != cached.metadata.etag
+            || current.metadata.last_modified != cached.metadata.last_modified
+            || current.metadata.cache_control != cached.metadata.cache_control
+        {
+            return Err(CacheError::Stale);
+        }
         let now = now_ms();
         let cc_base = meta
             .cache_control
@@ -333,7 +468,12 @@ impl ReaderImageCache {
             Some(cc) => {
                 let stripped = cc
                     .split(',')
-                    .filter(|p| !p.trim().starts_with("githux-age="))
+                    .filter(|p| {
+                        !p.trim().split('=').next().is_some_and(|name| {
+                            name.trim().eq_ignore_ascii_case("githux-age")
+                                || name.trim().eq_ignore_ascii_case("githux-age-v2")
+                        })
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 match meta.age_secs {
@@ -346,6 +486,10 @@ impl ReaderImageCache {
             None => meta.age_secs.map(|age| format!("githux-age={age}")),
         };
 
+        let cache_control = Some(cache_control.map_or_else(
+            || "githux-age-v2".into(),
+            |cc| format!("{cc}, githux-age-v2"),
+        ));
         let updated_metadata = CacheMetadata {
             representation_version: READER_IMAGE_REPRESENTATION_VERSION,
             fetched_at_ms: cached.metadata.fetched_at_ms,
