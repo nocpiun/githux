@@ -11,7 +11,9 @@
 //! independent memory. The reader keeps a bounded number of decoded pictures;
 //! older ones are released rather than accumulated.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -215,9 +217,12 @@ impl ImageBoard {
     pub(super) fn set_render_options(&mut self, options: ImageRenderOptions) {
         self.render_options = options;
     }
-    pub(crate) fn is_loading(&self, key: &ImageKey) -> bool {
-        matches!(self.states.get(key), Some(ImageState::Loading))
-            || (!self.attached && !self.states.contains_key(key))
+    /// Whether this generation already holds drawable pixels for `key`.
+    ///
+    /// Only a `Ready` picture paints; loading, failed, unavailable and released
+    /// sources all draw nothing, so a block made only of them keeps no space.
+    pub(super) fn is_ready(&self, key: &ImageKey) -> bool {
+        self.states.get(key).is_some_and(ImageState::is_ready)
     }
 
     pub(super) fn sink(&self) -> ImageSink {
@@ -276,10 +281,6 @@ impl ImageBoard {
     pub(super) fn suspend(&mut self) {
         self.finish_animations();
         self.forget_unfinished();
-    }
-
-    pub(super) fn attached(&self) -> bool {
-        self.attached
     }
 
     /// Called while building a visible image block. Returns the state to draw
@@ -461,8 +462,8 @@ impl ImageBoard {
     }
 
     /// Releases the oldest decoded pictures until the budget holds again.
-    /// Returns the top-level blocks whose picture shrank to a placeholder, so
-    /// their rows are measured at the new height instead of keeping the old one.
+    /// Returns the top-level blocks whose picture disappeared, so their rows are
+    /// measured at the new height instead of keeping the released box.
     pub(super) fn evict(&mut self) -> Vec<usize> {
         let mut affected = Vec::new();
         while self.ready_order.len() > self.limits.max_ready_images
@@ -583,43 +584,22 @@ pub(super) fn resolve_target(
     }
 }
 
-/// The theme-derived styling one picture block needs.
-#[derive(Clone, Copy)]
-pub(super) struct PictureStyle<'a> {
-    pub colors: &'a ely_core::theme::Palette,
-    pub small_text: f32,
-    pub radius: gpui::Rems,
-}
-
-/// Draws one picture block in its current state, always keeping the alt text.
+/// Draws one picture block: real pixels when ready, nothing at all otherwise.
+///
+/// Owner direction (2026-11-12): an image that cannot be displayed shows no
+/// failure placeholder, alt caption, diagnostic label or reserved panel. Alt
+/// text stays in the document/copy model and failure reasons stay internal
+/// state, so a missing or unreachable picture is simply absent from the page.
+/// Every non-ready state therefore draws an empty zero-size element; callers
+/// are expected to drop it from their row so it cannot contribute gaps or
+/// height, and to remeasure the containing block when the state changes.
 pub(super) fn image_element(
     id: gpui::ElementId,
     selector: String,
-    alt: &str,
     state: &ImageState,
     hints: ImageHints,
-    style: PictureStyle<'_>,
     frame_selector: String,
 ) -> AnyElement {
-    let PictureStyle {
-        colors,
-        small_text: sm,
-        radius,
-    } = style;
-    let note = |text: String| {
-        div()
-            .debug_selector({
-                let selector = selector.clone();
-                move || selector.clone()
-            })
-            .px_3()
-            .py_2()
-            .rounded(radius)
-            .bg(colors.sunken)
-            .text_size(gpui::px(sm))
-            .text_color(colors.fg_muted)
-            .child(text)
-    };
     match state {
         ImageState::Ready(image, width, height) => {
             // The real pixels are drawn at their intrinsic or author-requested
@@ -672,36 +652,56 @@ pub(super) fn image_element(
                 .child(frame.child(picture))
                 .into_any_element()
         }
-        ImageState::Loading => div()
+        // Loading/unrequested, failed/refused, unavailable and released all
+        // render the same empty element: the page shows nothing where the
+        // picture would be. The selector stays attached so tests and the
+        // renderer can still find the position, but it has no size, content,
+        // background, border or padding.
+        ImageState::Loading
+        | ImageState::Failed(_)
+        | ImageState::Unavailable
+        | ImageState::Released => div()
             .debug_selector(move || selector.clone())
             .w(px(0.0))
             .h(px(0.0))
             .overflow_hidden()
             .into_any_element(),
-        ImageState::Unavailable => note(if alt.is_empty() {
-            "Picture not loaded — no image service is attached.".to_string()
-        } else {
-            format!("{alt} — picture not loaded (no image service is attached)")
-        })
-        .into_any_element(),
-        ImageState::Released => note(if alt.is_empty() {
-            "Picture released to keep memory bounded.".to_string()
-        } else {
-            format!("{alt} — picture released to keep memory bounded")
-        })
-        .into_any_element(),
-        ImageState::Failed(failure) => note(if alt.is_empty() {
-            format!("Picture not loaded — {}.", failure.label())
-        } else {
-            format!("{alt} — picture not loaded ({})", failure.label())
-        })
-        .into_any_element(),
     }
 }
 
-/// A debug selector for a picture block, stable per top-level block.
+/// Wraps a drawn picture so a finite SVG animation starts and keeps playing
+/// only while the picture is actually on screen.
+///
+/// `visibility` is the board and source key the picture belongs to; without an
+/// attached provider there is nothing to report. The window's content mask
+/// excludes rows scrolled out of the viewport, so a picture that is built for
+/// overdraw does not start playing off-screen.
+pub(super) fn painted_when_visible(
+    picture: AnyElement,
+    visibility: Option<(Rc<RefCell<ImageBoard>>, ImageKey)>,
+) -> AnyElement {
+    div()
+        .max_w_full()
+        .child(picture)
+        .on_children_prepainted(move |bounds, window, _| {
+            if let Some((board, key)) = &visibility
+                && bounds.iter().any(|bounds| {
+                    let visible = window.content_mask().bounds.intersect(bounds);
+                    visible.size.width > px(0.0) && visible.size.height > px(0.0)
+                })
+            {
+                board.borrow_mut().painted(key);
+            }
+        })
+        .into_any_element()
+}
+
+/// A debug selector for a drawn picture block, stable per top-level block.
+///
+/// It is attached only when the picture really paints, so its absence is the
+/// evidence that a non-ready picture reserved no space.
 pub(super) fn image_selector(ix: usize) -> String {
-    format!("markdown-picture-note-{ix}")
+    format!("markdown-picture-{ix}")
 }
 
 /// The selector of a ready picture's frame, for layout checks.

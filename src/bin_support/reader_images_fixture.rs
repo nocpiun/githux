@@ -106,10 +106,14 @@ pub enum Scene {
     /// page scroll (the profile-README case), with a picture that widens it.
     SvgProfile,
     Flow,
+    /// The OPanel-style Screenshots table: two centred columns of pictures
+    /// followed by caption rows, including a delayed raster and a finite SVG.
+    Table,
 }
 
 impl Scene {
-    pub const ALL: [Scene; 8] = [
+    pub const ALL: [Scene; 9] = [
+        Scene::Table,
         Scene::SvgProfile,
         Scene::Healthy,
         Scene::Extremes,
@@ -122,6 +126,7 @@ impl Scene {
 
     pub fn label(self) -> &'static str {
         match self {
+            Scene::Table => "Screenshots table",
             Scene::SvgProfile => "SVG profile",
             Scene::Healthy => "Healthy",
             Scene::Extremes => "Extremes",
@@ -135,6 +140,9 @@ impl Scene {
 
     pub fn description(self) -> &'static str {
         match self {
+            Scene::Table => {
+                "A two-column Screenshots table: raster, wide, delayed and SVG cells with captions."
+            }
             Scene::SvgProfile => {
                 "Finite SVG entry animation, CSS variable card details and inline SVG badge logos."
             }
@@ -305,6 +313,7 @@ impl FixtureTransport {
             (README_PATH, Scene::Extremes) => extremes_readme(),
             (README_PATH, Scene::Failure) => failure_readme(),
             (README_PATH, Scene::Oversize) => oversize_readme(),
+            (README_PATH, Scene::Table) => table_readme(),
             (README_PATH, Scene::SvgProfile) => svg_profile_readme(),
             (README_PATH, Scene::Flow) => flow_readme(),
             (README_PATH, _) => long_readme(),
@@ -404,6 +413,24 @@ impl FixtureTransport {
             .to_string(),
         )
     }
+}
+
+/// The OPanel README's Screenshots section shape: two centred columns with
+/// picture rows and bold caption rows. Uses the fixture's own deterministic
+/// blobs, including a delayed picture and a finite SVG.
+fn table_readme() -> String {
+    "## Screenshots
+
+|||
+|:---:|:---:|
+|![Dashboard](images/diagram.png)|![Monitor](images/banner.png)|
+|**Dashboard**|**Monitor**|
+|![Map](images/slow.png)|![Stats](https://images.invalid/stats.svg)|
+|**Map**|**Stats**|
+|![Terminal](images/huge.png)||
+|**Terminal**||
+"
+    .to_string()
 }
 
 fn healthy_readme() -> String {

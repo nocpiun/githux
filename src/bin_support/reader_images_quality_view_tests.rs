@@ -165,12 +165,13 @@ fn check_pending(cx: &mut TestAppContext, flow: bool, only_images: bool) {
     );
     let base = if only_images { 0 } else { 1 };
     for i in base..base + 4 {
-        let selector: &'static str =
-            Box::leak(format!("markdown-picture-note-{i}").into_boxed_str());
+        // Loading and queued pictures draw no element, so neither the picture
+        // selector nor its frame may exist before the bytes land.
+        let picture: &'static str = Box::leak(format!("markdown-picture-{i}").into_boxed_str());
+        let frame: &'static str = Box::leak(format!("markdown-picture-frame-{i}").into_boxed_str());
         assert!(
-            cx.debug_bounds(selector)
-                .is_none_or(|bounds| bounds.size.height == px(0.0)),
-            "no loading panel or label"
+            cx.debug_bounds(picture).is_none() && cx.debug_bounds(frame).is_none(),
+            "a pending picture reserves no panel, label or box"
         );
     }
     assert!(

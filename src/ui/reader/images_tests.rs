@@ -275,9 +275,8 @@ fn a_key_is_built_from_the_resolved_target_only() {
 }
 
 #[test]
-fn a_picture_of_every_state_draws_something() {
-    // The element builder is exercised through the real renderer in the view
-    // tests; this only checks the state labels the placeholders use.
+fn every_non_ready_state_is_known_and_never_ready() {
+    // Only `Ready` paints; the view tests prove the other states draw nothing.
     for state in [
         ImageState::Unavailable,
         ImageState::Released,
@@ -386,8 +385,8 @@ fn a_stale_completion_does_not_consume_a_current_slot() {
     assert_eq!(label(&board, &target("docs/a.png").key()), Some("ready"));
 }
 
-/// Finding: eviction replaces a ready picture with a shorter placeholder, so the
-/// owning block must be measured again.
+/// Finding: eviction drops a ready picture entirely, so the owning block must be
+/// measured again at its new (shorter) height.
 #[test]
 fn eviction_reports_the_blocks_it_shrank() {
     let limits = ImageLimits {

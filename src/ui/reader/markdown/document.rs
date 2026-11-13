@@ -18,7 +18,7 @@ use gpui::{
 };
 
 use super::{
-    ast::{self, Align, Block, Inline},
+    ast::{self, Align, Block, CellImage, Inline},
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
 };
@@ -69,6 +69,16 @@ struct Hit {
     start: usize,
 }
 
+/// One painted table-cell picture hit target.
+///
+/// Its pixels stand in for the cell's alt text, so a press or drag over it
+/// belongs to that picture's document unit instead of being blank space.
+struct PictureHit {
+    bounds: Bounds<Pixels>,
+    range: std::ops::Range<usize>,
+    link: Option<String>,
+}
+
 /// A link pressed in the document; the owner resolves it.
 pub type OnLink = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>;
 
@@ -109,6 +119,11 @@ pub struct MarkdownView {
     dragging: bool,
     /// A link pressed on the last press, opened only on a click without drag.
     pressed_link: Option<String>,
+    /// Painted bounds of visible table-cell pictures, by their document unit
+    /// index, with the unit's document range and the link wrapping the picture.
+    /// A picture has no shaped glyphs, so without this a press on it would look
+    /// like blank space and a drag would start from offset 0.
+    picture_hits: Rc<RefCell<std::collections::HashMap<usize, PictureHit>>>,
     /// Top-level block the press landed in, so a drag maps hits in order.
     anchor_block: Option<usize>,
     /// Real layouts of visible paragraphs, keyed by their unit index in the
@@ -158,6 +173,7 @@ impl MarkdownView {
             head: 0,
             dragging: false,
             pressed_link: None,
+            picture_hits: Default::default(),
             anchor_block: None,
             paragraphs: Default::default(),
             paragraph_ranges: Default::default(),
@@ -355,6 +371,7 @@ impl MarkdownView {
         self.paragraphs.borrow_mut().clear();
         self.paragraph_ranges.borrow_mut().clear();
         self.block_bounds.borrow_mut().clear();
+        self.picture_hits.borrow_mut().clear();
         let old = self.parsed.blocks.len();
         let new = read.blocks.len();
         if old == 0 && new > 0 {
@@ -557,6 +574,37 @@ impl MarkdownView {
                     .glyph_at(position)
                     .and_then(|glyph| self.parsed.doctext.link_at(doc.start + glyph));
                 best = Some((at, at, link));
+            }
+        }
+        // A table-cell picture has no shaped glyphs, so its unit has no
+        // paragraph layout. Its painted box is the hit target: without it a
+        // drag starting on the picture would look like blank space and select
+        // from the beginning of the document.
+        {
+            let pictures = self.picture_hits.borrow();
+            let forward = self.head >= self.anchor;
+            for hit in pictures.values() {
+                if !hit.bounds.contains(&position) {
+                    continue;
+                }
+                let at = if forward {
+                    hit.range.end
+                } else {
+                    hit.range.start
+                };
+                let replace = match &best {
+                    None => true,
+                    Some((known, _, _)) => {
+                        if forward {
+                            at > *known
+                        } else {
+                            at < *known
+                        }
+                    }
+                };
+                if replace {
+                    best = Some((at, at, hit.link.clone()));
+                }
             }
         }
         best.map(|(_, at, link)| Hit {
@@ -808,6 +856,7 @@ impl MarkdownView {
                     text: text.clone(),
                     styles: Vec::new(),
                     links: Vec::new(),
+                    cell_images: Vec::new(),
                 };
                 // The language label is a real element above the code body.
                 // Shifting it up fixes the old centred gap without moving the
@@ -893,36 +942,18 @@ impl MarkdownView {
                 let repeated = *repeated_head;
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
-                        let mut cell = div()
-                            .debug_selector(move || format!("markdown-cell-{ix}-{row}-{column}"))
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .child(if repeated && header {
-                                // A repeated chunk header is presentation only:
-                                // its document range is empty, so it must not
-                                // take part in offset hit testing. It still
-                                // consumes its unit to keep the cursor in step.
-                                let _ = this.next_unit(ix, &unit_cursor);
-                                div().child(inline.text.clone()).into_any_element()
-                            } else {
-                                this.paragraph_unit(
-                                    gpui::ElementId::Name(
-                                        format!("reader-cell-{ix}-{row}-{column}").into(),
-                                    ),
-                                    inline,
-                                    this.next_unit(ix, &unit_cursor),
-                                )
-                                .align(table_align(aligns, column))
-                                .into_any_element()
-                            });
-                        if header {
-                            cell = cell
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(colors.fg_muted);
-                        }
-                        cell
+                        this.table_cell(
+                            ix,
+                            &unit_cursor,
+                            inline,
+                            column,
+                            aligns,
+                            repeated,
+                            header,
+                            &format!("cell-{ix}-{row}-{column}"),
+                            format!("markdown-cell-{ix}-{row}-{column}"),
+                            colors.fg_muted,
+                        )
                     };
                 // Table text uses the same body size and line height as prose:
                 // cells inherit it, so the shaped runs, selection, links and
@@ -979,9 +1010,7 @@ impl MarkdownView {
                 .text_size(gpui::px(sm))
                 .child(tex.clone())
                 .into_any_element(),
-            Block::ImageRow(pictures) => {
-                self.picture_row(ix, &unit_cursor, pictures, &colors, xs, radius)
-            }
+            Block::ImageRow(pictures) => self.picture_row(ix, &unit_cursor, pictures),
             Block::Centered(blocks) => div()
                 .w_full()
                 .flex()
@@ -998,17 +1027,9 @@ impl MarkdownView {
                     )
                 }))
                 .into_any_element(),
-            Block::Image { alt, url, hints } => self.picture_unit(
-                ix,
-                alt,
-                url,
-                *hints,
-                images::PictureStyle {
-                    colors: &colors,
-                    small_text: xs,
-                    radius,
-                },
-            ),
+            Block::Image { url, hints, .. } => self
+                .picture_unit(ix, url, *hints)
+                .unwrap_or_else(|| div().into_any_element()),
             Block::Html(text) => div()
                 .debug_selector(move || format!("markdown-html-{ix}"))
                 .font_family(mono)
@@ -1048,15 +1069,15 @@ impl MarkdownView {
         // Flow mode uses the same real first/last block inset; the host scrolls
         // it, so the document does not need list-level padding tricks.
         let vertical = window.rem_size() * 0.75;
-        let pending_images = self.only_pending_images(block);
+        let hidden_images = self.only_hidden_images(block);
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
             .when(centered, |block| {
                 block.w_full().flex().flex_col().items_center()
             })
             .px_3()
-            .when(!pending_images, |block| block.py_1())
-            .when(pending_images, |block| {
+            .when(!hidden_images, |block| block.py_1())
+            .when(hidden_images, |block| {
                 block.h(gpui::px(0.0)).overflow_hidden()
             })
             // Include real content insets in first/last block measurements.
@@ -1216,26 +1237,18 @@ impl MarkdownView {
                 let repeated = *repeated_head;
                 let cell =
                     |this: &Self, inline: &Inline, row: usize, column: usize, header: bool| {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .child(if repeated && header {
-                                let _ = this.next_unit(ix, units);
-                                div().child(inline.text.clone()).into_any_element()
-                            } else {
-                                this.paragraph_unit(
-                                    gpui::ElementId::Name(
-                                        format!("reader-nested-cell-{}-{row}-{column}", id.1)
-                                            .into(),
-                                    ),
-                                    inline,
-                                    this.next_unit(ix, units),
-                                )
-                                .align(table_align(aligns, column))
-                                .into_any_element()
-                            })
+                        this.table_cell(
+                            ix,
+                            units,
+                            inline,
+                            column,
+                            aligns,
+                            repeated,
+                            header,
+                            &format!("nested-{}-{row}-{column}", id.1),
+                            format!("markdown-nested-cell-{}-{row}-{column}", id.1),
+                            colors.fg_muted,
+                        )
                     };
                 // Same body size and line height as prose, so a nested table
                 // is not larger than the text around it.
@@ -1314,9 +1327,7 @@ impl MarkdownView {
                     .child(view)
                     .into_any_element()
             }
-            Block::ImageRow(pictures) => {
-                self.picture_row(ix, units, pictures, colors, body, radius)
-            }
+            Block::ImageRow(pictures) => self.picture_row(ix, units, pictures),
             Block::Centered(blocks) => div()
                 .w_full()
                 .flex()
@@ -1327,22 +1338,13 @@ impl MarkdownView {
                     self.nested(ix, units, ("center", format!("{ix}-{at}")), block, style)
                 }))
                 .into_any_element(),
-            Block::Image { alt, url, hints } => self.picture_unit(
-                ix,
-                alt,
-                url,
-                *hints,
-                images::PictureStyle {
-                    colors,
-                    small_text: body,
-                    radius,
-                },
-            ),
+            Block::Image { url, hints, .. } => self
+                .picture_unit(ix, url, *hints)
+                .unwrap_or_else(|| div().into_any_element()),
             other => div()
                 .text_size(gpui::px(body))
                 .text_color(colors.fg_muted)
                 .child(match other {
-                    Block::Image { alt, .. } => alt.clone(),
                     Block::Html(text) => text.clone(),
                     Block::Math { tex, .. } => tex.clone(),
                     Block::Paragraph(inline) => inline.text.clone(),
@@ -1354,14 +1356,181 @@ impl MarkdownView {
 }
 
 impl MarkdownView {
+    /// One table cell: its text runs and any pictures it keeps inline.
+    ///
+    /// A cell registers one document unit per piece (see [`ast::cell_parts`]),
+    /// exactly as `DocText` registered them, so selection, links and copy keep
+    /// working through a cell that also shows images. `presentation` marks the
+    /// repeated header of a virtualized chunk: it paints the same pieces but
+    /// takes no part in offset hit testing.
+    #[allow(clippy::too_many_arguments)]
+    fn table_cell(
+        &self,
+        ix: usize,
+        units: &std::cell::Cell<usize>,
+        cell: &Inline,
+        column: usize,
+        aligns: &[Align],
+        repeated: bool,
+        header: bool,
+        key: &str,
+        selector: String,
+        muted: gpui::Hsla,
+    ) -> AnyElement {
+        let align = table_align(aligns, column);
+        let presentation = repeated && header;
+        let content = if cell.cell_images.is_empty() {
+            // A cell without pictures draws exactly as it always has: one
+            // shaped paragraph, aligned per column.
+            if presentation {
+                let _ = self.next_unit(ix, units);
+                div().child(cell.text.clone()).into_any_element()
+            } else {
+                self.paragraph_unit(
+                    gpui::ElementId::Name(format!("reader-{key}-0").into()),
+                    cell,
+                    self.next_unit(ix, units),
+                )
+                .align(align)
+                .into_any_element()
+            }
+        } else {
+            // A cell with pictures stacks them with its text runs in reading
+            // order. Each piece keeps the cell's full inner width, so a
+            // picture shrinks to a narrow cell and keeps its aspect ratio
+            // instead of being clipped or stretching the column.
+            let mut content = div().flex().flex_col().gap_1().w_full().min_w_0();
+            content = match align {
+                TextAlign::Center => content.items_center(),
+                TextAlign::Right => content.items_end(),
+                TextAlign::Left => content.items_start(),
+            };
+            let parts = ast::cell_parts(cell);
+            for (at, part) in parts.iter().enumerate() {
+                match part.image {
+                    Some(image) => {
+                        // `DocText` registered one unit per piece, in this
+                        // order, so the cursor advances once per piece either
+                        // way; a picture's unit is its alt text, so copying
+                        // keeps the description while the cell paints pixels.
+                        let unit = self.next_unit(ix, units);
+                        let link = image.link.clone();
+                        let Some(picture) =
+                            self.cell_picture(ix, image, format!("{key}-picture-{at}"))
+                        else {
+                            // Pending demand stays invisible and adds no cell
+                            // row; the board still has the request and remeasures
+                            // this block when the picture lands.
+                            continue;
+                        };
+                        let mut frame = div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .when(align == TextAlign::Center, |row| row.justify_center())
+                            .when(align == TextAlign::Right, |row| row.justify_end())
+                            .child(picture);
+                        if !presentation {
+                            // The painted picture is the hit target for its own
+                            // document unit, so a selection drag starts here
+                            // instead of at document offset 0.
+                            let hits = self.picture_hits.clone();
+                            let range = unit.1.clone();
+                            let link = link.clone();
+                            frame = frame.on_children_prepainted(move |bounds, _, _| {
+                                if let Some(bounds) = bounds.first().copied() {
+                                    hits.borrow_mut().insert(
+                                        unit.0,
+                                        PictureHit {
+                                            bounds,
+                                            range: range.clone(),
+                                            link: link.clone(),
+                                        },
+                                    );
+                                }
+                            });
+                        }
+                        if link.is_some() {
+                            frame = frame.cursor(gpui::CursorStyle::PointingHand);
+                        }
+                        content = content.child(frame.into_any_element());
+                    }
+                    None => {
+                        // One unit per text run, in the same order `DocText`
+                        // registered them. A repeated chunk header is
+                        // presentation only: it consumes its unit to keep the
+                        // cursor in step but stays out of offset hit testing.
+                        let unit = self.next_unit(ix, units);
+                        let piece = cell.slice(part.range.clone());
+                        content = content.child(div().w_full().min_w_0().child(if presentation {
+                            div().child(piece.text).into_any_element()
+                        } else {
+                            self.paragraph_unit(
+                                gpui::ElementId::Name(format!("reader-{key}-{at}").into()),
+                                &piece,
+                                unit,
+                            )
+                            .align(align)
+                            .into_any_element()
+                        }));
+                    }
+                }
+            }
+            content.into_any_element()
+        };
+        let mut cell = div()
+            .debug_selector(move || selector)
+            .flex_1()
+            .min_w_0()
+            .px_3()
+            .py_2()
+            .child(content);
+        if header {
+            cell = cell.font_weight(gpui::FontWeight::MEDIUM).text_color(muted);
+        }
+        cell.into_any_element()
+    }
+
+    /// One picture inside a table cell, sized within the cell.
+    ///
+    /// It draws through the same picture presenter as every other picture.
+    /// `None` means nothing is drawn: still loading, failed/refused,
+    /// unavailable or released after eviction. The cell then adds neither a
+    /// row nor a gap for it, while its alt text stays in the copy model and a
+    /// landed picture keeps its logical size.
+    fn cell_picture(&self, ix: usize, picture: &CellImage, key: String) -> Option<AnyElement> {
+        let state = match (&self.image_board, &self.resource_context) {
+            (Some(board), Some(context)) => match images::resolve_target(&picture.url, context) {
+                Ok(target) => board.borrow_mut().want(ix, target),
+                Err(failure) => ImageState::Failed(failure),
+            },
+            _ => ImageState::Unavailable,
+        };
+        if !state.is_ready() {
+            // Demand is registered; the shared presenter and the reader pump
+            // keep the state machine, budgets and remeasurement unchanged.
+            return None;
+        }
+        let element = images::image_element(
+            gpui::ElementId::Name(format!("reader-{key}").into()),
+            format!("markdown-{key}"),
+            &state,
+            picture.hints,
+            format!("markdown-{key}-frame"),
+        );
+        Some(images::painted_when_visible(
+            element,
+            self.picture_visibility(&picture.url),
+        ))
+    }
+
+    /// One picture block: the resolved state of its source, or the honest
+    /// reason it cannot be shown. The alt text stays visible in every state.
     fn picture_row(
         &self,
         ix: usize,
         units: &std::cell::Cell<usize>,
         pictures: &[(String, String, ImageHints)],
-        colors: &ely_core::theme::Palette,
-        size: f32,
-        radius: gpui::Rems,
     ) -> AnyElement {
         div()
             .debug_selector(move || format!("markdown-picture-row-{ix}"))
@@ -1385,21 +1554,11 @@ impl MarkdownView {
                         if !alt.is_empty() {
                             let _ = self.next_unit(ix, units);
                         }
+                        // Every non-ready picture is dropped from the row, so it
+                        // cannot claim its own gap or keep an empty box. The
+                        // shared presenter already reports only pixels.
+                        let picture = self.picture_unit(ix, url, *hints)?;
                         // Different pictures in one paragraph must keep independent element IDs.
-                        let picture = self.picture_unit(
-                            ix,
-                            alt,
-                            url,
-                            *hints,
-                            images::PictureStyle {
-                                colors,
-                                small_text: size,
-                                radius,
-                            },
-                        );
-                        if self.pending_image(url) {
-                            return None;
-                        }
                         Some(
                             div()
                                 .debug_selector(move || {
@@ -1415,41 +1574,61 @@ impl MarkdownView {
             .into_any_element()
     }
 
-    fn pending_image(&self, url: &str) -> bool {
-        self.image_board
-            .as_ref()
-            .zip(self.resource_context.as_ref())
-            .is_some_and(|(board, context)| {
-                images::resolve_target(url, context)
-                    .ok()
-                    .is_some_and(|target| board.borrow().is_loading(&target.key()))
-            })
+    /// The board and source key a picture's animation visibility belongs to.
+    fn picture_visibility(
+        &self,
+        url: &str,
+    ) -> Option<(Rc<RefCell<ImageBoard>>, crate::content::images::ImageKey)> {
+        self.image_board.clone().zip(
+            self.resource_context
+                .as_ref()
+                .and_then(|context| images::resolve_target(url, context).ok())
+                .map(|target| target.key()),
+        )
     }
 
-    fn only_pending_images(&self, block: &Block) -> bool {
-        let loading = |url: &str| self.pending_image(url);
+    /// Whether a picture source is on screen right now.
+    ///
+    /// Only `Ready` paints. Loading/unrequested, failed/refused, unavailable
+    /// and released pictures all render nothing, so a block made only of them
+    /// must not keep its image padding or an empty row around them.
+    fn picture_visible(&self, url: &str) -> bool {
+        let Some(board) = self.image_board.as_ref() else {
+            // Without a board no picture can paint.
+            return false;
+        };
+        let Some(context) = self.resource_context.as_ref() else {
+            return false;
+        };
+        match images::resolve_target(url, context) {
+            Ok(target) => board.borrow().is_ready(&target.key()),
+            Err(_) => false,
+        }
+    }
+
+    /// A block whose pictures are all invisible contributes no image row.
+    fn only_hidden_images(&self, block: &Block) -> bool {
+        let hidden = |url: &str| !self.picture_visible(url);
         match block {
-            Block::Image { url, .. } => loading(url),
+            Block::Image { url, .. } => hidden(url),
             Block::ImageRow(pictures) => {
-                !pictures.is_empty() && pictures.iter().all(|(_, url, _)| loading(url))
+                !pictures.is_empty() && pictures.iter().all(|(_, url, _)| hidden(url))
             }
             Block::Centered(body) => {
-                !body.is_empty() && body.iter().all(|block| self.only_pending_images(block))
+                !body.is_empty() && body.iter().all(|block| self.only_hidden_images(block))
             }
             _ => false,
         }
     }
 
-    /// One picture block: pending demand is visually collapsed; failures retain
-    /// diagnostics, and successful pixels retain their author dimensions.
-    fn picture_unit(
-        &self,
-        ix: usize,
-        alt: &str,
-        url: &str,
-        hints: ImageHints,
-        style: images::PictureStyle<'_>,
-    ) -> AnyElement {
+    /// One picture block: real pixels when ready, nothing at all otherwise.
+    ///
+    /// `None` means the picture contributes no element of its own: still
+    /// loading/unrequested, failed/refused, unavailable or released. Demand is
+    /// still registered through `want`, so the state machine, budgets,
+    /// cancellation and remeasurement are unchanged; only the visuals are
+    /// omitted, and alt text stays in the copy model.
+    fn picture_unit(&self, ix: usize, url: &str, hints: ImageHints) -> Option<AnyElement> {
         let state = match (&self.image_board, &self.resource_context) {
             (Some(board), Some(context)) => match images::resolve_target(url, context) {
                 Ok(target) => board.borrow_mut().want(ix, target),
@@ -1457,35 +1636,20 @@ impl MarkdownView {
             },
             _ => ImageState::Unavailable,
         };
-        let visibility = self.image_board.clone().zip(
-            self.resource_context
-                .as_ref()
-                .and_then(|context| images::resolve_target(url, context).ok())
-                .map(|target| target.key()),
-        );
+        if !state.is_ready() {
+            return None;
+        }
         let picture = images::image_element(
             gpui::ElementId::Name(format!("reader-picture-{ix}-{url}").into()),
             images::image_selector(ix),
-            alt,
             &state,
             hints,
-            style,
             images::frame_selector(ix),
         );
-        div()
-            .max_w_full()
-            .child(picture)
-            .on_children_prepainted(move |bounds, window, _| {
-                if let Some((board, key)) = &visibility
-                    && bounds.iter().any(|bounds| {
-                        let visible = window.content_mask().bounds.intersect(bounds);
-                        visible.size.width > gpui::px(0.0) && visible.size.height > gpui::px(0.0)
-                    })
-                {
-                    board.borrow_mut().painted(key);
-                }
-            })
-            .into_any_element()
+        Some(images::painted_when_visible(
+            picture,
+            self.picture_visibility(url),
+        ))
     }
 
     /// A paragraph drawn from one unit of the document model.
@@ -1608,6 +1772,7 @@ impl MarkdownView {
     fn render_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let horizontal = window.rem_size() * 0.5;
         self.visible_units.borrow_mut().clear();
+        self.picture_hits.borrow_mut().clear();
         let blocks = self.parsed.blocks.len();
         let mut column = div().flex().flex_col().w_full().min_w_0();
         for ix in 0..blocks {
@@ -1705,8 +1870,10 @@ impl Render for MarkdownView {
             } else {
                 gpui::px(0.0)
             };
-        // A new frame: only paragraphs laid out below are hit-testable.
+        // A new frame: only paragraphs and pictures laid out below are
+        // hit-testable.
         self.visible_units.borrow_mut().clear();
+        self.picture_hits.borrow_mut().clear();
         let list = list(
             self.list.clone(),
             cx.processor(|view: &mut Self, ix: usize, window: &mut Window, cx| {

@@ -1571,7 +1571,7 @@ fn replacing_markdown_rejects_previous_background_results(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext) {
+fn a_repository_file_picture_draws_nothing_without_loading(cx: &mut TestAppContext) {
     let (reader, cx) = open(
         cx,
         PreparedBody::Utf8 {
@@ -1581,17 +1581,19 @@ fn repository_file_picture_draws_a_note_without_loading(cx: &mut TestAppContext)
         DocumentKind::Markdown,
     );
     frames(cx);
-    assert!(cx.debug_bounds("markdown-picture-note-0").is_some());
-    assert!(
-        reader
-            .read_with(cx, |r, cx| r
-                .markdown()
-                .unwrap()
-                .read(cx)
-                .text()
-                .to_string())
-            .contains("file:")
-    );
+    // The address is refused, so no picture element and no placeholder exist;
+    // the alt text and the source stay readable in the document model.
+    assert!(cx.debug_bounds("markdown-picture-0").is_none());
+    assert!(cx.debug_bounds("markdown-picture-frame-0").is_none());
+    let (text, alt) = reader.read_with(cx, |r, cx| {
+        let document = r.markdown().unwrap().read(cx);
+        (
+            document.text().to_string(),
+            document.document_text().to_string(),
+        )
+    });
+    assert!(text.contains("file:"), "{text:?}");
+    assert!(alt.contains("untrusted"), "{alt:?}");
 }
 
 #[gpui::test]
@@ -2557,5 +2559,867 @@ fn a_long_table_copies_its_header_once(cx: &mut TestAppContext) {
     assert!(
         copied.contains("c0") && copied.contains("c79"),
         "{copied:?}"
+    );
+}
+
+// ---- table-cell pictures ----
+
+/// Completes every request with a real decoded picture whose size depends on
+/// the source path, so layout can be checked without any network.
+struct TableImages {
+    requests: std::sync::Mutex<Vec<crate::content::images::ImageRequest>>,
+    sizes: Vec<(&'static str, u32, u32)>,
+}
+
+impl TableImages {
+    fn new(sizes: &[(&'static str, u32, u32)]) -> Self {
+        Self {
+            requests: Default::default(),
+            sizes: sizes.to_vec(),
+        }
+    }
+
+    /// Answers `.svg` paths from a real bounded-SVG fixture instead of a
+    /// generated raster, so table cells exercise the shared SVG pipeline.
+    fn decode(&self, path: &str) -> crate::content::images::DecodedImage {
+        if path.ends_with(".svg") {
+            return crate::content::images::decode_image(
+                include_bytes!("../../content/images/fixtures/entry-stats.svg").to_vec(),
+                &crate::content::images::ImageLimits::default(),
+            )
+            .expect("decode the SVG fixture");
+        }
+        let (width, height) = self
+            .sizes
+            .iter()
+            .find(|(name, _, _)| path.ends_with(name))
+            .map(|(_, width, height)| (*width, *height))
+            .unwrap_or((320, 180));
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([40, (x % 256) as u8, (y % 256) as u8, 255])
+        });
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("encode the test picture");
+        crate::content::images::decode_image(
+            cursor.into_inner(),
+            &crate::content::images::ImageLimits::default(),
+        )
+        .expect("decode the test picture")
+    }
+}
+
+impl crate::content::images::ImageProvider for TableImages {
+    fn start(
+        &self,
+        request: crate::content::images::ImageRequest,
+        sink: crate::content::images::ImageSink,
+    ) {
+        self.requests.lock().unwrap().push(request.clone());
+        let path = match &request.target {
+            crate::content::images::ImageTarget::Repository { path, .. } => path.clone(),
+            crate::content::images::ImageTarget::External { url } => url.clone(),
+        };
+        sink.push(crate::content::images::ImageCompletion {
+            scope: request.scope,
+            key: request.key,
+            result: Ok(self.decode(&path)),
+        });
+    }
+
+    fn cancel(&self, _scope: crate::content::images::ImageScope) {}
+}
+
+/// Runs frames while advancing the picture pump's clock until the reader has
+/// no outstanding picture work.
+fn settle_pictures(reader: &Entity<ReaderView>, cx: &mut VisualTestContext) {
+    for _ in 0..40 {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(25));
+        cx.run_until_parked();
+        if !reader.read_with(cx, |reader, _| reader.has_pending_images()) {
+            return;
+        }
+    }
+    panic!(
+        "the table pictures did not settle: {:?}",
+        reader.read_with(cx, |reader, _| reader.image_states_debug())
+    );
+}
+
+#[gpui::test]
+fn screenshot_table_cells_draw_their_pictures_and_keep_the_caption_rows(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::screenshot_table(), DocumentKind::Markdown);
+    let images = std::sync::Arc::new(TableImages::new(&[
+        ("preview-dashboard.png", 320, 180),
+        ("preview-monitor.png", 120, 240),
+    ]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
+    settle_pictures(&reader, cx);
+
+    let requests = images.requests.lock().unwrap();
+    assert!(
+        requests.iter().any(|request| matches!(
+            &request.target,
+            crate::content::images::ImageTarget::Repository { path, commit, .. }
+                if path == "docs/images/preview-dashboard.png" && commit == fixtures::COMMIT
+        )),
+        "a repository-relative cell picture resolves at the fixed commit: {requests:?}"
+    );
+    drop(requests);
+
+    // The first body row is the Dashboard/Monitor picture row.
+    let dashboard_cell = cx
+        .debug_bounds("markdown-cell-1-1-0")
+        .expect("the Dashboard cell is laid out");
+    let dashboard = cx
+        .debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+        .expect("the Dashboard picture frame is laid out");
+    let monitor = cx
+        .debug_bounds("markdown-cell-1-1-1-picture-0-frame")
+        .expect("the Monitor picture frame is laid out");
+    assert!(
+        dashboard.size.width > px(1.0) && dashboard.size.height > px(1.0),
+        "the cell picture is really laid out: {dashboard:?}"
+    );
+    assert!(
+        (dashboard.size.width / dashboard.size.height - 320.0 / 180.0).abs() < 0.05,
+        "the wide picture keeps its aspect ratio: {dashboard:?}"
+    );
+    assert!(
+        (monitor.size.width / monitor.size.height - 120.0 / 240.0).abs() < 0.05,
+        "the tall picture keeps its aspect ratio: {monitor:?}"
+    );
+    assert!(
+        dashboard.size.width <= dashboard_cell.size.width - px(20.0),
+        "the picture stays inside its cell padding: {dashboard:?} vs {dashboard_cell:?}"
+    );
+    assert!(
+        dashboard.right() <= dashboard_cell.right(),
+        "the picture is not clipped by the cell edge: {dashboard:?} vs {dashboard_cell:?}"
+    );
+
+    // The caption rows are separate text rows and remain readable.
+    let caption = cx
+        .debug_bounds("markdown-cell-1-2-0")
+        .expect("the Dashboard caption row is laid out");
+    assert!(
+        caption.origin.y >= dashboard_cell.origin.y + dashboard.size.height,
+        "the caption row sits below the picture row: {caption:?} vs {dashboard:?}"
+    );
+    let snapshot = inline_snapshot(cx, "Dashboard");
+    assert!(
+        snapshot.pieces[0].text_bounds.top() >= dashboard.bottom() - px(2.0),
+        "the caption text is drawn under the picture row"
+    );
+
+    // A narrow window shrinks the pictures inside their cells without
+    // stretching or clipping them.
+    cx.simulate_resize(gpui::size(px(420.0), px(1200.0)));
+    frames(cx);
+    let narrow_cell = cx
+        .debug_bounds("markdown-cell-1-1-0")
+        .expect("the narrow Dashboard cell is laid out");
+    let narrow = cx
+        .debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+        .expect("the narrow picture is laid out");
+    assert!(
+        narrow.size.width < dashboard.size.width,
+        "a narrow cell shrinks its picture: {narrow:?} vs {dashboard:?}"
+    );
+    assert!(
+        narrow.right() <= narrow_cell.right(),
+        "the narrow picture stays inside the cell: {narrow:?} vs {narrow_cell:?}"
+    );
+    assert!(
+        (narrow.size.width / narrow.size.height - 320.0 / 180.0).abs() < 0.05,
+        "shrinking keeps the aspect ratio: {narrow:?}"
+    );
+
+    // Copying keeps the alt text where the picture was, then the caption row.
+    let cell_text = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .expect("markdown")
+            .read(cx)
+            .document_text()
+            .to_string()
+    });
+    assert!(
+        cell_text.contains("Dashboard\tMonitor\nDashboard\tMonitor"),
+        "the copy model keeps the alt text and the caption row: {cell_text:?}"
+    );
+}
+
+#[gpui::test]
+fn a_delayed_cell_picture_remeasures_its_row_after_it_lands(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot |\n|---|\n| ![Wide](wide.png) |\n\nTrailing text.\n".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    // A 900x300 picture is much taller than the loading placeholder, so a
+    // remeasure is visible as a taller row.
+    let images = std::sync::Arc::new(TableImages::new(&[("wide.png", 900, 300)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    frames(cx);
+    let before = reader.read_with(cx, |reader, cx| {
+        let document = reader.markdown().expect("markdown").read(cx);
+        (
+            document.top_block(),
+            document.painted_content_bounds(0).map(|b| b.size.height),
+        )
+    });
+    let row_before = cx
+        .debug_bounds("markdown-cell-0-1-0")
+        .expect("the picture cell draws before the picture lands")
+        .size
+        .height;
+
+    settle_pictures(&reader, cx);
+    frames(cx);
+
+    let after = reader.read_with(cx, |reader, cx| {
+        let document = reader.markdown().expect("markdown").read(cx);
+        (
+            document.top_block(),
+            document.painted_content_bounds(0).map(|b| b.size.height),
+        )
+    });
+    let row_after = cx
+        .debug_bounds("markdown-cell-0-1-0")
+        .expect("the picture cell draws after the picture lands")
+        .size
+        .height;
+    assert!(
+        row_after > row_before,
+        "the landed picture remeasures the table row: {row_after:?} vs {row_before:?}"
+    );
+    assert_eq!(
+        before.0, after.0,
+        "an image landing must not jump the reading position"
+    );
+    assert!(
+        after
+            .1
+            .is_some_and(|height| height > before.1.unwrap_or_default()),
+        "the containing block grew with the picture: {before:?} vs {after:?}"
+    );
+}
+
+#[gpui::test]
+fn a_picture_wrapped_in_a_link_in_a_cell_opens_the_link(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot |
+|---|
+| [![Guide](guide.png)](https://example.com/guide) |
+
+After.
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("guide.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let frame = cx
+        .debug_bounds("markdown-cell-0-1-0-picture-0-frame")
+        .expect("the linked picture frame is laid out");
+    cx.simulate_click(frame.center(), Modifiers::none());
+    cx.run_until_parked();
+    match reader.read_with(cx, |reader, _| reader.last_action().cloned()) {
+        Some(ReaderAction::Link(LinkTarget::External { url })) => {
+            assert_eq!(url, "https://example.com/guide");
+        }
+        other => panic!("expected the picture's external link, got {other:?}"),
+    }
+}
+
+#[gpui::test]
+fn a_drag_that_starts_on_a_linked_cell_picture_does_not_open_it(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot | note |
+|---|---|
+| [![Guide](guide.png)](https://example.com/guide) | text after |
+
+After.
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("guide.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let frame = cx
+        .debug_bounds("markdown-cell-0-1-0-picture-0-frame")
+        .expect("the linked picture frame is laid out");
+    let note = inline_snapshot(cx, "text after");
+    drag(
+        cx,
+        &[
+            frame.center(),
+            point(
+                note.pieces[0].text_bounds.right(),
+                note.pieces[0].text_bounds.center().y,
+            ),
+        ],
+    );
+    frames(cx);
+    assert!(
+        reader.read_with(cx, |reader, _| reader.last_action().is_none()),
+        "a selection drag that began on the picture must not navigate: {:?}",
+        reader.read_with(cx, |reader, _| reader.last_action().cloned())
+    );
+}
+
+#[gpui::test]
+fn copying_a_table_with_pictures_keeps_the_cell_text_and_tabs(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::screenshot_table(), DocumentKind::Markdown);
+    let images = std::sync::Arc::new(TableImages::new(&[("preview-dashboard.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let cell = inline_snapshot(cx, "Dashboard").pieces[0]
+        .text_bounds
+        .center();
+    cx.simulate_click(cell, Modifiers::none());
+    frames(cx);
+    cx.simulate_keystrokes("secondary-a");
+    frames(cx);
+    let copied = copy_selection(&reader, cx);
+    assert!(
+        copied.contains(
+            "Dashboard	Monitor
+Dashboard	Monitor"
+        ),
+        "the picture cells copy as their alt text, in place: {copied:?}"
+    );
+    assert!(
+        copied.contains("Map	Players Manager"),
+        "later rows keep their cells: {copied:?}"
+    );
+}
+
+#[gpui::test]
+fn a_pending_table_picture_is_silent_and_loads_when_a_provider_attaches(cx: &mut TestAppContext) {
+    let (reader, cx) = open(cx, fixtures::screenshot_table(), DocumentKind::Markdown);
+    cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
+    frames(cx);
+    // No provider is attached: pending demand stays invisible. No placeholder
+    // box, no visible alt, and no picture row.
+    assert!(
+        cx.debug_bounds("markdown-cell-1-1-0-picture-0").is_none(),
+        "a pending cell picture must not show a placeholder"
+    );
+    assert!(
+        cx.debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+            .is_none(),
+        "a pending cell picture must not reserve a frame"
+    );
+    let text = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .expect("markdown")
+            .read(cx)
+            .document_text()
+            .to_string()
+    });
+    assert!(
+        text.contains("Dashboard	Monitor"),
+        "the alt text is still the copy model: {text:?}"
+    );
+
+    // Attaching a provider schedules the demand that was registered while the
+    // picture was invisible; the landed picture remeasures its row.
+    let images = std::sync::Arc::new(TableImages::new(&[("preview-dashboard.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    settle_pictures(&reader, cx);
+    frames(cx);
+    assert!(
+        cx.debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+            .is_some(),
+        "the late provider paints the pending cell picture"
+    );
+}
+
+#[gpui::test]
+fn a_refused_or_failed_cell_picture_draws_nothing(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot | note |
+|---|---|
+| ![Secret](file:///c:/secret.png) | a refused address |
+| ![Gone](missing.png) | a failed load |
+
+After.
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    // A provider that fails every request, so the second picture is a real
+    // failure rather than an unrequested source.
+    struct Failing;
+    impl crate::content::images::ImageProvider for Failing {
+        fn start(
+            &self,
+            request: crate::content::images::ImageRequest,
+            sink: crate::content::images::ImageSink,
+        ) {
+            sink.push(crate::content::images::ImageCompletion {
+                scope: request.scope,
+                key: request.key,
+                result: Err(crate::content::images::ImageFailure::NotFound),
+            });
+        }
+        fn cancel(&self, _scope: crate::content::images::ImageScope) {}
+    }
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(std::sync::Arc::new(Failing)), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+
+    // Neither the refused address nor the failed load paints a picture, a
+    // placeholder, an alt label or a frame; both rows keep only their text.
+    for row in [1, 2] {
+        let picture: &'static str =
+            Box::leak(format!("markdown-cell-0-{row}-0-picture-0").into_boxed_str());
+        let frame: &'static str =
+            Box::leak(format!("markdown-cell-0-{row}-0-picture-0-frame").into_boxed_str());
+        assert!(
+            cx.debug_bounds(picture).is_none(),
+            "cell picture {row} must not draw a placeholder"
+        );
+        assert!(
+            cx.debug_bounds(frame).is_none(),
+            "cell picture {row} must not reserve a frame"
+        );
+        let cell: &'static str = Box::leak(format!("markdown-cell-0-{row}-0").into_boxed_str());
+        let bounds = cx.debug_bounds(cell).expect("the cell is still laid out");
+        assert!(
+            bounds.size.height > px(1.0) && bounds.size.height < px(80.0),
+            "the cell keeps only its text height: {bounds:?}"
+        );
+    }
+    // The table's own structure and the author's caption rows are untouched.
+    assert!(cx.debug_bounds("markdown-cell-0-1-1").is_some());
+    assert!(
+        cx.debug_bounds("markdown-cell-0-0-0").is_some(),
+        "the header row still exists"
+    );
+    let text = reader.read_with(cx, |reader, cx| {
+        reader
+            .markdown()
+            .expect("markdown")
+            .read(cx)
+            .document_text()
+            .to_string()
+    });
+    assert!(
+        text.contains("Secret") && text.contains("Gone"),
+        "both alts stay in the copy model: {text:?}"
+    );
+}
+
+#[gpui::test]
+fn a_released_cell_picture_disappears_instead_of_reserving_its_box(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| one | two |\n|---|---|\n| ![One](one.png) | ![Two](two.png) |\n| **One** | **Two** |\n"
+                .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_limits(
+            crate::content::images::ImageLimits {
+                max_ready_images: 1,
+                ..Default::default()
+            },
+            cx,
+        );
+    });
+    let images = std::sync::Arc::new(TableImages::new(&[
+        ("one.png", 320, 180),
+        ("two.png", 120, 240),
+    ]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(1200.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+
+    // Both pictures were decoded, but the budget keeps only one: the released
+    // one draws nothing at all rather than a placeholder panel.
+    let states = reader.read_with(cx, |reader, _| reader.image_states_debug());
+    assert!(
+        states.iter().any(|(_, state)| *state == "released"),
+        "the budget really released a picture: {states:?}"
+    );
+    let mut drawn = 0;
+    for column in [0, 1] {
+        let frame: &'static str =
+            Box::leak(format!("markdown-cell-0-1-{column}-picture-0-frame").into_boxed_str());
+        let picture: &'static str =
+            Box::leak(format!("markdown-cell-0-1-{column}-picture-0").into_boxed_str());
+        if cx.debug_bounds(frame).is_some() {
+            drawn += 1;
+        } else {
+            assert!(
+                cx.debug_bounds(picture).is_none(),
+                "a released cell picture shows no placeholder or label"
+            );
+        }
+        // The cell itself keeps its own height for the author's text row.
+        let cell: &'static str = Box::leak(format!("markdown-cell-0-1-{column}").into_boxed_str());
+        assert!(
+            cx.debug_bounds(cell)
+                .is_some_and(|bounds| bounds.size.height > px(1.0)),
+            "the cell keeps a real row after the picture is released"
+        );
+    }
+    assert_eq!(drawn, 1, "only the retained picture is drawn");
+    // The author's caption row is untouched by the release.
+    assert!(cx.debug_bounds("markdown-cell-0-2-0").is_some());
+    assert!(cx.debug_bounds("markdown-cell-0-2-1").is_some());
+}
+
+#[gpui::test]
+fn a_text_link_beside_a_cell_picture_still_opens(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot | note |
+|---|---|
+| ![Shot](shot.png) [Guide](guide.md) | plain |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("shot.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let guide = inline_snapshot(cx, " Guide").pieces[0].text_bounds.center();
+    cx.simulate_click(guide, Modifiers::none());
+    cx.run_until_parked();
+    match reader.read_with(cx, |reader, _| reader.last_action().cloned()) {
+        Some(ReaderAction::Link(LinkTarget::Repository(link))) => {
+            assert_eq!(link.path, "docs/guide.md");
+        }
+        other => panic!("expected the cell text link, got {other:?}"),
+    }
+}
+
+#[gpui::test]
+fn dragging_from_a_cell_picture_selects_from_the_picture_not_the_document_start(
+    cx: &mut TestAppContext,
+) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "Before the table.
+
+| shot | note |
+|---|---|
+| ![Shot](shot.png) text after | plain |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("shot.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let frame = cx
+        .debug_bounds("markdown-cell-1-1-0-picture-0-frame")
+        .expect("the cell picture frame is laid out");
+    let after = inline_snapshot(cx, " text after");
+    drag(
+        cx,
+        &[
+            frame.center(),
+            point(
+                after.pieces[0].text_bounds.right(),
+                after.pieces[0].text_bounds.center().y,
+            ),
+        ],
+    );
+    frames(cx);
+    let selected = selected(&reader, cx);
+    assert!(
+        selected.contains("text after"),
+        "the drag selects the text after the picture: {selected:?}"
+    );
+    assert!(
+        !selected.contains("Before the table"),
+        "a drag that started on the picture must not select from document offset 0: {selected:?}"
+    );
+}
+
+#[gpui::test]
+fn an_empty_alt_cell_picture_opens_its_own_link_not_the_neighbouring_one(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| shot |
+|---|
+| [Guide](guide.md)[![](shot.png)](https://example.com/shot) |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("shot.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    // A text piece precedes the empty-alt picture, so it is the second cell
+    // piece and its picture key carries that part index.
+    let frame = cx
+        .debug_bounds("markdown-cell-0-1-0-picture-1-frame")
+        .expect("the empty-alt picture frame is laid out");
+    cx.simulate_click(frame.center(), Modifiers::none());
+    cx.run_until_parked();
+    match reader.read_with(cx, |reader, _| reader.last_action().cloned()) {
+        Some(ReaderAction::Link(LinkTarget::External { url })) => {
+            assert_eq!(url, "https://example.com/shot");
+        }
+        other => panic!("expected the picture's own link, got {other:?}"),
+    }
+}
+
+#[gpui::test]
+fn a_narrow_cell_picture_follows_the_column_alignment(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| Left | Center | Right |
+|:---|:---:|---:|
+| ![L](left.png) | ![C](center.png) | ![R](right.png) |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[
+        ("left.png", 96, 96),
+        ("center.png", 96, 96),
+        ("right.png", 96, 96),
+    ]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let cell = |cx: &mut VisualTestContext, column: usize| {
+        cx.debug_bounds(&*Box::leak(
+            format!("markdown-cell-0-1-{column}").into_boxed_str(),
+        ))
+        .expect("the aligned cell is laid out")
+    };
+    let frame = |cx: &mut VisualTestContext, column: usize| {
+        cx.debug_bounds(&*Box::leak(
+            format!("markdown-cell-0-1-{column}-picture-0-frame").into_boxed_str(),
+        ))
+        .expect("the aligned picture is laid out")
+    };
+    let left_cell = cell(cx, 0);
+    let left = frame(cx, 0);
+    assert!(
+        (left.left() - (left_cell.left() + px(12.0))).abs() <= px(2.0),
+        "a left column keeps the picture at its start: {left:?} vs {left_cell:?}"
+    );
+    let center_cell = cell(cx, 1);
+    let center = frame(cx, 1);
+    assert!(
+        (center.center().x - center_cell.center().x).abs() <= px(2.0),
+        "a centered column centers a narrow picture: {center:?} vs {center_cell:?}"
+    );
+    let right_cell = cell(cx, 2);
+    let right = frame(cx, 2);
+    assert!(
+        (right.right() - (right_cell.right() - px(12.0))).abs() <= px(2.0),
+        "a right column ends the picture at the cell's inner right edge: {right:?} vs {right_cell:?}"
+    );
+}
+
+/// Advances both the virtual executor clock and real time, so the reader's
+/// 20ms picture pump and the finite-animation wall clock both make progress
+/// while prepaint keeps reporting the picture as visible.
+fn frames_over_real_time(reader: &Entity<ReaderView>, cx: &mut VisualTestContext, steps: usize) {
+    for _ in 0..steps {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(25));
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        cx.run_until_parked();
+    }
+    let _ = reader;
+}
+
+#[gpui::test]
+fn a_table_cell_svg_uses_logical_size_and_plays_its_visible_animation(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "| stats |
+|---|
+| ![Stats](stats.svg) |
+"
+            .into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    cx.update(|_, cx| {
+        ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false);
+    });
+    let images = std::sync::Arc::new(TableImages::new(&[]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    let key = crate::content::images::ImageTarget::Repository {
+        owner: fixtures::OWNER.into(),
+        name: fixtures::NAME.into(),
+        commit: fixtures::COMMIT.into(),
+        path: "docs/stats.svg".into(),
+    }
+    .key();
+    for _ in 0..200 {
+        frames_over_real_time(&reader, cx, 1);
+        if reader.read_with(cx, |reader, _| reader.image_state(&key)) == Some("ready".into()) {
+            break;
+        }
+    }
+    assert_eq!(
+        reader.read_with(cx, |reader, _| reader.image_state(&key)),
+        Some("ready".into()),
+        "the table SVG loads through the shared pipeline"
+    );
+    // The SVG is 240x100 logical but its final PNG is supersampled; layout must
+    // use the logical size, not the pixel grid.
+    let frame = cx
+        .debug_bounds("markdown-cell-0-1-0-picture-0-frame")
+        .expect("the table SVG frame is laid out");
+    assert!(
+        (frame.size.width - px(240.0)).abs() < px(1.0),
+        "a table SVG keeps its logical width: {frame:?}"
+    );
+
+    // Keep prepainting the visible picture for longer than the presenter's
+    // ~150ms not-visible fallback. A picture that never reported `painted`
+    // would have finished by now.
+    frames_over_real_time(&reader, cx, 24);
+    assert!(
+        reader.read_with(cx, |reader, _| reader.has_pending_images()),
+        "a visible table SVG keeps its finite animation running"
+    );
+    // It still has to finish: no permanent frame work.
+    for _ in 0..200 {
+        frames_over_real_time(&reader, cx, 1);
+        if !reader.read_with(cx, |reader, _| reader.has_pending_images()) {
+            break;
+        }
+    }
+    assert!(
+        !reader.read_with(cx, |reader, _| reader.has_pending_images()),
+        "the finite table animation settles"
+    );
+}
+
+#[gpui::test]
+fn an_html_table_cell_picture_uses_the_same_image_lifecycle(cx: &mut TestAppContext) {
+    let (reader, cx) = open(
+        cx,
+        PreparedBody::Utf8 {
+            text: "<table><tr><td><img src=\"images/pic.png\" alt=\"Pic\"></td><td>note</td></tr></table>
+".into(),
+            has_bom: false,
+        },
+        DocumentKind::Markdown,
+    );
+    let images = std::sync::Arc::new(TableImages::new(&[("pic.png", 320, 180)]));
+    reader.update_in(cx, |reader, _, cx| {
+        reader.set_image_provider(Some(images.clone()), cx)
+    });
+    cx.simulate_resize(gpui::size(px(800.0), px(700.0)));
+    settle_pictures(&reader, cx);
+    frames(cx);
+    let frame = cx
+        .debug_bounds("markdown-cell-0-0-0-picture-0-frame")
+        .expect("the HTML cell picture is laid out");
+    assert!(
+        (frame.size.width / frame.size.height - 320.0 / 180.0).abs() < 0.05,
+        "the HTML cell picture keeps its aspect ratio: {frame:?}"
+    );
+    let requests = images.requests.lock().unwrap();
+    assert!(
+        requests.iter().any(|request| matches!(
+            &request.target,
+            crate::content::images::ImageTarget::Repository { path, .. }
+                if path == "docs/images/pic.png"
+        )),
+        "the sanitized HTML cell picture resolves through the same pipeline: {requests:?}"
     );
 }

@@ -171,3 +171,10 @@
 - **证据**：[返工记录](docs/devlog/2026-11-10-reader-svg.md#2026-11-11-负责人反馈后的集成返工) 与内容像素/延迟帧/分组几何回归。公开原始响应留在本地调查目录，没有因其公开可读就当作已获分发许可的 committed fixture。此前静态交付的通过记录保留为历史，不改写成人工验收成功。
 - **补充（同字节与物理网格）**：品质排查要让参考浏览器和解码器消费同一响应，并区分作者风格、字体缺失、渲染器算术与设备像素不足。Star History 本来有手绘位移，但 resvg 重复乘 scale 和忽略内嵌字体是实际偏差；修几何前先定位这条差异。动画帧、保留最终图与逻辑盒可以有不同网格，成本须按各自真实像素累计；只给静态图 2× 不代表高 DPI 动画/收尾清晰。见[品质返工](docs/devlog/2026-11-10-reader-svg.md#2026-11-11-再次品质返工同字节参考设备密度与静默加载)。
 - **范围**：SVG、图表、文档图片、动画及组合页面渲染；补充 L002/L012，不要求测试依赖实时外部网络。
+
+## L024：可读降级不能冒充“已支持”，多段内容的单元拆分必须由模型与渲染器共用
+
+- **规则**：当某类内容暂时无法按原语义绘制时（例如 AST 的 table cell 只有行内文本、没有块列表可挂图片），降级成 alt/文本只能算“保留可读内容”，不是“已支持”，相关文档、测试与注释都必须标成未覆盖，不能把降级状态写成特性。等模型层补上后，新增的多段结构（文本段与图片）必须由**同一个拆分函数**同时服务复制模型（`DocText`）与渲染器，逐段登记/消费单元；两边各写一套拆分规则会让选区偏移、游标与复制文本在部分行悄悄错位。
+- **原因**：`reader-table-images` 修复前，`ast.rs` 的 `in_cell` 分支刻意保留 alt 文本，于是公开 README 的 Screenshots 表格只显示 “Dashboard/Monitor” 而看不到截图，负责人只能看到文字；主题文档也确实把“表格内图片不加载”写成边界，但没有阻止功能被当成“已支持表格图片”。修复时若只改渲染器、不让 `DocText` 用同一份切分，cell 内的图片会多出一个未登记单元，后续 cell 的选区与 Ctrl+C 都会错一截。
+- **证据**：2026-11-11 `reader-table-images` 的 `ast::CellImage` + `cell_parts` 同时被 `doctext::DocText::cell` 与 `document::MarkdownView::table_cell` 使用，回归 `a_picture_cell_registers_one_unit_per_piece`、`copying_a_table_with_pictures_keeps_the_cell_text_and_tabs` 与 `screenshot_table_cells_draw_their_pictures_and_keep_the_caption_rows` 覆盖单元数、复制文本和真实布局；见[开发日志](docs/devlog/2026-11-11-reader-table-images.md)。
+- **范围**：任何把“可读文本占位”用于暂不支持内容的地方（表格、列表、引用中的富内容、HTML 子集）；也适用于后续新增 cell/段落分段渲染的改动。

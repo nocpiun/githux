@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use super::ast::{Block, Inline};
+use super::ast::{Block, Inline, cell_parts};
 
 /// Separators a copied table keeps: a tab between cells, a newline between
 /// rows, and a blank line after the whole table (added by `separate`).
@@ -20,6 +20,7 @@ static EMPTY: Inline = Inline {
     text: String::new(),
     styles: Vec::new(),
     links: Vec::new(),
+    cell_images: Vec::new(),
 };
 
 /// One selectable unit: paragraph, heading, table cell, code block or maths.
@@ -201,14 +202,16 @@ impl DocText {
                 // no text and no separator, so a copy joins the chunk rows
                 // exactly as if the table had never been split.
                 if *repeated_head {
-                    for _ in head {
-                        self.push_with_separator(&EMPTY.text, Vec::new(), "");
+                    for cell in head {
+                        for _ in cell_parts(cell) {
+                            self.push_with_separator(&EMPTY.text, Vec::new(), "");
+                        }
                     }
                 } else {
                     let last_cell = head.len().saturating_sub(1);
                     for (index, cell) in head.iter().enumerate() {
                         let separator = if index == last_cell { ROW } else { CELL };
-                        self.push_with_separator(&cell.text, cell.links.clone(), separator);
+                        self.cell(cell, separator);
                     }
                 }
                 // Body rows: tabs between cells, a newline after each row.
@@ -227,7 +230,7 @@ impl DocText {
                         } else {
                             ROW
                         };
-                        self.push_with_separator(&cell.text, cell.links.clone(), separator);
+                        self.cell(cell, separator);
                     }
                 }
             }
@@ -306,6 +309,25 @@ impl DocText {
         // block or cell in render order.
         self.push(&inline.text, inline.links.clone());
     }
+
+    /// Register one cell's pieces: a cell that holds pictures renders (and so
+    /// registers) one unit per text run and one per picture, while the copied
+    /// bytes stay exactly the cell's own text and its `separator`.
+    fn cell(&mut self, cell: &Inline, separator: &'static str) {
+        if cell.cell_images.is_empty() {
+            // The common case: one unit per cell, exactly as before pictures
+            // existed. Its text and links are used unchanged.
+            self.push_with_separator(&cell.text, cell.links.clone(), separator);
+            return;
+        }
+        let parts = cell_parts(cell);
+        let last = parts.len().saturating_sub(1);
+        for (index, part) in parts.iter().enumerate() {
+            let piece = cell.slice(part.range.clone());
+            let ending = if index == last { separator } else { "" };
+            self.push_with_separator(&piece.text, piece.links, ending);
+        }
+    }
 }
 
 /// The char boundary at or before `at`.
@@ -327,6 +349,7 @@ mod tests {
             text: text.to_string(),
             styles: Vec::new(),
             links: Vec::new(),
+            cell_images: Vec::new(),
         }
     }
 
@@ -435,6 +458,53 @@ next"
         let expected = ["a\tb\nc\td\ne\tf\n\n"][0];
         assert_eq!(text, expected, "{text:?}");
     }
+    #[test]
+    fn a_picture_cell_copies_its_alt_text_in_place() {
+        let doc = parse(
+            "| shot | note |
+|---|---|
+| ![Dashboard](d.png) | first |
+| ![Map](m.png) and ![Players](p.png) | second |",
+        );
+        let model = DocText::build(&doc.blocks);
+        assert_eq!(
+            model.text(),
+            "shot	note
+Dashboard	first
+Map and Players	second
+
+",
+            "{:?}",
+            model.text()
+        );
+    }
+
+    #[test]
+    fn a_picture_cell_registers_one_unit_per_piece() {
+        let doc = parse(
+            "| a |
+|---|
+| before ![x](x.png) after |",
+        );
+        let model = DocText::build(&doc.blocks);
+        // Header cell, then the body cell's text run, picture and last text run.
+        assert_eq!(model.units_of(0).count(), 4);
+        let units: Vec<String> = model
+            .units_of(0)
+            .map(|unit| model.slice(unit.at.clone()).to_string())
+            .collect();
+        assert_eq!(units, vec!["a", "before ", "x", " after"]);
+        // A link right after a picture still resolves through the cell text.
+        let linked = parse(
+            "| a |
+|---|
+| ![x](x.png) [Guide](guide.md) |",
+        );
+        let model = DocText::build(&linked.blocks);
+        let at = model.text().find("Guide").unwrap();
+        assert_eq!(model.link_at(at).as_deref(), Some("guide.md"));
+    }
+
     #[test]
     fn a_table_copies_as_rows_not_one_line() {
         let doc = parse(

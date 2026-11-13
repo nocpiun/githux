@@ -37,6 +37,12 @@ pub struct Inline {
     pub text: String,
     pub styles: Vec<(Range<usize>, Style)>,
     pub links: Vec<(Range<usize>, String)>,
+    /// Pictures that stay inside a table cell, in reading order.
+    ///
+    /// A cell has no block list, so a picture cannot be moved after the text
+    /// the way a paragraph's pictures are. The alternative — keeping only the
+    /// alt text — hid real screenshots. Every other `Inline` leaves this empty.
+    pub cell_images: Vec<CellImage>,
 }
 
 impl Inline {
@@ -44,6 +50,116 @@ impl Inline {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.styles.is_empty()
     }
+
+    /// The part of this inline between `range`'s byte offsets, with the styles
+    /// and links that overlap it clipped and rebased to the new text.
+    ///
+    /// A table cell is drawn piece by piece (text runs around its pictures),
+    /// and each piece keeps its own byte offsets so selection mapping and link
+    /// opening still work through the document model.
+    pub fn slice(&self, range: Range<usize>) -> Inline {
+        let start = range.start.min(self.text.len());
+        let end = range.end.clamp(start, self.text.len());
+        let clip = |range: &Range<usize>| -> Option<Range<usize>> {
+            let from = range.start.max(start).min(end);
+            let to = range.end.min(end).max(from);
+            (from < to).then(|| from - start..to - start)
+        };
+        Inline {
+            text: self.text[start..end].to_string(),
+            styles: self
+                .styles
+                .iter()
+                .filter_map(|(range, style)| clip(range).map(|range| (range, *style)))
+                .collect(),
+            links: self
+                .links
+                .iter()
+                .filter_map(|(range, url)| clip(range).map(|range| (range, url.clone())))
+                .collect(),
+            cell_images: Vec::new(),
+        }
+    }
+}
+
+/// A picture inside a table cell and the alt text it keeps in the cell text.
+///
+/// The alt text stays part of [`Inline::text`] so a copy still carries the
+/// description and the surrounding words keep their order; [`alt_range`] marks
+/// the bytes a renderer replaces with the picture itself.
+///
+/// [`alt_range`]: CellImage::alt_range
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellImage {
+    pub alt: String,
+    pub url: String,
+    /// HTML `width`/`height` hints, if the author wrote them.
+    pub hints: images::ImageHints,
+    /// Bytes of the owning cell's `Inline::text` that hold the alt text.
+    pub alt_range: Range<usize>,
+    /// The link the picture itself is wrapped in, if the author wrote
+    /// `[![alt](img)](href)`.
+    ///
+    /// Kept on the picture instead of inferred from `Inline::links` ranges:
+    /// an empty-alt picture has a zero-length byte range, so it cannot tell an
+    /// enclosing link from a neighbouring link that merely touches that offset.
+    pub link: Option<String>,
+}
+
+/// One piece of a table cell, in reading order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellPart<'a> {
+    /// The bytes this piece covers inside the cell's inline text. For a picture
+    /// these are its alt text; the renderer draws the picture there instead.
+    pub range: Range<usize>,
+    /// The cell text of `range`.
+    pub text: &'a str,
+    /// The picture drawn at this position, if this piece is one.
+    pub image: Option<&'a CellImage>,
+}
+
+/// Split one cell into the text runs and pictures it draws, in reading order.
+///
+/// Both the document text model and the renderer walk these pieces, so a cell
+/// registers exactly the units that are painted and neither side has to know
+/// how the other splits a cell.
+///
+pub fn cell_parts(cell: &Inline) -> Vec<CellPart<'_>> {
+    let len = cell.text.len();
+    if cell.cell_images.is_empty() {
+        return vec![CellPart {
+            range: 0..len,
+            text: &cell.text,
+            image: None,
+        }];
+    }
+    let mut parts = Vec::with_capacity(cell.cell_images.len() * 2 + 1);
+    let mut at = 0;
+    for image in &cell.cell_images {
+        let start = image.alt_range.start.clamp(at, len);
+        let end = image.alt_range.end.clamp(start, len);
+        if start > at {
+            parts.push(CellPart {
+                range: at..start,
+                text: &cell.text[at..start],
+                image: None,
+            });
+        }
+        parts.push(CellPart {
+            range: start..end,
+            text: &cell.text[start..end],
+            image: Some(image),
+        });
+        at = end;
+    }
+    if at < len {
+        parts.push(CellPart {
+            range: at..len,
+            text: &cell.text[at..],
+            image: None,
+        });
+    }
+    parts
 }
 
 /// Table column alignment.
@@ -103,9 +219,13 @@ pub enum Block {
         inline: bool,
         tex: String,
     },
-    /// A picture: never loaded. Its alt text is shown as a note.
+    /// A row of pictures that were written together in one paragraph, drawn
+    /// side by side.
     ImageRow(Vec<(String, String, images::ImageHints)>),
+    /// A centred container from raw HTML; children keep their own blocks.
     Centered(Vec<Block>),
+    /// A picture outside a table cell: it is drawn as its own block after the
+    /// paragraph, which shows its alt text as a note until the picture lands.
     Image {
         alt: String,
         url: String,
@@ -233,6 +353,10 @@ impl Building {
         let text = self.inline.text.len();
         let notes = self.notes.len();
         let opens = self.html.len();
+        let pictures = self.inline.cell_images.len();
+        // An HTML `<img>` inside a Markdown link still belongs to that link:
+        // the Markdown span lives in `open`, not in the HTML opening stack.
+        let markdown_link = self.enclosing_markdown_link();
         if let Some((name, mut depth)) = self.suppressed.clone() {
             if !html::is_raw_text(&name) && self.suppressed_raw.is_none() {
                 for node in &nodes {
@@ -288,9 +412,24 @@ impl Building {
                 }
             }
         }
+        if let Some(link) = markdown_link {
+            for image in &mut self.inline.cell_images[pictures..] {
+                if image.link.is_none() {
+                    image.link = Some(link.clone());
+                }
+            }
+        }
         // A comment or dropped element glues the surrounding text runs.
         self.html_gap =
             self.inline.text.len() == text && self.notes.len() == notes && self.html.len() == opens;
+    }
+
+    /// The innermost Markdown link still open around this point, if any.
+    fn enclosing_markdown_link(&self) -> Option<String> {
+        self.open.iter().rev().find_map(|(_, open)| match open {
+            Open::Link(url) => Some(url.clone()),
+            _ => None,
+        })
     }
 
     fn consume_hidden_end(&mut self, name: &str) -> bool {
@@ -317,15 +456,30 @@ impl Building {
                 Open::Image { url, .. } => {
                     let start = start.min(end);
                     let alt = self.inline.text[start..end].to_string();
-                    self.notes.push(Block::Image {
-                        alt,
-                        url,
-                        hints: images::ImageHints::default(),
-                    });
                     if self.in_cell {
-                        // A cell has no block list for notes, and images are
-                        // never loaded: the description is the only readable
-                        // stand-in, so it stays exactly where the image was.
+                        // A cell has no block list to move a picture into, so
+                        // it stays where the author put it: the alt bytes mark
+                        // the spot the renderer draws the picture, and the text
+                        // itself stays for copying and for the surrounding
+                        // words' order.
+                        // The picture may be wrapped by a Markdown link or by
+                        // an HTML `<a>` that is still open.
+                        let link = self.enclosing_markdown_link().or_else(|| {
+                            self.html.iter().rev().find_map(|open| match &open.kind {
+                                HtmlKind::Link(url) => Some(url.clone()),
+                                HtmlKind::Style(_) => None,
+                            })
+                        });
+                        self.inline.cell_images.push(CellImage {
+                            alt,
+                            url,
+                            hints: images::ImageHints::default(),
+                            alt_range: start..start.max(end),
+                            link,
+                        });
+                        // Formatting and links that began inside the description
+                        // belong to it; dropping them cannot style the picture or
+                        // split a following multibyte character.
                         self.inline
                             .styles
                             .retain(|(range, _)| range.end <= start || range.start >= end);
@@ -334,6 +488,11 @@ impl Building {
                             .retain(|(range, _)| range.end <= start || range.start >= end);
                         return;
                     }
+                    self.notes.push(Block::Image {
+                        alt,
+                        url,
+                        hints: images::ImageHints::default(),
+                    });
                     self.inline.text.truncate(start);
                     // HTML opened before this image keeps spanning the text
                     // that follows it; only ranges that began inside the
@@ -437,18 +596,25 @@ pub fn parse(markdown: &str) -> Document {
             if at > 0 {
                 cell.inline.text.push(' ');
             }
+            let shift = cell.inline.text.len();
             cell.inline.text.push_str(&inline.text);
+            cell.inline.styles.extend(
+                inline
+                    .styles
+                    .into_iter()
+                    .map(|(range, style)| (range.start + shift..range.end + shift, style)),
+            );
+            cell.inline.links.extend(
+                inline
+                    .links
+                    .into_iter()
+                    .map(|(range, url)| (range.start + shift..range.end + shift, url)),
+            );
             cell.inline
-                .styles
-                .extend(inline.styles.into_iter().map(|(range, style)| {
-                    let shift = cell.inline.text.len() - inline.text.len();
-                    (range.start + shift..range.end + shift, style)
-                }));
-            cell.inline
-                .links
-                .extend(inline.links.into_iter().map(|(range, url)| {
-                    let shift = cell.inline.text.len() - inline.text.len();
-                    (range.start + shift..range.end + shift, url)
+                .cell_images
+                .extend(inline.cell_images.into_iter().map(|mut image| {
+                    image.alt_range = image.alt_range.start + shift..image.alt_range.end + shift;
+                    image
                 }));
             return;
         }
@@ -841,10 +1007,9 @@ pub fn parse(markdown: &str) -> Document {
                     let end = building.inline.text.len();
                     building.close(end);
                 }
-                // A cell has no block list to attach image notes to. Images
-                // are never loaded, so their alternative text is the only
-                // readable content: keep it in the cell instead of dropping
-                // it with the note.
+                // A cell has no block list to attach image notes to; a picture
+                // met inside one is recorded as a cell picture instead. Keep
+                // any lingering note's description rather than dropping text.
                 for note in std::mem::take(&mut building.notes) {
                     if let Block::Image { alt, .. } = note
                         && !alt.is_empty()
@@ -852,6 +1017,7 @@ pub fn parse(markdown: &str) -> Document {
                         building.inline.text.push_str(&alt);
                     }
                 }
+                normalize_cell_images(&mut building.inline);
                 if let Some(Container::Table { row, .. }) = stack.last_mut() {
                     row.push(building.inline);
                 }
@@ -1089,7 +1255,13 @@ fn merge_cell_builder(cell: &mut Building, mut pending: Building) {
             .into_iter()
             .map(|(range, url)| (range.start + at..range.end + at, url)),
     );
-    // A cell keeps a picture's alt text in place; it has no notes to attach.
+    cell.inline
+        .cell_images
+        .extend(pending.inline.cell_images.into_iter().map(|mut image| {
+            image.alt_range = image.alt_range.start + at..image.alt_range.end + at;
+            image
+        }));
+    // A cell keeps its pictures inline; anything else still has notes to attach.
     if !cell.in_cell {
         cell.notes.append(&mut pending.notes);
     }
@@ -1476,7 +1648,8 @@ fn collect_table_rows(
                         continue;
                     }
                     has_th |= cell.name == "th";
-                    let (inline, _) = inline_of_nodes(&cell.children, true);
+                    let (mut inline, _) = inline_of_nodes(&cell.children, true);
+                    normalize_cell_images(&mut inline);
                     cells.push(inline);
                     row_aligns.push(cell_align(cell));
                 }
@@ -1575,8 +1748,25 @@ fn append_html_element(
         "img" => {
             let alt = element.attr("alt").unwrap_or_default();
             let url = element.attr("src").unwrap_or_default().trim();
-            if url.is_empty() || in_cell {
+            if url.is_empty() {
                 push_html_text(inline, alt);
+            } else if in_cell {
+                // A cell keeps its pictures inline: the description stays in
+                // the cell text and marks where the picture is drawn.
+                let start = inline.text.len();
+                push_html_text(inline, alt);
+                let alt = inline.text[start..].to_string();
+                let link = opens.iter().rev().find_map(|open| match &open.kind {
+                    HtmlKind::Link(url) => Some(url.clone()),
+                    HtmlKind::Style(_) => None,
+                });
+                inline.cell_images.push(CellImage {
+                    alt,
+                    url: url.to_string(),
+                    hints: html_image_hints(element),
+                    alt_range: start..inline.text.len(),
+                    link,
+                });
             } else {
                 notes.push(Block::Image {
                     alt: alt.to_string(),
@@ -1700,6 +1890,41 @@ fn trim_inline_end(inline: &mut Inline) {
     }
     inline.styles.retain(|(range, _)| range.start < range.end);
     inline.links.retain(|(range, _)| range.start < range.end);
+    // A picture only shrinks to an empty description when the author wrote no
+    // alt text at all; it still stays where it was so the picture is drawn.
+    for image in inline.cell_images.iter_mut() {
+        image.alt_range.start = image.alt_range.start.min(len);
+        image.alt_range.end = image.alt_range.end.clamp(image.alt_range.start, len);
+    }
+}
+
+/// Sort a cell's pictures by position and drop overlaps.
+///
+/// Pictures are recorded in the order their closing events arrived, which can
+/// differ from their alt text's order when HTML and Markdown are mixed. The
+/// renderer walks one ordered list, so make that order explicit and never let
+/// two pictures claim the same bytes.
+fn normalize_cell_images(inline: &mut Inline) {
+    if inline.cell_images.is_empty() {
+        return;
+    }
+    let len = inline.text.len();
+    for image in inline.cell_images.iter_mut() {
+        image.alt_range.start = image.alt_range.start.min(len);
+        image.alt_range.end = image.alt_range.end.clamp(image.alt_range.start, len);
+    }
+    inline
+        .cell_images
+        .sort_by_key(|image| (image.alt_range.start, image.alt_range.end));
+    let mut at = 0;
+    let mut kept = Vec::with_capacity(inline.cell_images.len());
+    for mut image in std::mem::take(&mut inline.cell_images) {
+        image.alt_range.start = image.alt_range.start.max(at);
+        image.alt_range.end = image.alt_range.end.max(image.alt_range.start);
+        at = image.alt_range.end;
+        kept.push(image);
+    }
+    inline.cell_images = kept;
 }
 
 #[cfg(test)]
@@ -1794,7 +2019,11 @@ mod tests {
 
     #[test]
     fn an_image_in_a_table_cell_keeps_its_alt_text() {
-        let doc = parse("| a | b |\n|---|---|\n| ![Windows](w.svg) or ![Linux](l.svg) | x |");
+        let doc = parse(
+            "| a | b |
+|---|---|
+| ![Windows](w.svg) or ![Linux](l.svg) | x |",
+        );
         let cells = match &doc.blocks[0] {
             Block::Table { rows, .. } => &rows[0],
             other => panic!("{other:?}"),
@@ -1802,6 +2031,152 @@ mod tests {
         assert_eq!(
             cells[0].text, "Windows or Linux",
             "the alt text stays where the image was"
+        );
+        assert_eq!(cells[0].cell_images.len(), 2, "{:?}", cells[0]);
+    }
+
+    fn table_cell(markdown: &str) -> Inline {
+        let doc = parse(markdown);
+        let Block::Table { rows, .. } = &doc.blocks[0] else {
+            panic!("expected a table: {doc:?}");
+        };
+        rows[0][0].clone()
+    }
+
+    #[test]
+    fn a_markdown_table_cell_keeps_its_picture_at_the_alt_text() {
+        let cell = table_cell(
+            "| a | b |
+|---|---|
+| ![Dashboard](./images/preview-dashboard.png) | x |",
+        );
+        assert_eq!(cell.text, "Dashboard");
+        assert_eq!(cell.cell_images.len(), 1, "{cell:?}");
+        let image = &cell.cell_images[0];
+        assert_eq!(image.url, "./images/preview-dashboard.png");
+        assert_eq!(image.alt, "Dashboard");
+        assert_eq!(image.alt_range, 0..9);
+    }
+
+    #[test]
+    fn pictures_and_text_keep_their_cell_order() {
+        let cell = table_cell(
+            "| a | b |
+|---|---|
+| before ![Map](map.png) after ![Players](p.png) end | x |",
+        );
+        assert_eq!(cell.text, "before Map after Players end");
+        let parts = cell_parts(&cell);
+        let shapes: Vec<_> = parts
+            .iter()
+            .map(|part| match part.image {
+                Some(image) => format!("<{}>", image.url),
+                None => part.text.to_string(),
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec!["before ", "<map.png>", " after ", "<p.png>", " end"],
+            "{parts:?}"
+        );
+    }
+
+    #[test]
+    fn an_html_picture_in_a_cell_keeps_its_size_hints() {
+        let cell = table_cell(
+            "| a |
+|---|
+| <img src=\"images/badge.png\" width=\"64\" height=\"36\" alt=\"badge\"> |",
+        );
+        assert_eq!(cell.text, "badge");
+        assert_eq!(cell.cell_images.len(), 1, "{cell:?}");
+        let image = &cell.cell_images[0];
+        assert_eq!(image.url, "images/badge.png");
+        assert_eq!(image.hints.width, Some(64));
+        assert_eq!(image.hints.height, Some(36));
+    }
+
+    #[test]
+    fn an_html_table_cell_picture_uses_the_same_inline_model() {
+        let doc =
+            parse("<table><tr><td><img src=\"a.png\" alt=\"A\"></td><td>plain</td></tr></table>");
+        let Block::Table { head, .. } = &doc.blocks[0] else {
+            panic!("expected a table: {doc:?}");
+        };
+        // A header-less HTML table promotes its first row to the header row.
+        assert_eq!(head[0].text, "A");
+        assert_eq!(head[0].cell_images.len(), 1, "{:?}", head[0]);
+        assert_eq!(head[0].cell_images[0].url, "a.png");
+        assert_eq!(head[1].text, "plain");
+        assert!(head[1].cell_images.is_empty(), "{:?}", head[1]);
+    }
+
+    #[test]
+    fn a_cell_picture_records_its_own_enclosing_link() {
+        let cell = table_cell(
+            "| a |
+|---|
+| [Guide](guide.md)[![](shot.png)](shot.md) |",
+        );
+        assert_eq!(cell.cell_images.len(), 1, "{cell:?}");
+        assert_eq!(
+            cell.cell_images[0].link.as_deref(),
+            Some("shot.md"),
+            "the empty-alt picture keeps its own link, not the neighbouring one: {cell:?}"
+        );
+        let unlinked = table_cell(
+            "| a |
+|---|
+| [Guide](guide.md) ![](shot.png) |",
+        );
+        assert!(unlinked.cell_images[0].link.is_none(), "{unlinked:?}");
+    }
+
+    #[test]
+    fn a_cell_picture_keeps_its_link_across_markup_syntaxes() {
+        // Markdown link wrapping an HTML <img>.
+        let md_outer = table_cell(
+            "| a |
+|---|
+| [<img src=\"shot.png\" alt=\"Shot\">](guide.md) |",
+        );
+        assert_eq!(
+            md_outer.cell_images[0].link.as_deref(),
+            Some("guide.md"),
+            "{md_outer:?}"
+        );
+        // HTML <a> wrapping a Markdown image.
+        let html_outer = table_cell(
+            "| a |
+|---|
+| <a href=\"guide.md\">![Shot](shot.png)</a> |",
+        );
+        assert_eq!(
+            html_outer.cell_images[0].link.as_deref(),
+            Some("guide.md"),
+            "{html_outer:?}"
+        );
+    }
+
+    #[test]
+    fn a_picture_without_alt_text_still_marks_its_place_in_a_cell() {
+        let cell = table_cell(
+            "| a |
+|---|
+| x ![](empty.png) y |",
+        );
+        assert_eq!(cell.text, "x  y");
+        assert_eq!(cell.cell_images.len(), 1, "{cell:?}");
+        let image = &cell.cell_images[0];
+        assert!(image.alt.is_empty());
+        assert_eq!(image.alt_range.start, image.alt_range.end);
+        let parts = cell_parts(&cell);
+        assert_eq!(
+            parts
+                .iter()
+                .map(|part| part.image.is_some())
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
         );
     }
 

@@ -10,7 +10,7 @@
 | 无凭据外部读取与条件请求 | [`src/network/reader_images.rs`](../src/network/reader_images.rs) | `ExternalImageBytes`、`ValidationHeaders`、`ExternalImageResponse` 与生产实现 `ReqwestExternalImages`：仅 HTTPS、手动逐跳验证重定向、总超时、流式字节上限、If-None-Match/If-Modified-Since 条件头与 304 处理 |
 | 图片持久缓存存储适配 | [`src/data/reader_image_cache.rs`](../src/data/reader_image_cache.rs) | `ReaderImageCache` 与 `ExternalFreshness`：基于 `CacheStore`、`CacheScope` 与 `CacheKey` 的持久适配，固定 blob SHA 命名空间与外部 URL 独立键管理、`max-age` 新鲜度判断、304 时间戳更新与 `no-store` 失效 |
 | 固定 commit 的仓库图片与缓存编排 | [`src/data/reader_images.rs`](../src/data/reader_images.rs) | `RepositoryImageService`：复用已捕获的 `RepositorySession` 的 revision/directory/blob 能力，支持可选注入 `(CacheStore, CacheScope, is_private)`，优先从持久缓存读取，网络回包异步入库，不持有 PAT |
-| 阅读器图片状态 | [`src/ui/reader/images.rs`](../src/ui/reader/images.rs) | 每个 reader 每个文档代次的 `ImageBoard`：请求排队、在途预算、完成应用、淘汰、拒绝与占位绘制 |
+| 阅读器图片状态 | [`src/ui/reader/images.rs`](../src/ui/reader/images.rs) | 每个 reader 每个文档代次的 `ImageBoard`：请求排队、在途预算、完成应用、淘汰、拒绝；只有 Ready 才绘制 |
 | Markdown 块接入 | [`src/ui/reader/markdown/document.rs`](../src/ui/reader/markdown/document.rs) | `Block::Image` 的解析目标解析、状态查询，以及图片尺寸确定后的块重测 |
 | 预览与测试装配 | [`src/bin_support/reader_images_modules.rs`](../src/bin_support/reader_images_modules.rs)、[`src/bin_support/reader_images_fixture.rs`](../src/bin_support/reader_images_fixture.rs)、[`src/bin_support/reader_images_view_tests.rs`](../src/bin_support/reader_images_view_tests.rs)、`examples/reader_images.rs`、`tests/reader_images.rs` | 真实流水线的确定性预览和验收测试，非产品二进制的一部分 |
 
@@ -43,12 +43,12 @@ let reader = cx.new(|cx| {
 });
 ```
 
-- **不传 provider**：合法图片处于未请求状态，零高度、不绘制 alt/占位；不会登记无法执行的在途工作。缺少资源上下文、真实失败与拒绝仍保留诊断；alt 继续进入复制文本。
+- **不传 provider**：合法图片处于未请求状态，不绘制任何元素；不会登记无法执行的在途工作。缺少资源上下文、真实失败与拒绝同样不绘制占位或诊断（原因留在内部状态供测试与日志使用）；alt 继续进入复制文本。
 - **传 `None` 或换 provider**：`set_image_provider` 先取消旧 scope 的在途工作，再清空未完成的请求；已完成的图片保留，但旧代次的完成不会发布。
 - **每个 reader 一份 provider**：接口允许共享，但推荐一份文档代次一份 provider。`ImageScope { reader, generation }` 让两个 reader 即使 generation 数字相同也不会互相取消或接收对方的完成；`RepositoryImageService` 的快照/目录缓存只在它自己的实例内，SHA 相同不是跨账户的授权依据。
 - **更换文档/账户/选择**：与现有 reader 规则一致，推荐换实体（或至少调 `show`）。`show` 推进图片代次、取消在途、清空旧图片与旧错误。账户失效时宿主在 `cancel_interactions` 的同时移除 reader；图片服务自己的 `verify()` 复核 session，旧授权下的字节不会变成当前文档的图片。
 - **隐藏窗口**：`observe_window_visibility` 取消当前 scope 的在途工作、保留已完成的图片；恢复可见时下一帧按需重新请求。
-- **显示密度**：`ImageProvider::start_with_options(request, sink, ImageRenderOptions)` 默认委托旧 `start`，现有 provider/`ImageRequest`/页面接口继续兼容；生产 `RepositoryImageService` 将 options 传入后台解码。Reader 初始化和每次绘制读取 `Window::scale_factor()`，有限有效比例归一到 1–4。已保留超采样网格或有限帧组的 SVG 在更高密度时取消旧 scope 并保留 Ready 图，按原始来源后台重建；原始栅格的网格不随 options 变化，不因密度刷新重载 PNG 或重启 GIF。完成后替换成本，不重播已展示的时间线；失败仍显示诊断并释放旧图。降回较低密度复用已有清晰网格。持久缓存仍存原始响应；原有新鲜度、授权、取消与 `no-store` 规则照常复核。
+- **显示密度**：`ImageProvider::start_with_options(request, sink, ImageRenderOptions)` 默认委托旧 `start`，现有 provider/`ImageRequest`/页面接口继续兼容；生产 `RepositoryImageService` 将 options 传入后台解码。Reader 初始化和每次绘制读取 `Window::scale_factor()`，有限有效比例归一到 1–4。已保留超采样网格或有限帧组的 SVG 在更高密度时取消旧 scope 并保留 Ready 图，按原始来源后台重建；原始栅格的网格不随 options 变化，不因密度刷新重载 PNG 或重启 GIF。完成后替换成本，不重播已展示的时间线；失败只释放旧图，不显示任何诊断。降回较低密度复用已有清晰网格。持久缓存仍存原始响应；原有新鲜度、授权、取消与 `no-store` 规则照常复核。
 - **解码与绘制**：解码在 provider 的后台线程完成，UI render 不做网络、不做解码、不做阻塞 I/O。普通静态图片以 `gpui::Image`（原始已验证字节）绘制；有限 SVG 时间线的 BGRA8 缓冲由后台预备并移交给单帧 `RenderImage`，按保留预算计费，收尾只保留最终帧。
 
 ## 地址解析与边界
@@ -61,7 +61,7 @@ let reader = cx.new(|cx| {
 | `https://…` | `External { url }` | 独立无凭据 HTTPS 通路 |
 | `http://…` | `Refused(InsecureExternal)` | 外部图片仅 HTTPS，不静默降级 |
 | `file:`、`data:`、`javascript:`、其他 scheme、`//host`、UNC/反斜杠/控制字符、空地址、`#fragment` | `Refused(..)` | 不请求、不执行、不读本地/SMB，与链接边界一致 |
-| `![alt](file:///...)` | 同上 | alt 保留，显示「local or unsupported source」，不会因为地址危险就丢弃文字 |
+| `![alt](file:///...)` | 同上 | 不请求、不绘制；alt 与源地址保留在文档模型，不会因为地址危险就丢弃文字 |
 
 常见 HTML `<img>` 经受限 HTML 解析转换为同一图片模型，保留正整数 `width` / `height` 提示，不执行 HTML 页面。相邻图片在同一纯图片段落内保留为 `ImageRow`，空行分隔各行；`align="center"` 容器保留居中作用域。含文字与图片的混合段落仍有下文注明的原位置限制。
 
@@ -144,11 +144,16 @@ GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会
 ## 显示、尺寸与滚动
 
 - 保留 #81 的固有/作者请求尺寸、列宽适配和透明成功路径：不放大、不强加背景或圆角；图片绝对定位在其实际比例盒内。小徽章的外盒按图片本身宽度参与行布局，高图保持原有尺寸语义，不恢复旧的 640px / 比例钳制。
-- Ready 图片不强制显示 alt 图注；alt 保留在文档文本/失败信息中。合法图片的未请求、排队、Loading 状态不显示盒、alt 标签或预留面板；Failed/Refused 与确实无法解析的资源仍给出诊断。
-- 请求需求在构建可见块时登记，随后从纯图片 flex 行中移除 pending 子项，避免零宽子项仍产生 gap；全 pending 的图片块高度归零。调度依赖 Reader 的既有布局/pump，不能依赖图片自身的正面积可见交集；后者只控制 Ready 动画开始计时。
+- Ready 图片不强制显示 alt 图注；alt 保留在文档文本中。**非 Ready 状态一律不绘制**：未请求、排队、Loading、Failed/Refused、Unavailable 与 Released（淘汰释放）都不产生可见图片元素、alt/诊断标签、占位样式或图片专属的预留尺寸/外边距/gap。失败原因只作为内部状态用于测试与调度，不再成为用户可见文案。
+- 请求需求在构建可见块时登记，随后从纯图片 flex 行中移除所有非 Ready 子项，避免零宽子项仍产生 gap；全部不可见的图片块高度归零。调度依赖 Reader 的既有布局/pump，不能依赖图片自身的正面积可见交集；后者只控制 Ready 动画开始计时。
 - 不再为 pending 状态预留 140px；图片完成后对该顶层块调用真实 `ListState::remeasure_items`，以**锚定当前滚动位置**的方式重测，不重排版整篇文档，不插入假 AST 项，不把文末 inset 挤出测量范围，不因图片落地产生全文档高频重绘。在 `MarkdownLayout::Flow`（自然高度）下改为请求一次重绘并由 `on_layout_changed` 通知宿主，宿主的页面容器随之增长。
-- 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。表格内图片仍受 AST 限制（见下）。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
+- 跨块选择/复制不受影响：图片块的 alt 仍在 `DocText` 中，图片本身不注册字形选区；选区坐标来自段落真实排版，不因图片尺寸变化而错位。滚动条继续由共享 `Motion`/`Bar` 读取同一个真实 `ListState`。
 - 同一纯图片段落（包括软换行间隔的链接徽章）保留为可换行的 `ImageRow`，空行另起段落；极长图片段落按最多 64 张图片切成有界组，跨片段居中 wrapper 最多保留 256 层。居中容器中的段落/图片行使用占满可用列宽的作用域，保留普通标题与正文的字号/间距，渲染前仍按原段落拆成独立虚拟项，不让整篇 Profile 成为一个无界行。混合文字和图片的段落仍将图片提取到文字后，未声称支持文字行盒中原位置嵌图。
+- **表格单元格图片**：AST 在 cell 内没有块列表，图片不能像段落图片那样移到块后。单元格记录 `CellImage`（alt、URL、`width`/`height` 提示、alt 在 cell 文本中的字节范围、包住图片自己的链接）；`cell_parts` 把单元格拆成「文本段 / 图片」的阅读顺序，`DocText` 与渲染器遍历同一份拆分，因此一个 cell 可能登记多个单元而复制文本仍是原来的 cell 文本（alt 保留原位）。
+  - 渲染复用同一 `ImageBoard`/`images::image_element` 状态与预算：仓库相对路径仍按固定 commit 解析，外链走同一条无凭据通路，SVG 同样经有界光栅化与有限时间线；图片按 cell 内容宽等比缩放（以逻辑尺寸为准，不用超采样像素网格），比 cell 窄时按列对齐落在内左/居中/内右。
+  - 非 Ready 的 cell 图片不生成子元素（不占行、不显示 alt 或占位面板），但 `want` 已登记需求；落地时对该顶层块（表格行所在的虚拟化块）重测，不改变滚动锚点。失败/拒绝/Unavailable/Released 同样什么都不画，表头、边框与作者写的图注行照常保留。
+  - 可见的表格 SVG 通过 `painted_when_visible` 上报 `painted`，与普通图片一样只有在真实可见交集时才起播并保持有限动画。
+  - 图片绘制区域登记为该单元的真实命中目标，从图片起手的拖选从图片所在 cell 开始，而不是从文档起点；`[![alt](img)](link)` 的归属链接在解析时记录在 `CellImage::link`（空 alt 图片不能靠字节包含关系区分相邻链接），点击图片会像点击那段文字一样报告 `ReaderAction::Link`，而拖选经过图片会取消这次点击。
 
 ## 生命周期与取消
 
@@ -159,10 +164,9 @@ GIF 的原有独立播放语义不变；SVG 的有限时间线不使用 GPUI 会
 
 ## 支持边界（明确未覆盖）
 
-- **表格单元格内的图片不加载**：AST 在 cell 中没有块列表可挂图片，现有行为是保留 alt 文本在单元格内（见 `ast.rs` 的 `in_cell` 分支）。这不属于「已覆盖表格图片」。
-- 段落中的 inline 图片被提取为段落后的图片块；不是文字行内原位置。
+- 段落中的 inline 图片被提取为段落后的图片块；纯图片段落保留为 `ImageRow`。表格单元格中的图片同样不在文字行内原位置：cell 内的文本段与图片按阅读顺序各占一行（`flex_col`），不在一行文字中间绘制。
 - 静态 SVG 经有界光栅化支持（典型徽章、统计卡片、Star History 折线图与常见文本/渐变/滤镜/裁剪）；**`<foreignObject>`、`<script>`、`on*` 事件、SMIL 动画、`@import` 样式、XML DTD/实体展开、外部 `<image href="https://...">` / 本地路径、外部网络/文件字体、WOFF2 与字体集合**均不支持或按边界拦截/不抓取；AVIF、BMP、TIFF、ICO 仍为 `Unsupported`。
-- 注意区别**公开样本响应可达性**与**离线解码验证**：本轮已实地核查公开徽章与 Star History SVG 响应形态（见 `docs/devlog/2026-11-10-reader-svg.md`；`github-readme-stats` 公开端点当时返回部署暂停文本而非 SVG），但所有自动化回归均基于确定性本地 SVG fixture，不依赖外部网络。
+- 注意区别**公开样本响应可达性**与**离线解码验证**：公开徽章与 Star History SVG 响应形态已实地核查（见 `docs/devlog/2026-11-10-reader-svg.md`；`github-readme-stats` 公开端点当时返回部署暂停文本而非 SVG），但所有自动化回归均基于确定性本地 SVG fixture，不依赖外部网络。
 - 不做跨账户/跨实例的持久授权复用；动态 badge 仍遵循 HTTP 缓存新鲜度与重验证规则。
 - 真实 Windows 窗口的原生验收（DPI、动画、IME、真实输入分发）以预览观察和后续负责人验收为准，测试平台不能替代。
 
@@ -187,7 +191,7 @@ RepositoryImageService::with_cache(
 1. **账户验证隔离**：注入的 `CacheScope` 会与 `session.context().auth().account` 进行一致性校验，不匹配则拒绝挂载持久缓存；私有属性 `is_private` 由调用方明确提供，不凭 SHA 穿透鉴权。
 2. **仓库图片对象缓存**：固定 commit 的图片按 `BlobIdentity` 解析得到的 blob SHA 存入固定对象缓存命名空间 `reader-image-bytes-v1`。重启 store 后离线读取直接命中；新分支新图使用独立对象 SHA，互不干扰。
 3. **外部图片与徽章重验证**：外部图片按 URL 建立可变条目。包含 `Cache-Control: max-age=...` 的资产在新鲜期内本地命中，过期或 `no-cache` 时携带 `If-None-Match` / `If-Modified-Since` 发送条件请求；服务端返回 304 时原子更新验证时间并复用原字节；返回 `no-store` 时立即删除旧缓存并阻止落盘。
-4. **缺失降级与错误处理**：缺失图片直接以 `ImageFailure::NotFound` 返回占位，其余图片和正文文档正常解码并渲染；`CredentialRejected` / `AccessDenied` 时安全降级。
+4. **缺失降级与错误处理**：缺失图片直接以 `ImageFailure::NotFound` 返回，其余图片和正文文档正常解码并渲染；`CredentialRejected` / `AccessDenied` 时安全降级。失败只影响该图片是否绘制（不绘制），不影响正文排版与其它图片。
 5. **正式 Shell 接线**：后续由协调者安排正式 Shell 离线接线任务，统一在 `RepositoryPage` 创建 `RepositoryImageService` 时将账户管理层获取的 `CacheStore` 与当前激活账户的 `CacheScope` 注入。
 
 ## 运行与验证
