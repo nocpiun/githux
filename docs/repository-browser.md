@@ -159,6 +159,7 @@ Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：
 - `RepositoryPage::activate`（以及尚无已显示摘要时的 `refresh_repository`）除既有在线链外再启动一个 `Job::Snapshot`：用 `RepositoryCacheMode::OfflineOnly` 经 locator index 读完整快照（摘要 → 分支 → ref revision → 根树 → README discovery → 初始正文），作为**单个** `Body::Snapshot` 发布，header/tree/README 因此永远指向同一 fixed commit。
 - 该消息带 `preliminary` 标记，只在页面仍为空（`details.is_none()`）时应用；摘要/分支/revision 保留 `Snapshot` provenance（既有 `Cached` 胶囊与 `Refresh`），固定对象沿用既有缓存语义。extras 以同一次快照读取，缓存未命中的 section 保持 Loading 而非报“未缓存”。
 - 在线链在同一 generation 内继续：网络摘要证明可达后分支列表改用在线模式；若屏上 revision 仍是快照，则对最新 `default_branch`/保存意图重新执行 `branch_choice`——仍是同一分支时以原 `branch_request` 身份在线重解析该 ref，默认分支已迁移时才切换。**同一 commit 时保留已加载的 tree/README/reader（含滚动与选区）**。同一账户、数字仓库与 ref 解析到不同 commit 时，`refresh.rs` 先在后台准备新 commit 的根树、已展开目录、README 定位和当前文档，再由单个 `Body::Replacement` 一次发布；准备期间继续显示旧 fixed commit 和对应历史来源，失败保留仍有效的旧快照并显示紧凑刷新错误。新列表中无法解析的选中路径到达诚实的不可用终态，不静默切回 README。切换 ref（含默认分支迁移）、账户或数字仓库身份仍先清旧内容。
+- 刷新取消尚未显示的正文后，摘要/ref/替换准备/根树失败会把没有在途正文请求的 Loading 收敛为可重试终态；已显示的内容和刷新后新发起的正文读取保留原状态。旧成功/失败回复仍由页面与选择请求代次拒绝，取消的文件可对保留的 fixed snapshot 单独重试。
 - 重新确认同一 commit 后，目录与正文的失败状态无论来自缓存还是在线读取，都允许这一轮刷新重试；成功显示的树/reader 保留。摘要尚未完成时不把失败终态改成无人负责的 Loading；摘要失败会释放分支 loading 标记，独立 Retry branches 仍可工作。
 - 迟到的缓存消息不会覆盖在线结果（`preliminary && details.is_some()` 直接丢弃）。
 - 保存的嵌套文件选择（如 `src/main.rs`）在快照中按 `RepositoryNavigation::ancestors` 逐级离线读取祖先目录，能解析时直接打开该文件；解析不到时保留 `Selection::File(path)` 交给在线链，而不是静默退回 README。

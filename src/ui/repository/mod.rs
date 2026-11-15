@@ -1951,6 +1951,7 @@ impl RepositoryPage {
             Err(error) => {
                 // No branch reply will arrive to release the manual-refresh loading gate.
                 self.branches_loading = false;
+                self.settle_reader_after_refresh_error(&error);
                 self.error = Some(error);
             }
         }
@@ -2287,10 +2288,28 @@ impl RepositoryPage {
             Err(error) => {
                 // Failure to resolve a ref is not proof that the still-authorized displayed
                 // snapshot disappeared. A real ref/account change cleared it before this read.
+                self.settle_reader_after_refresh_error(&error);
                 self.error = Some(error);
             }
         }
         cx.notify();
+    }
+
+    /// A refresh may cancel the load that owned Loading while retaining its fixed snapshot. An
+    /// upstream failure must leave a retryable terminal state, unless a newer content request or
+    /// an already displayed reader still owns the presentation.
+    fn settle_reader_after_refresh_error(&mut self, error: &PageError) {
+        if self.branch.is_some()
+            && self.reader_status == ReaderStatus::Loading
+            && self.pending_content.is_none()
+        {
+            self.reader = None;
+            self.reader_status = ReaderStatus::ContentFailed(PageError::new(
+                "Document loading was interrupted.",
+                Some(error.title.clone()),
+                true,
+            ));
+        }
     }
 
     fn spawn_replacement(&mut self) {
@@ -2328,6 +2347,7 @@ impl RepositoryPage {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.replacement = None;
+                self.settle_reader_after_refresh_error(&error);
                 self.error = Some(error);
                 cx.notify();
                 return;
@@ -2418,6 +2438,7 @@ impl RepositoryPage {
             Err(error) => {
                 state.tree.fail_load("", error.clone());
                 self.invalidate_rows();
+                self.settle_reader_after_refresh_error(&error);
                 self.error = Some(error);
             }
         }

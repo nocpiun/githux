@@ -496,6 +496,111 @@ fn continuity_review_a_failed_summary_does_not_disable_independent_branch_retry(
     );
 }
 
+fn canceled_document_has_a_terminal_state_after_refresh_failure(
+    cx: &mut TestAppContext,
+    failed_path: &str,
+) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.update(cx, |page, cx| page.toggle_directory("src", cx));
+    settle(&page, cx, |page| page.tree("src").is_some());
+    *fixture.transport.held_path.lock().unwrap() =
+        Some("/git/blobs/b000000000000000000000000000000000000004".into());
+    page.update(cx, |page, cx| page.select_file("src/main.rs", cx));
+    settle(&page, cx, |page| {
+        page.pending_content.is_some()
+            && fixture
+                .transport
+                .held_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 1
+    });
+    *fixture.transport.failed_path.lock().unwrap() = Some(failed_path.into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    page.update(cx, |page, cx| page.refresh_repository(cx));
+    settle(&page, cx, |page| page.error().is_some());
+    page.read_with(cx, |page, _| {
+        assert!(matches!(page.reader_status(), ReaderStatus::ContentFailed(error) if error.retryable),
+            "a canceled file must offer retry after refresh fails, rather than leave an unowned Loading");
+        assert!(page.pending_content.is_none());
+        assert_eq!(page.fixed_commit().unwrap().as_str(), MAIN_COMMIT);
+    });
+    assert!(cx.debug_bounds("repository-content-error").is_some());
+    assert!(cx.debug_bounds("repository-loading").is_none());
+    *fixture.transport.failed_path.lock().unwrap() = None;
+    fixture.transport.tree_release.send_replace(true);
+    page.update(cx, |page, cx| page.retry_reader(cx));
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(reader_text(&page, cx).contains("fn main"));
+}
+
+#[gpui::test]
+fn continuity_canceled_file_settles_when_summary_refresh_fails(cx: &mut TestAppContext) {
+    canceled_document_has_a_terminal_state_after_refresh_failure(cx, "/repos/octo/ledger");
+}
+
+#[gpui::test]
+fn continuity_canceled_file_settles_when_revision_refresh_fails(cx: &mut TestAppContext) {
+    canceled_document_has_a_terminal_state_after_refresh_failure(cx, "/commits/main");
+}
+
+#[gpui::test]
+fn continuity_refresh_failure_keeps_a_newer_document_read_running(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.update(cx, |page, cx| page.toggle_directory("src", cx));
+    settle(&page, cx, |page| page.tree("src").is_some());
+    fixture.transport.hold(true);
+    *fixture.transport.held_path.lock().unwrap() =
+        Some("/git/blobs/b000000000000000000000000000000000000004".into());
+    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    page.update(cx, |page, cx| {
+        page.refresh_repository(cx);
+        page.select_file("src/main.rs", cx);
+    });
+    settle(&page, cx, |page| {
+        page.pending_content.is_some()
+            && fixture
+                .transport
+                .held_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 1
+    });
+    fixture.transport.release_all();
+    settle(&page, cx, |page| page.error().is_some());
+    page.read_with(cx, |page, _| {
+        assert!(page.pending_content.is_some());
+        assert_eq!(
+            page.reader_status(),
+            &ReaderStatus::Loading,
+            "a document request started after refresh still owns its loading state"
+        );
+    });
+    *fixture.transport.failed_path.lock().unwrap() = None;
+    fixture.transport.tree_release.send_replace(true);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(reader_text(&page, cx).contains("fn main"));
+}
+
 #[gpui::test]
 fn continuity_failed_refresh_keeps_the_cached_document(cx: &mut TestAppContext) {
     let mut fixture = CachedFixture::new(Scene::Normal);

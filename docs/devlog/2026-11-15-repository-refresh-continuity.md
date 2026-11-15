@@ -69,6 +69,16 @@ Codex 对 `37305ac` 提出两项 P2，均符合既有刷新/失败约定，可�
 
 `cargo clippy --locked --bin githux --tests -- -D warnings`（runner `b21e4c3e-e818-43f1-b40a-a604ba6a7bc2`）通过，槽等待 149.3s / 执行 118.0s；fmt check（runner `ef7f9ace-73af-4dd5-aa77-de757a47f2a0`）通过，不占槽 / 执行 25.5s。差异检查通过。仅测试模块变化不重做本地生产构建；生产代码与 `96d9dc5` 相同，最新提交仍按完整远端 CI 与 Codex 流程核验。
 
+## PR #89 第三轮审查：取消的正文必须结算
+
+Codex 对 `61fa7c9` 提出 [P2：刷新失败后取消的正文永久 Loading](https://github.com/nocpiun/githux/pull/89#discussion_r4577709453)，成立且可直接修复，无待裁决。持有 `src/main.rs` 的真实 blob 请求后 Refresh 会取消其旧代次；若摘要或 ref 返回 404，原实现只记录页级错误，正文没有任何请求拥有其 Loading。
+
+两条独立传输门闩回归在未修路径上均失败（runner `1204919f-8450-4c5f-8e10-4ff8d1be46b5`，0 通过/2 失败，测试 0.65s；槽等待 24.6s / 实际编译执行 90.8s）。修复在摘要、revision、替换准备和根树错误路径共用结算：保留快照存在、正文仍 Loading 且没有当前正文请求时，发布可 Retry 的终态；成功显示的 reader 或刷新后新开始的正文请求不被覆盖。现有 generation/selection request 校验继续拒绝被取消的旧回复。回归还验证正文可独立重试恢复，并加入“刷新后另开文件”的新请求仍能完成的保留场景。
+
+在本轮准备期间，`61fa7c9` 的 [完整 CI 43695709389](https://github.com/nocpiun/githux/actions/runs/43695709389) 已通过（四平台构建与全量 code-check 均通过），确认 Profile 夹具修复通过远端验证。该收据属于父提交，不代替本轮新 head 的 CI/review。
+
+本轮本地检查全部通过：仓库 118 项（runner `d574fbc3-f27a-403d-9311-b9e1d025702f`，槽等待 707.5s / 编译执行 146.0s，测试 8.97s）；clippy 生产 bin + repository test，`-D warnings`（`bc03ff85-8faa-48c9-a45b-97aea4f78ae4`，等待 610.9s / 执行 15.9s）；生产 build（`95378309-97cf-46da-bd19-9604b12fed56`，等待 120.3s / 执行 47.0s）；fmt check（`cae0ae70-738c-4285-a8cb-f759352819d8`，不占槽 / 执行 23.3s）与差异检查。重新检查由本轮实际生产错误路径修复与 3 项边界新增触发。
+
 ## 可复用教训
 
 缓存先行的测试需要检查“在线 revision 已返回，但新树/文档未准备好”的中间绘制状态。仅断言网络放行前有缓存、全部完成后有最新内容，会漏掉两个断言之间的清空/重建。保留显示资源与更新读取代次是两个操作；保留旧画面时也必须保留其 carried authorization，而不是用新请求的令牌替换它。
