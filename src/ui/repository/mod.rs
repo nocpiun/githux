@@ -41,6 +41,7 @@ mod extras;
 mod locator_index;
 mod navigation;
 mod page_tabs;
+mod refresh;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -363,6 +364,14 @@ enum Body {
     /// root tree, README discovery and the initial document. Published as a single message so the
     /// header, tree and reader can never disagree about which commit they describe.
     Snapshot(Box<SnapshotBundle>),
+    Replacement(Box<ReplacementReply>),
+}
+
+struct ReplacementReply {
+    branch: String,
+    target: refresh::Target,
+    selection_request: u64,
+    result: Result<refresh::Replacement, PageError>,
 }
 
 /// Everything one cache-first read found, or nothing where the snapshot could not answer.
@@ -455,6 +464,8 @@ pub struct RepositoryPage {
     /// cannot stick after the commit is verified.
     online_verified: bool,
     branch: Option<BranchState>,
+    /// A different commit being prepared while the displayed fixed snapshot stays usable.
+    replacement: Option<(String, refresh::Target)>,
     /// Monotonic identity of the newest branch resolution. A → B → A shares the
     /// page generation, so a branch name alone cannot tell an older A reply from
     /// the current one; this does.
@@ -552,6 +563,7 @@ impl RepositoryPage {
             branches_error: None,
             snapshot_preliminary: false,
             branch: None,
+            replacement: None,
             branch_request: 0,
             online_verified: false,
             branches_loading: false,
@@ -827,43 +839,37 @@ impl RepositoryPage {
 
     /// Revalidates repository summary, branches, revision and overview online.
     ///
-    /// A refresh replaces the whole browsing generation: queued replies from the
-    /// previous load must not repopulate the page. Cancelling `work` only stops
-    /// future I/O, so the page generation *and* the branch request identity are
-    /// advanced before the new read starts; every older reply then fails the
-    /// publication checks in `apply`.
+    /// The new request generation rejects queued replies without discarding valid displayed data.
+    /// Retained content keeps its original authorization tokens until it is actually replaced.
     pub fn refresh_repository(&mut self, cx: &mut Context<Self>) {
+        self.check_authorization(cx);
         if !self.active || self.authorization_lost {
             self.activate(cx);
             return;
         }
         self.stop_star();
-        self.extras.stop();
+        self.extras.cancel_reads();
         self.cancel_reader_interactions(cx);
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
         self.branch_request = self.branch_request.wrapping_add(1);
-        self.reset_authorization();
         self.inbox.lock().expect("repository page inbox").clear();
         self.work = Some(Work::new());
         self.pending_content = None;
         self.selection_request = self.selection_request.wrapping_add(1);
-        self.details = None;
-        self.details_provenance = None;
-        self.snapshot_preliminary = false;
-        self.online_verified = false;
-        self.branch = None;
-        self.branches = None;
-        self.branches_provenance = None;
+        if let Some(state) = self.branch.as_mut() {
+            state.tree.supersede_pending_loads();
+        }
+        self.snapshot_preliminary = self.branch.is_some();
+        self.branches_loading = true;
         self.branches_error = None;
-        self.branches_loading = false;
-        self.reader = None;
-        self.readme_path = None;
-        self.reader_status = ReaderStatus::Loading;
         self.error = None;
-        self.cursor = None;
-        self.invalidate_rows();
-        self.spawn_snapshot();
+        if let Some(reader) = self.reader.clone() {
+            self.bind_reader_actions(&reader, cx);
+        }
+        if self.details.is_none() {
+            self.spawn_snapshot();
+        }
         self.spawn_job(Job::Repository {
             locator: self.locator.clone(),
             star_write_generation: self.star_write_generation,
@@ -1600,6 +1606,7 @@ impl RepositoryPage {
     }
 
     fn stop_work(&mut self) {
+        self.replacement = None;
         if let Some(work) = self.work.take() {
             work.source.cancel();
         }
@@ -1734,7 +1741,10 @@ impl RepositoryPage {
         let slot = match &message.body {
             Body::Repository { .. } | Body::Snapshot(_) => AuthSlot::Repository,
             Body::Branches(_) => AuthSlot::Branches,
-            Body::Revision { .. } | Body::Root { .. } | Body::Readme { .. } => AuthSlot::Revision,
+            Body::Revision { .. }
+            | Body::Root { .. }
+            | Body::Readme { .. }
+            | Body::Replacement(_) => AuthSlot::Revision,
             Body::Directory { .. } | Body::Content(_) => AuthSlot::Content,
         };
         match message.body {
@@ -1767,6 +1777,7 @@ impl RepositoryPage {
             } => self.apply_directory(branch, commit, path, mode, result, cx),
             Body::Content(content) => self.apply_content(content, window, cx),
             Body::Snapshot(bundle) => self.apply_snapshot(*bundle, window, cx),
+            Body::Replacement(reply) => self.apply_replacement(*reply, window, cx),
         }
         // Only a reply that passed its own carried-token check above may replace
         // the displayed token, and only for the resource it produced. Other
@@ -1886,7 +1897,34 @@ impl RepositoryPage {
                 // observation or its authoritative count refresh.
                 let star_request = self.star_request;
                 let identity = details.identity.clone();
+                if self
+                    .details
+                    .as_ref()
+                    .is_some_and(|shown| shown.identity != identity)
+                {
+                    // A locator can be reused for another numeric repository. Continuity only
+                    // applies to the same identity, never to content at a recycled route.
+                    self.stop_work();
+                    self.work = Some(Work::new());
+                    self.extras.stop();
+                    self.generation = self.generation.wrapping_add(1);
+                    self.branch_request = self.branch_request.wrapping_add(1);
+                    self.selection_request = self.selection_request.wrapping_add(1);
+                    self.pending_content = None;
+                    self.branch = None;
+                    self.reader = None;
+                    self.readme_path = None;
+                    self.reader_status = ReaderStatus::Loading;
+                    self.branches = None;
+                    self.branches_provenance = None;
+                    self.snapshot_preliminary = false;
+                    self.online_verified = false;
+                    self.cursor = None;
+                    self.reset_authorization();
+                    self.invalidate_rows();
+                }
                 self.details = Some(details);
+                self.error = None;
                 // Provenance is applied *before* choosing the next read mode, so a page that was
                 // showing a cached snapshot switches back to `OnlinePreferred` for the dependent
                 // branches/revision reads. A summary this pass read from the network proves the
@@ -2200,6 +2238,20 @@ impl RepositoryPage {
                 cx.notify();
                 return;
             }
+            Ok((snapshot, provenance))
+                if self.branch.as_ref().is_some_and(|state| {
+                    state.name == branch && state.snapshot.repository == snapshot.repository
+                }) =>
+            {
+                self.replacement = Some((
+                    branch,
+                    refresh::Target {
+                        snapshot,
+                        provenance,
+                    },
+                ));
+                self.spawn_replacement();
+            }
             Ok((snapshot, provenance)) => {
                 let verified_online = provenance
                     .as_ref()
@@ -2230,12 +2282,113 @@ impl RepositoryPage {
                 });
             }
             Err(error) => {
-                self.branch = None;
-                self.reader = None;
-                self.reader_status = ReaderStatus::Loading;
+                // Failure to resolve a ref is not proof that the still-authorized displayed
+                // snapshot disappeared. A real ref/account change cleared it before this read.
                 self.error = Some(error);
             }
         }
+        cx.notify();
+    }
+
+    fn spawn_replacement(&mut self) {
+        let Some((branch, target)) = self.replacement.clone() else {
+            return;
+        };
+        self.spawn_job(Job::Replacement {
+            branch,
+            target,
+            intent: self.intent.clone(),
+            selection: self.selection.clone(),
+            selection_request: self.selection_request,
+        });
+    }
+
+    fn apply_replacement(
+        &mut self,
+        reply: ReplacementReply,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((branch, target)) = self.replacement.as_ref() else {
+            return;
+        };
+        if *branch != reply.branch || target.snapshot.commit() != reply.target.snapshot.commit() {
+            return;
+        }
+        // The user may keep browsing the old snapshot while this one prepares. Resolve the newest
+        // selection before publishing; never restore an earlier selection from the captured intent.
+        if reply.selection_request != self.selection_request {
+            self.spawn_replacement();
+            return;
+        }
+        let prepared = match reply.result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.replacement = None;
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.cancel_reader_interactions(cx);
+        self.stop_work();
+        self.work = Some(Work::new());
+        self.branch_request = self.branch_request.wrapping_add(1);
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.pending_content = None;
+        self.online_verified = reply
+            .target
+            .provenance
+            .as_ref()
+            .is_none_or(|p| p.origin == RepositoryCacheOrigin::Network);
+        self.branch = Some(BranchState {
+            name: reply.branch,
+            snapshot: reply.target.snapshot,
+            snapshot_provenance: reply.target.provenance,
+            tree: prepared.tree,
+            readme: prepared.readme,
+        });
+        self.readme_path = match &self.branch.as_ref().unwrap().readme {
+            ReadmeState::Found(descriptor) if self.selection == Selection::Readme => {
+                Some(descriptor.path.as_str().to_string())
+            }
+            _ => None,
+        };
+        if let Some(path) = self.current_path().map(str::to_string) {
+            self.intent
+                .expanded
+                .extend(RepositoryNavigation::ancestors(&path));
+        }
+        self.reader = None;
+        if let Some(content) = prepared.content {
+            self.install_cached_reader(content, None, window, cx);
+        }
+        self.reader_status = prepared.status;
+        self.error = None;
+        // Keep the tree's scroll handle, expansion intent and valid cursor; missing paths have no
+        // selected row in the new tree and an explicit reader terminal state.
+        if self.cursor.as_ref().is_some_and(|path| {
+            self.branch
+                .as_ref()
+                .unwrap()
+                .tree
+                .entry_kind(path)
+                .is_none()
+        }) {
+            self.cursor = self
+                .current_path()
+                .filter(|path| {
+                    self.branch
+                        .as_ref()
+                        .unwrap()
+                        .tree
+                        .entry_kind(path)
+                        .is_some()
+                })
+                .map(str::to_string);
+        }
+        self.invalidate_rows();
+        self.load_expanded(cx);
         cx.notify();
     }
 
@@ -2408,16 +2561,25 @@ impl RepositoryPage {
     ) {
         let path = content.identity.path().as_str().to_string();
         let kind = DocumentKind::for_path(&path);
-        let page = cx.entity().downgrade();
-        let generation = self.generation;
-        let branch_request = self.branch_request;
-        let selected_request = self.selection_request;
         let provider = provider.or_else(|| self.image_provider_for(&content));
         let reader = cx.new(|cx| {
             let mut reader = ReaderView::from_prepared(content, kind, window, cx);
             reader.set_markdown_layout(crate::ui::reader::MarkdownLayout::Repository, cx);
             reader.set_image_limits(self.services.image_limits.clone(), cx);
             reader.set_image_provider(provider, cx);
+            reader
+        });
+        self.bind_reader_actions(&reader, cx);
+        self.reader = Some(reader);
+    }
+
+    /// A retained reader keeps its selection/scroll but its callbacks must follow request identity.
+    fn bind_reader_actions(&self, reader: &Entity<ReaderView>, cx: &mut Context<Self>) {
+        let page = cx.entity().downgrade();
+        let generation = self.generation;
+        let branch_request = self.branch_request;
+        let selected_request = self.selection_request;
+        reader.update(cx, |reader, _| {
             reader.on_action(Rc::new(move |action, window, cx| {
                 // The callback runs inside ReaderView::update. Defer the host action so
                 // cancelling/replacing that reader cannot re-enter the entity currently
@@ -2436,9 +2598,7 @@ impl RepositoryPage {
                     });
                 });
             }));
-            reader
         });
-        self.reader = Some(reader);
     }
 
     /// Routes a reader link press. External URLs are handed to the host; a
@@ -2978,6 +3138,7 @@ impl RepositoryPage {
                 ..
             } => Some(identity.id()),
             Job::Directory { handle, .. } => Some(handle.repository().id()),
+            Job::Replacement { target, .. } => Some(target.snapshot.repository.id()),
             Job::Content { identity, .. } => Some(identity.repository().id()),
         }
     }
@@ -2987,7 +3148,10 @@ impl RepositoryPage {
         match job {
             Job::Repository { .. } | Job::Snapshot { .. } => AuthSlot::Repository,
             Job::Branches { .. } => AuthSlot::Branches,
-            Job::Revision { .. } | Job::Root { .. } | Job::Readme { .. } => AuthSlot::Revision,
+            Job::Revision { .. }
+            | Job::Root { .. }
+            | Job::Readme { .. }
+            | Job::Replacement { .. } => AuthSlot::Revision,
             Job::Directory { .. } | Job::Content { .. } => AuthSlot::Content,
         }
     }
@@ -3122,6 +3286,13 @@ enum Job {
         locator: RepositoryLocator,
         hint: Option<CacheHint>,
         intent: RepositoryNavigation,
+    },
+    Replacement {
+        branch: String,
+        target: refresh::Target,
+        intent: RepositoryNavigation,
+        selection: Selection,
+        selection_request: u64,
     },
     Branches {
         identity: RepositoryIdentity,
@@ -3455,6 +3626,30 @@ async fn run_job(
                 readme,
                 content,
                 selection,
+            }))
+        }
+        Job::Replacement {
+            branch,
+            target,
+            intent,
+            selection,
+            selection_request,
+        } => {
+            let result = refresh::prepare(
+                session,
+                plain,
+                &target.snapshot,
+                intent,
+                selection,
+                limits,
+                cancel,
+            )
+            .await;
+            Body::Replacement(Box::new(ReplacementReply {
+                branch,
+                target,
+                selection_request,
+                result,
             }))
         }
         Job::Branches { identity, mode } => Body::Branches(match session {

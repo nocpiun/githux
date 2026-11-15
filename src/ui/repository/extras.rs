@@ -74,18 +74,26 @@ pub(super) struct Extras {
     displayed_authorization: Option<CacheAuthorization>,
 }
 impl Extras {
-    pub fn stop(&mut self) {
-        for work in &mut self.work {
+    /// Cancel one read pass while retaining the same authorized displayed overview and binding.
+    pub fn cancel_reads(&mut self) {
+        for (index, work) in self.work.iter_mut().enumerate() {
             if let Some(work) = work.take() {
                 work.source.cancel();
             }
+            self.requests[index] = self.requests[index].wrapping_add(1);
         }
         if let Some(work) = self.counts_work.take() {
             work.source.cancel();
         }
+        self.counts_request = self.counts_request.wrapping_add(1);
+        self.inbox.lock().expect("overview inbox").clear();
+        self.counts_inbox.lock().expect("count inbox").clear();
+    }
+
+    pub fn stop(&mut self) {
+        self.cancel_reads();
         self.counts = None;
         self.counts_historical = false;
-        self.counts_request += 1;
         self.displayed_authorization = None;
         self.view = None;
         self.session = None;
@@ -105,7 +113,8 @@ impl Extras {
     fn accepts(&self, page: &RepositoryPage, binding: &OverviewBinding) -> bool {
         page.active
             && self.binding.as_ref() == Some(binding)
-            && binding.generation == page.generation
+            // The binding identifies displayed data; request counters identify refresh passes.
+            // activate/rebind stop the overview entirely before changing authorization.
             && page
                 .details
                 .as_ref()
@@ -141,16 +150,19 @@ impl RepositoryPage {
                 .binding
                 .as_ref()
                 .is_some_and(|binding| binding.repository == repository)
-            && self.extras.binding.as_ref().is_some_and(|binding| {
-                binding.generation == self.generation && self.extras.accepts(self, binding)
-            })
+            && self
+                .extras
+                .binding
+                .as_ref()
+                .is_some_and(|binding| self.extras.accepts(self, binding))
         {
             let offline_only = self
                 .details_provenance
                 .as_ref()
                 .is_some_and(|prov| prov.origin == crate::data::RepositoryCacheOrigin::Snapshot);
-            let authorization = self.current_authorization(repository.id());
-            self.extras.displayed_authorization = authorization.clone();
+            // Keep the token belonging to the retained values. A new read cannot re-authorize
+            // an older displayed section by swapping its invalidation token.
+            let authorization = self.extras.displayed_authorization.clone();
             self.read_counts(offline_only, authorization.clone());
             for endpoint in [
                 Endpoint::Releases,

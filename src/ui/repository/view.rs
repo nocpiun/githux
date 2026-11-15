@@ -887,6 +887,29 @@ fn tree_warnings(
     cx: &mut Context<RepositoryPage>,
 ) -> Vec<AnyElement> {
     let mut warnings = Vec::new();
+    if let Some(error) = page.error().filter(|_| page.selected_branch().is_some()) {
+        let owner = cx.weak_entity();
+        let retry = error
+            .retryable
+            .then_some(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                let _ = owner.update(cx, |page, cx| page.refresh_repository(cx));
+            });
+        warnings.push(
+            div()
+                .debug_selector(|| "repository-refresh-error".to_string())
+                .px_2()
+                .py_1()
+                .child(crate::ui::compact_status::failed(
+                    "repository-retry-refresh",
+                    "Repository refresh failed",
+                    error.title.clone(),
+                    retry,
+                    Some("repository-retry-refresh"),
+                    cx,
+                ))
+                .into_any_element(),
+        );
+    }
     if page.tree("").is_some_and(tree_incomplete) {
         warnings.push(
             div()
