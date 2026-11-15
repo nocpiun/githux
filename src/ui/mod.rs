@@ -1476,6 +1476,7 @@ impl Shell {
     /// No page state is lost — only the theme global and the windows it repaints change. On
     /// Windows the installed native caption is recolored in place so the title bar follows the
     /// switch instead of staying in the startup palette.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     pub fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let next = if cx.theme().is_dark() {
             ely_core::theme::Mode::Light
