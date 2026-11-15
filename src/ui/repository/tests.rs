@@ -294,7 +294,7 @@ fn the_normal_fixture_renders_its_readme_at_a_real_path_and_single_selection(
         page.read_with(cx, |page, _| page.current_path().unwrap().to_string())
     );
     assert!(cx.debug_bounds("repository-tab-code").is_some());
-    assert!(cx.debug_bounds("repository-tab-active-code").is_some());
+    assert_band_under(&page, "repository-tab-code", cx);
     assert!(cx.debug_bounds("repository-description").is_some());
 
     // Nothing in the run was an unmodelled request.
@@ -2174,4 +2174,147 @@ fn tree_viewport_insets_and_complete_edge_rows_survive_resize_and_scale(cx: &mut
             }
         }
     }
+}
+
+// ---------------------------------------------------- shared active-tab band --
+
+/// The band painted on the last frame of the page's content tabs.
+fn band(page: &Entity<RepositoryPage>, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+    page.read_with(cx, |page, _| page.tab_underline_rect())
+        .expect("a measured strip paints its band")
+}
+
+fn assert_band_under(page: &Entity<RepositoryPage>, tab: &'static str, cx: &mut VisualTestContext) {
+    let target = cx.debug_bounds(tab).expect("measured tab");
+    let band = band(page, cx);
+    assert_eq!(band.left(), target.left(), "band left follows {tab}");
+    assert_eq!(
+        band.size.width, target.size.width,
+        "band width follows {tab}"
+    );
+    assert_eq!(
+        band.bottom(),
+        target.bottom(),
+        "band sits on {tab}'s own bottom edge"
+    );
+}
+
+#[gpui::test]
+fn the_active_tab_band_starts_on_its_tab_and_moves_and_resizes_between_tabs(
+    cx: &mut TestAppContext,
+) {
+    let (_fixture, page, cx) = normal(cx);
+    // One pinned clock, stepped by hand: the move can be inspected frame by frame. The base is
+    // far past the page's own clock so the first pinned frame settles anything still in flight.
+    const BASE: u64 = 1_000_000;
+    page.update(cx, |page, _| page.pin_clock(BASE));
+    frames(cx);
+    assert_band_under(&page, "repository-tab-code", cx);
+
+    // A real pointer press, not a direct state write. `Issues` is a wider label than `Code`, so
+    // the band has to move and resize.
+    let code = cx.debug_bounds("repository-tab-code").expect("code tab");
+    let issues = cx
+        .debug_bounds("repository-tab-issues")
+        .expect("issues tab");
+    cx.simulate_click(issues.center(), Modifiers::none());
+    page.update(cx, |page, _| page.pin_clock(BASE + 16));
+    frames(cx);
+    assert_eq!(
+        page.read_with(cx, |page, _| page.tab()),
+        RepositoryTab::Issues
+    );
+    let first = band(&page, cx);
+    assert!(
+        first.left() > code.left() && first.left() < issues.left(),
+        "one frame after the press the band is on its way, not already swapped: {first:?}"
+    );
+    assert!(
+        first.size.width > code.size.width && first.size.width < issues.size.width,
+        "the band's width is interpolated too: {first:?}"
+    );
+    assert!(page.read_with(cx, |page, _| page.tab_underline_is_animating(BASE + 16)));
+
+    // Later in the same move it is further along, still between the two tabs.
+    let halfway = BASE + 16 + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS / 2;
+    page.update(cx, |page, _| page.pin_clock(halfway));
+    frames(cx);
+    let middle = band(&page, cx);
+    assert!(middle.left() > first.left() && middle.left() < issues.left());
+
+    let landed = BASE + 16 + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS;
+    page.update(cx, |page, _| page.pin_clock(landed));
+    frames(cx);
+    assert_band_under(&page, "repository-tab-issues", cx);
+    assert!(
+        !page.read_with(cx, |page, _| page.tab_underline_is_animating(landed)),
+        "a settled strip asks for no more frames"
+    );
+}
+
+#[gpui::test]
+fn an_interrupted_tab_selection_continues_from_the_band_in_flight(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = normal(cx);
+    const BASE: u64 = 1_000_000;
+    page.update(cx, |page, _| page.pin_clock(BASE));
+    frames(cx);
+    let code = cx.debug_bounds("repository-tab-code").expect("code tab");
+    let issues = cx
+        .debug_bounds("repository-tab-issues")
+        .expect("issues tab");
+    cx.simulate_click(issues.center(), Modifiers::none());
+    // Part way through the first move, then a second selection before it finishes.
+    page.update(cx, |page, _| {
+        page.pin_clock(BASE + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS / 2)
+    });
+    frames(cx);
+    let in_flight = band(&page, cx);
+    assert!(in_flight.left() > code.left() && in_flight.left() < issues.left());
+    let pulls = cx.debug_bounds("repository-tab-pulls").expect("pulls tab");
+    cx.simulate_click(pulls.center(), Modifiers::none());
+    frames(cx);
+    let restarted = band(&page, cx);
+    assert!(
+        (restarted.left() - in_flight.left()).abs() <= px(0.1)
+            && (restarted.size.width - in_flight.size.width).abs() <= px(0.1),
+        "the restart begins where the band was: {restarted:?} vs {in_flight:?}"
+    );
+    page.update(cx, |page, _| {
+        page.pin_clock(BASE + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS * 2)
+    });
+    frames(cx);
+    assert_band_under(&page, "repository-tab-pulls", cx);
+}
+
+#[gpui::test]
+fn reduced_motion_puts_the_band_on_the_selected_tab_in_one_frame(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = normal(cx);
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
+    page.update(cx, |page, _| page.pin_clock(1_000_000));
+    frames(cx);
+    let issues = cx
+        .debug_bounds("repository-tab-issues")
+        .expect("issues tab");
+    cx.simulate_click(issues.center(), Modifiers::none());
+    frames(cx);
+    assert_band_under(&page, "repository-tab-issues", cx);
+}
+
+#[gpui::test]
+fn the_band_follows_a_resize_and_a_scale_change_without_sliding(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = normal(cx);
+    page.update(cx, |page, _| page.pin_clock(1_000_000));
+    frames(cx);
+    assert_band_under(&page, "repository-tab-code", cx);
+
+    // A narrower window moves and shrinks the tabs. The band is a layout follower, so it adopts
+    // the new box in the same frame instead of easing through the old path.
+    cx.simulate_resize(gpui::size(px(720.0), px(620.0)));
+    frames(cx);
+    assert_band_under(&page, "repository-tab-code", cx);
+
+    // A display scale change is a layout change too: same rule, no slide and no stale width.
+    cx.simulate_scale_factor_change(1.5);
+    frames(cx);
+    assert_band_under(&page, "repository-tab-code", cx);
 }

@@ -10,6 +10,15 @@
 
 窄态分类 Tabs 与仓库页内容 Tabs 使用同一组主题参数，而不是另造视觉：`TextSize::Sm`、`IconSize::Xs`、icon-label `gap_1p5`、单项 `px_2`/`py_2`、项间 `gap_2`；未选 `FontWeight::NORMAL` + `fg_muted`，选中 `MEDIUM` + `fg`，hover 文字 `fg`；选中底部 2px `accent` 下划线与整条 1px `border` 基线。键盘 focus 用背景色表达，不增加边框尺寸；横向滚动容器就是 tab 行本身，使 `scroll_to_item`、选中末项 reveal 与滚轮/滚动条继续有效，滚动条画在下方预留带而不是压住下划线。
 
+### 共享的活动 tab 下划线
+
+三条横向 tab 条（本页窄态分类、仓库页内容 Tabs、Profile Overview 条）共用 `src/ui/tab_underline.rs` 的一份呈现，而不是各自把 2px 下划线画在被选中项上。每个 tab 用一个不注册命中区的 `probe` 上报自身真实绘制边界，tab 条再用 `layer` 在该边界上画出同宽、贴住 tab 底边的下划线：切换 tab 时一个对象移动并改变宽度，不再是一项消失、另一项出现。
+
+- 过渡从当前插值位置出发，快速连选不会退回旧 tab；宽度同样插值，所以不等宽标签与后来才出现的 count pill 都是同一对象的变化。
+- 首次布局、resize、字体/DPI 变化、count pill 改变标签宽度、tab 条横向滚动都按布局事实立即采纳，不下滑一段 tab 没有走过的路径；滚动与裁剪由 tab 条自身的 `overflow` 负责，`probe` 不改间距、命中区、焦点或 role。
+- reduced motion 立即落位；只有移动期间请求动画帧，静止的 tab 条不请求。
+- 被测行为：`src/ui/tab_underline.rs` 的状态机用例、仓库页 `the_active_tab_band_starts_on_its_tab_and_moves_and_resizes_between_tabs`、本页窄态键盘用例与 Profile `overview_tab_band_covers_the_measured_tab_box`。
+
 PAT 表单默认收起。Add account 和账户行 Replace PAT 在列表下方打开表单，替换绑定被点击身份，允许目标为非当前账户。当前账户用 Current 标记，不生成 Switch 控件。账户状态来自服务权威目录，Verified、PendingVerification、MissingCredential、CredentialUnavailable、过期/拒绝与连接失败保持区别。
 
 ## 宿主接口与状态归属

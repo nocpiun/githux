@@ -47,6 +47,10 @@ pub(super) fn render(
     let background = theme.colors.surface;
     let foreground = theme.colors.fg;
     let text_size = theme.text_size(TextSize::Sm);
+    // A moving tab band asks for the next frame; a settled one asks for nothing.
+    if page.tab_underline.is_animating(page.now_ms()) {
+        window.request_animation_frame();
+    }
     let header = header(page, window, cx);
     let tabs = tab_strip(page, cx);
     let browsing = page.selected_branch().is_some();
@@ -577,9 +581,22 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
     let small = theme.text_size(TextSize::Sm);
     let active = page.tab();
     let picker = branch_picker(page, cx);
+    // The band is the shared strip presentation: the selected tab only supplies its measured
+    // bounds, so a change moves and resizes one object instead of swapping two.
+    let active_index = RepositoryTab::ALL
+        .iter()
+        .position(|tab| *tab == active)
+        .unwrap_or(0);
+    let band = page.tab_underline.layer(
+        active_index,
+        colors.accent,
+        cx.theme().reduced_motion || cx.reduce_motion(),
+        page.now_ms(),
+    );
     let tabs: Vec<AnyElement> = RepositoryTab::ALL
         .iter()
-        .map(|&tab| {
+        .enumerate()
+        .map(|(index, &tab)| {
             let entity = cx.entity().downgrade();
             let is_active = tab == active;
             let fg = if is_active {
@@ -628,18 +645,9 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
                             .child(Badge::new(count.to_string()))
                     }),
                 )
-                .when(is_active, |entry| {
-                    entry.child(
-                        div()
-                            .debug_selector(move || format!("repository-tab-active-{}", tab.id()))
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(2.0))
-                            .bg(colors.accent),
-                    )
-                })
+                // Invisible measurement only: it registers no hitbox, so the tab's cursor,
+                // hover, focus ring and click target are unchanged.
+                .child(page.tab_underline.probe(index))
                 .on_click(move |_, _, cx| {
                     // A weak entity may already be released; nothing is left to notify.
                     let _ = entity.update(cx, |page, cx| page.select_tab(tab, cx));
@@ -660,12 +668,14 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
         .border_color(border)
         .child(
             div()
+                .relative()
                 .flex()
                 .items_center()
                 .min_w_0()
                 .flex_wrap()
                 .gap_2()
-                .children(tabs),
+                .children(tabs)
+                .child(band),
         )
         .child(div().flex_1())
         .child(picker)

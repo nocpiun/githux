@@ -507,7 +507,10 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
             move || debug.clone()
         });
     if let Some(action) = row.on_row_click {
-        container = container.on_click(move |_, window, cx| {
+        // The whole row is the click target in the global lists, so the whole row is also where
+        // the pointer says so. Rows whose only actions are their own text links do not reach this
+        // branch and keep the default cursor on their blank space.
+        container = container.cursor_pointer().on_click(move |_, window, cx| {
             cx.stop_propagation();
             action(window, cx);
         });

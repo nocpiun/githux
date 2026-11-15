@@ -57,6 +57,10 @@ pub struct ProfileView {
     pub(super) page_bars: Bars,
     pub(super) heatmap_bars: Bars,
     pub(super) clock: Instant,
+    #[cfg(test)]
+    pub(super) pinned_ms: Option<u64>,
+    /// The shared active-tab band of the Overview strip.
+    pub(super) overview_underline: crate::ui::tab_underline::TabUnderline,
     pub(super) on_action: Option<OnProfileAction>,
     pub(super) last_action: Option<ProfileAction>,
     _window_activation: Subscription,
@@ -114,6 +118,9 @@ impl ProfileView {
             page_bars: Bars::new(),
             heatmap_bars: Bars::new(),
             clock: Instant::now(),
+            #[cfg(test)]
+            pinned_ms: None,
+            overview_underline: crate::ui::tab_underline::TabUnderline::new(),
             on_action: None,
             last_action: None,
             _window_activation: activation,
@@ -609,7 +616,29 @@ impl ProfileView {
     }
 
     pub(super) fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(ms) = self.pinned_ms {
+            return ms;
+        }
         self.clock.elapsed().as_millis() as u64
+    }
+
+    /// Pins the view clock so a tab change can be stepped frame by frame without sleeping.
+    #[cfg(test)]
+    pub(super) fn pin_clock(&mut self, ms: u64) {
+        self.pinned_ms = Some(ms);
+    }
+
+    /// The shared Overview band painted on the last frame, in window coordinates.
+    #[cfg(test)]
+    pub(super) fn overview_underline_rect(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.overview_underline.painted()
+    }
+
+    /// Whether the shared Overview band still has frames to draw at `now_ms`.
+    #[cfg(test)]
+    pub(super) fn overview_underline_is_animating(&self, now_ms: u64) -> bool {
+        self.overview_underline.is_animating(now_ms)
     }
 
     pub(super) fn tick_scroll(&self, window: &mut Window, reduce: bool) {

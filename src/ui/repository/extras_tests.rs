@@ -446,7 +446,17 @@ fn neutral_count_pill_stays_inside_its_tab_click_target(cx: &mut TestAppContext)
     cx.simulate_click(badge.center(), Modifiers::none());
     frames(cx);
     assert_eq!(page.read_with(cx, |p, _| p.tab()), RepositoryTab::Issues);
-    assert!(cx.debug_bounds("repository-tab-active-issues").is_some());
+    // The one shared band is under the newly selected tab once its move has finished.
+    let issues = cx.debug_bounds("repository-tab-issues").unwrap();
+    page.update(cx, |p, _| p.pin_clock(10_000_000));
+    frames(cx);
+    let band = page
+        .read_with(cx, |p, _| p.tab_underline_rect())
+        .expect("the strip paints its band");
+    assert_eq!(
+        (band.left(), band.size.width),
+        (issues.left(), issues.size.width)
+    );
     assert!(cx.debug_bounds("repository-body").is_none());
     let tab = cx.debug_bounds("repository-tab-code").unwrap();
     cx.simulate_click(tab.center(), Modifiers::none());

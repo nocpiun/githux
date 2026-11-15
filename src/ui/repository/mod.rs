@@ -507,6 +507,8 @@ pub struct RepositoryPage {
     star_write_generation: u64,
     star_inbox: Arc<Mutex<VecDeque<StarReply>>>,
     clock: std::time::Instant,
+    /// The shared active-tab band of this page's content tabs.
+    tab_underline: crate::ui::tab_underline::TabUnderline,
     #[cfg(test)]
     pinned_clock: Option<u64>,
     _window_activation: Subscription,
@@ -583,6 +585,7 @@ impl RepositoryPage {
             star_write_generation: 0,
             star_inbox: Arc::new(Mutex::new(VecDeque::new())),
             clock: std::time::Instant::now(),
+            tab_underline: crate::ui::tab_underline::TabUnderline::new(),
             #[cfg(test)]
             pinned_clock: None,
             _window_activation: cx.observe_window_activation(window, |page, window, cx| {
@@ -1621,6 +1624,24 @@ impl RepositoryPage {
             return ms;
         }
         self.clock.elapsed().as_millis() as u64
+    }
+
+    /// Pins the page clock so a tab change can be stepped frame by frame without sleeping.
+    #[cfg(test)]
+    pub(crate) fn pin_clock(&mut self, ms: u64) {
+        self.pinned_clock = Some(ms);
+    }
+
+    /// The band painted on the last frame, in window coordinates.
+    #[cfg(test)]
+    pub(crate) fn tab_underline_rect(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.tab_underline.painted()
+    }
+
+    /// Whether the band still has frames to draw at `now_ms`.
+    #[cfg(test)]
+    pub(crate) fn tab_underline_is_animating(&self, now_ms: u64) -> bool {
+        self.tab_underline.is_animating(now_ms)
     }
 
     /// The receiver drains background results on a light GPUI-side cadence,
