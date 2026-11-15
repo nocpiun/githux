@@ -390,7 +390,7 @@ fn html_list_starts_cannot_overflow_the_renderers_counter() {
         .blocks
         .iter()
         .find_map(|block| match block {
-            Block::List { start, items } => Some((*start, items.len())),
+            Block::List { start, items, .. } => Some((*start, items.len())),
             _ => None,
         })
         .expect("list");

@@ -262,3 +262,124 @@ pub fn large_markdown() -> PreparedBody {
         has_bom: false,
     }
 }
+
+/// A GitHub profile README: short bullet paragraphs between sections, all
+/// five alerts, an ordinary quote, a table, a fenced block and a rule.
+///
+/// It is the owner-facing case for the Markdown rhythm: the gaps between
+/// "Hello world", the four one-line bullets, and the following sections must
+/// stay tight, and every alert kind must read as its own colour.
+pub const PROFILE: &str = r##"# Hello world
+
+## Hi there
+
+I am a developer who builds small tools.
+
+- I am a developer
+- I use Drupal
+- I use Nuxt
+- I write Druxt
+
+### What I build
+
+Some longer prose with a [relative link](guide.md#setup), `inline code` and 中文 content so the paragraph wraps at ordinary window widths.
+
+> [!NOTE]
+> A note body with a [nested guide](guide.md).
+
+> [!TIP]
+> A tip body.
+
+> [!IMPORTANT]
+> An important body.
+
+> [!WARNING]
+> A warning body.
+
+> [!CAUTION]
+> A caution body.
+
+> A quote that stays neutral.
+
+### Sponsors
+
+Thanks to everyone.
+
+### What I use
+
+- Rust
+- TypeScript
+
+| Tool | Use |
+| --- | --- |
+| Rust | everything |
+
+```rust
+fn main() {}
+```
+
+---
+
+Tail paragraph with a [wrapped long link label that is long enough](guide.md).
+"##;
+
+pub fn profile() -> PreparedBody {
+    PreparedBody::Utf8 {
+        text: PROFILE.to_string(),
+        has_bom: false,
+    }
+}
+
+/// Tight, loose and nested lists plus the heading transitions around them.
+pub fn lists() -> PreparedBody {
+    PreparedBody::Utf8 {
+        text: "lead paragraph
+
+- tight one
+- tight two
+- tight three
+
+loose lead
+
+- loose one
+
+- loose two
+
+nested lead
+
+- parent
+  - child one
+  - child two
+
+## After the lists
+
+tail paragraph
+
+# Top one
+
+### Small three
+"
+        .to_string(),
+        has_bom: false,
+    }
+}
+
+/// Links in every container the reader supports, plus one refused address.
+pub const NESTED_LINKS: &str = r##"A paragraph with a [relative link](guide.md), plain words and a [refused link](javascript:alert(1)) and an [anchor](#setup).
+
+- item with [a list link](guide.md)
+- item two
+
+> quoted [quote link](guide.md)
+
+| Col |
+| --- |
+| [cell link](guide.md) |
+"##;
+
+pub fn nested_links() -> PreparedBody {
+    PreparedBody::Utf8 {
+        text: NESTED_LINKS.to_string(),
+        has_bom: false,
+    }
+}

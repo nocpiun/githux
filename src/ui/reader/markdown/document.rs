@@ -9,18 +9,22 @@
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use ely_core::theme::{ActiveTheme, Radius, TextSize};
+use ely_core::{
+    primitives::Icon,
+    theme::{ActiveTheme, IconSize, Radius, TextSize},
+};
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, EmptyView, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, ListAlignment, ListState, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString, Styled, Task, TextAlign,
-    Window, div, list, prelude::*, relative,
+    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, EmptyView,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ListAlignment,
+    ListState, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
+    Styled, Task, TextAlign, Window, div, list, prelude::*, px, relative,
 };
 
 use super::{
-    ast::{self, Align, Block, CellImage, Inline},
+    ast::{self, AlertKind, Align, Block, CellImage, Inline},
     doctext::DocText,
     inline::{LocalLayout, ParagraphView},
+    rhythm::{self, Rhythm},
 };
 use crate::ui::reader::images::{self, ImageBoard, ImageHints, ImageState};
 
@@ -54,7 +58,7 @@ struct SelectDrag;
 #[derive(Clone, Copy)]
 struct NestedStyle<'a> {
     colors: &'a ely_core::theme::Palette,
-    body: f32,
+    rhythm: Rhythm,
     mono: &'a SharedString,
     radius: gpui::Rems,
 }
@@ -117,6 +121,9 @@ pub struct MarkdownView {
     anchor: usize,
     head: usize,
     dragging: bool,
+    /// Whether the pointer rests on a navigable link right now. Hover changes
+    /// request a frame, which is when the pointing hand is applied.
+    pointer_over_link: bool,
     /// A link pressed on the last press, opened only on a click without drag.
     pressed_link: Option<String>,
     /// Painted bounds of visible table-cell pictures, by their document unit
@@ -172,6 +179,7 @@ impl MarkdownView {
             anchor: 0,
             head: 0,
             dragging: false,
+            pointer_over_link: false,
             pressed_link: None,
             picture_hits: Default::default(),
             anchor_block: None,
@@ -467,7 +475,34 @@ impl MarkdownView {
         self.head = at;
         self.dragging = true;
         self.pressed_link = link;
+        self.pointer_over_link = false;
         cx.notify();
+    }
+
+    /// Updates the hover state; the cursor only changes on a repaint.
+    fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let over = !self.dragging
+            && self
+                .hit_at_live(position)
+                .and_then(|hit| hit.link)
+                .is_some_and(|url| self.link_is_interactive(&url));
+        if over != self.pointer_over_link {
+            self.pointer_over_link = over;
+            cx.notify();
+        }
+    }
+
+    /// Drops the hover state when the pointer leaves the reading area.
+    fn leave(&mut self, cx: &mut Context<Self>) {
+        if self.pointer_over_link {
+            self.pointer_over_link = false;
+            cx.notify();
+        }
+    }
+
+    /// Whether the pointer currently rests on a navigable link.
+    pub fn pointer_over_link(&self) -> bool {
+        self.pointer_over_link
     }
 
     /// A drag moved to document offset `at`.
@@ -740,9 +775,10 @@ impl MarkdownView {
         let sm = f32::from(theme.text_size(TextSize::Sm).to_pixels(window.rem_size()));
         let xs = f32::from(theme.text_size(TextSize::Xs).to_pixels(window.rem_size()));
         let radius = theme.radius(Radius::Md);
+        let rhythm = Rhythm::new(body);
         let nested_style = NestedStyle {
             colors: &colors,
-            body,
+            rhythm,
             mono: &mono,
             radius,
         };
@@ -754,8 +790,8 @@ impl MarkdownView {
         let element = match block {
             Block::Paragraph(inline) => div()
                 .debug_selector(move || format!("markdown-paragraph-{ix}"))
-                .text_size(gpui::px(body))
-                .line_height(gpui::px(body * 1.6))
+                .text_size(px(body))
+                .line_height(rhythm.line())
                 .text_color(colors.fg)
                 .child(self.paragraph_unit(
                     gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
@@ -763,50 +799,24 @@ impl MarkdownView {
                     self.next_unit(ix, &unit_cursor),
                 ))
                 .into_any_element(),
-            Block::Heading(level, inline) => {
-                let scale = match level {
-                    1 => 2.25,
-                    2 => 1.75,
-                    3 => 1.5,
-                    4 => 1.25,
-                    _ => 1.0,
-                };
-                div()
-                    .debug_selector(move || format!("markdown-heading-{ix}"))
-                    .pt_2()
-                    .text_size(gpui::px(body * scale))
-                    .line_height(relative(1.3))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(if *level == 6 {
-                        colors.fg_muted
-                    } else {
-                        colors.fg
-                    })
-                    .child(self.paragraph_unit(
-                        gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
-                        inline,
-                        self.next_unit(ix, &unit_cursor),
-                    ))
-                    .into_any_element()
-            }
+            Block::Heading(level, inline) => heading_unit(
+                ix,
+                *level,
+                self.paragraph_unit(
+                    gpui::ElementId::Name(format!("reader-inline-{ix}").into()),
+                    inline,
+                    self.next_unit(ix, &unit_cursor),
+                ),
+                &colors,
+                rhythm,
+                false,
+            ),
             Block::Quote { kind, body: inner } => {
-                let mut quoted = div().flex().flex_col().gap_2();
-                if let Some(kind) = kind {
-                    quoted = quoted.child(
-                        div()
-                            .text_size(gpui::px(sm))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(colors.fg_muted)
-                            .child(kind.title()),
-                    );
-                }
-                div()
-                    .pl_4()
-                    .border_l_2()
-                    .border_color(colors.border_strong)
-                    .text_color(colors.fg_muted)
+                let (frame, column) =
+                    quote_frame(format!("markdown-quote-{ix}"), *kind, nested_style);
+                frame
                     .child(
-                        quoted.children(
+                        column.children(
                             inner
                                 .iter()
                                 .enumerate()
@@ -861,17 +871,18 @@ impl MarkdownView {
                 // The language label is a real element above the code body.
                 // Shifting it up fixes the old centred gap without moving the
                 // code rows.
+                let (cell_x, _) = rhythm.cell_padding();
                 div()
                     .debug_selector(move || format!("markdown-code-block-{ix}"))
                     .flex()
                     .flex_col()
                     .rounded(radius)
                     .bg(colors.sunken)
-                    .px_3()
-                    .pb_3()
-                    .pt_2()
+                    .px(cell_x)
+                    .pb(rhythm.code_padding())
+                    .pt(px(body * 0.5))
                     .font_family(mono.clone())
-                    .text_size(gpui::px(sm))
+                    .text_size(px(sm))
                     .text_color(colors.syntax.variable)
                     .when_some(language.clone(), |block, language| {
                         block.child(
@@ -902,18 +913,28 @@ impl MarkdownView {
                     )
                     .into_any_element()
             }
-            Block::List { start, items } => {
-                let mut list = div().flex().flex_col().gap_2();
+            Block::List {
+                start,
+                items,
+                tight,
+            } => {
+                let item_gap = if *tight {
+                    rhythm.list_item()
+                } else {
+                    rhythm.block()
+                };
+                let mut list = list_column(rhythm, item_gap);
                 for (at, (task, blocks)) in items.iter().enumerate() {
                     let marker = item_marker(*start, *task, at);
                     list = list.child(
                         div()
                             .flex()
+                            .items_start()
                             .gap_2()
                             .w_full()
                             .child(div().flex_none().text_color(colors.fg_muted).child(marker))
                             .child(
-                                div().flex_1().min_w_0().flex().flex_col().gap_1().children(
+                                div().flex_1().min_w_0().children(
                                     blocks
                                         .iter()
                                         .enumerate()
@@ -953,6 +974,7 @@ impl MarkdownView {
                             &format!("cell-{ix}-{row}-{column}"),
                             format!("markdown-cell-{ix}-{row}-{column}"),
                             colors.fg_muted,
+                            rhythm,
                         )
                     };
                 // Table text uses the same body size and line height as prose:
@@ -961,8 +983,8 @@ impl MarkdownView {
                 let mut table = div()
                     .flex()
                     .flex_col()
-                    .text_size(gpui::px(body))
-                    .line_height(gpui::px(body * 1.6))
+                    .text_size(px(body))
+                    .line_height(rhythm.line())
                     .rounded(radius)
                     .border_1()
                     .border_color(colors.border)
@@ -996,9 +1018,8 @@ impl MarkdownView {
             }
             Block::Rule => div()
                 .debug_selector(move || format!("markdown-rule-{ix}"))
-                .my_2()
-                .border_t_2()
-                .border_color(colors.border_strong)
+                .border_t_1()
+                .border_color(colors.border)
                 .into_any_element(),
             Block::Math { tex, .. } => div()
                 .debug_selector(move || format!("markdown-math-{ix}"))
@@ -1016,7 +1037,7 @@ impl MarkdownView {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap_2()
+                .gap(rhythm.block())
                 .children(blocks.iter().enumerate().map(|(at, block)| {
                     self.nested(
                         ix,
@@ -1070,13 +1091,20 @@ impl MarkdownView {
         // it, so the document does not need list-level padding tricks.
         let vertical = window.rem_size() * 0.75;
         let hidden_images = self.only_hidden_images(block);
+        // One measured policy owns the vertical rhythm: each wrapper pads its
+        // own halves so adjacent blocks never stack duplicated margins.
+        let (pad_top, pad_bottom) = if hidden_images {
+            (Pixels::ZERO, Pixels::ZERO)
+        } else {
+            rhythm.block_padding(block, ix == 0)
+        };
         div()
             .debug_selector(move || format!("markdown-block-{ix}"))
             .when(centered, |block| {
                 block.w_full().flex().flex_col().items_center()
             })
             .px_3()
-            .when(!hidden_images, |block| block.py_1())
+            .when(!hidden_images, |block| block.pt(pad_top).pb(pad_bottom))
             .when(hidden_images, |block| {
                 block.h(gpui::px(0.0)).overflow_hidden()
             })
@@ -1123,10 +1151,11 @@ impl MarkdownView {
     ) -> AnyElement {
         let NestedStyle {
             colors,
-            body,
+            rhythm,
             mono,
             radius,
         } = style;
+        let body = rhythm.body();
         let key = gpui::ElementId::Name(format!("reader-{}-{}", id.0, id.1).into());
         if let Block::Image { alt, .. } = block
             && !alt.is_empty()
@@ -1135,8 +1164,8 @@ impl MarkdownView {
         }
         match block {
             Block::Paragraph(inline) => div()
-                .text_size(gpui::px(body))
-                .line_height(gpui::px(body * 1.6))
+                .text_size(px(body))
+                .line_height(rhythm.line())
                 .text_color(colors.fg)
                 .child(self.paragraph_unit(key, inline, self.next_unit(ix, units)))
                 .into_any_element(),
@@ -1145,86 +1174,83 @@ impl MarkdownView {
                 // so the next paragraph maps to its own range.
                 let _ = self.next_unit(ix, units);
                 div()
-                    .px_3()
-                    .py_2()
+                    .px(rhythm.code_padding())
+                    .py(px(body * 0.4))
                     .rounded(radius)
                     .bg(colors.sunken)
                     .font_family(mono.clone())
                     .child(text.clone())
                     .into_any_element()
             }
-            Block::List { start, items } => div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .children(
-                    items
-                        .iter()
-                        .enumerate()
-                        .map(|(at, (task, blocks))| {
-                            let marker = item_marker(*start, *task, at);
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(div().flex_none().text_color(colors.fg_muted).child(marker))
-                                .child(
-                                    div().flex_1().min_w_0().children(
-                                        blocks
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(sub, block)| {
-                                                self.nested_keyed(
-                                                    ix,
-                                                    units,
-                                                    (id.0, format!("{}-{at}-{sub}", id.1)),
-                                                    block,
-                                                    style,
-                                                )
-                                            })
-                                            .collect::<Vec<_>>(),
-                                    ),
-                                )
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .into_any_element(),
-            Block::Rule => div()
-                .my_1()
-                .border_t_1()
-                .border_color(colors.border_strong)
-                .into_any_element(),
-            Block::Quote { kind, body: inner } => {
-                let mut quote = div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .pl_4()
-                    .border_l_2()
-                    .border_color(colors.border_strong);
-                if let Some(kind) = kind {
-                    quote = quote.child(
-                        div()
-                            .text_size(gpui::px(body))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(colors.fg_muted)
-                            .child(kind.title()),
-                    );
-                }
-                quote
+            Block::List {
+                start,
+                items,
+                tight,
+            } => {
+                let item_gap = if *tight {
+                    rhythm.list_item()
+                } else {
+                    rhythm.block()
+                };
+                list_column(rhythm, item_gap)
                     .children(
-                        inner
+                        items
                             .iter()
                             .enumerate()
-                            .map(|(at, block)| {
-                                self.nested_keyed(
-                                    ix,
-                                    units,
-                                    (id.0, format!("{}-quote-{at}", id.1)),
-                                    block,
-                                    style,
-                                )
+                            .map(|(at, (task, blocks))| {
+                                let marker = item_marker(*start, *task, at);
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        div().flex_none().text_color(colors.fg_muted).child(marker),
+                                    )
+                                    .child(
+                                        div().flex_1().min_w_0().children(
+                                            blocks
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(sub, block)| {
+                                                    self.nested_keyed(
+                                                        ix,
+                                                        units,
+                                                        (id.0, format!("{}-{at}-{sub}", id.1)),
+                                                        block,
+                                                        style,
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        ),
+                                    )
                             })
                             .collect::<Vec<_>>(),
+                    )
+                    .into_any_element()
+            }
+            Block::Rule => div()
+                .border_t_1()
+                .border_color(colors.border)
+                .into_any_element(),
+            Block::Quote { kind, body: inner } => {
+                let (frame, column) = quote_frame(format!("markdown-{}-quote", id.1), *kind, style);
+                frame
+                    .child(
+                        column.children(
+                            inner
+                                .iter()
+                                .enumerate()
+                                .map(|(at, block)| {
+                                    self.nested_keyed(
+                                        ix,
+                                        units,
+                                        (id.0, format!("{}-quote-{at}", id.1)),
+                                        block,
+                                        style,
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
                     )
                     .into_any_element()
             }
@@ -1248,6 +1274,7 @@ impl MarkdownView {
                             &format!("nested-{}-{row}-{column}", id.1),
                             format!("markdown-nested-cell-{}-{row}-{column}", id.1),
                             colors.fg_muted,
+                            rhythm,
                         )
                     };
                 // Same body size and line height as prose, so a nested table
@@ -1255,8 +1282,8 @@ impl MarkdownView {
                 let mut table = div()
                     .flex()
                     .flex_col()
-                    .text_size(gpui::px(body))
-                    .line_height(gpui::px(body * 1.6))
+                    .text_size(px(body))
+                    .line_height(rhythm.line())
                     .rounded(radius)
                     .border_1()
                     .border_color(colors.border)
@@ -1320,12 +1347,7 @@ impl MarkdownView {
                     inline,
                     self.next_unit(ix, units),
                 );
-                div()
-                    .text_size(gpui::px(body * (1.0 + f32::from(6 - level) * 0.15)))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(colors.fg)
-                    .child(view)
-                    .into_any_element()
+                heading_unit(ix, *level, view, colors, rhythm, true)
             }
             Block::ImageRow(pictures) => self.picture_row(ix, units, pictures),
             Block::Centered(blocks) => div()
@@ -1333,7 +1355,7 @@ impl MarkdownView {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap_2()
+                .gap(rhythm.block())
                 .children(blocks.iter().enumerate().map(|(at, block)| {
                     self.nested(ix, units, ("center", format!("{ix}-{at}")), block, style)
                 }))
@@ -1376,6 +1398,7 @@ impl MarkdownView {
         key: &str,
         selector: String,
         muted: gpui::Hsla,
+        rhythm: Rhythm,
     ) -> AnyElement {
         let align = table_align(aligns, column);
         let presentation = repeated && header;
@@ -1440,6 +1463,15 @@ impl MarkdownView {
                             .when(align == TextAlign::Center, |row| row.justify_center())
                             .when(align == TextAlign::Right, |row| row.justify_end())
                             .child(picture);
+                        // Only a picture that really navigates is a pointer
+                        // target, and never while a selection gesture owns it.
+                        let navigates = !self.dragging
+                            && link
+                                .as_deref()
+                                .is_some_and(|url| self.link_is_interactive(url));
+                        if navigates {
+                            frame = frame.cursor(CursorStyle::PointingHand);
+                        }
                         if !presentation && drawable {
                             // The painted picture is the hit target for its own
                             // document unit, so a selection drag starts here
@@ -1459,9 +1491,6 @@ impl MarkdownView {
                                     );
                                 }
                             });
-                        }
-                        if link.is_some() && drawable {
-                            frame = frame.cursor(gpui::CursorStyle::PointingHand);
                         }
                         content = content.child(frame.into_any_element());
                     }
@@ -1489,12 +1518,13 @@ impl MarkdownView {
             }
             images::pending_container(content, self.image_board.clone(), pending)
         };
+        let (cell_x, cell_y) = rhythm.cell_padding();
         let mut cell = div()
             .debug_selector(move || selector)
             .flex_1()
             .min_w_0()
-            .px_3()
-            .py_2()
+            .px(cell_x)
+            .py(cell_y)
             .child(content);
         if header {
             cell = cell.font_weight(gpui::FontWeight::MEDIUM).text_color(muted);
@@ -1715,11 +1745,42 @@ impl MarkdownView {
             .unit(index)
             .and_then(|unit| self.parsed.blocks.get(unit.block))
             .is_some_and(|block| matches!(block, Block::Centered(_)));
-        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout).align(if centered {
-            TextAlign::Center
-        } else {
-            TextAlign::Left
-        })
+        // Only links that actually navigate may claim the pointer; a refused
+        // scheme keeps its link styling but stays inert.
+        let links = self
+            .parsed
+            .doctext
+            .unit(index)
+            .map(|unit| {
+                unit.links
+                    .iter()
+                    .filter(|(_, url)| self.link_is_interactive(url))
+                    .map(|(range, _)| range.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        ParagraphView::new(key, inline.clone(), doc, self.selection(), layout)
+            .link_ranges(links, !self.dragging)
+            .align(if centered {
+                TextAlign::Center
+            } else {
+                TextAlign::Left
+            })
+    }
+
+    /// Whether a Markdown address really navigates.
+    ///
+    /// The cursor uses the same resolution the press path uses, so a refused
+    /// scheme never looks clickable. Without a repository context the document
+    /// cannot resolve addresses, and every link counts as interactive.
+    fn link_is_interactive(&self, url: &str) -> bool {
+        match &self.resource_context {
+            Some(context) => !matches!(
+                super::super::links::resolve(url, context),
+                super::super::links::LinkTarget::Refused { .. }
+            ),
+            None => true,
+        }
     }
 
     /// The next unit of block `ix`: its global unit index and document range.
@@ -1766,13 +1827,18 @@ fn flatten(blocks: Vec<Block>) -> Vec<Block> {
                     }
                 }
             }
-            Block::List { start, items } if items.len() > LAZY_CHILDREN => {
+            Block::List {
+                start,
+                items,
+                tight,
+            } if items.len() > LAZY_CHILDREN => {
                 for (chunk, group) in items.chunks(LAZY_CHILDREN).enumerate() {
                     let first = chunk * LAZY_CHILDREN;
                     out.push(Block::List {
                         // Numbering continues across the split rows.
                         start: start.map(|first_number| first_number + first as u64),
                         items: group.to_vec(),
+                        tight,
                     });
                 }
             }
@@ -1863,6 +1929,14 @@ impl MarkdownView {
                     }
                 },
             ))
+            .on_mouse_move(cx.listener(|view, event: &gpui::MouseMoveEvent, _, cx| {
+                view.hover(event.position, cx);
+            }))
+            .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                if !*hovered {
+                    view.leave(cx);
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |view, _, window, cx| {
@@ -1978,6 +2052,14 @@ impl Render for MarkdownView {
                     }
                 },
             ))
+            .on_mouse_move(cx.listener(|view, event: &gpui::MouseMoveEvent, _, cx| {
+                view.hover(event.position, cx);
+            }))
+            .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                if !*hovered {
+                    view.leave(cx);
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |view, _, window, cx| {
@@ -2004,6 +2086,112 @@ impl Render for MarkdownView {
                 }
             }))
             .into_any_element()
+    }
+}
+
+/// One list column: items share the marker style and the policy gap.
+fn list_column(rhythm: Rhythm, item_gap: Pixels) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(item_gap)
+        // The marker and the item text share one text style, so a bullet's
+        // line box no longer sets the row height on its own.
+        .text_size(px(rhythm.body()))
+        .line_height(rhythm.line())
+}
+
+/// One heading, shared by the top-level list and nested containers.
+///
+/// Primer: sizes 2 / 1.5 / 1.25 / 1 / 0.875 / 0.85em, weight 600, condensed
+/// line height, `h1`/`h2` underlined with `padding-bottom: 0.3em`, and `h6`
+/// in the muted colour.
+fn heading_unit(
+    ix: usize,
+    level: u8,
+    view: ParagraphView,
+    colors: &ely_core::theme::Palette,
+    rhythm: Rhythm,
+    nested: bool,
+) -> AnyElement {
+    let body = rhythm.body();
+    let size = body * rhythm.heading_scale(level);
+    let mut heading = div()
+        .debug_selector(move || format!("markdown-heading-{ix}"))
+        .text_size(px(size))
+        .line_height(relative(rhythm.heading_line()))
+        .font_weight(rhythm.heading_weight())
+        .text_color(if level == 6 {
+            colors.fg_muted
+        } else {
+            colors.fg
+        })
+        .child(view);
+    if !nested && rhythm.heading_rule(level) {
+        heading = heading
+            .pb(px(size * 0.3))
+            .border_b_1()
+            .border_color(colors.border);
+    }
+    heading.into_any_element()
+}
+
+/// The shared quote/callout frame: `(outer, body column)`.
+///
+/// A plain blockquote stays neutral (muted text, neutral bar). A GitHub alert
+/// gets its kind's tinted fill, accent bar, and an icon + title row in the
+/// accent colour. Both paths use this one policy, so a nested callout looks
+/// exactly like a top-level one.
+fn quote_frame(
+    selector: String,
+    kind: Option<AlertKind>,
+    style: NestedStyle<'_>,
+) -> (gpui::Div, gpui::Div) {
+    let rhythm = style.rhythm;
+    let colors = style.colors;
+    let column = div().flex().flex_col().gap(rhythm.block());
+    let frame = div()
+        .debug_selector({
+            let selector = selector.clone();
+            move || selector.clone()
+        })
+        .flex()
+        .flex_col()
+        .pl(rhythm.quote_inset())
+        .pr(rhythm.quote_inset() * 0.5)
+        .border_l(rhythm.quote_bar());
+    match kind {
+        Some(kind) => {
+            let alert = rhythm::alert_style(kind, colors);
+            let title = div()
+                .debug_selector({
+                    let selector = format!("{selector}-title");
+                    move || selector.clone()
+                })
+                .flex()
+                .items_center()
+                .gap(px(rhythm.body() * 0.4))
+                .text_color(alert.accent)
+                .font_weight(rhythm.heading_weight())
+                .child(Icon::new(alert.icon).size(IconSize::Sm).color(alert.accent))
+                .child(kind.title());
+            (
+                frame
+                    .py(rhythm.quote_padding_y())
+                    .rounded(style.radius)
+                    .bg(alert.fill)
+                    .border_color(alert.accent)
+                    .text_color(colors.fg),
+                column.child(title),
+            )
+        }
+        None => (
+            frame
+                .py(px(rhythm.body() * 0.15))
+                .border_color(colors.border)
+                .text_color(colors.fg_muted),
+            column,
+        ),
     }
 }
 

@@ -12,9 +12,9 @@ use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use ely_core::theme::ActiveTheme;
 use gpui::{
-    App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, HighlightStyle,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, RenderOnce, ShapedLine, SharedString,
-    Styled, TextAlign, Window, div, fill, point, prelude::*, px, size,
+    App, AvailableSpace, Bounds, CursorStyle, Element, ElementId, GlobalElementId, HighlightStyle,
+    Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Pixels, Point, RenderOnce,
+    ShapedLine, SharedString, Styled, TextAlign, Window, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -42,6 +42,10 @@ struct Piece {
 pub struct LocalLayout {
     pieces: Vec<Piece>,
     bounds: Bounds<Pixels>,
+    /// The painted rectangles of the interactive link runs, relative to the
+    /// paragraph origin. One rectangle per wrapped row segment, so a link that
+    /// wraps stays a link on every row and nothing beside it becomes one.
+    links: Vec<Bounds<Pixels>>,
     line_height: Pixels,
     /// Font families requested for code pieces, for the test snapshot.
     code_fonts: Vec<SharedString>,
@@ -138,6 +142,27 @@ impl LocalLayout {
         )
     }
 
+    /// Whether `position` is over a painted link run of this paragraph.
+    ///
+    /// This is the pointer-cursor and hover rule: only the link's own glyph
+    /// rectangles count, never the paragraph or its blank trailing space.
+    pub fn link_at(&self, position: Point<Pixels>) -> bool {
+        if !self.bounds.contains(&position) {
+            return false;
+        }
+        let local = position - self.bounds.origin;
+        self.links.iter().any(|rect| rect.contains(&local))
+    }
+
+    /// The painted link rectangles, in window coordinates (tests/geometry).
+    #[cfg(test)]
+    pub fn link_boxes(&self) -> Vec<Bounds<Pixels>> {
+        self.links
+            .iter()
+            .map(|rect| Bounds::new(self.bounds.origin + rect.origin, rect.size))
+            .collect()
+    }
+
     /// The glyph byte under `position`; None when it is not over a glyph.
     pub fn glyph_at(&self, position: Point<Pixels>) -> Option<usize> {
         let local = position - self.bounds.origin;
@@ -197,6 +222,10 @@ pub struct ParagraphView {
     /// The document's current selection, in document offsets.
     selection: Range<usize>,
     layout: Rc<RefCell<LocalLayout>>,
+    /// Ranges that open a navigable link; only these paint a pointer cursor.
+    links: Vec<Range<usize>>,
+    /// False while a selection gesture owns the pointer.
+    link_cursor: bool,
     /// Shown before the inline text, such as a list bullet.
     prefix: Option<SharedString>,
 }
@@ -215,11 +244,23 @@ impl ParagraphView {
             doc,
             selection,
             layout,
+            links: Vec::new(),
+            link_cursor: true,
             prefix: None,
             syntax: Vec::new(),
             mono: false,
             align: TextAlign::Left,
         }
+    }
+
+    /// Only `links` may show the pointing hand, and only while `allowed`.
+    ///
+    /// The document resolves each address first, so a refused scheme is styled
+    /// as a link but never claims an interactive cursor.
+    pub fn link_ranges(mut self, links: Vec<Range<usize>>, allowed: bool) -> Self {
+        self.links = links;
+        self.link_cursor = allowed;
+        self
     }
 
     /// Align this paragraph's rows inside its box (table columns).
@@ -266,6 +307,8 @@ impl RenderOnce for ParagraphView {
                 doc: self.doc,
                 selection: self.selection,
                 layout: self.layout,
+                links: self.links,
+                link_cursor: self.link_cursor,
                 syntax: self.syntax,
                 mono: self.mono,
                 align: self.align,
@@ -279,6 +322,8 @@ struct Paragraph {
     doc: Range<usize>,
     selection: Range<usize>,
     layout: Rc<RefCell<LocalLayout>>,
+    links: Vec<Range<usize>>,
+    link_cursor: bool,
     syntax: Vec<(Range<usize>, gpui::HighlightStyle)>,
     mono: bool,
     align: TextAlign,
@@ -432,7 +477,9 @@ fn highlight(style: Style) -> HighlightStyle {
 
 impl Element for Paragraph {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// The hover hitbox that carries the pointing-hand cursor, when this
+    /// paragraph has interactive links.
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -455,6 +502,7 @@ impl Element for Paragraph {
         let theme = cx.theme();
         let mono = theme.mono_family.clone();
         let inline = self.inline.clone();
+        let paragraph_links = self.links.clone();
         let link_color = cx.theme().colors.link;
         let shaped_runs = runs(&inline, &style, &mono, link_color, &self.syntax, self.mono);
         let align = self.align;
@@ -619,9 +667,33 @@ impl Element for Paragraph {
                     }
                 }
                 let height = line_height * rows.len().max(1);
+                // The pointer cursor is decided from these real glyph
+                // rectangles: one per (link run, row) so wrapped links stay
+                // links and nothing else does.
+                let mut links = Vec::new();
+                for range in &paragraph_links {
+                    for piece in &pieces {
+                        let start = piece.range.start.max(range.start);
+                        let end = piece.range.end.min(range.end);
+                        if start >= end {
+                            continue;
+                        }
+                        let x0 = piece.line.x_for_index(start - piece.range.start);
+                        let x1 = piece.line.x_for_index(end - piece.range.start);
+                        if x1 <= x0 {
+                            continue;
+                        }
+                        let pad = if piece.code { px(PAD_X) } else { Pixels::ZERO };
+                        links.push(Bounds::new(
+                            point(piece.origin.x + x0 - pad, piece.origin.y),
+                            size(x1 - x0 + pad * 2.0, line_height),
+                        ));
+                    }
+                }
                 *layout.borrow_mut() = LocalLayout {
                     pieces,
                     bounds: Bounds::default(),
+                    links,
                     line_height,
                     code_fonts: code_fonts.clone(),
                     align,
@@ -639,16 +711,40 @@ impl Element for Paragraph {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Option<Hitbox> {
         self.layout.borrow_mut().bounds = bounds;
         self.layout.borrow_mut().align = self.align;
+        let hitbox = if self.link_cursor {
+            let layout = self.layout.borrow();
+            layout.links.first().map(|first| {
+                let mut union = *first;
+                for rect in &layout.links[1..] {
+                    let left = union.left().min(rect.left());
+                    let top = union.top().min(rect.top());
+                    union = Bounds::new(
+                        point(left, top),
+                        size(
+                            union.right().max(rect.right()) - left,
+                            union.bottom().max(rect.bottom()) - top,
+                        ),
+                    );
+                }
+                window.insert_hitbox(
+                    Bounds::new(bounds.origin + union.origin, union.size),
+                    HitboxBehavior::Normal,
+                )
+            })
+        } else {
+            None
+        };
         #[cfg(test)]
         {
             let layout = self.layout.borrow();
             let snapshot = Snapshot {
                 text: self.inline.text.clone(),
+                link_boxes: layout.link_boxes(),
                 bounds,
                 font_size: layout.font_size,
                 line_height: layout.line_height,
@@ -676,6 +772,7 @@ impl Element for Paragraph {
         }
         #[cfg(not(test))]
         let _ = cx;
+        hitbox
     }
 
     fn paint(
@@ -684,10 +781,18 @@ impl Element for Paragraph {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
+        // A selection gesture keeps the platform's own cursor: the pointing
+        // hand only appears for a plain hover over a real link.
+        if let Some(hitbox) = hitbox.as_ref()
+            && !cx.has_active_drag()
+            && self.layout.borrow().link_at(window.mouse_position())
+        {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
         let layout = self.layout.borrow();
         // The document's selection, translated into this paragraph's bytes.
         let selected =
@@ -768,6 +873,8 @@ pub struct PieceSnapshot {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub text: String,
+    /// Painted link rectangles, in window coordinates.
+    pub link_boxes: Vec<Bounds<Pixels>>,
     pub bounds: Bounds<Pixels>,
     pub font_size: Pixels,
     pub line_height: Pixels,
@@ -785,4 +892,12 @@ impl gpui::Global for Snapshots {}
 #[cfg(test)]
 pub fn snapshot(text: &str, cx: &App) -> Option<Snapshot> {
     cx.try_global::<Snapshots>()?.0.get(text).cloned()
+}
+
+/// Every laid-out paragraph text, for diagnosing a missing snapshot.
+#[cfg(test)]
+pub fn snapshot_texts(cx: &App) -> Vec<String> {
+    cx.try_global::<Snapshots>()
+        .map(|snapshots| snapshots.0.keys().cloned().collect())
+        .unwrap_or_default()
 }
