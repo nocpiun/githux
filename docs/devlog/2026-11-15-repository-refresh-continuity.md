@@ -54,6 +54,21 @@ Codex 对 `37305ac` 提出两项 P2，均符合既有刷新/失败约定，可�
 
 本轮其余检查均通过：clippy（同生产 bin + repository test 目标，`-D warnings`）runner `36b1ba8c-7d48-4313-865c-280a4ab2f908`，槽等待 197.7s / 执行 13.9s；生产 build runner `e3187e19-9d40-4caa-885d-dba89dbcbdf0`，槽等待 211ms / 执行 40.5s；fmt check runner `22a41477-0780-47a5-ae18-bb242d3d2c1c`，不占槽 / 执行 26.3s。差异检查通过。重新运行的原因是上述两项生产修复与对应回归新增。
 
+## CI 的既有 Profile 测试边界
+
+`96d9dc5` 的 Codex 审查 clean（[收据](https://github.com/nocpiun/githux/pull/89#issuecomment-6891312410)），四平台构建和 PR Check 通过，但 [CI 43691590108](https://github.com/nocpiun/githux/actions/runs/43691590108) 的 bin 全量测试为 1402 通过、2 失败、3 忽略。失败均在此前未修改的 `src/app/pages/profile.rs` 测试模块；仓库连续刷新与隔离用例在 CI 通过。第一轮 CI 43689989481 也在其中的 partial/calendar 用例失败，而 alias 用例当时通过。
+
+聚焦诊断 `cargo test --locked --bin githux app::pages::profile::tests:: -- --nocapture`（runner `5d8fbc8a-f7ea-4d09-89fe-61e81781887b`）在原测试代码上 28 通过；这只是 Windows 聚焦结果，不能冒充 Ubuntu CI 已通过。源码与 CI 状态确认的测试依赖：
+
+- alias 用例未阻塞 Basic 网络，却必须观察到 Basic 缓存标记；网络先到时按正确的发布顺序抑制缓存，测试等不到标记，兄弟 work 仍被自己挂起。夹具增加独立 Basic/兄弟门闩，先确认缓存首屏，再只放行 Basic，确认它已在线更新且兄弟仍在途，最后放行兄弟，实际加强既定顺序覆盖。
+- partial/calendar 用例的最终失败状态是 `Error(NotCached)`、work 全空；一次按 README 异步布局测得的坐标点击没有证明 Retry action 被送达。将此缓存主机用例的重试放在当前 `ProfileRequest` 的 `ProfileAction::RetryContributions` 边界，保留最终新鲜日历断言；真实 warning 标记点击仍由既有 UI 用例 `historical_and_partial_provenance_badges_and_section_retries_work` 覆盖。本轮合并运行 Profile 主机与 UI 边界，不把主机 action 调用声称为原生鼠标验收。
+
+这些改动仅在 `#[cfg(test)] mod tests` 中；Profile 产品代码、公共 API、布局及账户/缓存规则没有改变。该 CI 修复不重新运行未改动的仓库 115 项；扩大到 Profile 相关检查是由真实 CI 失败引起的。
+
+修复后的 `cargo test --locked --bin githux profile::`（runner `9309fa5d-3fbb-4612-9f79-c21927294360`）92 通过、0 失败，含主机与 UI 用例。槽等待 1200.6s，实际编译/执行 138.6s（测试本身 1.90s）；不把共享槽等待计作测试运行。
+
+`cargo clippy --locked --bin githux --tests -- -D warnings`（runner `b21e4c3e-e818-43f1-b40a-a604ba6a7bc2`）通过，槽等待 149.3s / 执行 118.0s；fmt check（runner `ef7f9ace-73af-4dd5-aa77-de757a47f2a0`）通过，不占槽 / 执行 25.5s。差异检查通过。仅测试模块变化不重做本地生产构建；生产代码与 `96d9dc5` 相同，最新提交仍按完整远端 CI 与 Codex 流程核验。
+
 ## 可复用教训
 
 缓存先行的测试需要检查“在线 revision 已返回，但新树/文档未准备好”的中间绘制状态。仅断言网络放行前有缓存、全部完成后有最新内容，会漏掉两个断言之间的清空/重建。保留显示资源与更新读取代次是两个操作；保留旧画面时也必须保留其 carried authorization，而不是用新请求的令牌替换它。

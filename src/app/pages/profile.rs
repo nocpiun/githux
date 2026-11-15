@@ -2293,6 +2293,7 @@ mod tests {
         /// True while held requests may continue. Arming a hold resets it, so a request that starts
         /// after the release cannot miss the notification the way a bare `notify_waiters` can.
         release: tokio::sync::watch::Sender<bool>,
+        sibling_release: tokio::sync::watch::Sender<bool>,
     }
 
     impl ProfileFixtureTransport {
@@ -2312,6 +2313,7 @@ mod tests {
                 held: AtomicBool::new(false),
                 hold_siblings: AtomicBool::new(false),
                 release: tokio::sync::watch::channel(true).0,
+                sibling_release: tokio::sync::watch::channel(true).0,
             }
         }
 
@@ -2325,12 +2327,18 @@ mod tests {
         fn hold_siblings(&self, held: bool) {
             self.hold_siblings.store(held, Ordering::SeqCst);
             if held {
-                self.release.send_replace(false);
+                self.sibling_release.send_replace(false);
             }
+        }
+
+        fn release_basic(&self) {
+            self.held.store(false, Ordering::SeqCst);
+            self.release.send_replace(true);
         }
 
         fn release_all(&self) {
             self.release.send_replace(true);
+            self.sibling_release.send_replace(true);
         }
 
         fn set_offline(&self, offline: bool) {
@@ -2388,13 +2396,15 @@ mod tests {
             Box::pin(async move {
                 let url = request.url.clone();
                 self.reads.lock().unwrap().push(url.clone());
-                let holds = (self.held.load(Ordering::SeqCst)
-                    || (self.hold_siblings.load(Ordering::SeqCst)
-                        && !url.starts_with("https://api.github.com/users/")))
-                    && !url.ends_with("/user")
-                    && !url.contains("/user/repos");
-                if holds {
-                    let mut released = self.release.subscribe();
+                let gated = !url.ends_with("/user") && !url.contains("/user/repos");
+                let gates = [
+                    (gated && self.held.load(Ordering::SeqCst)).then(|| self.release.subscribe()),
+                    (gated
+                        && self.hold_siblings.load(Ordering::SeqCst)
+                        && !url.starts_with("https://api.github.com/users/"))
+                    .then(|| self.sibling_release.subscribe()),
+                ];
+                for mut released in gates.into_iter().flatten() {
                     tokio::select! {
                         _ = async {
                             loop {
@@ -3020,8 +3030,9 @@ mod tests {
         harness
             .page
             .update(cx, |page, _| page.login = "Alice".into());
-        // Hold the sibling section reads only: the basic read may finish (and canonicalize the
-        // login) while those requests are still in flight.
+        // First require a cached Basic paint. Then release Basic independently, keeping the
+        // sibling network reads in flight while it canonicalizes the route spelling.
+        harness.transport.hold(true);
         harness.transport.hold_siblings(true);
         cx.update_window_entity(&harness.page, |page, _, cx| {
             let services = harness.controller.read(cx).services();
@@ -3031,7 +3042,17 @@ mod tests {
             cx.debug_bounds("profile-basic-provenance-historical")
                 .is_some()
         });
-        harness.transport.hold(false);
+        harness.transport.release_basic();
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    view.read(cx)
+                        .basic_provenance()
+                        .is_some_and(|p| !p.is_historical())
+                }) && page.work[Section::Basic.index()].is_none()
+                    && page.work[1..].iter().all(Option::is_some)
+            })
+        });
         harness.transport.release_all();
         // Every section started before the rename must still finish: the canonical login change is
         // the same profile, not a different target.
@@ -3431,37 +3452,27 @@ mod tests {
             })
         });
 
-        // Bring network back with complete calendar, and click retry on contributions section!
+        // Bring the network back and retry the contributions section through its bound action.
         harness.transport.set_offline(false);
         harness
             .transport
             .calendar_fail
             .store(false, Ordering::SeqCst);
-        // Flow README growth can move this section below a small viewport.
-        // Reveal it through the real page scroll route before clicking.
-        let mut retry_mark = None;
-        for _ in 0..16 {
-            let viewport = cx.debug_bounds("profile-overview").unwrap();
-            if let Some(mark) = cx.debug_bounds("profile-section-error-mark")
-                && mark.top() >= viewport.top()
-                && mark.bottom() <= viewport.bottom()
-            {
-                retry_mark = Some(mark);
-                break;
-            }
-            let position = gpui::point(viewport.left() + gpui::px(4.0), viewport.center().y);
-            cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
-            cx.simulate_event(gpui::ScrollEvent {
-                position,
-                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-200.0))),
-                modifiers: gpui::Modifiers::none(),
-                touch_phase: Default::default(),
-                source: gpui::ScrollSource::Pointer,
-            });
-            pump_page(&harness, cx);
-        }
-        let retry_mark = retry_mark.expect("contributions retry must be visible before click");
-        cx.simulate_click(retry_mark.center(), gpui::Modifiers::none());
+        // This host test verifies cached section state through the currently bound action.
+        // The real retry-mark click is covered by the Profile view's
+        // historical_and_partial_provenance_badges_and_section_retries_work test; coupling this
+        // cache assertion to asynchronous README image layout made CI clicks miss the mark.
+        cx.update_window_entity(&harness.page, |page, window, cx| {
+            let request = page.view_for_test().unwrap().read(cx).request();
+            page.action(
+                ProfileAction {
+                    request,
+                    kind: ProfileActionKind::RetryContributions,
+                },
+                window,
+                cx,
+            );
+        });
 
         wait_for_profile(&harness, cx, |cx| {
             harness.page.read_with(cx, |page, cx| {
