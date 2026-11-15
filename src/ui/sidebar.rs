@@ -40,20 +40,11 @@ pub(super) type SharedRun = std::rc::Rc<dyn Fn(&mut Window, &mut App) + 'static>
 pub(super) struct AccountDisplay {
     pub name: String,
     pub login: String,
-    /// Placeholder GitHub user status (emoji + label). The status button is not wired to a write.
-    pub status_emoji: &'static str,
-    pub status_label: &'static str,
 }
 
 impl AccountDisplay {
     pub(super) fn new(name: String, login: String) -> Self {
-        Self {
-            name,
-            login,
-            // The status button stays the accepted placeholder; no status is read or written.
-            status_emoji: "\u{1F4BB}",
-            status_label: "Coding",
-        }
+        Self { name, login }
     }
 }
 
@@ -441,10 +432,11 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
 
 /// The account row. Signed in, only the compact avatar/name/@id cluster opens the profile; the row
 /// itself is not a button and does not light up as a whole. Expanded mode adds a separate
-/// placeholder status button on the right.
+/// Notifications bell on the right (the old status placeholder position); `notifications` is the
+/// same navigation the removed quick action used to run.
 ///
 /// Logged out there is no identity to draw: the same control becomes a plain "Sign in" entry with
-/// no name, login or status, so the sidebar never shows an account that is not there.
+/// no name, login or bell, so the sidebar never shows an account that is not there.
 pub(super) fn account_row(
     account: Option<AccountDisplay>,
     // The signed-in account's avatar at the interpolated expansion size. `None` while logged out,
@@ -452,7 +444,10 @@ pub(super) fn account_row(
     avatar: Option<AnyElement>,
     active: bool,
     frame: SidebarFrame,
+    // Opens the profile (signed in) or the sign-in form (signed out).
     run: impl Fn(&mut Window, &mut App) + 'static,
+    // Opens the Notifications inbox; this is the old quick action, now in the status position.
+    notifications: Run,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -544,11 +539,7 @@ pub(super) fn account_row(
     };
 
     let identity_label = format!("Profile: {} (@{})", account.name, account.login);
-    let collapsed_label = format!(
-        "{} (@{}) · {} {}",
-        account.name, account.login, account.status_emoji, account.status_label
-    );
-    let status_label = format!("Status: {}", account.status_label);
+    let collapsed_label = identity_label.clone();
 
     let identity = div()
         .id("account-identity")
@@ -610,9 +601,13 @@ pub(super) fn account_row(
             )
         });
 
-    let status = div()
-        .id("account-status")
-        .debug_selector(|| "account-status".to_string())
+    // The bell replaces the old placeholder status emoji in the same spot, with the same 24px
+    // box and the same ghost styling. It runs the Notifications navigation that the removed
+    // quick action used to own, and stops propagation so it never reads as a Profile click.
+    let notifications = notifications;
+    let bell = div()
+        .id("account-notifications")
+        .debug_selector(|| "account-notifications".to_string())
         .flex()
         .flex_none()
         .items_center()
@@ -622,21 +617,21 @@ pub(super) fn account_row(
         .border_1()
         .border_color(transparent_black())
         .role(Role::Button)
-        .aria_label(status_label.clone())
+        .aria_label("Notifications")
         .cursor_pointer()
         .tab_index(0)
         .focus(move |style| style.border_color(focus))
         .hover(move |style| style.bg(colors.hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |_, _, cx| {
-            // Placeholder for a future GitHub status editor: no navigation, no write.
+        .on_click(move |_, window, cx| {
             cx.stop_propagation();
+            notifications(window, cx);
         })
-        .tooltip(ui_tooltip(account.status_label))
+        .tooltip(ui_tooltip("Notifications"))
         .child(
-            div()
-                .text_size(theme.text_size(TextSize::Sm))
-                .child(account.status_emoji),
+            Icon::new(IconName::Bell)
+                .size(IconSize::Sm)
+                .color(colors.fg_muted),
         );
 
     let row = div()
@@ -655,7 +650,7 @@ pub(super) fn account_row(
         })
         .text_color(fg)
         .child(identity)
-        .when(!collapsed, |row| row.child(status))
+        .when(!collapsed, |row| row.child(bell))
         .into_any_element();
     marked(row, active, height, cx)
 }
@@ -1024,6 +1019,15 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
             IconName::GitPullRequest,
             Some(crate::workspace::Route::PullRequests),
         ),
+        (
+            "Toggle theme",
+            if theme.is_dark() {
+                IconName::Sun
+            } else {
+                IconName::Moon
+            },
+            None,
+        ),
         ("New", IconName::Plus, None),
     ];
     let row_height = theme.control_height(ely_core::theme::ControlSize::Md);
@@ -1032,7 +1036,8 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
         .enumerate()
         .map(|(index, (label, icon, target))| {
             let active = target.as_ref().is_some_and(|target| route == target);
-            let disabled = target.is_none();
+            let theme_toggle = index == 3;
+            let disabled = target.is_none() && !theme_toggle;
             let highlighted = cursor == index && !disabled;
             let this = this.clone();
             let run = {
@@ -1042,7 +1047,12 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
                 move |window: &mut Window, cx: &mut App| {
                     open.set(false);
                     this.update(cx, |shell, cx| {
-                        shell.pick_sidebar_menu(target.clone(), window, cx);
+                        if theme_toggle {
+                            shell.close_sidebar_menu(window, cx);
+                            shell.toggle_theme(window, cx);
+                        } else {
+                            shell.pick_sidebar_menu(target.clone(), window, cx);
+                        }
                     });
                 }
             };
@@ -1090,7 +1100,7 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(move |_, window, cx| run(window, cx))
-                    .when(active, |row| {
+                    .when(active && !theme_toggle, |row| {
                         row.child(Icon::new(IconName::Check).size(IconSize::Xs))
                     })
                     .into_any_element()

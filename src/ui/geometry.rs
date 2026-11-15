@@ -31,7 +31,7 @@ pub const SIDEBAR_ROW_GAP: f32 = 4.0;
 /// Space above and below the footer rule. The column gap adds below this band's own content, so
 /// the band is sized to absorb it: the rule ends up equally spaced from the list and identity.
 pub const FOOTER_DIVIDER_SPACE: f32 = 8.0;
-/// Size of the account status button (expanded only).
+/// Size of the account-row action button (the Notifications bell, expanded only).
 pub const STATUS_BUTTON_SIZE: f32 = 24.0;
 pub const SIDEBAR_CONTENT_MIN_WIDTH: f32 = 600.0;
 pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8.0;
