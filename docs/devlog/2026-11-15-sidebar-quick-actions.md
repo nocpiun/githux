@@ -6,6 +6,7 @@
 
 - 删除 `AccountDisplay.status_emoji/status_label` 与占位状态按钮（原 `account-status`）。`src/ui/sidebar.rs` 的账号行在展开态右侧换成 `account-notifications` 铃铛按钮：沿用原 24px 盒（`STATUS_BUTTON_SIZE`，注释改为账号行动作按钮），透明边框 + hover 背景的 ghost 风格、`aria_label`/tooltip 均为 “Notifications”、Tab 焦点 + Enter/Space、点击 `navigate(Route::Notifications)` 并 `stop_propagation`，因此不读成 Profile 点击。收起态铃铛隐藏（与旧状态按钮一致），但 Notifications 在收起态 More 菜单中仍然可达，不丢失唯一入口。
 - 展开态底部四入口的 Notifications 换成 `theme-toggle`：`Shell::toggle_theme` 读取 `cx.theme().is_dark()` 后调 `Theme::set_mode(Mode::Light|Dark)`，图标/标签随当前模式切换（Sun/Moon，tooltip 为 “Light theme”/“Dark theme”），不导航、不改变 route、不引入持久化。模式切换只换 Ely 主题 global 的 mode 并重绘窗口；`Theme::update` 里的 `font_family`/`mono_family`（Noto Sans SC / Google Sans Code）独立于 `Palette`，切换后保持。启动默认 Dark 仍在 `src/app/mod.rs`，未改。
+- 首轮 Codex P2 修复：主题切换时同步原生 Windows 标题栏。`platform::caption::set_theme` 在 Windows 上把当前 Ely 主题的 `colors.bg`/`colors.fg` 与明暗偏好写回已安装的 caption 适配器（Tall 的 `AppWindowTitleBar` 或 legacy DWM），避免标题栏按钮停留在启动时的 dark 调色板。Tall 适配器新增 `set_theme` 重设 `SetPreferredTheme` 与各 background/foreground 色；legacy 适配器新增 `set_theme` 写 `DWMWA_CAPTION_COLOR`/`DWMWA_TEXT_COLOR` 并翻转 `DWMWA_USE_IMMERSIVE_DARK_MODE`，无适配器安装时均为 no-op。
 - 收起态 More 菜单增加 `Toggle theme` 项（图标 Moon），作为启用项参与方向键高亮与 Enter/Space；主题项不标 route Check，`New` 仍 disabled。`move_sidebar_menu_cursor`/`pick_sidebar_menu_cursor` 的启用项从 3 扩到 4，`Shell::toggle_theme` 在菜单执行路径与展开按钮路径共用。
 - 调用方 `src/ui/mod.rs`：`account_row` 新增 `notifications: Run` 参数；`quarter_row` 首个槽位改为主题切换。
 
@@ -27,6 +28,7 @@
 - `873766fc`：`cargo test --locked --bin githux -- navigation_rows_and_quarter_entries theme_toggle account_identity`，5 passed。
 - `3493ece5`：`cargo test --locked --bin githux -- pat_submit_is_masked_cleared`（登录前 `account-notifications` 隐藏断言），1 passed。
 - `31060709`：`cargo test --locked --bin githux` 全量，1402 passed，0 failed，3 ignored。
+- 首轮 Codex P2 修复后：`94b34271` `cargo check --locked --bin githux` SUCCESS；`7b1bf404` `cargo clippy --locked --bin githux -- -D warnings` SUCCESS；`de0edeb9` `cargo test --locked --bin githux` 全量 1402 passed，0 failed，3 ignored。
 
 远端 CI/Codex 与 head 见 PR 交付记录。
 

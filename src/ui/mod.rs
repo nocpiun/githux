@@ -1473,14 +1473,26 @@ impl Shell {
     /// Toggles the Ely theme between light and dark in place. The mode change never touches the
     /// global font overrides: `Theme::set_mode` repaints with the new palette while `font_family`
     /// and `mono_family` (Noto Sans SC / Google Sans Code) stay exactly as startup set them.
-    /// No page state is lost — only the theme global and the windows it repaints change.
-    pub fn toggle_theme(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// No page state is lost — only the theme global and the windows it repaints change. On
+    /// Windows the installed native caption is recolored in place so the title bar follows the
+    /// switch instead of staying in the startup palette.
+    pub fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let next = if cx.theme().is_dark() {
             ely_core::theme::Mode::Light
         } else {
             ely_core::theme::Mode::Dark
         };
         ely_core::theme::Theme::set_mode(next, cx);
+        #[cfg(target_os = "windows")]
+        {
+            let colors = cx.theme().colors.clone();
+            crate::platform::caption::set_theme(
+                window,
+                colors.bg,
+                colors.fg,
+                next == ely_core::theme::Mode::Dark,
+            );
+        }
         cx.notify();
     }
 
