@@ -1,4 +1,5 @@
 //! Compact rendering; the host supplies all observations and decoded images.
+use super::language_colors::linguist_color;
 use super::*;
 use crate::domain::repository_extras::{
     Contributor, ContributorKind, ContributorsState as DomainContributorsState, ExtrasCompleteness,
@@ -14,13 +15,17 @@ use ely_core::{
     typography::Ellipsis,
 };
 use gpui::{
-    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Render, Rgba, Styled, Window,
+    div, prelude::*, px, relative,
 };
 
 impl Render for RepositoryOverview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let releases = self.release_summary(cx);
+        // A repository that is confirmed to have no releases has nothing to summarize here, so the
+        // whole Releases block (heading, zero badge, row and the gap it would reserve) is omitted
+        // instead of being drawn empty. Unknown, loading, failed, partial and retained historical
+        // observations keep the block with their existing loading/retry/freshness chrome.
+        let releases = (!self.releases_confirmed_empty()).then(|| self.release_summary(cx));
         let contributors = self.contributor_summary(cx);
         div()
             .id("repository-overview")
@@ -34,7 +39,7 @@ impl Render for RepositoryOverview {
             .py_3()
             .text_color(cx.theme().colors.fg)
             .text_size(cx.theme().text_size(TextSize::Base))
-            .child(releases)
+            .children(releases)
             .child(contributors)
     }
 }
@@ -113,6 +118,42 @@ impl RepositoryOverview {
             Some(&id),
             cx,
         )
+    }
+    /// Whether a successful observation has established that this repository has no releases.
+    ///
+    /// Only a current, complete (not partial) release list read successfully with zero entries
+    /// proves that. A latest-release 404 on its own cannot: it only means no published
+    /// non-prerelease release is visible, so draft- or prerelease-only repositories keep the block.
+    /// Loading, idle, failed and partial observations are unknown rather than empty, and a retained
+    /// historical snapshot keeps its Cached badge and refresh entry so freshness stays reachable.
+    /// A latest failure also keeps its retry mark instead of being hidden by the omission.
+    fn releases_confirmed_empty(&self) -> bool {
+        let Some(data) = self.releases.value() else {
+            return false;
+        };
+        if self.releases.is_partial()
+            || matches!(data.list.completeness, ExtrasCompleteness::Partial { .. })
+            || self.releases.is_historical()
+            || data.historical
+            || self
+                .latest
+                .as_ref()
+                .is_some_and(SectionState::is_historical)
+            || (self.latest.is_none() && data.latest_historical)
+        {
+            return false;
+        }
+        if !data.list.releases.is_empty() {
+            return false;
+        }
+        // A latest read that is still loading, failed, partial, idle or never applied is not
+        // evidence of an empty repository, and its own UI must stay reachable.
+        let latest_empty = match self.latest.as_ref() {
+            Some(SectionState::Ready(value)) => Some(value.release.is_none()),
+            Some(_) => None,
+            None => data.latest.as_ref().map(|latest| latest.release.is_none()),
+        };
+        latest_empty == Some(true) && data.latest_error.is_none()
     }
     fn release_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let data = self.releases.value();
@@ -473,7 +514,9 @@ impl RepositoryOverview {
                     .w(relative(segment.share as f32))
                     .h_full()
                     .flex_none()
-                    .bg(cx.theme().colors.chart[segment.color])
+                    .bg(segment
+                        .color
+                        .unwrap_or_else(|| Rgba::from(cx.theme().colors.fg_subtle)))
                     .aria_label(label.clone())
                     .tooltip(Tooltip::rich(move |_, cx| {
                         crate::ui::tooltip::ui_tooltip_content(label.clone(), cx)
@@ -498,7 +541,10 @@ pub(crate) fn contributor_display(contributor: &Contributor) -> String {
 pub(crate) struct Segment {
     pub name: String,
     pub share: f64,
-    pub color: usize,
+    /// GitHub Linguist's own color for the language. `None` for names the pinned table does not
+    /// know and for languages Linguist leaves colorless; those draw with the neutral fallback
+    /// instead of an invented chart hue.
+    pub color: Option<Rgba>,
 }
 /// Checked byte arithmetic; never trust independently rounded/malformed supplied shares.
 pub(crate) fn language_segments(outcome: &LanguagesOutcome) -> Option<Vec<Segment>> {
@@ -523,15 +569,10 @@ pub(crate) fn language_segments(outcome: &LanguagesOutcome) -> Option<Vec<Segmen
         .map(|item| Segment {
             name: item.name.clone(),
             share: item.bytes as f64 / total as f64,
-            color: language_color(&item.name),
+            color: linguist_color(&item.name),
         })
         .collect();
     Some(result)
-}
-fn language_color(name: &str) -> usize {
-    name.bytes().fold(0usize, |hash, byte| {
-        hash.wrapping_mul(31).wrapping_add(byte as usize)
-    }) % 8
 }
 pub(crate) fn format_share(share: f64) -> String {
     if share > 0.0 && share < 0.005 {

@@ -223,3 +223,7 @@ impl RepositoryOverview {
 
 #[path = "summary.rs"]
 pub(super) mod summary;
+
+/// Compact, generated offline table of GitHub Linguist language colors.
+#[path = "language_colors.rs"]
+mod language_colors;

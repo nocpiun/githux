@@ -527,15 +527,205 @@ fn no_latest_is_a_true_empty_not_a_warning(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn complete_zero_release_count_remains_visible_but_partial_count_does_not(cx: &mut TestAppContext) {
+fn confirmed_empty_repository_omits_the_whole_releases_block(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     let b = fixtures::binding(1);
-    let mut data = fixtures::ready_releases();
-    data.list.releases.clear();
-    data.latest = None;
-    apply_releases(&h, &b, SectionState::Ready(data), cx);
+    apply_contributors(
+        &h,
+        &b,
+        SectionState::Ready(fixtures::ready_contributors()),
+        cx,
+    );
+    apply_releases(&h, &b, SectionState::Ready(fixtures::empty_releases()), cx);
+    cx.simulate_resize(size(px(1100.0), px(760.0)));
+    cx.run_until_parked();
+    // No heading, zero badge, row, loading mark or retry mark survives the omission.
+    for omitted in [
+        "overview-releases",
+        "overview-release-count",
+        "overview-release-version",
+        "overview-release-tag-icon",
+        "overview-latest-badge",
+        "overview-releases-cached",
+        "overview-retry-releases",
+    ] {
+        assert!(
+            cx.debug_bounds(omitted).is_none(),
+            "{omitted} should be omitted"
+        );
+    }
+    // The sibling group stays, and takes the strip's leading edge: no gap is reserved for the
+    // omitted block.
+    let top = bounds("repository-overview", cx);
+    let people = bounds("overview-contributors", cx);
+    assert!(people.origin.x <= top.origin.x + px(0.5));
+    assert!(people.origin.x >= top.origin.x - px(0.5));
+    assert!(bounds("probe-reader", cx).size.height > px(600.0));
+
+    // The production read applies the list and the latest endpoint separately. The list alone is
+    // already authoritative, but an unsettled latest keeps the block until it answers.
+    let latest = fixtures::empty_releases().latest.unwrap();
+    let mut list_only = fixtures::empty_releases();
+    list_only.latest = None;
+    apply_releases(&h, &b, SectionState::Ready(list_only), cx);
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_latest_release(&b, SectionState::Loading, cx);
+    });
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_latest_release(&b, SectionState::Ready(latest), cx);
+    });
+    assert!(cx.debug_bounds("overview-releases").is_none());
+}
+
+#[gpui::test]
+fn no_latest_stable_release_is_not_a_repository_without_releases(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = fixtures::binding(1);
+    // A latest 404 only means no published stable release; the list keeps the block visible.
+    apply_releases(
+        &h,
+        &b,
+        SectionState::Ready(fixtures::latest_none_releases()),
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-release-count").is_some());
+    assert!(cx.debug_bounds("overview-release-version").is_none());
+    assert!(cx.debug_bounds("overview-retry-releases").is_none());
+    // Draft/prerelease-only data is still a release list, not an empty one. The latest endpoint
+    // has no qualifying stable release, but the count and the block stay.
+    let mut prerelease_only = fixtures::empty_releases();
+    let mut list = fixtures::ready_releases().list;
+    list.releases
+        .retain(|release| release.prerelease || release.draft);
+    assert_eq!(list.releases.len(), 2);
+    prerelease_only.list = list;
+    apply_releases(&h, &b, SectionState::Ready(prerelease_only), cx);
+    assert!(cx.debug_bounds("overview-releases").is_some());
     assert!(cx.debug_bounds("overview-release-count").is_some());
     assert!(cx.debug_bounds("overview-latest-badge").is_none());
-    apply_releases(&h, &b, fixtures::partial_releases_state(), cx);
+    assert!(cx.debug_bounds("overview-release-version").is_none());
+}
+
+#[gpui::test]
+fn unknown_loading_failed_and_partial_releases_keep_their_block(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = fixtures::binding(1);
+    // Nothing observed yet is not an empty repository.
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    apply_releases(&h, &b, SectionState::Loading, cx);
+    assert!(cx.debug_bounds("overview-releases").is_some());
     assert!(cx.debug_bounds("overview-release-count").is_none());
+    apply_releases(
+        &h,
+        &b,
+        SectionState::Error {
+            message: "offline".into(),
+        },
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-retry-releases").is_some());
+    // A partial list may hide releases on unread pages, so it cannot prove emptiness.
+    apply_releases(&h, &b, fixtures::partial_releases_state(), cx);
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-release-count").is_none());
+    // A latest failure over an empty list keeps its actionable retry.
+    apply_releases(
+        &h,
+        &b,
+        SectionState::Ready(fixtures::latest_error_releases()),
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-retry-releases").is_some());
+}
+
+#[gpui::test]
+fn historical_empty_keeps_cached_refresh_until_a_current_read_confirms(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = fixtures::binding(1);
+    apply_releases(&h, &b, fixtures::historical_empty_releases(), cx);
+    // Retained historical data keeps its Cached badge and refresh entry instead of vanishing.
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-releases-cached").is_some());
+    assert!(cx.debug_bounds("overview-retry-releases").is_some());
+    assert!(cx.debug_bounds("overview-release-count").is_none());
+    // The current, complete empty observation then removes the whole block.
+    apply_releases(&h, &b, SectionState::Ready(fixtures::empty_releases()), cx);
+    assert!(cx.debug_bounds("overview-releases").is_none());
+    assert!(cx.debug_bounds("overview-contributors").is_some());
+}
+
+#[test]
+fn language_colors_come_from_the_pinned_linguist_table() {
+    let segments = language_segments(&fixtures::github_languages()).unwrap();
+    let color = |name: &str| {
+        segments
+            .iter()
+            .find(|segment| segment.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the bar"))
+            .color
+    };
+    // Values from github-linguist/linguist @ d456527 lib/linguist/languages.yml.
+    assert_eq!(color("Rust"), Some(gpui::rgb(0xdea584)));
+    assert_eq!(color("TypeScript"), Some(gpui::rgb(0x3178c6)));
+    assert_eq!(color("JavaScript"), Some(gpui::rgb(0xf1e05a)));
+    assert_eq!(color("Python"), Some(gpui::rgb(0x3572a5)));
+    assert_eq!(color("C++"), Some(gpui::rgb(0xf34b7d)));
+    assert_eq!(color("Java"), Some(gpui::rgb(0xb07219)));
+    // Linguist leaves COBOL colorless and does not know the other name: neutral fallback.
+    assert_eq!(color("COBOL"), None);
+    assert_eq!(color("Not A Real GitHub Language"), None);
+    // Colors do not reorder segments: still by descending checked bytes.
+    let names: Vec<&str> = segments
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Rust",
+            "TypeScript",
+            "JavaScript",
+            "Python",
+            "C++",
+            "Java",
+            "COBOL",
+            "Not A Real GitHub Language",
+        ]
+    );
+    assert!((segments[0].share - 0.5).abs() < 1e-12);
+    assert!((segments.iter().map(|segment| segment.share).sum::<f64>() - 1.0).abs() < 1e-12);
+}
+
+#[gpui::test]
+fn colorless_and_unknown_languages_still_draw_one_segment_each(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    apply_languages(
+        &h,
+        &fixtures::binding(1),
+        SectionState::Ready(fixtures::github_languages()),
+        cx,
+    );
+    assert!(cx.debug_bounds("overview-language-bar").is_some());
+    // Every language keeps its identity and its own share, including the fallback pair.
+    for selector in [
+        "overview-language-segment-0",
+        "overview-language-segment-1",
+        "overview-language-segment-2",
+        "overview-language-segment-3",
+        "overview-language-segment-4",
+        "overview-language-segment-5",
+        "overview-language-segment-6",
+        "overview-language-segment-7",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} was not drawn"
+        );
+    }
+    assert!(cx.debug_bounds("overview-language-segment-8").is_none());
 }

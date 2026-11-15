@@ -199,3 +199,10 @@
 - **原因**：原生九图预览揭示标量 Lanczos3 的 decode 阶段平均约 2.3s。更换 SIMD 并只优化依赖后，完整 display probe 仍为 1.11s，其中重采样约 915ms；将调用封入优化的私有内核后，该段约 9.8ms，完整原图→1200×713 为 203ms，应用和 decoder 保持原配置。
 - **证据**：[性能日志](docs/devlog/2026-11-12-reader-image-performance.md)，阶段 run `093d2989`，及透明边缘、EXIF、显示网格与原始 cache bytes 回归。数字为本机样本，不作跨机器性能保证。
 - **范围**：调试构建中的 SIMD/图像/数值计算依赖，以及热循环跨 crate 的泛型调用。
+
+## L028：语义颜色必须取上游权威数据，不能用本地哈希近似
+
+- **规则**：UI 要表达“上游语义分类的颜色或名称”（语言色、标签色、分类名）时，先取上游发布的权威数据，固定修订与文件摘要，静态内置并保留许可文本；上游没有给出值时用已记录的中性回退。不要用名字哈希映射到本地调色板冒充上游语义。
+- **原因**：哈希取色让同一种语言在不同仓库、不同版本里颜色不稳定，也与 GitHub 自己的语言条完全不同；用户看到的是“随机色”，不是“Rust 的颜色”。反过来，只换色又容易连带改动排序、比例、tooltip 与无障碍标签，所以数据来源和呈现契约要分开锁定。
+- **证据**：2026-11-15 `repository-summary-polish` 把 `language_color` 的 `hash % 8` + `theme.colors.chart[i]` 换成固定修订的 Linguist 表；回归 `language_colors_come_from_the_pinned_linguist_table` 断言 6 种语言的确切色值与 COBOL/未知名回退，`colorless_and_unknown_languages_still_draw_one_segment_each` 断言逐语言一个色块、顺序与比例不变。见[开发日志](docs/devlog/2026-11-15-repository-summary-polish.md)与[仓库顶部资料组件](docs/repository-overview.md#已确认的展示)。
+- **范围**：语言条、标签/分类色彩等需要与网页一致的语义色。不适用于纯装饰渐变或本就只随主题取色的组件。
