@@ -934,21 +934,32 @@ impl MarkdownView {
                             .w_full()
                             .child(div().flex_none().text_color(colors.fg_muted).child(marker))
                             .child(
-                                div().flex_1().min_w_0().children(
-                                    blocks
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(sub, block)| {
-                                            self.nested(
-                                                ix,
-                                                &unit_cursor,
-                                                ("list", format!("{ix}-{at}-{sub}")),
-                                                block,
-                                                nested_style,
-                                            )
-                                        })
-                                        .collect::<Vec<_>>(),
-                                ),
+                                // Blocks inside one item keep their own
+                                // rhythm: a loose item spaces its paragraphs
+                                // like the page, a tight item keeps a nested
+                                // list glued to its text (Primer's
+                                // `ul ul { margin-top: 0 }`).
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(item_inner_gap(*tight, rhythm))
+                                    .children(
+                                        blocks
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(sub, block)| {
+                                                self.nested(
+                                                    ix,
+                                                    &unit_cursor,
+                                                    ("list", format!("{ix}-{at}-{sub}")),
+                                                    block,
+                                                    nested_style,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    ),
                             ),
                     );
                 }
@@ -1207,21 +1218,27 @@ impl MarkdownView {
                                         div().flex_none().text_color(colors.fg_muted).child(marker),
                                     )
                                     .child(
-                                        div().flex_1().min_w_0().children(
-                                            blocks
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(sub, block)| {
-                                                    self.nested_keyed(
-                                                        ix,
-                                                        units,
-                                                        (id.0, format!("{}-{at}-{sub}", id.1)),
-                                                        block,
-                                                        style,
-                                                    )
-                                                })
-                                                .collect::<Vec<_>>(),
-                                        ),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(item_inner_gap(*tight, rhythm))
+                                            .children(
+                                                blocks
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(sub, block)| {
+                                                        self.nested_keyed(
+                                                            ix,
+                                                            units,
+                                                            (id.0, format!("{}-{at}-{sub}", id.1)),
+                                                            block,
+                                                            style,
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>(),
+                                            ),
                                     )
                             })
                             .collect::<Vec<_>>(),
@@ -2099,6 +2116,14 @@ fn list_column(rhythm: Rhythm, item_gap: Pixels) -> gpui::Div {
         // line box no longer sets the row height on its own.
         .text_size(px(rhythm.body()))
         .line_height(rhythm.line())
+}
+
+/// Gap between the blocks of one list item.
+///
+/// A tight item's blocks are its text plus a nested list, which GitHub glues
+/// together; a loose item's extra paragraphs get the normal block gap.
+fn item_inner_gap(tight: bool, rhythm: Rhythm) -> Pixels {
+    if tight { Pixels::ZERO } else { rhythm.block() }
 }
 
 /// One heading, shared by the top-level list and nested containers.

@@ -351,6 +351,12 @@ nested lead
   - child one
   - child two
 
+loose item lead
+
+- first paragraph
+
+  second paragraph of the same item
+
 ## After the lists
 
 tail paragraph

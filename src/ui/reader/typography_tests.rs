@@ -157,6 +157,16 @@ fn readme_rhythm_matches_the_github_scale(cx: &mut TestAppContext) {
         "a loose list keeps paragraph spacing: {loose_pitch} vs {tight_pitch}"
     );
 
+    // A loose item with two paragraphs keeps the paragraph gap inside it,
+    // even though the item column is not one of the top-level blocks.
+    let item_first = snapshot(cx, "first paragraph");
+    let item_second = snapshot(cx, "second paragraph of the same item");
+    let inside_item = f32::from(item_second.bounds.top() - item_first.bounds.bottom());
+    assert!(
+        (inside_item - block).abs() < 0.75,
+        "paragraphs inside one loose item keep their gap: {inside_item}"
+    );
+
     // A nested list is indented and keeps the tight pitch.
     assert!(
         child_one.bounds.left() > parent.bounds.left() + px(BODY),
@@ -168,7 +178,7 @@ fn readme_rhythm_matches_the_github_scale(cx: &mut TestAppContext) {
     assert!((nested_pitch - tight_pitch).abs() < 0.75, "{nested_pitch}");
 
     // A heading leads in with Primer's 24px-equivalent margin.
-    let list_to_heading = f32::from(after.bounds.top() - child_two.bounds.bottom());
+    let list_to_heading = f32::from(after.bounds.top() - item_second.bounds.bottom());
     assert!(
         (list_to_heading - BODY * 1.6).abs() < 1.0,
         "heading lead-in: {list_to_heading}"

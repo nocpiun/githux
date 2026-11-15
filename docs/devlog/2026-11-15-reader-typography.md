@@ -43,3 +43,9 @@
 - 表格 cell 中"被链接包裹的图片"仍以 cell 图片行作为光标目标（图片在行内居中），与既有图片行为一致；段落级 markdown 图片至今不保留外层链接，所以不作为可交互目标。
 - 未做：锚点滚动、逐语言代码着色（沿用既有边界）。
 - 待负责人验收：callout 颜色/间距、README 节奏、指针光标（含拖动中不显示）。
+
+## 审查修复（PR #94，Codex P2）
+
+Codex 指出 loose 列表项内多个段落失去分隔：移除了 item 列的 `gap_1` 后，`nested_keyed` 不为段落加边距，`- first\n\n  second paragraph` 的两段会贴在一起。修复为 item 内块列使用 `item_inner_gap`：tight 项为 0（对应 Primer `ul ul { margin-top: 0 }`），loose 项为 0.85em 段落间距；顶层与嵌套列表共用。`lists` fixture 增加 loose 多段 item，回归断言 item 内两段间距等于一个块间距，heading lead-in 断言改用该 fixture 的末段（插入新块后原测量跨过了新内容）。
+
+修复后 `cargo clippy --all-targets -D warnings`（run `93b7f0ac`）与 `cargo test --locked`（run `a01e78f1`，1411 项）通过。
