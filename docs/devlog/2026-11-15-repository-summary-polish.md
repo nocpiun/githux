@@ -43,6 +43,10 @@
 - 构建槽等待与执行时间分开记录在 runner 记录里：`b655eb58` 槽等待 230,550 ms、执行 397,634 ms；`4596d654` 槽等待 1,431,043 ms、执行 24,059 ms。
 - 未覆盖：真实 Windows 窗口中的整页视觉（颜色是否与 GitHub 观感一致、空仓库条带高度）需要负责人验收；GPUI 测试不断言填充色像素，也不代替原生截图。执行期间的根目录级 `find` 探针曾失控并被协调者终止；本轮后续只使用项目内 `rg` 与有超时的有界搜索，未因此产生代码或结论变化。
 
+## 基线同步
+
+首次推送后 PR #92 返回 `merge_conflict`（main 已前进到 `5a3eab3`，`docs/agent-workflow.md` 与 `LESSONS.md` 冲突）。合并 main 时保留 main 已占用的 L028（目录搜索与工具时限），本任务的颜色来源条目改为 **L029**；其余 main 变更（派发 skill、bash 超时时限）与本任务文件无重叠。冲突解决后对组合树重跑 `cargo test --locked --test repository_overview`。
+
 ## 后续
 
 - 负责人用正式应用或 `cargo run --locked --example repository_overview`（`No releases` 场景）做视觉验收；PR 保持 `pending`，验收通过后由协调者移除。
