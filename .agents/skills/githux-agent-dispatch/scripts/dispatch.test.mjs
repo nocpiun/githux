@@ -3,9 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { createTask, launchTask, taskStatus, loadConfig, processTable, encodePS, terminalCommand, keroPreflight, keroProject, keroCommand, visibleLaunch } from './dispatch.mjs';
+import { createTask, launchTask, taskStatus, loadConfig, processTable, encodePS, terminalCommand, keroPreflight, keroProject, keroCommand, visibleLaunch, bashTimeoutExtensionPath } from './dispatch.mjs';
+import bashTimeoutExtension, {
+  applyBashTimeoutPolicy,
+  BashTimeoutPolicyError,
+  DEFAULT_TIMEOUT_SECONDS,
+  MAX_TIMEOUT_SECONDS,
+} from '../extensions/bash-timeout.js';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(source, 'dispatch.mjs');
@@ -407,4 +413,142 @@ test('shared Kero project resolution handles duplicate names and preserves workt
   assert.equal(loadConfig(f.config).kero_project_id, 'shared-id');
   put(f.config, { ...config, kero_project_id: 'not an id' });
   assert.throws(() => loadConfig(f.config), /exact Kero project ID/);
+});
+
+test('the packaged bash timeout extension resolves from the skill package with an absolute real path', t => {
+  fixture(t);
+  const resolved = bashTimeoutExtensionPath();
+  assert.equal(path.isAbsolute(resolved), true);
+  assert.equal(fs.statSync(resolved).isFile(), true);
+  // Resolved next to dispatch.mjs itself, not from the task worktree, so a resume of an older
+  // worktree still loads the coordinator's current dispatcher asset.
+  assert.equal(path.dirname(resolved), fs.realpathSync.native(path.resolve(source, '..', 'extensions')));
+  assert.equal(path.basename(resolved), 'bash-timeout.js');
+  assert.match(fs.readFileSync(resolved, 'utf8'), /DEFAULT_TIMEOUT_SECONDS = 600/);
+});
+
+test('start and resume pass one explicit extension path while keeping --no-extensions/--no-mcp', async t => {
+  const f = fixture(t), s = createTask(f.opts);
+  launchTask('start', { config: f.config, worktree: s.worktree }, f.launch);
+  const invocation = path.join(s.session_dir, 'invocations.jsonl');
+  await until(() => fs.existsSync(invocation));
+  fs.writeFileSync(path.join(s.session_dir, 'exit-gate'), 'exit');
+  assert.equal((await f.children[0].done).code, 0);
+  assert.equal(taskStatus(s.worktree).process_state, 'exited');
+  const followup = path.join(f.root, 'ext 空格 & % !.md');
+  fs.writeFileSync(followup, 'Resume with the packaged timeout policy.');
+  launchTask('resume', { config: f.config, worktree: s.worktree, followup }, f.launch);
+  await until(() => fs.readFileSync(invocation, 'utf8').trim().split('\n').length === 2);
+  fs.writeFileSync(path.join(s.session_dir, 'exit-gate'), 'exit');
+  assert.equal((await f.children[1].done).code, 0);
+  const calls = fs.readFileSync(invocation, 'utf8').trim().split('\n').map(JSON.parse);
+  const expected = bashTimeoutExtensionPath();
+  for (const call of calls) {
+    assert.ok(call.args.includes('--no-extensions'));
+    assert.ok(call.args.includes('--no-mcp'));
+    const positions = call.args.flatMap((arg, index) => (arg === '--extension' || arg === '-e' ? [index] : []));
+    assert.equal(positions.length, 1, 'exactly one explicit extension');
+    assert.equal(call.args[positions[0] + 1], expected);
+    assert.equal(path.isAbsolute(call.args[positions[0] + 1]), true);
+  }
+  // resume keeps the exact original session file; only the launch arguments grow the policy.
+  assert.equal(calls[1].session, calls[0].session);
+  assert.ok(calls[1].args.includes('--session'));
+});
+
+test('a missing packaged extension refuses to start before the lock, session or child exists', async t => {
+  const f = fixture(t), s = createTask(f.opts);
+  const dir = path.join(s.worktree, '.agents', 'task');
+  // Import a copy of the dispatcher package that has no extensions/ directory. Resolution is relative
+  // to the dispatcher file itself, so this reproduces an incomplete skill package.
+  const pkg = path.join(f.root, 'skill copy 空格');
+  fs.mkdirSync(path.join(pkg, 'scripts'), { recursive: true });
+  const copied = path.join(pkg, 'scripts', 'dispatch.mjs');
+  fs.copyFileSync(script, copied);
+  const broken = await import(pathToFileURL(copied).href);
+  assert.throws(() => broken.bashTimeoutExtensionPath(), /Bash timeout extension is missing/);
+  fs.mkdirSync(path.join(pkg, 'extensions'));
+  const copiedAsset = path.join(pkg, 'extensions', 'bash-timeout.js');
+  fs.copyFileSync(path.join(source, '..', 'extensions', 'bash-timeout.js'), copiedAsset);
+  assert.equal(broken.bashTimeoutExtensionPath(), fs.realpathSync.native(copiedAsset));
+  fs.rmSync(path.join(pkg, 'extensions'), { recursive: true });
+  // Real refusal path: no lock, no session, no recorded attempt, no child launched.
+  assert.throws(() => broken.launchTask('start', { config: f.config, worktree: s.worktree }, f.launch), /Bash timeout extension is missing/);
+  assert.equal(fs.existsSync(path.join(dir, 'launch.lock')), false);
+  assert.equal(fs.readdirSync(s.session_dir).length, 0);
+  assert.equal(json(path.join(dir, 'dispatch-state.json')).runtime.attempts.length, 0);
+  assert.equal(taskStatus(s.worktree).process_state, 'created');
+});
+
+// Bash timeout policy shipped in this skill's extensions/. Handlers are invoked the way Pi's
+// ExtensionRunner does: mutate `event.input` in place before execution, or block the call.
+function handlers() {
+  const registered = new Map();
+  bashTimeoutExtension({ on: (name, handler) => registered.set(name, handler) });
+  return registered;
+}
+
+test('missing timeout gets the ten minute default and the input is mutated in place', async () => {
+  const input = { command: 'find /' };
+  assert.deepEqual(applyBashTimeoutPolicy(input), { timeout: 600, changed: true });
+  assert.deepEqual(input, { command: 'find /', timeout: 600 });
+  assert.equal(DEFAULT_TIMEOUT_SECONDS, 600);
+  const second = { command: 'rg -n foo', timeout: undefined };
+  await handlers().get('tool_call')({ toolName: 'bash', input: second });
+  assert.equal(second.timeout, 600);
+});
+
+test('explicit values are preserved: short probes stay short and long builds keep their budget', async () => {
+  for (const seconds of [20, 30, 599, 600, 601, 3600, MAX_TIMEOUT_SECONDS]) {
+    const input = { command: 'cargo test', timeout: seconds };
+    assert.deepEqual(applyBashTimeoutPolicy(input), { timeout: seconds, changed: false });
+    assert.equal(input.timeout, seconds);
+  }
+  // A short explicit value must never be widened to the default.
+  const probe = { command: "rg -n 'set_mode_now' src/app/mod.rs", timeout: 20 };
+  await handlers().get('tool_call')({ toolName: 'bash', input: probe });
+  assert.equal(probe.timeout, 20);
+});
+
+test('values above the cap are clamped to three hours, not to the default', () => {
+  assert.equal(MAX_TIMEOUT_SECONDS, 10800);
+  const input = { command: 'cargo build', timeout: 999999 };
+  assert.deepEqual(applyBashTimeoutPolicy(input), { timeout: MAX_TIMEOUT_SECONDS, changed: true });
+  assert.equal(input.timeout, 10800);
+});
+
+test('invalid provided values block the call instead of running without a bound', async () => {
+  for (const bad of [0, -1, -0.5, Number.NaN, Number.POSITIVE_INFINITY, '600', null, true, {}, []]) {
+    const input = { command: 'find /', timeout: bad };
+    assert.throws(() => applyBashTimeoutPolicy(input), BashTimeoutPolicyError, `expected rejection for ${String(bad)}`);
+    const result = await handlers().get('tool_call')({ toolName: 'bash', input });
+    assert.equal(result?.block, true);
+    assert.match(result.reason, /bash timeout policy/);
+    assert.equal(input.timeout, bad);
+  }
+});
+
+test('non-bash tools and events without input are untouched', async () => {
+  const registered = handlers();
+  const onToolCall = registered.get('tool_call');
+  const read = { file_path: 'src/app/mod.rs' };
+  assert.equal(await onToolCall({ toolName: 'read', input: read }), undefined);
+  assert.deepEqual(read, { file_path: 'src/app/mod.rs' });
+  const custom = { arg: 1 };
+  assert.equal(await onToolCall({ toolName: 'custom_tool', input: custom }), undefined);
+  assert.deepEqual(custom, { arg: 1 });
+  assert.equal(await onToolCall({ toolName: 'bash' }), undefined);
+  assert.equal(await onToolCall({}), undefined);
+  assert.equal(bashTimeoutExtension.length, 1);
+  assert.deepEqual([...registered.keys()], ['tool_call']);
+});
+
+test('the packaged extension file is loadable as a Pi extension module', async () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const file = path.resolve(here, '..', 'extensions', 'bash-timeout.js');
+  assert.equal(fs.statSync(file).isFile(), true);
+  const module = await import(new URL('../extensions/bash-timeout.js', import.meta.url).href);
+  assert.equal(typeof module.default, 'function');
+  assert.equal(module.DEFAULT_TIMEOUT_SECONDS, 600);
+  assert.equal(module.MAX_TIMEOUT_SECONDS, 10800);
 });
