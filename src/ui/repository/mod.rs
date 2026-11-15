@@ -1951,7 +1951,7 @@ impl RepositoryPage {
             Err(error) => {
                 // No branch reply will arrive to release the manual-refresh loading gate.
                 self.branches_loading = false;
-                self.settle_reader_after_refresh_error(&error);
+                self.settle_after_refresh_error(&error, cx);
                 self.error = Some(error);
             }
         }
@@ -2288,17 +2288,16 @@ impl RepositoryPage {
             Err(error) => {
                 // Failure to resolve a ref is not proof that the still-authorized displayed
                 // snapshot disappeared. A real ref/account change cleared it before this read.
-                self.settle_reader_after_refresh_error(&error);
+                self.settle_after_refresh_error(&error, cx);
                 self.error = Some(error);
             }
         }
         cx.notify();
     }
 
-    /// A refresh may cancel the load that owned Loading while retaining its fixed snapshot. An
-    /// upstream failure must leave a retryable terminal state, unless a newer content request or
-    /// an already displayed reader still owns the presentation.
-    fn settle_reader_after_refresh_error(&mut self, error: &PageError) {
+    /// Revision success resumes canceled reads. If it cannot be reached, settle only missing
+    /// resources with no current owner; displayed observations and newer requests remain intact.
+    fn settle_after_refresh_error(&mut self, error: &PageError, cx: &mut Context<Self>) {
         if self.branch.is_some()
             && self.reader_status == ReaderStatus::Loading
             && self.pending_content.is_none()
@@ -2310,6 +2309,37 @@ impl RepositoryPage {
                 true,
             ));
         }
+        let mut tree_changed = false;
+        if let Some(state) = self.branch.as_mut() {
+            let interrupted = || {
+                PageError::new(
+                    "Directory loading was interrupted.",
+                    Some(error.title.clone()),
+                    true,
+                )
+            };
+            if state.tree.root().is_none()
+                && state.tree.failure("").is_none()
+                && !state.tree.is_loading("")
+            {
+                state.tree.fail_load("", interrupted());
+                tree_changed = true;
+            }
+            for path in &self.intent.expanded {
+                if state.tree.tree(path).is_none()
+                    && state.tree.failure(path).is_none()
+                    && !state.tree.is_loading(path)
+                    && state.tree.child_directory(path).is_ok()
+                {
+                    state.tree.fail_load(path, interrupted());
+                    tree_changed = true;
+                }
+            }
+        }
+        if tree_changed {
+            self.invalidate_rows();
+        }
+        self.settle_overview_after_refresh_error(error, cx);
     }
 
     fn spawn_replacement(&mut self) {
@@ -2347,7 +2377,7 @@ impl RepositoryPage {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.replacement = None;
-                self.settle_reader_after_refresh_error(&error);
+                self.settle_after_refresh_error(&error, cx);
                 self.error = Some(error);
                 cx.notify();
                 return;
@@ -2438,7 +2468,7 @@ impl RepositoryPage {
             Err(error) => {
                 state.tree.fail_load("", error.clone());
                 self.invalidate_rows();
-                self.settle_reader_after_refresh_error(&error);
+                self.settle_after_refresh_error(&error, cx);
                 self.error = Some(error);
             }
         }
@@ -2634,6 +2664,13 @@ impl RepositoryPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active
+            || !self.session.as_ref().is_some_and(RepositorySession::verify)
+            || !self.cache_allowed()
+        {
+            self.check_authorization(cx);
+            return;
+        }
         let ReaderAction::Link(target) = action;
         match target {
             LinkTarget::External { url } => self.emit(PageAction::OpenExternal(url), window, cx),

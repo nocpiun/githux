@@ -1,4 +1,7 @@
 use super::*;
+use crate::ui::reader::{LinkTarget, ReaderAction};
+use crate::ui::repository_overview::{OverviewAction, OverviewSection};
+use std::rc::Rc;
 
 #[gpui::test]
 fn continuity_same_commit_and_manual_refresh_keep_reader_scroll_selection_and_overview(
@@ -599,6 +602,291 @@ fn continuity_refresh_failure_keeps_a_newer_document_read_running(cx: &mut TestA
         page.reader_status() == &ReaderStatus::Showing
     });
     assert!(reader_text(&page, cx).contains("fn main"));
+}
+
+fn canceled_overview_has_a_terminal_state(
+    cx: &mut TestAppContext,
+    path: &str,
+    section: OverviewSection,
+) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    *fixture.transport.held_path.lock().unwrap() = Some(path.into());
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    let overview = page.read_with(cx, |page, _| page.overview().unwrap().clone());
+    wait_overview(&page, &overview, cx, |view| match section {
+        OverviewSection::Releases => {
+            view.releases().is_loading()
+                && view.contributors().value().is_some()
+                && view.languages().value().is_some()
+        }
+        OverviewSection::Contributors => {
+            view.contributors().is_loading()
+                && view.releases().value().is_some()
+                && view.languages().value().is_some()
+        }
+        _ => unreachable!(),
+    });
+    let reader = page.read_with(cx, |page, _| page.reader().unwrap().entity_id());
+    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    page.update(cx, |page, cx| page.refresh_repository(cx));
+    settle(&page, cx, |page| page.error().is_some());
+    overview.read_with(cx, |view, _| match section {
+        OverviewSection::Releases => {
+            assert!(
+                view.releases().error().is_some(),
+                "canceled releases must expose Retry rather than stay Loading"
+            );
+            assert!(
+                view.latest_release()
+                    .is_some_and(|state| state.error().is_some())
+            );
+            assert!(view.contributors().value().is_some());
+        }
+        OverviewSection::Contributors => {
+            assert!(
+                view.contributors().error().is_some(),
+                "canceled contributors must expose Retry rather than stay Loading"
+            );
+            assert!(view.releases().value().is_some());
+        }
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.reader().unwrap().entity_id()),
+        reader
+    );
+    if section == OverviewSection::Releases {
+        assert!(cx.debug_bounds("overview-retry-releases").is_some());
+    }
+    *fixture.transport.failed_path.lock().unwrap() = None;
+    fixture.transport.tree_release.send_replace(true);
+    page.update_in(cx, |page, window, cx| {
+        let binding = page.overview().unwrap().read(cx).binding().clone();
+        page.overview_action(OverviewAction::Refresh { binding, section }, window, cx);
+    });
+    wait_overview(&page, &overview, cx, |view| match section {
+        OverviewSection::Releases => {
+            view.releases().value().is_some()
+                && view
+                    .latest_release()
+                    .is_some_and(|state| state.value().is_some())
+        }
+        OverviewSection::Contributors => view.contributors().value().is_some(),
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.reader().unwrap().entity_id()),
+        reader
+    );
+}
+
+fn wait_overview(
+    page: &Entity<RepositoryPage>,
+    overview: &Entity<crate::ui::repository_overview::RepositoryOverview>,
+    cx: &mut VisualTestContext,
+    mut ready: impl FnMut(&crate::ui::repository_overview::RepositoryOverview) -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        cx.run_until_parked();
+        frames(cx);
+        if overview.read_with(cx, |view, _| ready(view)) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "overview did not reach the expected state"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[gpui::test]
+fn continuity_canceled_releases_settle_when_summary_refresh_fails(cx: &mut TestAppContext) {
+    canceled_overview_has_a_terminal_state(cx, "/releases", OverviewSection::Releases);
+}
+
+#[gpui::test]
+fn continuity_canceled_contributors_settle_when_summary_refresh_fails(cx: &mut TestAppContext) {
+    canceled_overview_has_a_terminal_state(cx, "/contributors", OverviewSection::Contributors);
+}
+
+#[gpui::test]
+fn continuity_canceled_directory_settles_when_summary_refresh_fails(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    let reader = page.read_with(cx, |page, _| page.reader().unwrap().entity_id());
+    *fixture.transport.held_path.lock().unwrap() =
+        Some("/git/trees/a000000000000000000000000000000000000010".into());
+    page.update(cx, |page, cx| page.toggle_directory("docs", cx));
+    settle(&page, cx, |_| {
+        fixture
+            .transport
+            .held_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1
+    });
+    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    page.update(cx, |page, cx| page.refresh_repository(cx));
+    settle(&page, cx, |page| page.error().is_some());
+    assert!(
+        page.read_with(cx, |page, _| page.tree_failure("docs").is_some()),
+        "a canceled directory must have a scoped terminal state after refresh fails"
+    );
+    assert!(cx.debug_bounds("repository-row-failed").is_some());
+    assert_eq!(
+        page.read_with(cx, |page, _| page.reader().unwrap().entity_id()),
+        reader
+    );
+    *fixture.transport.failed_path.lock().unwrap() = None;
+    fixture.transport.tree_release.send_replace(true);
+    page.update(cx, |page, cx| page.retry_directory("docs", cx));
+    settle(&page, cx, |page| page.tree("docs").is_some());
+    assert!(page.read_with(cx, |page, _| page.tree_failure("docs").is_none()));
+}
+
+#[gpui::test]
+fn continuity_summary_failure_keeps_a_newer_overview_read_running(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    *fixture.transport.failed_path.lock().unwrap() = Some("/releases".into());
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    let overview = page.read_with(cx, |page, _| page.overview().unwrap().clone());
+    wait_overview(&page, &overview, cx, |view| {
+        view.releases().error().is_some()
+    });
+    fixture.transport.hold(true);
+    *fixture.transport.held_path.lock().unwrap() = Some("/releases".into());
+    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    page.update_in(cx, |page, window, cx| {
+        page.refresh_repository(cx);
+        let binding = page.overview().unwrap().read(cx).binding().clone();
+        page.overview_action(
+            OverviewAction::Refresh {
+                binding,
+                section: OverviewSection::Releases,
+            },
+            window,
+            cx,
+        );
+    });
+    settle(&page, cx, |_| {
+        fixture
+            .transport
+            .held_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1
+    });
+    fixture.transport.release_all();
+    settle(&page, cx, |page| page.error().is_some());
+    assert!(
+        overview.read_with(cx, |view, _| view.releases().is_loading()),
+        "the new section request still owns Loading"
+    );
+    *fixture.transport.failed_path.lock().unwrap() = None;
+    fixture.transport.tree_release.send_replace(true);
+    wait_overview(&page, &overview, cx, |view| {
+        view.releases().value().is_some()
+            && view
+                .latest_release()
+                .is_some_and(|state| state.value().is_some())
+    });
+}
+
+#[gpui::test]
+fn continuity_failed_summary_settles_uncached_overview_previews(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    *fixture.transport.held_path.lock().unwrap() = Some("/releases".into());
+    {
+        let (host, page, visual) = open_cached(cx, &fixture, RepositoryNavigation::default());
+        settle(&page, visual, |page| {
+            page.reader_status() == &ReaderStatus::Showing
+        });
+        release_page(&host, visual);
+    }
+    fixture.restart();
+    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.error().is_some() && page.reader_status() == &ReaderStatus::Showing
+    });
+    let overview = page.read_with(cx, |page, _| page.overview().unwrap().clone());
+    wait_overview(&page, &overview, cx, |view| {
+        view.releases().error().is_some()
+            && view
+                .latest_release()
+                .is_some_and(|state| state.error().is_some())
+    });
+    assert!(cx.debug_bounds("overview-retry-releases").is_some());
+    assert!(reader_text(&page, cx).contains("Ledger"));
+}
+
+#[gpui::test]
+fn continuity_reader_action_rechecks_repository_authorization_before_emit(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = received.clone();
+    page.update(cx, |page, _| {
+        page.on_action(Rc::new(move |action, _, _| {
+            sink.lock().unwrap().push(action)
+        }))
+    });
+    let store = fixture.store.as_ref().expect("cache store").clone();
+    let scope = store
+        .saved_account(crate::domain::AccountKey::new(
+            1,
+            crate::domain::HostId::github(),
+        ))
+        .expect("saved scope");
+    store.revoke_repository(&scope, Some(42)).expect("revoke");
+    page.update_in(cx, |page, window, cx| {
+        assert!(page.active && page.session.as_ref().unwrap().verify());
+        page.on_reader_action(
+            ReaderAction::Link(LinkTarget::External {
+                url: "https://example.invalid/revoked".into(),
+            }),
+            window,
+            cx,
+        );
+    });
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "a revoked snapshot cannot emit an external action before the next frame"
+    );
 }
 
 #[gpui::test]

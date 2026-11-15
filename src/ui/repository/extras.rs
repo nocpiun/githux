@@ -1,5 +1,5 @@
 //! Repository-scoped overview composition. Branch changes never restart these reads.
-use super::{PageAction, RepositoryPage, Work, format_sync_age};
+use super::{PageAction, PageError, RepositoryPage, Work, format_sync_age};
 use crate::data::page_cache::{
     CachedPageReadSession, PageCacheError, PageOrigin, PageReadMode, PageValue,
 };
@@ -419,6 +419,7 @@ impl RepositoryPage {
             }
         });
         if submitted.is_err() {
+            self.extras.work[index] = None;
             let message = "Background services are closing.".to_string();
             let update = match endpoint {
                 Endpoint::Releases => OverviewUpdate::Releases(SectionState::Error { message }),
@@ -434,7 +435,53 @@ impl RepositoryPage {
             });
         }
     }
+    pub(super) fn settle_overview_after_refresh_error(
+        &mut self,
+        error: &PageError,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((view, binding)) = self.extras.view.clone().zip(self.extras.binding.clone())
+        else {
+            return;
+        };
+        for endpoint in [
+            Endpoint::Releases,
+            Endpoint::Latest,
+            Endpoint::Contributors,
+            Endpoint::Languages,
+        ] {
+            if self.extras.work[endpoint.index()].is_some() {
+                continue;
+            }
+            let loading = match endpoint {
+                Endpoint::Releases => view.read(cx).releases().is_loading(),
+                Endpoint::Latest => view
+                    .read(cx)
+                    .latest_release()
+                    .is_some_and(SectionState::is_loading),
+                Endpoint::Contributors => view.read(cx).contributors().is_loading(),
+                Endpoint::Languages => view.read(cx).languages().is_loading(),
+            };
+            if !loading {
+                continue;
+            }
+            let message = error.title.clone();
+            let update = match endpoint {
+                Endpoint::Releases => OverviewUpdate::Releases(SectionState::Error { message }),
+                Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Error { message }),
+                Endpoint::Contributors => {
+                    OverviewUpdate::Contributors(SectionState::Error { message })
+                }
+                Endpoint::Languages => OverviewUpdate::Languages(SectionState::Error { message }),
+            };
+            view.update(cx, |view, cx| {
+                view.apply(&binding, update, cx);
+            });
+        }
+    }
+
     pub(super) fn drain_overview(&mut self, cx: &mut Context<Self>) {
+        let mut completed = false;
         let counts: Vec<_> = self
             .extras
             .counts_inbox
@@ -453,6 +500,8 @@ impl RepositoryPage {
                     .repo_service()
                     .is_current(&reply.context)
             {
+                self.extras.counts_work = None;
+                completed = true;
                 match reply
                     .result
                     .ok()
@@ -498,11 +547,18 @@ impl RepositoryPage {
             {
                 continue;
             }
+            self.extras.work[reply.endpoint.index()] = None;
+            completed = true;
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
                 view.apply(&reply.binding, reply.update, cx);
             });
             // The language strip is composed by the page from this same state.
             cx.notify();
+        }
+        // A cache-only miss may finish after the summary failure. It no longer has a network
+        // successor, so settle that unanswered preview once its actual read has completed.
+        if completed && let Some(error) = self.error.clone() {
+            self.settle_overview_after_refresh_error(&error, cx);
         }
     }
     pub(super) fn overview_action(
