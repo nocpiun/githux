@@ -88,6 +88,7 @@ pub(super) struct OfflineTransport {
     held_requests: std::sync::atomic::AtomicUsize,
     tree_release: tokio::sync::watch::Sender<bool>,
     failed_path: Mutex<Option<String>>,
+    failed_status: std::sync::atomic::AtomicU16,
     remove_main: std::sync::atomic::AtomicBool,
     moved_readme: std::sync::atomic::AtomicBool,
 }
@@ -107,6 +108,7 @@ impl OfflineTransport {
             held_requests: std::sync::atomic::AtomicUsize::new(0),
             tree_release: tokio::sync::watch::channel(false).0,
             failed_path: Mutex::new(None),
+            failed_status: std::sync::atomic::AtomicU16::new(500),
             remove_main: std::sync::atomic::AtomicBool::new(false),
             moved_readme: std::sync::atomic::AtomicBool::new(false),
         }
@@ -336,7 +338,7 @@ impl Transport for OfflineTransport {
                 .is_some_and(|path| request.url.contains(path))
             {
                 return Ok(json_response(
-                    500,
+                    self.failed_status.load(std::sync::atomic::Ordering::SeqCst),
                     r#"{"message":"synthetic refresh resource failure"}"#,
                 ));
             }

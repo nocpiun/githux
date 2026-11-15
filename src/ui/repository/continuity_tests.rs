@@ -399,6 +399,104 @@ fn continuity_a_recycled_locator_retires_old_repository_replies(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn continuity_review_refresh_retries_failed_resources_on_the_same_commit(cx: &mut TestAppContext) {
+    let fixture = CachedFixture::new(Scene::FileFailure);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    page.update(cx, |page, cx| page.select_file("src/main.rs", cx));
+    settle(&page, cx, |page| {
+        matches!(page.reader_status(), ReaderStatus::ContentFailed(_))
+    });
+    let verified_before = page.read_with(cx, |page, _| {
+        page.revision_provenance().unwrap().verified_at_ms
+    });
+    fixture.transport.hold(true);
+    // A separate failed directory must be retried by the same refresh too.
+    page.update(cx, |page, cx| {
+        page.branch.as_mut().unwrap().tree.fail_load(
+            "docs",
+            crate::ui::repository::PageError::new("synthetic directory failure", None, true),
+        );
+        page.intent.expanded.insert("docs".into());
+        page.refresh_repository(cx);
+        assert!(matches!(page.reader_status(), ReaderStatus::ContentFailed(_)),
+            "until revalidation answers, retain an honest terminal state rather than an idle Loading");
+    });
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        page.revision_provenance()
+            .is_some_and(|p| p.verified_at_ms > verified_before)
+    });
+    page.read_with(cx, |page, _| {
+        assert!(
+            !matches!(page.reader_status(), ReaderStatus::ContentFailed(_)),
+            "successful same-commit revalidation must retry the failed document"
+        );
+        assert!(page.tree_failure("docs").is_none());
+    });
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && page.tree("docs").is_some()
+    });
+    assert!(reader_text(&page, cx).contains("fn main"));
+    assert_eq!(
+        page.read_with(cx, |page, _| page
+            .fixed_commit()
+            .unwrap()
+            .as_str()
+            .to_string()),
+        MAIN_COMMIT
+    );
+}
+
+#[gpui::test]
+fn continuity_review_a_failed_summary_does_not_disable_independent_branch_retry(
+    cx: &mut TestAppContext,
+) {
+    let fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+    fixture
+        .transport
+        .failed_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    page.update(cx, |page, cx| page.refresh_repository(cx));
+    settle(&page, cx, |page| page.error().is_some());
+    page.read_with(cx, |page, _| {
+        assert!(
+            !page.branches_loading,
+            "summary failure must release the branch retry gate"
+        );
+        assert_eq!(page.reader_status(), &ReaderStatus::Showing);
+    });
+    *fixture.transport.failed_path.lock().unwrap() = None;
+    let before = fixture
+        .transport
+        .recorded()
+        .iter()
+        .filter(|url| url.contains("/branches"))
+        .count();
+    page.update(cx, |page, cx| page.retry_branches(cx));
+    settle(&page, cx, |page| !page.branches_loading);
+    assert!(
+        fixture
+            .transport
+            .recorded()
+            .iter()
+            .filter(|url| url.contains("/branches"))
+            .count()
+            > before
+    );
+}
+
+#[gpui::test]
 fn continuity_failed_refresh_keeps_the_cached_document(cx: &mut TestAppContext) {
     let mut fixture = CachedFixture::new(Scene::Normal);
     fixture.login(1);

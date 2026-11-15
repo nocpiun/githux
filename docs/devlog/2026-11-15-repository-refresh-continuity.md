@@ -41,6 +41,19 @@ Runner `6e66d345-943b-4c2d-ad73-aa090d7993a7`，命令 `node scripts/verify.mjs 
 - `cargo fmt --all -- --check`：runner `02178731-f0db-4742-a9a2-c69f3784a8d1` 通过；不占构建槽，实际执行 24.4s。`git diff --check` 与 `git diff --cached --check` 通过。
 - 所有 Cargo 经共享 runner，重检查串行持有构建 mutex。最终通过后未重复运行未改变的测试；远端最新 head 的 CI/Codex 证据留在 PR 与任务交付状态。
 
+## PR #89 第一轮审查
+
+Codex 对 `37305ac` 提出两项 P2，均符合既有刷新/失败约定，可直接修复；无待裁决事项，保留 `arbitration_ever_required: false / merge_owner: worker`。
+
+1. [失败资源重试](https://github.com/nocpiun/githux/pull/89#discussion_r4577492837)：原地刷新保留 `ContentFailed`，而同 commit 捷径仅为 cache-first 失败清理状态，导致先前在线文件读取失败后整页刷新不再重读。回归通过共享 `Scene::FileFailure` 的真实服务响应建立失败，随后执行 Refresh，并包含已失败目录的恢复。
+2. [分支 loading 释放](https://github.com/nocpiun/githux/pull/89#discussion_r4577492842)：手动 Refresh 提前设置 `branches_loading`，摘要失败后不会有 `apply_branches` 来释放它，独立 Retry branches 因而被一直挡住。回归注入摘要 404（不回退为缓存成功、不当作明确撤权），检查旧内容保留且分支重试可继续。
+
+两条新增回归在未修生产路径上失败（runner `f7922e47-54c1-4c01-a92f-d7290b685dea`，0 通过/2 失败，测试 0.37s；槽等待 92.9s，实际编译/执行 91.5s）。修复将失败资源的清理放在同 commit 重验成功后：目录失败从任意来源清除，reader 的失败终态转为可重试 Loading，再按当前选择读取；此前已成功显示的 reader/tree 不动。在摘要仍挂起或失败时保留诚实的失败终态，避免制造无在途读取的 Loading。摘要错误路径清掉分支 loading 标记，让独立枚举重试继续。
+
+本轮仓库边界 runner `51262267-3074-4709-a2e1-f8ab2f928946`：115 通过、0 失败；槽等待 198ms，实际编译/执行 138.0s（测试 6.44s）。回归进一步在网络挂起时确认保留失败终态，再等待真实新 revision provenance 发布，确认文件/目录重试成功。
+
+本轮其余检查均通过：clippy（同生产 bin + repository test 目标，`-D warnings`）runner `36b1ba8c-7d48-4313-865c-280a4ab2f908`，槽等待 197.7s / 执行 13.9s；生产 build runner `e3187e19-9d40-4caa-885d-dba89dbcbdf0`，槽等待 211ms / 执行 40.5s；fmt check runner `22a41477-0780-47a5-ae18-bb242d3d2c1c`，不占槽 / 执行 26.3s。差异检查通过。重新运行的原因是上述两项生产修复与对应回归新增。
+
 ## 可复用教训
 
 缓存先行的测试需要检查“在线 revision 已返回，但新树/文档未准备好”的中间绘制状态。仅断言网络放行前有缓存、全部完成后有最新内容，会漏掉两个断言之间的清空/重建。保留显示资源与更新读取代次是两个操作；保留旧画面时也必须保留其 carried authorization，而不是用新请求的令牌替换它。

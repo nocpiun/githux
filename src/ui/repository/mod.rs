@@ -1949,6 +1949,8 @@ impl RepositoryPage {
                 }
             }
             Err(error) => {
+                // No branch reply will arrive to release the manual-refresh loading gate.
+                self.branches_loading = false;
                 self.error = Some(error);
             }
         }
@@ -2186,26 +2188,27 @@ impl RepositoryPage {
                 if verified_online {
                     self.online_verified = true;
                 }
+                // Revalidating the same commit retries failed resources from either an online
+                // read or a preliminary cache read. Successfully displayed content stays intact.
+                if let Some(state) = self.branch.as_mut() {
+                    state.tree.clear_failures();
+                }
                 if cache_painted {
-                    // Everything the preliminary snapshot could not settle came from `OfflineOnly`
-                    // reads. Completed failures are cleared, and reads that are still in flight are
-                    // superseded so their late cache-miss result is discarded and the verified chain
-                    // requests the same paths again.
+                    // In-flight cache-only reads also need new identities before online retries.
                     if let Some(state) = self.branch.as_mut() {
-                        state.tree.clear_failures();
                         let _superseded = state.tree.supersede_pending_loads();
                     }
                     if self.pending_content.take().is_some() {
                         // A new selection identity drops the pending reply in `apply_content`.
                         self.selection_request = self.selection_request.wrapping_add(1);
                     }
-                    if matches!(
-                        self.reader_status,
-                        ReaderStatus::ContentFailed(_) | ReaderStatus::SelectionUnavailable { .. }
-                    ) {
-                        self.reader = None;
-                        self.reader_status = ReaderStatus::Loading;
-                    }
+                }
+                if matches!(
+                    self.reader_status,
+                    ReaderStatus::ContentFailed(_) | ReaderStatus::SelectionUnavailable { .. }
+                ) {
+                    self.reader = None;
+                    self.reader_status = ReaderStatus::Loading;
                 }
                 if let Some((missing_root, missing_readme)) = missing {
                     let mode = RepositoryCacheMode::OnlinePreferred;
