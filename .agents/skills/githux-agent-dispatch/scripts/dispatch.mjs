@@ -7,6 +7,9 @@ import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 
 const SELF = fileURLToPath(import.meta.url);
+// The bash timeout policy ships with this skill package, not with the task worktree, so a resume of an
+// older worktree still loads the coordinator's current extension. Only this explicit file is loaded.
+const BASH_TIMEOUT_EXTENSION = path.resolve(path.dirname(SELF), '..', 'extensions', 'bash-timeout.js');
 const fail = message => { throw new Error(message); };
 const now = () => new Date().toISOString();
 const exists = p => fs.existsSync(p);
@@ -80,6 +83,14 @@ export function checkInventory(c, cwd) {
   if (result.error || result.status !== 0) fail('Model inventory failed; launch refused (no fallback). Inspect executor stderr.');
   const rows = result.stdout.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).map(line => line.trim().split(/\s+/));
   if (!rows.some(row => row.length >= 6 && row[0] === c.provider && row[1] === c.model)) fail('Exact provider/model absent from offline inventory; launch refused (no fallback).');
+}
+export function bashTimeoutExtensionPath() {
+  // Absolute, real path; validated before a session/lock exists so a missing asset never launches a child.
+  let resolved;
+  try { resolved = fs.realpathSync.native(BASH_TIMEOUT_EXTENSION); }
+  catch { fail(`Bash timeout extension is missing from the dispatch skill package: ${BASH_TIMEOUT_EXTENSION}`); }
+  if (!path.isAbsolute(resolved) || !fs.statSync(resolved).isFile()) fail(`Bash timeout extension is not a regular file: ${resolved}`);
+  return resolved;
 }
 function locations(worktree) {
   const root = canonical(worktree);
@@ -371,6 +382,8 @@ export function launchTask(mode, o, launch = visibleLaunch) {
   if (mode === 'start' && phase !== 'created') fail('start is only for an untouched created task; use resume with its exact existing session');
   if (mode === 'resume' && !['exited', 'failed'].includes(phase)) fail('resume requires a confirmed stopped task; inspect/reconcile unknown runtime state deliberately');
   stopped(s, processTable());
+  // Validate the packaged policy asset before any state write or session/lock creation.
+  const extension = bashTimeoutExtensionPath();
   const session = mode === 'resume' ? findSession(s) : null;
   if (mode === 'start' && fs.readdirSync(s.session_dir).length) fail('Session directory is not empty; refuse to overwrite/reuse a session');
   if (mode === 'start' && s.session_path) fail('Dispatch state already records a session; start would not create a genuinely new one');
@@ -396,7 +409,7 @@ export function launchTask(mode, o, launch = visibleLaunch) {
     if (contextPath) fs.writeFileSync(contextPath, context, { flag: 'wx', encoding: 'utf8' });
     const followupPath = followup === null ? null : path.join(t.dir, `FOLLOWUP-${token}.md`);
     if (followupPath) fs.writeFileSync(followupPath, followup, { flag: 'wx', encoding: 'utf8' });
-    atomicJSON(path.join(t.lock, 'launch.json'), { token, mode, config: c, requested_model: c.model, session, followup: followupPath, context: contextPath, launcher, created_at: now() });
+    atomicJSON(path.join(t.lock, 'launch.json'), { token, mode, config: c, requested_model: c.model, session, followup: followupPath, context: contextPath, extension, launcher, created_at: now() });
     update(t.root, latest => {
       latest.runtime.phase = 'starting';
       latest.runtime.starting_at = now();
@@ -437,7 +450,9 @@ export async function supervise(worktree, token, { allowNonTTY = false } = {}) {
   if (meta.mode === 'resume' && !same(findSession(current), meta.session)) fail('Session changed before child startup');
   if (meta.mode === 'start' && fs.readdirSync(current.session_dir).length) fail('Unexpected session exists before first startup');
   const c = meta.config;
-  const args = [c.cli, '--offline', '--approve', '--no-extensions', '--no-mcp', '--provider', c.provider, '--model', c.model, '--thinking', c.thinking, '--session-dir', current.session_dir];
+  if (!meta.extension || !path.isAbsolute(meta.extension) || !fs.existsSync(meta.extension) || !fs.statSync(meta.extension).isFile()) fail('Bash timeout extension recorded for this launch is missing; lock retained, no CLI started');
+  // `--no-extensions`/`--no-mcp` stay; only the explicit policy file is added.
+  const args = [c.cli, '--offline', '--approve', '--no-extensions', '--no-mcp', '--extension', meta.extension, '--provider', c.provider, '--model', c.model, '--thinking', c.thinking, '--session-dir', current.session_dir];
   args.push(...(meta.mode === 'resume' ? ['--session', meta.session] : ['--session-id', current.session_id]));
   args.push(`@${meta.followup ?? path.join(t.dir, 'TASK.md')}`);
   if (meta.context) args.push(`@${meta.context}`);
