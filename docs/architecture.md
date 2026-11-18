@@ -61,7 +61,7 @@ UI 事件启动后台工作，通过受控通道回到 GPUI；不能假设 GPUI 
 
 ## 已建立的工程边界
 
-[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、深色主题与窗口，并在启动时绑定外壳快捷键；[`workspace::Route`](../src/workspace/mod.rs) 是唯一地址模型，[`workspace::Workspace`](../src/workspace/mod.rs) 持有会话集合与活动标签，[`ui::Shell`](../src/ui/mod.rs) 持有工作区、侧栏滚动句柄与搜索浮层状态，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。
+[`src/main.rs`](../src/main.rs) 是真实 binary 入口，[`app::run`](../src/app/mod.rs) 组合 GPUI、Ely、Geek Neutral 深色主题与窗口，并在启动时绑定外壳快捷键；深色 palette 的安装与 token 继承见[正式深色主题](theme.md)；[`workspace::Route`](../src/workspace/mod.rs) 是唯一地址模型，[`workspace::Workspace`](../src/workspace/mod.rs) 持有会话集合与活动标签，[`ui::Shell`](../src/ui/mod.rs) 持有工作区、侧栏滚动句柄与搜索浮层状态，[`platform::fonts`](../src/platform/fonts.rs) 注册编译进 binary 的字体。主题默认 Noto Sans / Google Sans Code；字体来源与许可见 [字体清单](../assets/fonts/README.md)。
 
 外壳按职责拆开，避免所有布局挤在一个视图里：`src/ui/chrome.rs` 画标题栏与搜索入口，`src/ui/sidebar.rs` 画固定列与有界的仓库组，`src/ui/page.rs` 画岛内页面，`src/ui/tabs.rs` 画应用级标签条，`src/ui/scroll/` 是唯一的滚动条外观、几何、拖动与淡入淡出实现（接口与接入步骤见 [统一滚动](scrolling.md)），`src/ui/palette.rs` 是本地导航浮层，`src/ui/geometry.rs` 集中放间距、宽度与圆角，`src/ui/fixtures.rs` 是确定性的本地面板数据。标题栏在所有平台绘制同一条品牌 + 搜索入口，只有 Windows 的三个窗口按钮由 `cfg!(target_os = "windows")` 控制；已确认行为（搜索入口固定在标题栏）不能挂在平台分支上。窗口拖动、双击最大化和边缘缩放使用 GPUI 的 `WindowControlArea` / `start_window_move`，由平台上已有的非客户区命中测试驱动，没有新增平台补丁。
 

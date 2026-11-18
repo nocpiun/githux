@@ -22,7 +22,7 @@ cargo run --locked
 
 Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接启动 exe 不分配控制台窗口；`cargo run` 等 Cargo 命令本身仍在调用者终端运行。测试 harness 保留控制台输出。正常 Windows 应用不再依赖 stdout/stderr 作为可见日志，持久诊断系统尚未实现。
 
-启动进入 Home：左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果为本地导航命令与当前账户已读取的仓库：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间真实仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Theme（明暗切换）、Issues、PRs、New；New 暂时禁用。账号行右侧的铃铛进入 Notifications；收起侧栏后 Notifications 与 Theme 仍在“...”菜单里。
+启动进入 Home：默认深色模式使用负责人选定的 Geek Neutral palette（浅色仍为 Ely，见[正式深色主题](docs/theme.md)）。左上角 Githux 位于自定义标题栏，从空白处可拖动窗口、双击最大化，右侧按钮依次为最小化、最大化/还原、关闭。右上角搜索入口或 `Ctrl+K` 打开 command palette，结果为本地导航命令与当前账户已读取的仓库：上下移动、Enter 打开、Esc 关闭。侧边栏顶部 Home、Settings，中间真实仓库列表只有自身滚动，底部头像进入 Profile，其下四个等宽入口为 Theme（明暗切换）、Issues、PRs、New；New 暂时禁用。账号行右侧的铃铛进入 Notifications；收起侧栏后 Notifications 与 Theme 仍在“...”菜单里。
 
 island 顶部是应用级标签条：点击侧栏仓库/Profile、底部入口或 palette 结果会打开或激活对应标签（同一资源复用、不重复），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换；关闭活动标签切到左邻，关闭最后一个标签后新建 Home。Home、Settings 与全局占位页按路由单例，仓库按 `owner/repo` 单例（大小写不敏感）。每个标签保留自己的页面滚动位置、焦点与仓库会话选择。标签数量不设上限：放不下时标签条自行横向滚动（滚轮 / `Shift`+滚轮 / 原生水平滚动 / 鼠标悬停时淡入的细滚动条），只影响标签条本身；新建、切换或 Tab 聚焦会把目标标签滚入视野。标签可以横向拖拽排序（按标签身份移动，不重建会话），鼠标中键在标签任意位置关闭该标签（不先激活），关闭按钮只在 hover 或活动标签上出现。标签条最右侧有一个固定的工具栏，本轮只放一个未接逻辑的禁用刷新入口。标签文本可省略，悬停显示完整名称。
 

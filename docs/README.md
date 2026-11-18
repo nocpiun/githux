@@ -7,6 +7,7 @@
 | 需要了解 | 文档 |
 | --- | --- |
 | 产品范围、UI 与未定选择 | [产品约定](product.md) |
+| 正式深色 Geek Neutral palette、安装与继承边界 | [正式深色主题](theme.md) |
 | 首版开发顺序、依赖与验收讨论稿 | [开发路线图](roadmap.md) |
 | 模块职责、状态归属与实现提案 | [架构方案](architecture.md) |
 | 统一滚动条外观、几何、拖动、淡入淡出与后续接入 | [统一滚动](scrolling.md) |
@@ -35,6 +36,7 @@
 本节区分“已合并组件/适配器”“正式 Shell 接线”和“原生验收”；实际 PR/CI/review 状态以 GitHub 记录为准，不由本地文档推断。截止 main `abae289`（2026-11-06，含 #68 应用缓存组装、#72 Home 缓存消费、#69 Profile 缓存消费与全局页面挂载）。
 
 - **正式 Shell 已接线**：Classic PAT 账户控制器、SQLite 账户目录恢复、真实账户与 `/user/repos` 侧栏/本地 palette、每账户独立内存 workspace、过渡 Settings › Accounts、Notifications 收件箱、全局 Issues/PR 列表，以及 Home/三类 Feed、Profile Overview 与统一 Repository/Reader 页面。仓库 Star/Unstar 是已接线的真实写操作，Fork 仍只有禁用入口。契约见[账户目录](account-persistence.md)、[账户接入](account-ui-preview.md)、[正式页面接入](shell-page-integration.md)、[Notifications](notifications.md)、[全局 Issues/PR](global-work-items.md)与[仓库 Star](repository-star.md)。
+- **正式深色主题已切换为 Geek Neutral**：启动首帧与侧栏浅→深往返使用同一套负责人选定 palette，浅色仍为 Ely；实验候选切换器与持久化未进入产品。契约与边界见[正式深色主题](theme.md)，原生观感待负责人验收。
 - **应用级缓存已组装、页面消费按任务逐个交付**：正式启动在 `app::accounts::runtime` 打开唯一 `CacheStore` 并以 `AccountService::open_with_cache` 注入；Home/Feed（#72）与 Profile（#69）已消费页面缓存，仓库页面（本批 `repository-offline`）消费仓库/页面/README 图片缓存。业务缓存存储核心（[cache-core.md](cache-core.md)）、账户生命周期绑定（[cache-account-lifecycle.md](cache-account-lifecycle.md)）与各适配器（[repository-cache.md](repository-cache.md)、[page-cache.md](page-cache.md)、[avatar-cache.md](avatar-cache.md)、[reader-images.md](reader-images.md)）已合并。缓存打开失败或账户未取得绑定时，页面保持原有在线读取路径。
 - **仍待独立交付**：最终 Settings 设计与其分类页（当前仍是过渡 Accounts 入口，正式 Settings 组件虽已实现但未挂载）。真实 Windows 原生窗口、真实 PAT 与整体 dogfooding 验收仍有明确未覆盖项：合并与离线组合测试不等于所有原生交互已验收。
 - 账户元数据、活动选择与凭据引用保存于 SQLite，PAT 在 Windows Credential Manager。缓存政策、参数和接线状态以[缓存策略](cache-strategy.md)为准；已接线不代表 `CacheStore` 容量参数、验证间隔等仍属建议的数值已定稿。
