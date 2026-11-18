@@ -114,7 +114,15 @@ Codex 对 `f9bf491` 提出 [P2：摘要失败后取消的 TOP 分组永久 Loadi
 
 两种配置均执行 `prepare-windows-runtime.ps1 -Destination target/<profile>` 并最终复核成功，各有 27 个经过固定包校验的 Runtime/PRI/许可证/manifest 文件，包含 `DeploymentAgent.exe` 与 `RestartAgent.exe`。PE 校验确认两个 `githux.exe` 都是 x64 Windows GUI 子系统；debug 为 128,370,176 bytes，release 为 99,632,640 bytes。产物及文件摘要保存在本任务忽略的验证记录中，不上传二进制或原始日志。可直接从工作树运行 `target/debug/githux.exe` 或 `target/release/githux.exe`，无需再等待一次优化编译；保留 exe 同目录的运行时文件。
 
-本轮没有修改 Cargo.lock、依赖、工具链、运行时脚本或仓库刷新实现；源代码变化来自按要求同步的 #93。构建和暂存成功不代替负责人对真实缓存刷新连续性的 Windows 视觉验收，PR #89 继续保持 `pending`，不合并。新提交仍单独等待最新 head 的 CI/Codex。
+构建复核阶段没有修改 Cargo.lock、依赖、工具链、运行时脚本或仓库刷新实现；该阶段源代码变化来自按要求同步的 #93。构建和暂存成功不代替负责人对真实缓存刷新连续性的 Windows 视觉验收，PR #89 继续保持 `pending`，不合并。新提交仍单独等待最新 head 的 CI/Codex。
+
+### 本轮审查：切分支中断 Refresh 的分组后继
+
+`ce52766` 的审查提出 [P2](https://github.com/nocpiun/githux/pull/89#discussion_r4611509374)：Refresh 已取消分组读取，用户在摘要完成前切分支会取消摘要并推进 branch request，摘要回复被拒绝，未显示的分组没有任何后继。两条真实传输门闩回归及一条迟到缓存预读 MISS 的发布边界回归在修复前全部失败（`82ce3b82-5f5c-4f76-8d48-f5cae310a05e`，0 通过/3 失败；槽等待 204.789s / 编译执行 94.346s，测试 0.63s）。该意见成立且可直接修复，无待裁决。
+
+分支导航现在清除已取消摘要/枚举的加载标记，并只结算无当前工作负责的 TOP Loading。中断原因保留到下一次仓库刷新，覆盖本地缓存预读晚于导航完成才返回 MISS 的时序；实际历史值和在途新请求继续保持，局部 Retry 仍使用当前仓库绑定。补充用例验证分支已成功切换、兄弟值与 overview 实体保留、分组 Retry 恢复且不重建新分支 Reader。此修复仅涉及仓库状态/回归和主题文档，不改并行组件的样式。
+
+修复后仓库整组 127 项通过（`13cf50ae-23f8-4323-b0ad-c6ecb8cba4a7`，等待 3.703s / 编译执行 152.326s，测试 8.04s）；release all-targets check 通过（`68d04a4d-f00c-408f-a13c-b412335638d0`，97.149s / 114.296s）；严格 all-target clippy 通过（`59cf1f94-878b-4f48-a9ff-ac7b45e8a400`，199.068s / 54.882s）；debug/release 构建通过（`9a7c7d30-d51e-449d-867c-85f112cfa449`，123.949s / 58.521s；`49c717a3-4ba0-4715-b4eb-4bee5e760b1d`，162.911s / 224.001s）；两套 Runtime 复核通过，fmt check `b7eff223-3439-4621-8ad9-33395a8d21b5` 通过。重建后的 debug/release exe 均为 x64 GUI，各有 27 个 Runtime 文件。
 
 ## 可复用教训
 

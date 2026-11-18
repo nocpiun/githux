@@ -608,6 +608,7 @@ fn canceled_overview_has_a_terminal_state(
     cx: &mut TestAppContext,
     path: &str,
     section: OverviewSection,
+    branch_switch: bool,
 ) {
     let fixture = CachedFixture::new(Scene::Normal);
     fixture.login(1);
@@ -631,13 +632,26 @@ fn canceled_overview_has_a_terminal_state(
         _ => unreachable!(),
     });
     let reader = page.read_with(cx, |page, _| page.reader().unwrap().entity_id());
-    *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
-    fixture
-        .transport
-        .failed_status
-        .store(404, std::sync::atomic::Ordering::SeqCst);
+    if branch_switch {
+        fixture.transport.hold(true);
+    } else {
+        *fixture.transport.failed_path.lock().unwrap() = Some("/repos/octo/ledger".into());
+        fixture
+            .transport
+            .failed_status
+            .store(404, std::sync::atomic::Ordering::SeqCst);
+    }
     page.update(cx, |page, cx| page.refresh_repository(cx));
-    settle(&page, cx, |page| page.error().is_some());
+    if branch_switch {
+        page.update(cx, |page, cx| page.select_branch("feature/docs-polish", cx));
+        fixture.transport.release_all();
+        settle(&page, cx, |page| {
+            page.selected_branch() == Some("feature/docs-polish")
+                && page.reader_status() == &ReaderStatus::Showing
+        });
+    } else {
+        settle(&page, cx, |page| page.error().is_some());
+    }
     overview.read_with(cx, |view, _| match section {
         OverviewSection::Releases => {
             assert!(
@@ -659,10 +673,27 @@ fn canceled_overview_has_a_terminal_state(
         }
         _ => unreachable!(),
     });
+    let current_reader = page.read_with(cx, |page, _| page.reader().unwrap().entity_id());
     assert_eq!(
-        page.read_with(cx, |page, _| page.reader().unwrap().entity_id()),
-        reader
+        page.read_with(cx, |page, _| page.overview().unwrap().entity_id()),
+        overview.entity_id()
     );
+    if branch_switch {
+        assert!(reader_text(&page, cx).contains("docs polish"));
+        page.read_with(cx, |page, _| {
+            assert!(
+                !page.branches_loading,
+                "canceled enumeration has no reply to end its loading gate"
+            );
+            assert!(!page.snapshot_preliminary);
+            assert!(
+                page.error().is_none(),
+                "a branch interruption is a section-local outcome"
+            );
+        });
+    } else {
+        assert_eq!(current_reader, reader);
+    }
     if section == OverviewSection::Releases {
         assert!(cx.debug_bounds("overview-retry-releases").is_some());
     }
@@ -684,7 +715,7 @@ fn canceled_overview_has_a_terminal_state(
     });
     assert_eq!(
         page.read_with(cx, |page, _| page.reader().unwrap().entity_id()),
-        reader
+        current_reader
     );
 }
 
@@ -712,12 +743,32 @@ fn wait_overview(
 
 #[gpui::test]
 fn continuity_canceled_releases_settle_when_summary_refresh_fails(cx: &mut TestAppContext) {
-    canceled_overview_has_a_terminal_state(cx, "/releases", OverviewSection::Releases);
+    canceled_overview_has_a_terminal_state(cx, "/releases", OverviewSection::Releases, false);
 }
 
 #[gpui::test]
 fn continuity_canceled_contributors_settle_when_summary_refresh_fails(cx: &mut TestAppContext) {
-    canceled_overview_has_a_terminal_state(cx, "/contributors", OverviewSection::Contributors);
+    canceled_overview_has_a_terminal_state(
+        cx,
+        "/contributors",
+        OverviewSection::Contributors,
+        false,
+    );
+}
+
+#[gpui::test]
+fn continuity_branch_switch_settles_canceled_releases(cx: &mut TestAppContext) {
+    canceled_overview_has_a_terminal_state(cx, "/releases", OverviewSection::Releases, true);
+}
+
+#[gpui::test]
+fn continuity_branch_switch_settles_canceled_contributors(cx: &mut TestAppContext) {
+    canceled_overview_has_a_terminal_state(
+        cx,
+        "/contributors",
+        OverviewSection::Contributors,
+        true,
+    );
 }
 
 #[gpui::test]

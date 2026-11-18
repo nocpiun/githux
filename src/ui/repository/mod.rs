@@ -1487,6 +1487,9 @@ impl RepositoryPage {
         };
         self.cancel_reader_interactions(cx);
         self.stop_work();
+        self.branches_loading = false;
+        self.snapshot_preliminary = false;
+        self.interrupt_overview_refresh(cx);
         self.work = Some(Work::new());
         self.pending_content = None;
         self.selection_request = self.selection_request.wrapping_add(1);

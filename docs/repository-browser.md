@@ -160,6 +160,7 @@ Languages 底条仍贴在页面根最后一个 `flex_none` 子元素的位置：
 - 该消息带 `preliminary` 标记，只在页面仍为空（`details.is_none()`）时应用；摘要/分支/revision 保留 `Snapshot` provenance（既有 `Cached` 胶囊与 `Refresh`），固定对象沿用既有缓存语义。extras 以同一次快照读取，缓存未命中的 section 保持 Loading 而非报“未缓存”。
 - 在线链在同一 generation 内继续：网络摘要证明可达后分支列表改用在线模式；若屏上 revision 仍是快照，则对最新 `default_branch`/保存意图重新执行 `branch_choice`——仍是同一分支时以原 `branch_request` 身份在线重解析该 ref，默认分支已迁移时才切换。**同一 commit 时保留已加载的 tree/README/reader（含滚动与选区）**。同一账户、数字仓库与 ref 解析到不同 commit 时，`refresh.rs` 先在后台准备新 commit 的根树、已展开目录、README 定位和当前文档，再由单个 `Body::Replacement` 一次发布；准备期间继续显示旧 fixed commit 和对应历史来源，失败保留仍有效的旧快照并显示紧凑刷新错误。新列表中无法解析的选中路径到达诚实的不可用终态，不静默切回 README。切换 ref（含默认分支迁移）、账户或数字仓库身份仍先清旧内容。
 - 刷新取消尚未显示的正文、未完成目录或 TOP 分组后，上游失败会把没有当前请求负责的加载态收敛为局部可 Retry 终态；已显示的值和刷新后新发起的读取保留原状态。目录结算只处理固定快照内已知且尚缺数据的展开路径；缓存预读晚于摘要失败结束时，真实历史值仍可显示，MISS 则不再等待不存在的网络后继。旧成功/失败回复仍由页面、分组和选择请求代次拒绝，局部重试使用保留的 fixed snapshot/仓库绑定。
+- 刷新期间切分支会取消摘要/枚举后继，并清理它们的加载标记；先前因 Refresh 取消、没有当前请求负责的 TOP Loading 转为局部可 Retry 终态，已有值与真实在途的分组读取保持不变。缓存预读在切分支后才以 MISS 结束时也按该中断原因结算；下一次仓库刷新会清除旧中断原因。
 - Reader 动作在最终发布给宿主之前复核当前上下文与 displayed 授权票据；仓库授权失效但账户 epoch 未变时，也不等待下一帧才拒绝旧动作。
 - 重新确认同一 commit 后，目录与正文的失败状态无论来自缓存还是在线读取，都允许这一轮刷新重试；成功显示的树/reader 保留。摘要尚未完成时不把失败终态改成无人负责的 Loading；摘要失败会释放分支 loading 标记，独立 Retry branches 仍可工作。
 - 迟到的缓存消息不会覆盖在线结果（`preliminary && details.is_some()` 直接丢弃）。

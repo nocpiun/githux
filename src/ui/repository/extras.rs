@@ -63,6 +63,8 @@ pub(super) struct Extras {
     binding: Option<OverviewBinding>,
     requests: [u64; 4],
     work: [Option<Work>; 4],
+    /// Retained until the next repository refresh, including cache previews that finish late.
+    interruption: Option<PageError>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     pub counts: Option<crate::domain::repository_counts::RepositoryCounts>,
     pub counts_historical: bool,
@@ -76,6 +78,7 @@ pub(super) struct Extras {
 impl Extras {
     /// Cancel one read pass while retaining the same authorized displayed overview and binding.
     pub fn cancel_reads(&mut self) {
+        self.interruption = None;
         for (index, work) in self.work.iter_mut().enumerate() {
             if let Some(work) = work.take() {
                 work.source.cancel();
@@ -435,6 +438,12 @@ impl RepositoryPage {
             });
         }
     }
+    pub(super) fn interrupt_overview_refresh(&mut self, cx: &mut Context<Self>) {
+        let error = PageError::new("Refresh was interrupted by a branch change.", None, true);
+        self.extras.interruption = Some(error.clone());
+        self.settle_overview_after_refresh_error(&error, cx);
+    }
+
     pub(super) fn settle_overview_after_refresh_error(
         &mut self,
         error: &PageError,
@@ -555,9 +564,14 @@ impl RepositoryPage {
             // The language strip is composed by the page from this same state.
             cx.notify();
         }
-        // A cache-only miss may finish after the summary failure. It no longer has a network
-        // successor, so settle that unanswered preview once its actual read has completed.
-        if completed && let Some(error) = self.error.clone() {
+        // A cache-only miss may finish after its summary successor fails or is canceled. Settle
+        // that unanswered preview once its actual read has completed.
+        if completed
+            && let Some(error) = self
+                .error
+                .clone()
+                .or_else(|| self.extras.interruption.clone())
+        {
             self.settle_overview_after_refresh_error(&error, cx);
         }
     }
@@ -1130,6 +1144,50 @@ mod tests {
     use super::*;
     use crate::ui::repository::tests::{frames, normal};
     use gpui::TestAppContext;
+    #[gpui::test]
+    fn continuity_branch_switch_settles_a_late_cache_preview_miss(cx: &mut TestAppContext) {
+        let (_fixture, page, cx) = normal(cx);
+        page.update(cx, |page, cx| {
+            let binding = page.extras.binding.clone().unwrap();
+            let context = page.context.clone().unwrap();
+            // Isolate a cache preview completion from the speed of real endpoint workers.
+            if let Some(work) = page.extras.work[0].take() {
+                work.source.cancel();
+            }
+            page.extras.requests[0] += 1;
+            let request = page.extras.requests[0];
+            page.extras.inbox.lock().unwrap().clear();
+            page.extras.work[0] = Some(Work::new());
+            let view = page.extras.view.clone().unwrap();
+            view.update(cx, |view, cx| {
+                view.apply(
+                    &binding,
+                    OverviewUpdate::Releases(SectionState::Loading),
+                    cx,
+                );
+            });
+            page.begin_branch("feature/docs-polish".into(), cx);
+            assert!(
+                view.read(cx).releases().is_loading(),
+                "the cache read still owns Loading until its reply"
+            );
+            page.extras.inbox.lock().unwrap().push_back(Reply {
+                binding,
+                context,
+                authorization: None,
+                endpoint: Endpoint::Releases,
+                request,
+                update: OverviewUpdate::Releases(SectionState::Loading),
+            });
+            page.drain_overview(cx);
+            assert!(
+                view.read(cx).releases().error().is_some(),
+                "a preview MISS after navigation cannot wait for the canceled summary successor"
+            );
+        });
+        frames(cx);
+    }
+
     #[gpui::test]
     fn stale_count_error_does_not_replace_newer_value_or_new_authorization(
         cx: &mut TestAppContext,
