@@ -20,6 +20,16 @@ pub fn install(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla) 
     }
 }
 
+/// Applies the current theme's caption palette and preferred title-bar theme. The adapter
+/// installation only ever colors the caption once at startup; a live light/dark toggle must
+/// repaint the native minimize/maximize/close area too, or it would stay in the startup palette
+/// while the GPUI content switches. Which adapter owns the window decides which path runs; both
+/// are no-ops when neither is installed.
+pub fn set_theme(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla, dark: bool) {
+    tall::set_theme(window, background, foreground, dark);
+    legacy::set_theme(window, background, foreground, dark);
+}
+
 pub fn area(window: &Window) -> Option<CaptionArea> {
     tall::area(window).or_else(|| legacy::area(window))
 }
