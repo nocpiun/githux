@@ -164,6 +164,25 @@ Codex 对 `f9bf491` 提出 [P2：摘要失败后取消的 TOP 分组永久 Loadi
 
 最终覆盖 11 个新正式页面场景。两套 `prepare-windows-runtime.ps1` 与产物复核成功：debug exe 128,430,080 bytes、release exe 99,716,608 bytes，均为 x64 Windows GUI；每个目录均有 27 个 Runtime/PRI/许可证/manifest 文件。最后读取 main 为 `47ae188e011faf7afab659db6dd98a33dbfa5091`，与组合基线一致。后续仅补本段日志，不改变验证代码；CI/Codex 仍绑定最终推送 head 单独等待。未记录真实 PAT 或原生 Windows 输入/视觉验收成功，PR #89 继续 `pending`、不合并，交负责人使用当前 release 正式程序复验。
 
+### 等待期间的 main #94 组合
+
+`f1abf0b` 收到 [Codex clean 收据](https://github.com/nocpiun/githux/pull/89#issuecomment-6979248666)，但 CI 未齐时 main 从 `47ae188` 前进到 `4157641366faab497f0005a8ccbacbd6a031485a`（#94，Reader 排版/callout/链接指针）。等待器 `620f2044-1c09-4111-9528-14c4dfb2c21a` 正确以 `base_changed` / exit 13 交回，未将旧组合当作完成。已无冲突合入；缓存提示实现保持不变，追加 Reader＋Repository 组合、全目标配置与两套正式产物重建。最终推送必须重新核验对应 head 的 CI/Codex，仍保留 pending。
+
+组合首轮 `18119f85-d43d-41a7-9d6e-4f7fe53f7d58`：Reader 360 通过、1 项既有忽略（9.35s）；Repository 1063 通过、1 失败、3 项既有忽略（18.45s）。失败是 #92 的 `cached_complete_empty_releases_never_paint_the_group` 把 list 和 latest 的独立缓存读取当成同时完成，列表一发布就断言 latest 也已发布。测试现逐帧保留“完整空列表一出现就省略整个 Releases”及其几何断言，同时明确等待 latest 后才校验它；在线预热同样等待自己的 latest 值。仅修测试完成条件，生产代码没有延时或新等待。Reader 输入未变，沿用其通过收据；对发生变化的 Repository 测试及最终配置/产物重新验证。
+
+#94 最终组合全部通过；时间为共享槽等待 / 实际执行（秒）：
+
+| 检查 | run ID | 等待 / 执行 |
+| --- | --- | --- |
+| Repository 1064 通过、3 项既有忽略；测试 18.51s | `faea48d3-5d9b-4048-8272-301cebbf6450` | 302.394 / 55.789 |
+| release all-targets check | `b5eee244-0baa-425d-b430-406c0f0a6902` | 0.160 / 126.213 |
+| strict all-target clippy | `ad069037-0aab-450d-bf08-142290389fef` | 125.294 / 123.720 |
+| debug bin build | `ad459fa4-cadd-44f4-af43-e5d480691c1a` | 124.206 / 52.842 |
+| release bin build | `67516b7d-a6a6-4fc8-b88c-92b326578e74` | 2078.408 / 201.631 |
+| fmt check | `2d89a0b2-6e86-44f3-8696-e66dfa7ef04b` | 0 / 24.330 |
+
+两套 Runtime 暂存通过，各 27 个文件；末次 PE 复核为 x64 Windows GUI，debug 128,490,496 bytes、release 99,795,968 bytes。release 的长耗时主要是共享槽排队，不能描述成持续链接；最终进程与 runner 收据已核实。末次 main 仍为 `4157641`。此后仅补日志，当前 Windows release 正式程序包含缓存提示返工及已合入 #94 的 Reader；等待最终 head 的 CI/Codex 后交付复验，保留 pending，不合并。
+
 
 ## 可复用教训
 

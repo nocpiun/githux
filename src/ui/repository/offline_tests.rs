@@ -1757,6 +1757,9 @@ fn cached_complete_empty_releases_never_paint_the_group(cx: &mut TestAppContext)
                 page.overview().is_some_and(|view| {
                     let view = view.read(cx);
                     !view.releases().is_loading()
+                        && view.latest_release().is_some_and(|latest| {
+                            latest.value().is_some_and(|value| value.release.is_none())
+                        })
                         && view
                             .releases()
                             .value()
@@ -1839,7 +1842,17 @@ fn cached_complete_empty_releases_never_paint_the_group(cx: &mut TestAppContext)
                 (people.origin.x - strip.origin.x).abs() < gpui::px(0.5),
                 "contributors take the leading edge while releases is omitted"
             );
-            break;
+            // List and latest are independent reads. Keep checking the first-frame omission
+            // while the other cache read finishes, rather than assuming list publication joins it.
+            if page.read_with(cx, |page, cx| {
+                page.overview()
+                    .unwrap()
+                    .read(cx)
+                    .latest_release()
+                    .is_some_and(|latest| latest.value().is_some())
+            }) {
+                break;
+            }
         }
         std::thread::sleep(Duration::from_millis(3));
     }
