@@ -15,10 +15,11 @@ mod html;
 #[cfg(test)]
 mod html_tests;
 mod inline;
+mod rhythm;
 
 pub use document::MarkdownView;
 
 #[cfg(test)]
-pub use ast::{Block, parse};
+pub use ast::{AlertKind, Block, parse};
 #[cfg(test)]
-pub use inline::{Snapshot, snapshot};
+pub use inline::{Snapshot, snapshot, snapshot_texts};

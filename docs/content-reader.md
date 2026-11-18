@@ -82,10 +82,34 @@ Markdown 阅读使用 `src/ui/reader/markdown/` 内由 Githux 单独维护的组
 - 文档使用真实 `gpui::ListState` 虚拟化块；只有可见块被构建。公开 `list_state()` 是真实滚动源，当前由 reader 的 3px 圆角半透明滚动条读取，hover/拖动使用 140ms 双向 `Fade`；无溢出时不构建条。
 - inline code 使用主题 `mono_family`（Google Sans Code）、3.5px 左右与 1px 上下真实 padding、4px 圆角；padding 参与换行/绘制/命中的同一排版坐标，跨中文/emoji/长代码的选择复制直接读原文。
 - fenced code 语言标签为真实元素并在代码块内上移；代码正文位置保留。
-- 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding、边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
+- 表格排版与正文同源：表头行与表体共用正文的 `body` 字号（`TextSize::Base` 换算）和 `body * 1.6` 行高，在表格公共父容器上显式设置，单元格的 shaped 文本、选区、链接与换行高度都按这一尺寸测量。顶层表格、引用/列表/脚注内嵌套表格，以及长表按 `LAZY_CHILDREN` 分块后重复绘制的表头都走同一层，所以字号不随父容器或分块变化。表头仍保留 `MEDIUM` 字重与 `fg_muted` 颜色层级，单元格 padding 由共享排版策略给出（约 6px 纵 / 13px 横 @16px 正文），边框、列对齐与 `flex_1` 宽度策略不变；单元格内的 inline code 仍用代码字体，但字号与该单元格正文一致。
 - 单元格图片（Markdown `![alt](url)` 与 HTML `<img>`）不再退化为 alt 文本：`ast::CellImage` 记录图片及其 alt 在 cell 文本中的字节范围，`cell_parts` 给出按阅读顺序的「文本段 / 图片」序列。`DocText` 与渲染器遍历同一份序列，每个 piece 一个单元，复制文本仍是原 cell 文本；同一 cell 内的文字、链接和图片保持先后顺序。图片按 cell 内容宽等比缩放，行高由图片的逻辑尺寸决定，落地后重测所在顶层块；非 Ready 的 cell 图片（pending/失败/拒绝/不可用/已释放）一律不占行、不显示 alt 或占位。
 - 图片按注入的 provider 显示（未请求/排队/加载中/失败/拒绝/不可用/已释放全部静默，只绘制 Ready 的真实像素），HTML 规范化后走同一 `Block`/`Inline`（其中 `<img>` 同样交给图片板），链接经版本化 `ReaderAction` 回调且危险 scheme 拒绝；异步旧结果不覆盖新文档，图片完成同样只发布到当前文档代次，2 MiB 边界保持在内容层。图片成功时按解码原生尺寸绘制，不拉伸到栏宽、不叠加占位背景；`<img width="…" height="…">` 的像素提示会被保留到渲染层，仅能缩小（不超过原生尺寸），超宽图按比例缩小到可用栏宽。
 - Source gutter 仍为原 0.75rem 加 6px。
+
+## Markdown 排版与 Callout（2026-11-15）
+
+排版策略集中在 `src/ui/reader/markdown/rhythm.rs`（`Rhythm` 与 `alert_style`），顶层块列表与嵌套容器共用同一份数值，不再各自 `py_1`/`gap_2` 叠加。数值取自 GitHub Primer 的 [markdown-body](https://raw.githubusercontent.com/primer/css/main/src/markdown/markdown-body.scss)、[headings](https://raw.githubusercontent.com/primer/css/main/src/markdown/headings.scss) 与 [lists](https://raw.githubusercontent.com/primer/css/main/src/markdown/lists.scss)，按正文 `TextSize::Base`（默认 13px）换算为倍数，因此随主题字体缩放一起变化；Noto Sans SC / Google Sans Code 与字号来源不变。
+
+| 元素 | 值（正文 em） | 说明 |
+| --- | --- | --- |
+| 正文行高 | 1.6 | 保留 CJK 可读性（Primer 为 1.5） |
+| 相邻块间距 | 0.85 | 两侧各 0.425，真实间距就是一个策略值，不叠加 |
+| 标题上方 | 1.6 | 首块不加；`h1…h6` 字号 2 / 1.5 / 1.25 / 1 / 0.875 / 0.85，字重 600，行高 1.25 |
+| `h1` / `h2` | 0.3em 下留白 + 1px 底边 | `h6` 用 `fg_muted`；嵌套容器内的标题沿用同一字号但不画底边 |
+| `li + li` | 0.25 | tight 列表；loose 列表改用 0.85 的段落间距 |
+| 嵌套列表 | 同一 tight 间距 | 由 marker 列自然缩进 |
+| 引用 | 内缩 1，条宽 0.25，纵向 0.15 | 普通引用保持中性：`fg_muted` 文字 + 中性条，无底色 |
+| `hr` | 上下各 1.5 | 1px `border` 颜色 |
+| fenced code | 内边距 0.9 / 0.5 | 语言标签位置与代码字号不变 |
+| Callout | 纵向 0.5、横向 1、条宽 0.25 | GitHub alert 的 padding 与 accent bar |
+
+- **Callout 色调**：Note 蓝（`colors.info`）、Tip 绿（`colors.success`）、Important 紫（调色板 violet chart hue，调色板没有紫色语义 token）、Warning 琥珀（`colors.warning`）、Caution 红（`colors.danger`）；填充用对应 `*_subtle`（Important 用低透明度 violet）。标题色经 `readable()` 处理，保证在 light / dark / high-contrast 页面上正文对比度 ≥ 4.5:1（`rhythm` 单元测试覆盖），`h6`/普通引用等中性层级不受影响。每类带固定 Lucide 图标（info / lightbulb / message-square-warning / triangle-alert / octagon-alert）与标题行，标题行是呈现元素，不进入 `DocText`，因此不改变复制文本与选区偏移。顶层引用与引用/列表内嵌套引用走同一个 `quote_frame`。
+- **tight / loose 列表**：`Block::List` 新增 `tight`。pulldown-cmark 对 tight 项不发出 `Tag::Paragraph`，解析器据此判断：列表项内出现显式段落即 loose。HTML `<li>` 列表按 tight 处理；虚拟化分块保留该标记。
+- **链接指针光标**：只有真实可导航的链接文字才显示指针，段落其余部分、空白、非链接文字保持默认。`LocalLayout` 按「链接片段 × 行」记录真实字形矩形（`link_boxes`），换行链接每行一段；`Paragraph` 的 prepaint 为**每个矩形**各放一个 Normal hitbox，paint 时对每个 hitbox 声明 `set_cursor_style(PointingHand)`。样式由平台按「指针实际落在哪个 hitbox」选取，不依赖 paint 时刻的鼠标位置，所以从一个段落的链接直接移到另一个段落的链接（中间没有普通文字事件、也没有重绘）同样正确。选择拖动期间 `ParagraphView` 不注册这些 hitbox（`link_cursor = false`），活动拖动本身也会抑制逐元素光标，因此拖选从不显示指针。表格内文字链接、引用/列表内链接、锚点（`#fragment`）同样覆盖；`links::resolve` 判定为 `Refused` 的地址（如 `javascript:`）保留链接样式但没有指针、点击仍按既有安全策略拒绝。表格 cell 图片按既有行为作为链接目标，光标条件为「可导航且不在拖动中」。`MarkdownView` 仍按同样的字形矩形维护 `pointer_over_link` 供测试与诊断，但不据此决定光标。
+- **保持不变**：字体族与字号来源、图片管线与显示规则、表格对齐/边框、选择与复制模型、链接安全策略；普通引用仍是中性而不是 callout。
+
+验证边界：`cargo test` 的 GPUI 测试平台不暴露平台光标状态，因此自动化覆盖的是「指针落在哪个矩形」「hover 状态」「拖动时不再请求」这些决策与几何（`ui::reader::typography_tests`）；原生光标外观、真实窗口中的间距观感与 callout 颜色由负责人在 Windows 窗口验收。
 
 ## HTML 子集（2026-10-29）
 
@@ -114,7 +138,7 @@ main 的 PR #29 已提供 `src/ui/scroll/`：统一 3 logical px、两端圆、�
 
 ## 未覆盖与待验收
 
-- **真实 Windows 窗口**：鼠标拖选、`Ctrl+C`、Shift+滚轮横向滚动、中文 IME 组合态在源码视图中的行为、emoji 与中文字形回退、多 DPI。测试平台不经过 Windows 原生输入分发，不能替代。
+- **真实 Windows 窗口**：鼠标拖选、`Ctrl+C`、Shift+滚轮横向滚动、中文 IME 组合态在源码视图中的行为、emoji 与中文字形回退、多 DPI。测试平台不经过 Windows 原生输入分发，不能替代；Markdown 的链接指针光标外观、callout 配色与 README 节奏同样只由负责人做原生视觉验收（自动化只断言矩形与 hover 决策）。
 - **锚点滚动**：`#fragment` 只报告目标，不滚动到标题。
 - **图片**：仓库模式不允许本地文件/data 图片，图片 URL 由既有图片管线（`links::resolve` → `ImageTarget` → 宿主 provider）判定；HTML 的 `img`/`a` 与 Markdown 共用同一安全边界，不新增读取路径。
 - **Markdown 等价性**：Ely 使用 GFM + 数学扩展；本轮不声称与 github.com 逐字节等价（例如 HTML 的 CSS 布局、`colspan`/`rowspan`、脚注样式、绝对 URL 重写）。无法支持的语法按内容保留的近似排版显示，不在本模块另造。

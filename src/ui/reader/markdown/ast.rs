@@ -205,6 +205,9 @@ pub enum Block {
         start: Option<u64>,
         /// Each item, and whether it is a checked task.
         items: Vec<(Option<bool>, Vec<Block>)>,
+        /// A tight list keeps its items close together; a loose list (blank
+        /// lines between items) spaces them like paragraphs, as GitHub does.
+        tight: bool,
     },
     Table {
         aligns: Vec<Align>,
@@ -523,6 +526,9 @@ enum Container {
         /// The task marker seen in this item; nested lists keep their own
         /// container on the stack, so a child cannot clear the parent's.
         task: Option<bool>,
+        /// A paragraph started explicitly inside an item means a loose list;
+        /// tight items deliver their text without a paragraph tag.
+        loose: bool,
     },
     Table {
         aligns: Vec<Align>,
@@ -790,7 +796,12 @@ pub fn parse(markdown: &str) -> Document {
             _ => None,
         };
         match event {
-            Event::Start(Tag::Paragraph) => inline = Some((None, Building::default())),
+            Event::Start(Tag::Paragraph) => {
+                if let Some(Container::List { loose, .. }) = stack.last_mut() {
+                    *loose = true;
+                }
+                inline = Some((None, Building::default()))
+            }
             Event::End(TagEnd::Paragraph) => {
                 finish_inline(&mut inline, &mut stack, &mut dropped, &mut dropped_raw)
             }
@@ -939,6 +950,7 @@ pub fn parse(markdown: &str) -> Document {
                     items: Vec::new(),
                     current: Vec::new(),
                     task: None,
+                    loose: false,
                 });
             }
             Event::Start(Tag::Item) => {
@@ -958,8 +970,21 @@ pub fn parse(markdown: &str) -> Document {
             }
             Event::End(TagEnd::List(_)) => {
                 finish_inline(&mut inline, &mut stack, &mut dropped, &mut dropped_raw);
-                if let Some(Container::List { start, items, .. }) = stack.pop() {
-                    push_block(&mut stack, Block::List { start, items });
+                if let Some(Container::List {
+                    start,
+                    items,
+                    loose,
+                    ..
+                }) = stack.pop()
+                {
+                    push_block(
+                        &mut stack,
+                        Block::List {
+                            start,
+                            items,
+                            tight: !loose,
+                        },
+                    );
                 }
             }
             Event::Start(Tag::Table(aligns)) => {
@@ -1584,7 +1609,11 @@ fn push_html_list(element: &Element, out: &mut Vec<Block>) {
         items.push((None, body));
     }
     if !items.is_empty() {
-        out.push(Block::List { start, items });
+        out.push(Block::List {
+            start,
+            items,
+            tight: true,
+        });
     }
 }
 
@@ -1930,6 +1959,71 @@ fn normalize_cell_images(inline: &mut Inline) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Tag::Paragraph` inside an item is what makes a list loose; tight
+    /// items deliver their text without one, and HTML `<li>` lists have none.
+    #[test]
+    fn tight_and_loose_lists_are_distinguished() {
+        let tightness = |markdown: &str| {
+            parse(markdown)
+                .blocks
+                .into_iter()
+                .find_map(|block| match block {
+                    Block::List { tight, .. } => Some(tight),
+                    _ => None,
+                })
+                .expect("a list")
+        };
+        assert!(
+            tightness(
+                "- one
+- two
+"
+            ),
+            "tight items emit no paragraph"
+        );
+        assert!(
+            !tightness(
+                "- one
+
+- two
+"
+            ),
+            "a blank line between items makes the list loose"
+        );
+        assert!(
+            !tightness(
+                "- first
+
+  second paragraph
+"
+            ),
+            "a second paragraph inside an item makes the list loose"
+        );
+        assert!(
+            tightness("<ul><li>one</li><li>two</li></ul>"),
+            "HTML list items have no paragraph tag"
+        );
+        // A nested list keeps its own tightness, not the parent's.
+        let doc = parse(
+            "- parent
+  - child one
+  - child two
+",
+        );
+        let Block::List { tight, items, .. } = &doc.blocks[0] else {
+            panic!("a list");
+        };
+        assert!(*tight);
+        assert!(
+            items[0]
+                .1
+                .iter()
+                .any(|block| matches!(block, Block::List { tight: true, .. })),
+            "the nested list stays tight: {:?}",
+            items[0].1
+        );
+    }
 
     fn inline(text: &str) -> Inline {
         let doc = parse(text);
