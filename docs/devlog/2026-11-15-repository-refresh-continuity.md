@@ -124,6 +124,23 @@ Codex 对 `f9bf491` 提出 [P2：摘要失败后取消的 TOP 分组永久 Loadi
 
 修复后仓库整组 127 项通过（`13cf50ae-23f8-4323-b0ad-c6ecb8cba4a7`，等待 3.703s / 编译执行 152.326s，测试 8.04s）；release all-targets check 通过（`68d04a4d-f00c-408f-a13c-b412335638d0`，97.149s / 114.296s）；严格 all-target clippy 通过（`59cf1f94-878b-4f48-a9ff-ac7b45e8a400`，199.068s / 54.882s）；debug/release 构建通过（`9a7c7d30-d51e-449d-867c-85f112cfa449`，123.949s / 58.521s；`49c717a3-4ba0-4715-b4eb-4bee5e760b1d`，162.911s / 224.001s）；两套 Runtime 复核通过，fmt check `b7eff223-3439-4621-8ad9-33395a8d21b5` 通过。重建后的 debug/release exe 均为 x64 GUI，各有 27 个 Runtime 文件。
 
+### 最终基线组合：同步 main #95
+
+收尾 fetch 发现 `main` 新增 `78d59400112225a069332e1c6c2dfef4d79b5f3b`（#95，Home/Profile 测试稳定化），已合入为 `73fdda9f14a72a6545150364830aa4d4b5fcfb7f`。Profile 的旧夹具修复与 main 新版冲突，选择已合入 main 的完整测试实现；合并前确认 `#[cfg(test)] mod tests` 之前的生产代码前缀完全一致，Home 改动也只在 `#[cfg(test)]` 模块。最终 PR 对 Profile 不再有独立差异。仓库刷新源码与 127 项边界收据对应输入不变；补跑受影响的页面组合和全目标配置，并再次重建两套产物。
+
+以下全部成功；时间按共享槽等待 / 实际执行分列，单位秒：
+
+| 检查 | run ID | 等待 / 执行 |
+| --- | --- | --- |
+| fmt check | `0f83cb4e-7324-4c19-b0ad-c02cf2ff9431` | 0 / 21.380 |
+| Home/Profile 页面组合 66 项（测试 5.75s） | `4993377f-4cda-499d-9df8-c5c1e367cccc` | 339.254 / 128.628 |
+| release all-targets check | `10747d1d-50b0-4803-a63c-6c3bf9aefbb0` | 264.643 / 86.589 |
+| strict all-target clippy | `b78cf6d2-b3fc-438d-b996-a37ccb7175ad` | 911.689 / 44.806 |
+| debug bin build | `ccfa47a9-4c9e-4fba-91e1-d48c5f530a64` | 198.371 / 23.557 |
+| release bin build | `b76d177f-afc7-49e3-9e59-53cb0e1f662d` | 226.786 / 220.835 |
+
+两套 SDK 暂存与末次文件复核均通过，各 27 个文件。最终 `target/debug/githux.exe` 为 128,371,712 bytes，`target/release/githux.exe` 为 99,632,128 bytes；二者 PE 均为 x64、Windows GUI。末次 fetch 的 main 仍为 `78d5940`。以上验证代码组合之后仅补此日志，不改变生产或测试输入；最新文档提交仍须重新等待对应 head 的 CI/Codex。没有记录应用实际启动或负责人视觉验收成功，继续保持 `pending`，不合并 PR #89。
+
 ## 可复用教训
 
 缓存先行的测试需要检查“在线 revision 已返回，但新树/文档未准备好”的中间绘制状态。仅断言网络放行前有缓存、全部完成后有最新内容，会漏掉两个断言之间的清空/重建。保留显示资源与更新读取代次是两个操作；保留旧画面时也必须保留其 carried authorization，而不是用新请求的令牌替换它。
