@@ -89,6 +89,33 @@ Codex 对 `f9bf491` 提出 [P2：摘要失败后取消的 TOP 分组永久 Loadi
 
 交付前同步 `main` 的 `5a3eab3`（PR #90，仅工具/文档）：保留其 L028，将本任务条目编为 L029。333 个 Rust/Cargo 输入文件在同步前后的归一化 SHA-256 同为 `184505fd129e9ee5c4a82cc688339a236b5cf0be89c925738bc38597f0097c38`，因此沿用同内容的 124 项 Rust 边界与 lint/build/fmt 收据；同步后的派发组合测试 20 项通过（84.98s）。新的 CI 仍需验证当前 head 与该基线的实际组合，不沿用旧 CI。
 
+## 2026-11-18：负责人本地 release 构建反馈复核
+
+负责人反馈本 worktree 本地无法编译；协调者观察到其它任务的 release exe 已产出，而本任务没有 `target/release/githux.exe`。此前的 Debug 构建、Debug CI 与 GPUI 用例不作为 release 构建成功的证据。
+
+先在未修改的 `43d5eb1` 复核：fmt check 通过；`cargo build --locked --release --bin githux` 确实失败（runner `84a53be6-fd7e-44bf-8412-dd333e5b1663`，槽等待 0.193s / 执行 139.848s，exit 101、未超时），错误为依赖 `rustybuzz` 读取标准库 `core` 时 `only metadata stub found for rlib dependency core`，尚未编译到 `githux`。同一原始 HEAD 的独立 `cargo check --locked --release --all-targets` 通过（`d79d9828-f447-46b8-8b0b-2953e9a5e547`，等待 0.202s / 执行 467.826s），包含 examples 的 release 类型检查。诊断 wrapper 的第三个 Node 子进程曾在 Cargo 启动前异常退出；独立检查的 runner 收据才计入结果。
+
+按负责人要求执行 merge，同步到 `main` 的 `4e75ad8`（#93；当次 fetch 尚无 #94），保留本任务 L029。默认 GPG 程序无法执行，备用程序也不能连接现有 keyboxd；仅对本任务的本地提交使用单次 `commit.gpgsign=false`，没有修改全局配置或密钥库。随后在合并后的代码上继续完整 release 构建并记录编译命令。终端和直接调用均为 Rust 1.98.1 / x64 MSVC，同一 sysroot，未发现 Rust/Cargo 环境覆写；标准库独立 `.rmeta` 文件存在。依赖元数据错误没有在本次重编译中再次出现，仍不将其推断为已证实的应用源码缺陷或特定缓存损坏原因。
+
+合并后的完整 `cargo build --locked --release --bin githux -vv` 通过并产出 release exe（`9704a87d-0b46-461b-a997-28e0e4acfdd5`，等待 0.181s / 执行 989.191s，未超时）。本机这轮完整优化编译实际超过 600 秒缺省工具时限；负责人原次失败没有完整日志，不能据此断言同一原因。本轮 Cargo 工具调用显式使用 3600 秒预算，长命令在同项目的持续检查终端中完成。
+
+合并后的 release 全目标检查通过（`d8c0adb8-1ce8-438a-9707-bab06b3e80db`）。随后默认并发的全目标 clippy 在主程序测试目标发生编译器 OOM（`cfec6274-4d41-4379-9d6f-ffbc220f2863`，`memory allocation of 2097152 bytes failed`，没有 lint 诊断）。机器有 32 个逻辑核、约 32 GiB 物理内存，失败后可用提交内存约 5 GiB；共享 mutex 只串行 Cargo 命令，不限制一个 Cargo 内的多目标并发。剩余本地验证使用命令级 `--jobs 1` 控制峰值，不修改全局或项目默认配置。该 OOM 是独立的已确认失败，不据此倒推首次标准库元数据错误的原因。
+
+最终在合并后的同一应用源码上完成以下复核（只有本节日志为待提交改动；所有 Cargo 保留共享 mutex）：
+
+| 检查 | runner | 构建槽等待 / 实际执行 |
+| --- | --- | --- |
+| fmt check | `0c88ec35-9153-4a1e-bdc5-1acfcd8030d5` | 通过 |
+| release all-targets check（含 examples） | `d8c0adb8-1ce8-438a-9707-bab06b3e80db` | 通过 |
+| all-targets clippy，`-D warnings`，`--jobs 1` | `3baf4947-225e-496c-ab96-9055af561d25` | 1791.246s / 70.150s |
+| debug bin build，`--jobs 1` | `e1b80ffa-a485-4d71-9740-bb0c36cfcdec` | 23.355s / 52.390s |
+| release bin build，`--jobs 1` | `290d0718-5cff-4752-a865-a379d1cbfbc7` | 54.871s / 7.015s |
+| `--test repository continuity_`，`--jobs 1` | `f12de51b-720e-4237-af5c-dc0920b84923` | 305.458s / 70.635s；21 项全过，测试 2.98s |
+
+两种配置均执行 `prepare-windows-runtime.ps1 -Destination target/<profile>` 并最终复核成功，各有 27 个经过固定包校验的 Runtime/PRI/许可证/manifest 文件，包含 `DeploymentAgent.exe` 与 `RestartAgent.exe`。PE 校验确认两个 `githux.exe` 都是 x64 Windows GUI 子系统；debug 为 128,370,176 bytes，release 为 99,632,640 bytes。产物及文件摘要保存在本任务忽略的验证记录中，不上传二进制或原始日志。可直接从工作树运行 `target/debug/githux.exe` 或 `target/release/githux.exe`，无需再等待一次优化编译；保留 exe 同目录的运行时文件。
+
+本轮没有修改 Cargo.lock、依赖、工具链、运行时脚本或仓库刷新实现；源代码变化来自按要求同步的 #93。构建和暂存成功不代替负责人对真实缓存刷新连续性的 Windows 视觉验收，PR #89 继续保持 `pending`，不合并。新提交仍单独等待最新 head 的 CI/Codex。
+
 ## 可复用教训
 
 缓存先行的测试需要检查“在线 revision 已返回，但新树/文档未准备好”的中间绘制状态。仅断言网络放行前有缓存、全部完成后有最新内容，会漏掉两个断言之间的清空/重建。保留显示资源与更新读取代次是两个操作；保留旧画面时也必须保留其 carried authorization，而不是用新请求的令牌替换它。
