@@ -19,6 +19,10 @@ use super::*;
 /// `TextSize::Base` at 100% font scale.
 const BODY: f32 = 13.0;
 
+/// Budget for the dense link + inline-code paragraph. The sweep takes well
+/// under a second here; the links × pieces loop it replaced took about eight.
+const DENSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn frames(cx: &mut VisualTestContext) {
     for _ in 0..4 {
         cx.run_until_parked();
@@ -363,6 +367,45 @@ fn a_refused_scheme_is_styled_but_never_claims_the_pointer(cx: &mut TestAppConte
         reader.read_with(cx, |r, _| r.last_action().cloned()),
         Some(ReaderAction::Link(LinkTarget::Refused { .. }))
     ));
+}
+
+/// Link rectangles are paired with the shaped pieces in one sweep, so a
+/// paragraph with thousands of links and inline-code pieces cannot turn the
+/// measured layout into a links × pieces intersection loop.
+#[gpui::test]
+fn dense_links_and_code_pieces_layout_within_budget(cx: &mut TestAppContext) {
+    // Every link holds an inline-code span, so the piece count is about twice
+    // the link count; the cross product would be ~10^8 comparisons.
+    let source = "[`x`](guide.md) ".repeat(10_000);
+    let (_, cx) = open_markdown(
+        cx,
+        PreparedBody::Utf8 {
+            text: source,
+            has_bom: false,
+        },
+    );
+    let start = std::time::Instant::now();
+    cx.simulate_resize(gpui::size(px(420.0), px(500.0)));
+    frames(cx);
+    // Measured on this machine: ~0.4s with the sweep, ~8s with the previous
+    // links × pieces loop, so this catches the quadratic version while
+    // leaving room for a slower CI runner.
+    assert!(
+        start.elapsed() < DENSE_BUDGET,
+        "dense link+code paragraph layout took {:?}",
+        start.elapsed()
+    );
+    // The sweep still finds real link rectangles on the wrapped rows.
+    let known = cx.update(|_, cx| super::markdown::snapshot_texts(cx));
+    let dense = known
+        .iter()
+        .max_by_key(|text| text.len())
+        .expect("the dense paragraph was laid out");
+    assert!(
+        dense.len() > 10_000,
+        "the dense paragraph holds its whole text: {}",
+        dense.len()
+    );
 }
 
 #[gpui::test]

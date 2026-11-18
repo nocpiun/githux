@@ -256,8 +256,12 @@ impl ParagraphView {
     /// Only `links` may show the pointing hand, and only while `allowed`.
     ///
     /// The document resolves each address first, so a refused scheme is styled
-    /// as a link but never claims an interactive cursor.
-    pub fn link_ranges(mut self, links: Vec<Range<usize>>, allowed: bool) -> Self {
+    /// as a link but never claims an interactive cursor. Ranges are sorted and
+    /// deduplicated here so the measured layout can sweep them against the
+    /// shaped pieces in one pass.
+    pub fn link_ranges(mut self, mut links: Vec<Range<usize>>, allowed: bool) -> Self {
+        links.sort_unstable_by_key(|range| (range.start, range.end));
+        links.dedup();
         self.links = links;
         self.link_cursor = allowed;
         self
@@ -674,9 +678,24 @@ impl Element for Paragraph {
                 // The pointer cursor is decided from these real glyph
                 // rectangles: one per (link run, row) so wrapped links stay
                 // links and nothing else does.
+                //
+                // Both lists are in byte order, so a sweep pairs them instead
+                // of intersecting every link with every piece: a paragraph
+                // with thousands of links and inline-code pieces would
+                // otherwise do hundreds of millions of comparisons inside
+                // this measured layout, on the UI thread.
                 let mut links = Vec::new();
+                let mut piece_at = 0;
                 for range in &paragraph_links {
-                    for piece in &pieces {
+                    // Pieces that end before this link starts can never match
+                    // a later link either, so the cursor only moves forward.
+                    while piece_at < pieces.len() && pieces[piece_at].range.end <= range.start {
+                        piece_at += 1;
+                    }
+                    for piece in pieces[piece_at..]
+                        .iter()
+                        .take_while(|piece| piece.range.start < range.end)
+                    {
                         let start = piece.range.start.max(range.start);
                         let end = piece.range.end.min(range.end);
                         if start >= end {

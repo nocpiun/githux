@@ -57,3 +57,7 @@ Codex 指出 loose 列表项内多个段落失去分隔：移除了 item 列的 
 Codex 第二轮 P2：`over` 是布尔量，从一段的链接直接移到另一段的链接时不触发重绘，目标段落没有注册指针光标，箭头会残留。根因是「用 paint 时刻的鼠标位置决定是否注册光标」。修复为 Codex 建议的第二种做法：prepaint 为**每个**链接矩形各建一个 Normal hitbox，paint 时无条件对每个 hitbox 声明 `PointingHand`，由平台按指针实际所在 hitbox 选样式，与重绘时机无关；拖动时 owner 不注册（`link_cursor = false`）且活动拖动抑制逐元素光标。`MarkdownView::hover` 改为按同样的字形矩形维护 `pointer_over_link`（仅供测试/诊断），不再决定光标。`typography_tests` 增加「链接→链接直接移动」回归。
 
 合并基线后的验证：`cargo check --all-targets`（run `f7ac9cf3`，此前两次因并行 worktree 占满内存导致 `STATUS_STACK_BUFFER_OVERRUN`/manifest OOM，属机器压力而非代码问题）、reader 全量 239 项（run `433d9a7d`）、`cargo clippy --all-targets -D warnings`（run `e066a8f6`）、`cargo test --locked` 1413 项（run `06d60fb1`）与 `cargo fmt --check`（run `555be876`）全部通过。
+
+### 第三轮审查 P2：链接矩形配对改为扫描
+
+第二轮 head `7c1734c` 的审查指出 `link_boxes` 计算对「每个链接 × 每个排版片段」求交：1 万条含 inline code 的链接约 2 万片，约 2 亿次比较，且发生在 `request_measured_layout`（UI 线程）。链接范围与片段本就按字节序，改为单向游标扫描；`ParagraphView::link_ranges` 先排序去重以保持该不变式。实测同一密集段落（10,000 个 `` [`x`](guide.md) ``）：旧循环 7.98s，扫描 0.43s。新增 `dense_links_and_code_pieces_layout_within_budget`（预算 5s），并验证回退到旧循环时该用例失败。合并基线后全量 `cargo test --locked` 里 `app::pages` 的两项网络用例在全套并发下偶发失败（`githux-network` 线程判定 / Home 未 settle），单独重跑通过，与本 PR 无关。
