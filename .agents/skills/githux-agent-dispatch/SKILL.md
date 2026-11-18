@@ -15,6 +15,8 @@ metadata:
 2. 在忽略的 `.agents/dispatch.local.json` 配置执行工具；凭据只由执行工具既有配置管理。可用 `--config` 指定另一份本地 JSON，不改用户全局配置。
 3. 写 UTF-8 任务规格文件，至少包含 `# Goal`、`# Scope`、`# Acceptance`、`# Relevant docs`（也接受目标、范围、验收、相关文档）。写清依赖、共享接口、不做内容和检查。只传必要任务上下文，不复制私人记忆。
    规格应简短聚焦：目标、硬性产品约束、真实反例、所有权/依赖、验收证据和完成条件。修复任务写明实际失败、必须保留的行为和最小复现，按[先验证问题，再扩大检查](../../../docs/agent-workflow.md#先验证问题再扩大检查)执行。链接共享规则而非复制。外部 API 假设需当前一手文档和代表性真实响应形状，测试保持确定性/离线。
+
+   start/resume 会自动用显式绝对路径加载本 skill 的 `extensions/bash-timeout.js`，为模型调用的内置 `bash` 补 600 秒缺省 `timeout`（显式值保留，超过 10800 秒钳到 10800，非数字/非有限/≤0 阻止调用，其他工具不受影响）；`--no-extensions`/`--no-mcp` 保持不变，该扩展缺失时在创建锁之前拒绝启动。约束从下一次启动或恢复生效，不追溯已在运行的会话，也不能代替下面的范围与进程核对。
 4. 普通实现任务使用 `--delivery pr`，让原执行者完成 PR 闭环；实验、诊断或明确本地验收才用 `local-only`。`create` 显式指定已提交 base、新分支、task ID、规格文件、`local-only` 或 `pr`。首版配套任务显式加 `--first-release true`；其他任务不继承 milestone。create 不启动执行工具。
 5. 核对输出的 worktree、branch、base SHA 和 `.agents/task/TASK.md`，再 `start`。每次 start/resume 都新建独立 Kero 会话，但同一仓库的所有任务统一放入同一个 `githux` 项目分组：用固定 project ID 传给 `kero new --project`，worktree 仍由 `--dir` 独立指定，不按任务目录自动创建分组。该规则也覆盖执行者自行创建的检查、构建、测试、探针和程序运行会话；优先复用当前终端，确需新会话时仍须传相同 project ID。每次 start/resume 自动附带独立 `KERO-<token>.md`，把实际 ID、辅助会话规则及执行检查点传给执行者，不依赖旧 worktree 的 skill 已更新。检查点涵盖最小复现、连续三轮无新事实后的换方法/停止空转、复用验证和收齐后交付；这是提示约束，脚本不监控或终止工具循环。负责人可在 Kero 中直接阅读、输入和接管配置的 CLI；脚本用继承的终端运行交互会话，没有 print/RPC 模式。用 status 返回的 `terminal.session_id/pane_id` 定位本任务；实际验证证据与边界见 reference。
 
@@ -43,5 +45,7 @@ node .agents/skills/githux-agent-dispatch/scripts/dispatch.mjs resume --worktree
 ```sh
 node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs
 ```
+
+该文件同时覆盖 `extensions/bash-timeout.js` 的缺省/显式/上限/非法值与 start/resume 参数集成。临时目录、空格路径和假 CLI 的隔离不变；脚本测试不证明真实模型、GUI 或完整 Windows 子进程树行为。
 
 Kero 可见会话、真实 TTY 接管、真实 CLI 会话持久化和真实模型接入由负责人/主 Agent 单独实测；子进程模拟不能证明这些体验已通过。

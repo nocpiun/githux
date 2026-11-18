@@ -39,7 +39,13 @@ create 使用显式 committed base，保留协调工作区的未提交修改；�
 
 库存命令为配置 Node + CLI 参数数组：`--offline --no-extensions --no-mcp --no-approve --list-models EXACT_ID`。从表格各列精确比较 provider 与 model（至少六列），不接受模糊包含。CLI 报错、超时或缺少匹配均停止。启动前在协调侧和监督进程各核验一次。
 
-首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。每次启动和恢复另写不可覆盖的 `.agents/task/KERO-TOKEN.md`，附上当前解析的 project ID、原 worktree 和所有辅助会话的归组规则，并作为最后一个 `@FILE` 参数与 TASK/FOLLOWUP 一起交给执行器；原 TASK、旧 follow-up 和旧 Kero 上下文不被改写。旧 worktree 的 skill 未包含新规则时，仍能从本次启动上下文得到当前约束。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --project PROJECT_ID --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
+首次交互启动：`node CLI --offline --approve --no-extensions --no-mcp --extension BASH_TIMEOUT_EXT --provider P --model M --thinking LEVEL --session-dir DIR --session-id ID @TASK_FILE`。resume 改用 `--session EXISTING_FILE @FOLLOWUP_FILE`，因为 `--session-id` 在缺失时可能创建新会话。`BASH_TIMEOUT_EXT` 是本 skill 包内 `extensions/bash-timeout.js` 的绝对实路径（相对 `dispatch.mjs` 自身解析，兼容带空格路径和旧 worktree 的 resume），在创建锁前核验存在；显式扩展与 `--no-extensions` 不冲突，但其他发现/内置扩展和 MCP 仍关闭。`--offline` 仅禁止启动时自动联网，不禁用推理网络；`--approve` 仅信任项目文件。每次启动和恢复另写不可覆盖的 `.agents/task/KERO-TOKEN.md`，附上当前解析的 project ID、原 worktree 和所有辅助会话的归组规则，并作为最后一个 `@FILE` 参数与 TASK/FOLLOWUP 一起交给执行器；原 TASK、旧 follow-up 和旧 Kero 上下文不被改写。旧 worktree 的 skill 未包含新规则时，仍能从本次启动上下文得到当前约束。没有 `--print`、JSON/RPC 或管道输入。使用 `kero new --project PROJECT_ID --name githux-TASK-TOKEN --dir WORKTREE -- powershell.exe -NoLogo -NoProfile -NoExit -EncodedCommand ...`；不让 Kero 再建 worktree。编码 PowerShell 桥通过参数数组启动 Node，继承 Kero 的 TTY，CLI 退出后保留终端。任务名附加每次启动的 token 前缀，避免恢复时与旧终端重名。CLI 和错误都在该 Kero 会话显示；不再创建独立 CMD 或回退到其他终端。
+
+## Bash 超时策略（已部署）
+
+`extensions/bash-timeout.js` 是仓库维护、无依赖的 Pi 扩展，只监听 `tool_call` 并就地改内置 `bash` 的 `timeout`：缺省补 `DEFAULT_TIMEOUT_SECONDS=600`；显式有限正数原样保留（20 秒的探索搜索、小时级构建/等待都不被上提或降低）；超过 `MAX_TIMEOUT_SECONDS=10800` 钳到上限；非数字、`NaN`/`Infinity`、≤0 返回 `block` 并附原因，而不是无限执行。单位是秒，不做命令文本解析，不修改 read/write/edit/MCP 或模型 HTTP 超时；`powershell` 工具也未被覆盖。
+
+生效边界：只对改动后新启动或 resume 的子进程生效，已在运行的 Pi 会话不会被追溯修改（不重启会话）。超时触发终止逻辑不等于能证明所有后代都已退出，取消/超时后仍需按[目录搜索与工具时限](../../../../docs/agent-workflow.md#目录搜索与工具时限)核对进程。修改策略只需改该扩展；若它缺失或不是常规文件，start/resume 在创建锁和子进程前报错，不会静默地无时限执行。不修改用户全局 Pi 设置，不自动加载其他扩展，不自动发现 `~/.pi` 或项目 `.pi/extensions`。
 
 resume 要求有效 session header（`type=session`、精确 `id`、原 `cwd`），已有记录路径也必须一致；缺失、重复、损坏或工作目录不同都拒绝。每份 follow-up 以独立唯一文件保留。原 TASK.md、session ID、branch、worktree 不变。配置模型变化不会被默默采用：resume 明示 `--model`，需要换 provider 时一并给 `--provider`；库存仍必须通过。requested/configured model 和每次启动历史保存；provider/model 或 group 名称不证明最终实际使用的后端模型。
 
@@ -115,7 +121,9 @@ kero new --project PROJECT_ID --name TASK-check --dir TASK_WORKTREE -- node scri
 
 ## 验证边界
 
-`node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs` 在 disposable Git 仓库使用假 CLI，覆盖真实 worktree、命令数组、进程创建时间、生命周期、原会话恢复、模型库存和冲突拒绝。Windows 专项隐藏执行内层 PowerShell recorder，验证路径/参数字符往返，**不创建真实 Kero 会话**。临时 Git 身份只传给测试 commit，签名只对该测试 commit 禁用，不改全局配置。
+`node --test .agents/skills/githux-agent-dispatch/scripts/dispatch.test.mjs` 在 disposable Git 仓库使用假 CLI，覆盖真实 worktree、命令数组、进程创建时间、生命周期、原会话恢复、模型库存、冲突拒绝、本 skill 的超时策略语义与一次显式扩展参数。Windows 专项隐藏执行内层 PowerShell recorder，验证路径/参数字符往返，**不创建真实 Kero 会话**。临时 Git 身份只传给测试 commit，签名只对该测试 commit 禁用，不改全局配置。
+
+2026-11-15 在本机已安装 Pi 1.5.2 上做了一次有界真实快速核验：用一个探针扩展记录实际收到的 `bash.timeout`，模型自发的无 timeout 调用被补为 600；显式 `timeout: 8` 的自建父子进程树被超时终止，工具返回超时文本，父/子进程随后均不存在。这是单次受控观测，不证明所有命令、其他工具或所有 Windows 进程树的清理；更广泛的后代残留仍需单独验证。
 
 这些测试不证明真实 CLI 的 TTY、Kero 会话、人工输入/接管、真实模型接入或路由后端。负责人/主 Agent用本地配置实测 create → start → 读写/接管 → 退出 → status → resume，并验证最新安装 CLI 的会话 header/参数与本脚本契约一致。离线脚本测试不替代 PR 的最新 head CI/review 门槛。
 
