@@ -131,7 +131,7 @@ Languages 顶部组完全移除。底条由同一个 overview 的 languages stat
 
 Releases版本前为Ely Tag图标，链接后为Success Outline `Latest`。仅可信latest结果存在才显示：独立latest优先，未提供才取ReleasesData.latest；Loading/404/error/空值/旧binding不显示，draft/prerelease事实保留且不冒充稳定Latest。完整list观察数量在Releases标题旁以同一Neutral Filled胶囊显示，Partial/未知隐藏数量，真实完整0保留。Releases与Contributors取消flex-grow，从左按自然内容宽度紧随，组间约32px，长tag有界省略/完整tooltip，窄窗可换行。
 
-五个页内tab均为Ely icon + label + 可用count pill：Code/CircleDot/GitPullRequest/Tag/Settings；父tab仍负责整片点击，下划线改由共享 `src/ui/tab_underline.rs` 按选中 tab 的实测边界绘制（移动与宽度插值、reduced motion 立即落位、布局变化与滚动直接采纳），详见 [Settings 的共享下划线](settings.md#共享的活动-tab-下划线)。文件树实际滚动viewport外留7px四边空隙，行填满扣除inset的宽度；uniform_list、wheel和共享Bar仍在同一个内视口上，未修改row-height、scroll handle/reveal或公共scroll。
+五个页内tab均为Ely icon + label + 可用count pill：Code/CircleDot/GitPullRequest/Tag/Settings；父tab仍负责整片点击，下划线改由共享 `src/ui/tab_underline.rs` 按选中 tab 的实测边界绘制（移动与宽度插值、reduced motion 立即落位、布局变化与滚动直接采纳）；标签文字改用同一模块的 `TabUnderline::label`，布局宽度恒为选中字重宽度，选中/取消选中不再改变任何 tab 的 `origin.x`/`size.width`。详见 [Settings 的共享下划线](settings.md#共享的活动-tab-下划线)。文件树实际滚动viewport外留7px四边空隙，行填满扣除inset的宽度；uniform_list、wheel和共享Bar仍在同一个内视口上，未修改row-height、scroll handle/reveal或公共scroll。
 
 统一开发预览的Light/Dark按钮仅在example工具栏，产品无主题debug开关。测试覆盖latest状态成功/404/error/恢复/旧binding/draft-prerelease、完整0与Partial数量、宽窗组不被推向半屏、点击badge切tab、长树Home/End首末行保持inset且完整可见，保留所有原计数/分支/reader/底条行为。
 

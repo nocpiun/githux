@@ -17,7 +17,8 @@
 - 过渡从当前插值位置出发，快速连选不会退回旧 tab；宽度同样插值，所以不等宽标签与后来才出现的 count pill 都是同一对象的变化。
 - 首次布局、resize、字体/DPI 变化、count pill 改变标签宽度、tab 条横向滚动都按布局事实立即采纳，不下滑一段 tab 没有走过的路径；滚动与裁剪由 tab 条自身的 `overflow` 负责，`probe` 不改间距、命中区、焦点或 role。
 - reduced motion 立即落位；只有移动期间请求动画帧，静止的 tab 条不请求。
-- 被测行为：`src/ui/tab_underline.rs` 的状态机用例、仓库页 `the_active_tab_band_starts_on_its_tab_and_moves_and_resizes_between_tabs`、本页窄态键盘用例与 Profile `overview_tab_band_covers_the_measured_tab_box`。
+- 选中态不再改变 tab 宽度：`FontWeight::MEDIUM` 的字形横向推进比 `NORMAL` 宽（bundled `Githux UI` 在 14px 下 `Pull requests` 实测 84.952px vs 87.304px），若直接把字重切换在流式布局的文字上，被选中 tab 会宽几个像素并把右侧所有 tab 推开。三个横向 tab 条统一改用 `TabUnderline::label(text, active, color)`：可见文字按当前字重绘制，其下方叠一个零高度、裁剪、完全透明、无 id/role/命中区/tooltip 的 `MEDIUM` 尺寸占位，因此每个 tab 的布局盒在选中与未选中时都是 active 宽度，颜色与字重仍区分状态。
+- 被测行为：`src/ui/tab_underline.rs` 的状态机用例、仓库页 `the_active_tab_band_starts_on_its_tab_and_moves_and_resizes_between_tabs` 与 `tab_boxes_keep_their_geometry_when_the_active_tab_changes_with_bundled_fonts`、本页窄态键盘用例与 `narrow_tab_boxes_keep_their_geometry_when_the_category_changes_with_bundled_fonts`、Profile `overview_tab_band_covers_the_measured_tab_box`。两项几何回归用 bundled Regular/Medium 字体逐个记录所有 tab 的 `origin.x`/`size.width`，切换选中后要求差值 ≤ 0.01px；去掉占位层时它们分别实测到 `96px → 97px`（仓库 Issues）与 `87px → 86px`（窄态 Accounts）而失败。
 
 PAT 表单默认收起。Add account 和账户行 Replace PAT 在列表下方打开表单，替换绑定被点击身份，允许目标为非当前账户。当前账户用 Current 标记，不生成 Switch 控件。账户状态来自服务权威目录，Verified、PendingVerification、MissingCredential、CredentialUnavailable、过期/拒绝与连接失败保持区别。
 

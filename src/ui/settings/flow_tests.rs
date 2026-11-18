@@ -429,3 +429,81 @@ fn narrow_tab_band_moves_and_resizes_with_keyboard_selection(cx: &mut TestAppCon
         "a settled band stops requesting frames"
     );
 }
+
+/// Every narrow category tab's measured box, in strip order.
+#[cfg(target_os = "windows")]
+fn category_bounds(
+    view: &Entity<SettingsView>,
+    count: usize,
+    cx: &mut VisualTestContext,
+) -> Vec<gpui::Bounds<gpui::Pixels>> {
+    (0..=count)
+        .map(|index| {
+            let selector: &'static str = match index {
+                0 => "settings-category-0",
+                1 => "settings-category-1",
+                2 => "settings-category-2",
+                3 => "settings-category-3",
+                4 => "settings-category-4",
+                _ => unreachable!("this test uses at most five categories"),
+            };
+            let _ = &view;
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("category {index} must be measured"))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn assert_categories_kept_their_boxes(
+    before: &[gpui::Bounds<gpui::Pixels>],
+    after: &[gpui::Bounds<gpui::Pixels>],
+) {
+    for (index, (before, after)) in before.iter().zip(after).enumerate() {
+        assert!(
+            (before.left() - after.left()).abs() <= px(0.01),
+            "category {index}: origin moved with the selection: {before:?} -> {after:?}"
+        );
+        assert!(
+            (before.size.width - after.size.width).abs() <= px(0.01),
+            "category {index}: width changed with the selection: {before:?} -> {after:?}"
+        );
+    }
+}
+
+/// With the bundled Regular/Medium faces a selected category used to be wider than the same
+/// category unselected, shifting the tabs to its right. The reserved active-weight width keeps every
+/// tab's `origin.x` and `size.width` identical across inactive <-> active.
+#[cfg(target_os = "windows")]
+#[test]
+fn narrow_tab_boxes_keep_their_geometry_when_the_category_changes_with_bundled_fonts() {
+    let mut cx = native_font_context();
+    let fixture = Fixture::open(Scenario::Normal);
+    let (view, binding, cx) = mount_themed(&mut cx, &fixture);
+    wait_idle(&binding, cx);
+    view.update(cx, |view, cx| {
+        view.pin_clock(1_000_000);
+        view.fixtures = 3;
+        cx.notify();
+    });
+    // Narrow host: the categories are one horizontally scrolling tab row.
+    cx.simulate_resize(size(px(648.0), px(720.0)));
+    draw(cx);
+    draw(cx);
+    cx.update_window_entity(&view, |view, window, cx| view.select(0, window, cx));
+    draw(cx);
+    let accounts_active = category_bounds(&view, 3, cx);
+
+    cx.update_window_entity(&view, |view, window, cx| view.select(1, window, cx));
+    view.update(cx, |view, _| view.pin_clock(2_000_000));
+    draw(cx);
+    let fixture_active = category_bounds(&view, 3, cx);
+    assert_categories_kept_their_boxes(&accounts_active, &fixture_active);
+
+    // And back: the previously active tab must not shrink either.
+    cx.update_window_entity(&view, |view, window, cx| view.select(0, window, cx));
+    view.update(cx, |view, _| view.pin_clock(3_000_000));
+    draw(cx);
+    let accounts_again = category_bounds(&view, 3, cx);
+    assert_categories_kept_their_boxes(&accounts_active, &accounts_again);
+}

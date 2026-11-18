@@ -31,6 +31,22 @@
 - Settings 窄态（`cargo test --locked --example settings`，该模块只在 example 测试目标里编译）：既有 `narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last` 改为断言共享层落在被 reveal 的末项实测盒上，并新增键盘驱动的 `narrow_tab_band_moves_and_resizes_with_keyboard_selection`。run `c34c20ee`：含两项在内 9 passed。
 - 全量：`cargo test --locked` run `3ea25c49`（各 target 合计 1412/116/668/392/349/910/1020/44/1413 passed，0 failed）、`cargo test --locked --example settings` run `253a7695`（1425 passed，含两项 Settings 用例）、`cargo clippy --locked --all-targets -- -D warnings` run `34312bf0`、`cargo build --locked` run `0137bab6`、`cargo fmt --all -- --check` run `c6342930`，均 exit 0。独立开发模块树 `src/bin_support/repository_modules.rs` 与 `profile_modules.rs` 挂上同一 `tab_underline` 文件（不复制实现），否则 `tests/repository.rs` 等 `#[path]` 装配缺模块。原生 Windows 光标字形、真实拖拽/输入与手感未经本人核验（GPUI 测试平台没有公开的 cursor 读取接口，pointer 相关结论是“命中盒几何 + 真实点击行为”层面的证据，不是光标字形证据，遵循 L002）。
 
+## 负责人验收反馈后的返工：选中态不再改变 tab 宽度
+
+负责人反馈：下划线动画没问题，但 inactive → active 时字重从 400 变 500 让 tab item 宽了几个像素，视觉明显。
+
+- 复现（先测量再改）：bundled `Githux UI` 在 14px 下 `layout_line("Pull requests")` 实测 `NORMAL = 84.952px`、`MEDIUM = 87.304px`。视图层回归 `tab_boxes_keep_their_geometry_when_the_active_tab_changes_with_bundled_fonts` 在基线实现上失败：`issues: 96px → 97px`（origin 未变，但宽度变化会把右侧 tab 整体推开）；窄态 Settings 同类用例实测 `Accounts: 87px → 86px`。
+- 前一版探测一度显示“无变化”，原因是测量走了错误的字体：`RepositoryPage` 的测试装配在窗口建好后会再执行一次 `setup()`，把主题字体改回系统 fallback（TestTextSystem 各字重推进相同），且测试窗口根节点没有像正式 Shell 那样设置 `font_family`。修正为 `native_font_context()`（native DirectWrite + bundled faces）+ `ThemedRepositoryPage`/`ThemedHost` 根节点（与 `home/row_tests.rs` 的 `ThemedHome` 同一做法），先量出真实差异再改代码。
+- 修复：`src/ui/tab_underline.rs` 新增 `TabUnderline::label(text, active, color)`，可见文字保持当前字重，下面叠一个 `h(px(0.0))`、`overflow_hidden()`、`opacity(0.0)`、`MEDIUM` 的透明占位文本，外层 `flex_col().items_center()`。占位文本没有 id/role/命中区/tooltip，不重复无障碍名称，只贡献推进宽度。仓库内容 Tabs 与窄态 Settings 分类条都改用它；Profile Overview 只有一项，宽度不变因此不需要占位；宽态 Settings 是 168px 固定栏 + 左对齐文字，不涉及流式宽度，未改动；`src/ui/tabs.rs` 的顶部会话标签（固定 `TAB_WIDTH`、拖动 ghost/箭头光标）按要求完全未动。
+- 同时 `git fetch origin main` 后 `git merge --no-edit origin/main`（`4e75ad8`，含 #90 bash 超时与 #93 侧栏/主题），`src/ui/mod.rs` 的相邻改动没有冲突，#93 的侧栏/主题支持与本任务的 `tab_underline` 注册同时保留。
+
+## 验证（返工轮）
+
+- 两项新几何回归在去掉占位层时分别失败（仓库 `96px → 97px`、窄态 `87px → 86px`），恢复后通过：run `d39ca100`（仓库）、`b01e7b92`（窄态）。
+- 既有下划线用例一并重跑 `e7ebd0da`：5 passed（移动/宽度插值、中断续接、reduced motion、resize+缩放、单 tab 几何）。
+- 全量：`cargo test --locked` `aaf8fce3`（1416/116/668/392/349/910/1022/44/1417 passed，0 failed；首跑 `04dfa4b0` 有 1 项与本任务无关的 `reader_images` 5 秒超时，单跑 `5657f136` 与复跑均通过）、`cargo test --locked --example settings` `bbb7223a`（1430 passed）、`cargo clippy --locked --all-targets -- -D warnings` `f0039e2c`、`cargo fmt --all -- --check` `95f520c9`、`cargo build --locked --release --bin githux` `92415e48`，均 exit 0。
+- 负责人用 release 做视觉验收，因此额外执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-runtime.ps1 -Destination target/release`（27 unchanged，0 written）。
+
 ## 后续
 
 - PR 关联 First Release #1 并加 `pending`，交负责人原生验收：三处下划线移动/宽度手感、减少动态效果开关、窄窗 tab 滚动时的裁剪、通知行/全局列表/贡献图的光标与点击范围。

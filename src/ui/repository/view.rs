@@ -616,15 +616,16 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
                 .py_2()
                 .cursor_pointer()
                 .text_size(small)
-                .font_weight(if is_active {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
                 .text_color(fg)
                 .hover(|style| style.text_color(colors.fg))
                 .child(Icon::new(tab.icon()).size(IconSize::Xs).color(fg))
-                .child(tab.label())
+                // Width is the active-weight width in both states, so selecting a tab moves no
+                // neighbour and the shared band measures one stable box.
+                .child(crate::ui::tab_underline::TabUnderline::label(
+                    tab.label(),
+                    is_active,
+                    fg,
+                ))
                 .children(
                     match tab {
                         RepositoryTab::Issues => page

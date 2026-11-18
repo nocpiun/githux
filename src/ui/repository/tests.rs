@@ -2318,3 +2318,157 @@ fn the_band_follows_a_resize_and_a_scale_change_without_sliding(cx: &mut TestApp
     frames(cx);
     assert_band_under(&page, "repository-tab-code", cx);
 }
+
+fn tab_selector(tab: RepositoryTab) -> &'static str {
+    match tab {
+        RepositoryTab::Code => "repository-tab-code",
+        RepositoryTab::Issues => "repository-tab-issues",
+        RepositoryTab::PullRequests => "repository-tab-pulls",
+        RepositoryTab::Releases => "repository-tab-releases",
+        RepositoryTab::Settings => "repository-tab-settings",
+    }
+}
+
+/// The bundled faces include a real `Medium`, so a weight change is a real advance change; the
+/// headless platform supplies `TestTextSystem` with uniform metrics, so request the native one.
+/// This still uses simulated input and does not claim native-window acceptance.
+#[cfg(target_os = "windows")]
+fn native_font_context() -> TestAppContext {
+    let native_text = gpui_platform::current_platform(false).text_system();
+    TestAppContext::build_with_text_system(gpui::TestDispatcher::new(0), None, native_text)
+}
+
+/// The product Shell applies the UI family at its root; a bare `RepositoryPage` window would keep
+/// GPUI's default text style, so the bundled family would never reach the tab labels.
+#[cfg(target_os = "windows")]
+struct ThemedRepositoryPage(Entity<RepositoryPage>);
+
+#[cfg(target_os = "windows")]
+impl gpui::Render for ThemedRepositoryPage {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use ely_core::theme::ActiveTheme;
+        gpui::div()
+            .size_full()
+            .font_family(cx.theme().font_family.clone())
+            .child(self.0.clone())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_themed<'a>(
+    cx: &'a mut TestAppContext,
+    fixture: &Fixture,
+) -> (Entity<RepositoryPage>, &'a mut VisualTestContext) {
+    setup(cx);
+    use_bundled_ui_family(cx);
+    let services = fixture.services();
+    let locator = locator();
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        ThemedRepositoryPage(cx.new(|cx| {
+            RepositoryPage::new(
+                services,
+                locator,
+                RepositoryNavigation::default(),
+                window,
+                cx,
+            )
+        }))
+    });
+    let page = host.read_with(cx, |host, _| host.0.clone());
+    cx.update(|window, _| window.activate_window());
+    (page, cx)
+}
+
+/// Switch the theme to the bundled UI family (the one that has both Regular and Medium faces).
+/// Must run after the fixture assembly's own `setup`, which installs the test fallback family.
+#[cfg(target_os = "windows")]
+fn use_bundled_ui_family(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::platform::fonts::register(cx).expect("bundled fonts");
+        ely_core::theme::Theme::update(cx, |theme| {
+            theme.font_family = crate::platform::fonts::UI_FAMILY.into();
+            theme.mono_family = crate::platform::fonts::CODE_FAMILY.into();
+        });
+    });
+}
+
+/// Every content tab's measured box, in strip order.
+fn all_tab_bounds(cx: &mut VisualTestContext) -> Vec<(RepositoryTab, gpui::Bounds<gpui::Pixels>)> {
+    RepositoryTab::ALL
+        .iter()
+        .map(|tab| {
+            let bounds = cx
+                .debug_bounds(tab_selector(*tab))
+                .unwrap_or_else(|| panic!("{} must be measured", tab.id()));
+            (*tab, bounds)
+        })
+        .collect()
+}
+
+fn assert_tabs_kept_their_boxes(
+    before: &[(RepositoryTab, gpui::Bounds<gpui::Pixels>)],
+    after: &[(RepositoryTab, gpui::Bounds<gpui::Pixels>)],
+) {
+    for (tab, before) in before {
+        let after = after
+            .iter()
+            .find(|(other, _)| other == tab)
+            .map(|(_, bounds)| *bounds)
+            .expect("same tab set");
+        assert!(
+            (before.left() - after.left()).abs() <= px(0.01),
+            "{}: origin moved with the selection: {before:?} -> {after:?}",
+            tab.id()
+        );
+        assert!(
+            (before.size.width - after.size.width).abs() <= px(0.01),
+            "{}: width changed with the selection: {before:?} -> {after:?}",
+            tab.id()
+        );
+    }
+}
+
+/// With the bundled Regular/Medium faces a selected tab used to be ~2-3px wider than the same tab
+/// unselected, shifting every tab to its right. The reserved active-weight width keeps every tab's
+/// `origin.x` and `size.width` identical across inactive <-> active.
+#[cfg(target_os = "windows")]
+#[test]
+fn tab_boxes_keep_their_geometry_when_the_active_tab_changes_with_bundled_fonts() {
+    let mut cx = native_font_context();
+    let fixture = Fixture::new(Scene::Normal);
+    fixture.login(1);
+    let (page, cx) = open_themed(&mut cx, &fixture);
+    activate(&page, cx);
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    // The count pill changes a tab's width when extras arrive: settle that before measuring.
+    for _ in 0..200 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        frames(cx);
+        if cx.debug_bounds("repository-badge-issues").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    assert!(
+        cx.debug_bounds("repository-badge-issues").is_some(),
+        "the fixture must supply the Issues count before widths are compared"
+    );
+    page.update(cx, |page, _| page.pin_clock(1_000_000));
+    frames(cx);
+    let inactive_state = all_tab_bounds(cx);
+
+    page.update(cx, |page, cx| page.select_tab(RepositoryTab::Issues, cx));
+    page.update(cx, |page, _| page.pin_clock(2_000_000));
+    frames(cx);
+    let issues_active = all_tab_bounds(cx);
+    assert_tabs_kept_their_boxes(&inactive_state, &issues_active);
+
+    // And back: the previously active tab must not shrink either.
+    page.update(cx, |page, cx| page.select_tab(RepositoryTab::Code, cx));
+    page.update(cx, |page, _| page.pin_clock(3_000_000));
+    frames(cx);
+    let code_again = all_tab_bounds(cx);
+    assert_tabs_kept_their_boxes(&inactive_state, &code_again);
+}

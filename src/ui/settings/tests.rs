@@ -36,6 +36,66 @@ pub(super) fn mount<'a>(
     draw(cx);
     (view, binding, cx)
 }
+/// The product host applies the UI family at its root; a bare `SettingsView` window would keep
+/// GPUI's default text style and never reach the bundled Regular/Medium faces.
+#[cfg(target_os = "windows")]
+pub(super) struct ThemedHost(Entity<SettingsView>);
+
+#[cfg(target_os = "windows")]
+impl gpui::Render for ThemedHost {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use ely_core::theme::ActiveTheme;
+        use gpui::{ParentElement, Styled};
+        gpui::div()
+            .size_full()
+            .font_family(cx.theme().font_family.clone())
+            .child(self.0.clone())
+    }
+}
+
+/// The bundled faces include a real `Medium`, so a weight change is a real advance change; the
+/// headless platform supplies `TestTextSystem` with uniform metrics, so request the native one.
+#[cfg(target_os = "windows")]
+pub(super) fn native_font_context() -> TestAppContext {
+    let native_text = gpui_platform::current_platform(false).text_system();
+    TestAppContext::build_with_text_system(gpui::TestDispatcher::new(0), None, native_text)
+}
+
+/// Mounts the real Settings view under the bundled UI family, the way the product host does.
+#[cfg(target_os = "windows")]
+pub(super) fn mount_themed<'a>(
+    cx: &'a mut TestAppContext,
+    fixture: &Fixture,
+) -> (
+    Entity<SettingsView>,
+    Entity<SettingsBinding>,
+    &'a mut VisualTestContext,
+) {
+    cx.update(ely_core::init_for_tests);
+    cx.update(|cx| {
+        crate::platform::fonts::register(cx).expect("bundled fonts");
+        ely_core::theme::Theme::update(cx, |theme| {
+            theme.font_family = crate::platform::fonts::UI_FAMILY.into();
+            theme.mono_family = crate::platform::fonts::CODE_FAMILY.into();
+        });
+    });
+    let runtime = fixture.runtime.clone();
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let controller = cx.new(|cx| Accounts::new(Some(runtime), window, cx));
+        let binding = cx.new(|cx| SettingsBinding::new(controller, window, cx));
+        ThemedHost(cx.new(|cx| SettingsView::new(binding, window, cx)))
+    });
+    let view = host.read_with(cx, |host, _| host.0.clone());
+    let binding = view.read_with(cx, |view, _| view.binding.clone());
+    cx.simulate_resize(size(px(1000.0), px(820.0)));
+    draw(cx);
+    (view, binding, cx)
+}
+
 pub(super) fn draw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {

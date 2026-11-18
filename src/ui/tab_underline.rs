@@ -27,8 +27,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Background, Bounds, Hsla, IntoElement, Pixels, Styled, Window, canvas, fill, point,
-    px, size,
+    AnyElement, Background, Bounds, Hsla, IntoElement, ParentElement, Pixels, Styled, Window,
+    canvas, div, fill, point, px, size,
 };
 
 /// How long one move between two tabs takes.
@@ -214,6 +214,54 @@ impl TabUnderline {
         .absolute()
         .inset_0()
         .into_any_element()
+    }
+
+    /// A tab label whose layout box is the same whether its tab is selected or not.
+    ///
+    /// `MEDIUM` glyphs have a wider horizontal advance than `NORMAL`, so switching the weight on
+    /// the flow-layout text used to widen the selected tab by a few pixels and push every tab to
+    /// its right. The visible label keeps its real weight on top of an invisible sizer carrying the
+    /// active weight: the box is always the active-width box, so selection changes only colour,
+    /// weight and the shared band — never `origin.x` or `size.width` of any tab.
+    ///
+    /// The sizer is a zero-height, clipped, fully transparent text node with no id, no role, no
+    /// hitbox and no tooltip, so it is neither reachable nor announced; it only contributes its
+    /// advance to the parent's intrinsic width.
+    pub(crate) fn label(
+        text: impl Into<gpui::SharedString>,
+        active: bool,
+        color: Hsla,
+    ) -> AnyElement {
+        let text = text.into();
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .font_weight(if active {
+                        gpui::FontWeight::MEDIUM
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .text_color(color)
+                    .child(text.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .h(px(0.0))
+                    .overflow_hidden()
+                    .opacity(0.0)
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(color)
+                    .child(text),
+            )
+            .into_any_element()
     }
 
     /// Whether the band still has frames to draw at `now_ms`.
