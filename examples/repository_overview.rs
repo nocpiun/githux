@@ -43,6 +43,7 @@ use crate::repository_overview::{OverviewAction, RepositoryOverview, SectionStat
 enum Scenario {
     Ready,
     LatestMissing,
+    NoReleases,
     Partial,
     Error,
     EmptyRepository,
@@ -51,9 +52,10 @@ enum Scenario {
 }
 
 impl Scenario {
-    const ALL: [Scenario; 7] = [
+    const ALL: [Scenario; 8] = [
         Scenario::Ready,
         Scenario::LatestMissing,
+        Scenario::NoReleases,
         Scenario::Partial,
         Scenario::Error,
         Scenario::EmptyRepository,
@@ -65,6 +67,7 @@ impl Scenario {
         match self {
             Self::Ready => "Ready",
             Self::LatestMissing => "Latest 404",
+            Self::NoReleases => "No releases",
             Self::Partial => "Partial",
             Self::Error => "Error",
             Self::EmptyRepository => "204 empty",
@@ -145,6 +148,26 @@ impl Preview {
                     let _ = view.apply_languages(
                         &binding,
                         SectionState::Ready(fixtures::ready_languages()),
+                        cx,
+                    );
+                }
+                Scenario::NoReleases => {
+                    // A complete empty release list and a latest 404: the whole Releases block is
+                    // omitted. Languages use the pinned Linguist colors, including the neutral
+                    // fallback for COBOL and a name GitHub does not know.
+                    let _ = view.apply_releases(
+                        &binding,
+                        SectionState::Ready(fixtures::empty_releases()),
+                        cx,
+                    );
+                    let _ = view.apply_contributors(
+                        &binding,
+                        SectionState::Ready(fixtures::ready_contributors()),
+                        cx,
+                    );
+                    let _ = view.apply_languages(
+                        &binding,
+                        SectionState::Ready(fixtures::github_languages()),
                         cx,
                     );
                 }
