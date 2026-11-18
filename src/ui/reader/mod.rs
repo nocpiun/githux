@@ -35,6 +35,8 @@ mod motion_tests;
 mod source;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod typography_tests;
 
 // The picture contract a host implements or drives. Re-exported so an
 // integration layer depends on the reader module alone.
