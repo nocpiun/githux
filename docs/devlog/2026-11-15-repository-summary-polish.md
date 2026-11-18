@@ -69,6 +69,8 @@
 
 负责人反馈修复前，main 已前进到 `4e75ad8`（#93 sidebar 通知铃与主题切换），改动集中在 sidebar/caption/ui 模块，与本任务文件无冲突；`git merge --no-edit origin/main` 干净合并，`LESSONS.md` 未再出现新的编号冲突（L028 仍为搜索时限，L029 为本任务颜色来源）。合并后重跑受影响检查。
 
+推送后 CI 又在 `app::pages::profile::tests` 的既有 deadline 用例上失败一次（`uncached_offline_and_online_recovery_work_without_masking_errors_as_absent_readme`，与本任务无调用关系）。随后 main 前进到 `78d5940`（#95 专门修正 profile alias 与 offline feed 的测试竞态），再次 `git merge --no-edit origin/main` 干净合并；合并后在组合树上重跑全量 `cargo test --locked`（run `d58408c4`）：除 main 刚改写的 Home 用例 `append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches` 在共享构建槽高负载下超时失败外通过，该用例单独重跑 `74095f62` 通过。随后在本任务受影响的两个 target 上重跑：`--test repository_overview` → `c3ace8c9` 通过（50 tests），`--test repository` → `7a9c8b8d` 通过（含新增真实页面回归）。全量套件以 CI 最新 head 为准。
+
 ## 基线同步
 
 首次推送后 PR #92 返回 `merge_conflict`（main 已前进到 `5a3eab3`，`docs/agent-workflow.md` 与 `LESSONS.md` 冲突）。合并 main 时保留 main 已占用的 L028（目录搜索与工具时限），本任务的颜色来源条目改为 **L029**；其余 main 变更（派发 skill、bash 超时时限）与本任务文件无重叠。冲突解决后对组合树重跑 `cargo test --locked --test repository_overview`。
