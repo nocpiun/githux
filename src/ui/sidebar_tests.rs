@@ -5,6 +5,7 @@ use crate::domain::{
     RepoVisibility,
 };
 use crate::workspace::Route;
+use ely_core::theme::ActiveTheme;
 use gpui::{
     Bounds, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
     ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, VisualContext, VisualTestContext,
@@ -207,6 +208,7 @@ fn collapse_restores_width_route_scroll_and_has_a_real_menu(cx: &mut TestAppCont
         "menu-row-Notifications",
         "menu-row-Issues",
         "menu-row-PRs",
+        "menu-row-Toggle theme",
         "menu-row-New",
     ] {
         assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
@@ -584,14 +586,18 @@ fn footer_divider_separates_the_repository_viewport_from_the_account(cx: &mut Te
 }
 
 #[gpui::test]
-fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestAppContext) {
+fn account_identity_opens_profile_while_bell_and_blank_do_not(cx: &mut TestAppContext) {
     let (view, cx) = shell(cx);
-    // Expanded: the separate status button exists and never navigates.
-    let status = bounds("account-status", cx);
-    cx.simulate_click(status.center(), Modifiers::none());
+    // Expanded: the separate bell exists and navigates to Notifications, never the profile.
+    let bell = bounds("account-notifications", cx);
+    cx.simulate_click(bell.center(), Modifiers::none());
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Home);
-    // The compact identity cluster opens the profile.
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Notifications);
+    // Back to Home, then the compact identity cluster opens the profile.
+    cx.update_window_entity(&view, |s, window, cx| {
+        s.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
     click("account-identity", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
     // The account row is the current identity, not a navigable page row: it must not gain the
@@ -605,18 +611,18 @@ fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestApp
         identity.size.width > px(0.0),
         "identity itself stays visible"
     );
-    // The blank space between the identity and the status is not a Profile hit area.
+    // The blank space between the identity and the bell is not a Profile hit area.
     cx.update_window_entity(&view, |s, window, cx| {
         s.navigate(Route::Home, window, cx);
     });
     cx.run_until_parked();
     let identity = bounds("account-identity", cx);
-    let status = bounds("account-status", cx);
+    let bell = bounds("account-notifications", cx);
     assert!(
-        identity.right() < status.left(),
+        identity.right() < bell.left(),
         "the fixture leaves a blank gap to test"
     );
-    let blank_x = px((f32::from(identity.right()) + f32::from(status.left())) / 2.0);
+    let blank_x = px((f32::from(identity.right()) + f32::from(bell.left())) / 2.0);
     cx.simulate_click(point(blank_x, identity.center().y), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(
@@ -624,11 +630,76 @@ fn account_identity_opens_profile_while_status_and_blank_do_not(cx: &mut TestApp
         Route::Home,
         "the blank right side must not open the profile"
     );
-    // Collapsed: the status button is hidden, but the identity still opens the profile.
+    // Collapsed: the bell is hidden, but the identity still opens the profile. The Notifications
+    // destination stays reachable through the More menu, and the theme toggle is an enabled menu
+    // entry that flips the mode without navigating.
     click("sidebar-toggle", cx);
-    assert!(cx.debug_bounds("account-status").is_none());
+    assert!(cx.debug_bounds("account-notifications").is_none());
     click("account-identity", cx);
     assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Profile);
+}
+
+#[gpui::test]
+fn theme_toggle_switches_mode_and_keeps_fonts_and_route(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    let before_mode = cx.update(|_, cx| cx.theme().mode());
+    let fonts_before = cx.update(|_, cx| {
+        (
+            cx.theme().font_family.clone(),
+            cx.theme().mono_family.clone(),
+        )
+    });
+    click("nav-settings", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Settings);
+    // Theme toggles in place: it must not navigate, and must flip the Ely mode.
+    click("quarter-theme-toggle", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Settings);
+    let after_mode = cx.update(|_, cx| cx.theme().mode());
+    assert_ne!(
+        before_mode, after_mode,
+        "the toggle must switch between light and dark"
+    );
+    // The global Noto Sans SC / Google Sans Code overrides survive the mode change.
+    let fonts_after = cx.update(|_, cx| {
+        (
+            cx.theme().font_family.clone(),
+            cx.theme().mono_family.clone(),
+        )
+    });
+    assert_eq!(
+        fonts_before, fonts_after,
+        "fonts must survive a theme switch"
+    );
+    // And back.
+    click("quarter-theme-toggle", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Settings);
+    assert_eq!(
+        before_mode,
+        cx.update(|_, cx| cx.theme().mode()),
+        "the second toggle must restore the original mode"
+    );
+}
+
+#[gpui::test]
+fn collapsed_menu_keeps_notifications_and_toggles_theme_in_place(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    click("sidebar-toggle", cx);
+    click("sidebar-more", cx);
+    // Notifications must not be silently lost when the shortcut moved to the bell.
+    let before_mode = cx.update(|_, cx| cx.theme().mode());
+    click("menu-row-Notifications", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Notifications);
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
+    // Reopen and run the theme entry: it must flip the mode without navigating away.
+    click("sidebar-more", cx);
+    click("menu-row-Toggle theme", cx);
+    assert_eq!(view.read_with(cx, |s, _| s.route()), Route::Notifications);
+    assert_ne!(
+        before_mode,
+        cx.update(|_, cx| cx.theme().mode()),
+        "the collapsed theme entry must flip the mode"
+    );
+    assert!(cx.debug_bounds("menu-panel-0").is_none());
 }
 
 #[gpui::test]

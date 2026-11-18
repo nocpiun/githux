@@ -11,8 +11,8 @@ use windows::{
     Win32::{
         Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Dwm::{
-            DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DwmDefWindowProc, DwmExtendFrameIntoClientArea,
-            DwmSetWindowAttribute,
+            DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmDefWindowProc,
+            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
         },
         Graphics::Gdi::ClientToScreen,
         UI::{
@@ -155,6 +155,53 @@ pub fn content_top_inset(window: &Window) -> f32 {
             return 0.0;
         }
         hidden_top(hwnd) as f32 / (GetDpiForWindow(hwnd) as f32 / 96.0).max(1.0)
+    }
+}
+
+/// Recolors the installed DWM caption in place for a live theme switch, and flips the immersive
+/// dark mode attribute so system-drawn button hover/press follow the window rather than the OS
+/// app mode. On systems without caption-color support the attribute change still applies; the
+/// explicit color writes degrade gracefully like the install path.
+pub fn set_theme(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla, dark: bool) {
+    let Some(hwnd) = hwnd(window) else {
+        return;
+    };
+    // SAFETY: the subclass marker is read/written only for our own HWND on its UI thread.
+    unsafe {
+        if GetPropW(hwnd, INSTALLED).is_invalid() {
+            return;
+        }
+        let dark_value: u32 = if dark { 1 } else { 0 };
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_value as *const _ as _,
+            size_of::<u32>() as u32,
+        );
+        for (attribute, color) in [
+            (DWMWA_CAPTION_COLOR, background),
+            (DWMWA_TEXT_COLOR, foreground),
+        ] {
+            let rgb = color.to_rgb();
+            let value = (rgb.r * 255.0).round() as u32
+                | ((rgb.g * 255.0).round() as u32) << 8
+                | ((rgb.b * 255.0).round() as u32) << 16;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                &value as *const _ as _,
+                size_of::<u32>() as u32,
+            );
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
     }
 }
 

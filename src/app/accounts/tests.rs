@@ -367,7 +367,7 @@ fn pat_submit_is_masked_cleared_and_real_repos_reach_the_shell(cx: &mut TestAppC
         Route::Settings
     );
     assert!(cx.debug_bounds("account-signed-out").is_some());
-    assert!(cx.debug_bounds("account-status").is_none());
+    assert!(cx.debug_bounds("account-notifications").is_none());
 
     focus_token(&controller, cx);
     cx.update(|window, cx| {
