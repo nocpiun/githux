@@ -1761,13 +1761,18 @@ fn refreshing_an_offline_feed_keeps_its_cached_continuation_pages(cx: &mut TestA
     });
     let (page, cx) = open_page(&mut fixture, cx);
     settle(&page, cx);
-    assert_eq!(feed_ids(&page, cx), ["first"]);
-    cx.update_window_entity(&page, |page, window, cx| {
-        page.load_more_for_test(window, cx)
-    });
-    drive_until(&page, cx, |page, cx| {
-        feed_ids(page, cx) == ["first", "second"]
-    });
+    // A one-item first Feed page is a "short initial page", so Home may legitimately auto-prefetch
+    // the cached continuation page while the sibling column is still finishing (LESSONS L015).
+    // Accept either shape, then make the continued collection explicit before the refresh.
+    if feed_ids(&page, cx) == ["first"] {
+        cx.update_window_entity(&page, |page, window, cx| {
+            page.load_more_for_test(window, cx)
+        });
+        drive_until(&page, cx, |page, cx| {
+            feed_ids(page, cx) == ["first", "second"]
+        });
+    }
+    assert_eq!(feed_ids(&page, cx), ["first", "second"]);
 
     // Refresh while still offline: the replay is the same first-page snapshot, which must not
     // replace the continued collection with a shorter one.
