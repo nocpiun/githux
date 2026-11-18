@@ -451,6 +451,8 @@ pub struct RepositoryPage {
     intent: RepositoryNavigation,
     details: Option<RepositoryDetails>,
     details_provenance: Option<RepositoryCacheProvenance>,
+    /// Current activation's summary, branch-list and code-snapshot request failures.
+    cache_failures: [bool; 3],
     branches: Option<BranchesOutcome>,
     branches_provenance: Option<RepositoryCacheProvenance>,
     branches_error: Option<PageError>,
@@ -558,6 +560,7 @@ impl RepositoryPage {
             intent,
             details: None,
             details_provenance: None,
+            cache_failures: [false; 3],
             branches: None,
             branches_provenance: None,
             branches_error: None,
@@ -828,6 +831,7 @@ impl RepositoryPage {
             return;
         }
         self.branches_loading = true;
+        self.cache_failures[1] = false;
         if let Some(details) = &self.details {
             self.spawn_job(Job::Branches {
                 identity: details.identity.clone(),
@@ -849,6 +853,10 @@ impl RepositoryPage {
         }
         self.stop_star();
         self.extras.cancel_reads();
+        if let Some(view) = &self.extras.view {
+            view.update(cx, |view, cx| view.clear_refresh_failures(cx));
+        }
+        self.cache_failures = [false; 3];
         self.cancel_reader_interactions(cx);
         self.stop_work();
         self.generation = self.generation.wrapping_add(1);
@@ -875,6 +883,43 @@ impl RepositoryPage {
             star_write_generation: self.star_write_generation,
             mode: RepositoryCacheMode::OnlinePreferred,
             hint: self.cache_hint(),
+        });
+        cx.notify();
+    }
+
+    /// Retries the displayed fixed-code snapshot without refreshing successful overview sections.
+    pub fn retry_code_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.check_authorization(cx);
+        if !self.active || self.authorization_lost {
+            return;
+        }
+        let Some((branch, identity)) = self
+            .branch
+            .as_ref()
+            .map(|b| b.name.clone())
+            .zip(self.details.as_ref().map(|d| d.identity.clone()))
+        else {
+            return;
+        };
+        self.stop_work();
+        self.work = Some(Work::new());
+        self.branch_request = self.branch_request.wrapping_add(1);
+        self.selection_request = self.selection_request.wrapping_add(1);
+        self.pending_content = None;
+        self.cache_failures[2] = false;
+        self.error = None;
+        self.snapshot_preliminary = false;
+        if let Some(state) = &mut self.branch {
+            state.tree.supersede_pending_loads();
+        }
+        if let Some(reader) = self.reader.clone() {
+            self.bind_reader_actions(&reader, cx);
+        }
+        self.spawn_job(Job::Revision {
+            branch,
+            request: self.branch_request,
+            identity,
+            mode: RepositoryCacheMode::OnlinePreferred,
         });
         cx.notify();
     }
@@ -1494,6 +1539,7 @@ impl RepositoryPage {
         self.pending_content = None;
         self.selection_request = self.selection_request.wrapping_add(1);
         self.intent.branch = Some(name.clone());
+        self.cache_failures[2] = false;
         self.branch = None;
         self.reader = None;
         self.readme_path = None;
@@ -1587,6 +1633,7 @@ impl RepositoryPage {
 
     /// Drops every cache-authorization binding held for the current generation.
     fn reset_authorization(&mut self) {
+        self.cache_failures = [false; 3];
         self.displayed_authorizations = Default::default();
     }
 
@@ -1797,7 +1844,8 @@ impl RepositoryPage {
     ///
     /// The bundle is applied as one unit so the summary, branch list, fixed revision, tree and
     /// reader all describe the same commit. Its parts keep `RepositoryCacheOrigin::Snapshot`
-    /// provenance, which is what draws the `Cached` marker; the online chain replaces them as its
+    /// provenance. Preview provenance alone never draws failure UI; request outcomes do.
+    /// The online chain replaces them as its
     /// results arrive. Nothing here starts follow-up jobs: the online chain already owns them, and a
     /// cached read must not suppress or duplicate that revalidation.
     fn apply_snapshot(
@@ -1927,6 +1975,7 @@ impl RepositoryPage {
                     self.invalidate_rows();
                 }
                 self.details = Some(details);
+                self.cache_failures[0] = provenance.as_ref().is_some_and(|p| p.revalidation_failed);
                 self.error = None;
                 // Provenance is applied *before* choosing the next read mode, so a page that was
                 // showing a cached snapshot switches back to `OnlinePreferred` for the dependent
@@ -1953,6 +2002,7 @@ impl RepositoryPage {
             }
             Err(error) => {
                 // No branch reply will arrive to release the manual-refresh loading gate.
+                self.cache_failures[0] = true;
                 self.branches_loading = false;
                 self.settle_after_refresh_error(&error, cx);
                 self.error = Some(error);
@@ -1974,6 +2024,8 @@ impl RepositoryPage {
             Ok((outcome, provenance)) => (Some(outcome), provenance, None),
             Err(error) => (None, None, Some(error)),
         };
+        self.cache_failures[1] =
+            error.is_some() || provenance.as_ref().is_some_and(|p| p.revalidation_failed);
         self.branches_error = error;
         // A summary or branch list this pass read from the network proves the network is reachable,
         // so a still-cached revision is revalidated instead of staying offline-only. The branch list
@@ -1985,8 +2037,10 @@ impl RepositoryPage {
                 .details_provenance
                 .as_ref()
                 .is_some_and(|value| value.origin == RepositoryCacheOrigin::Network);
-        self.branches_provenance = provenance;
-        self.branches = outcome.clone();
+        if outcome.is_some() {
+            self.branches_provenance = provenance;
+            self.branches = outcome.clone();
+        }
         if self.branch.is_some() {
             // Retrying enumeration updates only the picker, never the loaded snapshot.
             //
@@ -2146,6 +2200,10 @@ impl RepositoryPage {
         {
             return;
         }
+        self.cache_failures[2] = match &result {
+            Ok((_, provenance)) => provenance.as_ref().is_some_and(|p| p.revalidation_failed),
+            Err(_) => true,
+        };
         match result {
             // Re-resolving the same ref can legitimately resolve to the same commit (the usual case:
             // the branch has not moved). The tree, README and reader are addressed by that commit, so
@@ -2380,6 +2438,7 @@ impl RepositoryPage {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.replacement = None;
+                self.cache_failures[2] = true;
                 self.settle_after_refresh_error(&error, cx);
                 self.error = Some(error);
                 cx.notify();

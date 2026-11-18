@@ -159,7 +159,9 @@ fn continuity_replacement_failure_retains_the_old_commit_and_explains_the_failur
     fixture.transport.tree_release.send_replace(true);
     settle(&page, cx, |page| page.error().is_some());
     assert!(cx.debug_bounds("reader-markdown").is_some());
-    assert!(cx.debug_bounds("repository-refresh-error").is_some());
+    assert!(cx.debug_bounds("repository-code-cached").is_some());
+    assert!(cx.debug_bounds("repository-refresh-code").is_some());
+    assert!(cx.debug_bounds("repository-cached-badge").is_none());
     page.read_with(cx, |page, _| {
         assert_eq!(page.reader().unwrap().entity_id(), reader);
         assert_eq!(page.fixed_commit().unwrap().as_str(), MAIN_COMMIT);

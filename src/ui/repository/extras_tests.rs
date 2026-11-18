@@ -93,19 +93,14 @@ fn scoped_retry_keeps_source_and_sibling_groups(cx: &mut TestAppContext) {
     let reader = page.read_with(cx, |p, _| p.reader().unwrap().entity_id());
     let overview = page.read_with(cx, |p, _| p.overview().unwrap().clone());
     assert!(overview.read_with(cx, |v, _| v.languages().error().is_some()));
-    assert!(cx.debug_bounds("overview-retry-languages").is_none());
-    // Languages have no permanent UI chrome; the scoped host retry remains available.
-    let binding = overview.read_with(cx, |v, _| v.binding().clone());
-    page.update_in(cx, |p, w, cx| {
-        p.overview_action(
-            OverviewAction::Refresh {
-                binding,
-                section: OverviewSection::Languages,
-            },
-            w,
-            cx,
-        )
-    });
+    let retry = cx
+        .debug_bounds("overview-retry-languages")
+        .expect("failed languages have a scoped retry");
+    assert!(
+        cx.debug_bounds("overview-languages-cached").is_none(),
+        "no cached language value exists"
+    );
+    cx.simulate_click(retry.center(), gpui::Modifiers::none());
     for _ in 0..200 {
         page.update_in(cx, |p, w, cx| p.drain(w, cx));
         frames(cx);

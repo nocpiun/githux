@@ -44,6 +44,8 @@ use crate::ui::reader::ImageKey;
 
 #[path = "continuity_tests.rs"]
 mod continuity_tests;
+#[path = "failure_indicator_tests.rs"]
+mod failure_indicator_tests;
 
 const MAIN_COMMIT: &str = "c0ffee0000000000000000000000000000000001";
 const FEATURE_COMMIT: &str = "c0ffee0000000000000000000000000000000002";
@@ -736,6 +738,14 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
         );
     });
 
+    assert!(
+        cx.debug_bounds("repository-cached-badge").is_none(),
+        "cache-first content is quiet while its online verification is pending"
+    );
+    assert!(
+        cx.debug_bounds("repository-refresh").is_none(),
+        "preview provenance alone must not add a failure refresh control"
+    );
     // Release the network: the online chain revalidates the same ref and replaces the provenance.
     fixture.transport.hold(false);
     fixture.transport.release_all();
@@ -921,6 +931,7 @@ fn an_unverified_revalidation_settles_the_missing_snapshot_resources(cx: &mut Te
                 origin: crate::data::RepositoryCacheOrigin::Snapshot,
                 fetched_at_ms: 1,
                 verified_at_ms: 1,
+                revalidation_failed: false,
                 completeness: crate::domain::cache::CacheCompleteness::Complete,
             },
         )
@@ -991,6 +1002,7 @@ fn a_pending_cache_phase_read_is_superseded_by_online_verification(cx: &mut Test
             origin: RepositoryCacheOrigin::Snapshot,
             fetched_at_ms: 1,
             verified_at_ms: 1,
+            revalidation_failed: false,
             completeness: crate::domain::cache::CacheCompleteness::Complete,
         });
         // A directory and a document read are in flight from the cache-only pass.
@@ -1013,6 +1025,7 @@ fn a_pending_cache_phase_read_is_superseded_by_online_verification(cx: &mut Test
                     origin: RepositoryCacheOrigin::Network,
                     fetched_at_ms: 2,
                     verified_at_ms: 2,
+                    revalidation_failed: false,
                     completeness: crate::domain::cache::CacheCompleteness::Complete,
                 }),
             )),
@@ -1174,6 +1187,7 @@ fn a_failed_branch_enumeration_still_revalidates_the_cached_revision(cx: &mut Te
                             origin: RepositoryCacheOrigin::Network,
                             fetched_at_ms: 1,
                             verified_at_ms: 1,
+                            revalidation_failed: false,
                             completeness: crate::domain::cache::CacheCompleteness::Complete,
                         }),
                     )),
@@ -1402,6 +1416,7 @@ fn a_late_cached_repository_reply_never_rolls_back_the_network_page(cx: &mut Tes
                             origin: RepositoryCacheOrigin::Snapshot,
                             fetched_at_ms: f64::MIN as i64,
                             verified_at_ms: 1,
+                            revalidation_failed: false,
                             completeness: crate::domain::cache::CacheCompleteness::Complete,
                         }),
                     )),
@@ -1711,12 +1726,12 @@ fn cached_extras_report_a_historical_snapshot(cx: &mut TestAppContext) {
     assert!(page.read_with(cx, |page, _| page.extras.counts_historical));
     frames(cx);
     assert!(
-        cx.debug_bounds("overview-releases-cached").is_some(),
-        "the cached release group is labelled"
+        cx.debug_bounds("overview-releases-cached").is_none(),
+        "a summary failure does not label an unrequested release preview"
     );
     assert!(
-        cx.debug_bounds("overview-contributors-cached").is_some(),
-        "the cached contributor group is labelled"
+        cx.debug_bounds("overview-contributors-cached").is_none(),
+        "a summary failure does not label an unrequested contributor preview"
     );
 }
 
@@ -2234,12 +2249,14 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
             origin: RepositoryCacheOrigin::Network,
             fetched_at_ms: now,
             verified_at_ms: now,
+            revalidation_failed: false,
             completeness: crate::domain::cache::CacheCompleteness::Complete,
         });
         page.branches_provenance = Some(super::super::RepositoryCacheProvenance {
             origin: RepositoryCacheOrigin::Snapshot,
             fetched_at_ms: old,
             verified_at_ms: old,
+            revalidation_failed: false,
             completeness: crate::domain::cache::CacheCompleteness::Complete,
         });
         if let Some(branch) = page.branch.as_mut() {
@@ -2247,6 +2264,7 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
                 origin: RepositoryCacheOrigin::Snapshot,
                 fetched_at_ms: old + 60_000,
                 verified_at_ms: old + 60_000,
+                revalidation_failed: false,
                 completeness: crate::domain::cache::CacheCompleteness::Complete,
             });
         }
@@ -2266,7 +2284,10 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
         );
     });
     frames(cx);
-    assert!(cx.debug_bounds("repository-cached-badge").is_some());
+    assert!(
+        cx.debug_bounds("repository-cached-badge").is_none(),
+        "historical provenance without a failed summary does not label the header"
+    );
 }
 
 /// An explicit repository revocation, with no account epoch change, must clear the

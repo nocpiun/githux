@@ -231,7 +231,8 @@ fn actions_are_scoped_and_anonymous_is_not_navigable(cx: &mut TestAppContext) {
         },
         cx,
     );
-    assert!(cx.debug_bounds("overview-retry-languages").is_none());
+    assert!(cx.debug_bounds("overview-retry-languages").is_some());
+    assert!(cx.debug_bounds("overview-languages-cached").is_none());
     assert!(cx.debug_bounds("overview-language-bar").is_none());
     assert!(cx.debug_bounds("overview-release-version").is_some());
 }
@@ -738,9 +739,21 @@ fn cached_non_empty_releases_keep_their_block_and_cached_mark(cx: &mut TestAppCo
     };
     apply_releases(&h, &b, historical, cx);
     cx.run_until_parked();
-    // Cached non-empty data keeps the group, its Cached mark, its refresh entry and the version
-    // row; only the exact count is withheld because it is not a freshly verified total.
+    // Non-empty previews retain their group and provenance without failure chrome.
     assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-releases-cached").is_none());
+    assert!(cx.debug_bounds("overview-retry-releases").is_none());
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_result(
+            &b,
+            OverviewUpdate::Releases(SectionState::Error {
+                message: "request failed".into(),
+            }),
+            true,
+            cx,
+        );
+    });
+    cx.run_until_parked();
     assert!(cx.debug_bounds("overview-releases-cached").is_some());
     assert!(cx.debug_bounds("overview-retry-releases").is_some());
     assert!(cx.debug_bounds("overview-latest-badge").is_none());

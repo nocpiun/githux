@@ -44,6 +44,7 @@ struct Reply {
     endpoint: Endpoint,
     request: u64,
     update: OverviewUpdate,
+    failed: bool,
 }
 struct CountsReply {
     binding: OverviewBinding,
@@ -341,6 +342,15 @@ impl RepositoryPage {
         let work = Work::new();
         let cancel = work.token();
         self.extras.work[index] = Some(work);
+        let loading = match endpoint {
+            Endpoint::Releases => OverviewUpdate::Releases(SectionState::Loading),
+            Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Loading),
+            Endpoint::Contributors => OverviewUpdate::Contributors(SectionState::Loading),
+            Endpoint::Languages => OverviewUpdate::Languages(SectionState::Loading),
+        };
+        self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
+            view.begin_refresh(&binding, &loading, cx);
+        });
         // A section already showing a cached value keeps it while the online re-read runs: turning
         // it back into a spinner would hide readable content for no reason. A truly empty section
         // still shows the loading state.
@@ -360,12 +370,6 @@ impl RepositoryPage {
                 }),
             Some(true)
         ) {
-            let loading = match endpoint {
-                Endpoint::Releases => OverviewUpdate::Releases(SectionState::Loading),
-                Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Loading),
-                Endpoint::Contributors => OverviewUpdate::Contributors(SectionState::Loading),
-                Endpoint::Languages => OverviewUpdate::Languages(SectionState::Loading),
-            };
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
                 view.apply(&binding, loading, cx);
             });
@@ -417,6 +421,8 @@ impl RepositoryPage {
                     authorization,
                     endpoint,
                     request,
+                    failed: update.has_error()
+                        || (!offline_only && !preliminary && update.is_historical()),
                     update,
                 });
             }
@@ -434,7 +440,7 @@ impl RepositoryPage {
             };
             let binding = self.extras.binding.as_ref().unwrap();
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
-                view.apply(binding, update, cx);
+                view.apply_result(binding, update, true, cx);
             });
         }
     }
@@ -559,7 +565,7 @@ impl RepositoryPage {
             self.extras.work[reply.endpoint.index()] = None;
             completed = true;
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
-                view.apply(&reply.binding, reply.update, cx);
+                view.apply_result(&reply.binding, reply.update, reply.failed, cx);
             });
             // The language strip is composed by the page from this same state.
             cx.notify();
@@ -1177,6 +1183,7 @@ mod tests {
                 authorization: None,
                 endpoint: Endpoint::Releases,
                 request,
+                failed: false,
                 update: OverviewUpdate::Releases(SectionState::Loading),
             });
             page.drain_overview(cx);
@@ -1246,6 +1253,7 @@ mod tests {
                 authorization: page.extras.displayed_authorization.clone(),
                 endpoint: Endpoint::Languages,
                 request: request - 1,
+                failed: true,
                 update: OverviewUpdate::Languages(SectionState::Error {
                     message: "old error".into(),
                 }),
@@ -1267,6 +1275,7 @@ mod tests {
                 authorization: None,
                 endpoint: Endpoint::Languages,
                 request,
+                failed: true,
                 update: OverviewUpdate::Languages(SectionState::Error {
                     message: "after deactivate".into(),
                 }),
