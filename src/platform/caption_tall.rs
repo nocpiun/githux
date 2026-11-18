@@ -242,6 +242,38 @@ pub fn shutdown() {
     let runtime = RUNTIME.with_borrow_mut(Option::take);
     drop(runtime);
 }
+
+/// Recolors the installed title bar in place for a live theme switch. Only the current window's
+/// installed state is touched; the App SDK's own hover/press animation and hit testing stay.
+pub fn set_theme(window: &Window, background: gpui::Hsla, foreground: gpui::Hsla, dark: bool) {
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let key = handle.0 as usize;
+    let Some(state) = WINDOWS.with_borrow(|windows| windows.get(&key).cloned()) else {
+        return;
+    };
+    let theme = if dark {
+        TitleBarTheme::Dark
+    } else {
+        TitleBarTheme::Light
+    };
+    let background = color::boxed(background);
+    let foreground = color::boxed(foreground);
+    let configured = (|| {
+        state.bar.SetPreferredTheme(theme)?;
+        state.bar.SetBackgroundColor(&background)?;
+        state.bar.SetInactiveBackgroundColor(&background)?;
+        state.bar.SetButtonBackgroundColor(&background)?;
+        state.bar.SetButtonInactiveBackgroundColor(&background)?;
+        state.bar.SetForegroundColor(&foreground)?;
+        state.bar.SetButtonForegroundColor(&foreground)?;
+        Ok::<(), Error>(())
+    })();
+    if let Err(error) = configured {
+        eprintln!("Native caption theme update failed: {error}");
+    }
+}
 pub fn area(window: &Window) -> Option<CaptionArea> {
     let handle = hwnd(window)?;
     let state = WINDOWS.with_borrow(|windows| windows.get(&(handle.0 as usize)).cloned())?;

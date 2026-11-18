@@ -306,7 +306,14 @@ fn navigation_rows_and_quarter_entries_route_and_keep_selection(cx: &mut TestApp
     assert!(cx.debug_bounds("page-home").is_none());
     assert!(cx.debug_bounds("page-settings").is_none());
 
-    click("quarter-notifications", cx);
+    click("quarter-theme-toggle", cx);
+    assert_eq!(
+        route(&view, cx),
+        Route::Settings,
+        "theme toggle must not navigate"
+    );
+    // The old Notifications shortcut is now the bell on the account row.
+    click("account-notifications", cx);
     assert_eq!(route(&view, cx), Route::Notifications);
     // The real host is mounted; without an account service it reports its own unavailable state.
     assert!(cx.debug_bounds("notifications-page-unavailable").is_some());

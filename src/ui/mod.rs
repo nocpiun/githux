@@ -1430,9 +1430,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// Moves the menu highlight, wrapping over the three enabled entries (New stays disabled).
+    /// Moves the menu highlight, wrapping over the four enabled entries (New stays disabled).
     pub fn move_sidebar_menu_cursor(&mut self, by: isize, cx: &mut Context<Self>) {
-        const ENABLED: [usize; 3] = [0, 1, 2];
+        const ENABLED: [usize; 4] = [0, 1, 2, 3];
         let at = ENABLED
             .iter()
             .position(|&i| i == self.sidebar_menu_cursor)
@@ -1442,7 +1442,8 @@ impl Shell {
         cx.notify();
     }
 
-    /// Runs the highlighted menu entry, if it is one of the enabled destinations.
+    /// Runs the highlighted menu entry, if it is one of the enabled destinations or the theme
+    /// toggle.
     pub fn pick_sidebar_menu_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = match self.sidebar_menu_cursor {
             0 => Some(Route::Notifications),
@@ -1450,6 +1451,11 @@ impl Shell {
             2 => Some(Route::PullRequests),
             _ => None,
         };
+        if self.sidebar_menu_cursor == 3 {
+            self.close_sidebar_menu(window, cx);
+            self.toggle_theme(window, cx);
+            return;
+        }
         self.pick_sidebar_menu(target, window, cx);
     }
 
@@ -1465,6 +1471,33 @@ impl Shell {
         if let Some(target) = target {
             self.navigate(target, window, cx);
         }
+    }
+
+    /// Toggles the Ely theme between light and dark in place. The mode change never touches the
+    /// global font overrides: `Theme::set_mode` repaints with the new palette while `font_family`
+    /// and `mono_family` (Noto Sans SC / Google Sans Code) stay exactly as startup set them.
+    /// No page state is lost — only the theme global and the windows it repaints change. On
+    /// Windows the installed native caption is recolored in place so the title bar follows the
+    /// switch instead of staying in the startup palette.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    pub fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = if cx.theme().is_dark() {
+            ely_core::theme::Mode::Light
+        } else {
+            ely_core::theme::Mode::Dark
+        };
+        ely_core::theme::Theme::set_mode(next, cx);
+        #[cfg(target_os = "windows")]
+        {
+            let colors = cx.theme().colors.clone();
+            crate::platform::caption::set_theme(
+                window,
+                colors.bg,
+                colors.fg,
+                next == ely_core::theme::Mode::Dark,
+            );
+        }
+        cx.notify();
     }
 
     /// Closes the collapsed More menu and returns focus to its trigger.
@@ -1995,7 +2028,8 @@ impl Shell {
             self.avatar_element("account", "sidebar-account-avatar", &name, key, rems, cx)
         });
         let account = {
-            let this = this.clone();
+            let profile_this = this.clone();
+            let notifications_this = this.clone();
             let target = if self.active_account().is_some() {
                 Some(Route::Profile)
             } else {
@@ -2011,7 +2045,7 @@ impl Shell {
                 frame,
                 move |window, cx| {
                     let target = target.clone();
-                    this.update(cx, |shell, cx| match target {
+                    profile_this.update(cx, |shell, cx| match target {
                         Some(target) => {
                             shell.navigate(target, window, cx);
                         }
@@ -2023,6 +2057,12 @@ impl Shell {
                         }
                     });
                 },
+                // The bell carries the Notifications navigation the removed quick action owned.
+                Box::new(move |window, cx| {
+                    notifications_this.update(cx, |shell, cx| {
+                        shell.navigate(Route::Notifications, window, cx);
+                    });
+                }),
                 cx,
             )
         };
@@ -2065,14 +2105,31 @@ impl Shell {
                 cx,
             )
         } else {
+            let this_for_theme = this.clone();
             sidebar::quarter_row([
-                quarter(
-                    "notifications",
-                    IconName::Bell,
-                    "Notifications",
-                    Some(Route::Notifications),
-                    route == Route::Notifications,
-                    this.clone(),
+                // The old Notifications shortcut is now the theme toggle; the bell moved to the
+                // account status position, so nothing is lost and no route is dropped.
+                sidebar::quarter_button(
+                    "theme-toggle",
+                    if cx.theme().is_dark() {
+                        IconName::Sun
+                    } else {
+                        IconName::Moon
+                    },
+                    if cx.theme().is_dark() {
+                        "Light theme"
+                    } else {
+                        "Dark theme"
+                    },
+                    false,
+                    false,
+                    {
+                        let this = this_for_theme.clone();
+                        move |window, cx| {
+                            this.update(cx, |shell, cx| shell.toggle_theme(window, cx));
+                        }
+                    },
+                    cx,
                 ),
                 quarter(
                     "issues",
