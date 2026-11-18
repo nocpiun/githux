@@ -1720,6 +1720,160 @@ fn cached_extras_report_a_historical_snapshot(cx: &mut TestAppContext) {
     );
 }
 
+/// A repository whose persisted cache already recorded a complete empty release list must never
+/// paint the Releases group: not on the cache-first frame, not while the online revalidation is
+/// held, and not after it finishes. This is the reported defect — the group used to appear with
+/// `Cached`/spinner/warning chrome and then pop out of the layout once the refresh completed.
+#[gpui::test]
+fn cached_complete_empty_releases_never_paint_the_group(cx: &mut TestAppContext) {
+    let mut fixture = CachedFixture::new(Scene::OverviewZero);
+    fixture.login(1);
+    // Warm the cache from the network: the fixture answers `/releases` with `[]` and
+    // `/releases/latest` with 404.
+    {
+        let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+        settle(&page, cx, |page| {
+            page.reader_status() == &ReaderStatus::Showing
+        });
+        for _ in 0..300 {
+            page.update_in(cx, |page, window, cx| page.drain(window, cx));
+            frames(cx);
+            let settled = page.read_with(cx, |page, cx| {
+                page.overview().is_some_and(|view| {
+                    let view = view.read(cx);
+                    !view.releases().is_loading()
+                        && view
+                            .releases()
+                            .value()
+                            .is_some_and(|data| data.list.releases.is_empty())
+                })
+            });
+            if settled {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        page.read_with(cx, |page, cx| {
+            let view = page.overview().expect("overview mounted").read(cx);
+            assert!(
+                view.releases()
+                    .value()
+                    .is_some_and(|data| data.list.releases.is_empty()),
+                "the warm-up observed a complete empty release list"
+            );
+            assert!(
+                view.latest_release().is_some_and(|latest| latest
+                    .value()
+                    .is_some_and(|value| value.release.is_none()))
+            );
+        });
+        assert!(
+            cx.debug_bounds("overview-releases").is_none(),
+            "the online observation already omits the empty group"
+        );
+        release_page(&host, cx);
+    }
+
+    // Reopen from cache with the online chain held at the transport boundary. The cached bundle
+    // paints synchronously; the overview's own cache reads land on the following drains.
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && page.is_showing_cached_snapshot()
+    });
+    // As soon as the cached release value is on screen the group must already be absent: no frame
+    // may show `Cached`, a spinner, a warning or a refresh entry for an empty list.
+    let mut published = false;
+    for _ in 0..300 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        frames(cx);
+        let observing_cached_empty = page.read_with(cx, |page, cx| {
+            page.overview().is_some_and(|view| {
+                let view = view.read(cx);
+                view.releases().is_historical()
+                    && view
+                        .releases()
+                        .value()
+                        .is_some_and(|data| data.list.releases.is_empty())
+            })
+        });
+        if observing_cached_empty {
+            published = true;
+            assert!(
+                cx.debug_bounds("overview-releases").is_none(),
+                "a cached empty release list must not paint the Releases group"
+            );
+            for omitted in [
+                "overview-release-count",
+                "overview-releases-cached",
+                "overview-retry-releases",
+            ] {
+                assert!(
+                    cx.debug_bounds(omitted).is_none(),
+                    "{omitted} must not paint for a cached empty release list"
+                );
+            }
+            let people = cx
+                .debug_bounds("overview-contributors")
+                .expect("the contributor group renders without releases");
+            let strip = cx
+                .debug_bounds("repository-overview")
+                .expect("the overview strip renders");
+            assert!(
+                (people.origin.x - strip.origin.x).abs() < gpui::px(0.5),
+                "contributors take the leading edge while releases is omitted"
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    assert!(
+        published,
+        "the cached empty release list never reached the overview"
+    );
+    page.read_with(cx, |page, cx| {
+        assert!(
+            page.is_showing_cached_snapshot(),
+            "the online chain is still held, so the snapshot remains on screen"
+        );
+        let view = page.overview().expect("overview mounted").read(cx);
+        assert!(
+            view.latest_release()
+                .is_some_and(|latest| latest.value().is_some()),
+            "the cached latest observation was published too"
+        );
+    });
+
+    // Let the online chain finish: the group must not appear after the refresh either.
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing && !page.is_showing_cached_snapshot()
+    });
+    for _ in 0..200 {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        frames(cx);
+        let settled = page.read_with(cx, |page, cx| {
+            page.overview().is_some_and(|view| {
+                let view = view.read(cx);
+                !view.releases().is_loading() && !view.releases().is_historical()
+            })
+        });
+        if settled {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    frames(cx);
+    assert!(
+        cx.debug_bounds("overview-releases").is_none(),
+        "the refreshed page keeps the empty group omitted"
+    );
+    assert!(cx.debug_bounds("overview-contributors").is_some());
+    release_page(&host, cx);
+}
+
 /// Offline Star never sends a write or fakes a toggled count; once back online
 /// and refreshed, Star/Unstar uses the authoritative server confirmation.
 #[gpui::test]

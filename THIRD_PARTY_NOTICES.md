@@ -33,6 +33,12 @@ Lucide icons, bundled by `ely-core` and embedded via `include_bytes!`.
 
 ## Copied source code
 
+- `src/ui/repository_overview/language_colors.rs` is generated from GitHub Linguist's
+  `lib/linguist/languages.yml` at commit
+  `d456527fe93355baa28c3c29d542c97282b61bc7` (MIT, Copyright (c) 2017 GitHub, Inc.). It
+  redistributes only each language's name and declared `color:` value; no grammar data is copied.
+  Full text: [assets/licenses/linguist-mit.txt](assets/licenses/linguist-mit.txt). See
+  [language strip colors](docs/repository-overview.md#已确认的展示).
 - `src/ui/reader/markdown/` is derived from Ely's `ely-documents` reader at
   revision `30c66fe1d5d23db769a6c834b771d054d7f288cf` (MIT). See
   [docs/content-reader-markdown-patch.md](docs/content-reader-markdown-patch.md).
