@@ -183,6 +183,14 @@ Codex 对 `f9bf491` 提出 [P2：摘要失败后取消的 TOP 分组永久 Loadi
 
 两套 Runtime 暂存通过，各 27 个文件；末次 PE 复核为 x64 Windows GUI，debug 128,490,496 bytes、release 99,795,968 bytes。release 的长耗时主要是共享槽排队，不能描述成持续链接；最终进程与 runner 收据已核实。末次 main 仍为 `4157641`。此后仅补日志，当前 Windows release 正式程序包含缓存提示返工及已合入 #94 的 Reader；等待最终 head 的 CI/Codex 后交付复验，保留 pending，不合并。
 
+### 审查补充：根目录重试恢复保存的文件选择
+
+`74f6ad0` 收到 [P2](https://github.com/nocpiun/githux/pull/89#discussion_r4615356580)：根树失败的加载态结算使保存的文件成为 ContentFailed，成功根目录 Retry 却只匹配命名祖先，漏掉 `""`。意见成立，无待裁决。新增根级 README.md 与嵌套 src/main.rs 两个正式页面用例，真实点击 root Retry；旧实现 0/2 通过（`7a82866a-3c2f-4c08-963c-9d6b0a9a5182`，等待 0.163s / 编译执行 60.809s，测试 0.22s），均明确失败于“根目录成功但保存文件仍 ContentFailed”。修复让根目录视为所有保存文件的依赖，成功后恢复 Loading 并继续解析文件，重复失败也维持局部终态；命名祖先与无关目录原行为保留。回归同时确认不重新解析 ref、不切换用户选择。缓存提示策略不变；后续验证与程序重建绑定此修复组合。
+
+审查修复最终检查全部 exit 0：Repository **1066 通过、3 项既有忽略**（`cec2ba13-bc7f-460f-a36d-e6d624608946`，等待 0.163s / 执行 94.408s，测试 18.35s）；release all-target check（`1580c39d-bc42-44cf-bf9a-1d1fbe85f626`，0.165s / 95.945s）；strict all-target clippy（`b3ccc749-59e8-4ed3-aa81-50d0b0ca0819`，0.165s / 47.730s）；debug/release 构建（`2671f599-5cb6-42ea-aae2-1b8a16c0f624`，0.168s / 35.756s；`bc8b8593-376d-4436-b245-9eec5fa5fca3`，0.173s / 196.771s）；fmt check（`f2c31ffe-47ce-4647-beac-c1a199925d85`，0 / 18.650s）。Reader 源码未变，保留 #94 组合的 360 通过/1 项既有忽略收据。两套 Runtime 各 27 文件，PE 复核均为 x64 GUI；debug 为 128,488,960 bytes、release 为 99,795,968 bytes。
+
+辅助整组脚本在全部九项成功后，最后一次结果文件 rename 遇到 Windows EPERM，已写成 success 的 `.tmp` 与单项 runner 均完整保留。完成事件等待因此只看到 running 并以等待超时退出；核对完整临时记录、9 个 exit code 和实际终端错误后，仅恢复最终 JSON 重命名，保留原始错误/恢复证据，未重跑或改写检查结果。末次 main 仍为 `4157641`。最终提交后重新等待该 head 的 CI/Codex，继续 pending、不合并。
+
 
 ## 可复用教训
 

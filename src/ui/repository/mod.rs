@@ -2589,12 +2589,13 @@ impl RepositoryPage {
             Err(error) => state.tree.fail_load(&path, error),
         }
         let failure = state.tree.failure(&path).cloned();
+        // Every saved file depends on the root, including root-level files with no named ancestors.
+        let selection_depends_on_directory = self.selection.path().is_some_and(|selected| {
+            path.is_empty() || RepositoryNavigation::ancestors(selected).contains(&path)
+        });
         if failure.is_none()
             && matches!(self.reader_status, ReaderStatus::ContentFailed(_))
-            && self
-                .selection
-                .path()
-                .is_some_and(|selected| RepositoryNavigation::ancestors(selected).contains(&path))
+            && selection_depends_on_directory
         {
             self.reader_status = ReaderStatus::Loading;
         }
@@ -2602,10 +2603,7 @@ impl RepositoryPage {
         // A selection waiting on *this* directory has to end in a terminal state
         // rather than stay Loading; others keep what they were showing.
         if let Some(error) = failure
-            && self
-                .selection
-                .path()
-                .is_some_and(|selected| RepositoryNavigation::ancestors(selected).contains(&path))
+            && selection_depends_on_directory
         {
             self.reader = None;
             self.reader_status = ReaderStatus::ContentFailed(PageError::new(
