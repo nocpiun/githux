@@ -624,7 +624,6 @@ fn tab_strip(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElem
                 .child(crate::ui::tab_underline::TabUnderline::label(
                     tab.label(),
                     is_active,
-                    fg,
                 ))
                 .children(
                     match tab {

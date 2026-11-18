@@ -40,11 +40,14 @@
 - 修复：`src/ui/tab_underline.rs` 新增 `TabUnderline::label(text, active, color)`，可见文字保持当前字重，下面叠一个 `h(px(0.0))`、`overflow_hidden()`、`opacity(0.0)`、`MEDIUM` 的透明占位文本，外层 `flex_col().items_center()`。占位文本没有 id/role/命中区/tooltip，不重复无障碍名称，只贡献推进宽度。仓库内容 Tabs 与窄态 Settings 分类条都改用它；Profile Overview 只有一项，宽度不变因此不需要占位；宽态 Settings 是 168px 固定栏 + 左对齐文字，不涉及流式宽度，未改动；`src/ui/tabs.rs` 的顶部会话标签（固定 `TAB_WIDTH`、拖动 ghost/箭头光标）按要求完全未动。
 - 同时 `git fetch origin main` 后 `git merge --no-edit origin/main`（`4e75ad8`，含 #90 bash 超时与 #93 侧栏/主题），`src/ui/mod.rs` 的相邻改动没有冲突，#93 的侧栏/主题支持与本任务的 `tab_underline` 注册同时保留。
 
+- Codex 第二轮 P3 成立：`TabUnderline::label` 第一版在可见文字上又显式设置了 `text_color`，压过了 tab 自身的 `.hover(|style| style.text_color(fg))`，未选中 tab hover 时文字不再变亮。已去掉该颜色参数，可见文字与占位都继承 tab 的颜色（选中/未选中色与 hover 色都由 tab 提供）。GPUI 测试平台没有查询绘制颜色的接口，这一项按代码路径核对并在本日志记录边界，不用不可靠的断言冒充证据。
+
 ## 验证（返工轮）
 
 - 两项新几何回归在去掉占位层时分别失败（仓库 `96px → 97px`、窄态 `87px → 86px`），恢复后通过：run `d39ca100`（仓库）、`b01e7b92`（窄态）。
 - 既有下划线用例一并重跑 `e7ebd0da`：5 passed（移动/宽度插值、中断续接、reduced motion、resize+缩放、单 tab 几何）。
-- 全量：`cargo test --locked` `aaf8fce3`（1416/116/668/392/349/910/1022/44/1417 passed，0 failed；首跑 `04dfa4b0` 有 1 项与本任务无关的 `reader_images` 5 秒超时，单跑 `5657f136` 与复跑均通过）、`cargo test --locked --example settings` `bbb7223a`（1430 passed）、`cargo clippy --locked --all-targets -- -D warnings` `f0039e2c`、`cargo fmt --all -- --check` `95f520c9`、`cargo build --locked --release --bin githux` `92415e48`，均 exit 0。
+- 合并 origin/main `47ae188`（#92/#95）后重验：clippy `d1c2361b`、`cargo test --locked` `cbab9344`、`--example settings` `00f892de`、fmt `3ee45813`、release build `b16e7766`，均 exit 0；去掉标签颜色参数后再跑 clippy `304bfe2b`、`cargo test --locked` `f7898559`、`--example settings` `9bdf07f0`、fmt `70f516a2`，均 exit 0。
+- 全量（返工轮首次）：`cargo test --locked` `aaf8fce3`（1416/116/668/392/349/910/1022/44/1417 passed，0 failed；首跑 `04dfa4b0` 有 1 项与本任务无关的 `reader_images` 5 秒超时，单跑 `5657f136` 与复跑均通过）、`cargo test --locked --example settings` `bbb7223a`（1430 passed）、`cargo clippy --locked --all-targets -- -D warnings` `f0039e2c`、`cargo fmt --all -- --check` `95f520c9`、`cargo build --locked --release --bin githux` `92415e48`，均 exit 0。
 - 负责人用 release 做视觉验收，因此额外执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-runtime.ps1 -Destination target/release`（27 unchanged，0 written）。
 
 ## 后续

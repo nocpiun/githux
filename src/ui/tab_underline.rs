@@ -227,11 +227,10 @@ impl TabUnderline {
     /// The sizer is a zero-height, clipped, fully transparent text node with no id, no role, no
     /// hitbox and no tooltip, so it is neither reachable nor announced; it only contributes its
     /// advance to the parent's intrinsic width.
-    pub(crate) fn label(
-        text: impl Into<gpui::SharedString>,
-        active: bool,
-        color: Hsla,
-    ) -> AnyElement {
+    /// No colour is set here on purpose: the label inherits it from the tab, so the tab's own
+    /// active/inactive colour *and* its hover colour keep working exactly as before (an explicit
+    /// colour on the label would win over the ancestor's hover style).
+    pub(crate) fn label(text: impl Into<gpui::SharedString>, active: bool) -> AnyElement {
         let text = text.into();
         div()
             .flex()
@@ -247,7 +246,6 @@ impl TabUnderline {
                     } else {
                         gpui::FontWeight::NORMAL
                     })
-                    .text_color(color)
                     .child(text.clone()),
             )
             .child(
@@ -258,7 +256,6 @@ impl TabUnderline {
                     .overflow_hidden()
                     .opacity(0.0)
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(color)
                     .child(text),
             )
             .into_any_element()

@@ -222,9 +222,7 @@ impl SettingsView {
                     // Width is the active-weight width in both states, so selecting a category
                     // never shifts the tabs to its right and the shared band stays on one box.
                     .child(crate::ui::tab_underline::TabUnderline::label(
-                        label,
-                        selected,
-                        if selected { active_fg } else { muted_fg },
+                        label, selected,
                     ))
                     // Invisible measurement for the shared band: no hitbox, so the tab keeps its
                     // cursor, hover, focus background and click target exactly as before.
