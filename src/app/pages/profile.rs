@@ -2293,6 +2293,8 @@ mod tests {
         /// True while held requests may continue. Arming a hold resets it, so a request that starts
         /// after the release cannot miss the notification the way a bare `notify_waiters` can.
         release: tokio::sync::watch::Sender<bool>,
+        /// Release gate for `hold_siblings`, kept apart from `release` so a test can let the basic
+        /// read finish while the sibling section reads stay in flight.
         sibling_release: tokio::sync::watch::Sender<bool>,
     }
 
@@ -2331,6 +2333,8 @@ mod tests {
             }
         }
 
+        /// Let the online basic read through while every sibling section read stays held. The two
+        /// gates are independent so releasing one cannot accidentally release the other.
         fn release_basic(&self) {
             self.held.store(false, Ordering::SeqCst);
             self.release.send_replace(true);
@@ -2366,6 +2370,26 @@ mod tests {
         }
     }
 
+    /// Wait until a hold gate opens, unless the read is cancelled first.
+    async fn wait_for_release(
+        mut released: tokio::sync::watch::Receiver<bool>,
+        cancel: CancellationToken,
+    ) -> Result<(), TransportError> {
+        tokio::select! {
+            _ = async {
+                loop {
+                    if *released.borrow_and_update() {
+                        break;
+                    }
+                    if released.changed().await.is_err() {
+                        break;
+                    }
+                }
+            } => Ok(()),
+            _ = cancel.cancelled() => Err(TransportError::Cancelled),
+        }
+    }
+
     impl Transport for ProfileFixtureTransport {
         fn execute_bounded<'a>(
             &'a self,
@@ -2396,30 +2420,16 @@ mod tests {
             Box::pin(async move {
                 let url = request.url.clone();
                 self.reads.lock().unwrap().push(url.clone());
-                let gated = !url.ends_with("/user") && !url.contains("/user/repos");
-                let gates = [
-                    (gated && self.held.load(Ordering::SeqCst)).then(|| self.release.subscribe()),
-                    (gated
-                        && self.hold_siblings.load(Ordering::SeqCst)
-                        && !url.starts_with("https://api.github.com/users/"))
-                    .then(|| self.sibling_release.subscribe()),
-                ];
-                for mut released in gates.into_iter().flatten() {
-                    tokio::select! {
-                        _ = async {
-                            loop {
-                                if *released.borrow_and_update() {
-                                    break;
-                                }
-                                if released.changed().await.is_err() {
-                                    break;
-                                }
-                            }
-                        } => {}
-                        _ = cancel.clone().cancelled() => {
-                            return Err(TransportError::Cancelled);
-                        }
-                    }
+                let exempt = url.ends_with("/user") || url.contains("/user/repos");
+                let hold_all = !exempt && self.held.load(Ordering::SeqCst);
+                let hold_siblings = !exempt
+                    && self.hold_siblings.load(Ordering::SeqCst)
+                    && !url.starts_with("https://api.github.com/users/");
+                if hold_all {
+                    wait_for_release(self.release.subscribe(), cancel.clone()).await?;
+                }
+                if hold_siblings {
+                    wait_for_release(self.sibling_release.subscribe(), cancel.clone()).await?;
                 }
                 if url.ends_with("/user") {
                     let id = *self.user_id.lock().unwrap();
@@ -3024,14 +3034,13 @@ mod tests {
                     && page.work.iter().all(Option::is_none)
             })
         });
-        // Reopen the page for the non-canonical route spelling, then hold the network: the snapshot
+        // Reopen the page for the non-canonical route spelling, then hold both gates: the snapshot
         // paints with the cached canonical spelling while the online read still answers with the
-        // login the request was made with.
+        // login the request was made with. Holding both keeps the online Basic from settling before
+        // the historical snapshot is observable, whichever reply wins the first drain.
         harness
             .page
             .update(cx, |page, _| page.login = "Alice".into());
-        // First require a cached Basic paint. Then release Basic independently, keeping the
-        // sibling network reads in flight while it canonicalizes the route spelling.
         harness.transport.hold(true);
         harness.transport.hold_siblings(true);
         cx.update_window_entity(&harness.page, |page, _, cx| {
@@ -3041,18 +3050,31 @@ mod tests {
         wait_for_profile(&harness, cx, |cx| {
             cx.debug_bounds("profile-basic-provenance-historical")
                 .is_some()
+                && harness
+                    .page
+                    .read_with(cx, |page, _| page.work.iter().all(Option::is_some))
         });
+        // Release only the basic gate: the online Basic must settle and clear its historical marker
+        // while every sibling online read is still held in flight.
         harness.transport.release_basic();
         wait_for_profile(&harness, cx, |cx| {
-            harness.page.read_with(cx, |page, cx| {
-                page.view_for_test().is_some_and(|view| {
-                    view.read(cx)
-                        .basic_provenance()
-                        .is_some_and(|p| !p.is_historical())
-                }) && page.work[Section::Basic.index()].is_none()
-                    && page.work[1..].iter().all(Option::is_some)
-            })
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+                && harness.page.read_with(cx, |page, cx| {
+                    page.view_for_test().is_some_and(|view| {
+                        view.read(cx)
+                            .basic_provenance()
+                            .is_some_and(|provenance| !provenance.is_historical())
+                    }) && page.work[Section::Basic.index()].is_none()
+                })
         });
+        harness.page.read_with(cx, |page, _| {
+            assert!(
+                page.work[1..].iter().all(Option::is_some),
+                "sibling online reads must still be held in flight once Basic settles"
+            );
+        });
+        harness.transport.hold_siblings(false);
         harness.transport.release_all();
         // Every section started before the rename must still finish: the canonical login change is
         // the same profile, not a different target.
@@ -3448,22 +3470,22 @@ mod tests {
                             view.contributions(),
                             SectionState::Error(PresentationError::NotCached)
                         )
-                })
+                }) && page.work.iter().all(Option::is_none)
             })
         });
 
-        // Bring the network back and retry the contributions section through its bound action.
+        // Bring network back with complete calendar, and retry the contributions section through the
+        // action bound to the mounted view. Coordinate-clicking `profile-section-error-mark` is not
+        // deterministic here: the asynchronous Flow README layout can still move the section while
+        // the test scrolls to it. The real UI click stays covered by
+        // `src/ui/profile/tests.rs::historical_and_partial_provenance_badges_and_section_retries_work`.
         harness.transport.set_offline(false);
         harness
             .transport
             .calendar_fail
             .store(false, Ordering::SeqCst);
-        // This host test verifies cached section state through the currently bound action.
-        // The real retry-mark click is covered by the Profile view's
-        // historical_and_partial_provenance_badges_and_section_retries_work test; coupling this
-        // cache assertion to asynchronous README image layout made CI clicks miss the mark.
         cx.update_window_entity(&harness.page, |page, window, cx| {
-            let request = page.view_for_test().unwrap().read(cx).request();
+            let request = page.request.clone().expect("view request");
             page.action(
                 ProfileAction {
                     request,
