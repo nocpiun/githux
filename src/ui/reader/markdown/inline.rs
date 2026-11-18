@@ -477,9 +477,13 @@ fn highlight(style: Style) -> HighlightStyle {
 
 impl Element for Paragraph {
     type RequestLayoutState = ();
-    /// The hover hitbox that carries the pointing-hand cursor, when this
-    /// paragraph has interactive links.
-    type PrepaintState = Option<Hitbox>;
+    /// One hitbox per painted link rectangle (per link run, per row).
+    ///
+    /// The cursor is decided by the platform from the hitbox under the
+    /// pointer, not from the mouse position at paint time, so moving quickly
+    /// from one paragraph's link straight to another's is still correct
+    /// without an intervening repaint.
+    type PrepaintState = Vec<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -713,31 +717,25 @@ impl Element for Paragraph {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<Hitbox> {
+    ) -> Vec<Hitbox> {
         self.layout.borrow_mut().bounds = bounds;
         self.layout.borrow_mut().align = self.align;
-        let hitbox = if self.link_cursor {
+        // Each link run gets its own hitbox, so a wrapped link is clickable
+        // and pointed at on every row and nothing beside it is.
+        let hitboxes = if self.link_cursor {
             let layout = self.layout.borrow();
-            layout.links.first().map(|first| {
-                let mut union = *first;
-                for rect in &layout.links[1..] {
-                    let left = union.left().min(rect.left());
-                    let top = union.top().min(rect.top());
-                    union = Bounds::new(
-                        point(left, top),
-                        size(
-                            union.right().max(rect.right()) - left,
-                            union.bottom().max(rect.bottom()) - top,
-                        ),
-                    );
-                }
-                window.insert_hitbox(
-                    Bounds::new(bounds.origin + union.origin, union.size),
-                    HitboxBehavior::Normal,
-                )
-            })
+            layout
+                .links
+                .iter()
+                .map(|rect| {
+                    window.insert_hitbox(
+                        Bounds::new(bounds.origin + rect.origin, rect.size),
+                        HitboxBehavior::Normal,
+                    )
+                })
+                .collect()
         } else {
-            None
+            Vec::new()
         };
         #[cfg(test)]
         {
@@ -772,7 +770,7 @@ impl Element for Paragraph {
         }
         #[cfg(not(test))]
         let _ = cx;
-        hitbox
+        hitboxes
     }
 
     fn paint(
@@ -781,17 +779,23 @@ impl Element for Paragraph {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
-        hitbox: &mut Option<Hitbox>,
+        hitboxes: &mut Vec<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        // A selection gesture keeps the platform's own cursor: the pointing
-        // hand only appears for a plain hover over a real link.
-        if let Some(hitbox) = hitbox.as_ref()
-            && !cx.has_active_drag()
-            && self.layout.borrow().link_at(window.mouse_position())
-        {
-            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        // Every link hitbox declares the pointing hand, and the platform picks
+        // the style from the hitbox actually under the pointer. Nothing here
+        // depends on the mouse position at paint time, so a fast move from one
+        // paragraph's link straight to another's is still correct without an
+        // intervening repaint.
+        //
+        // The owner clears `link_cursor` for a selection gesture, and an
+        // active drag suppresses it too, so dragging a selection never shows
+        // the hand (gpui drops per-element cursor styles during a drag).
+        if self.link_cursor && !cx.has_active_drag() {
+            for hitbox in hitboxes.iter() {
+                window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+            }
         }
         let layout = self.layout.borrow();
         // The document's selection, translated into this paragraph's bytes.

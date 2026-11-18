@@ -49,3 +49,11 @@
 Codex 指出 loose 列表项内多个段落失去分隔：移除了 item 列的 `gap_1` 后，`nested_keyed` 不为段落加边距，`- first\n\n  second paragraph` 的两段会贴在一起。修复为 item 内块列使用 `item_inner_gap`：tight 项为 0（对应 Primer `ul ul { margin-top: 0 }`），loose 项为 0.85em 段落间距；顶层与嵌套列表共用。`lists` fixture 增加 loose 多段 item，回归断言 item 内两段间距等于一个块间距，heading lead-in 断言改用该 fixture 的末段（插入新块后原测量跨过了新内容）。
 
 修复后 `cargo clippy --all-targets -D warnings`（run `93b7f0ac`）与 `cargo test --locked`（run `a01e78f1`，1411 项）通过。
+
+## 合并前基线同步与第二轮审查（PR #94，head `1e9c263`）
+
+负责人视觉验收通过（"reader-typography：通过"），协调者移除 `pending`。`main` 已推进到 `4e75ad8`（#93 侧栏），按门槛先 `git fetch origin main` + `git merge --no-edit origin/main` 干净合入（`src/ui/reader/` 零重叠，保留全部 callout/节奏/指针行为与既有 SVG、表格图片、非 Ready 图片静默行为），push 后重新触发 `@codex review`。
+
+Codex 第二轮 P2：`over` 是布尔量，从一段的链接直接移到另一段的链接时不触发重绘，目标段落没有注册指针光标，箭头会残留。根因是「用 paint 时刻的鼠标位置决定是否注册光标」。修复为 Codex 建议的第二种做法：prepaint 为**每个**链接矩形各建一个 Normal hitbox，paint 时无条件对每个 hitbox 声明 `PointingHand`，由平台按指针实际所在 hitbox 选样式，与重绘时机无关；拖动时 owner 不注册（`link_cursor = false`）且活动拖动抑制逐元素光标。`MarkdownView::hover` 改为按同样的字形矩形维护 `pointer_over_link`（仅供测试/诊断），不再决定光标。`typography_tests` 增加「链接→链接直接移动」回归。
+
+合并基线后的验证：`cargo check --all-targets`（run `f7ac9cf3`，此前两次因并行 worktree 占满内存导致 `STATUS_STACK_BUFFER_OVERRUN`/manifest OOM，属机器压力而非代码问题）、reader 全量 239 项（run `433d9a7d`）、`cargo clippy --all-targets -D warnings`（run `e066a8f6`）、`cargo test --locked` 1413 项（run `06d60fb1`）与 `cargo fmt --check`（run `555be876`）全部通过。

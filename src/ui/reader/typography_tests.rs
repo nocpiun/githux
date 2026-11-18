@@ -313,6 +313,31 @@ fn pointer_cursor_covers_only_real_links(cx: &mut TestAppContext) {
     }
     let cell = snapshot(cx, "cell link");
     assert_eq!(cell.link_boxes.len(), 1, "table links are interactive");
+
+    // Moving straight from one paragraph's link to another paragraph's link,
+    // with no plain-text event in between, must not leave the arrow behind.
+    // The cursor is declared by per-link rectangles rather than by a paint-time
+    // mouse position, so no repaint is needed for that move to be correct.
+    let list_link = snapshot(cx, "item with a list link").link_boxes[0].center();
+    cx.simulate_mouse_move(list_link, None, Modifiers::none());
+    cx.simulate_mouse_move(first, None, Modifiers::none());
+    frames(cx);
+    assert!(
+        document.read_with(cx, |d, _| d.pointer_over_link()),
+        "a direct link-to-link move keeps the pointer interactive"
+    );
+    // Both links own their own cursor target, so whichever one the pointer is
+    // over the platform has a hitbox to read the style from.
+    assert!(
+        !snapshot(cx, "item with a list link").link_boxes.is_empty()
+            && !snapshot(
+                cx,
+                "A paragraph with a relative link, plain words and a refused link and an anchor."
+            )
+            .link_boxes
+            .is_empty(),
+        "each paragraph keeps its own link target"
+    );
 }
 
 #[gpui::test]

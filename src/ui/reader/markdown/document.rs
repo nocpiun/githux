@@ -479,13 +479,18 @@ impl MarkdownView {
         cx.notify();
     }
 
-    /// Updates the hover state; the cursor only changes on a repaint.
+    /// Updates the hover state from the painted link rectangles.
+    ///
+    /// The platform applies the pointing hand from per-link hitboxes, so this
+    /// only records the decision for tests and diagnostics; it never decides
+    /// the cursor from a paint-time mouse position.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let over = !self.dragging
             && self
-                .hit_at_live(position)
-                .and_then(|hit| hit.link)
-                .is_some_and(|url| self.link_is_interactive(&url));
+                .paragraphs
+                .borrow()
+                .values()
+                .any(|layout| layout.borrow().link_at(position));
         if over != self.pointer_over_link {
             self.pointer_over_link = over;
             cx.notify();
