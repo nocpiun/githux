@@ -562,17 +562,18 @@ fn confirmed_empty_repository_omits_the_whole_releases_block(cx: &mut TestAppCon
     assert!(people.origin.x >= top.origin.x - px(0.5));
     assert!(bounds("probe-reader", cx).size.height > px(600.0));
 
-    // The production read applies the list and the latest endpoint separately. The list alone is
-    // already authoritative, but an unsettled latest keeps the block until it answers.
+    // The production read applies the list and the latest endpoint separately. The complete empty
+    // list is already authoritative, so an in-flight or failed latest read neither draws chrome
+    // nor waits for the network before the block disappears.
     let latest = fixtures::empty_releases().latest.unwrap();
     let mut list_only = fixtures::empty_releases();
     list_only.latest = None;
     apply_releases(&h, &b, SectionState::Ready(list_only), cx);
-    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-releases").is_none());
     overview(&h, cx).update(cx, |view, cx| {
         view.apply_latest_release(&b, SectionState::Loading, cx);
     });
-    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-releases").is_none());
     overview(&h, cx).update(cx, |view, cx| {
         view.apply_latest_release(&b, SectionState::Ready(latest), cx);
     });
@@ -644,19 +645,149 @@ fn unknown_loading_failed_and_partial_releases_keep_their_block(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn historical_empty_keeps_cached_refresh_until_a_current_read_confirms(cx: &mut TestAppContext) {
+fn cached_empty_releases_never_paints_the_block_before_or_during_revalidation(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     let b = fixtures::binding(1);
+    apply_contributors(
+        &h,
+        &b,
+        SectionState::Ready(fixtures::ready_contributors()),
+        cx,
+    );
+    cx.simulate_resize(size(px(1100.0), px(760.0)));
+    // Frame 1 of cache-first paint: the persisted snapshot is historical, both endpoints are
+    // historical, and the latest snapshot is a 404 (`release: None`). No Cached / spinner / warning
+    // / retry chrome may appear for a section that has no content.
     apply_releases(&h, &b, fixtures::historical_empty_releases(), cx);
-    // Retained historical data keeps its Cached badge and refresh entry instead of vanishing.
+    cx.run_until_parked();
+    for omitted in [
+        "overview-releases",
+        "overview-release-count",
+        "overview-releases-cached",
+        "overview-retry-releases",
+    ] {
+        assert!(
+            cx.debug_bounds(omitted).is_none(),
+            "{omitted} must not paint for a cached empty release list"
+        );
+    }
+    let leading_edge = |cx: &mut VisualTestContext| {
+        let top = bounds("repository-overview", cx);
+        (top.origin.x, bounds("overview-contributors", cx).origin.x)
+    };
+    let (strip, people) = leading_edge(cx);
+    assert!(
+        (people - strip).abs() < px(0.5),
+        "contributors keep the strip's leading edge with no reserved gap"
+    );
+
+    // Background revalidation re-issues the latest read: still no block, and the sibling does not
+    // move, so the omission cannot turn into a layout jump.
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_latest_release(&b, SectionState::Loading, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-releases").is_none());
+    assert_eq!(leading_edge(cx), (strip, people));
+
+    // Offline revalidation keeps the cached empty list while latest degrades to a historical empty
+    // value with a partial reason: the list is still authoritative, so nothing is painted.
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_latest_release(
+            &b,
+            SectionState::Historical {
+                value: fixtures::empty_releases().latest.unwrap(),
+                sync_label: Some("5 minutes ago".into()),
+                reason: Some("cached snapshot · refresh when online".into()),
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-releases").is_none());
+    assert_eq!(leading_edge(cx), (strip, people));
+
+    // A transient offline failure of the latest endpoint cannot resurrect the block either; a
+    // complete `/releases` page already listed drafts and prereleases, so it cannot have a latest.
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_latest_release(
+            &b,
+            SectionState::Error {
+                message: "offline fixture".into(),
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-releases").is_none());
+    assert_eq!(leading_edge(cx), (strip, people));
+    assert!(cx.debug_bounds("overview-contributors").is_some());
+}
+
+#[gpui::test]
+fn cached_non_empty_releases_keep_their_block_and_cached_mark(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = fixtures::binding(1);
+    let sync_label = Some("5 minutes ago".to_string());
+    let historical = SectionState::Historical {
+        value: fixtures::ready_releases().with_provenance(true, false, sync_label.clone()),
+        sync_label,
+        reason: None,
+    };
+    apply_releases(&h, &b, historical, cx);
+    cx.run_until_parked();
+    // Cached non-empty data keeps the group, its Cached mark, its refresh entry and the version
+    // row; only the exact count is withheld because it is not a freshly verified total.
     assert!(cx.debug_bounds("overview-releases").is_some());
     assert!(cx.debug_bounds("overview-releases-cached").is_some());
     assert!(cx.debug_bounds("overview-retry-releases").is_some());
+    assert!(cx.debug_bounds("overview-latest-badge").is_none());
+    // A list that only holds drafts/prereleases is still a release list, cached or not.
+    let mut prerelease_only = fixtures::empty_releases();
+    let mut list = fixtures::ready_releases().list;
+    list.releases
+        .retain(|release| release.prerelease || release.draft);
+    prerelease_only.list = list;
+    let sync_label = Some("5 minutes ago".to_string());
+    apply_releases(
+        &h,
+        &b,
+        SectionState::Historical {
+            value: prerelease_only.with_provenance(true, true, sync_label.clone()),
+            sync_label,
+            reason: None,
+        },
+        cx,
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    // A cached count would read as freshly verified, so the historical snapshot keeps the group,
+    // its Cached mark and its release row without claiming an exact total.
     assert!(cx.debug_bounds("overview-release-count").is_none());
-    // The current, complete empty observation then removes the whole block.
-    apply_releases(&h, &b, SectionState::Ready(fixtures::empty_releases()), cx);
-    assert!(cx.debug_bounds("overview-releases").is_none());
-    assert!(cx.debug_bounds("overview-contributors").is_some());
+    assert!(cx.debug_bounds("overview-releases-cached").is_some());
+}
+
+#[gpui::test]
+fn conflicting_empty_list_and_supplied_latest_keep_the_block(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = fixtures::binding(1);
+    // Two observations that disagree: the list says there are no releases while the independently
+    // applied latest endpoint still supplies one. Do not silently drop the only release on screen.
+    let mut data = fixtures::empty_releases();
+    data.latest = None;
+    apply_releases(&h, &b, SectionState::Ready(data), cx);
+    overview(&h, cx).update(cx, |view, cx| {
+        view.apply_latest_release(
+            &b,
+            SectionState::Ready(fixtures::ready_releases().latest.unwrap()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("overview-releases").is_some());
+    assert!(cx.debug_bounds("overview-release-version").is_some());
 }
 
 #[test]

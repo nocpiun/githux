@@ -119,41 +119,41 @@ impl RepositoryOverview {
             cx,
         )
     }
-    /// Whether a successful observation has established that this repository has no releases.
+    /// Whether the supplied observations have established that this repository has no releases.
     ///
-    /// Only a current, complete (not partial) release list read successfully with zero entries
-    /// proves that. A latest-release 404 on its own cannot: it only means no published
-    /// non-prerelease release is visible, so draft- or prerelease-only repositories keep the block.
-    /// Loading, idle, failed and partial observations are unknown rather than empty, and a retained
-    /// historical snapshot keeps its Cached badge and refresh entry so freshness stays reachable.
-    /// A latest failure also keeps its retry mark instead of being hidden by the omission.
+    /// A complete (not partial) release list that was read successfully and holds zero entries is
+    /// authoritative, whichever provenance it carries. GitHub's list endpoint already includes
+    /// drafts and prereleases, so an exhausted empty page leaves nothing for the latest endpoint to
+    /// show either. Deciding on the list alone is what keeps the block out of the layout during
+    /// cache-first paint, background revalidation (`latest` still `Loading`), and offline fallback
+    /// (`latest` reduced to a historical empty value or an error) instead of drawing `Cached`,
+    /// spinner, warning or retry chrome for a section that has no content.
+    ///
+    /// Still shown: no list observation at all (idle, cold loading, cold failure), a partial list
+    /// (unread pages may hold releases), and any non-empty list — including draft- or
+    /// prerelease-only repositories, whose `latest` is `None` but whose count, tag, `Cached` mark
+    /// and retry presentation stay. A latest value that *does* carry a release while the list says
+    /// none is two conflicting observations, so the block stays visible instead of trusting one.
     fn releases_confirmed_empty(&self) -> bool {
         let Some(data) = self.releases.value() else {
             return false;
         };
         if self.releases.is_partial()
             || matches!(data.list.completeness, ExtrasCompleteness::Partial { .. })
-            || self.releases.is_historical()
-            || data.historical
-            || self
-                .latest
-                .as_ref()
-                .is_some_and(SectionState::is_historical)
-            || (self.latest.is_none() && data.latest_historical)
+            || !data.list.releases.is_empty()
         {
             return false;
         }
-        if !data.list.releases.is_empty() {
-            return false;
-        }
-        // A latest read that is still loading, failed, partial, idle or never applied is not
-        // evidence of an empty repository, and its own UI must stay reachable.
-        let latest_empty = match self.latest.as_ref() {
-            Some(SectionState::Ready(value)) => Some(value.release.is_none()),
-            Some(_) => None,
-            None => data.latest.as_ref().map(|latest| latest.release.is_none()),
-        };
-        latest_empty == Some(true) && data.latest_error.is_none()
+        // The independently applied endpoint wins when the host has one; otherwise the value the
+        // grouped snapshot carries is all there is. `SectionState::value` covers `Ready`,
+        // `Historical` and `Partial` (any of which can carry a release) and yields `None` for
+        // `Loading`, `Idle` and `Error`, which supply no release of their own.
+        let latest = self
+            .latest
+            .as_ref()
+            .and_then(SectionState::value)
+            .or(data.latest.as_ref());
+        !latest.is_some_and(|latest| latest.release.is_some())
     }
     fn release_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let data = self.releases.value();
