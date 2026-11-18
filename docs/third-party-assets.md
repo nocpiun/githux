@@ -88,6 +88,20 @@ cargo metadata --locked --offline --format-version 1
 - 派生自 Ely 的部分与 `ely-core` 同受 [`assets/licenses/ely-mit.txt`](../assets/licenses/ely-mit.txt) 覆盖。
 - 新增直接依赖 `pulldown-cmark 0.13.5`（MIT，`Copyright 2015 Google Inc.`，原文 [`assets/licenses/pulldown-cmark-mit.txt`](../assets/licenses/pulldown-cmark-mit.txt)，SHA-256 `c4f10f55904bdb9f27d3fbf94c354926d6cfe8b982276e556238c258941b243b`）与 `unicode-segmentation 1.13.3`（MIT OR Apache-2.0）。
 
+### 4.1 GitHub Linguist 语言颜色表
+
+仓库页面底边语言条不再自行用哈希分配调色板色，而是使用 GitHub 自己的语言颜色。数据来自 GitHub Linguist 的 `lib/linguist/languages.yml`，只提取“语言名 + 显式 `color:`”两列，生成 [`src/ui/repository_overview/language_colors.rs`](../src/ui/repository_overview/language_colors.rs)，运行时不上网、不解析 YAML。
+
+| 项 | 内容 |
+| --- | --- |
+| 上游仓库 | `https://github.com/github-linguist/linguist` |
+| 固定修订 | `d456527fe93355baa28c3c29d542c97282b61bc7`（2026-11-04，`main` 当时最新） |
+| 固定文件 | `lib/linguist/languages.yml`，167,711 B，SHA-256 `09c13db185b6f9b8f64b932dcd79815fef4a67624ab2dade9c194388d1dbe29d` |
+| 提取规则 | 只取显式声明 `color:` 的 701 个语言；无 `color` 或未知名字使用中性回退色，不自行推算色值 |
+| 再生成 | [`scripts/generate-linguist-language-colors.mjs`](../scripts/generate-linguist-language-colors.mjs)（脚本注释内含下载与调用命令） |
+| 许可证 | MIT，`Copyright (c) 2017 GitHub, Inc.`，原文已复制到 [`assets/licenses/linguist-mit.txt`](../assets/licenses/linguist-mit.txt)（SHA-256 `7717070c5a8c85440ff2312930bb30dd19002ab5bc235c9800042767f6f5242f`） |
+| 分发形态 | 颜色表以静态 `&[(&str, u32)]` 编译进 binary，只含名字与色值，不携带语法或仓库内容 |
+
 ## 5. 直接依赖
 
 版本与 SPDX 来自 `cargo metadata --locked --offline`。**“许可证文本”列指向本机精确版本的原文；本轮只对明确标注的做了核对，其余是上游声明。**
@@ -192,9 +206,10 @@ grep -c '^\[\[package\]\]' Cargo.lock
 3. Ely MIT：`assets/licenses/ely-mit.txt`（覆盖 `ely-core`/`ely-settings`/`ely-canvas` 与提取的 Markdown 派生代码）。
 4. Lucide 图标 ISC + Feather MIT：`assets/licenses/lucide-icons-isc.txt`。
 5. GPUI（Apache-2.0）与其余 Rust crate 的许可文本：至少 `assets/licenses/gpui-pre-apache-2.0.txt`、`assets/licenses/pulldown-cmark-mit.txt`，以及第 5 节各直接依赖的 registry 许可文本；双许可项需先定选。
-6. SQLite 公有领域说明：`assets/licenses/sqlite-public-domain.txt`（信息性）。
-7. Windows App SDK 各包 `license.txt`：由 `windows-runtime-lib.ps1` 复制到可执行文件旁。
-8. 合并入口：[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。
+6. GitHub Linguist MIT：`assets/licenses/linguist-mit.txt`（语言颜色表为 MIT 数据的派生）。
+7. SQLite 公有领域说明：`assets/licenses/sqlite-public-domain.txt`（信息性）。
+8. Windows App SDK 各包 `license.txt`：由 `windows-runtime-lib.ps1` 复制到可执行文件旁。
+9. 合并入口：[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。
 
 ## 9. 已验证与未覆盖
 

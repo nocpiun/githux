@@ -1,4 +1,5 @@
 //! Compact rendering; the host supplies all observations and decoded images.
+use super::language_colors::linguist_color;
 use super::*;
 use crate::domain::repository_extras::{
     Contributor, ContributorKind, ContributorsState as DomainContributorsState, ExtrasCompleteness,
@@ -14,13 +15,17 @@ use ely_core::{
     typography::Ellipsis,
 };
 use gpui::{
-    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, Context, FontWeight, IntoElement, ParentElement, Render, Rgba, Styled, Window,
+    div, prelude::*, px, relative,
 };
 
 impl Render for RepositoryOverview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let releases = self.release_summary(cx);
+        // A repository that is confirmed to have no releases has nothing to summarize here, so the
+        // whole Releases block (heading, zero badge, row and the gap it would reserve) is omitted
+        // instead of being drawn empty. Unknown, loading, failed, partial and retained historical
+        // observations keep the block with their existing loading/retry/freshness chrome.
+        let releases = (!self.releases_confirmed_empty()).then(|| self.release_summary(cx));
         let contributors = self.contributor_summary(cx);
         div()
             .id("repository-overview")
@@ -34,7 +39,7 @@ impl Render for RepositoryOverview {
             .py_3()
             .text_color(cx.theme().colors.fg)
             .text_size(cx.theme().text_size(TextSize::Base))
-            .child(releases)
+            .children(releases)
             .child(contributors)
     }
 }
@@ -113,6 +118,42 @@ impl RepositoryOverview {
             Some(&id),
             cx,
         )
+    }
+    /// Whether the supplied observations have established that this repository has no releases.
+    ///
+    /// A complete (not partial) release list that was read successfully and holds zero entries is
+    /// authoritative, whichever provenance it carries. GitHub's list endpoint already includes
+    /// drafts and prereleases, so an exhausted empty page leaves nothing for the latest endpoint to
+    /// show either. Deciding on the list alone is what keeps the block out of the layout during
+    /// cache-first paint, background revalidation (`latest` still `Loading`), and offline fallback
+    /// (`latest` reduced to a historical empty value or an error) instead of drawing `Cached`,
+    /// spinner, warning or retry chrome for a section that has no content.
+    ///
+    /// Still shown: no list observation at all (idle, cold loading, cold failure), a partial list
+    /// (unread pages may hold releases), and any non-empty list — including draft- or
+    /// prerelease-only repositories, whose `latest` is `None` but whose count, tag, `Cached` mark
+    /// and retry presentation stay. A latest value that *does* carry a release while the list says
+    /// none is two conflicting observations, so the block stays visible instead of trusting one.
+    fn releases_confirmed_empty(&self) -> bool {
+        let Some(data) = self.releases.value() else {
+            return false;
+        };
+        if self.releases.is_partial()
+            || matches!(data.list.completeness, ExtrasCompleteness::Partial { .. })
+            || !data.list.releases.is_empty()
+        {
+            return false;
+        }
+        // The independently applied endpoint wins when the host has one; otherwise the value the
+        // grouped snapshot carries is all there is. `SectionState::value` covers `Ready`,
+        // `Historical` and `Partial` (any of which can carry a release) and yields `None` for
+        // `Loading`, `Idle` and `Error`, which supply no release of their own.
+        let latest = self
+            .latest
+            .as_ref()
+            .and_then(SectionState::value)
+            .or(data.latest.as_ref());
+        !latest.is_some_and(|latest| latest.release.is_some())
     }
     fn release_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let data = self.releases.value();
@@ -473,7 +514,9 @@ impl RepositoryOverview {
                     .w(relative(segment.share as f32))
                     .h_full()
                     .flex_none()
-                    .bg(cx.theme().colors.chart[segment.color])
+                    .bg(segment
+                        .color
+                        .unwrap_or_else(|| Rgba::from(cx.theme().colors.fg_subtle)))
                     .aria_label(label.clone())
                     .tooltip(Tooltip::rich(move |_, cx| {
                         crate::ui::tooltip::ui_tooltip_content(label.clone(), cx)
@@ -498,7 +541,10 @@ pub(crate) fn contributor_display(contributor: &Contributor) -> String {
 pub(crate) struct Segment {
     pub name: String,
     pub share: f64,
-    pub color: usize,
+    /// GitHub Linguist's own color for the language. `None` for names the pinned table does not
+    /// know and for languages Linguist leaves colorless; those draw with the neutral fallback
+    /// instead of an invented chart hue.
+    pub color: Option<Rgba>,
 }
 /// Checked byte arithmetic; never trust independently rounded/malformed supplied shares.
 pub(crate) fn language_segments(outcome: &LanguagesOutcome) -> Option<Vec<Segment>> {
@@ -523,15 +569,10 @@ pub(crate) fn language_segments(outcome: &LanguagesOutcome) -> Option<Vec<Segmen
         .map(|item| Segment {
             name: item.name.clone(),
             share: item.bytes as f64 / total as f64,
-            color: language_color(&item.name),
+            color: linguist_color(&item.name),
         })
         .collect();
     Some(result)
-}
-fn language_color(name: &str) -> usize {
-    name.bytes().fold(0usize, |hash, byte| {
-        hash.wrapping_mul(31).wrapping_add(byte as usize)
-    }) % 8
 }
 pub(crate) fn format_share(share: f64) -> String {
     if share > 0.0 && share < 0.005 {

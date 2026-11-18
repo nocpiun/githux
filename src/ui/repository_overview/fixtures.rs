@@ -113,6 +113,33 @@ pub fn latest_error_releases() -> ReleasesData {
     data
 }
 
+/// A successfully observed repository with no releases at all: a complete, empty release list and
+/// a latest 404. This is the only shape that proves the repository is empty.
+pub fn empty_releases() -> ReleasesData {
+    let list = ReleasesOutcome {
+        repository: repository(),
+        releases: Vec::new(),
+        completeness: ExtrasCompleteness::Complete,
+        page_metadata: vec![ResponseMetadata::default()],
+    };
+    let latest = LatestReleaseOutcome {
+        repository: repository(),
+        release: None,
+        metadata: ResponseMetadata::default(),
+    };
+    ReleasesData::new(list, Some(latest))
+}
+
+/// The same confirmed-empty list retained as a cached snapshot, with its freshness chrome.
+pub fn historical_empty_releases() -> SectionState<ReleasesData, Vec<ExtrasIncompleteReason>> {
+    let sync_label = Some("5 minutes ago".to_string());
+    SectionState::Historical {
+        value: empty_releases().with_provenance(true, true, sync_label.clone()),
+        sync_label,
+        reason: None,
+    }
+}
+
 pub fn partial_releases() -> ReleasesData {
     let mut data = ready_releases();
     data.list.completeness = ExtrasCompleteness::Partial {
@@ -236,6 +263,35 @@ pub fn zero_languages() -> LanguagesOutcome {
         repository: repository(),
         languages: Vec::new(),
         total_bytes: 0,
+        metadata: ResponseMetadata::default(),
+    }
+}
+
+/// Language names as GitHub's `/languages` reports them, including a name Linguist leaves
+/// colorless (COBOL) and a name that is not a GitHub language at all, so the neutral fallback is
+/// exercised without inventing a chart hue.
+pub fn github_languages() -> LanguagesOutcome {
+    let names = [
+        ("Rust", 500),
+        ("TypeScript", 200),
+        ("JavaScript", 100),
+        ("Python", 80),
+        ("C++", 60),
+        ("Java", 40),
+        ("COBOL", 10),
+        ("Not A Real GitHub Language", 10),
+    ];
+    LanguagesOutcome {
+        repository: repository(),
+        languages: names
+            .iter()
+            .map(|(name, bytes)| LanguageStat {
+                name: (*name).to_string(),
+                bytes: *bytes,
+                share: None,
+            })
+            .collect(),
+        total_bytes: names.iter().map(|(_, bytes)| *bytes).sum(),
         metadata: ResponseMetadata::default(),
     }
 }
