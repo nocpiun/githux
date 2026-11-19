@@ -1,22 +1,13 @@
-//! Integration assembly for the reusable Profile Overview tests.
+//! Geometry test for the reusable Profile Overview design fixture.
 
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/bin_support/profile_modules.rs"]
-mod profile_modules;
-#[allow(unused_imports)]
-use profile_modules as ui;
-#[allow(unused_imports)]
-use profile_modules::profile;
-
-#[path = "../src/bin_support/profile_fixtures.rs"]
-mod profile_fixtures;
+use crate::{
+    domain,
+    profile_fixtures::{self, SCENARIOS, Scenario},
+    ui::{self, profile},
+};
 
 #[gpui::test]
 fn design_fixture_renders_real_profile_content(cx: &mut gpui::TestAppContext) {
-    use profile_fixtures::{SCENARIOS, Scenario};
     cx.update(ely_core::init_for_tests);
     for (scenario, _) in SCENARIOS {
         let _ = profile_fixtures::basic(*scenario);
