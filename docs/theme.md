@@ -1,6 +1,6 @@
 # 正式深色主题
 
-更新：2026-11-18。状态：**已实现，等待负责人原生观感验收**。主题 token 的权威实现是 [`src/app/theme.rs`](../src/app/theme.rs)，启动接线在 [`src/app/mod.rs`](../src/app/mod.rs)；本任务记录见[开发日志](devlog/2026-11-18-geek-neutral-theme.md)。
+更新：2026-11-19。状态：**已实现，等待负责人原生观感验收**。主题 token 的权威实现是 [`src/app/theme.rs`](../src/app/theme.rs)，启动接线在 [`src/app/mod.rs`](../src/app/mod.rs)；本任务记录见[开发日志](devlog/2026-11-18-geek-neutral-theme.md)（含 2026-11-19 负责人反馈轮）。
 
 ## 模式与安装
 
@@ -13,7 +13,9 @@
 
 ## 取代与继承
 
-实现以 `Palette::dark(false)` 为底，显式覆盖下表全部 token；未列出的 `on_media`、`backdrop`、`media_backdrop`、`shimmer`、`shadow`、`paper`、`ink` 保持 Ely 深色值。`glass` 使用新的 `bg` 加 Ely 原有 `0xb8` alpha，因此模糊浮层跟随新地面而不是透出旧灰。
+实现以 `Palette::dark(false)` 为底，显式覆盖下面各表列出的 token；未列出的 `on_media`、`backdrop`、`media_backdrop`、`shimmer`、`shadow`、`paper`、`ink` 保持 Ely 深色值。`glass` 使用新的 `bg` 加 Ely 原有 `0xb8` alpha，因此模糊浮层跟随新地面而不是透出旧灰。
+
+**`accent` / `accent_hover` / `on_accent` 也继承 Ely 深色值**（`#f3f1f0` / `#d9d7d5` / `#252525`），不采用对照实验里的紫色强调。这三个 token 同时承担活动页内 tab 下划线、Feed 的 “Read more” 链接与 PR 标记、Accounts 的 “✓ Current”、Settings 分类下划线和 Ely 主按钮填充，负责人要求这些保持主题改动前的颜色；继承 `Palette::dark(false)` 正好复现改动前的实际取值。不要只改其中一个去向，也不要重新引入第二种 accent 色。
 
 ### 表面与文字
 
@@ -43,11 +45,12 @@
 | `link` | `#6cb6ff` |
 | `focus` | `#4d9fff` |
 | `selection` | `#4d9fff`，alpha `0x4d` |
-| `accent` / `accent_hover` / `on_accent` | `#a371f7` / `#b98cff` / `#0d0d0d` |
 | `success` / `success_subtle` | `#3fb950` / `#1b2f21` |
 | `warning` / `warning_subtle` | `#e3b341` / `#382f1c` |
 | `danger` / `danger_subtle` | `#ff6b6b` / `#3a2321` |
 | `info` / `info_subtle` | `#58a6ff` / `#1a2b3d` |
+
+`accent`、`accent_hover` 与 `on_accent` 不在上表：它们继承 `Palette::dark(false)`，为 `#f3f1f0`、`#d9d7d5`、`#252525`，与主题改动前一致（见上一节）。受影响的现有消费方包括活动页内 tab 下划线（仓库内容 Tabs、窄态 Settings 分类、Profile Overview）、Feed “Read more” 与 PR 类型图标、Accounts “✓ Current”、Settings 分类下划线和 Ely 主按钮（如 “Verify and add”）。深色下这些值与 `fg` 相同，浅色仍使用 Ely light 的 accent 三值。
 
 `chart` 8 色依次为 `#6cb6ff`、`#56d4dd`、`#e3b341`、`#f2788f`、`#bc8cff`、`#3fb950`、`#ff9e64`、`#7ee0ff`。`ansi` 16 色为 `#333333`、`#ff7b72`、`#3fb950`、`#e3b341`、`#58a6ff`、`#bc8cff`、`#39c5cf`、`#b8b8b8`、`#525252`、`#ff8b85`、`#56d364`、`#f0cc6a`、`#79c0ff`、`#d2a8ff`、`#56d4dd`、`#ededed`。
 
@@ -56,7 +59,7 @@
 ## 边界
 
 - 本任务只落负责人选定的 **Geek Neutral**。实验分支的候选切换器、对照 UI、布局改版、主题偏好持久化和新增 Settings 不在正式产品中，也不依赖实验 worktree 路径。
-- 浅色 palette、字体、间距、滚动、tab 几何与页面生命周期不变。
+- 浅色 palette、字体、间距、滚动、tab 几何与页面生命周期不变；#91 的共享下划线呈现（一次测量、移动与宽度插值）与本主题无关，只是它消费的 `accent` 回到原值。
 - 正式产品没有高对比度或色盲安全开关；安装自定义深色 palette 后，深色目标固定为本文的值，不叠加 Ely 的高对比度深色变体。若以后接入这些设置，需要另行定义它们与 Geek Neutral 的组合。
 - 精确 token 与浅→深往返由 `cargo test --locked app::theme` 覆盖；Windows 原生绘制观感、GPU/显示器差异和真实页面整体效果由负责人用正式入口验收，不由测试平台推断。
 

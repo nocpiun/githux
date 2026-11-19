@@ -17,7 +17,7 @@ use ely_core::theme::ActiveTheme;
 pub mod accounts;
 pub mod avatar;
 pub mod pages;
-mod theme;
+pub(crate) mod theme;
 
 use crate::{app::accounts::Accounts, platform, ui::Shell};
 

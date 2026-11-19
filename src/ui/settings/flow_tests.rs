@@ -262,6 +262,9 @@ fn ime_confirmation_does_not_submit_or_close_form(cx: &mut TestAppContext) {
 fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mut TestAppContext) {
     let fixture = Fixture::open(Scenario::Expired);
     let (view, binding, cx) = mount(cx, &fixture);
+    // Install the real product dark palette, not Ely's bare default: the settings example compiles
+    // `src/app/mod.rs`, so this asserts the colours the owner actually sees.
+    cx.update(|_, cx| crate::app::theme::install(cx));
     wait_idle(&binding, cx);
     // One pinned clock for the whole test, so the shared band can be stepped by hand. The base is
     // far past the view's own clock so the first pinned frame settles anything still in flight.
@@ -306,6 +309,30 @@ fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mu
     assert_eq!(band.left(), last.left());
     assert_eq!(band.size.width, last.size.width);
     assert_eq!(band.bottom(), last.bottom());
+    // #91's shared band is one of the consumers of `colors.accent`. Read the quad it actually
+    // submitted: the product paints Settings in dark mode, and the accent family is inherited from
+    // Ely rather than replaced by the comparison's violet.
+    let expect_accent = cx.update(|_, cx| {
+        use ely_core::theme::ActiveTheme;
+        cx.theme().colors.accent
+    });
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let painted = window
+            .painted_quads()
+            .into_iter()
+            .find(|quad| quad.bounds == band.scale(scale) && !quad.background.is_transparent())
+            .expect("the shared band submits a background quad");
+        assert_eq!(painted.background.as_solid(), Some(expect_accent));
+        // The installed product palette inherits this accent from Ely; pin the pre-theme value so
+        // the band cannot drift to the comparison's violet.
+        let rgba = gpui::Rgba::from(expect_accent);
+        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+        assert_eq!(
+            (channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b),
+            0xf3f1f0
+        );
+    });
     assert!(
         cx.debug_bounds("settings-category-indicator").is_none(),
         "the narrow layout must not paint the wide rail indicator"

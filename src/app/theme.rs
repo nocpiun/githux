@@ -13,6 +13,14 @@
 //! comparison left alone stay Ely's dark values: `on_media`, `backdrop`, `media_backdrop`,
 //! `shimmer`, `shadow`, `paper` and `ink`. `glass` is the new ground with Ely's existing alpha, so
 //! a blurred pane keeps its weight instead of showing the old grey through.
+//!
+//! The accent family (`accent`, `accent_hover`, `on_accent`) is inherited too, deliberately: the
+//! comparison's violet accent is **not** in the product. Those three tokens carry more than one
+//! role — the active in-page tab underline, Feed's "Read more" link and PR marker, the Accounts
+//! "Current" mark, the Settings category underline and Ely's primary button — and the owner asked
+//! for their pre-theme colors back. Inheriting `Palette::dark(false)` restores exactly what these
+//! consumers painted before this theme existed: `accent #f3f1f0`, `accent_hover #d9d7d5`,
+//! `on_accent #252525`. Do not re-add a violet value here without revisiting every consumer.
 
 use ely_core::theme::{Mode, Palette, Syntax, Theme};
 use gpui::{App, Hsla, rgb, rgba};
@@ -48,13 +56,12 @@ pub(crate) fn geek_neutral() -> Palette {
     palette.fg_disabled = c(0x525252);
     palette.tooltip_bg = c(0x3a3a3a);
     palette.tooltip_fg = c(0xededed);
-    // Blue link/focus, violet accent and terminal emerald/amber/coral/blue feedback.
+    // Blue link/focus and terminal emerald/amber/coral/blue feedback. `accent`,
+    // `accent_hover` and `on_accent` intentionally keep Ely's dark values (see the module note):
+    // the tab underlines, Feed "Read more", Accounts "Current" and the primary button consume them.
     palette.link = c(0x6cb6ff);
     palette.focus = c(0x4d9fff);
     palette.selection = rgba(0x4d9fff4d).into();
-    palette.accent = c(0xa371f7);
-    palette.accent_hover = c(0xb98cff);
-    palette.on_accent = c(0x0d0d0d);
     palette.success = c(0x3fb950);
     palette.success_subtle = c(0x1b2f21);
     palette.warning = c(0xe3b341);
@@ -110,7 +117,7 @@ mod tests {
     }
 
     /// Every token the owner's palette replaces, in the same order as the comparison's table.
-    const OWNER_TOKENS: [(&str, u32); 28] = [
+    const OWNER_TOKENS: [(&str, u32); 25] = [
         ("sunken", 0x141414),
         ("bg", 0x191919),
         ("surface", 0x202020),
@@ -127,9 +134,6 @@ mod tests {
         ("tooltip_fg", 0xededed),
         ("link", 0x6cb6ff),
         ("focus", 0x4d9fff),
-        ("accent", 0xa371f7),
-        ("accent_hover", 0xb98cff),
-        ("on_accent", 0x0d0d0d),
         ("success", 0x3fb950),
         ("success_subtle", 0x1b2f21),
         ("warning", 0xe3b341),
@@ -195,8 +199,13 @@ mod tests {
             );
         }
 
-        // Tokens the comparison deliberately left to Ely's dark palette.
+        // Tokens the comparison deliberately left to Ely's dark palette, plus the accent family the
+        // owner asked to restore: the underline, Feed link, Accounts "Current" and primary button
+        // must keep their pre-theme colors, not the comparison's violet.
         for token in [
+            "accent",
+            "accent_hover",
+            "on_accent",
             "on_media",
             "backdrop",
             "media_backdrop",
@@ -211,6 +220,11 @@ mod tests {
                 "{token} must keep Ely's dark value"
             );
         }
+        // The restored accent family is exactly the pre-theme trio, spelled out so a future
+        // palette edit cannot quietly reintroduce a second accent hue.
+        assert_eq!(hex_of(palette.accent), 0xf3f1f0);
+        assert_eq!(hex_of(palette.accent_hover), 0xd9d7d5);
+        assert_eq!(hex_of(palette.on_accent), 0x252525);
 
         // The pane follows the new ground with Ely's existing alpha.
         assert_eq!(palette.glass, palette.bg.opacity(GLASS_ALPHA));

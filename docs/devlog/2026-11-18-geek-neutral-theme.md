@@ -1,6 +1,6 @@
 # 正式深色主题：Geek Neutral
 
-- 日期：2026-11-18；任务 ID `geek-neutral-theme`；分支 `feat/geek-neutral-theme`；任务 base `78d59400112225a069332e1c6c2dfef4d79b5f3b`，交付前已 rebase 到当时 main `4157641` 重新验证组合。
+- 日期：2026-11-18（2026-11-19 负责人反馈轮更新）；任务 ID `geek-neutral-theme`；分支 `feat/geek-neutral-theme`；任务 base `78d59400112225a069332e1c6c2dfef4d79b5f3b`，PR 交付前已 rebase 到 main `4157641`；反馈轮先 rebase 到 `684c84f`，随后 main 合入 #91（`154b7f4`）的共享 tab 下划线，交付前再次 rebase 到 `154b7f4` 并重新核对、重新验证组合。
 - 目标：负责人已在 `dark-theme-comparison` 第二轮选定 **Geek Neutral**，把该配色接到正式 Githux Windows 应用的深色模式；原实验继续保留对照。
 - 状态：**已实现、测试与 release 构建通过，待负责人原生观感验收**。稳定契约与完整 token 表见[正式深色主题](../theme.md)。
 
@@ -23,6 +23,18 @@
 - 侧栏既有 `Shell::toggle_theme` 不改逻辑：浅→深重新解析同一份自定义深色 palette，浅色仍走 Ely；字体覆盖、路由、页面状态和 Windows 标题栏同步路径不变。
 - [`src/ui/tabs.rs`](../../src/ui/tabs.rs) 的拖拽 ghost 阴影由字面量 `rgba(0x000000)` 改为语义 `colors.shadow`。深色值不变（Ely 深色 shadow 为黑），浅色则使用 Ely 的 shadow 值；这是本次检查到的唯一绕开主题的旧暗色常量，Reader 其余测试色只在 `#[cfg(test)]` 中。
 
+## 2026-11-19 负责人反馈轮：恢复 accent 家族
+
+负责人在 PR #96 head `108d4ad` 上指出三处可见回归，它们是同一个根因：第一版把对照实验的紫色 `accent`/`accent_hover`/`on_accent`（`#a371f7`/`#b98cff`/`#0d0d0d`）当成了产品强调色，而这三个 token 在正式应用里承担多个旧角色。
+
+1. **Feed “Read more”**：`src/ui/home/rows.rs` 的链接文字读 `colors.accent`，因此紫色覆盖把它从原正文白变成了紫色。恢复继承后即为 `#f3f1f0`，与 #96 之前一致。
+2. **活动页内 tab 下划线**：`src/ui/tabs.rs`（拖拽插入标记）、`src/ui/repository/view.rs`、`src/ui/settings/layout.rs`（窄态分类）、`src/ui/profile/render.rs`（Overview 底边）都消费 `colors.accent`。恢复继承即取回原色。main 在反馈轮期间合入 #91，把这些下划线统一为 `src/ui/tab_underline.rs` 的一份共享呈现（实测边界、移动与宽度插值）；该模块同样把 `theme.colors.accent` 交给 `layer(...)`，所以恢复 token 后共享 band 自动取回原色，不需要改 #91 的实现。
+3. **紫色 active/selected 样式**：Accounts “✓ Current”标记（`src/ui/accounts/form.rs` 的图标与文字）与 “Verify and add” 主按钮（Ely `ButtonVariant::Primary` = `accent` 填充 / `on_accent` 文字 / `accent_hover` 悬停）恢复原值。
+
+处理方式：`geek_neutral()` 不再给这三个 token 赋值，改为从 `Palette::dark(false)` 继承；模块注释、`docs/theme.md` 与测试同步说明，并写明 “不要再加回紫色”。同一轮还核对了其余 `accent` 消费方——command palette 底部 2px 标记、Notifications 未读圆点、`work_item_row` 的 Merged 状态色、`badge` 的 Accent tone、窗口关闭按钮文字（`on_accent`）与 `chrome` 的关闭前景——它们都由同一 token 驱动，因此同时回到原值，没有逐个改成新的第二强调色。`chart`/`syntax`/`link`/`focus`/语义色、碳灰表面与中性行底色、浅色 palette 全部保持不变。
+
+被否定的旧断言：第一版 `the_dark_palette_is_exactly_the_owner_selected_geek_neutral` 把 `accent #a371f7` 等三项当成 “Geek Neutral 必须精确匹配”的候选值；现在这三项移入 “继承 Ely 深色” 的断言组，并额外写死 `#f3f1f0`/`#d9d7d5`/`#252525`，防止 `Palette::dark` 未来的变化静默改掉可见颜色。
+
 ## 验证
 
 全部 Cargo 操作通过 `node scripts/verify.mjs` 执行，以记录的 exit code 与日志为准：
@@ -39,9 +51,16 @@ rebase 前在 `78d5940` 基线上也执行过 targeted `cargo test --locked app:
 
 测试覆盖：
 
-- `the_dark_palette_is_exactly_the_owner_selected_geek_neutral`：逐项断言 28 个替换 token、`selection` alpha、8 个 chart、16 个 ANSI、13 个 syntax 与 `glass`，并断言 7 个继承 token 仍等于 Ely 深色值。
+- `the_dark_palette_is_exactly_the_owner_selected_geek_neutral`：逐项断言 25 个替换 token、`selection` alpha、8 个 chart、16 个 ANSI、13 个 syntax 与 `glass`；断言 10 个继承 token（含 `accent` 三值）仍等于 Ely 深色值，并把 `accent` 三值写死为 `#f3f1f0`/`#d9d7d5`/`#252525`。曾把紫色临时放回 `geek_neutral()` 验证该项失败（`4e78e6e4`）。
 - `the_surfaces_are_achromatic_and_step_cleanly`：`R == G == B`、`sunken < bg < surface < overlay < hover < active` 且每级至少 4/255，文字权重递减。
 - `startup_and_a_light_round_trip_show_the_same_geek_neutral`：GPUI 测试平台安装后首帧即为 Geek Neutral；切浅色为 Ely light；再切深色恢复同一套值。
+
+反馈轮新增的三处可见回归覆盖（都读实际提交给渲染器的 quad，而不只比对常量）：
+
+- `read_more_keeps_the_pre_theme_accent_text_color`（`tests/home.rs`）：截断预览出现 “Read more”，其文字色解析为继承后的 `#f3f1f0`，并显式断言不是 `#a371f7`。
+- `the_active_tab_band_paints_the_theme_accent`（`tests/repository.rs`）：切到深色后读取 #91 共享 band 的 `tab_underline_rect()`，断言其对应 quad 的填充等于 `colors.accent`，切到 Issues 后仍成立；该值写死为 `#f3f1f0`。用 pin_clock 让 band 停稳，使上报矩形与提交 quad 描述同一帧。
+- `narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last`（Settings 窄态用例，`--example settings`）：在 #91 的 `category_underline_rect()` 上读取共享 band 的 quad，等于 `colors.accent`，同样写死 `#f3f1f0`。
+- `the_current_mark_and_primary_button_keep_the_pre_theme_accent`（主程序测试）：`app::accounts::tests::setup` 先装产品深色 palette，断言 `accent`/`accent_hover`/`on_accent` 三值、表单范围内没有任何 `#a371f7` 填充，并确认启用的 Verify 主按钮确实画出继承后的强调填充；`account-current-badge` 仍在。
 
 Windows 运行时与正式入口：
 
