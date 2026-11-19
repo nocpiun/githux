@@ -39,7 +39,7 @@ use ely_core::{
 use gpui::{
     AnyElement, App, BoxShadow, CursorStyle, ElementId, FocusHandle, FontWeight, IntoElement,
     MouseButton, ParentElement, Render, Role, ScrollHandle, StatefulInteractiveElement, Styled,
-    Window, div, prelude::*, px, rgba, transparent_black,
+    Window, div, prelude::*, px, transparent_black,
 };
 
 use crate::workspace::{Route, TabId};
@@ -151,7 +151,7 @@ impl Render for TabGhost {
             .text_color(colors.fg)
             .font_weight(FontWeight::MEDIUM)
             .shadow(vec![BoxShadow {
-                color: rgba(0x000000).into(),
+                color: colors.shadow,
                 offset: gpui::point(px(0.0), px(4.0)),
                 blur_radius: px(12.0),
                 spread_radius: px(0.0),

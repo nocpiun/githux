@@ -8,10 +8,7 @@
 //! The developer-only account example is a separate Cargo target. This product path has no
 //! preview flag, fixture scenario selector or preview window hook.
 
-use ely_core::{
-    Assets,
-    theme::{Mode, Theme},
-};
+use ely_core::{Assets, theme::Theme};
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 #[cfg(target_os = "windows")]
@@ -20,6 +17,7 @@ use ely_core::theme::ActiveTheme;
 pub mod accounts;
 pub mod avatar;
 pub mod pages;
+pub(crate) mod theme;
 
 use crate::{app::accounts::Accounts, platform, ui::Shell};
 
@@ -29,7 +27,7 @@ pub fn run() {
         .run(|cx: &mut App| {
             ely_core::init(cx).expect("failed to initialize Ely");
             platform::fonts::register(cx).expect("failed to register bundled fonts");
-            Theme::set_mode_now(Mode::Dark, cx);
+            theme::install(cx);
             Theme::update(cx, |theme| {
                 theme.font_family = platform::fonts::UI_FAMILY.into();
                 theme.mono_family = platform::fonts::CODE_FAMILY.into();

@@ -1915,6 +1915,57 @@ fn pr_body_previews_short_and_long_with_read_more_navigation(cx: &mut TestAppCon
     );
 }
 
+/// Feed's "Read more" keeps its pre-theme text color. It reads `colors.accent` rather than a
+/// literal, and the product's dark palette inherits that token from Ely (`app::theme` pins the
+/// exact trio), so the link resolves to `#f3f1f0` instead of the comparison's violet.
+///
+/// This module tree has no access to `app::theme` (the Home preview assembles only `ui`), so the
+/// dark target is installed here through Ely's own API — the same target the product inherits.
+#[gpui::test]
+fn read_more_keeps_the_pre_theme_accent_text_color(cx: &mut TestAppContext) {
+    use ely_core::theme::{ActiveTheme, Mode, Theme};
+
+    let (view, cx) = open(cx);
+    // The tree's `setup` installs the global theme; the product's dark target is applied after it.
+    cx.update(|_, cx| {
+        Theme::set_palette(Mode::Dark, None, cx);
+        Theme::set_mode_now(Mode::Dark, cx);
+    });
+    let mut card = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut card.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "A long body excerpt that exceeds the compact limit and ends with…".into(),
+            is_truncated: true,
+        });
+    }
+    let outcome = feed_outcome(vec![card], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("feed-pr-read-more-0").is_some(),
+        "a truncated preview offers Read more"
+    );
+
+    // The link paints text only, so its color is the resolved `accent` token; assert both that the
+    // token is the pre-theme value and that it is not the comparison's violet.
+    let accent = cx.update(|_, cx| {
+        let color = cx.theme().colors.accent;
+        let rgba = gpui::Rgba::from(color);
+        let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+        (channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b)
+    });
+    assert_eq!(
+        accent, 0xf3f1f0,
+        "Read more must keep the pre-theme accent text color"
+    );
+    assert_ne!(
+        accent, 0xa371f7,
+        "the comparison's violet is not the product link color"
+    );
+}
+
 #[gpui::test]
 fn read_more_link_can_be_keyboard_activated(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);

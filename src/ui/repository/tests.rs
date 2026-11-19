@@ -635,6 +635,75 @@ fn the_readme_relative_link_follows_the_guide_at_the_same_commit(cx: &mut TestAp
     );
 }
 
+/// The active content tab's band must paint the theme's `accent`, not a hard-coded hue: the
+/// product installs Geek Neutral, whose surfaces and signals changed but whose accent family is
+/// inherited from Ely, and #91's shared band is one of several consumers of that same token.
+///
+/// The assertion reads the quad the band actually submitted, so reintroducing a literal color (or
+/// a second accent token) fails here even if the palette constant looks right. #91's own tests keep
+/// owning the band's motion and resizing; this one only pins the colour it paints.
+#[gpui::test]
+fn the_active_tab_band_paints_the_theme_accent(cx: &mut TestAppContext) {
+    let (_fixture, page, cx) = normal(cx);
+    // The product paints this page in dark mode. This tree starts from Ely's default mode, so show
+    // the dark target explicitly; the accent it resolves is the one `src/app/theme.rs` inherits.
+    cx.update(|_, cx| {
+        use ely_core::theme::{Mode, Theme};
+        Theme::set_palette(Mode::Dark, None, cx);
+        Theme::set_mode_now(Mode::Dark, cx);
+    });
+    // One pinned clock, far past the page's own, settles the band so the reported rect and the
+    // submitted quad describe the same frame.
+    page.update(cx, |page, _| page.pin_clock(1_000_000));
+    frames(cx);
+    let expect_accent = cx.update(|_, cx| {
+        use ely_core::theme::ActiveTheme;
+        cx.theme().colors.accent
+    });
+    assert_band_paints_the_accent(&page, expect_accent, cx);
+
+    // The band follows the selection and keeps the same token there.
+    page.update(cx, |page, cx| page.select_tab(RepositoryTab::Issues, cx));
+    page.update(cx, |page, _| page.pin_clock(1_001_000));
+    frames(cx);
+    assert_band_paints_the_accent(&page, expect_accent, cx);
+    // This module tree draws against Ely's dark target, which is the accent family the product
+    // inherits (`src/app/theme.rs`). Pinning the value keeps the pre-theme band colour from
+    // drifting back to the comparison's violet.
+    assert_eq!(hex_of(expect_accent), 0xf3f1f0);
+}
+
+/// The band #91's shared painter last reported, and the colour of the quad it submitted.
+fn assert_band_paints_the_accent(
+    page: &Entity<RepositoryPage>,
+    expect_accent: gpui::Hsla,
+    cx: &mut VisualTestContext,
+) {
+    let band = page
+        .read_with(cx, |page, _| page.tab_underline_rect())
+        .expect("a measured strip paints its band");
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let painted = window
+            .painted_quads()
+            .into_iter()
+            .find(|quad| quad.bounds == band.scale(scale) && !quad.background.is_transparent())
+            .expect("the active band submits a background quad");
+        assert_eq!(
+            painted.background.as_solid(),
+            Some(expect_accent),
+            "the band must use colors.accent"
+        );
+    });
+}
+
+/// The hex a color holds, for exact-value assertions in this file.
+fn hex_of(color: gpui::Hsla) -> u32 {
+    let rgba = gpui::Rgba::from(color);
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b)
+}
+
 #[gpui::test]
 fn switching_to_another_tab_clears_the_code_area_and_returning_restores_it(
     cx: &mut TestAppContext,

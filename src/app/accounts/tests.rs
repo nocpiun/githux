@@ -30,6 +30,9 @@ fn setup(cx: &mut TestAppContext) {
     cx.update(|cx| {
         ely_core::init_for_tests(cx);
         crate::platform::fonts::register(cx).expect("test fonts");
+        // The product installs Geek Neutral dark before opening its window; the accounts surface is
+        // drawn against that palette, so assert against the same one the owner sees.
+        crate::app::theme::install(cx);
         Shell::bind_keys(cx);
     });
 }
@@ -1638,6 +1641,97 @@ fn the_settings_accounts_page_is_one_compact_list_plus_a_form(cx: &mut TestAppCo
             "{selector} must stay inside the island at the minimum width"
         );
     }
+}
+
+/// The dark theme's accent family drives several pre-existing affordances: the "Current" mark on the
+/// active account and Ely's primary (Verify) button. The product's Geek Neutral palette replaces the
+/// surfaces and signals but inherits `accent`/`accent_hover`/`on_accent`, so these must paint the same
+/// colors the app used before the theme existed instead of the comparison's violet.
+#[gpui::test]
+fn the_current_mark_and_primary_button_keep_the_pre_theme_accent(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(MockTransport::new());
+    host_runtime().block_on(mock.enqueue(Ok(user(1, "alice"))));
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+    put_token(&controller, cx, "first");
+    submit(&controller, cx);
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+    show_settings(&view, cx);
+
+    // Typing enables the primary button, so its filled tone is actually painted.
+    cx.simulate_input("synthetic-token");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+
+    let (accent, accent_hover, on_accent) = cx.update(|_, cx| {
+        use ely_core::theme::ActiveTheme;
+        let colors = &cx.theme().colors;
+        (colors.accent, colors.accent_hover, colors.on_accent)
+    });
+    // The inherited trio, spelled out: these are the pre-Geek-Neutral values, not the violet.
+    assert_eq!(hex_of_hsla(accent), 0xf3f1f0, "dark accent");
+    assert_eq!(hex_of_hsla(accent_hover), 0xd9d7d5, "dark accent_hover");
+    assert_eq!(hex_of_hsla(on_accent), 0x252525, "dark on_accent");
+
+    // The Verify button is Ely's primary variant: it fills with `accent` and writes `on_accent`.
+    // Ely's `Button` exposes no debug selector, so read the form's submitted quads instead. Only
+    // the primary control paints the accent fill there, so this asserts what is drawn rather than
+    // what the palette constant claims.
+    let form = cx
+        .debug_bounds("account-token-form")
+        .expect("the account form is mounted");
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let form = form.scale(scale);
+        let mut accent_fills = 0;
+        for quad in window.painted_quads() {
+            let Some(solid) = quad.background.as_solid() else {
+                continue;
+            };
+            let visible = quad.bounds.intersect(&quad.content_mask.bounds);
+            if visible.size.width <= gpui::ScaledPixels(0.0)
+                || visible.size.height <= gpui::ScaledPixels(0.0)
+            {
+                continue;
+            }
+            // Only a fill inside the form can be the Verify control.
+            if visible.top() < form.top() || visible.bottom() > form.bottom() {
+                continue;
+            }
+            let rgb = hex_of_hsla(solid);
+            assert_ne!(
+                rgb, 0xa371f7,
+                "the comparison's violet must not reach the product accent"
+            );
+            if rgb == 0xf3f1f0 {
+                accent_fills += 1;
+            }
+        }
+        assert!(
+            accent_fills > 0,
+            "the enabled Verify button paints the inherited accent fill"
+        );
+    });
+
+    // The "Current" mark is text plus a check icon in the accent color, so it paints ink rather
+    // than a filled block; presence plus the pinned token trio above cover it.
+    assert!(
+        cx.debug_bounds("account-current-badge").is_some(),
+        "the active account keeps its Current mark"
+    );
+}
+
+/// The hex a palette token holds, for exact-value assertions in this file.
+fn hex_of_hsla(color: gpui::Hsla) -> u32 {
+    let rgba = gpui::Rgba::from(color);
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b)
 }
 
 /// A rejected PAT (an unsuccessful mutation that leaves the authorization unchanged) must not drop
