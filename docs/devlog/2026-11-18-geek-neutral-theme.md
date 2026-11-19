@@ -62,6 +62,28 @@ rebase 前在 `78d5940` 基线上也执行过 targeted `cargo test --locked app:
 - `narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last`（Settings 窄态用例，`--example settings`）：在 #91 的 `category_underline_rect()` 上读取共享 band 的 quad，等于 `colors.accent`，同样写死 `#f3f1f0`。
 - `the_current_mark_and_primary_button_keep_the_pre_theme_accent`（主程序测试）：`app::accounts::tests::setup` 先装产品深色 palette，断言 `accent`/`accent_hover`/`on_accent` 三值、表单范围内没有任何 `#a371f7` 填充，并确认启用的 Verify 主按钮确实画出继承后的强调填充；`account-current-badge` 仍在。
 
+### 2026-11-19 Home 离线分页测试竞态（任务包 A）
+
+PR #96 的 `Code check` 首次失败在既有测试 `app::pages::home::tests::online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page`（`left: ["first", "second"]` / `right: ["first"]`），与主题改动无关，属于 [L015](../../LESSONS.md#l015虚拟列表的未知高度不能当成内容耗尽) 记录的短首屏自动预取竞态；同类失败在 2026-11-10、2026-11-11 的开发日志中也已出现。
+
+修复只改 `src/app/pages/home/tests.rs`，不动生产逻辑：
+
+- 新增 `assert_cached_feed_prefix` / `is_legal_cached_feed_prefix`：离线首屏只能是缓存集合自身的有序前缀（`["first"]` 或 `["first", "second"]`），条目不得重复、不得乱序、不得出现集合外 id、不得为空页。
+- `require_cached_continuation`：若自动预取尚未带出第二页，才手动 `load_more_for_test` 并等待 `["first", "second"]`。
+- 三处同款断言改为该规则：`online_cache_reopens_...`（仍要求最终 `["first", "second"]`、Feed provenance 与 `saved description`）、`acceptance_cold_start_without_network_revalidation_replays_saved_home`、`network_failure_after_the_cached_paint_keeps_the_readable_snapshot`。
+- 新增纯规则单测 `only_the_cached_ordered_prefix_is_a_legal_offline_first_screen`：防止规则被悄悄放宽（曾临时改回只接受 `["first"]` 验证它确实失败）。
+
+验证（`node scripts/verify.mjs`）：
+
+| 检查 | run | 结果 |
+| --- | --- | --- |
+| 三个用例各连续 5 次（`--test scroll_viewports -- --exact <name>`） | 15 个 run | 15/15 rc=0，每次 `1 passed; 0 failed` |
+| 规则单测 `--exact` | `cecd4f5d` | 通过 |
+| 规则被放宽时同一单测 | `d82c6116` | 失败（证明非恒真） |
+| 整个 `--test scroll_viewports` | `64f57b3f` | 1480 passed, 0 failed, 3 ignored |
+
+未覆盖：CI 真实负载下的重复稳定性仍以 PR 新提交的 CI 为准；本次未改生产代码。
+
 Windows 运行时与正式入口：
 
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-runtime.ps1 -Destination target/release` 成功：首次 27 个文件写入，最终 release 上复跑为 27 unchanged / 0 written。

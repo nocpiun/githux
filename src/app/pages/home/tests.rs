@@ -556,6 +556,77 @@ fn feed_ids(page: &Entity<HomePage>, cx: &VisualTestContext) -> Vec<String> {
     })
 }
 
+/// The Feed ids an offline first-screen read may legitimately settle on.
+///
+/// A one-item first Feed page is a "short initial page": Home may auto-prefetch the cached
+/// continuation page before `settle` returns, so both `["first"]` and `["first", "second"]` are
+/// legal results of the same read (LESSONS L015). Anything else — a different order, a duplicate,
+/// a foreign id or an extra page — is still a failure. Use [`require_cached_continuation`] when a
+/// test needs the continuation to be present.
+fn assert_cached_feed_prefix(page: &Entity<HomePage>, cx: &VisualTestContext) {
+    let ids = feed_ids(page, cx);
+    assert!(
+        is_legal_cached_feed_prefix(&ids),
+        "an offline first screen may only be a legal ordered prefix, got {ids:?}"
+    );
+}
+
+/// The shape rule behind [`assert_cached_feed_prefix`], kept pure so it can be unit-tested: only the
+/// cached collection's own ordered prefix is legal, and no id may repeat.
+fn is_legal_cached_feed_prefix(ids: &[String]) -> bool {
+    const CACHED: [&str; 2] = ["first", "second"];
+    if ids.is_empty() || ids.len() > CACHED.len() {
+        return false;
+    }
+    if ids.iter().zip(CACHED).any(|(id, expected)| id != expected) {
+        return false;
+    }
+    let mut unique = ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    unique.len() == ids.len()
+}
+
+/// Drives the cached continuation page in when the automatic short-page prefetch has not already
+/// delivered it, and returns the settled ids. The final order is still asserted by the caller.
+fn require_cached_continuation(page: &Entity<HomePage>, cx: &mut VisualTestContext) -> Vec<String> {
+    if feed_ids(page, cx) == ["first"] {
+        cx.update_window_entity(page, |page, window, cx| page.load_more_for_test(window, cx));
+        pump_until(page, cx, |page, cx| {
+            feed_ids(page, cx) == ["first", "second"]
+        });
+    }
+    feed_ids(page, cx)
+}
+
+/// The rule must accept exactly the two legal short-page shapes and nothing else, so widening it
+/// (or dropping the duplicate check) fails here rather than hiding in a slower integration run.
+#[test]
+fn only_the_cached_ordered_prefix_is_a_legal_offline_first_screen() {
+    let ids = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+    for legal in [ids(&["first"]), ids(&["first", "second"])] {
+        assert!(
+            is_legal_cached_feed_prefix(&legal),
+            "{legal:?} must be legal"
+        );
+    }
+    for illegal in [
+        // An empty Feed is a failed read, not a legal prefix of the cached collection.
+        vec![],
+        ids(&["second"]),
+        ids(&["second", "first"]),
+        ids(&["first", "first"]),
+        ids(&["first", "second", "third"]),
+        ids(&["first", "other"]),
+        ids(&["fresh"]),
+    ] {
+        assert!(
+            !is_legal_cached_feed_prefix(&illegal),
+            "{illegal:?} must be rejected"
+        );
+    }
+}
+
 #[gpui::test]
 fn online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page(
     cx: &mut TestAppContext,
@@ -595,15 +666,13 @@ fn online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page(
         "home={:?}",
         page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone())
     );
-    assert_eq!(feed_ids(&page, cx), ["first"]);
+    // The first screen is an ordered prefix of the cached collection; the one-item short page may
+    // already have auto-prefetched the cached continuation (LESSONS L015).
+    assert_cached_feed_prefix(&page, cx);
     assert!(page.read_with(cx, |page, cx| page.cached_enabled_for_test()
         && page.view.read(cx).provenance(Column::Home).is_some()));
-    cx.update_window_entity(&page, |page, window, cx| {
-        page.load_more_for_test(window, cx)
-    });
-    pump_until(&page, cx, |page, cx| {
-        feed_ids(page, cx) == ["first", "second"]
-    });
+    // The continuation is required here, whether it arrived by prefetch or by this explicit read.
+    assert_eq!(require_cached_continuation(&page, cx), ["first", "second"]);
     assert!(page.read_with(cx, |page, cx| {
         page.view.read(cx).provenance(Column::Feed).is_some()
     }));
@@ -1404,7 +1473,9 @@ fn acceptance_cold_start_without_network_revalidation_replays_saved_home(cx: &mu
     let (page, cx) = open_page(&mut fixture, cx);
     settle(&page, cx);
     assert_eq!(home_title(&page, cx).as_deref(), Some("cached home"));
-    assert_eq!(feed_ids(&page, cx), ["first"]);
+    // Same offline first-screen shape as the reopened-cache test: a legal ordered prefix, never a
+    // repeat or a foreign order.
+    assert_cached_feed_prefix(&page, cx);
     assert!(page.read_with(cx, |page, cx| {
         page.view.read(cx).provenance(Column::Home).is_some()
     }));
@@ -1811,7 +1882,7 @@ fn network_failure_after_the_cached_paint_keeps_the_readable_snapshot(cx: &mut T
         "state={:?}",
         page.read_with(cx, |page, cx| page.view.read(cx).home_state().clone())
     );
-    assert_eq!(feed_ids(&page, cx), ["first"]);
+    assert_cached_feed_prefix(&page, cx);
     page.read_with(cx, |page, cx| {
         assert!(page.view.read(cx).provenance(Column::Home).is_some());
         assert!(page.view.read(cx).provenance(Column::Feed).is_some());
