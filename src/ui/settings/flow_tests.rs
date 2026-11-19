@@ -263,6 +263,9 @@ fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mu
     let fixture = Fixture::open(Scenario::Expired);
     let (view, binding, cx) = mount(cx, &fixture);
     wait_idle(&binding, cx);
+    // One pinned clock for the whole test, so the shared band can be stepped by hand. The base is
+    // far past the view's own clock so the first pinned frame settles anything still in flight.
+    view.update(cx, |view, _| view.pin_clock(1_000_000));
     view.update(cx, |view, cx| {
         view.fixtures = 12;
         cx.notify();
@@ -292,10 +295,17 @@ fn narrow_tabs_scroll_without_content_overflow_and_keyboard_reveals_last(cx: &mu
     assert!(view.read_with(cx, |view, _| view.tabs.offset().x < px(0.0)));
     let last = cx.debug_bounds("settings-category-12").expect("last tab");
     assert!(last.right() <= tabs.right() + px(1.0));
-    let underline = cx
-        .debug_bounds("settings-category-active-underline")
-        .expect("active underline");
-    assert_eq!(underline.size.height, px(2.0));
+    // The shared band is painted, not an element on the selected tab: after the reveal it sits
+    // exactly on the last tab's measured box, including its (clipped) scrolled position.
+    view.update(cx, |view, _| view.pin_clock(1_000_500));
+    draw(cx);
+    let band = view
+        .read_with(cx, |view, _| view.category_underline_rect())
+        .expect("the narrow strip paints its band");
+    assert_eq!(band.size.height, px(2.0));
+    assert_eq!(band.left(), last.left());
+    assert_eq!(band.size.width, last.size.width);
+    assert_eq!(band.bottom(), last.bottom());
     assert!(
         cx.debug_bounds("settings-category-indicator").is_none(),
         "the narrow layout must not paint the wide rail indicator"
@@ -340,4 +350,160 @@ fn wide_categories_are_compact_with_one_indicator_and_follow_selection(cx: &mut 
         .debug_bounds("settings-category-1")
         .expect("selected row");
     assert!(moved.top() >= second.top() && moved.bottom() <= second.bottom());
+}
+
+/// The narrow strip's band follows its own keyboard activation, not only pointer clicks: the
+/// arrows/Home/End already select a tab, and the band must move and resize with the same timing.
+#[gpui::test]
+fn narrow_tab_band_moves_and_resizes_with_keyboard_selection(cx: &mut TestAppContext) {
+    let fixture = Fixture::open(Scenario::Normal);
+    let (view, binding, cx) = mount(cx, &fixture);
+    wait_idle(&binding, cx);
+    view.update(cx, |view, cx| {
+        view.pin_clock(1_000_000);
+        view.fixtures = 3;
+        cx.notify();
+    });
+    // Narrow host: the categories are one horizontally scrolling tab row.
+    cx.simulate_resize(size(px(648.0), px(720.0)));
+    draw(cx);
+    draw(cx);
+    cx.update_window_entity(&view, |view, window, cx| view.select(0, window, cx));
+    draw(cx);
+    let accounts = cx
+        .debug_bounds("settings-category-0")
+        .expect("the accounts tab is measured");
+    let band = view
+        .read_with(cx, |view, _| view.category_underline_rect())
+        .expect("the strip paints its band");
+    assert_eq!(band.left(), accounts.left());
+    assert_eq!(band.size.width, accounts.size.width);
+    assert_eq!(band.bottom(), accounts.bottom());
+
+    cx.simulate_keystrokes("right");
+    draw(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.category.clone()),
+        Category::Fixture(1)
+    );
+    let still = view
+        .read_with(cx, |view, _| view.category_underline_rect())
+        .expect("band");
+    assert!(
+        (still.left() - accounts.left()).abs() <= px(0.1),
+        "the band has not jumped ahead of its own move yet"
+    );
+
+    let target = cx
+        .debug_bounds("settings-category-1")
+        .expect("fixture tab measured");
+    view.update(cx, |view, _| {
+        view.pin_clock(1_000_000 + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS / 2)
+    });
+    draw(cx);
+    let midway = view
+        .read_with(cx, |view, _| view.category_underline_rect())
+        .expect("band");
+    assert!(midway.left() > accounts.left() && midway.left() < target.left());
+    assert!(
+        view.read_with(cx, |view, _| view.category_underline_is_animating(
+            1_000_000 + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS / 2
+        )),
+        "a moving band asks for the next frame"
+    );
+
+    view.update(cx, |view, _| {
+        view.pin_clock(1_000_000 + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS)
+    });
+    draw(cx);
+    let landed = view
+        .read_with(cx, |view, _| view.category_underline_rect())
+        .expect("band");
+    assert_eq!(landed.left(), target.left());
+    assert_eq!(landed.size.width, target.size.width);
+    assert_eq!(landed.bottom(), target.bottom());
+    assert!(
+        !view.read_with(cx, |view, _| view.category_underline_is_animating(
+            1_000_000 + crate::ui::tab_underline::TAB_UNDERLINE_DURATION_MS
+        )),
+        "a settled band stops requesting frames"
+    );
+}
+
+/// Every narrow category tab's measured box, in strip order.
+#[cfg(target_os = "windows")]
+fn category_bounds(
+    view: &Entity<SettingsView>,
+    count: usize,
+    cx: &mut VisualTestContext,
+) -> Vec<gpui::Bounds<gpui::Pixels>> {
+    (0..=count)
+        .map(|index| {
+            let selector: &'static str = match index {
+                0 => "settings-category-0",
+                1 => "settings-category-1",
+                2 => "settings-category-2",
+                3 => "settings-category-3",
+                4 => "settings-category-4",
+                _ => unreachable!("this test uses at most five categories"),
+            };
+            let _ = &view;
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("category {index} must be measured"))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn assert_categories_kept_their_boxes(
+    before: &[gpui::Bounds<gpui::Pixels>],
+    after: &[gpui::Bounds<gpui::Pixels>],
+) {
+    for (index, (before, after)) in before.iter().zip(after).enumerate() {
+        assert!(
+            (before.left() - after.left()).abs() <= px(0.01),
+            "category {index}: origin moved with the selection: {before:?} -> {after:?}"
+        );
+        assert!(
+            (before.size.width - after.size.width).abs() <= px(0.01),
+            "category {index}: width changed with the selection: {before:?} -> {after:?}"
+        );
+    }
+}
+
+/// With the bundled Regular/Medium faces a selected category used to be wider than the same
+/// category unselected, shifting the tabs to its right. The reserved active-weight width keeps every
+/// tab's `origin.x` and `size.width` identical across inactive <-> active.
+#[cfg(target_os = "windows")]
+#[test]
+fn narrow_tab_boxes_keep_their_geometry_when_the_category_changes_with_bundled_fonts() {
+    let mut cx = native_font_context();
+    let fixture = Fixture::open(Scenario::Normal);
+    let (view, binding, cx) = mount_themed(&mut cx, &fixture);
+    wait_idle(&binding, cx);
+    view.update(cx, |view, cx| {
+        view.pin_clock(1_000_000);
+        view.fixtures = 3;
+        cx.notify();
+    });
+    // Narrow host: the categories are one horizontally scrolling tab row.
+    cx.simulate_resize(size(px(648.0), px(720.0)));
+    draw(cx);
+    draw(cx);
+    cx.update_window_entity(&view, |view, window, cx| view.select(0, window, cx));
+    draw(cx);
+    let accounts_active = category_bounds(&view, 3, cx);
+
+    cx.update_window_entity(&view, |view, window, cx| view.select(1, window, cx));
+    view.update(cx, |view, _| view.pin_clock(2_000_000));
+    draw(cx);
+    let fixture_active = category_bounds(&view, 3, cx);
+    assert_categories_kept_their_boxes(&accounts_active, &fixture_active);
+
+    // And back: the previously active tab must not shrink either.
+    cx.update_window_entity(&view, |view, window, cx| view.select(0, window, cx));
+    view.update(cx, |view, _| view.pin_clock(3_000_000));
+    draw(cx);
+    let accounts_again = category_bounds(&view, 3, cx);
+    assert_categories_kept_their_boxes(&accounts_active, &accounts_again);
 }

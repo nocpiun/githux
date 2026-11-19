@@ -245,6 +245,55 @@ fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext
     assert_eq!(fixture.requests().len(), 3);
 }
 
+/// The repository link in a notification row is the repository name, not the row's trailing blank
+/// space. Before the fix the link was the flex-growing element, so its pointer, underline, tooltip
+/// and click covered the empty rest of the line.
+#[gpui::test]
+fn the_repository_link_covers_the_name_and_not_the_row_blank_space(cx: &mut TestAppContext) {
+    let (controller, executor, _fixture) = setup(cx);
+    let captured = Rc::new(RefCell::new(Vec::new()));
+    let sink = captured.clone();
+    let on_repository: OnRepository = Rc::new(move |action, _, _| sink.borrow_mut().push(action));
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = NotificationsView::new(
+            controller.clone(),
+            executor.clone(),
+            on_repository,
+            window,
+            cx,
+        );
+        view.sync(cx);
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(960.0), px(740.0)));
+    cx.run_until_parked();
+    let row = cx.debug_bounds("notification-row-0").expect("row");
+    let link = cx
+        .debug_bounds("notification-repository-0")
+        .expect("repository link");
+    assert!(
+        link.size.width < row.size.width / 2.0,
+        "a short repository name must not own half the row: link={link:?} row={row:?}"
+    );
+    let blank = gpui::point(link.right() + px(60.0), link.center().y);
+    assert!(
+        blank.x < row.right() - px(140.0),
+        "the probe stays inside the row and left of its action column"
+    );
+    cx.simulate_click(blank, Modifiers::none());
+    assert!(
+        captured.borrow().is_empty(),
+        "a press on the row's blank space must not open the repository"
+    );
+    cx.simulate_click(link.center(), Modifiers::none());
+    assert_eq!(
+        captured.borrow().len(),
+        1,
+        "the name itself still navigates"
+    );
+}
+
 #[gpui::test]
 fn empty_failure_and_partial_render_distinctly(cx: &mut TestAppContext) {
     cx.update(ely_core::init_for_tests);

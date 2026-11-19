@@ -37,8 +37,12 @@ pub(crate) struct SettingsView {
     tab_motion: Motion<ScrollHandle>,
     tab_bars: Bars,
     tab_focus: Vec<FocusHandle>,
+    /// The shared active-tab band of the narrow category tabs.
+    category_underline: crate::ui::tab_underline::TabUnderline,
     focus_observers: Vec<Subscription>,
     clock: Instant,
+    #[cfg(test)]
+    pinned_ms: Option<u64>,
     _observed: Subscription,
     _activation: Subscription,
 }
@@ -71,8 +75,11 @@ impl SettingsView {
             tabs,
             tab_bars: Bars::new(),
             tab_focus: vec![],
+            category_underline: crate::ui::tab_underline::TabUnderline::new(),
             focus_observers: vec![],
             clock: Instant::now(),
+            #[cfg(test)]
+            pinned_ms: None,
             _observed: observed,
             _activation: activation,
         }
@@ -98,6 +105,33 @@ impl SettingsView {
             window.focus(focus, cx);
         }
         cx.notify();
+    }
+
+    /// The strip's shared clock, pinnable so tests can step one move frame by frame.
+    fn now_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(ms) = self.pinned_ms {
+            return ms;
+        }
+        self.clock.elapsed().as_millis() as u64
+    }
+
+    /// Pins the view clock for the underline/fade tests.
+    #[cfg(test)]
+    pub(crate) fn pin_clock(&mut self, ms: u64) {
+        self.pinned_ms = Some(ms);
+    }
+
+    /// The shared band painted on the last frame, in window coordinates.
+    #[cfg(test)]
+    pub(crate) fn category_underline_rect(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.category_underline.painted()
+    }
+
+    /// Whether the shared band still has frames to draw at `now_ms`.
+    #[cfg(test)]
+    pub(crate) fn category_underline_is_animating(&self, now_ms: u64) -> bool {
+        self.category_underline.is_animating(now_ms)
     }
 
     fn navigation(
@@ -177,11 +211,6 @@ impl SettingsView {
                     .py_2()
                     .whitespace_nowrap()
                     .text_size(small)
-                    .font_weight(if selected {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
                     .text_color(if selected { active_fg } else { muted_fg })
                     .hover(move |style| style.text_color(active_fg))
                     .focus_visible(move |style| style.bg(hover_bg))
@@ -190,19 +219,14 @@ impl SettingsView {
                     } else {
                         muted_fg
                     }))
-                    .child(label)
-                    .when(selected, |tab| {
-                        tab.child(
-                            div()
-                                .debug_selector(|| "settings-category-active-underline".to_string())
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(px(2.0))
-                                .bg(accent),
-                        )
-                    })
+                    // Width is the active-weight width in both states, so selecting a category
+                    // never shifts the tabs to its right and the shared band stays on one box.
+                    .child(crate::ui::tab_underline::TabUnderline::label(
+                        label, selected,
+                    ))
+                    // Invisible measurement for the shared band: no hitbox, so the tab keeps its
+                    // cursor, hover, focus background and click target exactly as before.
+                    .child(self.category_underline.probe(index))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
                     )
@@ -307,9 +331,21 @@ impl SettingsView {
         if !narrow {
             return items.w(px(168.0)).flex_none().into_any_element();
         }
-        let now = self.clock.elapsed().as_millis() as u64;
+        let now = self.now_ms();
+        let selected_index = match self.category {
+            Category::Accounts => 0,
+            Category::Fixture(index) => index,
+        };
+        let band = self.category_underline.layer(
+            selected_index,
+            accent,
+            cx.theme().reduced_motion || cx.reduce_motion(),
+            now,
+        );
         let opacity = self.tab_bars.opacity(now);
-        if self.tab_motion.tick(Instant::now(), cx.reduce_motion()) || self.tab_bars.is_animating()
+        if self.tab_motion.tick(Instant::now(), cx.reduce_motion())
+            || self.tab_bars.is_animating()
+            || self.category_underline.is_animating(now)
         {
             window.request_animation_frame();
         }
@@ -322,7 +358,7 @@ impl SettingsView {
                     &this.tab_motion,
                     axis,
                     active,
-                    this.clock.elapsed().as_millis() as u64,
+                    this.now_ms(),
                     cx.reduce_motion(),
                 );
                 cx.notify();
@@ -351,23 +387,33 @@ impl SettingsView {
             .flex()
             .flex_col()
             .on_hover(cx.listener(|this, hovered, _, cx| {
-                this.tab_bars.hover(
-                    *hovered,
-                    this.clock.elapsed().as_millis() as u64,
-                    cx.reduce_motion(),
-                );
+                this.tab_bars
+                    .hover(*hovered, this.now_ms(), cx.reduce_motion());
                 cx.notify();
             }))
             .child(
-                // Keep the tabs themselves as the direct scroll children so `scroll_to_item`
-                // addresses a tab, not a single wrapper. The 1px divider belongs to the strip.
-                items
+                // The shared band is a sibling of the scroll strip, clipped to the strip's own box
+                // so a partially scrolled tab cannot paint its underline outside the strip.
+                div()
+                    .debug_selector(|| "settings-tabs-strip".into())
+                    .relative()
                     .w_full()
                     .min_w_0()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.tabs)
-                    .border_b_1()
-                    .border_color(border),
+                    .flex_none()
+                    .overflow_hidden()
+                    .child(
+                        // Keep the tabs themselves as the direct scroll children so
+                        // `scroll_to_item` addresses a tab, not a single wrapper. The 1px divider
+                        // belongs to the strip.
+                        items
+                            .w_full()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tabs)
+                            .border_b_1()
+                            .border_color(border),
+                    )
+                    .child(band),
             )
             .child(div().w_full().h(px(TAB_SCROLLBAR_BAND)).flex_none())
             .child(scroll::wheel_overlay(
@@ -421,7 +467,7 @@ impl Render for SettingsView {
             .when(narrow, |row| row.flex_col().gap_6())
             .child(nav)
             .child(div().flex_1().min_w_0().child(content));
-        let now = self.clock.elapsed().as_millis() as u64;
+        let now = self.now_ms();
         self.bars.settle(&self.motion, now, cx.reduce_motion());
         if self.motion.tick(Instant::now(), cx.reduce_motion()) || self.bars.is_animating() {
             window.request_animation_frame();
@@ -434,7 +480,7 @@ impl Render for SettingsView {
                     &this.motion,
                     axis,
                     active,
-                    this.clock.elapsed().as_millis() as u64,
+                    this.now_ms(),
                     cx.reduce_motion(),
                 );
                 cx.notify();
@@ -482,11 +528,7 @@ impl Render for SettingsView {
             .bg(cx.theme().colors.surface)
             .overflow_hidden()
             .on_hover(cx.listener(|this, hovered, _, cx| {
-                this.bars.hover(
-                    *hovered,
-                    this.clock.elapsed().as_millis() as u64,
-                    cx.reduce_motion(),
-                );
+                this.bars.hover(*hovered, this.now_ms(), cx.reduce_motion());
                 cx.notify();
             }))
             .child(measure)

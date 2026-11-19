@@ -19,5 +19,7 @@ pub mod reader;
 pub mod relative_time;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
+#[path = "../ui/tab_underline.rs"]
+pub mod tab_underline;
 #[path = "../ui/tooltip.rs"]
 pub mod tooltip;

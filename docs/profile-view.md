@@ -152,4 +152,4 @@ cargo run --example profile
 
 ReaderView 与内部 MarkdownView 当前均 size_full，虚拟 ListState 自持 viewport/Motion；无自然高度或外部纵向流 API。按字符/行猜高度、复制 renderer 或 measure_all 不被采用。已向协调者提交 additive ReaderLayout::Flow 建议：默认 Viewport 不变，复用现有 AST/选择/链接，短正文真实排版占高、长内容保留 lazy 外部页面流，移除冗余纵向 wheel/bar。涉及共享 reader/mod.rs、markdown/document.rs 与 Reader 专属测试/文档，Profile 未越权改这些文件。
 
-负责人最新反馈为除 Overview tab 未居中外，其余当前视觉无问题。Overview 的图标与文字现作为一组在既有 112px tab 内水平居中，保留原高度、间距和下划线范围。README 仍使用现有固定 viewport；上述自然流 API 尚未实现，不把这次视觉反馈写成该能力已完成。`blocked` 仍由负责人管理，Agent 不移除。
+负责人最新反馈为除 Overview tab 未居中外，其余当前视觉无问题。Overview 的图标与文字现作为一组在既有 112px tab 内水平居中，保留原高度、间距和下划线范围。下划线现由仓库页/Settings 共用的 `src/ui/tab_underline.rs` 绘制在 tab 自身实测底边上（本轮只有一项，几何与视觉不变；加第二个 tab 时同一对象移动而不是换一项画线），见 [共享下划线](settings.md#共享的活动-tab-下划线)。README 仍使用现有固定 viewport；上述自然流 API 尚未实现，不把这次视觉反馈写成该能力已完成。`blocked` 仍由负责人管理，Agent 不移除。

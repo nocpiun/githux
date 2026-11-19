@@ -315,27 +315,41 @@ impl Render for ProfileView {
 }
 
 impl ProfileView {
+    /// The Profile tab strip. It has one tab this round, but it is the same shared strip
+    /// presentation as the repository content tabs and the narrow Settings categories, so a second
+    /// tab moves the same band instead of drawing a second style of underline.
     fn overview_marker(&self, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let band = self.overview_underline.layer(
+            0,
+            theme.colors.accent,
+            theme.reduced_motion || cx.reduce_motion(),
+            self.now_ms(),
+        );
         div()
             .w_full()
             .border_b_1()
-            .border_color(cx.theme().colors.border)
+            .border_color(theme.colors.border)
             .child(
                 div()
+                    .debug_selector(|| "profile-overview-tab".to_string())
                     .flex()
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .py_2()
+                    .pt_2()
+                    // The 2px band's own room: same text box and total height as the previous
+                    // bottom border, now painted by the shared strip instead.
+                    .pb(px(10.0))
                     .px_2()
-                    .border_b_2()
-                    .border_color(cx.theme().colors.accent)
                     .w(px(112.0))
-                    .text_size(cx.theme().text_size(TextSize::Sm))
+                    .text_size(theme.text_size(TextSize::Sm))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(Icon::new(IconName::BookOpen).size(IconSize::Sm))
-                    .child("Overview"),
+                    .child("Overview")
+                    .child(self.overview_underline.probe(0)),
             )
+            .child(band)
             .into_any_element()
     }
 
@@ -1036,6 +1050,9 @@ impl ProfileView {
             .id(("profile-contribution-day", index))
             .role(Role::Button)
             .aria_label(detail.clone())
+            // Selecting a day is a real action, so the pointer says so on the same cell that
+            // receives the click.
+            .cursor_pointer()
             .size(px(CELL))
             .flex_none()
             .rounded(px(2.0))

@@ -430,23 +430,34 @@ impl NotificationsView {
             relative(Some(&item.updated_at), self.now)
         );
         let weak = cx.entity().downgrade();
+        // The stretch belongs to this non-interactive slot, not to the link: a link that grows
+        // would put its pointer, underline, tooltip and click on the row's trailing blank space
+        // instead of on the repository name.
         let repo_link = div()
-            .id(("notification-repository", index))
-            .debug_selector(move || format!("notification-repository-{index}"))
-            .role(gpui::Role::Link)
-            .aria_label(format!("Open repository {repository}"))
-            .tab_index(0)
+            .flex()
+            .items_center()
             .flex_1()
             .min_w_0()
-            .truncate()
-            .cursor_pointer()
-            .hover(|style| style.underline())
-            .tooltip(Tooltip::text(repository.clone()))
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                let _ = weak.update(cx, |view, cx| view.navigate(index, window, cx));
-            })
-            .child(repository.clone());
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(("notification-repository", index))
+                    .debug_selector(move || format!("notification-repository-{index}"))
+                    .role(gpui::Role::Link)
+                    .aria_label(format!("Open repository {repository}"))
+                    .tab_index(0)
+                    .min_w_0()
+                    .max_w_full()
+                    .truncate()
+                    .cursor_pointer()
+                    .hover(|style| style.underline())
+                    .tooltip(Tooltip::text(repository.clone()))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let _ = weak.update(cx, |view, cx| view.navigate(index, window, cx));
+                    })
+                    .child(repository.clone()),
+            );
 
         // Read state is background + dot + title weight. The unread dot keeps
         // its own gutter so the subject icon stays centred across read states.

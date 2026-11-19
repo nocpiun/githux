@@ -1305,3 +1305,27 @@ fn frames(cx: &mut VisualTestContext) {
         cx.run_until_parked();
     }
 }
+
+/// The Overview strip is the same shared band as the repository and Settings tabs: it covers the
+/// tab's own measured box (including the 2px room the previous bottom border occupied).
+#[gpui::test]
+fn overview_tab_band_covers_the_measured_tab_box(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    frames(cx);
+    let tab = cx
+        .debug_bounds("profile-overview-tab")
+        .expect("the overview tab is measured");
+    let band = view
+        .read_with(cx, |view, _| view.overview_underline_rect())
+        .expect("the strip paints its band");
+    assert_eq!(band.size.height, px(2.0));
+    assert_eq!(band.left(), tab.left());
+    assert_eq!(band.size.width, tab.size.width);
+    assert_eq!(band.bottom(), tab.bottom());
+    assert!(
+        !view.read_with(cx, |view, _| view
+            .overview_underline_is_animating(view.now_ms())),
+        "one tab never moves, so the strip never asks for frames"
+    );
+}

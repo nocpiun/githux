@@ -53,6 +53,9 @@ pub mod repository_overview;
 pub(crate) mod scroll;
 mod sidebar;
 mod sidebar_state;
+// One active-tab underline presentation shared by the repository content tabs, the narrow
+// Settings category tabs and the Profile Overview strip.
+pub(crate) mod tab_underline;
 mod tabs;
 pub(crate) mod tooltip;
 // One work-item row presentation shared by Home's Involved column and the global Issues/PR

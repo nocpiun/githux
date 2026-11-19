@@ -29,5 +29,7 @@ pub mod repository;
 pub mod repository_overview;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
+#[path = "../ui/tab_underline.rs"]
+pub mod tab_underline;
 #[path = "../ui/tooltip.rs"]
 pub mod tooltip;

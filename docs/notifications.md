@@ -19,6 +19,7 @@
 - 读状态只用背景 + unread 圆点 + 标题字重区分：未读用 `info_subtle` 背景、accent 圆点、`FontWeight::MEDIUM`，已读用 `bg`、无圆点、`FontWeight::NORMAL`；hover/selected 用 `hover`/`active`。不渲染 Read/Unread 字样或 badge。无障碍名称仍表达读状态。
 - reason（Watching/Mentioned/Review requested…）不另占行，放在 subject 图标 tooltip。
 - 标题用 GPUI 原生 `.truncate()`（`min_w_0` + `flex_1`），不再使用 Ely `Ellipsis`：后者的隐藏全量测量 div 在虚拟列表 item 的 `MaxContent` 测量下会把行撑到整段文本宽度（#57 描述的现象），与本任务行内布局叠加后会扩大列表宽度。
+- 仓库 link 的 pointer、hover 下划线、tooltip 与点击都只在仓库名本身的文字盒上：`flex_1` 属于外层非交互 slot，链接自身不 grow。此前 `flex_1` 直接在被链接元素上，链接在 960px 窗口实测宽 740px，点到名字右侧空白仍会打开仓库；回归 `the_repository_link_covers_the_name_and_not_the_row_blank_space` 断言短名字不占半行、点空白不导航、点名字仍导航。
 - 时间复用 Home 已验收的 `relative`（抽取到 `src/ui/relative_time.rs`），显示 Just now / N minutes ago / N hours ago / Yesterday / N days ago，绝对时间只放 tooltip；无效为 Time unavailable、未来为 In the future，不伪装成功 ago。可见时一个 30 秒低频本地时钟刷新，隐藏/释放/失活不留下计时任务，且不触发任何 GitHub 请求。
 - 顶部只显示已加载行数 `N`（无 `loaded` 字样），tooltip/无障碍说明它只是当前视图已加载数量，不是远端未读总数。
 
