@@ -214,3 +214,10 @@
 - **证据**：2026-11-15 `repository-summary-polish` 把 `language_color` 的 `hash % 8` + `theme.colors.chart[i]` 换成固定修订的 Linguist 表；回归 `language_colors_come_from_the_pinned_linguist_table` 断言 6 种语言的确切色值与 COBOL/未知名回退，`colorless_and_unknown_languages_still_draw_one_segment_each` 断言逐语言一个色块、顺序与比例不变。见[开发日志](docs/devlog/2026-11-15-repository-summary-polish.md)与[仓库顶部资料组件](docs/repository-overview.md#已确认的展示)。
 - **范围**：语言条、标签/分类色彩等需要与网页一致的语义色。不适用于纯装饰渐变或本就只随主题取色的组件。
 
+## L030：取消刷新工作后必须交接加载态的所有权
+
+- **规则**：保留显示内容的刷新取消旧任务后，要逐项为未完成的 Loading 指定后继：继续当前新请求、重新读取，或在上游失败时进入可重试终态。保留已显示值与真实在途的新请求；缓存预读 MISS 晚于失败结束也要结算，已完成的 work 句柄不能代表仍在读取。
+- **原因**：Repository Refresh 推进请求代次后，旧正文、展开目录与 TOP 回复都被正确拒绝，但摘要/ref 失败没有执行成功路径里的恢复读取，导致没有任务负责的局部 Loading 长期存在。仅检查成功刷新或最终数据不能覆盖这条失败分支。
+- **证据**：[刷新连续性日志](docs/devlog/2026-11-15-repository-refresh-continuity.md) 的第三、四轮审查与门闩回归；正文两例及分组/目录三例均先复现失败，再验证局部 Retry、保留兄弟值、新请求继续和缓存 MISS 晚到。
+- **范围**：缓存首屏后的多阶段刷新、持久页面上的取消/重试，以及独立分组的异步状态机。
+

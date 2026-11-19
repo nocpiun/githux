@@ -93,11 +93,11 @@ fn text(label: impl Into<String>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 impl RepositoryOverview {
-    fn retry(&self, section: OverviewSection, message: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn retry(&self, section: OverviewSection, message: &str, cx: &App) -> AnyElement {
         let binding = self.binding.clone();
         let label = format!("Retry {}", section.title());
         let reason = message.to_string();
-        let this = cx.entity().downgrade();
+        let this = self.owner.clone();
         let id = format!("overview-retry-{}", section.id());
         crate::ui::compact_status::failed(
             gpui::ElementId::Name(id.clone().into()),
@@ -163,11 +163,6 @@ impl RepositoryOverview {
             });
         let list_historical =
             self.releases.is_historical() || data.is_some_and(|data| data.historical);
-        let latest_historical = self
-            .latest
-            .as_ref()
-            .is_some_and(SectionState::is_historical)
-            || (self.latest.is_none() && data.is_some_and(|data| data.latest_historical));
         let sync_label = self
             .latest
             .as_ref()
@@ -267,19 +262,20 @@ impl RepositoryOverview {
                 version.into_any_element()
             });
             // Historical snapshots are never promoted to a current verified Latest badge.
-            let trusted_latest = match self.latest.as_ref() {
-                Some(SectionState::Ready(value)) => value.release.is_some(),
-                None => data.is_some_and(|data| {
-                    !data.latest_historical
-                        && !data.historical
-                        && data.latest_error.is_none()
-                        && data
-                            .latest
-                            .as_ref()
-                            .is_some_and(|latest| latest.release.is_some())
-                }),
-                _ => false,
-            };
+            let trusted_latest = !self.failures[1]
+                && match self.latest.as_ref() {
+                    Some(SectionState::Ready(value)) => value.release.is_some(),
+                    None => data.is_some_and(|data| {
+                        !data.latest_historical
+                            && !data.historical
+                            && data.latest_error.is_none()
+                            && data
+                                .latest
+                                .as_ref()
+                                .is_some_and(|latest| latest.release.is_some())
+                    }),
+                    _ => false,
+                };
             if trusted_latest && !release.draft && !release.prerelease {
                 row = row.child(
                     div()
@@ -332,7 +328,9 @@ impl RepositoryOverview {
         if list_partial || self.latest.as_ref().is_some_and(SectionState::is_partial) {
             row = row.child(text("Partial", cx));
         }
-        if list_historical || latest_historical {
+        if (self.failures[0] && data.is_some())
+            || (self.failures[1] && self.latest.as_ref().and_then(SectionState::value).is_some())
+        {
             let tip = match sync_label {
                 Some(label) => {
                     format!("Cached releases snapshot · synced {label}. Click to refresh.")
@@ -355,7 +353,7 @@ impl RepositoryOverview {
             }
         }
         let count = data
-            .filter(|_| !list_partial && !list_historical)
+            .filter(|_| !list_partial && !list_historical && !self.failures[0])
             .map(|data| data.list.releases.len().to_string());
         group_with_count(
             "overview-releases",
@@ -437,7 +435,7 @@ impl RepositoryOverview {
             {
                 row = row.child(text("Partial", cx));
             }
-            if self.contributors.is_historical() {
+            if self.failures[2] {
                 let tip = match self.contributors.sync_label() {
                     Some(label) => {
                         format!("Cached contributors snapshot · synced {label}. Click to refresh.")
@@ -479,14 +477,17 @@ impl RepositoryOverview {
     /// The host places this at the page bottom; no title, legend or text row.
     pub fn language_bar(&self, cx: &App) -> AnyElement {
         let Some(segments) = self.languages.value().and_then(language_segments) else {
-            return div().into_any_element();
+            return self.languages.error().map_or_else(
+                || div().into_any_element(),
+                |error| self.retry(OverviewSection::Languages, error, cx),
+            );
         };
         if segments.is_empty() {
             return div().into_any_element();
         }
-        let historical = self.languages.is_historical();
+        let historical = self.failures[3];
         let sync_label = self.languages.sync_label().map(str::to_string);
-        div()
+        let bar = div()
             .id("overview-language-bar")
             .debug_selector(|| "overview-language-bar".into())
             .flex()
@@ -524,6 +525,31 @@ impl RepositoryOverview {
                             .into_any_element()
                     }))
             }))
+            .into_any_element();
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .when(self.failures[3], |column| {
+                column.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .debug_selector(|| "overview-languages-cached".into())
+                                .child(Badge::new("Cached").outline()),
+                        )
+                        .child(self.retry(
+                            OverviewSection::Languages,
+                            "Refresh failed; showing cached languages",
+                            cx,
+                        )),
+                )
+            })
+            .child(bar)
             .into_any_element()
     }
 }

@@ -1598,6 +1598,54 @@ fn empty_binary_and_large_files_use_the_real_reader_states(cx: &mut TestAppConte
     ));
 }
 
+fn saved_file_root_retry(cx: &mut TestAppContext, path: &str) {
+    let fixture = Fixture::new(Scene::RootFailure);
+    fixture.login(1);
+    let intent = RepositoryNavigation {
+        path: Some(path.into()),
+        ..RepositoryNavigation::default()
+    };
+    let (page, cx) = open(cx, &fixture, intent);
+    activate(&page, cx);
+    settle(&page, cx, |p| {
+        p.tree_failure("").is_some() && matches!(p.reader_status(), ReaderStatus::ContentFailed(_))
+    });
+    let revisions = fixture.transport.count("/commits/main");
+    let retry = cx
+        .debug_bounds("repository-retry-root")
+        .expect("root failure has a real retry")
+        .center();
+    cx.simulate_click(retry, Modifiers::none());
+    settle(&page, cx, |p| p.tree("").is_some());
+    assert!(
+        !page.read_with(cx, |p, _| matches!(
+            p.reader_status(),
+            ReaderStatus::ContentFailed(_)
+        )),
+        "a successful root retry must resume the saved selection {path}"
+    );
+    settle(&page, cx, |p| {
+        p.reader_status() == &ReaderStatus::Showing && p.current_path() == Some(path)
+    });
+    assert_eq!(
+        page.read_with(cx, |p, _| p.selection().clone()),
+        Selection::File(path.into())
+    );
+    assert_eq!(
+        fixture.transport.count("/commits/main"),
+        revisions,
+        "root retry keeps the fixed snapshot"
+    );
+}
+#[gpui::test]
+fn saved_file_recovers_after_root_retry_at_root(cx: &mut TestAppContext) {
+    saved_file_root_retry(cx, "README.md");
+}
+#[gpui::test]
+fn saved_file_recovers_after_root_retry_nested(cx: &mut TestAppContext) {
+    saved_file_root_retry(cx, "src/main.rs");
+}
+
 #[gpui::test]
 fn root_retry_uses_the_snapshot_and_child_partial_is_never_empty(cx: &mut TestAppContext) {
     let fixture = Fixture::new(Scene::RootFailure);

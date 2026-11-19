@@ -9,6 +9,9 @@ use super::{
 
 pub struct RepositoryOverview {
     binding: OverviewBinding,
+    owner: gpui::WeakEntity<Self>,
+    /// Current request outcomes, independent of where the displayed values originated.
+    failures: [bool; 4],
     releases: ReleasesState,
     latest: Option<LatestReleaseState>,
     contributors: ContributorsState,
@@ -19,9 +22,11 @@ pub struct RepositoryOverview {
     date_label: Option<(u64, String)>,
 }
 impl RepositoryOverview {
-    pub fn new(binding: OverviewBinding, _: &mut Window, _: &mut Context<Self>) -> Self {
+    pub fn new(binding: OverviewBinding, _: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             binding,
+            owner: cx.weak_entity(),
+            failures: [false; 4],
             releases: SectionState::Idle,
             latest: None,
             contributors: SectionState::Idle,
@@ -105,6 +110,7 @@ impl RepositoryOverview {
             return;
         }
         self.binding = binding;
+        self.failures = [false; 4];
         self.releases = SectionState::Idle;
         self.latest = None;
         self.contributors = SectionState::Idle;
@@ -194,6 +200,53 @@ impl RepositoryOverview {
         }
         self.latest = Some(state);
         cx.notify();
+        true
+    }
+
+    /// Starts a new request without hiding its usable previous observation.
+    pub fn begin_refresh(
+        &mut self,
+        binding: &OverviewBinding,
+        update: &OverviewUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        if &self.binding == binding {
+            self.failures[update.index()] = false;
+            cx.notify();
+        }
+    }
+    pub fn clear_refresh_failures(&mut self, cx: &mut Context<Self>) {
+        self.failures = [false; 4];
+        cx.notify();
+    }
+    /// A failed request retains its usable authorized value. Disk previews alone are quiet.
+    pub fn apply_result(
+        &mut self,
+        binding: &OverviewBinding,
+        update: OverviewUpdate,
+        failed: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if &self.binding != binding {
+            return false;
+        }
+        let index = update.index();
+        let error = update.has_error();
+        let has_value = match index {
+            0 => self.releases.value().is_some(),
+            1 => self.latest.as_ref().and_then(SectionState::value).is_some(),
+            2 => self.contributors.value().is_some(),
+            _ => self.languages.value().is_some(),
+        };
+        if error && has_value {
+            self.failures[index] = true;
+            cx.notify();
+            return true;
+        }
+        if !self.apply(binding, update, cx) {
+            return false;
+        }
+        self.failures[index] = failed || error;
         true
     }
 
