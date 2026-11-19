@@ -72,7 +72,7 @@ export function loadConfig(configFile, repo = process.cwd()) {
   c.provider = model(c.provider, 'provider');
   c.model = model(c.model, 'model');
   if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(c.thinking)) fail('Invalid thinking level');
-  c.worktree_parent = canonical(c.worktree_parent ?? 'D:/');
+  c.worktree_parent = canonical(c.worktree_parent ?? 'D:/githux-worktrees');
   plainDir(c.worktree_parent);
   return c;
 }

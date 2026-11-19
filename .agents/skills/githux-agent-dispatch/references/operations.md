@@ -11,14 +11,39 @@
   "provider": "<exact provider>",
   "model": "<exact inventory model ID>",
   "thinking": "medium",
-  "worktree_parent": "<existing absolute parent directory>",
+  "worktree_parent": "D:/githux-worktrees",
   "kero_project_id": "<shared local Kero project ID>"
 }
 ```
 
 `kero_project_id` 是同一仓库共用的 Kero 分组 ID，不是显示名称。通过 `kero projects --json` 核对 `dir` 对应协调仓库根目录，选择一个现有 `githux` 分组并写入本地配置。缺省仅在该目录恰好有一个分组时自动选择；没有分组或已有多个同名/同目录分组时，在创建会话和锁之前报错，要求明确选择。不会自动新建分组，也不自动移动/关闭旧会话；固定 ID 不受侧栏排序改变影响。首次使用可先在 Kero 建立该仓库的项目分组，再记录 ID。
 
-只接受这些字段，不接受 API key、token、env、URL、自定义参数或凭据文件路径。认证由执行工具自己的既有配置提供；脚本不读写或打印其认证配置，也不修改全局设置。`node` 可为字面值 `node`（解析为运行调度器的 Node），或绝对 Node executable 路径；CLI 必须为已有 .js/.mjs/.cjs 文件。启动使用 PATH 中的 `kero` 与系统 Windows PowerShell；Kero 应已运行。PATH 刚更新时重开终端或刷新当前进程的 PATH，不写死本机安装路径，不改全局配置。worktree parent 缺省采用项目约定的盘根目录；测试和其他本地布局显式指定现有目录。
+只接受这些字段，不接受 API key、token、env、URL、自定义参数或凭据文件路径。认证由执行工具自己的既有配置提供；脚本不读写或打印其认证配置，也不修改全局设置。`node` 可为字面值 `node`（解析为运行调度器的 Node），或绝对 Node executable 路径；CLI 必须为已有 .js/.mjs/.cjs 文件。启动使用 PATH 中的 `kero` 与系统 Windows PowerShell；Kero 应已运行。PATH 刚更新时重开终端或刷新当前进程的 PATH，不写死本机安装路径，不改全局配置。worktree parent 默认为 `D:/githux-worktrees`。本机各模型配置也应使用这个目录；测试夹具可显式指定自己的临时目录。
+
+在 Windows 协调机上先创建这个父目录，并把 `sccache.exe` 安装到它的 `.tools` 下。在 `D:/githux-worktrees/.cargo/config.toml` 写入以下配置。从任一任务工作树调用 Cargo 都会继承它。各任务的 `target/` 和启动程序仍在各自工作树内。
+
+```toml
+[build]
+rustc-wrapper = "D:/githux-worktrees/.tools/sccache.exe"
+incremental = false
+
+[env]
+SCCACHE_DIR = "D:/githux-worktrees/.sccache"
+SCCACHE_CACHE_SIZE = "10G"
+SCCACHE_SERVER_PORT = "47296"
+```
+
+缓存上限适用于 `.sccache`。可执行文件、链接产物及其他 `target/` 文件仍占用各自工作树的磁盘空间。不要在父目录或派发环境中设置共享 `target-dir` 或 `CARGO_TARGET_DIR`。需要比较两次构建的命中率时，可在同一 PowerShell 中先启动项目的缓存服务，再在各工作树中正常构建；已有监听服务时可跳过启动命令。
+
+```powershell
+$env:SCCACHE_DIR = 'D:/githux-worktrees/.sccache'
+$env:SCCACHE_CACHE_SIZE = '10G'
+$env:SCCACHE_SERVER_PORT = '47296'
+D:/githux-worktrees/.tools/sccache.exe --start-server
+D:/githux-worktrees/.tools/sccache.exe --show-stats
+```
+
+构建后再运行 `--show-stats`。计数属于当前服务进程；它重启后计数归零，但磁盘缓存仍可命中。一般构建无需手动启动服务，也无需设置全局环境变量。
 
 配置文件和相关目录应由本机可信用户维护；任务进程不是沙箱。实际 CLI 的 Node 版本要求另行满足。脚本把交互子进程挂在 supervisor 下，因此 start/resume 命令返回时 CLI 可能仍在启动；随后用 status 确认，而不是把短暂的 starting 当成已完成。路径支持空格、Unicode、`& % !`、单引号和 `$()` 等字符；拒绝控制字符、双引号、`< > |`。model/provider 只接受字母数字开头及字母数字、`_ . / - & % !`，拒绝空格、冒号 thinking 后缀、通配符和参数注入。过长编码命令在创建 launch lock 之前拒绝，缩短脚本或 worktree 路径再试。
 

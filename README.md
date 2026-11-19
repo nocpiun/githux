@@ -14,7 +14,7 @@
 cargo run --locked
 ```
 
-首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`；不要与其他项目/原型共享可写 target。Windows debug binary 为 `target/debug/githux.exe`。
+首次构建需访问 crates.io 与 Ely Git 上游，且编译体积较大。默认输出在本 worktree 的 `target/`。本机并行任务可通过 [sccache 配置](.agents/skills/githux-agent-dispatch/references/operations.md#本机配置)共享编译缓存。Windows debug binary 为 `target/debug/githux.exe`。
 
 复杂组件的开发预览使用独立 Cargo example，不进入正式产品启动路径或发行包。仓库正文阅读器运行 `cargo run --example reader`；真实账户与仓库读取接线预览运行 `cargo run --example account`。后者直接连接应用数据目录、系统凭据与 GitHub，token 只能由操作者在预览 UI 中输入；自动测试使用合成凭据与 mock。两个 example 都不随默认 release 构建或正式 artifact 发布。
 

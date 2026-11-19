@@ -12,9 +12,9 @@
 
 所有任务开工时，主 Agent、基层 Agents 和诊断/审查执行者都须阅读 [LESSONS](../LESSONS.md)，查找与本任务相关的教训，并将其用于任务拆分、实现及验证；文档、诊断和 `local-only` 任务同样适用。
 
-负责人和主 Agent 共同讨论方向、架构、功能和体验。基层 Agents 使用本地任务上下文指定的执行工具，会话在负责人可见、可补充指令或接管的终端中运行。主 Agent 保持既有协调会话，当前不实现自动唤醒。并行任务各自使用独立 worktree、index 与 `target/`，并在派发时明确共享文件的写入归属。
+负责人和主 Agent 共同讨论方向、架构、功能和体验。基层 Agents 使用本地任务上下文指定的执行工具，会话在负责人可见、可补充指令或接管的终端中运行。主 Agent 保持既有协调会话，当前不实现自动唤醒。并行任务各自使用独立 worktree、index 与 `target/`，并在派发时明确共享文件的写入归属。同机任务通过工作树父目录的 [sccache 配置](../.agents/skills/githux-agent-dispatch/references/operations.md#本机配置)复用编译缓存。
 
-实现任务独立 worktree：`D:\githux-<task>`；独立分支：`<type>/<branch-name>`，例如 `feature/...`、`fix/...`。使用同一任务基层 Agent 会话完成实现、审查修复和交付。
+实现任务独立 worktree：`D:\githux-worktrees\githux-<task>`；独立分支：`<type>/<branch-name>`，例如 `feature/...`、`fix/...`。使用同一任务基层 Agent 会话完成实现、审查修复和交付。
 
 **并发：** 首次流程试跑只用一个实现 Agent 的限制已由负责人在 2026-10-22 解除。当前按就绪依赖、写入冲突、审查积压和机器资源安排并行，不保留固定 Agent 总数上限；编译与真实 GUI 验证可以有独立资源限制。历史事实保留：首轮试跑确实只运行了一个实现者，后续并行集成仍需继续观察。同一任务仍然同一时刻只有一个有效写入者。
 
