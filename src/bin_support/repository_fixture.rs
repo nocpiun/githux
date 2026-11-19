@@ -1,8 +1,9 @@
 //! Deterministic development fixture for the repository page preview and its tests.
 //!
 //! This module is development-only material: it is compiled into the
-//! `examples/repository.rs` preview and the `tests/repository.rs` suite through
-//! `src/bin_support/repository_modules.rs`, and the product binary never
+//! `examples/repository.rs` preview through `src/bin_support/repository_modules.rs`
+//! and into the main crate's `#[cfg(test)]` suite through
+//! `src/bin_support/test_repository_modules.rs`, and the product binary never
 //! declares it. It is the *one* fixture both the preview and the acceptance
 //! tests browse, so what the owner clicks is exactly what the tests exercise.
 //!

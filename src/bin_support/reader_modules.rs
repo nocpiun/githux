@@ -1,5 +1,5 @@
 // Root of the standalone reader module tree, pulled in by `#[path]` from
-// `examples/reader.rs` and `tests/reader.rs`. Each `#[path]` below is resolved
+// `examples/reader.rs`. Each `#[path]` below is resolved
 // against this file's directory, so it is identical on every platform and
 // `rustfmt` can resolve it.
 //

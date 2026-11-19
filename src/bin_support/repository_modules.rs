@@ -1,5 +1,5 @@
 // Root of the standalone repository-page module tree, pulled in by `#[path]`
-// from `examples/repository.rs` and `tests/repository.rs`. Each `#[path]` below
+// from `examples/repository.rs`. Each `#[path]` below
 // resolves against this file's directory, so Windows and Linux assemble the
 // same real modules and `rustfmt` can resolve them.
 //

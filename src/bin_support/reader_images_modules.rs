@@ -1,8 +1,8 @@
-// Root of the standalone `reader-images` preview/test assembly.
+// Root of the standalone `reader-images` preview assembly.
 //
-// `examples/reader_images.rs` and `tests/reader_images.rs` declare the product
+// `examples/reader_images.rs` declares the product
 // service modules (`auth`, `content`, `data`, `domain`, `github`, `network`,
-// `storage`) directly at their own crate root, because those modules resolve
+// `storage`) directly at its own crate root, because those modules resolve
 // `crate::…` paths internally. Declaring them here would produce a second,
 // incompatible copy of the product types.
 //

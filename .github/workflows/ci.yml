@@ -62,9 +62,11 @@ jobs:
   code-check:
     needs: changes
     if: ${{ needs.changes.outputs.app == 'true' }}
-    name: Code check (fmt, check, clippy, test)
+    name: Code check (fmt, clippy, test)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
 
@@ -74,8 +76,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
-            clang \
-            cmake \
             libfontconfig1-dev \
             libfreetype6-dev \
             libxkbcommon-dev \
@@ -98,14 +98,11 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Cargo check
-        run: cargo check --locked --all-targets
-
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --bins --tests
 
   build:
     needs: changes
@@ -143,8 +140,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
-            clang \
-            cmake \
             libfontconfig1-dev \
             libfreetype6-dev \
             libxkbcommon-dev \

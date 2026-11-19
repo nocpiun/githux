@@ -1,6 +1,6 @@
 # 共同代码与验证约定
 
-更新：2026-10-22。只维护当前项目有用的稳定规则；具体业务要求链接到 [产品](product.md)、[架构](architecture.md)、[缓存](cache-strategy.md) 和 [工作流](agent-workflow.md)。
+更新：2026-11-19。只维护当前项目有用的稳定规则；具体业务要求链接到 [产品](product.md)、[架构](architecture.md)、[缓存](cache-strategy.md) 和 [工作流](agent-workflow.md)。
 
 ## 改动与并行
 
@@ -32,7 +32,7 @@ CI 在 workflow 层按 workflow 名称与 github.ref 分组，并启用 cancel-i
 | 应用源码、资源、Cargo/工具链/构建配置，以及未明确排除的新路径 | 运行 | 按脚本范围判断 |
 | `.github/**`，包括工作流与范围/门槛脚本 | 运行 | 运行 |
 
-混合变更取并集；`src/` 与 `assets/` 内的 Markdown 也可能是构建输入，不归入文档跳过。CI 自身变更完整运行各分支以验证检查配置。Rust `code-check` 在 Ubuntu 24.04 安装 Linux 构建依赖后执行 fmt/check/clippy/test；Windows 专项脚本测试仍由 `script-check` 负责，四平台 Debug 构建各用原生 runner。每次先运行轻量 `Detect changes`（含范围/门槛离线测试），然后始终执行 `CI` 汇总；纯文档不会启动 Ubuntu Rust 检查或四平台构建，也不上传构建 artifact。
+混合变更取并集；`src/` 与 `assets/` 内的 Markdown 也可能是构建输入，不归入文档跳过。CI 自身变更完整运行各分支以验证检查配置。Rust `code-check` 在 Ubuntu 24.04 安装 Linux 构建依赖后执行 fmt/clippy/test（`clippy --all-targets` 覆盖主应用、测试装配与全部示例，`test` 通过 `--bins --tests` 避免重复编译链接示例，并启用 `CARGO_PROFILE_TEST_DEBUG=line-tables-only`）；Windows 专项脚本测试仍由 `script-check` 负责，四平台 Debug 构建各用原生 runner。每次先运行轻量 `Detect changes`（含范围/门槛离线测试），然后始终执行 `CI` 汇总；纯文档不会启动 Ubuntu Rust 检查或四平台构建，也不上传构建 artifact。
 
 PR 使用 base 与 head 的 merge-base 三点差异，覆盖整个 PR；后续只追加文档不能遮住之前的源码变更。main push 使用 before/after 两点差异，首次零 before 用完整树。checkout 获取完整历史，Git NUL 文件名列表不依赖 API 的文件数量上限，重命名按删除和新增共同分类。引用不可读取或范围判断出错时 CI 失败，不能当作文档变更。规则不是依赖扫描器：若未来将 docs/ 或根 Markdown 作为运行时/构建输入，须先调整策略。
 
@@ -57,10 +57,9 @@ Node.js 20+；审查脚本使用本机 `gh`，其测试不访问 GitHub。派发
 
 ```sh
 cargo fmt --all -- --check
-cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
-cargo test --locked
+cargo test --locked --bins --tests
 ```
 
 `cargo test` 使用 GPUI 测试平台渲染实际外壳视图，覆盖路由、缩放时的有界滚动、侧栏独立滚动、搜索浮层的打开/过滤/选择/关闭/组合态 Enter、焦点返回与未设计页面留空；fixture 与命令排序另有用例。该测试不经过 Windows 原生输入分发，也不驱动真实非客户区命中测试，不替代真实窗口复测；具体证据和限制见 [外壳布局开发日志](devlog/2026-10-22-shell-layout.md)。依赖锁文件必须入 Git；每个 worktree 使用自己的 `target/`。运行步骤和 GUI 验收要求见 [README](../README.md)；CI 首次实际执行与 macOS/Linux 验证不能由本地 Windows 结果推断。
