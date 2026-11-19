@@ -20,7 +20,7 @@ let snapshot = cached.revision(&repository, RevisionSpec::Ref(main), &limits,
 - `OfflineOnly`：不发网络请求；未缓存返回 `Miss(NotCached)`，损坏/版本不符单独保留 miss 原因。
 - `ForceRefresh`：跳过固定对象快速命中和可变 validator，发无条件网络请求。
 
-固定 commit/tree/README/blob 的已缓存对象可直接复用，但每次读取仍复核 session context 和 cache gate。ref 快照只是上次观察，不表示当前 main。`CachedRepositoryRead` 携带 `Network`/`Snapshot`、fetched/verified 毫秒时间及完整性，供后续 UI 标注“上次同步/固定 commit”；不会将旧值包装成 fresh online。
+固定 commit/tree/README/blob 的已缓存对象可直接复用，但每次读取仍复核 session context 和 cache gate。ref 快照只是上次观察，不表示当前 main。`CachedRepositoryRead` 携带 `Network`/`Snapshot`、fetched/verified 毫秒时间及完整性，并以不持久化的 `revalidation_failed` 区分“本次在线失败后的授权快照回退”与单纯离线预读/固定对象复用。后者始终为 false；不会把上次打开的失败写入下一次缓存首帧，也不会将旧值包装成 fresh online。
 
 所有缓存读、ticket、权限 proof 和写入均在 Tokio blocking worker 执行，等待前后检查原 session context 与取消状态。`content` 在缓存 bytes 读出后仍调用现有 `prepare_content`，保留有效空、二进制、非 UTF-8 和大小限制。
 

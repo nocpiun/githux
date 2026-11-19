@@ -1,5 +1,5 @@
 //! Repository-scoped overview composition. Branch changes never restart these reads.
-use super::{PageAction, RepositoryPage, Work, format_sync_age};
+use super::{PageAction, PageError, RepositoryPage, Work, format_sync_age};
 use crate::data::page_cache::{
     CachedPageReadSession, PageCacheError, PageOrigin, PageReadMode, PageValue,
 };
@@ -44,6 +44,7 @@ struct Reply {
     endpoint: Endpoint,
     request: u64,
     update: OverviewUpdate,
+    failed: bool,
 }
 struct CountsReply {
     binding: OverviewBinding,
@@ -63,6 +64,8 @@ pub(super) struct Extras {
     binding: Option<OverviewBinding>,
     requests: [u64; 4],
     work: [Option<Work>; 4],
+    /// Retained until the next repository refresh, including cache previews that finish late.
+    interruption: Option<PageError>,
     inbox: Arc<Mutex<VecDeque<Reply>>>,
     pub counts: Option<crate::domain::repository_counts::RepositoryCounts>,
     pub counts_historical: bool,
@@ -74,18 +77,27 @@ pub(super) struct Extras {
     displayed_authorization: Option<CacheAuthorization>,
 }
 impl Extras {
-    pub fn stop(&mut self) {
-        for work in &mut self.work {
+    /// Cancel one read pass while retaining the same authorized displayed overview and binding.
+    pub fn cancel_reads(&mut self) {
+        self.interruption = None;
+        for (index, work) in self.work.iter_mut().enumerate() {
             if let Some(work) = work.take() {
                 work.source.cancel();
             }
+            self.requests[index] = self.requests[index].wrapping_add(1);
         }
         if let Some(work) = self.counts_work.take() {
             work.source.cancel();
         }
+        self.counts_request = self.counts_request.wrapping_add(1);
+        self.inbox.lock().expect("overview inbox").clear();
+        self.counts_inbox.lock().expect("count inbox").clear();
+    }
+
+    pub fn stop(&mut self) {
+        self.cancel_reads();
         self.counts = None;
         self.counts_historical = false;
-        self.counts_request += 1;
         self.displayed_authorization = None;
         self.view = None;
         self.session = None;
@@ -105,7 +117,8 @@ impl Extras {
     fn accepts(&self, page: &RepositoryPage, binding: &OverviewBinding) -> bool {
         page.active
             && self.binding.as_ref() == Some(binding)
-            && binding.generation == page.generation
+            // The binding identifies displayed data; request counters identify refresh passes.
+            // activate/rebind stop the overview entirely before changing authorization.
             && page
                 .details
                 .as_ref()
@@ -141,16 +154,19 @@ impl RepositoryPage {
                 .binding
                 .as_ref()
                 .is_some_and(|binding| binding.repository == repository)
-            && self.extras.binding.as_ref().is_some_and(|binding| {
-                binding.generation == self.generation && self.extras.accepts(self, binding)
-            })
+            && self
+                .extras
+                .binding
+                .as_ref()
+                .is_some_and(|binding| self.extras.accepts(self, binding))
         {
             let offline_only = self
                 .details_provenance
                 .as_ref()
                 .is_some_and(|prov| prov.origin == crate::data::RepositoryCacheOrigin::Snapshot);
-            let authorization = self.current_authorization(repository.id());
-            self.extras.displayed_authorization = authorization.clone();
+            // Keep the token belonging to the retained values. A new read cannot re-authorize
+            // an older displayed section by swapping its invalidation token.
+            let authorization = self.extras.displayed_authorization.clone();
             self.read_counts(offline_only, authorization.clone());
             for endpoint in [
                 Endpoint::Releases,
@@ -326,6 +342,15 @@ impl RepositoryPage {
         let work = Work::new();
         let cancel = work.token();
         self.extras.work[index] = Some(work);
+        let loading = match endpoint {
+            Endpoint::Releases => OverviewUpdate::Releases(SectionState::Loading),
+            Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Loading),
+            Endpoint::Contributors => OverviewUpdate::Contributors(SectionState::Loading),
+            Endpoint::Languages => OverviewUpdate::Languages(SectionState::Loading),
+        };
+        self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
+            view.begin_refresh(&binding, &loading, cx);
+        });
         // A section already showing a cached value keeps it while the online re-read runs: turning
         // it back into a spinner would hide readable content for no reason. A truly empty section
         // still shows the loading state.
@@ -345,12 +370,6 @@ impl RepositoryPage {
                 }),
             Some(true)
         ) {
-            let loading = match endpoint {
-                Endpoint::Releases => OverviewUpdate::Releases(SectionState::Loading),
-                Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Loading),
-                Endpoint::Contributors => OverviewUpdate::Contributors(SectionState::Loading),
-                Endpoint::Languages => OverviewUpdate::Languages(SectionState::Loading),
-            };
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
                 view.apply(&binding, loading, cx);
             });
@@ -402,11 +421,14 @@ impl RepositoryPage {
                     authorization,
                     endpoint,
                     request,
+                    failed: update.has_error()
+                        || (!offline_only && !preliminary && update.is_historical()),
                     update,
                 });
             }
         });
         if submitted.is_err() {
+            self.extras.work[index] = None;
             let message = "Background services are closing.".to_string();
             let update = match endpoint {
                 Endpoint::Releases => OverviewUpdate::Releases(SectionState::Error { message }),
@@ -418,11 +440,63 @@ impl RepositoryPage {
             };
             let binding = self.extras.binding.as_ref().unwrap();
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
-                view.apply(binding, update, cx);
+                view.apply_result(binding, update, true, cx);
             });
         }
     }
+    pub(super) fn interrupt_overview_refresh(&mut self, cx: &mut Context<Self>) {
+        let error = PageError::new("Refresh was interrupted by a branch change.", None, true);
+        self.extras.interruption = Some(error.clone());
+        self.settle_overview_after_refresh_error(&error, cx);
+    }
+
+    pub(super) fn settle_overview_after_refresh_error(
+        &mut self,
+        error: &PageError,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((view, binding)) = self.extras.view.clone().zip(self.extras.binding.clone())
+        else {
+            return;
+        };
+        for endpoint in [
+            Endpoint::Releases,
+            Endpoint::Latest,
+            Endpoint::Contributors,
+            Endpoint::Languages,
+        ] {
+            if self.extras.work[endpoint.index()].is_some() {
+                continue;
+            }
+            let loading = match endpoint {
+                Endpoint::Releases => view.read(cx).releases().is_loading(),
+                Endpoint::Latest => view
+                    .read(cx)
+                    .latest_release()
+                    .is_some_and(SectionState::is_loading),
+                Endpoint::Contributors => view.read(cx).contributors().is_loading(),
+                Endpoint::Languages => view.read(cx).languages().is_loading(),
+            };
+            if !loading {
+                continue;
+            }
+            let message = error.title.clone();
+            let update = match endpoint {
+                Endpoint::Releases => OverviewUpdate::Releases(SectionState::Error { message }),
+                Endpoint::Latest => OverviewUpdate::LatestRelease(SectionState::Error { message }),
+                Endpoint::Contributors => {
+                    OverviewUpdate::Contributors(SectionState::Error { message })
+                }
+                Endpoint::Languages => OverviewUpdate::Languages(SectionState::Error { message }),
+            };
+            view.update(cx, |view, cx| {
+                view.apply(&binding, update, cx);
+            });
+        }
+    }
+
     pub(super) fn drain_overview(&mut self, cx: &mut Context<Self>) {
+        let mut completed = false;
         let counts: Vec<_> = self
             .extras
             .counts_inbox
@@ -441,6 +515,8 @@ impl RepositoryPage {
                     .repo_service()
                     .is_current(&reply.context)
             {
+                self.extras.counts_work = None;
+                completed = true;
                 match reply
                     .result
                     .ok()
@@ -486,11 +562,23 @@ impl RepositoryPage {
             {
                 continue;
             }
+            self.extras.work[reply.endpoint.index()] = None;
+            completed = true;
             self.extras.view.as_ref().unwrap().update(cx, |view, cx| {
-                view.apply(&reply.binding, reply.update, cx);
+                view.apply_result(&reply.binding, reply.update, reply.failed, cx);
             });
             // The language strip is composed by the page from this same state.
             cx.notify();
+        }
+        // A cache-only miss may finish after its summary successor fails or is canceled. Settle
+        // that unanswered preview once its actual read has completed.
+        if completed
+            && let Some(error) = self
+                .error
+                .clone()
+                .or_else(|| self.extras.interruption.clone())
+        {
+            self.settle_overview_after_refresh_error(&error, cx);
         }
     }
     pub(super) fn overview_action(
@@ -1063,6 +1151,51 @@ mod tests {
     use crate::ui::repository::tests::{frames, normal};
     use gpui::TestAppContext;
     #[gpui::test]
+    fn continuity_branch_switch_settles_a_late_cache_preview_miss(cx: &mut TestAppContext) {
+        let (_fixture, page, cx) = normal(cx);
+        page.update(cx, |page, cx| {
+            let binding = page.extras.binding.clone().unwrap();
+            let context = page.context.clone().unwrap();
+            // Isolate a cache preview completion from the speed of real endpoint workers.
+            if let Some(work) = page.extras.work[0].take() {
+                work.source.cancel();
+            }
+            page.extras.requests[0] += 1;
+            let request = page.extras.requests[0];
+            page.extras.inbox.lock().unwrap().clear();
+            page.extras.work[0] = Some(Work::new());
+            let view = page.extras.view.clone().unwrap();
+            view.update(cx, |view, cx| {
+                view.apply(
+                    &binding,
+                    OverviewUpdate::Releases(SectionState::Loading),
+                    cx,
+                );
+            });
+            page.begin_branch("feature/docs-polish".into(), cx);
+            assert!(
+                view.read(cx).releases().is_loading(),
+                "the cache read still owns Loading until its reply"
+            );
+            page.extras.inbox.lock().unwrap().push_back(Reply {
+                binding,
+                context,
+                authorization: None,
+                endpoint: Endpoint::Releases,
+                request,
+                failed: false,
+                update: OverviewUpdate::Releases(SectionState::Loading),
+            });
+            page.drain_overview(cx);
+            assert!(
+                view.read(cx).releases().error().is_some(),
+                "a preview MISS after navigation cannot wait for the canceled summary successor"
+            );
+        });
+        frames(cx);
+    }
+
+    #[gpui::test]
     fn stale_count_error_does_not_replace_newer_value_or_new_authorization(
         cx: &mut TestAppContext,
     ) {
@@ -1120,6 +1253,7 @@ mod tests {
                 authorization: page.extras.displayed_authorization.clone(),
                 endpoint: Endpoint::Languages,
                 request: request - 1,
+                failed: true,
                 update: OverviewUpdate::Languages(SectionState::Error {
                     message: "old error".into(),
                 }),
@@ -1141,6 +1275,7 @@ mod tests {
                 authorization: None,
                 endpoint: Endpoint::Languages,
                 request,
+                failed: true,
                 update: OverviewUpdate::Languages(SectionState::Error {
                     message: "after deactivate".into(),
                 }),

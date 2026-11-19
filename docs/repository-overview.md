@@ -11,6 +11,7 @@ Releases、Contributors 是一个横向自然高度摘要条，嵌在仓库 iden
 - Contributors：最多 5 个横向 Ely Avatar。关联用户且有 html_url 才可导航；匿名或无地址者不可点击/Tab 激活。名字置于 tooltip/accessibility，不显示 email/raw JSON、贡献次数、总人数或永久 API caveat。`+N` 只计当前观察中没画出的条目，非仓库总人数。Partial 显示短标识；204 显示 Empty repository，成功空集合是 None returned，错误是 Unavailable · Retry。
 - Languages：数据仍归同一个 RepositoryOverview state；`language_bar(cx)` 小接口由RepositoryPage在页面最底边渲染4px纯色条。顶部不再保留标题/图例/百分比或第三列占位。checked字节总和/可信total，按每种实际语言各一个比例色块，不合并Other、没有伪最小宽度；hover完整名称与比例使用Ely tooltip，零/未知/error不画条也不画文本。内部作用域重试保留，无常驻Refresh/Retry。色块用 GitHub 自己的语言色：`language_colors::linguist_color(name)` 查询固定版本的 Linguist 静态表（源码、修订、SHA-256 与许可证见[第三方资产](third-party-assets.md#41-github-linguist-语言颜色表)），不再用名字哈希取 `theme.colors.chart[i]`。Linguist 没有给颜色的语言（如 COBOL）与表中不存在的名字一律用主题中性色 `fg_subtle` 作回退，不自行推算色值；排序、字节比例、tooltip、溢出裁切与无障碍名称都不因换色改变，运行时无网络查询。
 - 每段状态和失败独立，Ready 不带刷新 chrome。Releases/Contributors 失败时原位 Retry 发出该段的 scoped Refresh；Languages 只保留内部真实失败与 Refresh 能力，无常驻文案；不会触发 HTTP、URL opener 或图像下载。
+- **缓存提示（2026-11-18 返工）**：历史来源与当前请求失败分开保存。正常缓存首帧及后台验证静默；只有本次对应请求失败且保留可用旧值的区域显示 Cached 和分组刷新。Releases 的 list/latest 独立记录，任一失败不能把成功兄弟分区标为缓存；Contributors、Languages 同样局部处理。真实无值失败提供 Retry、不报 Cached；完整空 Releases 仍整组隐藏。重试保留内容、清除旧提示，成功静默，再失败可继续重试；换绑定清除失败记录。宿主始终在发布前校验账户/请求/授权，来源 provenance 不因静默 UI 改成 fresh。
 - 后续 Packages、Environments 等摘要块沿用同一规则：只在成功且完整地确认“没有内容”时整段省略（标题与间距一并省略），包括缓存/历史快照首帧，不能先画空壳再随刷新消失；未知/加载/失败/部分结果与非空快照继续显示各自的加载、重试或新鲜度入口。本轮只实现 Releases；Packages/Environments 本身仍未实现，本节不是实现授权。
 
 ## 复用与自然高度嵌入

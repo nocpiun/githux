@@ -40,6 +40,9 @@ pub struct RepositoryCacheProvenance {
     pub fetched_at_ms: i64,
     pub verified_at_ms: i64,
     pub completeness: CacheCompleteness,
+    /// This read attempted online validation and retained the authorized snapshot after failure.
+    /// In-memory only: offline previews never inherit a previous activation's failure.
+    pub revalidation_failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -972,9 +975,10 @@ impl CachedRepositorySession {
                     // revocation/PAT isolation during the request wins over the
                     // copied fallback bytes.
                     let decode = prior.decode.clone();
-                    let current = self
+                    let mut current = self
                         .offline(&_key, cancel, move |snapshot| decode(snapshot))
                         .await?;
+                    current.provenance.revalidation_failed = true;
                     return self.scoped(current);
                 }
                 return Err(error.into());
@@ -1193,6 +1197,7 @@ fn provenance(metadata: CacheMetadata, origin: RepositoryCacheOrigin) -> Reposit
         fetched_at_ms: metadata.fetched_at_ms,
         verified_at_ms: metadata.verified_at_ms,
         completeness: metadata.completeness,
+        revalidation_failed: false,
     }
 }
 fn validators(metadata: &CacheMetadata) -> Option<RepositoryResponseMetadata> {

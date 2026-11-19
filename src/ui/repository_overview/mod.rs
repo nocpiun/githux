@@ -221,6 +221,33 @@ pub enum OverviewUpdate {
     Languages(LanguagesState),
 }
 
+impl OverviewUpdate {
+    pub(crate) fn index(&self) -> usize {
+        match self {
+            Self::Releases(_) => 0,
+            Self::LatestRelease(_) => 1,
+            Self::Contributors(_) => 2,
+            Self::Languages(_) => 3,
+        }
+    }
+    pub(crate) fn has_error(&self) -> bool {
+        match self {
+            Self::Releases(s) => s.error().is_some(),
+            Self::LatestRelease(s) => s.error().is_some(),
+            Self::Contributors(s) => s.error().is_some(),
+            Self::Languages(s) => s.error().is_some(),
+        }
+    }
+    pub(crate) fn is_historical(&self) -> bool {
+        match self {
+            Self::Releases(s) => s.is_historical(),
+            Self::LatestRelease(s) => s.is_historical(),
+            Self::Contributors(s) => s.is_historical(),
+            Self::Languages(s) => s.is_historical(),
+        }
+    }
+}
+
 /// A typed user action. The component never opens a URL, downloads an asset or refreshes by itself.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverviewAction {

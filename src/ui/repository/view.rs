@@ -13,7 +13,7 @@ use crate::ui::tooltip::ui_tooltip;
 use std::rc::Rc;
 
 use ely_core::{
-    buttons::{Button, ButtonVariant},
+    buttons::{Button, ButtonVariant, IconButton},
     data_display::Tone,
     forms::{Choice, Select},
     primitives::{Icon, IconName},
@@ -203,11 +203,9 @@ fn header(
         .into_any_element()
 }
 
-/// Explicit "this page is showing a cached snapshot" marker with the last
-/// verified time and the one explicit online refresh. It is only drawn for
-/// historical data: a network-verified page shows nothing extra.
+/// A failed summary request retaining a usable observation. Cache previews are silent.
 fn cached_marker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> AnyElement {
-    if !page.is_showing_cached_snapshot() {
+    if !page.cache_failures[0] || page.details().is_none() {
         return div().into_any_element();
     }
     // Only sources that really came from the cache contribute their age; a page
@@ -215,7 +213,8 @@ fn cached_marker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
     // snapshot must not claim it was cached "just now". With several cached
     // sources the oldest one is reported.
     let synced = page
-        .historical_verified_at_ms()
+        .details_provenance()
+        .map(|p| p.verified_at_ms)
         .map(super::format_sync_age)
         .unwrap_or_else(|| "an earlier sync".to_string());
     let theme = cx.theme();
@@ -277,6 +276,44 @@ fn cached_marker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
                 })
                 .child("Refresh"),
         )
+        .into_any_element()
+}
+
+/// Failure status for independently retained branch-list or fixed-code observations.
+fn cached_region(
+    _page: &RepositoryPage,
+    scope: usize,
+    selector: &'static str,
+    cx: &mut Context<RepositoryPage>,
+) -> AnyElement {
+    let owner = cx.weak_entity();
+    let retry = if scope == 1 {
+        "repository-refresh-branches"
+    } else {
+        "repository-refresh-code"
+    };
+    div()
+        .debug_selector(move || selector.into())
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(Badge::new("Cached").outline())
+        .child(crate::ui::compact_status::failed(
+            retry,
+            "Refresh",
+            "Refresh failed; showing cached data",
+            Some(move |_: &mut Window, cx: &mut App| {
+                let _ = owner.update(cx, |page, cx| {
+                    if scope == 1 {
+                        page.retry_branches(cx);
+                    } else {
+                        page.retry_code_snapshot(cx);
+                    }
+                });
+            }),
+            Some(retry),
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -445,6 +482,24 @@ fn repository_actions(
         .gap_2()
         .items_center()
         .children(buttons)
+        .children(
+            (!page.cache_failures[0] || page.details().is_none()).then(|| {
+                div()
+                    .debug_selector(|| "repository-refresh-all".into())
+                    .child(
+                        IconButton::new("repository-refresh-all", IconName::RotateCw)
+                            .tooltip("Refresh repository")
+                            .size(ControlSize::Sm)
+                            .on_click({
+                                let owner = cx.weak_entity();
+                                move |_, _, cx| {
+                                    let _ =
+                                        owner.update(cx, |page, cx| page.refresh_repository(cx));
+                                }
+                            }),
+                    )
+            }),
+        )
         .children(star_failure.map(|message| {
             let owner = cx.weak_entity();
             crate::ui::compact_status::failed(
@@ -569,6 +624,9 @@ fn branch_picker(page: &RepositoryPage, cx: &mut Context<RepositoryPage>) -> Any
         .w(px(220.0))
         .child(select)
         .children(note)
+        .when(page.cache_failures[1], |row| {
+            row.child(cached_region(page, 1, "repository-branches-cached", cx))
+        })
         .into_any_element()
 }
 
@@ -897,6 +955,34 @@ fn tree_warnings(
     cx: &mut Context<RepositoryPage>,
 ) -> Vec<AnyElement> {
     let mut warnings = Vec::new();
+    if page.cache_failures[2] && page.selected_branch().is_some() {
+        warnings.push(cached_region(page, 2, "repository-code-cached", cx));
+    }
+    if let Some(error) = page.error().filter(|_| {
+        page.selected_branch().is_some() && !page.cache_failures[0] && !page.cache_failures[2]
+    }) {
+        let owner = cx.weak_entity();
+        let retry = error
+            .retryable
+            .then_some(move |_: &mut gpui::Window, cx: &mut gpui::App| {
+                let _ = owner.update(cx, |page, cx| page.refresh_repository(cx));
+            });
+        warnings.push(
+            div()
+                .debug_selector(|| "repository-refresh-error".to_string())
+                .px_2()
+                .py_1()
+                .child(crate::ui::compact_status::failed(
+                    "repository-retry-refresh",
+                    "Repository refresh failed",
+                    error.title.clone(),
+                    retry,
+                    Some("repository-retry-refresh"),
+                    cx,
+                ))
+                .into_any_element(),
+        );
+    }
     if page.tree("").is_some_and(tree_incomplete) {
         warnings.push(
             div()

@@ -42,6 +42,11 @@ use crate::storage::accounts::AccountDatabaseConfig;
 use crate::storage::cache::{CacheConfig, CacheStore};
 use crate::ui::reader::ImageKey;
 
+#[path = "continuity_tests.rs"]
+mod continuity_tests;
+#[path = "failure_indicator_tests.rs"]
+mod failure_indicator_tests;
+
 const MAIN_COMMIT: &str = "c0ffee0000000000000000000000000000000001";
 const FEATURE_COMMIT: &str = "c0ffee0000000000000000000000000000000002";
 const MAIN_TREE: &str = "a000000000000000000000000000000000000001";
@@ -80,6 +85,14 @@ pub(super) struct OfflineTransport {
     default_branch: Mutex<Option<String>>,
     /// Test-only: fail the branch enumeration so the cached picker is replayed instead.
     fail_branches: std::sync::atomic::AtomicBool,
+    moved_main: std::sync::atomic::AtomicBool,
+    held_path: Mutex<Option<String>>,
+    held_requests: std::sync::atomic::AtomicUsize,
+    tree_release: tokio::sync::watch::Sender<bool>,
+    failed_path: Mutex<Option<String>>,
+    failed_status: std::sync::atomic::AtomicU16,
+    remove_main: std::sync::atomic::AtomicBool,
+    moved_readme: std::sync::atomic::AtomicBool,
 }
 
 impl OfflineTransport {
@@ -92,6 +105,14 @@ impl OfflineTransport {
             release: tokio::sync::watch::channel(true).0,
             default_branch: Mutex::new(None),
             fail_branches: std::sync::atomic::AtomicBool::new(false),
+            moved_main: std::sync::atomic::AtomicBool::new(false),
+            held_path: Mutex::new(None),
+            held_requests: std::sync::atomic::AtomicUsize::new(0),
+            tree_release: tokio::sync::watch::channel(false).0,
+            failed_path: Mutex::new(None),
+            failed_status: std::sync::atomic::AtomicU16::new(500),
+            remove_main: std::sync::atomic::AtomicBool::new(false),
+            moved_readme: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -276,10 +297,25 @@ impl Transport for OfflineTransport {
                     message: "offline fixture: connection refused".into(),
                 });
             }
-            if self.held.load(std::sync::atomic::Ordering::SeqCst)
-                && !request.url.ends_with("/user")
+            let tree_held = self
+                .held_path
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|path| request.url.contains(path));
+            if tree_held
+                || (self.held.load(std::sync::atomic::Ordering::SeqCst)
+                    && !request.url.ends_with("/user"))
             {
-                let mut released = self.release.subscribe();
+                if tree_held {
+                    self.held_requests
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let mut released = if tree_held {
+                    self.tree_release.subscribe()
+                } else {
+                    self.release.subscribe()
+                };
                 tokio::select! {
                     _ = async {
                         loop {
@@ -296,6 +332,18 @@ impl Transport for OfflineTransport {
                     }
                 }
             }
+            if self
+                .failed_path
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|path| request.url.contains(path))
+            {
+                return Ok(json_response(
+                    self.failed_status.load(std::sync::atomic::Ordering::SeqCst),
+                    r#"{"message":"synthetic refresh resource failure"}"#,
+                ));
+            }
             if self.fail_branches.load(std::sync::atomic::Ordering::SeqCst)
                 && request.url.contains("/branches")
             {
@@ -308,7 +356,60 @@ impl Transport for OfflineTransport {
             if let Some(custom) = self.custom_answer(&request) {
                 return Ok(custom);
             }
-            self.inner.execute(request, cancel).await
+            let mut request = request;
+            if self.moved_main.load(std::sync::atomic::Ordering::SeqCst)
+                && request.url.ends_with("/commits/main")
+            {
+                request.url =
+                    request.url.trim_end_matches("main").to_string() + "feature%2Fdocs-polish";
+            }
+            let remove_main = self.remove_main.load(std::sync::atomic::Ordering::SeqCst)
+                && request
+                    .url
+                    .ends_with("/git/trees/a000000000000000000000000000000000000021");
+            let moved_readme = self.moved_readme.load(std::sync::atomic::Ordering::SeqCst);
+            let new_readme = moved_readme
+                && request
+                    .url
+                    .contains(&format!("/readme?ref={FEATURE_COMMIT}"));
+            let new_root = moved_readme
+                && request
+                    .url
+                    .ends_with("/git/trees/a000000000000000000000000000000000000002");
+            let new_docs = moved_readme
+                && request
+                    .url
+                    .ends_with("/git/trees/a000000000000000000000000000000000000013");
+            let response = self.inner.execute(request, cancel).await?;
+            if new_readme || new_root || new_docs {
+                let mut value: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+                if new_readme {
+                    value["path"] = "docs/README.md".into();
+                } else if new_root {
+                    value["tree"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|entry| entry["path"] != "README.md");
+                } else {
+                    value["tree"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "path": "README.md", "mode": "100644", "type": "blob",
+                            "sha": "b00000000000000000000000000000000000000a"
+                        }));
+                }
+                return Ok(json_response(200, &value.to_string()));
+            }
+            if remove_main {
+                let mut value: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+                value["tree"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|entry| entry["path"] != "main.rs");
+                return Ok(json_response(200, &value.to_string()));
+            }
+            Ok(response)
         })
     }
 
@@ -637,6 +738,14 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
         );
     });
 
+    assert!(
+        cx.debug_bounds("repository-cached-badge").is_none(),
+        "cache-first content is quiet while its online verification is pending"
+    );
+    assert!(
+        cx.debug_bounds("repository-refresh").is_none(),
+        "preview provenance alone must not add a failure refresh control"
+    );
     // Release the network: the online chain revalidates the same ref and replaces the provenance.
     fixture.transport.hold(false);
     fixture.transport.release_all();
@@ -657,6 +766,80 @@ fn cached_repository_paints_before_the_online_chain_finishes_then_is_replaced(
         );
         assert_eq!(page.current_path(), Some("README.md"));
     });
+}
+
+/// Hold the new fixed tree after the online ref has moved. The old cached snapshot must remain
+/// rendered until the replacement's tree and selected document are ready together.
+#[gpui::test]
+fn continuity_changed_commit_keeps_cached_content_until_replacement_is_ready(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = CachedFixture::new(Scene::Normal);
+    fixture.login(1);
+    warm_up(cx, &fixture);
+    fixture.restart();
+    fixture.transport.hold(true);
+    let (_host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
+    settle(&page, cx, |page| {
+        page.reader_status() == &ReaderStatus::Showing
+    });
+    assert!(page.read_with(cx, |page, _| page.is_showing_cached_snapshot()));
+    let reader = page.read_with(cx, |page, _| page.reader().unwrap().entity_id());
+    fixture
+        .transport
+        .moved_main
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // Let summary, branches and revision finish, then gate only the new root tree.
+    *fixture.transport.held_path.lock().unwrap() =
+        Some("/git/trees/a000000000000000000000000000000000000002".into());
+    fixture.transport.release_all();
+    // Wait until the new tree is actually requested.
+    settle(&page, cx, |_| {
+        fixture
+            .transport
+            .held_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1
+    });
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.reader_status(),
+            &ReaderStatus::Showing,
+            "refresh must not blank the cached reader while the new tree is delayed"
+        );
+        assert_eq!(page.reader().unwrap().entity_id(), reader);
+        assert_eq!(page.fixed_commit().unwrap().as_str(), MAIN_COMMIT);
+        assert!(page.tree("").is_some());
+    });
+    assert!(cx.debug_bounds("repository-row-README.md").is_some());
+    assert!(cx.debug_bounds("reader-markdown").is_some());
+    fixture.transport.tree_release.send_replace(true);
+    fixture.transport.hold(false);
+    fixture.transport.release_all();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        page.update_in(cx, |page, window, cx| page.drain(window, cx));
+        frames(cx);
+        assert!(cx.debug_bounds("reader-markdown").is_some());
+        assert!(cx.debug_bounds("repository-row-README.md").is_some());
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.reader_status(), &ReaderStatus::Showing);
+            let commit = page.fixed_commit().unwrap();
+            assert_eq!(page.tree("").unwrap().directory.commit(), commit);
+            assert_eq!(
+                page.reader().unwrap().read(cx).context().commit(),
+                commit.as_str()
+            );
+        });
+        if page.read_with(cx, |page, _| {
+            page.fixed_commit().unwrap().as_str() == FEATURE_COMMIT
+        }) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(reader_text(&page, cx).contains("docs polish"));
 }
 
 /// Regression (review finding): when only README discovery was missing, the retained root is still
@@ -748,6 +931,7 @@ fn an_unverified_revalidation_settles_the_missing_snapshot_resources(cx: &mut Te
                 origin: crate::data::RepositoryCacheOrigin::Snapshot,
                 fetched_at_ms: 1,
                 verified_at_ms: 1,
+                revalidation_failed: false,
                 completeness: crate::domain::cache::CacheCompleteness::Complete,
             },
         )
@@ -818,6 +1002,7 @@ fn a_pending_cache_phase_read_is_superseded_by_online_verification(cx: &mut Test
             origin: RepositoryCacheOrigin::Snapshot,
             fetched_at_ms: 1,
             verified_at_ms: 1,
+            revalidation_failed: false,
             completeness: crate::domain::cache::CacheCompleteness::Complete,
         });
         // A directory and a document read are in flight from the cache-only pass.
@@ -840,6 +1025,7 @@ fn a_pending_cache_phase_read_is_superseded_by_online_verification(cx: &mut Test
                     origin: RepositoryCacheOrigin::Network,
                     fetched_at_ms: 2,
                     verified_at_ms: 2,
+                    revalidation_failed: false,
                     completeness: crate::domain::cache::CacheCompleteness::Complete,
                 }),
             )),
@@ -1001,6 +1187,7 @@ fn a_failed_branch_enumeration_still_revalidates_the_cached_revision(cx: &mut Te
                             origin: RepositoryCacheOrigin::Network,
                             fetched_at_ms: 1,
                             verified_at_ms: 1,
+                            revalidation_failed: false,
                             completeness: crate::domain::cache::CacheCompleteness::Complete,
                         }),
                     )),
@@ -1229,6 +1416,7 @@ fn a_late_cached_repository_reply_never_rolls_back_the_network_page(cx: &mut Tes
                             origin: RepositoryCacheOrigin::Snapshot,
                             fetched_at_ms: f64::MIN as i64,
                             verified_at_ms: 1,
+                            revalidation_failed: false,
                             completeness: crate::domain::cache::CacheCompleteness::Complete,
                         }),
                     )),
@@ -1538,12 +1726,12 @@ fn cached_extras_report_a_historical_snapshot(cx: &mut TestAppContext) {
     assert!(page.read_with(cx, |page, _| page.extras.counts_historical));
     frames(cx);
     assert!(
-        cx.debug_bounds("overview-releases-cached").is_some(),
-        "the cached release group is labelled"
+        cx.debug_bounds("overview-releases-cached").is_none(),
+        "a summary failure does not label an unrequested release preview"
     );
     assert!(
-        cx.debug_bounds("overview-contributors-cached").is_some(),
-        "the cached contributor group is labelled"
+        cx.debug_bounds("overview-contributors-cached").is_none(),
+        "a summary failure does not label an unrequested contributor preview"
     );
 }
 
@@ -1569,6 +1757,9 @@ fn cached_complete_empty_releases_never_paint_the_group(cx: &mut TestAppContext)
                 page.overview().is_some_and(|view| {
                     let view = view.read(cx);
                     !view.releases().is_loading()
+                        && view.latest_release().is_some_and(|latest| {
+                            latest.value().is_some_and(|value| value.release.is_none())
+                        })
                         && view
                             .releases()
                             .value()
@@ -1651,7 +1842,17 @@ fn cached_complete_empty_releases_never_paint_the_group(cx: &mut TestAppContext)
                 (people.origin.x - strip.origin.x).abs() < gpui::px(0.5),
                 "contributors take the leading edge while releases is omitted"
             );
-            break;
+            // List and latest are independent reads. Keep checking the first-frame omission
+            // while the other cache read finishes, rather than assuming list publication joins it.
+            if page.read_with(cx, |page, cx| {
+                page.overview()
+                    .unwrap()
+                    .read(cx)
+                    .latest_release()
+                    .is_some_and(|latest| latest.value().is_some())
+            }) {
+                break;
+            }
         }
         std::thread::sleep(Duration::from_millis(3));
     }
@@ -1900,9 +2101,13 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
             page.branch_request != old_branch_request,
             "refresh advances the branch request identity"
         );
+        assert_eq!(
+            page.branch.as_ref().unwrap().snapshot.commit(),
+            snapshot.commit()
+        );
         assert!(
-            page.details().is_none() && page.branch.is_none(),
-            "a queued reply from the previous generation cannot repopulate the page"
+            page.details().is_some() && page.reader().is_some(),
+            "refresh retains the displayed snapshot; the queued old reply cannot replace it"
         );
     });
     // The refresh itself completes normally under the new generation.
@@ -1996,10 +2201,10 @@ fn reply_captured_before_revocation_is_rejected_afterwards_and_never_revived(
     release_page(&host, cx);
 }
 
-/// Activation and refresh drop every retained authorization token, so a later
-/// revocation cannot be masked by a token captured for a previous generation.
+/// Activation drops retained authorizations; refresh keeps the tokens belonging to the content
+/// it continues to display, so a revocation during refresh still clears it.
 #[gpui::test]
-fn activation_and_refresh_reset_retained_authorizations(cx: &mut TestAppContext) {
+fn activation_resets_but_refresh_retains_displayed_authorizations(cx: &mut TestAppContext) {
     let fixture = CachedFixture::new(Scene::Normal);
     fixture.login(1);
     let (host, page, cx) = open_cached(cx, &fixture, RepositoryNavigation::default());
@@ -2018,8 +2223,8 @@ fn activation_and_refresh_reset_retained_authorizations(cx: &mut TestAppContext)
     page.update_in(cx, |page, window, cx| {
         page.refresh_repository(cx);
         assert!(
-            page.displayed_authorizations.iter().all(Option::is_none),
-            "refresh drops the previous generation's tokens"
+            page.displayed_authorizations.iter().any(Option::is_some),
+            "refresh retains the displayed snapshot's tokens"
         );
         page.drain(window, cx);
     });
@@ -2057,12 +2262,14 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
             origin: RepositoryCacheOrigin::Network,
             fetched_at_ms: now,
             verified_at_ms: now,
+            revalidation_failed: false,
             completeness: crate::domain::cache::CacheCompleteness::Complete,
         });
         page.branches_provenance = Some(super::super::RepositoryCacheProvenance {
             origin: RepositoryCacheOrigin::Snapshot,
             fetched_at_ms: old,
             verified_at_ms: old,
+            revalidation_failed: false,
             completeness: crate::domain::cache::CacheCompleteness::Complete,
         });
         if let Some(branch) = page.branch.as_mut() {
@@ -2070,6 +2277,7 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
                 origin: RepositoryCacheOrigin::Snapshot,
                 fetched_at_ms: old + 60_000,
                 verified_at_ms: old + 60_000,
+                revalidation_failed: false,
                 completeness: crate::domain::cache::CacheCompleteness::Complete,
             });
         }
@@ -2089,7 +2297,10 @@ fn cached_marker_reports_the_oldest_historical_source_not_a_fresh_summary(cx: &m
         );
     });
     frames(cx);
-    assert!(cx.debug_bounds("repository-cached-badge").is_some());
+    assert!(
+        cx.debug_bounds("repository-cached-badge").is_none(),
+        "historical provenance without a failed summary does not label the header"
+    );
 }
 
 /// An explicit repository revocation, with no account epoch change, must clear the
