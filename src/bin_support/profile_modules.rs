@@ -1,6 +1,6 @@
 // Thin standalone assembly for the reusable Profile Overview and its existing
 // ReaderView/scrollbar dependencies. No product Shell, app or routes are
-// included; `examples/profile.rs` and `tests/profile.rs` share this real tree.
+// included; `examples/profile.rs` uses this real tree.
 #![allow(dead_code, unused_imports)]
 
 #[path = "../ui/avatar.rs"]

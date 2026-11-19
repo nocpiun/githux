@@ -1,42 +1,26 @@
 //! Geometry through the production Shell and page hosts, with offline HTTP fixtures.
-// The test mounts the production host directly; app::run is an unused startup entry here.
-#[allow(dead_code)]
-#[path = "../src/app/mod.rs"]
-mod app;
-#[path = "../src/auth/mod.rs"]
-mod auth;
-#[path = "../src/content/mod.rs"]
-mod content;
-#[path = "../src/data/mod.rs"]
-mod data;
-#[path = "../src/diagnostics/mod.rs"]
-mod diagnostics;
-#[path = "../src/domain/mod.rs"]
-mod domain;
-#[path = "../src/github/mod.rs"]
-mod github;
-#[path = "../src/network/mod.rs"]
-mod network;
-#[path = "../src/platform/mod.rs"]
-pub mod platform;
-#[path = "../src/bin_support/test_repository_modules.rs"]
-mod repository_modules;
-#[path = "../src/storage/mod.rs"]
-mod storage;
-#[path = "../src/ui/mod.rs"]
-mod ui;
-#[path = "../src/workspace/mod.rs"]
-mod workspace;
+
+use std::{sync::Arc, time::Duration};
 
 use gpui::{AppContext, TestAppContext, VisualTestContext, px, size};
-use network::transport::{HttpRequest, HttpResponse, Transport, TransportError};
-use std::{sync::Arc, time::Duration};
+
+use crate::{
+    app, auth, data, domain, github,
+    network::{
+        self,
+        transport::{HttpRequest, HttpResponse, Transport, TransportError},
+    },
+    platform,
+    repository_modules::fixture::{FixtureTransport, NAME, OWNER, Scene},
+    ui, workspace,
+};
+
 type TransportFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>,
 >;
-use repository_modules::fixture::{FixtureTransport, NAME, OWNER, Scene};
 
 struct GeometryTransport(FixtureTransport, std::sync::Mutex<Vec<String>>);
+
 impl Transport for GeometryTransport {
     fn execute<'a>(
         &'a self,
@@ -79,6 +63,7 @@ impl Transport for GeometryTransport {
         }
         self.0.execute(request, cancel)
     }
+
     fn execute_bounded<'a>(
         &'a self,
         request: HttpRequest,
@@ -94,12 +79,14 @@ impl Transport for GeometryTransport {
         })
     }
 }
+
 fn frames(cx: &mut VisualTestContext) {
     for _ in 0..3 {
         cx.update(|w, _| w.refresh());
         cx.run_until_parked();
     }
 }
+
 fn bounds(cx: &mut VisualTestContext, name: &str) -> gpui::Bounds<gpui::Pixels> {
     cx.debug_bounds(Box::leak(name.to_string().into_boxed_str()))
         .unwrap_or_else(|| panic!("missing {name}"))

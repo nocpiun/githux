@@ -2,7 +2,7 @@
 //!
 //! Development-only material: compiled through
 //! `src/bin_support/reader_images_modules.rs` into `examples/reader_images.rs`
-//! and `tests/reader_images.rs`, never into the product binary.
+//! and through `#[cfg(test)]` in `src/main.rs`, never into the product binary.
 //!
 //! The fixture answers by request identity, not from a one-shot queue, so the
 //! same commit, tree or blob can be read again and again in any order. It has

@@ -1,4 +1,4 @@
-// Module tree for the standalone Home/Feed preview and integration tests.
+// Module tree for the standalone Home/Feed preview.
 // Every path is relative to this file; the real view and shared scroll code
 // are reused without Shell, routes, network or application services.
 #![allow(dead_code, unused_imports)]
