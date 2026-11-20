@@ -55,9 +55,11 @@ pub(crate) const PAT_HELP: &str =
 pub(crate) enum RepositoryListOrigin {
     /// A live read in this operation.
     Network,
-    /// A replayed persistent snapshot after an allowed network failure. Carries the snapshot's last
-    /// verified time so the UI can label it as offline history rather than a live complete result.
-    Historical { verified_at_ms: i64 },
+    /// A replayed persistent snapshot and the outcome of its current online validation.
+    Historical {
+        verified_at_ms: i64,
+        revalidation_failed: bool,
+    },
 }
 
 /// What the account UI currently shows for one account's repository access.
@@ -99,14 +101,13 @@ impl Repositories {
     /// not a live complete read. `None` for a live read or a state without rows.
     pub fn historical_status(&self) -> Option<String> {
         match self.origin {
-            RepositoryListOrigin::Historical { verified_at_ms }
-                if matches!(self.preview, RepositoryPreview::Ready(_)) =>
-            {
-                Some(format!(
-                    "Offline snapshot · last synced {}",
-                    relative_ms(verified_at_ms)
-                ))
-            }
+            RepositoryListOrigin::Historical {
+                verified_at_ms,
+                revalidation_failed: true,
+            } if matches!(self.preview, RepositoryPreview::Ready(_)) => Some(format!(
+                "Offline snapshot · last synced {}",
+                relative_ms(verified_at_ms)
+            )),
             _ => None,
         }
     }
@@ -1201,11 +1202,20 @@ impl Accounts {
         ));
         let for_account = self.snapshot.active.clone();
         let publication = if operation == Operation::Repositories {
-            self.snapshot.repositories = Repositories {
-                account: for_account.clone(),
-                preview: RepositoryPreview::Loading,
-                origin: RepositoryListOrigin::Network,
-            };
+            if self.snapshot.repositories.account == for_account
+                && let RepositoryListOrigin::Historical {
+                    revalidation_failed,
+                    ..
+                } = &mut self.snapshot.repositories.origin
+            {
+                *revalidation_failed = false;
+            } else {
+                self.snapshot.repositories = Repositories {
+                    account: for_account.clone(),
+                    preview: RepositoryPreview::Loading,
+                    origin: RepositoryListOrigin::Network,
+                };
+            }
             // Record the settled authorization this read belongs to, so a later plain
             // `autoload_if_needed` (from a repaint-driven settlement) will not repeat it.
             if let Some(context) = runtime.accounts.active_context() {
@@ -1756,8 +1766,8 @@ fn error_text(error: &GitHubError) -> String {
 /// publishes the previously displayed repository set immediately, so startup does not wait for a
 /// slow or failing `/user/repos` request before anything appears. Only a readable authorized
 /// snapshot counts; a miss, corruption, stale authorization or operational cache fault yields `None`
-/// and leaves the ordinary read in charge. The historical origin is preserved so the sidebar labels
-/// it as a replayed snapshot rather than a live complete list.
+/// and leaves the ordinary read in charge. The historical origin is preserved while the online
+/// request determines whether to show a fallback notice.
 async fn read_cached_repositories(
     repos: &crate::data::RepoService,
     cancel: CancellationToken,
@@ -1775,6 +1785,7 @@ async fn read_cached_repositories(
             outcome: Ok(value),
             origin: RepositoryListOrigin::Historical {
                 verified_at_ms: metadata.verified_at_ms,
+                revalidation_failed: false,
             },
         }),
         PageValue::Value { .. } | PageValue::Miss(_) => None,
@@ -1818,6 +1829,7 @@ async fn read_repositories(
                 outcome: Ok(value),
                 origin: RepositoryListOrigin::Historical {
                     verified_at_ms: metadata.verified_at_ms,
+                    revalidation_failed: false,
                 },
             },
             PageValue::Miss(reason) => RepositoryReply {
@@ -1854,6 +1866,7 @@ async fn read_repositories(
                             outcome: Ok(value),
                             origin: RepositoryListOrigin::Historical {
                                 verified_at_ms: metadata.verified_at_ms,
+                                revalidation_failed: true,
                             },
                         },
                         // An offline request must not publish a live-origin list as current, and a
