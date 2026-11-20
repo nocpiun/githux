@@ -31,7 +31,7 @@ use super::navigation::{
 use super::{ReaderStatus, RepositoryPage, RepositoryTab, Selection, TREE_ROW_HEIGHT, TREE_WIDTH};
 use crate::domain::repo::RepoVisibility;
 use crate::domain::repository::Completeness;
-use crate::ui::{badge::Badge, scroll};
+use crate::ui::{badge::Badge, interaction, scroll};
 
 const INDENT: f32 = 14.0;
 /// Room for the disclosure chevron, so file rows line up with directory names.
@@ -1079,7 +1079,6 @@ fn tree_row(
     let is_cursor =
         page.tree_focus.is_focused(window) && cursor.as_deref() == Some(row.path.as_str());
     let hover = colors.hover;
-    let focus_ring = colors.fg_subtle;
     let entity = cx.entity();
 
     let chevron: AnyElement = match kind {
@@ -1208,10 +1207,13 @@ fn tree_row(
         .cursor_pointer()
         .border_1()
         .border_color(gpui::transparent_black())
-        .when(is_selected, |row| row.bg(colors.border))
-        .when(!is_selected, |row| row.hover(move |style| style.bg(hover)))
-        // Keyboard focus is a ring, distinct from hover and selection.
-        .when(is_cursor, |row| row.border_color(focus_ring))
+        .when(is_selected, |row| row.bg(colors.active))
+        .when(!is_selected, |row| {
+            row.hover(move |style| style.bg(hover))
+                .active(interaction::pressed_fill(cx))
+        })
+        // Keyboard focus is the shared ring, distinct from hover and selection.
+        .when(is_cursor, |row| row.border_color(colors.focus))
         .child(chevron)
         .child(Icon::new(icon).size(IconSize::Xs).color(icon_color))
         .child(

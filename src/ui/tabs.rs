@@ -48,6 +48,7 @@ use super::geometry::{
     TAB_CLOSE_SIZE, TAB_GAP, TAB_HEIGHT, TAB_ICON_GAP, TAB_SCROLLBAR_BAND, TAB_STRIP_HEIGHT,
     TAB_STRIP_INSET, TAB_TOOLBAR_WIDTH, TAB_WIDTH,
 };
+use super::interaction;
 
 pub(super) type Run = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 /// A strip callback that reports one boolean, such as the pointer entering or leaving.
@@ -453,10 +454,12 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
         .when(active, |tab| {
             tab.bg(active_bg).font_weight(FontWeight::MEDIUM)
         })
-        .when(!active, |tab| tab.hover(move |style| style.bg(hover)))
-        // Keyboard focus is a neutral foreground change on top of whatever background the tab
-        // already has, so a focused inactive tab still does not look active.
-        .focus(move |style| style.text_color(fg))
+        .when(!active, |tab| {
+            tab.hover(move |style| style.bg(hover))
+                .active(interaction::pressed_fill(cx))
+        })
+        // A keyboard focus is the shared ring, so a focused inactive tab never reads as active.
+        .focus(interaction::focus_ring(cx))
         .cursor_pointer()
         .track_focus(&entry.focus)
         .on_click(move |_, window, cx| select(window, cx))

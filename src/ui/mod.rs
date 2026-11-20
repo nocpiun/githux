@@ -40,6 +40,7 @@ pub(crate) mod compact_status;
 pub(crate) mod geometry;
 pub mod global_work_items;
 pub mod home;
+pub(crate) mod interaction;
 mod island;
 pub mod notifications;
 mod page;
@@ -55,6 +56,7 @@ mod sidebar;
 mod sidebar_state;
 // One active-tab underline presentation shared by the repository content tabs, the narrow
 // Settings category tabs and the Profile Overview strip.
+pub(crate) mod surface;
 pub(crate) mod tab_underline;
 mod tabs;
 pub(crate) mod tooltip;
@@ -2230,7 +2232,7 @@ impl Shell {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
-        let outside = colors.bg;
+        let outside = crate::ui::surface::window(&colors);
         let strip = self.tab_strip(window, cx);
         let settings_route = self.workspace.route() == &Route::Settings;
         let session_id = self.workspace.active_id();
@@ -2850,7 +2852,7 @@ impl Render for Shell {
         }
         let theme = cx.theme();
         let colors = &theme.colors;
-        let (bg, fg) = (colors.bg, colors.fg);
+        let (bg, fg) = (crate::ui::surface::window(colors), colors.fg);
         let this = cx.entity();
         let search_focus = self.search_focus.clone();
         let open_search = move |window: &mut Window, cx: &mut App| {

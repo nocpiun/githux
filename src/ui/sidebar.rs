@@ -27,6 +27,7 @@ use super::{
         SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_RADIUS, SIDEBAR_INDICATOR_WIDTH,
         SIDEBAR_PADDING, SIDEBAR_RAIL_ITEM_SIZE, SIDEBAR_ROW_GAP, STATUS_BUTTON_SIZE,
     },
+    interaction,
     scroll::{self, Motion},
     sidebar_state::SidebarFrame,
 };
@@ -90,6 +91,7 @@ impl super::Shell {
                     // while the right edge grows to the band end (the island's outer frame).
                     .left(px(SIDEBAR_SASH_LEFT))
                     .w(px(SIDEBAR_SASH_WIDTH))
+                    .rounded(px(SIDEBAR_SASH_WIDTH / 2.0))
                     .bg(fg.opacity(sash_opacity)),
             )
             .child(
@@ -276,13 +278,18 @@ pub(super) fn nav_row(
         .border_color(transparent_black())
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(if active { fg } else { muted })
-        .when(active, |row| row.bg(hover).font_weight(FontWeight::MEDIUM))
-        .hover(move |style| style.bg(hover).text_color(fg))
+        .when(active, |row| {
+            row.bg(theme.colors.active).font_weight(FontWeight::MEDIUM)
+        })
+        .when(!active, |row| {
+            row.hover(move |style| style.bg(hover).text_color(fg))
+                .active(interaction::pressed_fill(cx))
+        })
         .role(Role::Button)
         .aria_label(label)
         .cursor_pointer()
         .tab_index(0)
-        .focus(move |style| style.border_color(muted))
+        .focus(interaction::focus_ring(cx))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
         .child(Icon::new(icon).size(IconSize::Sm))
@@ -365,13 +372,7 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let colors = &theme.colors;
     let (radius, text) = (theme.radius(Radius::Md), theme.text_size(TextSize::Sm));
-    let (fg, muted, hover, active_bg, focus_color) = (
-        colors.fg,
-        colors.fg_muted,
-        colors.hover,
-        colors.active,
-        colors.fg_muted,
-    );
+    let (fg, muted, hover, active_bg) = (colors.fg, colors.fg_muted, colors.hover, colors.active);
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (REPO_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
@@ -402,12 +403,13 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         })
         .when(!active, |row| {
             row.hover(move |style| style.bg(hover).text_color(fg))
+                .active(interaction::pressed_fill(cx))
         })
         .role(Role::Button)
         .aria_label(full_name.clone())
         .cursor_pointer()
         .track_focus(focus)
-        .focus(move |style| style.border_color(focus_color))
+        .focus(interaction::focus_ring(cx))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
         .child(
@@ -453,7 +455,7 @@ pub(super) fn account_row(
     let theme = cx.theme();
     let colors = &theme.colors;
     let (name_size, login_size) = (theme.text_size(TextSize::Sm), theme.text_size(TextSize::Xs));
-    let (fg, subtle, focus) = (colors.fg, colors.fg_subtle, colors.fg_muted);
+    let (fg, subtle) = (colors.fg, colors.fg_subtle);
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (ACCOUNT_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
@@ -476,7 +478,7 @@ pub(super) fn account_row(
             .aria_label(sign_in_label)
             .cursor_pointer()
             .tab_index(0)
-            .focus(move |style| style.border_color(focus))
+            .focus(interaction::focus_ring(cx))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(move |_, window, cx| run(window, cx))
             .tooltip(ui_tooltip(sign_in_label))
@@ -559,7 +561,7 @@ pub(super) fn account_row(
         })
         .cursor_pointer()
         .tab_index(0)
-        .focus(move |style| style.border_color(focus))
+        .focus(interaction::focus_ring(cx))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| run(window, cx))
         .tooltip(ui_tooltip(if collapsed {
@@ -620,8 +622,9 @@ pub(super) fn account_row(
         .aria_label("Notifications")
         .cursor_pointer()
         .tab_index(0)
-        .focus(move |style| style.border_color(focus))
+        .focus(interaction::focus_ring(cx))
         .hover(move |style| style.bg(colors.hover))
+        .active(interaction::pressed_fill(cx))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -729,11 +732,10 @@ pub(super) fn quarter_button(
 ) -> AnyElement {
     let theme = cx.theme();
     let colors = &theme.colors;
-    let (radius, hover, muted, focus, border) = (
+    let (radius, hover, muted, border) = (
         theme.radius(Radius::Md),
         colors.hover,
         if active { colors.fg } else { colors.fg_muted },
-        colors.fg_muted,
         colors.border,
     );
     let run: Run = Box::new(run);
@@ -748,23 +750,27 @@ pub(super) fn quarter_button(
         .rounded(radius)
         .border_1()
         .border_color(border)
-        .hover(move |style| style.bg(hover))
         .role(Role::Button)
         .aria_label(label)
         .when(active, |button| {
-            button.bg(hover).font_weight(FontWeight::MEDIUM)
+            button.bg(colors.active).font_weight(FontWeight::MEDIUM)
         })
         .map(|button| {
             if disabled {
                 return button
                     .aria_description("Creating resources is not available in this round.")
-                    .opacity(0.45)
+                    .opacity(interaction::DISABLED_OPACITY)
                     .cursor_not_allowed();
             }
             button
+                .when(!active, |button| {
+                    button
+                        .hover(move |style| style.bg(hover))
+                        .active(interaction::pressed_fill(cx))
+                })
                 .cursor_pointer()
                 .tab_index(0)
-                .focus(move |style| style.border_color(focus))
+                .focus(interaction::focus_ring(cx))
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(move |_, window, cx| run(window, cx))
         })
@@ -978,8 +984,9 @@ pub(super) fn overflow(view: OverflowMenuView<'_>, cx: &App) -> AnyElement {
                 .role(Role::Button)
                 .aria_label("More")
                 .cursor_pointer()
-                .focus(move |style| style.border_color(colors.focus))
+                .focus(interaction::focus_ring(cx))
                 .hover(move |style| style.bg(colors.hover))
+                .active(interaction::pressed_fill(cx))
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(move |_, window, cx| toggle(window, cx))
                 .child(
