@@ -1138,6 +1138,16 @@ impl Shell {
             OpenResult::Opened(id) | OpenResult::Activated(id) => id,
         };
         self.follow_page_focus(previous, id, window, cx);
+        if previous != id
+            && let Some(prev_session) = self.workspace.session(previous)
+            && (prev_session.state().strip_focus.is_focused(window)
+                || prev_session
+                    .state()
+                    .strip_focus
+                    .contains_focused(window, cx))
+        {
+            self.focus_page(id, window, cx);
+        }
         self.reveal_tab(id);
         if previous != id
             && let Some(page) = self.pages.get(&previous)

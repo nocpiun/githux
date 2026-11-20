@@ -462,6 +462,9 @@ fn tab(entry: &Entry, view: &View, owner: gpui::EntityId, cx: &App) -> AnyElemen
         .focus(interaction::focus_ring(cx))
         .cursor_pointer()
         .track_focus(&entry.focus)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
         .on_click(move |_, window, cx| select(window, cx))
         // Middle click closes; `on_aux_click` only receives non-primary buttons, so it never runs
         // the selection, and this is the only aux handler in the tab subtree.

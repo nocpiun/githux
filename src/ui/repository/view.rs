@@ -751,6 +751,7 @@ fn code_header(cx: &App) -> gpui::Div {
         .flex_none()
         .min_w_0()
         .h(theme.control_height(ControlSize::Sm) + gpui::rems(0.5))
+        .bg(theme.colors.bg)
         .border_b_1()
         .border_color(theme.colors.border)
         .whitespace_nowrap()
@@ -1476,4 +1477,33 @@ fn failure_panel(
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::code_header;
+    use ely_core::theme::ActiveTheme;
+    use gpui::{Background, Styled, TestAppContext};
+
+    #[gpui::test]
+    fn code_header_is_one_step_darker_than_page_in_dark_and_light(cx: &mut TestAppContext) {
+        cx.update(ely_core::init_for_tests);
+        for mode in [ely_core::theme::Mode::Dark, ely_core::theme::Mode::Light] {
+            cx.update(|cx| {
+                ely_core::theme::Theme::set_mode_now(mode, cx);
+                let expected = cx.theme().colors.bg;
+                let page_bg = cx.theme().colors.surface;
+                assert_ne!(expected, page_bg);
+                let mut header = code_header(cx);
+                assert_eq!(
+                    header
+                        .style()
+                        .background
+                        .as_ref()
+                        .and_then(|fill| fill.color()),
+                    Some(Background::from(expected))
+                );
+            });
+        }
+    }
 }

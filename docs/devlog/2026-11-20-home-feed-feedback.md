@@ -39,3 +39,10 @@
   - `cargo build --locked --example home` / `--example repository` / `--bin githux`
 - 通过 `./scripts/prepare-windows-runtime.ps1 -Destination target/debug` 在 `target/debug/` 准备正式 Windows App SDK 运行时供负责人启动 `target/debug/githux.exe` 验收。
 - **边界（L002）**：GPUI 模拟测试不能替代真实 Windows 窗口上的鼠标悬停/按下、Tab/Shift+Tab 焦点轮廓与视觉对比度人工验收；PR 标记 `pending` 等待负责人确认。
+
+## 2026-11-20 负责人人工验收返工
+
+1. **Feed 合并 PR 图标紫色**：[`src/ui/home/rows.rs`](../../src/ui/home/rows.rs) 新增 `feed_pr_icon_color`，仅对 `FeedActivityKind::PullRequestMerged` 使用 `colors.chart[4]`（Geek Neutral `#bc8cff`，浅色 `#8572bb`），其余活动保持 `colors.accent`。
+2. **标签焦点遗留**：[`src/ui/tabs.rs`](../../src/ui/tabs.rs) 为标签左键按下补充 `window.prevent_default()`，避免鼠标点击/切换留下键盘焦点环；[`src/ui/mod.rs`](../../src/ui/mod.rs) 的 `open_route` 在切往新标签时若前标签 `strip_focus` 仍持有焦点则移交至新页面 `focus_page`，保留 `Tab`/`Shift+Tab` 键盘焦点可见性。
+3. **仓库 Code 双栏标题带加深一级**：[`src/ui/repository/view.rs`](../../src/ui/repository/view.rs) 的共享 `code_header`（左 `Files`/commit，右文件图标/`README.md` 或当前文件名）统一设置 `.bg(theme.colors.bg)`，在深浅主题下较 `surface` 正文加深一级，保留字体、几何与 `border_b_1`。
+4. **回归验证**：新增 `feed_pr_icon_color_uses_purple_only_for_merged_in_dark_and_light`、`clicking_a_tab_or_opening_a_link_from_a_focused_tab_leaves_no_stale_tab_focus` 与 `code_header_is_one_step_darker_than_page_in_dark_and_light`，并重跑全量 `fmt`、`clippy --all-targets`、`--bins --tests`、示例与 Windows 运行时准备。

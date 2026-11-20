@@ -275,6 +275,19 @@ pub(super) fn home_row(
     )
 }
 
+/// Color of the PR title icon inside a Feed card: merged contributions use the
+/// theme's purple chart token, while other activity kinds keep the neutral accent.
+pub(super) fn feed_pr_icon_color(
+    kind: FeedActivityKind,
+    colors: &ely_core::theme::Palette,
+) -> gpui::Hsla {
+    if kind == FeedActivityKind::PullRequestMerged {
+        colors.chart[4]
+    } else {
+        colors.accent
+    }
+}
+
 pub(super) fn feed_repository(event: &FeedEvent) -> RepositoryIdentity {
     let (owner, name) = event
         .repository
@@ -466,7 +479,7 @@ pub(super) fn feed_row(
                 .child(
                     Icon::new(IconName::GitPullRequest)
                         .size(IconSize::Sm)
-                        .color(colors.accent),
+                        .color(feed_pr_icon_color(activity.kind, &colors)),
                 )
                 .child(title(Column::Feed, index, label, cx)),
         );
