@@ -37,9 +37,9 @@ use ely_core::{
     typography::Ellipsis,
 };
 use gpui::{
-    AnyElement, App, BoxShadow, CursorStyle, ElementId, FocusHandle, FontWeight, IntoElement,
-    MouseButton, ParentElement, Render, Role, ScrollHandle, StatefulInteractiveElement, Styled,
-    Window, div, prelude::*, px, transparent_black,
+    AnyElement, App, CursorStyle, ElementId, FocusHandle, FontWeight, IntoElement, MouseButton,
+    ParentElement, Render, Role, ScrollHandle, StatefulInteractiveElement, Styled, Window, div,
+    prelude::*, px, transparent_black,
 };
 
 use crate::workspace::{Route, TabId};
@@ -132,7 +132,10 @@ impl Render for TabGhost {
         let text = theme.text_size(TextSize::Sm);
         let font_family = theme.font_family.clone();
         let title = self.title.clone();
-        div()
+        // A carried tab is drawn over the strip it came from, so it takes the theme's floating
+        // layer through the shared elevation seam: one place decides offsets, blur and the
+        // mode-aware color, and the light window no longer borrows the dark mode's dense black.
+        crate::ui::elevation::attach(div(), cx)
             .debug_selector(|| "tab-drag-ghost".to_string())
             .font_family(font_family)
             .flex()
@@ -150,13 +153,6 @@ impl Render for TabGhost {
             .text_size(text)
             .text_color(colors.fg)
             .font_weight(FontWeight::MEDIUM)
-            .shadow(vec![BoxShadow {
-                color: colors.shadow,
-                offset: gpui::point(px(0.0), px(4.0)),
-                blur_radius: px(12.0),
-                spread_radius: px(0.0),
-                inset: false,
-            }])
             .child(Icon::new(self.icon).size(IconSize::Xs).color(colors.fg))
             .child(
                 div()
