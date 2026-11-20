@@ -43,6 +43,7 @@ impl Render for ListRow {
                     updated_tooltip: "2026-11-10T00:00:00Z".into(),
                     aria: "Work item".into(),
                     selected: self.selected,
+                    show_selected_bar: false,
                     on_row_click: Some(Rc::new(move |_, _| {
                         selected_clicks.set(selected_clicks.get() + 1)
                     })),

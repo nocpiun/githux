@@ -70,10 +70,10 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 - 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。
 - 单栏最多同时呈现 loading、empty、error、unavailable 或 Ready 中的一种；Partial 仍保留已取条目并显示原因提示。
-- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。与全局 Issues/PR 共用 `work_item_row`：56 logical px 行高、8px 水平内边距、两行间距 3px，metadata 的编号起点与标题文字左沿对齐。owner/name 无额外布局空隙地组成 `owner/repo`，各自独立导航；owner 的宽度上限按可用 metadata 空间计算，为窄栏名称保留空间，同时避免因 owner/name 长度比例而提前截断正常 owner；更新时间为相对时间。链接与 tooltip 的交互节点只占实际显示文字宽度，非交互的横向 flex slot 吸收余宽；长标题/名称在可用宽度内原生截断。整行原本的选择/激活行为由调用方保留。
-- Feed 是紧凑的活动卡片：avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
-  - **星标仓库**：在仓库链接下方展示仓库真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
-  - **合并 PR**：展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮。
+- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。与全局 Issues/PR 共用 `work_item_row`：56 logical px 行高、8px 水平内边距、两行间距 3px，metadata 的编号起点与标题文字左沿对齐。未选中事项带 `hover` 底色，选中事项保持 `active` 底色并显示左侧 2.5px `accent` 强调条（上下各 10px 留白，不扩增链接热区；该竖条仅 Home 启用）。元信息文字使用 `fg_muted`，相对时间使用 `fg_subtle`。owner/name 无额外布局空隙地组成 `owner/repo`，各自独立导航；owner 的宽度上限按可用 metadata 空间计算，为窄栏名称保留空间，同时避免因 owner/name 长度比例而提前截断正常 owner；更新时间为相对时间。链接与 tooltip 的交互节点只占实际显示文字宽度，非交互的横向 flex slot 吸收余宽；长标题/名称在可用宽度内原生截断。整行原本的选择/激活行为由调用方保留。
+- Feed 是紧凑的活动卡片，页面背景使用 `surface::page`（`surface`），未选中卡片使用 `surface::raised`（`overlay`），卡内详情区使用 `surface::well`（`sunken`），选中卡片保持 `active` 底色并配 `border_strong` 边框；avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
+  - **星标仓库**：使用主题 `warning` 颜色的星标图标（其他 Feed 活动保留原有图标与颜色），在仓库链接下方展示与仓库文字左沿对齐（`pl_5`）的真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
+  - **合并 PR**：PR 标题左侧图标使用主题 `chart[4]` 紫色（仅 `PullRequestMerged` 上色，其他状态/活动不上色），展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本），摘要与“Read more”均与 PR 标题文字左沿对齐（`pl_6`，不扩增“Read more”点击热区）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮（沿用主题 `accent` 原色）。
   - **Read more 交互**：点击或键盘激活经宿主的延迟导航通道打开 `Route::PullRequest { namespace, name, number }`。标签显示 `owner/repo #number` 和 PR 图标；同账户同仓库同编号复用标签，仓库名大小写别名不重复开页。当前仅接入内部导航，详情内容仍待独立实现；不打开系统浏览器、不在卡片内展开全文；阻止事件冒泡，不触发卡片选中或次级激活。
   - 没有 branch/ref/SHA/commit 数等技术噪声 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
