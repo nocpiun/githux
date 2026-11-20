@@ -52,6 +52,7 @@ pub mod repository;
 pub mod repository_overview;
 pub(crate) mod scroll;
 mod sidebar;
+mod sidebar_active;
 mod sidebar_state;
 // One active-tab underline presentation shared by the repository content tabs, the narrow
 // Settings category tabs and the Profile Overview strip.
@@ -152,6 +153,7 @@ pub struct Shell {
     #[cfg(test)]
     tab_drag_pinned: bool,
     sidebar_state: sidebar_state::SidebarState,
+    sidebar_active: sidebar_active::SidebarActive,
     sidebar_activation: gpui::Subscription,
     sidebar_keys: gpui::Subscription,
     sidebar_bounds: gpui::Subscription,
@@ -331,6 +333,7 @@ impl Shell {
             sidebar_menu: false,
             sidebar_menu_cursor: 0,
             sidebar_state: sidebar_state::SidebarState::default(),
+            sidebar_active: sidebar_active::SidebarActive::default(),
             sidebar_activation,
             workspace: Sessions::new(cx),
             pages: HashMap::new(),
@@ -425,6 +428,7 @@ impl Shell {
                 // A new visible workspace: nothing from the previous account may stay active.
                 self.cancel_account_scoped_view_state(cx);
             }
+            self.reset_sidebar_motion_for_repository_order(snapshot.repositories.rows());
             self.repositories = snapshot.repositories.rows().to_vec();
             self.repo_focus = (0..self.repositories.len())
                 .map(|_| cx.focus_handle().tab_stop(true))
@@ -672,6 +676,7 @@ impl Shell {
         self.focused_tab = None;
         self.tab_reach = gpui::Pixels::ZERO;
         self.sidebar_state.menu_open.set(false);
+        self.sidebar_active.reset();
         self.sidebar_menu = false;
     }
 
@@ -708,10 +713,22 @@ impl Shell {
         cx.notify();
     }
 
+    fn reset_sidebar_motion_for_repository_order(&self, rows: &[RepoSummary]) {
+        if self
+            .repositories
+            .iter()
+            .map(|repo| repo.id)
+            .ne(rows.iter().map(|repo| repo.id))
+        {
+            self.sidebar_active.reset();
+        }
+    }
+
     /// Replaces the shell's repository rows in tests, exactly as a real `/user/repos` result would
     /// populate them. Production only ever takes them from the account controller.
     #[cfg(test)]
     pub fn set_repositories(&mut self, rows: Vec<RepoSummary>, cx: &mut Context<Self>) {
+        self.reset_sidebar_motion_for_repository_order(&rows);
         self.repositories = rows;
         self.repo_focus = (0..self.repositories.len())
             .map(|_| cx.focus_handle().tab_stop(true))
@@ -943,8 +960,12 @@ impl Shell {
     /// do not need the network path. Production only ever reads this from the service snapshot.
     #[cfg(test)]
     pub fn set_account(&mut self, summary: Option<AccountSummary>, cx: &mut Context<Self>) {
+        let next_active = summary.as_ref().map(|summary| summary.identity.key.clone());
+        if self.account_state.active != next_active {
+            self.sidebar_active.reset();
+        }
         self.account_state.accounts = summary.clone().into_iter().collect();
-        self.account_state.active = summary.map(|summary| summary.identity.key);
+        self.account_state.active = next_active;
         cx.notify();
     }
 
@@ -1817,6 +1838,17 @@ impl Shell {
         let frame = self.sidebar_state.frame;
         let nav_metrics = sidebar::nav_metrics(frame.expansion, window.rem_size(), cx);
 
+        let active_item = match &route {
+            Route::Home => Some(sidebar_active::Item::Home),
+            Route::Settings => Some(sidebar_active::Item::Settings),
+            Route::Repository { .. } => self
+                .repositories
+                .iter()
+                .find(|repo| route.is_repository(repo))
+                .map(|repo| sidebar_active::Item::Repo(repo.id)),
+            _ => None,
+        };
+        let measurements = self.sidebar_active.measure(active_item);
         let home = {
             let this = this.clone();
             sidebar::nav_row(
@@ -1825,6 +1857,7 @@ impl Shell {
                 "Home",
                 route == Route::Home,
                 nav_metrics,
+                measurements.probe(sidebar_active::Item::Home),
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Home, window, cx);
@@ -1841,6 +1874,7 @@ impl Shell {
                 "Settings",
                 route == Route::Settings,
                 nav_metrics,
+                measurements.probe(sidebar_active::Item::Settings),
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Settings, window, cx);
@@ -1940,6 +1974,7 @@ impl Shell {
                         focus: &focus,
                         active,
                         frame,
+                        probe: measurements.probe(sidebar_active::Item::Repo(repo.id)),
                         run: Box::new(move |window, cx| {
                             let target = target.clone();
                             this.update(cx, |shell, cx| {
@@ -2152,7 +2187,30 @@ impl Shell {
             ])
         };
 
-        sidebar::sidebar(nav, heading, repositories, account, quarters, frame, cx)
+        let active_layer = self.sidebar_active.layer(
+            measurements,
+            sidebar_active::LayerStyle {
+                scroll: self.repo_scroll.clone(),
+                radius: cx
+                    .theme()
+                    .radius(ely_core::theme::Radius::Md)
+                    .to_pixels(window.rem_size()),
+                reduced: cx.theme().reduced_motion || cx.reduce_motion(),
+                now: self.tab_now_ms(),
+                nav_color: cx.theme().colors.hover,
+                repo_color: cx.theme().colors.active,
+            },
+        );
+        sidebar::sidebar(
+            active_layer,
+            nav,
+            heading,
+            repositories,
+            account,
+            quarters,
+            frame,
+            cx,
+        )
     }
 
     /// Settings › Accounts. The minimal account surface: only the operations the accepted account
