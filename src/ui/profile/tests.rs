@@ -1329,3 +1329,74 @@ fn overview_tab_band_covers_the_measured_tab_box(cx: &mut TestAppContext) {
         "one tab never moves, so the strip never asks for frames"
     );
 }
+
+#[gpui::test]
+fn in_place_refresh_preserves_repository_selection_day_selection_and_heatmap_scroll(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = open(cx);
+    publish_ready(&view, cx);
+    frames(cx);
+
+    let (request, range, pinned, calendar) = view.read_with(cx, |view, _| {
+        let pinned = match view.repositories() {
+            SectionState::Ready(pinned) => pinned.clone(),
+            _ => panic!("expected ready repositories"),
+        };
+        let calendar = match view.contributions() {
+            SectionState::Ready(calendar) => calendar.clone(),
+            _ => panic!("expected ready contributions"),
+        };
+        (view.request(), view.range().clone(), pinned, calendar)
+    });
+    assert!(
+        pinned.repos.len() >= 2,
+        "fixture must have at least two repositories to test selection preservation"
+    );
+
+    // Move repository selection, day selection, and horizontal heatmap scroll away from 0.
+    view.update(cx, |view, cx| {
+        view.selected_repository = 1;
+        view.selected_day = Some(5);
+        view.heatmap_motion
+            .set_offset(gpui::point(px(-48.0), px(0.0)));
+        cx.notify();
+    });
+    frames(cx);
+    let offset_before = view.read_with(cx, |view, _| view.heatmap_scroll.offset().x);
+
+    // Publish an in-place Ready -> Ready refresh for repositories and contributions.
+    view.update(cx, |view, cx| {
+        assert!(view.update_repositories_with_provenance(
+            &request,
+            SectionState::Ready(pinned.clone()),
+            None,
+            cx,
+        ));
+        assert!(view.update_contributions_with_provenance(
+            &request,
+            &range,
+            SectionState::Ready(calendar.clone()),
+            None,
+            cx,
+        ));
+    });
+    frames(cx);
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.selected_repository, 1,
+            "in-place refresh must preserve selected repository"
+        );
+        assert_eq!(
+            view.selected_day,
+            Some(5),
+            "in-place refresh must preserve selected contribution day"
+        );
+        assert_eq!(
+            view.heatmap_scroll.offset().x,
+            offset_before,
+            "in-place refresh must preserve horizontal heatmap scroll offset"
+        );
+    });
+}

@@ -783,6 +783,27 @@ fn profile_tab_refresh_revalidates_all_sections_and_handles_partial_failure(
         view.read_with(cx, |shell, cx| shell.profile_target_for_test(cx).is_some()),
         "transient Basic refresh error must not tear down the mounted ProfileView"
     );
+
+    // Retrying while Basic is in Error must defer README until Basic succeeds (never failing
+    // README with InvalidData before Basic returns), then revalidate README once Basic recovers.
+    let readme_before_retry = transport.seen("/repos/alice/alice");
+    transport.hold("/users/alice");
+    click_tab_refresh(cx);
+    pump_all(&view, &controller, cx);
+    assert!(view.read_with(cx, |shell, cx| {
+        shell.active_refresh_state(cx).is_refreshing()
+    }));
+    assert_eq!(
+        transport.seen("/repos/alice/alice"),
+        readme_before_retry,
+        "README refresh must wait for valid Basic data"
+    );
+    transport.release("/users/alice");
+    wait_for(&view, &controller, cx, |shell, _, cx| {
+        shell.active_refresh_state(cx).is_ready()
+            && transport.seen("/users/alice") == basic_before + 3
+            && transport.seen("/repos/alice/alice") == readme_before_retry + 1
+    });
 }
 
 #[gpui::test]

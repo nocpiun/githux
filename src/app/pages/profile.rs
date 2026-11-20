@@ -185,6 +185,10 @@ pub struct ProfilePage {
     navigation: NavigationSink,
     active: bool,
     unavailable: Option<PresentationError>,
+    /// Set when `refresh_all` could not start `Section::Readme` immediately because `Basic` was
+    /// not in `SectionState::Ready` (for example after a transient Basic refresh failure). Once
+    /// Basic succeeds, `apply_basic` consumes this flag and starts the deferred README read.
+    pending_readme_refresh: bool,
     _changed: Option<Subscription>,
     _avatars_changed: Option<Subscription>,
 }
@@ -228,6 +232,7 @@ impl ProfilePage {
             navigation,
             active: true,
             unavailable: None,
+            pending_readme_refresh: false,
             _changed: None,
             _avatars_changed: None,
         };
@@ -272,16 +277,17 @@ impl ProfilePage {
             return false;
         }
         self.unavailable = None;
-        if self.view.is_some() {
-            for section in [
-                Section::Basic,
-                Section::Repositories,
-                Section::Contributions,
-                Section::Readme,
-            ] {
-                self.start(section, cx);
+        if let Some(view) = &self.view {
+            let has_basic = matches!(view.read(cx).basic(), SectionState::Ready(_));
+            self.pending_readme_refresh = !has_basic;
+            self.start(Section::Basic, cx);
+            self.start(Section::Repositories, cx);
+            self.start(Section::Contributions, cx);
+            if has_basic {
+                self.start(Section::Readme, cx);
             }
         } else {
+            self.pending_readme_refresh = false;
             self.start(Section::Basic, cx);
         }
         cx.notify();
@@ -299,6 +305,7 @@ impl ProfilePage {
         self.requests = [0; 4];
         self.request = None;
         self.unavailable = None;
+        self.pending_readme_refresh = false;
         self.cache_invalidated
             .store(u64::MAX, std::sync::atomic::Ordering::Release);
         *self.authorizations.lock().expect("profile authorizations") = [None, None, None, None];
@@ -1348,14 +1355,15 @@ impl ProfilePage {
                 }
                 // Every sibling section that still has no content is read now; one that is already
                 // displayed keeps its value until its own online read replaces it.
+                let deferred_readme = std::mem::take(&mut self.pending_readme_refresh);
                 for section in [
                     Section::Repositories,
                     Section::Contributions,
                     Section::Readme,
                 ] {
-                    // The README is login-dependent, so a canonical rename restarts it even when it
-                    // already had content.
-                    if (section == Section::Readme && changed_login)
+                    // The README depends on valid Basic data (and canonical login), so a canonical
+                    // rename or a refresh deferred while Basic was in Error starts it here.
+                    if (section == Section::Readme && (changed_login || deferred_readme))
                         || self.section_is_empty(section, cx)
                     {
                         self.start(section, cx);
@@ -1376,6 +1384,7 @@ impl ProfilePage {
                 }
             }
             Err(error) => {
+                self.pending_readme_refresh = false;
                 // When a Profile view is already mounted and a manual refresh hits a transient
                 // Basic error (network/5xx/rate-limit), report the error on the Basic section
                 // instead of tearing down sibling sections (Repositories, Contributions, README)

@@ -341,7 +341,21 @@ impl ProfileView {
         if !self.accepts(request) {
             return false;
         }
-        self.selected_repository = 0;
+        self.selected_repository = match (&self.repositories, &state) {
+            (SectionState::Ready(previous), SectionState::Ready(next)) => {
+                if next.repos.is_empty() {
+                    0
+                } else if let Some(selected) = previous.repos.get(self.selected_repository) {
+                    next.repos
+                        .iter()
+                        .position(|repo| repo.name_with_owner == selected.name_with_owner)
+                        .unwrap_or_else(|| self.selected_repository.min(next.repos.len() - 1))
+                } else {
+                    self.selected_repository.min(next.repos.len() - 1)
+                }
+            }
+            _ => 0,
+        };
         self.repositories = state;
         self.repositories_provenance = provenance;
         cx.notify();
@@ -369,13 +383,37 @@ impl ProfileView {
         if !self.accepts(request) || range != &self.range {
             return false;
         }
+        let in_place = matches!(
+            (&self.contributions, &state),
+            (SectionState::Ready(_), SectionState::Ready(_))
+        );
         self.selected_day = match &state {
-            SectionState::Ready(calendar) if !calendar.weeks.is_empty() => Some(0),
+            SectionState::Ready(calendar) if !calendar.weeks.is_empty() => {
+                if in_place {
+                    let day_count: usize =
+                        super::heatmap::heatmap_presentation(&self.range, calendar)
+                            .weeks
+                            .iter()
+                            .map(|week| week.days.len())
+                            .sum();
+                    if day_count == 0 {
+                        None
+                    } else {
+                        self.selected_day
+                            .map(|index| index.min(day_count - 1))
+                            .or(Some(0))
+                    }
+                } else {
+                    Some(0)
+                }
+            }
             _ => None,
         };
         self.contributions = state;
         self.contributions_provenance = provenance;
-        self.heatmap_motion.set_offset(point(px(0.0), px(0.0)));
+        if !in_place {
+            self.heatmap_motion.set_offset(point(px(0.0), px(0.0)));
+        }
         cx.notify();
         true
     }
