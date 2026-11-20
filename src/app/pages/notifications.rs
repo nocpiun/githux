@@ -69,6 +69,33 @@ impl NotificationsPage {
             view.update(cx, |view, cx| view.set_active(active, cx));
         }
     }
+
+    pub(crate) fn refresh_state(&self, cx: &gpui::App) -> crate::ui::shell_refresh::RefreshState {
+        let Some(view) = &self.view else {
+            return crate::ui::shell_refresh::RefreshState::disabled(
+                "Sign in to refresh Notifications",
+            );
+        };
+        let view = view.read(cx);
+        if !view.controller_is_current() {
+            crate::ui::shell_refresh::RefreshState::disabled("Sign in to refresh Notifications")
+        } else if view.is_refreshing() {
+            crate::ui::shell_refresh::RefreshState::refreshing("Refreshing Notifications")
+        } else if view.is_cooling() {
+            crate::ui::shell_refresh::RefreshState::disabled(
+                "Refresh available after the server cooldown",
+            )
+        } else {
+            crate::ui::shell_refresh::RefreshState::ready("Refresh Notifications")
+        }
+    }
+
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(view) = &self.view else {
+            return false;
+        };
+        view.update(cx, |view, cx| view.refresh(cx))
+    }
 }
 
 impl Render for NotificationsPage {

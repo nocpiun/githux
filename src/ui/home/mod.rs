@@ -706,6 +706,24 @@ impl HomeView {
         }
     }
 
+    /// Marks one column as refreshing in place without disturbing its displayed snapshot, scroll
+    /// offset or selection. Used by the Shell active-page refresh coordinator so column headers
+    /// stay in sync with the top-level toolbar spinner.
+    pub fn set_refreshing(
+        &mut self,
+        column: Column,
+        binding: &RequestBinding,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.accepts(binding, generation) {
+            return false;
+        }
+        self.begin_refresh(column);
+        cx.notify();
+        true
+    }
+
     /// Starts loading one column without disturbing the other. A host normally
     /// calls this before its first read; refreshing an existing snapshot can be
     /// left to the refresh action itself.

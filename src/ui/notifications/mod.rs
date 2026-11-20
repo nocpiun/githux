@@ -163,6 +163,29 @@ impl NotificationsView {
         cx.notify();
     }
 
+    pub fn is_refreshing(&self) -> bool {
+        self.snapshot.busy.is_some() && self.controller.verify()
+    }
+
+    pub fn is_cooling(&self) -> bool {
+        self.cooldown_until
+            .is_some_and(|deadline| deadline > Instant::now())
+    }
+
+    pub fn controller_is_current(&self) -> bool {
+        self.controller.verify()
+    }
+
+    /// Triggers an inbox refresh if the controller is current, idle and outside server cooldown.
+    /// Duplicate clicks while refreshing or cooling are ignored without setting an error.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.controller.verify() || self.is_refreshing() || self.is_cooling() {
+            return false;
+        }
+        self.request(RequestKind::Refresh, cx);
+        self.snapshot.busy.is_some()
+    }
+
     fn cancel_activity(&mut self) {
         self.time_task = None;
         self.cooldown_wake = None;

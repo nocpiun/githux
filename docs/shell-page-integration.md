@@ -105,6 +105,27 @@ Home、Profile、Repository、Notifications 与全局 Issues/PR 都拥有自己�
 - 历史缺陷：只移除 Profile README 的 280px 固定高度时，Reader 尚无自然高度 API，导致正文塌缩；随后已通过下述 Flow 接线修复，见 LESSONS L013。
 - 2026-10-30：`reader-images`（PR #45，main `9522eee`）合入 Flow 后，Profile 在构造 README 时设置 `MarkdownLayout::Flow` 并注册 `on_layout_changed`。正文按真实高度完整展开、只由 Profile 外层滚动，文末 inset 保留。Pinned 简介同时改为自然换行、最多三行，卡片随内容长高。
 
+## 顶部 `tab-refresh` 主动刷新（2026-11-19）
+
+顶部 tab 条最右的 `tab-refresh` 由独立模块 [`src/ui/shell_refresh.rs`](../src/ui/shell_refresh.rs) 统一协调，映射到当前活动 tab 的路由与已挂载页面数据 owner，复用各页已有的真实在线刷新与状态：
+
+- **呈现与防重入**：空闲可刷新时显示 `RotateCw` ghost 图标按钮；当前页任一已挂载分区处于刷新/加载在途时，同一固定方槽显示 Ely 动画 `Spinner`（`tab-refresh-spinner`）并忽略/合并重复点击；全部在途分区收尾（成功或失败）后结束动画并恢复可重试。
+- **全路由适用性**：
+
+| 路由 | 适用性 | 刷新范围与边界 |
+| --- | --- | --- |
+| `Route::Home` | 适用（需有效账户会话） | 同步重验证 Home 工作项列与 Feed 列，保留屏上内容、滚动与选择；Feed 处于 `X-Poll-Interval` 冷却期时不违背冷却，仍允许 Home 列刷新 |
+| `Route::Profile` / `Route::UserProfile` | 适用（需有效账户会话） | 同步重验证 Basic、Pinned/Popular 仓库、Contributions 与 README 四个分区，保留屏上内容与阅读器；瞬态 Basic 错误原地报在 Basic 分区，不拆毁兄弟分区 |
+| `Route::Repository` | 适用（需有效活动会话） | 复用 `refresh_repository` 重验证仓库摘要、分支列表、当前分支固定快照/已展开目录/当前正文、overview 四组与 OPEN Issues/PR 计数；不遍历未展开目录，不触发任何写操作；通过 `Work` 在途计数与 `extras.has_in_flight()` 跨阶段追踪直到全部收尾 |
+| `Route::Notifications` | 适用（需有效会话且不在冷却期） | 触发收件箱刷新，保留现有行与在途条目动作；服务端 `X-Poll-Interval` / 限流冷却期间禁用并提示冷却 |
+| `Route::Issues` / `Route::PullRequests` | 适用（需有效账户会话） | 触发当前筛选的替换刷新，保留旧快照直到结果返回 |
+| `Route::Settings` | 禁用（无操作） | 本地账户设置页无远端数据刷新语义，不凭空发请求 |
+| `Route::PullRequest` | 禁用（无操作） | 未设计详情空白路由，不凭空发请求 |
+| 任一路由未登录 / 未挂载 / 授权失效 | 禁用（无操作） | 保持禁用，点击零请求 |
+
+- **跨页签与生命周期隔离**：`Shell` 按 `TabId` 订阅已挂载页面实体，仅当活动 tab 状态变化时通知 `Shell` 重绘工具栏。切换到相邻 tab、关闭刷新中的 tab 或切换账户时，每个 tab 呈现自身真实状态；旧 tab 或旧账户的异步晚到回复不会影响新活动页面。
+- **预览入口**：正式程序 `cargo run --locked` 在真实账户下可用；离线交互预览 `cargo run --locked --example shell_refresh` 使用临时目录、内存凭据与 650ms 延迟 fixture 驱动真实 `Shell`，可在不配置真实 PAT 的情况下验证全路由刷新动画与禁用语义。
+
 ## 验证与限制
 
 正式集成测试（`src/app/pages/tests.rs`）使用临时 SQLite、内存凭据、可控 transport、真实 `Accounts` 控制器、正式 `Shell` 与真实页面组件，覆盖：
