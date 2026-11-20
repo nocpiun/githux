@@ -23,7 +23,7 @@ use gpui::{
 use crate::{
     app::{
         AccountsHandle,
-        accounts::{Accounts, Snapshot},
+        accounts::{Accounts, RepositoryListOrigin, Snapshot},
     },
     domain::{AccountKey, AccountSummary, RepoSummary},
     platform::fonts,
@@ -1657,11 +1657,7 @@ impl Shell {
             RepositoryPreview::Ready(outcome)
                 if outcome.repositories.is_empty()
                     && outcome.readiness == crate::domain::repo::ReposReadiness::Complete
-                    && self
-                        .account_state
-                        .repositories
-                        .historical_status()
-                        .is_none() => {}
+                    && self.account_state.repositories.origin == RepositoryListOrigin::Network => {}
             _ => return None,
         }
         let theme = cx.theme();

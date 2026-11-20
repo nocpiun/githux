@@ -27,48 +27,76 @@ use super::{
 const CELL: f32 = 12.0;
 const CELL_GAP: f32 = 3.0;
 
-fn provenance_badges(
-    id_prefix: &'static str,
-    provenance: Option<&ProfileProvenance>,
-    now: std::time::SystemTime,
-) -> Vec<AnyElement> {
-    let Some(prov) = provenance else {
-        return Vec::new();
-    };
-    let mut badges = Vec::new();
-    if prov.is_historical() {
-        let label = prov
-            .relative_time(now)
-            .map(|rel| format!("Cached · {rel}"))
-            .unwrap_or_else(|| "Cached".to_string());
-        let selector = format!("{id_prefix}-provenance-historical");
-        badges.push(
-            div()
-                .id(gpui::ElementId::Name(selector.clone().into()))
-                .debug_selector(move || selector.clone())
-                .tooltip(ui_tooltip("Historical snapshot loaded from local cache."))
-                .child(
-                    crate::ui::badge::Badge::new(label).tone(ely_core::data_display::Tone::Neutral),
-                )
-                .into_any_element(),
-        );
+impl ProfileView {
+    pub(super) fn provenance_badges(
+        &self,
+        id_prefix: &'static str,
+        provenance: Option<&ProfileProvenance>,
+        retry_action: ProfileActionKind,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(prov) = provenance else {
+            return Vec::new();
+        };
+        let mut badges = Vec::new();
+        if prov.revalidation_failed {
+            let label = prov
+                .relative_time(self.now)
+                .map(|rel| format!("Cached · {rel}"))
+                .unwrap_or_else(|| "Cached".to_string());
+            let selector = format!("{id_prefix}-provenance-historical");
+            badges.push(
+                div()
+                    .id(gpui::ElementId::Name(selector.clone().into()))
+                    .debug_selector(move || selector.clone())
+                    .tooltip(ui_tooltip("Historical snapshot loaded from local cache."))
+                    .child(
+                        crate::ui::badge::Badge::new(label)
+                            .tone(ely_core::data_display::Tone::Neutral),
+                    )
+                    .into_any_element(),
+            );
+            if self.on_action.is_some() {
+                let request = self.request();
+                let weak = cx.weak_entity();
+                badges.push(crate::ui::compact_status::failed(
+                    format!("{id_prefix}-cache-retry"),
+                    "Retry",
+                    "Refresh failed. Showing cached content.",
+                    Some(move |window: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |view, cx| {
+                            if view.accepts(&request) {
+                                view.emit(retry_action.clone(), window, cx);
+                            }
+                        });
+                    }),
+                    Some(match id_prefix {
+                        "profile-basic" => "profile-basic-cache-retry",
+                        "profile-repositories" => "profile-repositories-cache-retry",
+                        "profile-contributions" => "profile-contributions-cache-retry",
+                        _ => "profile-readme-cache-retry",
+                    }),
+                    cx,
+                ));
+            }
+        }
+        if let Some(reason) = prov.partial_reason() {
+            let reason = reason.to_string();
+            let selector = format!("{id_prefix}-provenance-partial");
+            badges.push(
+                div()
+                    .id(gpui::ElementId::Name(selector.clone().into()))
+                    .debug_selector(move || selector.clone())
+                    .tooltip(ui_tooltip(reason))
+                    .child(
+                        crate::ui::badge::Badge::new("Partial")
+                            .tone(ely_core::data_display::Tone::Warning),
+                    )
+                    .into_any_element(),
+            );
+        }
+        badges
     }
-    if let Some(reason) = prov.partial_reason() {
-        let reason = reason.to_string();
-        let selector = format!("{id_prefix}-provenance-partial");
-        badges.push(
-            div()
-                .id(gpui::ElementId::Name(selector.clone().into()))
-                .debug_selector(move || selector.clone())
-                .tooltip(ui_tooltip(reason))
-                .child(
-                    crate::ui::badge::Badge::new("Partial")
-                        .tone(ely_core::data_display::Tone::Warning),
-                )
-                .into_any_element(),
-        );
-    }
-    badges
 }
 
 fn section_heading_with_badges(
@@ -400,8 +428,12 @@ impl ProfileView {
             let context = reader.read(cx).context();
             format!("{} / {}", context.owner(), context.path())
         });
-        let readme_badges =
-            provenance_badges("profile-readme", self.readme_provenance.as_ref(), self.now);
+        let readme_badges = self.provenance_badges(
+            "profile-readme",
+            self.readme_provenance.as_ref(),
+            ProfileActionKind::RetryReadme,
+            cx,
+        );
         let header_row = if identity.is_some() || !readme_badges.is_empty() {
             Some(
                 div()
@@ -473,10 +505,11 @@ impl ProfileView {
         };
         let presentation = repository_presentation(&pinned);
         let count = presentation.repositories.len();
-        let repo_badges = provenance_badges(
+        let repo_badges = self.provenance_badges(
             "profile-repositories",
             self.repositories_provenance.as_ref(),
-            self.now,
+            ProfileActionKind::RetryRepositories,
+            cx,
         );
         self.selected_repository = self.selected_repository.min(count.saturating_sub(1));
         let cards = presentation
@@ -770,10 +803,11 @@ impl ProfileView {
                 .child(panel(body, cx))
                 .into_any_element();
         };
-        let contrib_badges = provenance_badges(
+        let contrib_badges = self.provenance_badges(
             "profile-contributions",
             self.contributions_provenance.as_ref(),
-            self.now,
+            ProfileActionKind::RetryContributions,
+            cx,
         );
         let model = super::heatmap::heatmap_presentation(&self.range, &calendar);
         let flat_count = model

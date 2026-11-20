@@ -110,40 +110,12 @@ impl ProfileView {
         if let Some(company) = super::render::clean(&basic.company) {
             metadata.push(meta(IconName::House, company.to_string(), cx));
         }
-        let mut provenance_badges = Vec::new();
-        if let Some(prov) = &self.basic_provenance {
-            if prov.is_historical() {
-                let label = prov
-                    .relative_time(self.now)
-                    .map(|rel| format!("Cached · {rel}"))
-                    .unwrap_or_else(|| "Cached".to_string());
-                provenance_badges.push(
-                    div()
-                        .id("profile-basic-provenance-historical")
-                        .debug_selector(|| "profile-basic-provenance-historical".to_string())
-                        .tooltip(ui_tooltip("Historical snapshot loaded from local cache."))
-                        .child(
-                            crate::ui::badge::Badge::new(label)
-                                .tone(ely_core::data_display::Tone::Neutral),
-                        )
-                        .into_any_element(),
-                );
-            }
-            if let Some(reason) = prov.partial_reason() {
-                let reason = reason.to_string();
-                provenance_badges.push(
-                    div()
-                        .id("profile-basic-provenance-partial")
-                        .debug_selector(|| "profile-basic-provenance-partial".to_string())
-                        .tooltip(ui_tooltip(reason))
-                        .child(
-                            crate::ui::badge::Badge::new("Partial")
-                                .tone(ely_core::data_display::Tone::Warning),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
+        let provenance_badges = self.provenance_badges(
+            "profile-basic",
+            self.basic_provenance.as_ref(),
+            ProfileActionKind::RetryBasic,
+            cx,
+        );
         div()
             .debug_selector(|| "profile-basic".into())
             .w_full()

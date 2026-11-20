@@ -66,6 +66,7 @@ pub enum SectionState<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileProvenance {
     pub historical: bool,
+    pub revalidation_failed: bool,
     pub fetched_at_ms: i64,
     pub verified_at_ms: i64,
     pub completeness: CacheCompleteness,
@@ -75,10 +76,16 @@ impl ProfileProvenance {
     pub fn from_cache(historical: bool, metadata: &CacheMetadata) -> Self {
         Self {
             historical,
+            revalidation_failed: false,
             fetched_at_ms: metadata.fetched_at_ms,
             verified_at_ms: metadata.verified_at_ms,
             completeness: metadata.completeness.clone(),
         }
+    }
+
+    pub fn after_revalidation_failure(mut self) -> Self {
+        self.revalidation_failed = self.historical;
+        self
     }
 
     pub fn is_historical(&self) -> bool {
