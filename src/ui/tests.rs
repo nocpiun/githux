@@ -1505,6 +1505,31 @@ fn clicking_a_tab_or_opening_a_link_from_a_focused_tab_leaves_no_stale_tab_focus
         "previous tab must not retain focus after opening a new tab"
     );
     assert_eq!(focused.as_ref(), Some(&new_page_focus));
+
+    // When tab A already has keyboard focus and the user clicks tab B with the mouse, tab A must
+    // lose its focus ring and focus must transfer to tab B's page.
+    let home_tab = view.read_with(cx, |shell, _| shell.tab_ids()[0]);
+    let home_strip = view.read_with(cx, |shell, _| shell.tab_strip_focus(home_tab).unwrap());
+    cx.update_window_entity(&view, |_, window, cx| window.focus(&home_strip, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&home_strip)
+    );
+    click("tab-1", cx);
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        issues_tab
+    );
+    let issues_page_focus =
+        view.read_with(cx, |shell, _| shell.tab_page_focus(issues_tab).unwrap());
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_ne!(
+        focused.as_ref(),
+        Some(&home_strip),
+        "clicking tab B must clear stale keyboard focus from tab A"
+    );
+    assert_eq!(focused.as_ref(), Some(&issues_page_focus));
 }
 
 /// Runs one more frame so a scroll offset applied during render is reflected in the painted bounds.

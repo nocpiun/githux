@@ -1138,16 +1138,7 @@ impl Shell {
             OpenResult::Opened(id) | OpenResult::Activated(id) => id,
         };
         self.follow_page_focus(previous, id, window, cx);
-        if previous != id
-            && let Some(prev_session) = self.workspace.session(previous)
-            && (prev_session.state().strip_focus.is_focused(window)
-                || prev_session
-                    .state()
-                    .strip_focus
-                    .contains_focused(window, cx))
-        {
-            self.focus_page(id, window, cx);
-        }
+        self.focus_page_if_other_strip_focused(id, window, cx);
         self.reveal_tab(id);
         if previous != id
             && let Some(page) = self.pages.get(&previous)
@@ -1370,6 +1361,26 @@ impl Shell {
             || previous.state().focus.contains_focused(window, cx);
         if in_previous_page {
             self.focus_page(next, window, cx);
+        }
+    }
+
+    /// When a tab switch is triggered by mouse click or page link while a different tab's strip
+    /// entry still holds keyboard focus, move focus into the incoming page so the old tab does not
+    /// keep a stale focus ring. Keyboard activation on the target tab itself (`id == active`) keeps
+    /// its own strip focus.
+    fn focus_page_if_other_strip_focused(
+        &self,
+        active: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let other_strip_focused = self.workspace.sessions().iter().any(|session| {
+            session.id() != active
+                && (session.state().strip_focus.is_focused(window)
+                    || session.state().strip_focus.contains_focused(window, cx))
+        });
+        if other_strip_focused {
+            self.focus_page(active, window, cx);
         }
     }
     /// Collapses or expands the sidebar the way the toggle does, for the layout regression tests
@@ -2737,6 +2748,7 @@ impl Shell {
         }
         self.tab_motion.cancel();
         self.follow_page_focus(previous, id, window, cx);
+        self.focus_page_if_other_strip_focused(id, window, cx);
         self.reveal_tab(id);
         cx.notify();
     }
