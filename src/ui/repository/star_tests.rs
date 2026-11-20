@@ -229,6 +229,7 @@ fn an_older_repository_summary_cannot_roll_back_a_write_or_its_count(cx: &mut Te
                 result: Ok((old, None)),
                 star_write_generation: 0,
             },
+            _in_flight: None,
         };
         page.apply(message, window, cx);
     });

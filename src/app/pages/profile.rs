@@ -243,6 +243,51 @@ impl ProfilePage {
         }
     }
 
+    fn has_current_session(&self) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session.verify()
+                && self
+                    .services
+                    .as_ref()
+                    .is_some_and(|services| services.repositories().is_current(session.context()))
+        })
+    }
+
+    pub(crate) fn refresh_state(&self) -> crate::ui::shell_refresh::RefreshState {
+        if !self.has_current_session() {
+            return crate::ui::shell_refresh::RefreshState::disabled("Sign in to refresh Profile");
+        }
+        if self.work.iter().any(Option::is_some) {
+            return crate::ui::shell_refresh::RefreshState::refreshing("Refreshing Profile");
+        }
+        crate::ui::shell_refresh::RefreshState::ready("Refresh Profile")
+    }
+
+    /// Revalidates all mounted Profile sections (basic profile, pinned/popular repositories,
+    /// contributions calendar and profile README) in place without resetting scroll, selection or
+    /// already displayed content. If the initial basic read failed and no view is mounted yet,
+    /// retries basic (which automatically starts the sibling sections once basic succeeds).
+    pub(crate) fn refresh_all(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.refresh_state().is_ready() {
+            return false;
+        }
+        self.unavailable = None;
+        if self.view.is_some() {
+            for section in [
+                Section::Basic,
+                Section::Repositories,
+                Section::Contributions,
+                Section::Readme,
+            ] {
+                self.start(section, cx);
+            }
+        } else {
+            self.start(Section::Basic, cx);
+        }
+        cx.notify();
+        self.work.iter().any(Option::is_some)
+    }
+
     pub fn rebind(&mut self, services: Option<AccountServices>, cx: &mut Context<Self>) {
         if let Some(view) = &self.view {
             view.update(cx, |view, cx| view.clear_reader(cx));
@@ -1331,9 +1376,26 @@ impl ProfilePage {
                 }
             }
             Err(error) => {
-                self.view = None;
-                self.request = None;
-                self.unavailable = Some(error);
+                // When a Profile view is already mounted and a manual refresh hits a transient
+                // Basic error (network/5xx/rate-limit), report the error on the Basic section
+                // instead of tearing down sibling sections (Repositories, Contributions, README)
+                // and losing scroll position. Authorization/unavailable errors still retire the
+                // whole page.
+                let retain_mounted = !matches!(
+                    error,
+                    PresentationError::Unauthorized | PresentationError::Forbidden
+                );
+                if retain_mounted
+                    && let (Some(request), Some(view)) = (self.request.clone(), self.view.clone())
+                {
+                    view.update(cx, |view, cx| {
+                        view.update_basic(&request, SectionState::Error(error), cx);
+                    });
+                } else {
+                    self.view = None;
+                    self.request = None;
+                    self.unavailable = Some(error);
+                }
             }
         }
     }

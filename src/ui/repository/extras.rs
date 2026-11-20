@@ -105,6 +105,12 @@ impl Extras {
         self.binding = None;
         self.inbox.lock().expect("overview inbox").clear();
     }
+    /// Whether any overview section (Releases, Latest, Contributors, Languages) or OPEN
+    /// Issues/PR count read is currently in flight.
+    pub(super) fn has_in_flight(&self) -> bool {
+        self.counts_work.is_some() || self.work.iter().any(Option::is_some)
+    }
+
     /// Whether the displayed overview's own cache authorization is still current.
     /// Lock-free atomic loads only, so the page's render/receiver checks can call
     /// it without touching storage.
@@ -297,27 +303,35 @@ impl RepositoryPage {
         let work = Work::new();
         let cancel = work.token();
         self.extras.counts_work = Some(work);
-        let _ = self.services.executor.handle().spawn(async move {
-            let result = match cached {
-                Some(cached) => {
-                    read_cached_counts(&cached, &binding.repository, offline_only, cancel).await
-                }
-                None if offline_only => {
-                    Err(crate::domain::repository_counts::CountsError::RepositoryIdentity)
-                }
-                None => session
-                    .repository_counts(&binding.repository, cancel)
-                    .await
-                    .map(|value| (value.value, false)),
-            };
-            inbox.lock().expect("count inbox").push_back(CountsReply {
-                binding,
-                context,
-                authorization,
-                request,
-                result,
-            });
-        });
+        if self
+            .services
+            .executor
+            .handle()
+            .spawn(async move {
+                let result = match cached {
+                    Some(cached) => {
+                        read_cached_counts(&cached, &binding.repository, offline_only, cancel).await
+                    }
+                    None if offline_only => {
+                        Err(crate::domain::repository_counts::CountsError::RepositoryIdentity)
+                    }
+                    None => session
+                        .repository_counts(&binding.repository, cancel)
+                        .await
+                        .map(|value| (value.value, false)),
+                };
+                inbox.lock().expect("count inbox").push_back(CountsReply {
+                    binding,
+                    context,
+                    authorization,
+                    request,
+                    result,
+                });
+            })
+            .is_err()
+        {
+            self.extras.counts_work = None;
+        }
     }
     fn read_extra(
         &mut self,
