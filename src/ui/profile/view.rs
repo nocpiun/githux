@@ -43,6 +43,9 @@ pub struct ProfileView {
     pub(super) avatar: Option<gpui::ImageSource>,
     pub(super) reader: Option<Entity<ReaderView>>,
     reader_generation: u64,
+    /// Document identity + content digest of the mounted `reader`, used to reuse the existing
+    /// `ReaderView` (preserving text selection and loaded images) on an unchanged in-place refresh.
+    readme_identity: Option<(ResourceContext, [u8; 20])>,
     pub(super) repository_focus: FocusHandle,
     pub(super) heatmap_focus: FocusHandle,
     pub(super) selected_repository: usize,
@@ -104,6 +107,7 @@ impl ProfileView {
             avatar: None,
             reader: None,
             reader_generation: 0,
+            readme_identity: None,
             repository_focus: cx.focus_handle().tab_stop(true),
             heatmap_focus: cx.focus_handle().tab_stop(true),
             selected_repository: 0,
@@ -155,6 +159,7 @@ impl ProfileView {
         self.avatar = None;
         self.cancel_reader(cx);
         self.reader = None;
+        self.readme_identity = None;
         self.selected_repository = 0;
         self.selected_day = None;
         self.last_action = None;
@@ -263,6 +268,7 @@ impl ProfileView {
         }
         self.cancel_reader(cx);
         self.reader = None;
+        self.readme_identity = None;
         self.readme = SectionState::Unavailable(message.into());
         self.readme_provenance = provenance;
         cx.notify();
@@ -513,6 +519,17 @@ impl ProfileView {
         if !self.accepts(request) {
             return false;
         }
+        if let SectionState::Ready(ref body) = state {
+            let identity = (context.clone(), readme_body_digest(body));
+            if self.reader.is_some()
+                && matches!(self.readme, SectionState::Ready(()))
+                && self.readme_identity.as_ref() == Some(&identity)
+            {
+                self.readme_provenance = provenance;
+                cx.notify();
+                return true;
+            }
+        }
         self.reader_generation = self
             .reader_generation
             .checked_add(1)
@@ -520,12 +537,14 @@ impl ProfileView {
         let reader_generation = self.reader_generation;
         self.cancel_reader(cx);
         self.reader = None;
+        self.readme_identity = None;
         self.readme_provenance = provenance;
         self.readme = match state {
             SectionState::Loading => SectionState::Loading,
             SectionState::Error(error) => SectionState::Error(error),
             SectionState::Unavailable(message) => SectionState::Unavailable(message),
             SectionState::Ready(body) => {
+                let identity = (context.clone(), readme_body_digest(&body));
                 let reader_request = self.request();
                 let layout_request = reader_request.clone();
                 let this = cx.entity().downgrade();
@@ -567,6 +586,7 @@ impl ProfileView {
                     reader
                 });
                 self.reader = Some(reader);
+                self.readme_identity = Some(identity);
                 SectionState::Ready(())
             }
         };
@@ -600,6 +620,7 @@ impl ProfileView {
     pub fn clear_reader(&mut self, cx: &mut Context<Self>) {
         self.cancel_reader(cx);
         self.reader = None;
+        self.readme_identity = None;
         cx.notify();
     }
 
@@ -724,4 +745,25 @@ impl From<ReaderAction> for ProfileActionKind {
     fn from(action: ReaderAction) -> Self {
         Self::Readme(action)
     }
+}
+
+fn readme_body_digest(body: &PreparedBody) -> [u8; 20] {
+    let mut hasher = sha1_smol::Sha1::new();
+    match body {
+        PreparedBody::Empty => hasher.update(b"empty"),
+        PreparedBody::Utf8 { text, has_bom } => {
+            hasher.update(if *has_bom { b"utf8:bom:" } else { b"utf8:raw:" });
+            hasher.update(text.as_bytes());
+        }
+        PreparedBody::Unsupported(kind) => {
+            hasher.update(b"unsupported:");
+            hasher.update(format!("{kind:?}").as_bytes());
+        }
+        PreparedBody::TooLarge { size, limit } => {
+            hasher.update(b"too_large:");
+            hasher.update(&size.to_le_bytes());
+            hasher.update(&(*limit as u64).to_le_bytes());
+        }
+    }
+    hasher.digest().bytes()
 }

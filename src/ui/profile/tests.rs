@@ -1399,4 +1399,56 @@ fn in_place_refresh_preserves_repository_selection_day_selection_and_heatmap_scr
             "in-place refresh must preserve horizontal heatmap scroll offset"
         );
     });
+
+    // Unchanged README refresh reuses the existing ReaderView entity (preserving selection and
+    // loaded image state) while updating provenance; changed README builds a new ReaderView.
+    let reader_before = view
+        .read_with(cx, |view, _| view.reader().map(|r| r.entity_id()))
+        .expect("mounted README reader");
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.update_readme_with_provider(
+            &request,
+            SectionState::Ready(readme(
+                "person",
+                "# Public README\n\n[external](https://example.com)",
+            )),
+            None,
+            Some(ProfileProvenance {
+                historical: true,
+                fetched_at_ms: 1_700_000_000_000,
+                verified_at_ms: 1_700_000_000_000,
+                completeness: crate::domain::cache::CacheCompleteness::Complete,
+            }),
+            window,
+            cx,
+        ));
+    });
+    assert_eq!(
+        view.read_with(cx, |view, _| view.reader().map(|r| r.entity_id())),
+        Some(reader_before),
+        "unchanged README refresh must reuse the mounted ReaderView entity"
+    );
+    assert!(
+        view.read_with(cx, |view, _| view
+            .readme_provenance
+            .as_ref()
+            .is_some_and(ProfileProvenance::is_historical)),
+        "unchanged README refresh must still update provenance"
+    );
+
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.update_readme_with_provider(
+            &request,
+            SectionState::Ready(readme("person", "# Updated README")),
+            None,
+            None,
+            window,
+            cx,
+        ));
+    });
+    assert_ne!(
+        view.read_with(cx, |view, _| view.reader().map(|r| r.entity_id())),
+        Some(reader_before),
+        "changed README content must replace the ReaderView entity"
+    );
 }
