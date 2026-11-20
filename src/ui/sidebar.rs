@@ -249,12 +249,14 @@ pub(super) fn nav_metrics(expansion: f32, rem_size: gpui::Pixels, cx: &App) -> R
 }
 
 /// Home or Settings; walks and clicks as every other sidebar row does.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn nav_row(
     selector: &'static str,
     icon: IconName,
     label: &'static str,
     active: bool,
     metrics: RowMetrics,
+    probe: Option<AnyElement>,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -276,8 +278,10 @@ pub(super) fn nav_row(
         .border_color(transparent_black())
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(if active { fg } else { muted })
-        .when(active, |row| row.bg(hover).font_weight(FontWeight::MEDIUM))
-        .hover(move |style| style.bg(hover).text_color(fg))
+        .when(active, |row| row.font_weight(FontWeight::MEDIUM))
+        .when(!active, |row| {
+            row.hover(move |style| style.bg(hover).text_color(fg))
+        })
         .role(Role::Button)
         .aria_label(label)
         .cursor_pointer()
@@ -300,12 +304,18 @@ pub(super) fn nav_row(
             }
         })
         .tooltip(ui_tooltip(label));
-    marked(row.into_any_element(), active, height, cx)
+    marked(row.into_any_element(), active, height, probe, cx)
 }
 
 /// Full-width lane: clickable background starts at the inset; marker has no hitbox.
 /// Repository lanes and their markers are clipped together by the repository viewport.
-fn marked(row: AnyElement, active: bool, row_height: f32, cx: &App) -> AnyElement {
+fn marked(
+    row: AnyElement,
+    active: bool,
+    row_height: f32,
+    probe: Option<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     let indicator_height = (row_height * SIDEBAR_INDICATOR_HEIGHT_RATIO)
         .clamp(SIDEBAR_INDICATOR_MIN_HEIGHT, SIDEBAR_INDICATOR_MAX_HEIGHT);
     let inset = ((row_height - indicator_height) / 2.0).max(0.0);
@@ -317,6 +327,7 @@ fn marked(row: AnyElement, active: bool, row_height: f32, cx: &App) -> AnyElemen
         .h(px(row_height))
         .pl(px(SIDEBAR_PADDING))
         .child(row)
+        .children(probe)
         .when(active, |lane| {
             lane.child(
                 div()
@@ -349,6 +360,7 @@ pub(super) struct RepoRowView<'a> {
     pub focus: &'a FocusHandle,
     pub active: bool,
     pub frame: SidebarFrame,
+    pub probe: Option<AnyElement>,
     pub run: Run,
 }
 
@@ -360,18 +372,14 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         focus,
         active,
         frame,
+        probe,
         run,
     } = view;
     let theme = cx.theme();
     let colors = &theme.colors;
     let (radius, text) = (theme.radius(Radius::Md), theme.text_size(TextSize::Sm));
-    let (fg, muted, hover, active_bg, focus_color) = (
-        colors.fg,
-        colors.fg_muted,
-        colors.hover,
-        colors.active,
-        colors.fg_muted,
-    );
+    let (fg, muted, hover, focus_color) =
+        (colors.fg, colors.fg_muted, colors.hover, colors.fg_muted);
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (REPO_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
@@ -397,9 +405,7 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         .border_color(transparent_black())
         .text_size(text)
         .text_color(if active { fg } else { muted })
-        .when(active, |row| {
-            row.bg(active_bg).font_weight(FontWeight::MEDIUM)
-        })
+        .when(active, |row| row.font_weight(FontWeight::MEDIUM))
         .when(!active, |row| {
             row.hover(move |style| style.bg(hover).text_color(fg))
         })
@@ -427,7 +433,7 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         })
         .tooltip(ui_tooltip(full_name))
         .into_any_element();
-    marked(row, active, height, cx)
+    marked(row, active, height, probe, cx)
 }
 
 /// The account row. Signed in, only the compact avatar/name/@id cluster opens the profile; the row
@@ -535,7 +541,7 @@ pub(super) fn account_row(
             .text_color(fg)
             .child(identity)
             .into_any_element();
-        return marked(row, active, height, cx);
+        return marked(row, active, height, None, cx);
     };
 
     let identity_label = format!("Profile: {} (@{})", account.name, account.login);
@@ -652,7 +658,7 @@ pub(super) fn account_row(
         .child(identity)
         .when(!collapsed, |row| row.child(bell))
         .into_any_element();
-    marked(row, active, height, cx)
+    marked(row, active, height, None, cx)
 }
 
 /// The account avatar's interpolated diameter in rems, exposed so the Shell can build the real
@@ -1307,7 +1313,9 @@ fn footer_divider(cx: &App) -> AnyElement {
 }
 
 /// The whole fixed column, from top navigation to the quick entries.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sidebar(
+    active_layer: AnyElement,
     nav: AnyElement,
     heading: AnyElement,
     repositories: AnyElement,
@@ -1318,6 +1326,7 @@ pub(super) fn sidebar(
 ) -> AnyElement {
     div()
         .debug_selector(|| "sidebar".to_string())
+        .relative()
         .flex()
         .flex_col()
         .flex_none()
@@ -1328,6 +1337,7 @@ pub(super) fn sidebar(
         .gap(px(SIDEBAR_ROW_GAP))
         .pt(px(SIDEBAR_PADDING))
         .pb(px(SIDEBAR_PADDING))
+        .child(active_layer)
         .child(nav)
         .when(frame.expansion > 0.0, |sidebar| {
             sidebar.child(

@@ -112,6 +112,164 @@ fn release(p: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+fn selection_quad(cx: &mut VisualTestContext, repo: bool) -> Option<gpui::Quad> {
+    cx.update(|window, cx| {
+        let color = if repo {
+            cx.theme().colors.active
+        } else {
+            cx.theme().colors.hover
+        };
+        window.painted_quads().into_iter().find(|quad| {
+            quad.bounds.left() == px(SIDEBAR_PADDING).scale(window.scale_factor())
+                && quad.background == gpui::Background::from(color)
+        })
+    })
+}
+
+fn assert_selection_at(cx: &mut VisualTestContext, selector: &'static str, repo: bool) {
+    let row = bounds(selector, cx);
+    let marker = bounds("sidebar-indicator", cx);
+    let scale = cx.update(|window, _| window.scale_factor());
+    assert!((marker.center().y - row.center().y).abs() <= px(1.0));
+    assert_eq!(selection_quad(cx, repo).unwrap().bounds, row.scale(scale));
+}
+
+#[gpui::test]
+fn active_background_moves_and_retargets_while_indicator_follows_input_immediately(
+    cx: &mut TestAppContext,
+) {
+    use super::sidebar_active::DURATION_MS;
+
+    let (view, cx) = shell(cx);
+    for (index, collapsed) in [false, true].into_iter().enumerate() {
+        let start = index as u64 * 1000;
+        if collapsed {
+            click("sidebar-toggle", cx);
+            click("nav-home", cx);
+        }
+        view.update(cx, |shell, cx| {
+            shell.pin_tab_clock(start);
+            cx.notify();
+        });
+        cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
+        cx.run_until_parked();
+        assert_selection_at(cx, "nav-home", false);
+        let home = selection_quad(cx, false).unwrap().bounds;
+        click("nav-settings", cx);
+        let settings = bounds("nav-settings", cx);
+        assert_eq!(
+            bounds("sidebar-indicator", cx).center().y,
+            settings.center().y
+        );
+        assert_eq!(selection_quad(cx, false).unwrap().bounds, home);
+
+        view.update(cx, |shell, _| shell.pin_tab_clock(start + DURATION_MS / 3));
+        cx.update(|window, cx| assert!(window.simulate_next_frame(cx) > 0));
+        cx.run_until_parked();
+        let moving = selection_quad(cx, false).unwrap().bounds;
+        let scale = cx.update(|window, _| window.scale_factor());
+        assert!(
+            moving.top() > home.top() && moving.top() < settings.scale(scale).top(),
+            "home={home:?}, intermediate={moving:?}, settings={settings:?}, scale={scale}"
+        );
+
+        let focus = view.read_with(cx, |shell, _| shell.repo_focus[0].clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.run_until_parked();
+        press("enter", cx);
+        let repo = bounds("repo-row-0", cx);
+        assert_eq!(bounds("sidebar-indicator", cx).center().y, repo.center().y);
+        assert_eq!(selection_quad(cx, true).unwrap().bounds, moving);
+        view.update(cx, |shell, cx| {
+            shell.pin_tab_clock(start + 2 * DURATION_MS);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_selection_at(cx, "repo-row-0", true);
+
+        cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
+        click("nav-settings", cx);
+        assert_selection_at(cx, "nav-settings", false);
+    }
+}
+
+#[gpui::test]
+fn active_background_uses_the_repository_clip_and_clears_when_hidden(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    cx.simulate_scale_factor_change(1.5);
+    cx.run_until_parked();
+    click("repo-row-0", cx);
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
+    view.update(cx, |shell, cx| {
+        shell.repo_scroll.set_offset(point(px(0.0), px(-12.5)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let row = bounds("repo-row-0", cx).scale(1.5);
+    let viewport = bounds("repo-scroll", cx).scale(1.5);
+    let quad = selection_quad(cx, true).unwrap();
+    assert_eq!(quad.bounds, row);
+    let visible = quad.bounds.intersect(&quad.content_mask.bounds);
+    assert_eq!(visible.top(), viewport.top());
+    assert!(visible.size.height > gpui::ScaledPixels(0.0) && visible.size.height < row.size.height);
+
+    view.update(cx, |shell, cx| {
+        shell.repo_scroll.set_offset(point(px(0.0), px(-500.0)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(selection_quad(cx, true).is_none());
+    click("nav-home", cx);
+    assert_selection_at(cx, "nav-home", false);
+    click("account-identity", cx);
+    assert!(cx.debug_bounds("sidebar-indicator").is_none());
+    assert!(selection_quad(cx, false).is_none());
+}
+
+#[gpui::test]
+fn active_background_settles_when_layout_or_account_changes(cx: &mut TestAppContext) {
+    let (view, cx) = shell(cx);
+    view.update(cx, |shell, cx| {
+        shell.pin_tab_clock(0);
+        cx.notify();
+    });
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
+    click("repo-row-0", cx);
+    view.update(cx, |shell, cx| {
+        let mut rows = shell.repositories().to_vec();
+        rows.swap(0, 1);
+        shell.set_repositories(rows, cx);
+    });
+    cx.run_until_parked();
+    assert_selection_at(cx, "repo-row-1", true);
+
+    click("nav-settings", cx);
+    click("sidebar-toggle", cx);
+    cx.update(|_, cx| {
+        cx.background_executor()
+            .advance_clock(Duration::from_millis(80))
+    });
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_selection_at(cx, "nav-settings", false);
+    cx.update(|_, cx| {
+        cx.background_executor()
+            .advance_clock(Duration::from_millis(200))
+    });
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_selection_at(cx, "nav-settings", false);
+
+    cx.update(|window, cx| {
+        view.update(cx, |shell, cx| {
+            shell.set_account(None, cx);
+            shell.navigate(Route::Home, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_selection_at(cx, "nav-home", false);
+}
+
 #[test]
 fn window_budget_and_remembered_width_are_independent() {
     let mut state = SidebarState::default();
