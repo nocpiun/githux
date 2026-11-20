@@ -1064,17 +1064,25 @@ impl ProfilePage {
         if !self.accepts(&reply) {
             return;
         }
-        // Publication check: re-verify the authorization ticket just before UI publication.
-        // `CacheAuthorization::is_current()` is lock-free and disk-free, so this never queries
-        // SQLite or takes the store's state mutex on the UI thread. A reply read before an explicit
-        // revocation, PAT replacement, rejection or retirement is discarded here, closing the
-        // window between the background read finishing and the UI commit. A freshly captured token
-        // never re-authorizes an older reply.
-        if let Some(auth) = &authorization
-            && !auth.is_current()
+        // Publication check: re-verify both the reply's authorization ticket and any displayed
+        // section's ticket just before UI publication. `CacheAuthorization::is_current()` is
+        // lock-free and disk-free, so this never queries SQLite or takes the store's state mutex
+        // on the UI thread. Checking displayed tickets before updating `self.authorizations` also
+        // prevents an `Err` reply (whose `authorization` is `None`) from overwriting an already
+        // invalidated ticket before the background monitor observes it.
+        let displayed_revoked = self
+            .authorizations
+            .lock()
+            .expect("profile authorizations")
+            .iter()
+            .flatten()
+            .any(|auth| !auth.is_current());
+        if displayed_revoked
+            || authorization
+                .as_ref()
+                .is_some_and(|auth| !auth.is_current())
         {
-            // An invalidated ticket retires whatever it backed, online or historical. The final
-            // reply clears the work slot; see below.
+            // An invalidated ticket retires whatever it backed, online or historical.
             self.retire_displayed_sections(cx);
             cx.notify();
             return;
