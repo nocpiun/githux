@@ -8,9 +8,13 @@
 
 仓库标题精确为 `Repositories (N)`，括号内是当前列表长度（`Shell::repositories().len()`），不使用中点分隔，不硬编码；收起态隐藏标题的行为保留。
 
-Home/Settings、仓库和 Profile 的活动行从客户区可绘制左缘 x=0 开始绘制 2px 宽中性指示条（`SIDEBAR_INDICATOR_WIDTH`）：左上/左下圆角严格为 0，只有右上/右下 4px 小圆角；高度为行高的约 2/3（`SIDEBAR_INDICATOR_HEIGHT_RATIO`），并 clamp 到 20–24px，垂直居中，因此随当前行（含动画中间高度）变化。它处在行背景外，没有交互命中区，不覆盖窗口 resize 规则。仓库指示线与行一起在独立 viewport 内滚动及裁剪。Ely NavItem 无关闭内建 accent indicator 的 API，侧栏模块因此按原控件的主题与键盘行为组合行，避免双线；四个全局入口仍使用自身活动态。
+Home、Settings 和匹配当前路由的仓库行在客户区可绘制左缘 x=0 绘制 2px 宽中性指示条（`SIDEBAR_INDICATOR_WIDTH`）。左上/左下圆角为 0，右上/右下为 4px。高度为行高约 2/3，并限制在 20–24px，垂直居中。路由切换时，指示条在新行当帧绘制。仓库指示条随仓库行滚动及裁剪。账号身份入口打开 Profile，底部全局入口使用各自的活动样式。
 
-账号区不是整行 button：外层 `account-row` 不 hover 点亮、不响应空白右侧；只有头像 + 显示名 + `@ID` 组成的紧凑身份控件（`account-identity`）打开 Profile，保留可访问名称、Tab 焦点与 Enter/Space。身份控件本身也没有整块 hover 背景：悬停时只显示 pointer 光标，并让 `@ID` 出现下划线。展开时右侧另有独立的 Notifications 铃铛（`account-notifications`，沿用原底部快捷入口的收件箱导航），hover tooltip 与可访问名称均为 “Notifications”，点击导航 Notifications 且停止冒泡，不读成 Profile 点击；本轮无未读计数。收起时铃铛隐藏；Notifications 与主题切换都保留在 More 菜单里。账号外层活动 indicator 仍按上面的贴边规则，不把快捷按钮标成 Profile 点击。
+`src/ui/sidebar_active.rs` 在导航和仓库行的文字、图标与交互层下方绘制一块共享选中背景，使用 `colors.active`。左键按下即预览目标；按住目标行时只保留悬停文字色，让共享背景可见。移出行、移出窗口或取消时返回实际选中行，普通悬停仍使用行底色。有效点击和键盘激活更新路由，窄指示条在路由切换的那一帧跳到目标。快速改向保留背景的绘制位置和速度，位置与高度用阻尼弹簧追随目标，触达或收敛后停帧。
+
+仓库之间的移动沿真实仓库 viewport 裁剪，固定导航与仓库之间可经过分组标题，绘制止于仓库 viewport 底边。首次挂载、切账号、列表重排、影响目标的滚动或布局变化时直接采用当前几何。目标完全离屏或没有对应行时清除背景，重新可见时直接贴合行。Ely 或系统启用 reduced motion 时，选中目标和按压预览都直接落点。
+
+账号区不是整行 button：外层 `account-row` 不 hover 点亮、不响应空白右侧；只有头像 + 显示名 + `@ID` 组成的紧凑身份控件（`account-identity`）打开 Profile，保留可访问名称、Tab 焦点与 Enter/Space。身份控件本身也没有整块 hover 背景：悬停时只显示 pointer 光标，并让 `@ID` 出现下划线。展开时右侧另有独立的 Notifications 铃铛（`account-notifications`，沿用原底部快捷入口的收件箱导航），hover tooltip 与可访问名称均为 “Notifications”，点击导航 Notifications 且停止冒泡，不读成 Profile 点击；本轮无未读计数。收起时铃铛隐藏；Notifications 与主题切换都保留在 More 菜单里。
 
 标题栏以下分界区域垂直中央的 24px 圆按钮负责收起/展开，其水平中心落在 island 的左边框线（`width + ISLAND_GAP + ISLAND_BORDER_WIDTH/2`），垂直中心对齐 island 自身高度中点（扣除底部 inset）；两个轴都从与 island 相同的几何常量推导，动画、resize、最大化和窗口化都跟随。分界 gap 提供 8px 横向 resize 命中带，无需拖圆按钮。sash 只在指针位于热区、或一次有效 resize 手势进行中时显示；手势从按下到释放全程保持可见（即使指针短暂跑出正在移动的旧命中带），释放后立即按真实 hover 决定淡出或继续。淡入淡出约 140ms ease-out、可逆续接并遵循 reduced-motion。sash 左侧锚点固定为原 2px 线的中心位置，只向右加宽，右缘与 island 外框左缘重合；上下端仍与 island 外框等高，toggle 在其上层且命中独立。竖线的纵向范围与主页面 island 的完整外框等高：顶端对齐 island 顶边，底端对齐 island 底边（命中带本身用 `ISLAND_INSET` 作为底部内缩，与其上层 island 的底部留白同源，不再叠加第二个 inset），因此不铺满侧栏、也不进入标题栏或窗口底部，且随展开/收起、宽度变化、矮窗口、最大化和窗口化一起跟随。中部的圆 toggle 在其上层绘制，线可被它遮挡但不会覆盖按钮。GPUI drag 捕获负责跨命中带拖动。拖动宽度由指针的绝对位置决定（`width = pointer - grab_offset`，grab offset 只是命中带内的真实几像素差），不再恢复记忆宽度，因此展开后 sash 与指针保持对齐。两个方向的模式切换用**同一个指针派生宽度**表达互斥滞回：
 
