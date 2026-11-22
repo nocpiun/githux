@@ -44,7 +44,7 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 
 - 每次应用都要求 binding 与 generation 同时匹配；旧绑定、旧 generation 的成功与错误都返回 `false` 且不改变状态。
 - `bind` 切换绑定前清空两栏内容、选择与滚动位置，旧 A→B→A 响应不会复活。
-- 新快照到达时清除该栏旧的键盘选择，避免选择指向另一快照或另一账户的条目。
+- 手动刷新成功时，以 Home 工作项 ID 或 Feed 事件 ID 保留选中行、顶部可见行及行内滚动偏移。选中行消失才清除选择；顶部行消失时保留最接近的原位置。切换绑定或全量替换仍清除旧选择。
 - 初建或 `set_unavailable` 是“无当前数据”，不是成功空列表；离线/无缓存不得显示成“没有活动”。
 - `set_loading` 只影响一栏；另一栏的内容、错误或滚动不被擦除。
 - `apply_error` 只终止对应栏；`HomeError` 的认证、限流、SSO、网络、超时、取消和解析失败分别给出不冒充空结果的提示。

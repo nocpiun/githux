@@ -29,9 +29,11 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::ui::shell_refresh::RefreshState;
 use crate::ui::tooltip::ui_tooltip;
 use ely_core::{
     buttons::{ButtonVariant, IconButton},
+    motion::Spinner,
     primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
     typography::Ellipsis,
@@ -312,32 +314,66 @@ pub(super) fn strip(
         .into_any_element()
 }
 
-/// The toolbar pinned to the strip's right edge. It holds one placeholder action this round: no
-/// refresh logic, request or navigation is attached, and the button is disabled so it does not
-/// suggest the capability already exists.
-pub(super) fn toolbar() -> AnyElement {
+/// The toolbar pinned to the strip's right edge. It holds the active-page `tab-refresh` control:
+/// an enabled `RotateCw` button when the active tab has refreshable mounted data, an animated
+/// `Spinner` in the same fixed slot while that page's refresh is in flight, and a disabled button
+/// when the active route has no remote data source (or is in server cooldown / logged out).
+pub(super) fn toolbar(refresh: RefreshState, on_refresh: Run, cx: &App) -> AnyElement {
+    let tooltip = refresh.tooltip();
+    let control = match refresh {
+        RefreshState::Refreshing { .. } => {
+            let side = cx.theme().control_height(ControlSize::Sm);
+            div()
+                .id("tab-refresh-slot")
+                .debug_selector(|| "tab-refresh".to_string())
+                .role(Role::ProgressIndicator)
+                .aria_label(tooltip)
+                .tooltip(ui_tooltip(tooltip))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(side)
+                .child(
+                    div()
+                        .debug_selector(|| "tab-refresh-spinner".to_string())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Spinner::new("tab-refresh-loading").size(IconSize::Sm)),
+                )
+                .into_any_element()
+        }
+        RefreshState::Ready { .. } => div()
+            .id("tab-refresh-slot")
+            .debug_selector(|| "tab-refresh".to_string())
+            .tooltip(ui_tooltip(tooltip))
+            .child(
+                IconButton::new("tab-refresh", IconName::RotateCw)
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .disabled(false)
+                    .on_click(move |_, window, cx| on_refresh(window, cx)),
+            )
+            .into_any_element(),
+        RefreshState::Disabled { .. } => div()
+            .id("tab-refresh-slot")
+            .debug_selector(|| "tab-refresh".to_string())
+            .tooltip(ui_tooltip(tooltip))
+            .child(
+                IconButton::new("tab-refresh", IconName::RotateCw)
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .disabled(true),
+            )
+            .into_any_element(),
+    };
+
     div()
         .debug_selector(|| "tab-toolbar-content".to_string())
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            // The wrapper is exactly the button's slot, so the tip's hover area is unchanged. GPUI
-            // paints a tooltip as its own root, and Ely's `IconButton` builds one with the default
-            // system face; the shell's helper is what puts it on the theme's UI family. Keep the
-            // established `tab-refresh` debug selector on the clickable slot.
-            div()
-                .id("tab-refresh-slot")
-                .debug_selector(|| "tab-refresh".to_string())
-                .tooltip(ui_tooltip("Refresh"))
-                .child(
-                    IconButton::new("tab-refresh", IconName::RotateCw)
-                        .size(ControlSize::Sm)
-                        .variant(ButtonVariant::Ghost)
-                        // Disabled: this round adds the entry, not the refresh it runs later.
-                        .disabled(true),
-                ),
-        )
+        .child(control)
         .into_any_element()
 }
 

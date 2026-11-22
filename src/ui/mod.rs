@@ -53,6 +53,7 @@ pub(crate) mod relative_time;
 pub mod repository;
 pub mod repository_overview;
 pub(crate) mod scroll;
+pub(crate) mod shell_refresh;
 mod sidebar;
 mod sidebar_state;
 // One active-tab underline presentation shared by the repository content tabs, the narrow
@@ -89,6 +90,8 @@ pub struct Shell {
     workspace: Sessions,
     /// Real mounted page hosts, keyed by the never-reused workspace TabId.
     pages: HashMap<TabId, crate::app::pages::MountedPage>,
+    /// Per-tab observers that notify `Shell` when the active tab's refresh state changes.
+    page_observers: HashMap<TabId, gpui::Subscription>,
     /// Last authorization/service context mounted into page hosts. A change clears old data
     /// before anything is read again, even when the visible AccountKey is unchanged.
     page_services: Option<crate::auth::AuthContext>,
@@ -337,6 +340,7 @@ impl Shell {
             sidebar_activation,
             workspace: Sessions::new(cx),
             pages: HashMap::new(),
+            page_observers: HashMap::new(),
             page_services: None,
             page_intents: HashMap::new(),
             active_page: None,
@@ -455,6 +459,7 @@ impl Shell {
         if self.page_services != auth {
             // Drop hosts first: this cancels their work and guarantees no old-authorized data can
             // survive into the next workspace incarnation, including a same-account PAT replace.
+            self.page_observers.clear();
             for (id, page) in std::mem::take(&mut self.pages) {
                 page.suspend(cx);
                 if let crate::app::pages::MountedPage::Repository { page, .. } = &page {
@@ -588,8 +593,34 @@ impl Shell {
             Route::PullRequest { .. } => None,
         };
         if let Some(page) = page {
-            self.pages.insert(id, page);
+            self.insert_page(id, page, cx);
         }
+    }
+
+    fn insert_page(
+        &mut self,
+        id: TabId,
+        page: crate::app::pages::MountedPage,
+        cx: &mut Context<Self>,
+    ) {
+        let observer = shell_refresh::observe_page(id, &page, cx);
+        self.pages.insert(id, page);
+        self.page_observers.insert(id, observer);
+    }
+
+    pub(crate) fn active_refresh_state(&self, cx: &App) -> shell_refresh::RefreshState {
+        let id = self.workspace.active_id();
+        shell_refresh::state_for_active_page(self.workspace.route(), self.pages.get(&id), cx)
+    }
+
+    pub(crate) fn refresh_active_page(&mut self, cx: &mut Context<Self>) -> bool {
+        let id = self.workspace.active_id();
+        let route = self.workspace.route().clone();
+        let started = shell_refresh::refresh_active_page(&route, self.pages.get(&id), cx);
+        if started {
+            cx.notify();
+        }
+        started
     }
 
     fn page_navigation_sink(&self, cx: &Context<Self>) -> crate::app::pages::NavigationSink {
@@ -752,7 +783,7 @@ impl Shell {
             _ => None,
         };
         if let Some(page) = page {
-            self.pages.insert(id, page);
+            self.insert_page(id, page, cx);
         }
     }
 
@@ -763,7 +794,9 @@ impl Shell {
             .as_ref()
             .and_then(|weak| weak.upgrade())
             .and_then(|accounts| accounts.read(cx).services());
-        self.pages.remove(&self.workspace.active_id());
+        let active = self.workspace.active_id();
+        self.pages.remove(&active);
+        self.page_observers.remove(&active);
         self.ensure_active_page(services, window, cx);
     }
 
@@ -830,6 +863,44 @@ impl Shell {
         if let Some(crate::app::pages::MountedPage::Home(page)) = self.pages.get(&id) {
             page.update(cx, |page, cx| page.drain_for_test(cx));
         }
+    }
+
+    #[cfg(test)]
+    pub fn drain_all_pages_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pages: Vec<_> = self.pages.keys().copied().collect();
+        for id in pages {
+            let Some(page) = self.pages.get(&id) else {
+                continue;
+            };
+            match page {
+                crate::app::pages::MountedPage::Home(page) => {
+                    page.update(cx, |page, cx| page.drain_for_test(cx));
+                }
+                crate::app::pages::MountedPage::Profile(page) => {
+                    page.update(cx, |page, cx| page.drain_for_test(window, cx));
+                }
+                crate::app::pages::MountedPage::Repository { page } => {
+                    crate::app::pages::drain_repository_for_test(page, window, cx);
+                }
+                crate::app::pages::MountedPage::Notifications(_)
+                | crate::app::pages::MountedPage::WorkItems(_) => {}
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn active_tab_id_for_test(&self) -> TabId {
+        self.workspace.active_id()
+    }
+
+    #[cfg(test)]
+    pub fn activate_tab_for_test(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab(id, window, cx);
     }
 
     #[cfg(test)]
@@ -1186,6 +1257,7 @@ impl Shell {
         // Dropping this one host cancels only this tab's requests; all other page entities and
         // their verified state remain untouched.
         self.pages.remove(&id);
+        self.page_observers.remove(&id);
         self.page_intents.remove(&id);
         if self.active_page == Some(id) {
             self.active_page = None;
@@ -2458,12 +2530,21 @@ impl Shell {
             on_drag: on_thumb_drag,
         }
         .render(cx);
+        let refresh = self.active_refresh_state(cx);
+        let on_refresh: tabs::Run = {
+            let entity = cx.entity().downgrade();
+            Rc::new(move |_, cx| {
+                let _ = entity.update(cx, |shell, cx| {
+                    shell.refresh_active_page(cx);
+                });
+            })
+        };
         let view = tabs::View {
             entries,
             scroll: self.tab_scroll.clone(),
             dragging: self.tab_drag.as_ref().map(|drag| drag.id),
             drop_at: self.tab_drag.as_ref().map(|drag| drag.slot),
-            toolbar: tabs::toolbar(),
+            toolbar: tabs::toolbar(refresh, on_refresh, cx),
             on_hover,
             on_drag_start,
             on_drag_move,

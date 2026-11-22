@@ -413,6 +413,7 @@ fn indicator_failure_before_disk_publication_and_late_account_reply(cx: &mut Tes
             },
             _ => unreachable!(),
         },
+        _in_flight: None,
     };
     page.update_in(cx, |p, w, cx| {
         p.apply(failure, w, cx);
