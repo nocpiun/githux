@@ -225,6 +225,28 @@ impl ProfileView {
         &self.readme
     }
 
+    pub(crate) fn begin_cached_retry(
+        &mut self,
+        action: ProfileActionKind,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let provenance = match action {
+            ProfileActionKind::RetryBasic => &mut self.basic_provenance,
+            ProfileActionKind::RetryRepositories => &mut self.repositories_provenance,
+            ProfileActionKind::RetryContributions => &mut self.contributions_provenance,
+            ProfileActionKind::RetryReadme => &mut self.readme_provenance,
+            _ => return false,
+        };
+        if let Some(provenance) = provenance
+            && provenance.revalidation_failed
+        {
+            provenance.revalidation_failed = false;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     pub fn basic_provenance(&self) -> Option<&ProfileProvenance> {
         self.basic_provenance.as_ref()
     }

@@ -2,6 +2,7 @@
 use super::{Column, HomeAction, HomeView, ProfileIdentity, RepositoryIdentity};
 use crate::domain::home::*;
 use crate::ui::relative_time::relative;
+use crate::ui::surface;
 use crate::ui::work_item_row::{text_target, text_tooltip};
 use ely_core::{
     data_display::Avatar,
@@ -266,11 +267,25 @@ pub(super) fn home_row(
                 item.number
             ),
             selected,
+            show_selected_bar: true,
             on_row_click: None,
             on_title_click: Some(title_action),
         },
         cx,
     )
+}
+
+/// Color of the PR title icon inside a Feed card: merged contributions use the
+/// theme's purple chart token, while other activity kinds keep the neutral accent.
+pub(super) fn feed_pr_icon_color(
+    kind: FeedActivityKind,
+    colors: &ely_core::theme::Palette,
+) -> gpui::Hsla {
+    if kind == FeedActivityKind::PullRequestMerged {
+        colors.chart[4]
+    } else {
+        colors.accent
+    }
 }
 
 pub(super) fn feed_repository(event: &FeedEvent) -> RepositoryIdentity {
@@ -396,7 +411,7 @@ pub(super) fn feed_row(
         .min_w_0()
         .p_3()
         .rounded(radius)
-        .bg(colors.sunken);
+        .bg(surface::well(&colors));
     // Exactly one of the two cards owns the repository element.
     let (sentence, mut inset) = if merged {
         (sentence.child(div().min_w_0().child(repo)), inset)
@@ -411,7 +426,21 @@ pub(super) fn feed_row(
                     .min_w_0()
                     .text_size(tiny)
                     .text_color(colors.fg_muted)
-                    .child(Icon::new(IconName::Folder).size(IconSize::Xs))
+                    .child(
+                        Icon::new(if activity.kind == FeedActivityKind::RepositoryStarred {
+                            IconName::Star
+                        } else {
+                            IconName::Folder
+                        })
+                        .size(IconSize::Xs)
+                        .color(
+                            if activity.kind == FeedActivityKind::RepositoryStarred {
+                                colors.warning
+                            } else {
+                                colors.fg_muted
+                            },
+                        ),
+                    )
                     .child(div().min_w_0().child(repo)),
             ),
         )
@@ -424,6 +453,7 @@ pub(super) fn feed_row(
                 .id(format!("feed-repo-description-{index}"))
                 .debug_selector(move || format!("feed-repo-description-{index}"))
                 .min_w_0()
+                .pl_5()
                 .text_size(tiny)
                 .text_color(colors.fg_subtle)
                 .line_clamp(3)
@@ -449,7 +479,7 @@ pub(super) fn feed_row(
                 .child(
                     Icon::new(IconName::GitPullRequest)
                         .size(IconSize::Sm)
-                        .color(colors.accent),
+                        .color(feed_pr_icon_color(activity.kind, &colors)),
                 )
                 .child(title(Column::Feed, index, label, cx)),
         );
@@ -461,6 +491,7 @@ pub(super) fn feed_row(
                 .id(format!("feed-pr-body-{index}"))
                 .debug_selector(move || format!("feed-pr-body-{index}"))
                 .min_w_0()
+                .pl_6()
                 .text_size(tiny)
                 .text_color(colors.fg_subtle)
                 .child(preview.excerpt.clone());
@@ -476,7 +507,7 @@ pub(super) fn feed_row(
                             .gap_1()
                             .min_w_0()
                             .child(body_div)
-                            .child(read_more),
+                            .child(div().pl_6().flex().child(read_more)),
                     );
                 } else {
                     inset = inset.child(body_div);
@@ -503,11 +534,15 @@ pub(super) fn feed_row(
                 .p_3()
                 .rounded(radius)
                 .border_1()
-                .border_color(colors.border)
+                .border_color(if selected {
+                    colors.border_strong
+                } else {
+                    colors.border
+                })
                 .bg(if selected {
                     colors.active
                 } else {
-                    colors.surface
+                    surface::raised(&colors)
                 })
                 .child(
                     div()

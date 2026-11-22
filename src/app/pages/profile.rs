@@ -84,6 +84,15 @@ enum Section {
 }
 
 impl Section {
+    fn retry_action(self) -> ProfileActionKind {
+        match self {
+            Self::Basic => ProfileActionKind::RetryBasic,
+            Self::Repositories => ProfileActionKind::RetryRepositories,
+            Self::Contributions => ProfileActionKind::RetryContributions,
+            Self::Readme => ProfileActionKind::RetryReadme,
+        }
+    }
+
     fn index(self) -> usize {
         match self {
             Self::Basic => 0,
@@ -138,6 +147,21 @@ enum SectionResult {
         Result<(SectionOutcome<ContributionCalendar>, ContributionRange), PresentationError>,
     ),
     Readme(Result<SectionOutcome<ProfileReadme>, PresentationError>),
+}
+
+impl SectionResult {
+    fn mark_revalidation_failed(&mut self) {
+        let provenance = match self {
+            Self::Basic(Ok(outcome)) => &mut outcome.provenance,
+            Self::Repositories(Ok(outcome)) => &mut outcome.provenance,
+            Self::Contributions(Ok((outcome, _))) => &mut outcome.provenance,
+            Self::Readme(Ok(outcome)) => &mut outcome.provenance,
+            _ => return,
+        };
+        *provenance = provenance
+            .take()
+            .map(ProfileProvenance::after_revalidation_failure);
+    }
 }
 
 struct Reply {
@@ -399,7 +423,9 @@ impl ProfilePage {
         self.unavailable = None;
         if let (Some(request), Some(view)) = (self.request.clone(), self.view.clone()) {
             view.update(cx, |view, cx| {
-                view.update_basic(&request, SectionState::Loading, cx);
+                if !view.begin_cached_retry(Section::Basic.retry_action(), cx) {
+                    view.update_basic(&request, SectionState::Loading, cx);
+                }
             });
         }
         self.start(Section::Basic, cx);
@@ -416,6 +442,13 @@ impl ProfilePage {
             }
             return;
         };
+        if view.update(cx, |view, cx| {
+            view.begin_cached_retry(section.retry_action(), cx)
+        }) {
+            self.start(section, cx);
+            cx.notify();
+            return;
+        }
         match section {
             Section::Basic => {
                 self.retry_basic(cx);
@@ -711,7 +744,7 @@ impl ProfilePage {
         }
         let submitted = services.executor().handle().spawn(async move {
             let authorization = authorization.as_ref();
-            let result = match section {
+            let mut result = match section {
                 Section::Basic => SectionResult::Basic(
                     read_profile_basic(
                         &repos_for_authorization,
@@ -762,6 +795,8 @@ impl ProfilePage {
                 }),
             };
             if *alive.borrow() {
+                // Only the final read can return a historical value after online fallback.
+                result.mark_revalidation_failed();
                 inbox.lock().expect("profile inbox").push_back(Reply {
                     section,
                     generation,
@@ -1090,11 +1125,11 @@ impl ProfilePage {
         if !reply.preliminary {
             self.work[reply.section.index()] = None;
         }
-        self.authorizations.lock().expect("profile authorizations")[reply.section.index()] =
-            authorization;
         if reply.preliminary && !self.accept_preliminary(&reply, cx) {
             return;
         }
+        self.authorizations.lock().expect("profile authorizations")[reply.section.index()] =
+            authorization;
         match reply.section {
             Section::Basic => self.apply_basic(reply, window, cx),
             section => {
@@ -3042,27 +3077,30 @@ mod tests {
             page.rebind(services, cx);
         });
         wait_for_profile(&harness, cx, |cx| {
-            cx.debug_bounds("profile-basic-provenance-historical")
-                .is_some()
-                && harness.page.read_with(cx, |page, cx| {
-                    let Some(view) = page.view_for_test() else {
-                        return false;
-                    };
-                    let v = view.read(cx);
-                    matches!(v.repositories(), SectionState::Ready(_))
-                        && matches!(v.contributions(), SectionState::Ready(_))
-                        && matches!(v.readme_state(), SectionState::Ready(()))
-                })
-                && cx
-                    .debug_bounds("profile-repositories-provenance-historical")
-                    .is_some()
-                && cx
-                    .debug_bounds("profile-contributions-provenance-historical")
-                    .is_some()
-                && cx
-                    .debug_bounds("profile-readme-provenance-historical")
-                    .is_some()
+            harness.page.read_with(cx, |page, cx| {
+                let Some(view) = page.view_for_test() else {
+                    return false;
+                };
+                let v = view.read(cx);
+                matches!(v.repositories(), SectionState::Ready(_))
+                    && matches!(v.contributions(), SectionState::Ready(_))
+                    && matches!(v.readme_state(), SectionState::Ready(()))
+                    && v.readme_provenance()
+                        .is_some_and(ProfileProvenance::is_historical)
+            })
         });
+        for selector in [
+            "profile-basic-provenance-historical",
+            "profile-repositories-provenance-historical",
+            "profile-contributions-provenance-historical",
+            "profile-readme-provenance-historical",
+            "profile-basic-cache-retry",
+            "profile-repositories-cache-retry",
+            "profile-contributions-cache-retry",
+            "profile-readme-cache-retry",
+        ] {
+            assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+        }
         harness.page.read_with(cx, |page, _| {
             assert!(
                 page.work.iter().all(Option::is_some),
@@ -3100,6 +3138,102 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn only_failed_readme_shows_cached_and_retry_keeps_the_reader_mounted(cx: &mut TestAppContext) {
+        let (harness, cx) = build_harness(cx, true);
+        wait_for_profile(&harness, cx, |cx| {
+            harness.page.read_with(cx, |page, cx| {
+                page.work.iter().all(Option::is_none)
+                    && page
+                        .view_for_test()
+                        .is_some_and(|view| view.read(cx).reader().is_some())
+            })
+        });
+        harness.transport.set_readme_mode(ReadmeMode::ServerError);
+        cx.update_window_entity(&harness.page, |page, _, cx| {
+            page.rebind(harness.controller.read(cx).services(), cx);
+        });
+        wait_for_profile(&harness, cx, |cx| {
+            cx.debug_bounds("profile-readme-cache-retry").is_some()
+                && harness
+                    .page
+                    .read_with(cx, |page, _| page.work.iter().all(Option::is_none))
+        });
+        assert!(
+            cx.debug_bounds("profile-readme-provenance-historical")
+                .is_some()
+        );
+        let readme_text = |cx: &mut VisualTestContext| {
+            harness.page.read_with(cx, |page, cx| {
+                let reader = page.view_for_test().unwrap().read(cx).reader().unwrap();
+                reader
+                    .read(cx)
+                    .markdown()
+                    .unwrap()
+                    .read(cx)
+                    .document_text()
+                    .to_string()
+            })
+        };
+        let old_text = readme_text(cx);
+        assert!(old_text.contains("Welcome to "));
+        for selector in [
+            "profile-basic-provenance-historical",
+            "profile-repositories-provenance-historical",
+            "profile-contributions-provenance-historical",
+        ] {
+            assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+        }
+
+        for mode in [ReadmeMode::ServerError, ReadmeMode::SlowPicture] {
+            let reader = harness.page.read_with(cx, |page, cx| {
+                page.view_for_test()
+                    .unwrap()
+                    .read(cx)
+                    .reader()
+                    .unwrap()
+                    .clone()
+            });
+            harness.transport.hold(true);
+            harness.transport.set_readme_mode(mode);
+            let retry = cx.debug_bounds("profile-readme-cache-retry").unwrap();
+            cx.simulate_click(retry.center(), gpui::Modifiers::none());
+            pump_page(&harness, cx);
+            assert!(
+                cx.debug_bounds("profile-readme-provenance-historical")
+                    .is_none()
+            );
+            assert!(cx.debug_bounds("profile-readme-cache-retry").is_none());
+            harness.page.read_with(cx, |page, cx| {
+                assert!(page.work[Section::Readme.index()].is_some());
+                assert_eq!(
+                    page.view_for_test().unwrap().read(cx).reader(),
+                    Some(&reader)
+                );
+            });
+            harness.transport.release_basic();
+            wait_for_profile(&harness, cx, |cx| {
+                harness.page.read_with(cx, |page, cx| {
+                    page.work[Section::Readme.index()].is_none()
+                        && page.view_for_test().unwrap().read(cx).reader().is_some()
+                })
+            });
+            let failed_again = matches!(mode, ReadmeMode::ServerError);
+            let text = readme_text(cx);
+            assert_eq!(text == old_text, failed_again);
+            assert!(text.contains("End of profile."));
+            assert_eq!(
+                cx.debug_bounds("profile-readme-cache-retry").is_some(),
+                failed_again
+            );
+            assert_eq!(
+                cx.debug_bounds("profile-readme-provenance-historical")
+                    .is_some(),
+                failed_again
+            );
+        }
+    }
+
     /// Regression (review finding): a cached Basic whose canonical login differs from the requested
     /// spelling must not rename the page while the online half still carries the requested login —
     /// that would make `accepts()` reject the final reply and strand Basic in its historical state.
@@ -3127,14 +3261,19 @@ mod tests {
             page.rebind(services, cx);
         });
         wait_for_profile(&harness, cx, |cx| {
-            cx.debug_bounds("profile-basic-provenance-historical")
-                .is_some()
-                && harness
-                    .page
-                    .read_with(cx, |page, _| page.work.iter().all(Option::is_some))
+            harness.page.read_with(cx, |page, cx| {
+                page.view_for_test().is_some_and(|view| {
+                    view.read(cx)
+                        .basic_provenance()
+                        .is_some_and(ProfileProvenance::is_historical)
+                }) && page.work.iter().all(Option::is_some)
+            })
         });
-        // Release only the basic gate: the online Basic must settle and clear its historical marker
-        // while every sibling online read is still held in flight.
+        assert!(
+            cx.debug_bounds("profile-basic-provenance-historical")
+                .is_none()
+        );
+        // Release only the basic gate while every sibling online read is still in flight.
         harness.transport.release_basic();
         wait_for_profile(&harness, cx, |cx| {
             cx.debug_bounds("profile-basic-provenance-historical")
@@ -3407,6 +3546,7 @@ mod tests {
                     && matches!(v.repositories(), SectionState::Ready(_))
                     && matches!(v.contributions(), SectionState::Ready(_))
                     && matches!(v.readme_state(), SectionState::Ready(()))
+                    && page.work.iter().all(Option::is_none)
                     && v.reader().is_some_and(|r| {
                         r.read(cx).image_state(&diagram_key).as_deref() == Some("ready")
                             && r.read(cx).image_state(&logo_key).as_deref() == Some("ready")
@@ -3777,6 +3917,7 @@ mod tests {
                         && v.read(cx)
                             .basic_provenance()
                             .is_some_and(|p| p.is_historical())
+                        && page.work[Section::Basic.index()].is_none()
                 })
             })
         });
@@ -4357,12 +4498,12 @@ mod tests {
         // snapshot could never be found again.
         let later = ContributionRange::new("2024-01-01", "2024-12-31").unwrap();
         assert_ne!(later, cached_range);
+        harness.transport.set_offline(true);
         cx.update_window_entity(&harness.page, |page, _, cx| {
             page.set_range_for_test(later.clone());
             let services = harness.controller.read(cx).services();
             page.rebind(services, cx);
         });
-        harness.transport.set_offline(true);
         wait_for_profile(&harness, cx, |cx| {
             harness.page.read_with(cx, |page, cx| {
                 page.view_for_test().is_some_and(|v| {
@@ -4370,6 +4511,7 @@ mod tests {
                     matches!(v.contributions(), SectionState::Ready(_))
                         && v.contributions_provenance()
                             .is_some_and(|p| p.is_historical())
+                        && page.work[Section::Contributions.index()].is_none()
                 })
             })
         });

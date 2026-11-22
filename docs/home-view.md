@@ -70,10 +70,10 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 
 - 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。
 - 单栏最多同时呈现 loading、empty、error、unavailable 或 Ready 中的一种；Partial 仍保留已取条目并显示原因提示。
-- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。与全局 Issues/PR 共用 `work_item_row`：56 logical px 行高、8px 水平内边距、两行间距 3px，metadata 的编号起点与标题文字左沿对齐。owner/name 无额外布局空隙地组成 `owner/repo`，各自独立导航；owner 的宽度上限按可用 metadata 空间计算，为窄栏名称保留空间，同时避免因 owner/name 长度比例而提前截断正常 owner；更新时间为相对时间。链接与 tooltip 的交互节点只占实际显示文字宽度，非交互的横向 flex slot 吸收余宽；长标题/名称在可用宽度内原生截断。整行原本的选择/激活行为由调用方保留。
-- Feed 是紧凑的活动卡片：avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
-  - **星标仓库**：在仓库链接下方展示仓库真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
-  - **合并 PR**：展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮。
+- Home 保持紧凑 work-item 列表；Issue/PR 图标和标题在同一 flex 行对齐，metadata 位于其下。与全局 Issues/PR 共用 `work_item_row`：56 logical px 行高、8px 水平内边距、两行间距 3px，metadata 的编号起点与标题文字左沿对齐。未选中事项带 `hover` 底色，选中事项保持 `active` 底色并显示左侧 2.5px `accent` 强调条（上下各 10px 留白，不扩增链接热区；该竖条仅 Home 启用）。元信息文字使用 `fg_muted`，相对时间使用 `fg_subtle`。owner/name 无额外布局空隙地组成 `owner/repo`，各自独立导航；owner 的宽度上限按可用 metadata 空间计算，为窄栏名称保留空间，同时避免因 owner/name 长度比例而提前截断正常 owner；更新时间为相对时间。链接与 tooltip 的交互节点只占实际显示文字宽度，非交互的横向 flex slot 吸收余宽；长标题/名称在可用宽度内原生截断。整行原本的选择/激活行为由调用方保留。
+- Feed 是紧凑的活动卡片，页面背景使用 `surface::page`（`surface`），未选中卡片使用 `surface::raised`（`overlay`），卡内详情区使用 `surface::well`（`sunken`），选中卡片保持 `active` 底色并配 `border_strong` 边框；avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
+  - **星标仓库**：使用主题 `warning` 颜色的星标图标（其他 Feed 活动保留原有图标与颜色），在仓库链接下方展示与仓库文字左沿对齐（`pl_5`）的真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
+  - **合并 PR**：PR 标题左侧图标使用主题 `chart[4]` 紫色（仅 `PullRequestMerged` 上色，其他状态/活动不上色），展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本），摘要与“Read more”均与 PR 标题文字左沿对齐（`pl_6`，不扩增“Read more”点击热区）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮（沿用主题 `accent` 原色）。
   - **Read more 交互**：点击或键盘激活经宿主的延迟导航通道打开 `Route::PullRequest { namespace, name, number }`。标签显示 `owner/repo #number` 和 PR 图标；同账户同仓库同编号复用标签，仓库名大小写别名不重复开页。当前仅接入内部导航，详情内容仍待独立实现；不打开系统浏览器、不在卡片内展开全文；阻止事件冒泡，不触发卡片选中或次级激活。
   - 没有 branch/ref/SHA/commit 数等技术噪声 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
@@ -98,17 +98,17 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 ## 2026-11-11 Cache-first 首次内容呈现
 
 - `HomePage` 在 `start` 时为每个栏目额外启动一个**只读本地快照**的作业（`read_cached_first`，`PageReadMode::Offline`），与原有在线读取并发；在线读取先开始，缓存 I/O 不前置。
-- 快照命中时以历史快照（`Saved` 标记 + 原 fetched 时间）立即发布，但**不释放**该栏的 work 槽、不恢复刷新可用性、不触发 Feed 轮询冷却——这些仍由在线结果收尾，因此快照期间刷新保持不可用、不会重复刷新。
+- 快照命中时立即发布内容和原 fetched 时间。在线读取仍占用该栏 work 槽并决定刷新可用性及 Feed 轮询冷却。在途快照隐藏 `Cached`，现有刷新入口在请求完结前保持禁用。
 - 前台用 `PublishMark`（Empty/Historical/Network）决定覆盖顺序：网络结果永远覆盖快照，迟到的缓存完成不会回滚更新的网络内容；同一快照不重复发布（重复发布只会重置滚动与选择）。
 - 缓存未命中、损坏、权限拒绝或存储故障不发布任何内容，保持原有 online loading（不伪装成空页/错误页）。
 - Feed 快照同样设置集合代次（`CollectionGeneration`）与 seen ids，快照期间的续页属于同一集合；网络首页到达后整体替换，不混排不同代次的分页。
 - 去重只用于“同一历史快照”的重复回放：若屏上已是同一代际、已追加过的集合，重放的第一页不会替换它（`apply_feed_page` 只扩不缩虚拟列表，缩短内容会让保留行越界）。此规则与滚动几何无关，改动 `src/ui/home/mod.rs` 的 insets/通道不影响它。
-- 未新增“快照 + 进行中”专用呈现 API：`src/ui/home/mod.rs` 未改动，缓存的“历史在屏”状态由既有 `Saved` 标记与禁用刷新共同表达。
+- 预读与失败回退可命中同一快照。回退完成时更新该栏的失败标记，沿用原列表、滚动和选择。
 
 ## 2026-11-03 离线页面缓存与历史快照呈现
 
 `HomePage` 现已消费 `data::page_cache::CachedPageReadSession`：
-- **离线回退与历史标识**：当且仅当在线网络或超时失败、且当前账户拥有合规缓存时，回退展示本地持久快照；离线未缓存首屏保持 Unavailable（不作为错误标或空活动展示）。历史快照明确保留其原有的 `fetched_at_ms`，并在栏目标题旁显示紧凑 `Saved` 图标与 tooltip 相对保存时间，在追加已缓存旧页时继续保留该标记，只有网络刷新替换整个集合后才清除。
+- **离线回退与历史标识**：在线网络或超时失败且当前账户拥有合规缓存时，显示历史快照。离线未缓存首屏显示 Unavailable。快照保留原 `fetched_at_ms`。完成失败回退后，在栏目标题旁显示 `Cached` 和相对保存时间 tooltip，使用原有列刷新重试。刷新在途隐藏标记，成功后替换集合。Home 和 Feed 独立结算。
 - **分页同源约束**：Feed 触底续读保持严格的同源集合（一次快照周期内全为网络结果或全为历史快照），全过滤空页仍自动续读下一页。若历史 Feed 某一后续页未被缓存，显示紧凑的 `Page N is not available offline` 提示并停止自动重试，绝不把不同代次或新旧混合的分页盲目拼接；同一 Feed 集合内的星标仓库描述批次独立完成，追加新页不会取消前页仍在途的描述查找，而在线刷新替换集合时会取消旧描述批次、重置去重集合与游标。
 - **授权门槛与边界**：401 凭据拒绝、请求取消和过时账户上下文绝不转为历史成功；缓存 quarantine/存储故障与账户会话有效性分开处理，当前 `PageReadSession` 仍有效时回退普通在线读取，不为恢复在线而解锁旧私有快照。切换账户、移除账户或替换 PAT 推进上下文后，已有展示副本在 `rebind`/前台检查时清空并回到 Unavailable。
 - **权限代次票据（2026-11-04）**：消费 cache-runtime 独立核心提交 `9f87f47` 的 `CacheAuthorization`（`CacheStore::authorization(scope, None)`），票据只做内存原子失效判断，不授予权限、不读磁盘。读取、追加、描述回复均携带同一票据，后台完成入队前与 UI 发布前复核；已显示 Home/Feed/描述副本在现有轻节拍 drain 检测到失效后清除，迟到结果不得复活旧内容。

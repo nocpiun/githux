@@ -20,9 +20,11 @@ use ely_core::{
 };
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use std::rc::Rc;
+
+use super::interaction;
 
 /// The single row height both lists reserve in their virtual list state.
 pub(crate) const WORK_ITEM_ROW_HEIGHT: f32 = 56.0;
@@ -122,6 +124,7 @@ pub(crate) struct Row {
     pub updated_tooltip: String,
     pub aria: String,
     pub selected: bool,
+    pub show_selected_bar: bool,
     pub on_row_click: Option<RowAction>,
     pub on_title_click: Option<TitleAction>,
 }
@@ -324,7 +327,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .min_w_0()
         .overflow_hidden()
         .text_size(tiny)
-        .text_color(colors.fg_subtle);
+        .text_color(colors.fg_muted);
     if let Some(debug) = selectors.metadata.clone() {
         metadata = metadata.debug_selector(move || debug);
     }
@@ -436,6 +439,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .id(SharedString::from(format!("{}-updated", selectors.row)))
         .min_w_0()
         .overflow_hidden()
+        .text_color(colors.fg_subtle)
         .tooltip(text_tooltip(
             row.updated_tooltip.clone(),
             format!("{}-updated-tooltip", selectors.row),
@@ -483,6 +487,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
     let mut container = div()
         .id(SharedString::from(selectors.row.clone()))
         .aria_label(row.aria)
+        .relative()
         .w_full()
         .h(px(WORK_ITEM_ROW_HEIGHT))
         .px_2()
@@ -502,6 +507,21 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         } else {
             gpui::transparent_black()
         })
+        .when(!row.selected, |this| {
+            this.hover(interaction::hover_fill(cx))
+        })
+        .when(row.selected && row.show_selected_bar, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(10.0))
+                    .bottom(px(10.0))
+                    .w(px(2.5))
+                    .rounded_r(radius)
+                    .bg(colors.accent),
+            )
+        })
         .debug_selector({
             let debug = selectors.row.clone();
             move || debug.clone()
@@ -510,10 +530,13 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         // The whole row is the click target in the global lists, so the whole row is also where
         // the pointer says so. Rows whose only actions are their own text links do not reach this
         // branch and keep the default cursor on their blank space.
-        container = container.cursor_pointer().on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            action(window, cx);
-        });
+        container = container
+            .cursor_pointer()
+            .active(interaction::pressed_fill(cx))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                action(window, cx);
+            });
     }
     container
         .child(title_line)
