@@ -744,6 +744,7 @@ impl HomePage {
         let binding = self.binding.clone();
         let generation = self.generation;
         self.view.update(cx, |view, cx| {
+            view.set_cache_revalidation_failed(column, false, cx);
             if initial {
                 view.set_loading(column, &binding, generation, cx);
             }
@@ -1187,7 +1188,10 @@ impl HomePage {
                 return;
             }
             // Never roll back a newer network value, and never republish the same snapshot.
-            if same_as_shown || matches!(self.published[index], PublishMark::Network) {
+            if self.work[index].is_none()
+                || same_as_shown
+                || matches!(self.published[index], PublishMark::Network)
+            {
                 return;
             }
         } else {
@@ -1336,7 +1340,12 @@ impl HomePage {
             }),
             Column::Home => None,
         };
+        let retained_snapshot = matches!(
+            self.published[Self::index(column)],
+            PublishMark::Historical { .. }
+        );
         self.view.update(cx, |view, cx| {
+            view.set_cache_revalidation_failed(column, retained_snapshot, cx);
             view.set_refresh_availability(
                 column,
                 &binding,
