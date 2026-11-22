@@ -40,6 +40,7 @@ pub(crate) mod compact_status;
 pub(crate) mod geometry;
 pub mod global_work_items;
 pub mod home;
+pub(crate) mod interaction;
 mod island;
 pub mod notifications;
 mod page;
@@ -56,6 +57,7 @@ mod sidebar_active;
 mod sidebar_state;
 // One active-tab underline presentation shared by the repository content tabs, the narrow
 // Settings category tabs and the Profile Overview strip.
+pub(crate) mod surface;
 pub(crate) mod tab_underline;
 mod tabs;
 pub(crate) mod tooltip;
@@ -1157,6 +1159,7 @@ impl Shell {
             OpenResult::Opened(id) | OpenResult::Activated(id) => id,
         };
         self.follow_page_focus(previous, id, window, cx);
+        self.focus_page_if_other_strip_focused(id, window, cx);
         self.reveal_tab(id);
         if previous != id
             && let Some(page) = self.pages.get(&previous)
@@ -1379,6 +1382,26 @@ impl Shell {
             || previous.state().focus.contains_focused(window, cx);
         if in_previous_page {
             self.focus_page(next, window, cx);
+        }
+    }
+
+    /// When a tab switch is triggered by mouse click or page link while a different tab's strip
+    /// entry still holds keyboard focus, move focus into the incoming page so the old tab does not
+    /// keep a stale focus ring. Keyboard activation on the target tab itself (`id == active`) keeps
+    /// its own strip focus.
+    fn focus_page_if_other_strip_focused(
+        &self,
+        active: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let other_strip_focused = self.workspace.sessions().iter().any(|session| {
+            session.id() != active
+                && (session.state().strip_focus.is_focused(window)
+                    || session.state().strip_focus.contains_focused(window, cx))
+        });
+        if other_strip_focused {
+            self.focus_page(active, window, cx);
         }
     }
     /// Collapses or expands the sidebar the way the toggle does, for the layout regression tests
@@ -2288,7 +2311,7 @@ impl Shell {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let (surface, border, fg) = (colors.surface, colors.border, colors.fg);
-        let outside = colors.bg;
+        let outside = crate::ui::surface::window(&colors);
         let strip = self.tab_strip(window, cx);
         let settings_route = self.workspace.route() == &Route::Settings;
         let session_id = self.workspace.active_id();
@@ -2783,6 +2806,7 @@ impl Shell {
         }
         self.tab_motion.cancel();
         self.follow_page_focus(previous, id, window, cx);
+        self.focus_page_if_other_strip_focused(id, window, cx);
         self.reveal_tab(id);
         cx.notify();
     }
@@ -2908,7 +2932,7 @@ impl Render for Shell {
         }
         let theme = cx.theme();
         let colors = &theme.colors;
-        let (bg, fg) = (colors.bg, colors.fg);
+        let (bg, fg) = (crate::ui::surface::window(colors), colors.fg);
         let this = cx.entity();
         let search_focus = self.search_focus.clone();
         let open_search = move |window: &mut Window, cx: &mut App| {

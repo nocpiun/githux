@@ -19,6 +19,8 @@ pub mod compact_status;
 pub mod fixture;
 #[path = "../ui/geometry.rs"]
 pub mod geometry;
+#[path = "../ui/interaction.rs"]
+pub mod interaction;
 #[path = "../ui/island.rs"]
 pub mod island;
 #[path = "../ui/reader/mod.rs"]

@@ -91,6 +91,7 @@ pub(super) fn row(
                 exact_time(&item.updated_at)
             ),
             selected,
+            show_selected_bar: false,
             // The title has no detail destination: selection and activation stay the repository
             // link's job, exactly as before the shared row.
             on_row_click: Some(select),
