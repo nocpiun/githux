@@ -7,3 +7,5 @@
 下一次产品讨论先确定 Issue 正文/评论与 PR Conversation/Files changed 的阅读深度，再确定试用前是否需要创建或评论。此记录不是功能实现或真机验收证据。
 
 补充：单列 Releases 历史与详情、Packages 包与版本、Profile 用户仓库列表，并按代码历史、人员与仓库发现、运行与部署等路径记录后续候选。对照仓库摘要、Profile Overview 和 GitHub 一手接口文档区分现状与待验证工作。PR 标题统一使用英文，本草稿同步更名。
+
+补充右侧栏与标签树的[两态设计稿](../right-sidebar.md)，对照已有 `Workspace`、`TabId`、固定工具栏与左栏动效划清共享和独立的状态。仅规划，未改应用；图中的独立 Issue、文件标签是目标示例。
