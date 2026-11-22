@@ -299,6 +299,17 @@ impl RowSelection<'_> {
         self.measurements.selected == Some(self.item)
     }
 
+    pub fn with_hover(&self, row: Stateful<Div>, fill: Hsla, foreground: Hsla) -> Stateful<Div> {
+        if self.active() {
+            return row;
+        }
+        let preview = self.measurements.preview == Some(self.item);
+        row.hover(move |style| {
+            let style = style.text_color(foreground);
+            if preview { style } else { style.bg(fill) }
+        })
+    }
+
     pub fn probe(&self) -> Option<AnyElement> {
         self.measurements.probe(self.item)
     }

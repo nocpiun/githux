@@ -285,9 +285,7 @@ pub(super) fn nav_row(
         .text_size(theme.text_size(TextSize::Sm))
         .text_color(if active { fg } else { muted })
         .when(active, |row| row.font_weight(FontWeight::MEDIUM))
-        .when(!active, |row| {
-            row.hover(move |style| style.bg(hover).text_color(fg))
-        })
+        .map(|row| selection.with_hover(row, hover, fg))
         .role(Role::Button)
         .aria_label(label)
         .cursor_pointer()
@@ -415,9 +413,7 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         .text_size(text)
         .text_color(if active { fg } else { muted })
         .when(active, |row| row.font_weight(FontWeight::MEDIUM))
-        .when(!active, |row| {
-            row.hover(move |style| style.bg(hover).text_color(fg))
-        })
+        .map(|row| selection.with_hover(row, hover, fg))
         .role(Role::Button)
         .aria_label(full_name.clone())
         .cursor_pointer()

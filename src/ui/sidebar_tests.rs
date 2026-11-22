@@ -188,6 +188,48 @@ fn active_background_moves_and_retargets_while_indicator_follows_input_immediate
 }
 
 #[gpui::test]
+fn sidebar_press_leaves_the_preview_visible_through_the_hovered_row(cx: &mut TestAppContext) {
+    let (_, cx) = shell(cx);
+    for target in ["nav-settings", "repo-row-0"] {
+        let row = bounds(target, cx);
+        let has_hover_fill = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let bounds = row.scale(window.scale_factor());
+                let hover = gpui::Background::from(cx.theme().colors.hover);
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .any(|quad| quad.bounds.contains(&bounds.center()) && quad.background == hover)
+            })
+        };
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(has_hover_fill(cx), "ordinary hover on {target}");
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: row.center(),
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        let scale = cx.update(|window, _| window.scale_factor());
+        assert_eq!(selection_quad(cx).unwrap().bounds, row.scale(scale));
+        assert!(
+            !has_hover_fill(cx),
+            "opaque hover hides preview on {target}"
+        );
+        let outside = bounds("island", cx).center();
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::none());
+        release(outside, cx);
+        assert_selection_at(cx, "nav-home");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(has_hover_fill(cx), "hover after cancel on {target}");
+    }
+}
+
+#[gpui::test]
 fn sidebar_press_previews_across_rows_and_leaving_reverses_without_navigation(
     cx: &mut TestAppContext,
 ) {
