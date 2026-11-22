@@ -12,4 +12,23 @@ PR #99 的侧栏差异已对照其远端 head `e85216c`。它为普通行增加�
 - `cargo test --locked --bin githux sidebar_tests` 通过，62 项，runner `4bf00e94`。构建槽等待 121.0 秒，命令执行 62.9 秒。
 - `cargo build --locked` 通过，runner `dfdd2181`。构建槽等待 189.3 秒，命令执行 81.7 秒。
 
-正式预览为本 worktree 的 `target/debug/githux.exe`。签入状态可测试 Home → Settings → 仓库，仓库间快速切换，以及键盘激活、侧栏展开/收起和滚动。验证用例读取 GPUI 提交的背景 quad、窄条布局与实际 content mask。它们覆盖鼠标点击、键盘 Enter、展开与窄轨、中途重定向、尺寸落点、150% 缩放的半行与完全离屏、无目标、列表重排、切账号和 reduced motion。负责人原生视觉验收待完成。
+## 负责人反馈后的返工
+
+负责人否决了固定 180ms ease-out 的手感。新版以 [Magpie `b168277` 的侧栏交互](https://github.com/yetone/magpie/blob/b168277b8f525a339cacc1ced1f14c4f9c89b593/internal/gui/assets/app.js) 为行为参照，在 Rust 中实现解析阻尼弹簧。沿用 0.42 秒响应参数和 0.84 阻尼比作为起点。它们决定曲线，实际收敛时间随距离和速度变化。改向保留上一绘制帧的位置与速度。首次触达目标即停，近端误差在 0.2 logical px 内且速度在 4 logical px/s 内也会贴合目标，以免跨多行后出现明显回摆或尾部抖动。
+
+按下 Home、Settings 或仓库行即预览背景，按住移出则撤销。移回后释放也保持原路由。有效点击及键盘激活沿用原路由入口，窄条当帧更新。与已合入的 #99（`173ce80`）组合后，共享层使用 `colors.active` 并承担这三类行的按压底色。悬停、真实焦点边框、其它按钮的按压反馈及圆角 sash 继续由各自控件绘制。
+
+### Windows 预览
+
+启动 worktree 下的 `target/debug/githux.exe`。Home 与 Settings 可以直接操作，仓库场景使用已经登录并加载仓库列表的账户。
+
+1. 在 Home 按住 Settings，观察底色开始移动，窄条仍在 Home。释放完成导航。再按住 Home，移进内容区后释放，确认背景返回 Settings 且页面保持原选中。
+2. 点击相邻仓库，再跨数行点击另一仓库。快速做 A → B → C → A，并在背景中途改向，观察位置连续、停在目标行且无可见回摆。Tab 聚焦仓库后按 Enter，检查焦点边框与窄条更新。
+3. 在窄轨和展开态重复。滚动令选中仓库半露、离屏、再回到视口，确认背景和窄条随行裁剪。关闭 Windows 的动画效果，再重复按压和切换，观察背景直接贴合目标。
+
+### 本轮验证
+
+- `cargo test --locked --bin githux sidebar` 通过 66 项，runner `7eb4e527`。构建槽等待 0.18 秒，命令执行 56.3 秒。用例观察相邻和跨 8 行的绘制帧、快速改向后继承速度、取消后保持路由、静止停帧、键盘激活、折叠及真实视口裁剪。
+- `cargo fmt --all` 与 `cargo build --locked` 通过，runner `3f7db45e` 与 `15adf3f6`。构建槽等待 0.19 秒，构建执行 23.8 秒。
+
+负责人本轮视觉验收仍待完成。

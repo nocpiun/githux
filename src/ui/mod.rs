@@ -256,6 +256,7 @@ impl Shell {
         let repo_ident = (account_state.active.clone(), repositories.len());
         let sidebar_activation = cx.observe_window_activation(window, |shell, window, cx| {
             if !window.is_window_active() {
+                shell.sidebar_active.cancel_press();
                 scroll::cancel_region(&mut shell.repo_bars, &shell.repo_smooth);
                 shell.close_sidebar_menu(window, cx);
                 let resizing = shell.sidebar_state.dragging;
@@ -1871,16 +1872,21 @@ impl Shell {
                 .map(|repo| sidebar_active::Item::Repo(repo.id)),
             _ => None,
         };
-        let measurements = self.sidebar_active.measure(active_item);
+        let sidebar_active = self.sidebar_active.clone();
+        let measurements = sidebar_active.measure(active_item);
+        let selection = |item| sidebar_active::RowSelection {
+            motion: &sidebar_active,
+            measurements: &measurements,
+            item,
+        };
         let home = {
             let this = this.clone();
             sidebar::nav_row(
                 "nav-home",
                 IconName::House,
                 "Home",
-                route == Route::Home,
                 nav_metrics,
-                measurements.probe(sidebar_active::Item::Home),
+                selection(sidebar_active::Item::Home),
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Home, window, cx);
@@ -1895,9 +1901,8 @@ impl Shell {
                 "nav-settings",
                 IconName::Settings,
                 "Settings",
-                route == Route::Settings,
                 nav_metrics,
-                measurements.probe(sidebar_active::Item::Settings),
+                selection(sidebar_active::Item::Settings),
                 move |window, cx| {
                     this.update(cx, |shell, cx| {
                         shell.navigate(Route::Settings, window, cx);
@@ -1987,7 +1992,6 @@ impl Shell {
             .map(|(index, repo)| {
                 let this = this.clone();
                 let target = Route::repository(repo);
-                let active = route.is_repository(repo);
                 let focus = self.repo_focus[index].clone();
                 sidebar::repo_row(
                     sidebar::RepoRowView {
@@ -1995,9 +1999,8 @@ impl Shell {
                         repo,
                         avatar: avatars.pop_front().expect("one avatar per row"),
                         focus: &focus,
-                        active,
                         frame,
-                        probe: measurements.probe(sidebar_active::Item::Repo(repo.id)),
+                        selection: selection(sidebar_active::Item::Repo(repo.id)),
                         run: Box::new(move |window, cx| {
                             let target = target.clone();
                             this.update(cx, |shell, cx| {
@@ -2220,8 +2223,7 @@ impl Shell {
                     .to_pixels(window.rem_size()),
                 reduced: cx.theme().reduced_motion || cx.reduce_motion(),
                 now: self.tab_now_ms(),
-                nav_color: cx.theme().colors.hover,
-                repo_color: cx.theme().colors.active,
+                color: cx.theme().colors.active,
             },
         );
         sidebar::sidebar(

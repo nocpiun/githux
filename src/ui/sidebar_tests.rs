@@ -112,13 +112,9 @@ fn release(p: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn selection_quad(cx: &mut VisualTestContext, repo: bool) -> Option<gpui::Quad> {
+fn selection_quad(cx: &mut VisualTestContext) -> Option<gpui::Quad> {
     cx.update(|window, cx| {
-        let color = if repo {
-            cx.theme().colors.active
-        } else {
-            cx.theme().colors.hover
-        };
+        let color = cx.theme().colors.active;
         window.painted_quads().into_iter().find(|quad| {
             quad.bounds.left() == px(SIDEBAR_PADDING).scale(window.scale_factor())
                 && quad.background == gpui::Background::from(color)
@@ -126,20 +122,18 @@ fn selection_quad(cx: &mut VisualTestContext, repo: bool) -> Option<gpui::Quad> 
     })
 }
 
-fn assert_selection_at(cx: &mut VisualTestContext, selector: &'static str, repo: bool) {
+fn assert_selection_at(cx: &mut VisualTestContext, selector: &'static str) {
     let row = bounds(selector, cx);
     let marker = bounds("sidebar-indicator", cx);
     let scale = cx.update(|window, _| window.scale_factor());
     assert!((marker.center().y - row.center().y).abs() <= px(1.0));
-    assert_eq!(selection_quad(cx, repo).unwrap().bounds, row.scale(scale));
+    assert_eq!(selection_quad(cx).unwrap().bounds, row.scale(scale));
 }
 
 #[gpui::test]
 fn active_background_moves_and_retargets_while_indicator_follows_input_immediately(
     cx: &mut TestAppContext,
 ) {
-    use super::sidebar_active::DURATION_MS;
-
     let (view, cx) = shell(cx);
     for (index, collapsed) in [false, true].into_iter().enumerate() {
         let start = index as u64 * 1000;
@@ -153,20 +147,20 @@ fn active_background_moves_and_retargets_while_indicator_follows_input_immediate
         });
         cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
         cx.run_until_parked();
-        assert_selection_at(cx, "nav-home", false);
-        let home = selection_quad(cx, false).unwrap().bounds;
+        assert_selection_at(cx, "nav-home");
+        let home = selection_quad(cx).unwrap().bounds;
         click("nav-settings", cx);
         let settings = bounds("nav-settings", cx);
         assert_eq!(
             bounds("sidebar-indicator", cx).center().y,
             settings.center().y
         );
-        assert_eq!(selection_quad(cx, false).unwrap().bounds, home);
+        assert_eq!(selection_quad(cx).unwrap().bounds, home);
 
-        view.update(cx, |shell, _| shell.pin_tab_clock(start + DURATION_MS / 3));
+        view.update(cx, |shell, _| shell.pin_tab_clock(start + 60));
         cx.update(|window, cx| assert!(window.simulate_next_frame(cx) > 0));
         cx.run_until_parked();
-        let moving = selection_quad(cx, false).unwrap().bounds;
+        let moving = selection_quad(cx).unwrap().bounds;
         let scale = cx.update(|window, _| window.scale_factor());
         assert!(
             moving.top() > home.top() && moving.top() < settings.scale(scale).top(),
@@ -179,18 +173,79 @@ fn active_background_moves_and_retargets_while_indicator_follows_input_immediate
         press("enter", cx);
         let repo = bounds("repo-row-0", cx);
         assert_eq!(bounds("sidebar-indicator", cx).center().y, repo.center().y);
-        assert_eq!(selection_quad(cx, true).unwrap().bounds, moving);
+        assert_eq!(selection_quad(cx).unwrap().bounds, moving);
         view.update(cx, |shell, cx| {
-            shell.pin_tab_clock(start + 2 * DURATION_MS);
+            shell.pin_tab_clock(start + 600);
             cx.notify();
         });
         cx.run_until_parked();
-        assert_selection_at(cx, "repo-row-0", true);
+        assert_selection_at(cx, "repo-row-0");
 
         cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = true));
         click("nav-settings", cx);
-        assert_selection_at(cx, "nav-settings", false);
+        assert_selection_at(cx, "nav-settings");
     }
+}
+
+#[gpui::test]
+fn sidebar_press_previews_across_rows_and_leaving_reverses_without_navigation(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = shell(cx);
+    click("repo-row-0", cx);
+    view.update(cx, |shell, _| shell.pin_tab_clock(0));
+    cx.update(|_, cx| ely_core::theme::Theme::update(cx, |theme| theme.reduced_motion = false));
+    cx.run_until_parked();
+    let initial = selection_quad(cx).unwrap().bounds;
+    let marker = bounds("sidebar-indicator", cx);
+    let target = bounds("repo-row-8", cx);
+    let selected = view.read_with(cx, |shell, _| shell.route());
+    cx.simulate_mouse_move(target.center(), None, Modifiers::none());
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: target.center(),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.run_until_parked();
+    assert_eq!(selection_quad(cx).unwrap().bounds, initial);
+    view.update(cx, |shell, _| shell.pin_tab_clock(60));
+    cx.update(|window, cx| assert!(window.simulate_next_frame(cx) > 0));
+    cx.run_until_parked();
+    let outbound = selection_quad(cx).unwrap().bounds;
+    let scale = cx.update(|window, _| window.scale_factor());
+    assert!(outbound.top() > initial.top() && outbound.top() < target.scale(scale).top());
+    assert_eq!(bounds("sidebar-indicator", cx), marker);
+    assert_eq!(view.read_with(cx, |shell, _| shell.route()), selected);
+
+    let outside = bounds("island", cx).center();
+    cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(selection_quad(cx).unwrap().bounds, outbound);
+    view.update(cx, |shell, _| shell.pin_tab_clock(70));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(
+        selection_quad(cx).unwrap().bounds.top() > outbound.top(),
+        "retains outgoing velocity before reversing"
+    );
+    cx.simulate_mouse_move(target.center(), Some(MouseButton::Left), Modifiers::none());
+    release(target.center(), cx);
+    assert_eq!(view.read_with(cx, |shell, _| shell.route()), selected);
+    view.update(cx, |shell, _| shell.pin_tab_clock(750));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert_selection_at(cx, "repo-row-0");
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| assert_eq!(window.simulate_next_frame(cx), 0));
+
+    click("repo-row-8", cx);
+    assert_eq!(
+        bounds("sidebar-indicator", cx).center().y,
+        target.center().y
+    );
 }
 
 #[gpui::test]
@@ -207,7 +262,7 @@ fn active_background_uses_the_repository_clip_and_clears_when_hidden(cx: &mut Te
     cx.run_until_parked();
     let row = bounds("repo-row-0", cx).scale(1.5);
     let viewport = bounds("repo-scroll", cx).scale(1.5);
-    let quad = selection_quad(cx, true).unwrap();
+    let quad = selection_quad(cx).unwrap();
     assert_eq!(quad.bounds, row);
     let visible = quad.bounds.intersect(&quad.content_mask.bounds);
     assert_eq!(visible.top(), viewport.top());
@@ -218,12 +273,24 @@ fn active_background_uses_the_repository_clip_and_clears_when_hidden(cx: &mut Te
         cx.notify();
     });
     cx.run_until_parked();
-    assert!(selection_quad(cx, true).is_none());
+    assert!(selection_quad(cx).is_none());
+    view.update(cx, |shell, cx| {
+        shell.repo_scroll.set_offset(point(px(0.0), px(0.0)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_selection_at(cx, "repo-row-0");
+    view.update(cx, |shell, cx| {
+        shell.repo_scroll.set_offset(point(px(0.0), px(-500.0)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(selection_quad(cx).is_none());
     click("nav-home", cx);
-    assert_selection_at(cx, "nav-home", false);
+    assert_selection_at(cx, "nav-home");
     click("account-identity", cx);
     assert!(cx.debug_bounds("sidebar-indicator").is_none());
-    assert!(selection_quad(cx, false).is_none());
+    assert!(selection_quad(cx).is_none());
 }
 
 #[gpui::test]
@@ -241,7 +308,7 @@ fn active_background_settles_when_layout_or_account_changes(cx: &mut TestAppCont
         shell.set_repositories(rows, cx);
     });
     cx.run_until_parked();
-    assert_selection_at(cx, "repo-row-1", true);
+    assert_selection_at(cx, "repo-row-1");
 
     click("nav-settings", cx);
     click("sidebar-toggle", cx);
@@ -251,14 +318,14 @@ fn active_background_settles_when_layout_or_account_changes(cx: &mut TestAppCont
     });
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    assert_selection_at(cx, "nav-settings", false);
+    assert_selection_at(cx, "nav-settings");
     cx.update(|_, cx| {
         cx.background_executor()
             .advance_clock(Duration::from_millis(200))
     });
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    assert_selection_at(cx, "nav-settings", false);
+    assert_selection_at(cx, "nav-settings");
 
     cx.update(|window, cx| {
         view.update(cx, |shell, cx| {
@@ -267,7 +334,7 @@ fn active_background_settles_when_layout_or_account_changes(cx: &mut TestAppCont
         });
     });
     cx.run_until_parked();
-    assert_selection_at(cx, "nav-home", false);
+    assert_selection_at(cx, "nav-home");
 }
 
 #[test]

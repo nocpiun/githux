@@ -29,6 +29,7 @@ use super::{
     },
     interaction,
     scroll::{self, Motion},
+    sidebar_active::RowSelection,
     sidebar_state::SidebarFrame,
 };
 
@@ -251,19 +252,18 @@ pub(super) fn nav_metrics(expansion: f32, rem_size: gpui::Pixels, cx: &App) -> R
 }
 
 /// Home or Settings; walks and clicks as every other sidebar row does.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn nav_row(
     selector: &'static str,
     icon: IconName,
     label: &'static str,
-    active: bool,
     metrics: RowMetrics,
-    probe: Option<AnyElement>,
+    selection: RowSelection<'_>,
     run: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
     let (fg, hover, muted) = (theme.colors.fg, theme.colors.hover, theme.colors.fg_muted);
+    let active = selection.active();
     let (height, expansion) = (metrics.height, metrics.expansion);
     let collapsed = expansion == 0.0;
     let row = div()
@@ -283,15 +283,13 @@ pub(super) fn nav_row(
         .when(active, |row| row.font_weight(FontWeight::MEDIUM))
         .when(!active, |row| {
             row.hover(move |style| style.bg(hover).text_color(fg))
-                .active(interaction::pressed_fill(cx))
         })
         .role(Role::Button)
         .aria_label(label)
         .cursor_pointer()
         .tab_index(0)
         .focus(interaction::focus_ring(cx))
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |_, window, cx| run(window, cx))
+        .map(|row| selection.bind(row, run))
         .child(Icon::new(icon).size(IconSize::Sm))
         .map(|row| {
             if collapsed {
@@ -307,7 +305,13 @@ pub(super) fn nav_row(
             }
         })
         .tooltip(ui_tooltip(label));
-    marked(row.into_any_element(), active, height, probe, cx)
+    marked(
+        row.into_any_element(),
+        active,
+        height,
+        selection.probe(),
+        cx,
+    )
 }
 
 /// Full-width lane: clickable background starts at the inset; marker has no hitbox.
@@ -361,9 +365,8 @@ pub(super) struct RepoRowView<'a> {
     pub repo: &'a RepoSummary,
     pub avatar: AnyElement,
     pub focus: &'a FocusHandle,
-    pub active: bool,
     pub frame: SidebarFrame,
-    pub probe: Option<AnyElement>,
+    pub selection: RowSelection<'a>,
     pub run: Run,
 }
 
@@ -373,15 +376,15 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         repo,
         avatar,
         focus,
-        active,
         frame,
-        probe,
+        selection,
         run,
     } = view;
     let theme = cx.theme();
     let colors = &theme.colors;
     let (radius, text) = (theme.radius(Radius::Md), theme.text_size(TextSize::Sm));
     let (fg, muted, hover) = (colors.fg, colors.fg_muted, colors.hover);
+    let active = selection.active();
     let collapsed = frame.expansion == 0.0;
     let height =
         SIDEBAR_RAIL_ITEM_SIZE + (REPO_ROW_HEIGHT - SIDEBAR_RAIL_ITEM_SIZE) * frame.expansion;
@@ -410,15 +413,13 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         .when(active, |row| row.font_weight(FontWeight::MEDIUM))
         .when(!active, |row| {
             row.hover(move |style| style.bg(hover).text_color(fg))
-                .active(interaction::pressed_fill(cx))
         })
         .role(Role::Button)
         .aria_label(full_name.clone())
         .cursor_pointer()
         .track_focus(focus)
         .focus(interaction::focus_ring(cx))
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |_, window, cx| run(window, cx))
+        .map(|row| selection.bind(row, run))
         .child(
             div()
                 .debug_selector(move || format!("sidebar-repo-avatar-{index}"))
@@ -436,7 +437,7 @@ pub(super) fn repo_row(view: RepoRowView<'_>, cx: &App) -> AnyElement {
         })
         .tooltip(ui_tooltip(full_name))
         .into_any_element();
-    marked(row, active, height, probe, cx)
+    marked(row, active, height, selection.probe(), cx)
 }
 
 /// The account row. Signed in, only the compact avatar/name/@id cluster opens the profile; the row
