@@ -35,9 +35,9 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 | 编号 | 首版排除 |
 | --- | --- |
-| C6、C7 | Packages、Environments 的展示及相关功能 |
+| C6、C7 | Packages、Environments 首版延后；Packages 的包与版本浏览已列入后续路线图 |
 | D5 | Profile 的 Contribution Activity 列表；D4 贡献热力图仍保留 |
-| H5 | Profile 的其他内容 Tabs，例如 Repositories、Stars |
+| H5 | Profile 的其他内容 Tabs 首版延后；用户仓库列表（Repositories）已单列后续路线，Stars 等仍分别定范围 |
 | H6 | 标签剩余的进阶操作：专门的溢出菜单、固定标签、把标签拖出新窗口、重复资源标签扩展、前进/后退历史、重启恢复等；A5 基础多标签、标签条水平滚动与标签拖拽排序已于 2026-10-25 移出排除 |
 | H8 | 安装包、应用签名、自动更新与正式分发渠道建设 |
 | G3、G4 | macOS/Linux 原生运行、交互适配及产品支持验收；不删除既有编译任务 |
@@ -82,8 +82,8 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | --- | --- |
 | Home | 启动进入首页；左栏标题严格为 **Home**，展示最近参与且有更新的 Issues/PRs；右栏标题严格为 **Feed**，展示关注动态 |
 | Repository | 顶部仓库资料与横向内容 Tabs；下方左文件树、右文件查看器，默认 README，处理没有 README 的仓库 |
-| 仓库附加资料 | Releases、Contributors 统一放在资料后的紧凑摘要区；Languages 以页面底边比例色条展示，不另开右侧纵栏，也不恢复旧的顶部 Languages 组。首版仅实现这三项，Packages/Environments 延后 |
-| Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；不实现 Contribution Activity 和其他内容 Tabs |
+| 仓库附加资料 | Releases、Contributors 统一放在资料后的紧凑摘要区；Languages 以页面底边比例色条展示，不另开右侧纵栏，也不恢复旧的顶部 Languages 组。首版摘要范围仅这三项。版本历史/详情与 Packages 包列表、版本浏览见[后续路线](roadmap.md#仓库与用户主页的后续功能)，不把摘要当成完整页面 |
+| Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；当前首版不实现 Contribution Activity 和其他内容 Tabs。后续用户仓库列表按目标用户与登录身份单独读取，不以 Pinned/Popular 或账户侧栏替代 |
 | Global Settings | 借鉴 Magpie 的分类与行式设置组织，具体分类布局与首批选项待定 |
 | Repository Settings | 首轮提供简单设置，风格与全局 Settings 一致，具体选项待定 |
 | Issue/PR 列表与详情 | 全局个人列表已接入。仓库 Issues、PR 列表及单条详情要在日常试用前补齐；不沿用旧原型。评论、改动文件、评审和写操作做到哪一步，依[路线图](roadmap.md#当前证据与下一步)分别定稿 |
