@@ -31,7 +31,7 @@ use super::navigation::{
 use super::{ReaderStatus, RepositoryPage, RepositoryTab, Selection, TREE_ROW_HEIGHT, TREE_WIDTH};
 use crate::domain::repo::RepoVisibility;
 use crate::domain::repository::Completeness;
-use crate::ui::{badge::Badge, scroll};
+use crate::ui::{badge::Badge, interaction, scroll};
 
 const INDENT: f32 = 14.0;
 /// Room for the disclosure chevron, so file rows line up with directory names.
@@ -751,6 +751,7 @@ fn code_header(cx: &App) -> gpui::Div {
         .flex_none()
         .min_w_0()
         .h(theme.control_height(ControlSize::Sm) + gpui::rems(0.5))
+        .bg(theme.colors.bg)
         .border_b_1()
         .border_color(theme.colors.border)
         .whitespace_nowrap()
@@ -1079,7 +1080,6 @@ fn tree_row(
     let is_cursor =
         page.tree_focus.is_focused(window) && cursor.as_deref() == Some(row.path.as_str());
     let hover = colors.hover;
-    let focus_ring = colors.fg_subtle;
     let entity = cx.entity();
 
     let chevron: AnyElement = match kind {
@@ -1208,10 +1208,13 @@ fn tree_row(
         .cursor_pointer()
         .border_1()
         .border_color(gpui::transparent_black())
-        .when(is_selected, |row| row.bg(colors.border))
-        .when(!is_selected, |row| row.hover(move |style| style.bg(hover)))
-        // Keyboard focus is a ring, distinct from hover and selection.
-        .when(is_cursor, |row| row.border_color(focus_ring))
+        .when(is_selected, |row| row.bg(colors.active))
+        .when(!is_selected, |row| {
+            row.hover(move |style| style.bg(hover))
+                .active(interaction::pressed_fill(cx))
+        })
+        // Keyboard focus is the shared ring, distinct from hover and selection.
+        .when(is_cursor, |row| row.border_color(colors.focus))
         .child(chevron)
         .child(Icon::new(icon).size(IconSize::Xs).color(icon_color))
         .child(
@@ -1474,4 +1477,33 @@ fn failure_panel(
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::code_header;
+    use ely_core::theme::ActiveTheme;
+    use gpui::{Background, Styled, TestAppContext};
+
+    #[gpui::test]
+    fn code_header_is_one_step_darker_than_page_in_dark_and_light(cx: &mut TestAppContext) {
+        cx.update(ely_core::init_for_tests);
+        for mode in [ely_core::theme::Mode::Dark, ely_core::theme::Mode::Light] {
+            cx.update(|cx| {
+                ely_core::theme::Theme::set_mode_now(mode, cx);
+                let expected = cx.theme().colors.bg;
+                let page_bg = cx.theme().colors.surface;
+                assert_ne!(expected, page_bg);
+                let mut header = code_header(cx);
+                assert_eq!(
+                    header
+                        .style()
+                        .background
+                        .as_ref()
+                        .and_then(|fill| fill.color()),
+                    Some(Background::from(expected))
+                );
+            });
+        }
+    }
 }

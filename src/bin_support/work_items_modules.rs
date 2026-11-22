@@ -6,6 +6,8 @@ pub mod fixture;
 pub mod geometry;
 #[path = "../ui/global_work_items/mod.rs"]
 pub mod global_work_items;
+#[path = "../ui/interaction.rs"]
+pub mod interaction;
 #[path = "../ui/page_layout.rs"]
 pub mod page_layout;
 #[path = "../ui/relative_time.rs"]

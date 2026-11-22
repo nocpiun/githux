@@ -33,6 +33,7 @@ use gpui::{
 
 use crate::domain::home::{FeedOutcome, HomeError, HomeItem, HomeSearchOutcome};
 use crate::ui::scroll::{self, Bars, Motion, ScrollTarget};
+use crate::ui::surface;
 
 use presentation::home_summary;
 use rows::{feed_row, home_row};
@@ -1379,7 +1380,7 @@ impl Render for HomeView {
             .relative()
             .px_4()
             .pt_4()
-            .bg(colors.surface)
+            .bg(surface::page(&colors))
             .text_size(body_size)
             .text_color(colors.fg)
             .child(columns)
