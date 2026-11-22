@@ -372,6 +372,50 @@ impl PanelView {
         ));
     }
 
+    /// Publish a replacement page. A refresh follows surviving rows by GitHub ID,
+    /// even when newer entries moved those rows down. A new binding starts clean.
+    fn replace_rows<T: PartialEq>(
+        &mut self,
+        previous: Option<&[T]>,
+        next: &[T],
+        height_hint: Pixels,
+        same_id: impl Fn(&T, &T) -> bool,
+    ) {
+        if previous == Some(next) {
+            return; // Keep measured Feed heights and the exact viewport for an unchanged result.
+        }
+        let find = |ix: usize| {
+            let old = previous?.get(ix)?;
+            next.iter().position(|row| same_id(old, row))
+        };
+        let top = self.scroll.logical_scroll_top();
+        let anchor = previous.filter(|rows| !rows.is_empty()).and_then(|rows| {
+            if top.item_ix == rows.len() {
+                return Some(gpui::ListOffset {
+                    item_ix: next.len(),
+                    offset_in_item: px(0.0),
+                });
+            }
+            next.len()
+                .checked_sub(1)
+                .map(|last| match find(top.item_ix) {
+                    Some(ix) => gpui::ListOffset { item_ix: ix, ..top },
+                    None => gpui::ListOffset {
+                        item_ix: top.item_ix.min(last),
+                        offset_in_item: px(0.0),
+                    },
+                })
+        });
+        self.selected = self.selected.and_then(find);
+        self.pending_reveal = self.pending_reveal.and_then(find);
+        self.motion.cancel();
+        self.scroll
+            .reset_with_uniform_height(next.len(), height_hint);
+        if let Some(anchor) = anchor {
+            self.scroll.scroll_to(anchor);
+        }
+    }
+
     fn now_ms(&self) -> u64 {
         #[cfg(test)]
         if let Some(ms) = self.pinned_clock {
@@ -776,8 +820,7 @@ impl HomeView {
     }
 
     /// Applies a typed result only if it belongs to the current binding and
-    /// generation. The keyboard selection is cleared so it can never keep
-    /// pointing at an entry from an older snapshot.
+    /// generation. During a refresh, retain the selection only if its item still exists.
     ///
     /// Non-open entries are dropped here as well as in the adapter. The adapter
     /// already asks GitHub for `is:open`, so this is a defense for fixtures,
@@ -822,17 +865,21 @@ impl HomeView {
             return false;
         }
         outcome.items.retain(HomeItem::is_open);
-        self.home_view.motion.cancel();
-        self.home_view.pending_reveal = None;
-        self.home_view
-            .scroll
-            .reset_with_uniform_height(outcome.items.len(), px(rows::HOME_ROW_HEIGHT));
+        self.home_view.replace_rows(
+            self.home
+                .state
+                .data()
+                .filter(|_| self.home.state.refreshing())
+                .map(|old| old.items.as_slice()),
+            &outcome.items,
+            px(rows::HOME_ROW_HEIGHT),
+            |old, new| old.id == new.id,
+        );
         self.home.state = PanelState::Ready {
             content: PanelContent::Ready(outcome),
             refreshing: false,
         };
         self.home.provenance = provenance;
-        self.home_view.selected = None;
         cx.notify();
         true
     }
@@ -879,17 +926,21 @@ impl HomeView {
         // this view never re-derives membership from a display string. Row count,
         // keyboard selection and activation indices all refer to the visible
         // activity list.
-        self.feed_view.motion.cancel();
-        self.feed_view.pending_reveal = None;
-        self.feed_view
-            .scroll
-            .reset_with_uniform_height(outcome.activities.len(), px(180.0));
+        self.feed_view.replace_rows(
+            self.feed
+                .state
+                .data()
+                .filter(|_| self.feed.state.refreshing())
+                .map(|old| old.activities.as_slice()),
+            &outcome.activities,
+            px(180.0),
+            |old, new| old.event.id == new.event.id,
+        );
         self.feed.state = PanelState::Ready {
             content: PanelContent::Ready(outcome),
             refreshing: false,
         };
         self.feed.provenance = provenance;
-        self.feed_view.selected = None;
         self.feed_append = FeedAppendState::Idle;
         cx.notify();
         true

@@ -21,3 +21,5 @@
 - 聚焦集成回归 [`src/app/pages/refresh_tests.rs`](../../src/app/pages/refresh_tests.rs)（6 项 GPUI 集成测试）：覆盖未登录/Settings/PR 禁用零请求、Home 双列在途合并/部分失败重试/Feed 冷却、Profile 四分区刷新与瞬态 Basic 失败保留视图、Repository 跨阶段在途追踪/不遍历未开目录/零写操作/部分失败重试、Notifications 与全局 Issues/PR 刷新及冷却、多 tab 连续切换/关闭刷新中 tab/切换账户晚到隔离。
 - 最终完整检查（`cargo fmt`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked --bins --tests`、`cargo build --locked`、`git diff --check`）结果见本轮交付记录与 PR 检查。
 - **验证边界**：GPUI 离线测试平台与 fixture 预览覆盖路由、请求计数、并发门闩与状态隔离；真实 Windows 原生窗口观感与真人交互仍待负责人验收（PR 保持 `pending`）。
+
+2026-11-22 合并验证：`refresh_preserves_both_list_anchors_and_selections` 覆盖双栏刷新前后内容不变、重排、选中项删除三种情况。Profile README 测试同步 #101 的缓存重验证字段。

@@ -1415,6 +1415,7 @@ fn in_place_refresh_preserves_repository_selection_day_selection_and_heatmap_scr
             None,
             Some(ProfileProvenance {
                 historical: true,
+                revalidation_failed: false,
                 fetched_at_ms: 1_700_000_000_000,
                 verified_at_ms: 1_700_000_000_000,
                 completeness: crate::domain::cache::CacheCompleteness::Complete,

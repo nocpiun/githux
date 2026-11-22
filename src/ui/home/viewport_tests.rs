@@ -456,6 +456,44 @@ fn endpoint_thumb_max_keeps_unmeasured_tail_spacing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn refresh_preserves_both_list_anchors_and_selections(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    populate(&view, 80, cx);
+    view.update(cx, |v, cx| {
+        let binding = v.binding.clone();
+        for column in [Column::Home, Column::Feed] {
+            let panel = v.panel_mut(column);
+            panel.scroll.scroll_to(gpui::ListOffset {
+                item_ix: 12,
+                offset_in_item: px(7.0),
+            });
+            panel.selected = Some(16);
+        }
+        for change in 0..3 {
+            let mut home = v.home.state.data().unwrap().clone();
+            let mut feed = v.feed.state.data().unwrap().clone();
+            if change == 1 {
+                home.items.rotate_right(1);
+                feed.activities.rotate_right(1);
+            } else if change == 2 {
+                home.items.remove(17);
+                feed.activities.remove(17);
+            }
+            assert!(v.set_refreshing(Column::Home, &binding, 1, cx));
+            assert!(v.set_refreshing(Column::Feed, &binding, 1, cx));
+            assert!(v.apply_home(&binding, 1, home, cx));
+            assert!(v.apply_feed(&binding, 1, feed, cx));
+            for panel in [&v.home_view, &v.feed_view] {
+                let top = panel.scroll.logical_scroll_top();
+                assert_eq!(top.item_ix, if change == 0 { 12 } else { 13 });
+                assert_eq!(top.offset_in_item, px(7.0));
+                assert_eq!(panel.selected, [Some(16), Some(17), None][change]);
+            }
+        }
+    });
+}
+
+#[gpui::test]
 fn endpoint_append_moves_only_the_content_tail_gap(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     cx.simulate_resize(size(px(1180.0), px(1000.0)));
