@@ -70,6 +70,42 @@ impl WorkItemsPage {
             view.update(cx, |view, cx| view.set_active(active, cx));
         }
     }
+
+    pub(crate) fn refresh_state(&self, cx: &gpui::App) -> crate::ui::shell_refresh::RefreshState {
+        let Some(view) = &self.view else {
+            return crate::ui::shell_refresh::RefreshState::disabled(
+                "Sign in to refresh work items",
+            );
+        };
+        let view = view.read(cx);
+        let is_issues = view.kind() == WorkItemKind::Issue;
+        if !view.controller_is_current() {
+            crate::ui::shell_refresh::RefreshState::disabled(if is_issues {
+                "Sign in to refresh Issues"
+            } else {
+                "Sign in to refresh Pull Requests"
+            })
+        } else if view.is_refreshing() {
+            crate::ui::shell_refresh::RefreshState::refreshing(if is_issues {
+                "Refreshing Issues"
+            } else {
+                "Refreshing Pull Requests"
+            })
+        } else {
+            crate::ui::shell_refresh::RefreshState::ready(if is_issues {
+                "Refresh Issues"
+            } else {
+                "Refresh Pull Requests"
+            })
+        }
+    }
+
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(view) = &self.view else {
+            return false;
+        };
+        view.update(cx, |view, cx| view.refresh(cx))
+    }
 }
 
 impl Render for WorkItemsPage {

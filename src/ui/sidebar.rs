@@ -163,7 +163,11 @@ impl super::Shell {
         // The toggle owns its focus handle across mode changes: activating it by keyboard must
         // leave focus on the same actionable button.
         let toggle_focus = self.sidebar_toggle_focus.clone();
-        let button = div()
+        // The round toggle is the one control in the fixed column that really rests over other
+        // content: it straddles the seam between the sidebar and the island. Rows, the account
+        // identity and the quick entries stay flat — they are surfaces inside one column, not
+        // things floating over it — so the shadow stays a depth cue instead of decoration.
+        let button = crate::ui::elevation::attach(div(), cx)
             .id("sidebar-toggle")
             .debug_selector(|| "sidebar-toggle".to_string())
             .track_focus(&toggle_focus)

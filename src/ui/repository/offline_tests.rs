@@ -1193,6 +1193,7 @@ fn a_failed_branch_enumeration_still_revalidates_the_cached_revision(cx: &mut Te
                     )),
                     star_write_generation: page.star_write_generation,
                 },
+                _in_flight: None,
             });
         page.inbox
             .lock()
@@ -1208,6 +1209,7 @@ fn a_failed_branch_enumeration_still_revalidates_the_cached_revision(cx: &mut Te
                     Some("synthetic".into()),
                     true,
                 ))),
+                _in_flight: None,
             });
         page.drain(window, cx);
     });
@@ -1422,6 +1424,7 @@ fn a_late_cached_repository_reply_never_rolls_back_the_network_page(cx: &mut Tes
                     )),
                     star_write_generation: page.star_write_generation,
                 },
+                _in_flight: None,
             });
         page.drain(window, cx);
     });
@@ -2088,6 +2091,7 @@ fn manual_refresh_invalidates_queued_replies_from_the_previous_generation(cx: &m
                     request: old_branch_request,
                     result: Ok((snapshot.clone(), None)),
                 },
+                _in_flight: None,
             });
         page.refresh_repository(cx);
         page.drain(window, cx);
@@ -2168,6 +2172,7 @@ fn reply_captured_before_revocation_is_rejected_afterwards_and_never_revived(
                     request: old_branch_request,
                     result: Ok((snapshot.clone(), None)),
                 },
+                _in_flight: None,
             });
     });
 

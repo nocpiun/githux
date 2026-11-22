@@ -510,6 +510,54 @@ impl HomePage {
         self.view.update(cx, |view, cx| view.set_active(active, cx));
     }
 
+    fn has_current_session(&self) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session.verify()
+                && self
+                    .services
+                    .as_ref()
+                    .is_some_and(|services| services.repositories().is_current(session.context()))
+        })
+    }
+
+    fn feed_in_cooldown(&self) -> bool {
+        self.feed_ready.is_some_and(|ready| Instant::now() < ready)
+    }
+
+    pub(crate) fn refresh_state(&self) -> crate::ui::shell_refresh::RefreshState {
+        if !self.has_current_session() {
+            return crate::ui::shell_refresh::RefreshState::disabled("Sign in to refresh Home");
+        }
+        if self.work.iter().any(Option::is_some) {
+            return crate::ui::shell_refresh::RefreshState::refreshing("Refreshing Home");
+        }
+        crate::ui::shell_refresh::RefreshState::ready("Refresh Home")
+    }
+
+    /// Revalidates both mounted Home columns (Involved work items and Following feed) without
+    /// discarding displayed content, scroll offsets or selection. Respects the server-requested
+    /// Feed poll cooldown while still allowing the Home column to refresh.
+    pub(crate) fn refresh_all(&mut self, cx: &mut Context<Self>) -> bool {
+        self.clear_stale_context(cx);
+        if !self.refresh_state().is_ready() {
+            return false;
+        }
+        let binding = self.binding.clone();
+        let generation = self.generation;
+        self.view.update(cx, |view, cx| {
+            view.set_refreshing(Column::Home, &binding, generation, cx);
+        });
+        self.start(Column::Home, false, cx);
+        if !self.feed_in_cooldown() {
+            self.view.update(cx, |view, cx| {
+                view.set_refreshing(Column::Feed, &binding, generation, cx);
+            });
+            self.start(Column::Feed, false, cx);
+        }
+        cx.notify();
+        self.work.iter().any(Option::is_some)
+    }
+
     pub fn rebind(
         &mut self,
         services: Option<AccountServices>,

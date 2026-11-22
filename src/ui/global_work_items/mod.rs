@@ -165,6 +165,28 @@ impl WorkItemsView {
     pub fn on_repository(&mut self, callback: OnRepository) {
         self.on_repository = Some(callback);
     }
+
+    pub fn kind(&self) -> WorkItemKind {
+        self.controller.query.kind
+    }
+
+    pub fn controller_is_current(&self) -> bool {
+        self.controller.current()
+    }
+
+    pub fn is_refreshing(&self) -> bool {
+        self.controller.busy.is_some() && self.controller.current()
+    }
+
+    /// Triggers a replacement refresh if the page is active, current and idle, preserving
+    /// displayed rows until the new page settles. Duplicate triggers while busy are ignored.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.active || !self.controller.current() || self.controller.busy.is_some() {
+            return false;
+        }
+        self.request(RequestMode::Replace, cx);
+        self.controller.busy.is_some()
+    }
     /// Call when retained tabs leave the foreground. Cancellation invalidates
     /// successes and errors; reentry loads only when no snapshot was obtained.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {

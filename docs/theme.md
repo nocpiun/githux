@@ -1,6 +1,6 @@
 # 正式深色主题
 
-更新：2026-11-19。状态：**已实现，等待负责人原生观感验收**。主题 token 的权威实现是 [`src/app/theme.rs`](../src/app/theme.rs)，启动接线在 [`src/app/mod.rs`](../src/app/mod.rs)；本任务记录见[开发日志](devlog/2026-11-18-geek-neutral-theme.md)（含 2026-11-19 负责人反馈轮）。
+更新：2026-11-20。状态：**已实现，等待负责人原生观感验收**。主题 token 的权威实现是 [`src/app/theme.rs`](../src/app/theme.rs)，启动接线在 [`src/app/mod.rs`](../src/app/mod.rs)，阴影/浮层的唯一取值入口是 [`src/ui/elevation.rs`](../src/ui/elevation.rs)（见[阴影与浮层](#阴影与浮层)）；本任务记录见[开发日志](devlog/2026-11-18-geek-neutral-theme.md)（含 2026-11-19 负责人反馈轮）与[阴影盘点](devlog/2026-11-20-ui-surface-shadows.md)。
 
 ## 模式与安装
 
@@ -55,6 +55,46 @@
 `chart` 8 色依次为 `#6cb6ff`、`#56d4dd`、`#e3b341`、`#f2788f`、`#bc8cff`、`#3fb950`、`#ff9e64`、`#7ee0ff`。`ansi` 16 色为 `#333333`、`#ff7b72`、`#3fb950`、`#e3b341`、`#58a6ff`、`#bc8cff`、`#39c5cf`、`#b8b8b8`、`#525252`、`#ff8b85`、`#56d364`、`#f0cc6a`、`#79c0ff`、`#d2a8ff`、`#56d4dd`、`#ededed`。
 
 `syntax` 13 个 token：`keyword #ff7b72`、`string #a5d6ff`、`number #79c0ff`、`comment #8b949e`、`function #d2a8ff`、`type_name #7ee787`、`constant #ffa657`、`property #79c0ff`、`tag #7ee787`、`attribute #ffa657`、`operator #c9d1d9`、`punctuation #8b949e`、`variable #ededed`。图表等消费 `chart` 的现有组件随语义 token 自动换色；仓库语言条使用独立、固定的 GitHub Linguist 数据色（main #92），不由主题覆盖。作者图片与外部内容颜色同样不进入主题覆盖。
+
+## 阴影与浮层
+
+阴影只属于真的压在别的内容之上的表面。正式界面里 [`src/ui/elevation.rs`](../src/ui/elevation.rs) 是项目自绘阴影的唯一入口，`attach` 从 Ely 的 `Elevation` 表取 `Floating` 层，而不是自己写 offset/blur/颜色：
+
+| 位置 | 元素 | 层级 |
+| --- | --- | --- |
+| 侧栏与 island 分界的收起/展开圆按钮 | `sidebar-toggle` | `Elevation::Floating` |
+| 拖动中的会话标签 ghost | `tab-drag-ghost` | `Elevation::Floating` |
+
+Ely 自己绘制的浮层继续各用一次它自己的层级：command palette 卡片是 `Modal`，侧栏 More 菜单与所有 tooltip 是 `Floating`，选择器下拉（仓库分支、Issues/PR 过滤）由 Ely 的 `Select`/popup 内部绘制。它们不属于本模块，也不额外叠加第二层。
+
+颜色取自 palette 的 `shadow` token，因此深色 Geek Neutral 与 Ely 浅色各自使用本模式的值；标签 ghost 过去写死的 `0,4,12` 黑投影在浅色下会显得过重，现在两个模式都走 `Floating` 的 alpha 与偏移。
+
+**未采用更浅的 `Raised`。** 首版按“小控件用浅层”选了 `Raised`，之后在 150% DPI 原生帧上实测：它只让按钮周边像素变化 1–2 个灰阶（深色 `#191919` 侧栏地面从 25 变到 24–25），窗口里看不出阴影，不满足“至少有明确可见的新增/改善”。改用 `Floating` 后同一区域可测得 32→24（深色）/ 255→245（浅色）的整圈暗环，同尺寸无浮层的对照区保持完全不变。证据见[阴影盘点](devlog/2026-11-20-ui-surface-shadows.md#原生像素证据)。
+
+**刻意保持平面**的对象：列表行、标题带、页面 header、tab 条、分区卡片、Settings/Accounts 表单块。给每一行都加阴影会把一页内容读成一叠卡片，本任务不这么做。未列入上表的元素不应自行 `.shadow(...)`；新增悬浮表面时先在这里登记它的层级，并复用 `elevation::attach`。
+
+形状与裁切无关：阴影只画在元素外框之外，不改尺寸、padding、命中区、焦点环或滚动几何。`cargo test --locked --bin githux ui::elevation` 校验两个模式下的层级、颜色差异，以及一次挂载不会叠两层。
+
+### 预览与验收
+
+正式 binary 已包含这两个表面，无需 example：
+
+```powershell
+cargo run --locked --release
+```
+
+1. 启动即见侧栏与 island 左边框之间的圆形收起按钮，默认深色下它带一圈投影；
+2. 底栏第一个按钮（Sun/Moon）切到浅色，同一位置比对浅色投影，再切回深色；
+3. 按住任一会话标签拖动，`tab-drag-ghost` 带投影跟手；松手后投影随 ghost 一起消失。
+
+只想对比两套主题的阴影而不走 Shell 时，用离线探针（不读账户、不联网）：
+
+```powershell
+cargo run --locked --example shadows
+$env:GITHUX_SHADOWS_MODE="light"; cargo run --locked --example shadows
+```
+
+测试平台只校验层级/颜色契约，探针只校验两模式下的绘制差异，都不判断原生观感；投影是否过重、是否抢眼、是否被裁断仍由负责人在真实 Windows 窗口验收。
 
 ## 边界
 

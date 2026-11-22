@@ -241,4 +241,7 @@ pub fn sync_repository_avatars(page: &Entity<RepositoryPage>, avatars: &PageAvat
 }
 
 #[cfg(test)]
+mod refresh_tests;
+
+#[cfg(test)]
 mod tests;

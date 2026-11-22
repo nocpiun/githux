@@ -296,20 +296,49 @@ impl BranchState {
     }
 }
 
+/// RAII guard for one non-preliminary background job owned by a [`Work`] instance.
+///
+/// Carried from `spawn_job` through the Tokio task into [`Message`] and dropped only after
+/// `apply` finishes (after any chained follow-up jobs like Branches, Revision, Replacement or
+/// Overview have already been spawned), so `is_refreshing()` never transiently drops to false
+/// between chained stages.
+struct InFlightJob(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for InFlightJob {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 /// One browsing generation's in-flight work.
 struct Work {
     token: CancellationToken,
     source: CancellationTokenSource,
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Work {
     fn new() -> Self {
         let (token, source) = CancellationToken::new();
-        Self { token, source }
+        Self {
+            token,
+            source,
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     fn token(&self) -> CancellationToken {
         self.token.clone()
+    }
+
+    fn track_job(&self) -> InFlightJob {
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        InFlightJob(self.in_flight.clone())
+    }
+
+    fn has_in_flight(&self) -> bool {
+        self.in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 }
 
@@ -329,6 +358,7 @@ struct Message {
     /// empty page but never ends or overrides the online read that owns the same resource.
     preliminary: bool,
     body: Body,
+    _in_flight: Option<InFlightJob>,
 }
 
 enum Body {
@@ -842,6 +872,34 @@ impl RepositoryPage {
             });
             cx.notify();
         }
+    }
+
+    /// Whether this repository page has an active, verified session eligible for revalidation.
+    pub fn can_refresh(&self) -> bool {
+        self.active
+            && !self.authorization_lost
+            && self.session.as_ref().is_some_and(RepositorySession::verify)
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|ctx| self.services.accounts.repo_service().is_current(ctx))
+    }
+
+    /// Whether any non-preliminary repository read (summary, branches, revision, tree/file
+    /// replacement, overview sections, or OPEN counts) is currently in flight.
+    pub fn is_refreshing(&self) -> bool {
+        self.work.as_ref().is_some_and(Work::has_in_flight) || self.extras.has_in_flight()
+    }
+
+    /// Revalidates this repository page only when idle and authorized, coalescing duplicate
+    /// refresh triggers while a refresh pass is already in flight.
+    pub fn refresh_if_idle(&mut self, cx: &mut Context<Self>) -> bool {
+        self.check_authorization(cx);
+        if !self.can_refresh() || self.is_refreshing() {
+            return false;
+        }
+        self.refresh_repository(cx);
+        self.is_refreshing()
     }
 
     /// Revalidates repository summary, branches, revision and overview online.
@@ -1723,6 +1781,7 @@ impl RepositoryPage {
     /// Drains the result queue, then re-checks that the session is still the
     /// active, verified one.
     fn drain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_refreshing = self.is_refreshing();
         let messages: Vec<Message> = {
             let mut inbox = self.inbox.lock().expect("repository page inbox");
             inbox.drain(..).collect()
@@ -1733,6 +1792,9 @@ impl RepositoryPage {
         }
         self.drain_overview(cx);
         self.drain_star(cx);
+        if was_refreshing != self.is_refreshing() {
+            cx.notify();
+        }
     }
 
     /// Detects an account/authorization change (including cache gate revocation
@@ -3347,6 +3409,7 @@ impl RepositoryPage {
                         context,
                         preliminary: true,
                         body,
+                        _in_flight: None,
                     });
             }
         });
@@ -3360,7 +3423,11 @@ impl RepositoryPage {
         let Some(context) = self.context.clone() else {
             return;
         };
-        let Some(cancel) = self.work.as_ref().map(Work::token) else {
+        let Some((cancel, in_flight)) = self
+            .work
+            .as_ref()
+            .map(|work| (work.token(), work.track_job()))
+        else {
             return;
         };
         let cached = self.cached_session.clone();
@@ -3390,6 +3457,7 @@ impl RepositoryPage {
                         context,
                         preliminary: false,
                         body,
+                        _in_flight: Some(in_flight),
                     });
             }
         });

@@ -262,6 +262,7 @@ fn continuity_a_ref_switch_cancels_the_prepared_replacement(cx: &mut TestAppCont
                         true,
                     )),
                 },
+                _in_flight: None,
             },
             window,
             cx,
@@ -388,6 +389,7 @@ fn continuity_a_recycled_locator_retires_old_repository_replies(cx: &mut TestApp
                 page.branches().unwrap().clone(),
                 None,
             ))),
+            _in_flight: None,
         };
         let mut details = page.details().unwrap().clone();
         details.identity.id = 43;

@@ -209,6 +209,10 @@ pub struct ProfilePage {
     navigation: NavigationSink,
     active: bool,
     unavailable: Option<PresentationError>,
+    /// Set when `refresh_all` could not start `Section::Readme` immediately because `Basic` was
+    /// not in `SectionState::Ready` (for example after a transient Basic refresh failure). Once
+    /// Basic succeeds, `apply_basic` consumes this flag and starts the deferred README read.
+    pending_readme_refresh: bool,
     _changed: Option<Subscription>,
     _avatars_changed: Option<Subscription>,
 }
@@ -252,6 +256,7 @@ impl ProfilePage {
             navigation,
             active: true,
             unavailable: None,
+            pending_readme_refresh: false,
             _changed: None,
             _avatars_changed: None,
         };
@@ -267,6 +272,52 @@ impl ProfilePage {
         }
     }
 
+    fn has_current_session(&self) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session.verify()
+                && self
+                    .services
+                    .as_ref()
+                    .is_some_and(|services| services.repositories().is_current(session.context()))
+        })
+    }
+
+    pub(crate) fn refresh_state(&self) -> crate::ui::shell_refresh::RefreshState {
+        if !self.has_current_session() {
+            return crate::ui::shell_refresh::RefreshState::disabled("Sign in to refresh Profile");
+        }
+        if self.work.iter().any(Option::is_some) {
+            return crate::ui::shell_refresh::RefreshState::refreshing("Refreshing Profile");
+        }
+        crate::ui::shell_refresh::RefreshState::ready("Refresh Profile")
+    }
+
+    /// Revalidates all mounted Profile sections (basic profile, pinned/popular repositories,
+    /// contributions calendar and profile README) in place without resetting scroll, selection or
+    /// already displayed content. If the initial basic read failed and no view is mounted yet,
+    /// retries basic (which automatically starts the sibling sections once basic succeeds).
+    pub(crate) fn refresh_all(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.refresh_state().is_ready() {
+            return false;
+        }
+        self.unavailable = None;
+        if let Some(view) = &self.view {
+            let has_basic = matches!(view.read(cx).basic(), SectionState::Ready(_));
+            self.pending_readme_refresh = !has_basic;
+            self.start(Section::Basic, cx);
+            self.start(Section::Repositories, cx);
+            self.start(Section::Contributions, cx);
+            if has_basic {
+                self.start(Section::Readme, cx);
+            }
+        } else {
+            self.pending_readme_refresh = false;
+            self.start(Section::Basic, cx);
+        }
+        cx.notify();
+        self.work.iter().any(Option::is_some)
+    }
+
     pub fn rebind(&mut self, services: Option<AccountServices>, cx: &mut Context<Self>) {
         if let Some(view) = &self.view {
             view.update(cx, |view, cx| view.clear_reader(cx));
@@ -278,6 +329,7 @@ impl ProfilePage {
         self.requests = [0; 4];
         self.request = None;
         self.unavailable = None;
+        self.pending_readme_refresh = false;
         self.cache_invalidated
             .store(u64::MAX, std::sync::atomic::Ordering::Release);
         *self.authorizations.lock().expect("profile authorizations") = [None, None, None, None];
@@ -1047,17 +1099,25 @@ impl ProfilePage {
         if !self.accepts(&reply) {
             return;
         }
-        // Publication check: re-verify the authorization ticket just before UI publication.
-        // `CacheAuthorization::is_current()` is lock-free and disk-free, so this never queries
-        // SQLite or takes the store's state mutex on the UI thread. A reply read before an explicit
-        // revocation, PAT replacement, rejection or retirement is discarded here, closing the
-        // window between the background read finishing and the UI commit. A freshly captured token
-        // never re-authorizes an older reply.
-        if let Some(auth) = &authorization
-            && !auth.is_current()
+        // Publication check: re-verify both the reply's authorization ticket and any displayed
+        // section's ticket just before UI publication. `CacheAuthorization::is_current()` is
+        // lock-free and disk-free, so this never queries SQLite or takes the store's state mutex
+        // on the UI thread. Checking displayed tickets before updating `self.authorizations` also
+        // prevents an `Err` reply (whose `authorization` is `None`) from overwriting an already
+        // invalidated ticket before the background monitor observes it.
+        let displayed_revoked = self
+            .authorizations
+            .lock()
+            .expect("profile authorizations")
+            .iter()
+            .flatten()
+            .any(|auth| !auth.is_current());
+        if displayed_revoked
+            || authorization
+                .as_ref()
+                .is_some_and(|auth| !auth.is_current())
         {
-            // An invalidated ticket retires whatever it backed, online or historical. The final
-            // reply clears the work slot; see below.
+            // An invalidated ticket retires whatever it backed, online or historical.
             self.retire_displayed_sections(cx);
             cx.notify();
             return;
@@ -1338,14 +1398,15 @@ impl ProfilePage {
                 }
                 // Every sibling section that still has no content is read now; one that is already
                 // displayed keeps its value until its own online read replaces it.
+                let deferred_readme = std::mem::take(&mut self.pending_readme_refresh);
                 for section in [
                     Section::Repositories,
                     Section::Contributions,
                     Section::Readme,
                 ] {
-                    // The README is login-dependent, so a canonical rename restarts it even when it
-                    // already had content.
-                    if (section == Section::Readme && changed_login)
+                    // The README depends on valid Basic data (and canonical login), so a canonical
+                    // rename or a refresh deferred while Basic was in Error starts it here.
+                    if (section == Section::Readme && (changed_login || deferred_readme))
                         || self.section_is_empty(section, cx)
                     {
                         self.start(section, cx);
@@ -1366,9 +1427,27 @@ impl ProfilePage {
                 }
             }
             Err(error) => {
-                self.view = None;
-                self.request = None;
-                self.unavailable = Some(error);
+                self.pending_readme_refresh = false;
+                // When a Profile view is already mounted and a manual refresh hits a transient
+                // Basic error (network/5xx/rate-limit), report the error on the Basic section
+                // instead of tearing down sibling sections (Repositories, Contributions, README)
+                // and losing scroll position. Authorization/unavailable errors still retire the
+                // whole page.
+                let retain_mounted = !matches!(
+                    error,
+                    PresentationError::Unauthorized | PresentationError::Forbidden
+                );
+                if retain_mounted
+                    && let (Some(request), Some(view)) = (self.request.clone(), self.view.clone())
+                {
+                    view.update(cx, |view, cx| {
+                        view.update_basic(&request, SectionState::Error(error), cx);
+                    });
+                } else {
+                    self.view = None;
+                    self.request = None;
+                    self.unavailable = Some(error);
+                }
             }
         }
     }
