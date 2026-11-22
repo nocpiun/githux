@@ -281,6 +281,7 @@ struct PanelModel<T> {
     /// `None` is a current/network observation; `Some` is an explicitly marked
     /// historical snapshot, including its original fetch/verification times.
     provenance: Option<PageProvenance>,
+    cache_revalidation_failed: bool,
 }
 
 impl<T> PanelModel<T> {
@@ -294,6 +295,14 @@ impl<T> PanelModel<T> {
             },
             refresh: RefreshAvailability::default(),
             provenance: None,
+            cache_revalidation_failed: false,
+        }
+    }
+
+    fn set_cache_revalidation_failed(&mut self, failed: bool) {
+        self.cache_revalidation_failed = failed;
+        if failed && let PanelState::Ready { refreshing, .. } = &mut self.state {
+            *refreshing = false;
         }
     }
 
@@ -306,6 +315,7 @@ impl<T> PanelModel<T> {
         };
         self.refresh = RefreshAvailability::default();
         self.provenance = None;
+        self.cache_revalidation_failed = false;
     }
 }
 
@@ -698,6 +708,19 @@ impl HomeView {
                 name: item.repository.name.clone(),
             },
         }))
+    }
+
+    pub(crate) fn set_cache_revalidation_failed(
+        &mut self,
+        column: Column,
+        failed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match column {
+            Column::Home => self.home.set_cache_revalidation_failed(failed),
+            Column::Feed => self.feed.set_cache_revalidation_failed(failed),
+        }
+        cx.notify();
     }
 
     fn begin_refresh(&mut self, column: Column) {
@@ -1440,11 +1463,22 @@ fn render_panel_with<T: PanelRows + 'static>(
         append_generation,
         cx,
     );
+    let busy = model.state.is_busy();
     let historical = model
         .provenance
         .as_ref()
+        .filter(|_| {
+            model.cache_revalidation_failed
+                && !busy
+                && matches!(
+                    model.state,
+                    PanelState::Ready {
+                        content: PanelContent::Ready(_),
+                        ..
+                    }
+                )
+        })
         .map(|provenance| historical_mark(column, provenance, cx));
-    let busy = model.state.is_busy();
     let disabled = !model.refresh.available || busy;
     let tooltip = if busy {
         format!("Refreshing {title}")
@@ -1813,7 +1847,7 @@ fn historical_mark(
     let colors = cx.theme().colors.clone();
     let at = std::time::UNIX_EPOCH + Duration::from_millis(provenance.fetched_at_ms.max(0) as u64);
     let when = crate::ui::relative_time::relative(Some(&format_rfc3339(at)), SystemTime::now());
-    let tip = format!("Saved {when}. Network content has not replaced this snapshot.");
+    let tip = format!("Refresh failed. Showing a snapshot saved {when}.");
     div()
         .id(format!("{}-historical", column_name(column)))
         .debug_selector(move || format!("{}-historical", column_name(column)))
@@ -1825,7 +1859,7 @@ fn historical_mark(
         .text_color(colors.fg_subtle)
         .tooltip(ui_tooltip(tip))
         .child(Icon::new(IconName::Clock).size(IconSize::Xs))
-        .child("Saved")
+        .child("Cached")
         .into_any_element()
 }
 

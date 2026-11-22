@@ -660,6 +660,11 @@ fn online_cache_reopens_and_offline_reads_the_same_home_feed_and_older_page(
     });
     let (page, cx) = open_page(&mut fixture, cx);
     settle(&page, cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("home-historical").is_some());
+    assert!(cx.debug_bounds("feed-historical").is_some());
     assert_eq!(
         home_title(&page, cx).as_deref(),
         Some("cached home"),
@@ -1685,11 +1690,13 @@ fn cached_home_and_feed_paint_before_the_network_read_finishes_then_are_replaced
     drive_until(&page, cx, |page, cx| {
         home_title(page, cx).as_deref() == Some("cached home") && feed_ids(page, cx) == ["first"]
     });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("home-historical").is_none());
+    assert!(cx.debug_bounds("feed-historical").is_none());
     page.read_with(cx, |page, cx| {
-        assert!(
-            page.view.read(cx).provenance(Column::Home).is_some(),
-            "a snapshot on screen must be marked as saved, not fresh"
-        );
+        assert!(page.view.read(cx).provenance(Column::Home).is_some());
         assert!(page.view.read(cx).provenance(Column::Feed).is_some());
         assert!(
             page.work[0].is_some() && page.work[1].is_some(),

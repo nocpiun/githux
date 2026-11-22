@@ -1238,7 +1238,7 @@ fn historical_and_partial_provenance_badges_and_section_retries_work(cx: &mut Te
         assert!(view.update_basic_with_provenance(
             &request,
             SectionState::Ready(basic("person")),
-            Some(ProfileProvenance::from_cache(true, &meta_hist)),
+            Some(ProfileProvenance::from_cache(true, &meta_hist).after_revalidation_failure()),
             cx,
         ));
         assert!(view.update_repositories_with_provenance(
@@ -1248,7 +1248,7 @@ fn historical_and_partial_provenance_badges_and_section_retries_work(cx: &mut Te
                 total_repos: 1,
                 ..pinned(Showcase::PinnedRepositories(vec![]))
             }),
-            Some(ProfileProvenance::from_cache(true, &meta_partial)),
+            Some(ProfileProvenance::from_cache(true, &meta_partial).after_revalidation_failure()),
             cx,
         ));
         assert!(view.update_contributions(
@@ -1261,7 +1261,7 @@ fn historical_and_partial_provenance_badges_and_section_retries_work(cx: &mut Te
             &request,
             SectionState::Ready(readme("person", "# Cached README")),
             None,
-            Some(ProfileProvenance::from_cache(true, &meta_hist)),
+            Some(ProfileProvenance::from_cache(true, &meta_hist).after_revalidation_failure()),
             window,
             cx,
         ));
