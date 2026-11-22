@@ -37,6 +37,7 @@ pub mod avatar;
 pub(crate) mod badge;
 mod chrome;
 pub(crate) mod compact_status;
+pub(crate) mod elevation;
 pub(crate) mod geometry;
 pub mod global_work_items;
 pub mod home;
