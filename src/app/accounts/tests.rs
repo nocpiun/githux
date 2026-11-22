@@ -2481,7 +2481,10 @@ fn a_network_failure_falls_back_to_the_cached_list_as_history(cx: &mut TestAppCo
         matches!(&state.repositories.preview, RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1)
             && matches!(
                 state.repositories.origin,
-                RepositoryListOrigin::Historical { .. }
+                RepositoryListOrigin::Historical {
+                    revalidation_failed: true,
+                    ..
+                }
             )
     });
     let state = snapshot(&controller, cx);
@@ -2552,13 +2555,18 @@ fn a_cached_repository_list_paints_before_the_online_read_finishes_then_is_repla
                         accounts.snapshot().repositories.origin,
                         RepositoryListOrigin::Historical { .. }
                     )
+                    && accounts
+                        .snapshot()
+                        .repositories
+                        .historical_status()
+                        .is_none()
                     && matches!(
                         &accounts.snapshot().repositories.preview,
                         RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 1
                     )
             })
         }),
-        "the cached list must paint while the online read is still pending"
+        "the cached list must paint silently while the online read is still pending"
     );
 
     // Releasing the network replaces it with the live, complete list.
@@ -2754,6 +2762,7 @@ fn only_a_historical_ready_list_reports_an_offline_label() {
         preview: RepositoryPreview::Ready(outcome()),
         origin: RepositoryListOrigin::Historical {
             verified_at_ms: 1_700_000_000_000,
+            revalidation_failed: true,
         },
     };
     let label = historical.historical_status().expect("historical label");
@@ -2894,7 +2903,10 @@ fn revocation_clears_online_rows_and_rejects_queued_replies_even_after_gate_reco
     assert!(!token.is_current());
     for origin in [
         RepositoryListOrigin::Network,
-        RepositoryListOrigin::Historical { verified_at_ms: 1 },
+        RepositoryListOrigin::Historical {
+            verified_at_ms: 1,
+            revalidation_failed: true,
+        },
     ] {
         controller.update(cx, |accounts, cx| {
             accounts.generation += 1;

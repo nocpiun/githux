@@ -54,7 +54,7 @@ Pinned/Popular 卡片的仓库简介改为自然换行、最多三行：`line_cl
    - 通过新增的 `ProfileView::update_readme_with_provider` 将 provider 交给 `ReaderView::set_image_provider`，同时保持 `MarkdownLayout::Flow` 自然高度、无灰底、无内嵌竖向滚动条和 HTML 子集行为。共享图片管线与缓存细节见 [README 图片加载与显示](reader-images.md)。
 3. **历史快照、Partial 与缺失缓存的紧凑视觉区分**：
    - `ProfileProvenance` 记录 `historical`（`PageOrigin::HistoricalSnapshot`）、时间戳与 `CacheCompleteness`。
-   - 离线历史快照在 Basic 标题行、README 头部、Pinned/Popular 标题行与 Contributions 标题行旁显示紧凑 Neutral `Badge`（`Cached · <relative time>`，复用 `ui::relative_time::relative`，hover tooltip 说明本地历史快照）。
+   - Online 失败并成功回退到历史快照时，在对应 Basic、README、Pinned/Popular 或 Contributions 标题旁显示 `Cached · <relative time>` 与分区 Retry。并发缓存预读保留同一来源与时间戳，首屏与重试在途均隐藏 Cached 与缓存重试入口。重试期间保留正文或其他可用结果；成功替换该区，另一区的结果独立结算。
    - `CacheCompleteness::Partial` 显示紧凑 Warning `Badge`（`Partial`，hover tooltip 显示具体不完整原因），与完整结果明确区分。
    - 离线无缓存快照（`PageValue::Miss(CacheMiss::NotCached)`）或缓存损坏映射为 `PresentationError::NotCached` / `CacheCorrupt`，显示黄色 warning 图标、hover 原因与点击重试（`RetryBasic` / `RetryRepositories` / `RetryContributions` / `RetryReadme`），绝不将未缓存或网络/授权失败伪装成“无 README”或空列表。
    - 已缓存的确认无 README（`ProfileReadme::Missing` / `NotEligible`）离线恢复时继续映射为 `SectionState::Unavailable` 并整段省略。

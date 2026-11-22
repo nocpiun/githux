@@ -495,3 +495,28 @@ fn row_acceptance_bundled_native_fonts() {
     );
     check_rendered_rows(&mut cx, Some(native_text));
 }
+
+#[test]
+fn feed_pr_icon_color_uses_purple_only_for_merged_in_dark_and_light() {
+    for colors in [
+        ely_core::theme::Palette::dark(false),
+        ely_core::theme::Palette::light(false),
+    ] {
+        let merged = super::rows::feed_pr_icon_color(
+            crate::domain::home::FeedActivityKind::PullRequestMerged,
+            &colors,
+        );
+        assert_eq!(merged, colors.chart[4]);
+        assert_ne!(merged, colors.accent);
+
+        for other in [
+            crate::domain::home::FeedActivityKind::RepositoryStarred,
+            crate::domain::home::FeedActivityKind::RepositoryCreated,
+        ] {
+            assert_eq!(
+                super::rows::feed_pr_icon_color(other, &colors),
+                colors.accent
+            );
+        }
+    }
+}
