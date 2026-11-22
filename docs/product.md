@@ -1,6 +1,6 @@
 # 产品约定
 
-更新：2026-11-03。以下是已确认基线的共享摘要，具体未定项在末尾。概念图用于讨论布局，不替代真实 Ely 窗口的视觉验收。
+更新：2026-11-22。以下是已确认基线的共享摘要，具体未定项在末尾。概念图用于讨论布局，不替代真实 Ely 窗口的视觉验收。
 
 “已确认”表示产品决定；“已合并”表示组件存在于 main；“正式接线”表示产品 binary 的实际路由使用它；“原生已验证”必须另有真实窗口证据。四者不能互相替代。当前合并基线、源码证据和剩余缺口见[开发路线图](roadmap.md#当前证据与下一步)。
 
@@ -20,13 +20,14 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 ## 首版范围
 
-以下依据负责人 2026-10-21 最后一次范围调整；编号沿用功能讨论清单。这里维护功能范围，[开发路线图](roadmap.md) 维护建议顺序、依赖与验收。排除项是首版延后项，不代表取消长期方向，也不因后续任务方便而自动恢复。
+以下沿用 2026-10-21 首版功能清单的编号；2026-11-22 补入日常试用前必须打通的列表与详情。这里维护功能范围，[开发路线图](roadmap.md) 维护建议顺序、依赖与验收。排除项是首版延后项，不代表取消长期方向，也不因后续任务方便而自动恢复。
 
 | 分类 | 首版保留 |
 | --- | --- |
 | A1–A6 外壳 | 自定义标题栏、island、固定侧边栏、全部仓库的有界列表、基础多标签、command palette 入口 |
 | B1–B3 Home | 启动首页、最近参与且有更新的 Issues/PRs、关注动态 |
 | C1–C5、C8–C9 仓库 | 资料、分支与文件树、README、源码阅读；Releases、Contributors 位于资料后的紧凑摘要区，Languages 位于页面底边 |
+| 仓库 Issue/PR 阅读 | 仓库内两类列表和单条详情纳入试用前主线；具体读取深度与写操作分别确认 |
 | D1–D4 Profile | 基本资料和 Overview 结构、个人 README、Pinned/Popular Repos、贡献热力图 |
 | E1–E2 设置 | 全局与仓库设置；最终设计及具体项目仍需确定。现有 Settings 仅是过渡账户功能入口，见[设置过渡边界](#设置过渡边界) |
 | F1–F4 账户和数据 | 登录与安全凭据保存、多账户保存但单账户活动、离线阅读、联网刷新 |
@@ -57,7 +58,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。R1 首份外壳交付只提供本地导航命令（各页与当前仓库列表），不调用 GitHub，也不据此确定未来全局搜索范围。
 - 侧栏以外的页面主区域采用 island，与窗口边缘留微小距离，内外圆角协调。不是所有子面板都变成浮动卡片；精确间距、圆角和最大化行为待真实窗口确认。
 - island 顶部为应用级会话标签（tab strip），可同时保留多个仓库、Issue/PR、个人主页等；它和页面内的横向内容 Tabs 是两层不同导航，不共用状态。页面内容内的大标题保留，不再显示重复页面名称的占位标题条，也不保留其高度。Profile 首版只实现 Overview。
-- 基础标签规则（负责人 2026-10-23 确认）：点击侧边栏仓库、底部入口或通过 command palette 选择页面时，统一执行“打开或激活”——同一资源已打开则切换到该标签，否则新建。Home、Settings 及当前全局占位页（Notifications、Issues、Pull requests）按路由单例，仓库按 `owner/repo` 单例；单条 PR 的 Read more 导航按 `owner/repo` 与 PR 编号单例（详情内容仍依下表留空）。GitHub 名称大小写不敏感，同一资源的别名不生成重复会话。不支持同资源重复标签。启动仍只有 Home，不恢复上次会话。
+- 基础标签规则（负责人 2026-10-23 确认）：点击侧边栏仓库、底部入口或通过 command palette 选择页面时，统一执行“打开或激活”——同一资源已打开则切换到该标签，否则新建。Home、Settings 及全局页面（Notifications、Issues、Pull requests）按路由单例，仓库按 `owner/repo` 单例；单条 PR 的 Read more 导航按 `owner/repo` 与 PR 编号单例（当前仍为空白，后续阅读范围见下表）。GitHub 名称大小写不敏感，同一资源的别名不生成重复会话。不支持同资源重复标签。启动仍只有 Home，不恢复上次会话。
 - 账户与标签（负责人 2026-10-28 确认）：每个账户拥有自己的打开标签集合，切换回某账户即恢复该账户自己的标签、顺序与活动标签；全局式标签（如 Settings）同样属于当前活动账户的 workspace。账户身份是 host + 稳定账户 ID，不是登录文本或 PAT，因此账户 A 与 B 拥有同一仓库或相同本地标签编号时，标签与异步身份都不会互相串。这是进程内内存状态：重启仍从 Home 开始，不扩展 workspace 持久化。
 - 关闭非活动标签不切换当前标签；关闭活动标签切换到左邻标签，没有左邻则右邻；关闭最后一个标签后新建 Home 标签。
 - 标签可鼠标打开/切换/关闭，键盘可到达（Tab 焦点与 Enter/Space），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换标签；这些组合键不与输入法候选确认（Enter/Esc/方向键）或文本输入争用。
@@ -85,12 +86,12 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；不实现 Contribution Activity 和其他内容 Tabs |
 | Global Settings | 借鉴 Magpie 的分类与行式设置组织，具体分类布局与首批选项待定 |
 | Repository Settings | 首轮提供简单设置，风格与全局 Settings 一致，具体选项待定 |
-| Issue/PR 详情 | 原型旧设计弃用，首轮内容区直接留空 |
-| 仓库其他未设计 Tabs | 除仓库 Settings 外，首轮内容区直接留空，不添加“未实现”卡片 |
+| Issue/PR 列表与详情 | 全局个人列表已接入。仓库 Issues、PR 列表及单条详情要在日常试用前补齐；不沿用旧原型。评论、改动文件、评审和写操作做到哪一步，依[路线图](roadmap.md#当前证据与下一步)分别定稿 |
+| 仓库其他未设计 Tabs | 除单独规划的 Issues、PR 与 Settings 外，未设计的内容区仍留空，不添加“未实现”卡片 |
 
 留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 已排除出首版，不套用仓库的留空约定补出额外内容页。
 
-**截至 main `d217116`（2026-11-03），正式 [`app::pages`](../src/app/pages/mod.rs) 已把 Home/Feed、Profile Overview 与统一 RepositoryPage 挂到正式 Shell 路由；[`ui::home`](../src/ui/home/mod.rs)、[`ui::profile`](../src/ui/profile/mod.rs) 与 [`ui::repository`](../src/ui/repository/mod.rs) 既是可复用组件也是正式页面实现。** 仓库 Star/Unstar 已接入正式写路径（见 [仓库 Star](repository-star.md)），Fork 仍只有禁用入口。Settings Accounts、Notifications 与全局 Issues/PR 组件已合并但尚未挂载，见[共享文档索引](README.md#当前状态)。组件验收不自动代表整条产品路径已验收。
+**截至 main `d217116`（2026-11-03），正式 [`app::pages`](../src/app/pages/mod.rs) 已把 Home/Feed、Profile Overview 与统一 RepositoryPage 挂到正式 Shell 路由；[`ui::home`](../src/ui/home/mod.rs)、[`ui::profile`](../src/ui/profile/mod.rs) 与 [`ui::repository`](../src/ui/repository/mod.rs) 既是可复用组件也是正式页面实现。** 仓库 Star/Unstar 已接入正式写路径（见 [仓库 Star](repository-star.md)），Fork 仍只有禁用入口。后续 Notifications 与全局 Issues/PR 已挂载，Settings 仍走过渡 Accounts 入口，见[共享文档索引](README.md#当前状态)。组件验收不自动代表整条产品路径已验收。
 
 ### 设置过渡边界
 
