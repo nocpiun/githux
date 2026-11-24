@@ -85,6 +85,8 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签并显示对应 [PR Conversation](pr-conversation.md)。
 
+2026-11-25：Home 工作条目的标题激活经 `HomeAction::ActivateWorkItem` 接入同一迟延导航通道。目标先由 `ui::home::work_item_target` 从 typed 身份（kind + 仓库 + 仓库内编号）一次性得出，不从标题推断；`PullRequest` 走既有 `Route::PullRequest`，同资源在同一账户内复用标签，同号不同库或同库 Issue/PR 不合并。投递前 host 核对 `HomeView::is_active` 与 `HomeView::has_work_item`，因此隐藏标签、切换账户或已替换快照后到达的旧激活不导航。`Issue` 目标因 `Route::Issue` 仍由 `issue-detail` 任务生产（未合入 main）而保持 inert，本任务不注册临时路由；合入后只需在该分支调用已有的 `PageNavigation::Open`。
+
 ## 页面内容几何与共享行（2026-11-04 视觉返工）
 
 - `src/ui/page_layout.rs` 提供四个正式页面共用的内容几何：`PAGE_GUTTER = 16`、`PAGE_TOP = 16`、`PAGE_BOTTOM = 8`、`PAGE_HEADER_HEIGHT = 40`，与 Home 已有的 `px_4 / pt_4 / pb_2` 和 40px 列头一致。Home、Notifications 与全局 Issues/PR 都据此布局，页面 body 负责留白，标题行不再各自叠加内边距。

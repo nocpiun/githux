@@ -96,6 +96,74 @@ fn setup(cx: &mut TestAppContext) {
     });
 }
 
+/// Deterministic Home list for the Host navigation tests.
+///
+/// Four open rows: Issue #7 and Pull request #7 in the same repository (same number, different
+/// kind), Issue #7 in another repository (same number, different repository), and Issue #8. Nothing
+/// here is derived from a displayed title, so a wrong destination cannot be blamed on the fixture.
+fn work_item_list_response(
+    request: &crate::network::transport::HttpRequest,
+) -> crate::network::transport::HttpResponse {
+    let url = reqwest::Url::parse(&request.url).expect("fixture request URL");
+    match url.path() {
+        "/user" => response(200, r#"{"id":1,"login":"octo"}"#),
+        "/user/repos" => response(
+            200,
+            r#"[{"id":10,"name":"repo","owner":{"id":1,"login":"octo"},"visibility":"public","private":false,"default_branch":"main","fork":false,"archived":false,"stargazers_count":0,"forks_count":0,"open_issues_count":0,"size":1,"html_url":"https://github.com/octo/repo"}]"#,
+        ),
+        "/search/issues" => response(
+            200,
+            &serde_json::json!({
+                "total_count": 4, "incomplete_results": false,
+                "items": [
+                    {
+                        "id": 9001, "number": 7, "title": "Issue seven in repo",
+                        "html_url": "https://github.com/octo/repo/issues/7", "state": "open",
+                        "updated_at": "2026-10-28T10:00:00Z",
+                        "repository_url": "https://api.github.com/repos/octo/repo",
+                        "pull_request": null
+                    },
+                    {
+                        "id": 9002, "number": 7, "title": "Issue seven in repo",
+                        "html_url": "https://github.com/octo/repo/pull/7", "state": "open",
+                        "updated_at": "2026-10-28T09:00:00Z",
+                        "repository_url": "https://api.github.com/repos/octo/repo",
+                        "pull_request": {"merged_at": null}
+                    },
+                    {
+                        "id": 9003, "number": 7, "title": "Issue seven in other",
+                        "html_url": "https://github.com/other/repo/issues/7", "state": "open",
+                        "updated_at": "2026-10-28T08:00:00Z",
+                        "repository_url": "https://api.github.com/repos/other/repo",
+                        "pull_request": null
+                    },
+                    {
+                        "id": 9004, "number": 8, "title": "Issue eight in repo",
+                        "html_url": "https://github.com/octo/repo/issues/8", "state": "open",
+                        "updated_at": "2026-10-28T07:00:00Z",
+                        "repository_url": "https://api.github.com/repos/octo/repo",
+                        "pull_request": null
+                    }
+                ]
+            })
+            .to_string(),
+        ),
+        "/users/octo/received_events" => events("online", None),
+        "/user/following" => response(200, r#"[{"id":7,"login":"bob"}]"#),
+        "/repos/octo/repo" => response(
+            200,
+            &serde_json::json!({
+                "id": 10, "name": "repo", "owner": {"id": 1, "login": "octo"},
+                "visibility": "public", "private": false, "default_branch": "main",
+                "fork": false, "archived": false, "stargazers_count": 0,
+                "forks_count": 0, "open_issues_count": 0, "size": 1,
+                "description": "online description", "html_url": "https://github.com/octo/repo"
+            })
+            .to_string(),
+        ),
+        _ => panic!("unmodelled work-item fixture request: {}", request.url),
+    }
+}
 #[derive(Default)]
 struct DescriptionGate {
     enabled: std::sync::atomic::AtomicBool,
@@ -108,6 +176,9 @@ struct DescriptionGate {
     /// refresh is observably a new value.
     refreshed: std::sync::atomic::AtomicBool,
     search_entered: std::sync::atomic::AtomicBool,
+    /// Serves a small Home list that distinguishes Issue vs Pull request in the same repository and
+    /// the same number in another repository, so Host navigation can be exercised deterministically.
+    work_item_list: std::sync::atomic::AtomicBool,
 }
 
 struct ControlledTransport {
@@ -149,6 +220,9 @@ impl crate::network::transport::Transport for ControlledTransport {
                 }
             }
             if self.gate.online_responses.load(SeqCst) {
+                if self.gate.work_item_list.load(SeqCst) {
+                    return Ok(work_item_list_response(&request));
+                }
                 return Ok(online_response(&request, self.gate.refreshed.load(SeqCst)));
             }
             if self.gate.enabled.load(SeqCst) && request.url.contains("/repos/octo/") {
@@ -1990,4 +2064,397 @@ fn a_corrupt_snapshot_does_not_fabricate_an_empty_page(cx: &mut TestAppContext) 
         assert!(page.view.read(cx).provenance(Column::Home).is_none());
         assert!(page.view.read(cx).provenance(Column::Feed).is_none());
     });
+}
+
+/// Host-level Home Issue/PR navigation: the row identity, not its title, decides the destination.
+///
+/// Four rows share the same pull-request/issue numbering on purpose: Issue #7 and Pull request #7 in
+/// `octo/repo`, Issue #7 in `other/repo`, and Issue #8. Each activation must address exactly its own
+/// row, and the same target must reuse one tab instead of opening duplicates.
+#[gpui::test]
+fn home_work_item_rows_navigate_by_identity_and_reuse_one_tab(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.work_item_list.store(true, SeqCst);
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    let items = page.read_with(cx, |page, cx| match page.view.read(cx).home_state() {
+        PanelState::Ready {
+            content: PanelContent::Ready(outcome),
+            ..
+        } => outcome
+            .items
+            .iter()
+            .map(|item| (item.title.clone(), item.id))
+            .collect::<Vec<_>>(),
+        other => panic!("expected a ready Home outcome, got {other:?}"),
+    });
+    assert_eq!(
+        items
+            .iter()
+            .map(|(title, _)| title.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Issue seven in repo",
+            // Deliberately the same text as the issue above: the displayed title cannot be what
+            // separates the two destinations.
+            "Issue seven in repo",
+            "Issue seven in other",
+            "Issue eight in repo",
+        ]
+    );
+    // The rows are still four different work items: the identical titles do not collapse them.
+    let ids: Vec<u64> = items.iter().map(|(_, id)| *id).collect();
+    assert_eq!(ids.len(), 4);
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), 4, "each row keeps its own stable id: {ids:?}");
+
+    // Activate rows by addressable identity, the same action the row's title emits. Issue rows are
+    // inert in this baseline because `Route::Issue` belongs to the issue-detail task.
+    for index in 0..4 {
+        let action = page.read_with(cx, |page, cx| page.view.read(cx).work_item_action(index));
+        let action = action.expect("a row identity for the requested index");
+        cx.update_window_entity(&page, |page, window, cx| {
+            page.action(action, window, cx);
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        *navigated.lock().unwrap(),
+        vec![Route::PullRequest {
+            namespace: "octo".into(),
+            name: "repo".into(),
+            number: 7,
+        }],
+        "only the pull request row has a route in this baseline; Issue rows stay inert"
+    );
+}
+
+/// The same target is one destination: activating the pull request row twice must not produce two
+/// different routes or drop the repository/kind distinction. The workspace reuse itself is covered
+/// by the Shell composition suite; here we pin the route a repeated activation asks for.
+#[gpui::test]
+fn repeated_home_work_item_activation_requests_the_same_route(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.work_item_list.store(true, SeqCst);
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    let pull_request = page
+        .read_with(cx, |page, cx| page.view.read(cx).work_item_action(1))
+        .expect("the pull request row");
+    for _ in 0..2 {
+        cx.update_window_entity(&page, |page, window, cx| {
+            page.action(pull_request.clone(), window, cx);
+        });
+        cx.run_until_parked();
+    }
+    let routes = navigated.lock().unwrap().clone();
+    assert_eq!(routes.len(), 2);
+    assert_eq!(routes[0], routes[1]);
+    assert_eq!(
+        routes[0],
+        Route::PullRequest {
+            namespace: "octo".into(),
+            name: "repo".into(),
+            number: 7,
+        }
+    );
+}
+
+/// A hidden Home must not navigate for a deferred row activation: closing or switching away from the
+/// tab retires the page, and the action can still be delivered after that.
+#[gpui::test]
+fn a_hidden_home_drops_work_item_navigation(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.work_item_list.store(true, SeqCst);
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    let pull_request = page
+        .read_with(cx, |page, cx| page.view.read(cx).work_item_action(1))
+        .expect("the pull request row");
+    page.update(cx, |page, cx| page.set_active(false, cx));
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.action(pull_request, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        navigated.lock().unwrap().is_empty(),
+        "an inactive Home must not navigate"
+    );
+}
+
+/// An action emitted from a row the page no longer shows (a replaced snapshot) must not navigate.
+#[gpui::test]
+fn a_stale_home_row_does_not_navigate(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.work_item_list.store(true, SeqCst);
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    let pull_request = page
+        .read_with(cx, |page, cx| page.view.read(cx).work_item_action(1))
+        .expect("the pull request row");
+
+    // Publish a replacement Home snapshot that no longer contains that row.
+    let binding = page.read_with(cx, |page, _| page.binding.clone());
+    let generation = page.read_with(cx, |page, _| page.generation);
+    let replacement = crate::domain::home::HomeSearchOutcome {
+        items: vec![crate::domain::home::HomeItem {
+            id: 9100,
+            kind: crate::domain::home::HomeItemKind::Issue,
+            number: 100,
+            title: "Replacement issue".into(),
+            html_url: String::new(),
+            state: "open".into(),
+            updated_at: "2026-10-29T00:00:00Z".into(),
+            repository: crate::domain::home::HomeRepositoryRef {
+                owner: "octo".into(),
+                name: "repo".into(),
+            },
+        }],
+        total_count: 1,
+        incomplete_results: false,
+        readiness: crate::domain::home::HomeReadiness::Complete,
+    };
+    page.update(cx, |page, cx| {
+        assert!(page.view.update(cx, |view, cx| view.apply_home(
+            &binding,
+            generation,
+            replacement,
+            cx
+        )));
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.action(pull_request, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        navigated.lock().unwrap().is_empty(),
+        "a row missing from the current snapshot must not navigate"
+    );
+}
+
+/// The route Home emits for a row is the same resource identity the workspace reuses. Opening it
+/// twice keeps one Issue/PR tab, and the same number in another repository or the other kind stays a
+/// separate destination.
+#[gpui::test]
+fn the_emitted_work_item_route_reuses_one_workspace_tab(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let mut workspace = crate::workspace::Workspace::new(cx);
+        let pull_request = Route::PullRequest {
+            namespace: "octo".into(),
+            name: "repo".into(),
+            number: 7,
+        };
+        let first = match workspace.open(pull_request.clone(), cx) {
+            crate::workspace::OpenResult::Opened(id) => id,
+            other => panic!("expected a new tab, got {other:?}"),
+        };
+        assert_eq!(
+            workspace.open(pull_request, cx),
+            crate::workspace::OpenResult::Activated(first)
+        );
+        // Same number, different repository and different kind: neither may collide with the PR tab.
+        let other_repository = workspace.open(
+            Route::PullRequest {
+                namespace: "other".into(),
+                name: "repo".into(),
+                number: 7,
+            },
+            cx,
+        );
+        assert!(matches!(
+            other_repository,
+            crate::workspace::OpenResult::Opened(_)
+        ));
+        // A case-only alias of the same repository is the same resource.
+        let alias = workspace.open(
+            Route::PullRequest {
+                namespace: "Octo".into(),
+                name: "REPO".into(),
+                number: 7,
+            },
+            cx,
+        );
+        assert_eq!(alias, crate::workspace::OpenResult::Activated(first));
+        assert_eq!(
+            workspace.sessions().len(),
+            3,
+            "Home + octo/repo #7 + other/repo #7"
+        );
+    });
+}
+
+/// Leaving Home and returning keeps the same page instance's selection and scroll, and the row it
+/// shows can still navigate: an ordinary tab switch is not a rebind.
+#[gpui::test]
+fn returning_to_home_keeps_the_selected_row_navigable(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.work_item_list.store(true, SeqCst);
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    // Select the pull-request row through the real pointer/keyboard selection path.
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.view
+            .update(cx, |view, cx| view.select(Column::Home, 1, window, cx));
+    });
+    cx.run_until_parked();
+    let before = page.read_with(cx, |page, cx| {
+        (
+            page.view.read(cx).selected(Column::Home),
+            page.view.read(cx).offset(Column::Home),
+        )
+    });
+    assert_eq!(before.0, Some(1));
+
+    page.update(cx, |page, cx| page.set_active(false, cx));
+    page.update(cx, |page, cx| page.set_active(true, cx));
+    cx.run_until_parked();
+    let after = page.read_with(cx, |page, cx| {
+        (
+            page.view.read(cx).is_active(),
+            page.view.read(cx).selected(Column::Home),
+            page.view.read(cx).offset(Column::Home),
+        )
+    });
+    assert!(after.0, "returning marks the page active again");
+    assert_eq!(after.1, before.0, "returning keeps the selected row");
+    assert_eq!(after.2, before.1, "returning keeps the scroll offset");
+
+    let pull_request = page
+        .read_with(cx, |page, cx| page.view.read(cx).work_item_action(1))
+        .expect("the pull request row");
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.action(pull_request, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *navigated.lock().unwrap(),
+        vec![Route::PullRequest {
+            namespace: "octo".into(),
+            name: "repo".into(),
+            number: 7,
+        }],
+        "the retained row still addresses its own resource after a tab switch"
+    );
+}
+
+/// Keyboard activation from the focused Home list goes through the same host mapping: Down selects
+/// the Pull request row and Enter emits exactly that row's destination. This is the real list
+/// keyboard path (focus handle + native key events), not a synthetic click on the title control.
+#[gpui::test]
+fn keyboard_activation_opens_the_rows_own_destination(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    fixture.gate.online_responses.store(true, SeqCst);
+    fixture.gate.work_item_list.store(true, SeqCst);
+    let navigated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_routes = navigated.clone();
+    let (page, cx) = open_page_with_navigation(
+        &mut fixture,
+        std::rc::Rc::new(move |action, _, _| {
+            if let PageNavigation::Open(route) = action {
+                sink_routes.lock().unwrap().push(route);
+            }
+        }),
+        cx,
+    );
+    settle(&page, cx);
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.view
+            .update(cx, |view, cx| view.select(Column::Home, 0, window, cx));
+    });
+    cx.run_until_parked();
+    // "down" moves from the Issue to the Pull request that shares its title, repository and number.
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        *navigated.lock().unwrap(),
+        vec![Route::PullRequest {
+            namespace: "octo".into(),
+            name: "repo".into(),
+            number: 7,
+        }],
+        "Enter on the selected Pull request row opens its own destination once"
+    );
+    assert_eq!(
+        page.read_with(cx, |page, cx| page.view.read(cx).selected(Column::Home)),
+        Some(1),
+        "the keyboard selection stayed on the activated row"
+    );
 }

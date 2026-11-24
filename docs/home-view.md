@@ -66,6 +66,12 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 
 Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会把仓库内 `number` 冒充为全局 id。Read more 使用独立的 `OpenPullRequest`，以仓库与编号定位资源，不依赖全局 id 或外部 URL。
 
+### 行目标映射（2026-11-24）
+
+`src/ui/home/navigation.rs` 的 `work_item_target(&WorkItemIdentity) -> Option<WorkItemTarget>` 把同一份 typed 身份一次性映射成工作区坐标：`kind` 来自 `HomeItemKind`，repository 与 number 来自被点击的行，**绝不从标题推断**。因此同库同号的 Issue 与 PR 是两个不同目标，同号不同库也是两个目标；编号为 0 或 owner/name 不能作为仓库段（空、含 `/`、控制字符）时返回 `None`，不构造猜测的路线。目标保留行上显示的大小写，别名复用由工作区按 `RouteKey` 决定。
+
+host 侧的延迟投递还有两道门：页面必须仍是当前显示的标签且捕获的 session 仍有效（`HomeView::is_active`），并且该身份仍是当前 Home 快照中的一行（`HomeView::has_work_item`，同时比对全局 id、kind、number、owner/name）。因此切换账户、隐藏标签或替换快照之后到达的旧激活不会导航。
+
 ## 呈现与失败语义
 
 - 两栏标题严格为 **Home** 与 **Feed**，各自拥有独立 header、状态区、虚拟化行、焦点、选择、滚动偏移、`Bars` 与 `Motion<ListState>`。

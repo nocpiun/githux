@@ -21,6 +21,7 @@ use crate::storage::cache::CacheAuthorization;
 use crate::ui::avatar::AvatarSlot;
 use crate::ui::home::{
     Column, HomeAction, HomeView, RefreshAvailability, RequestBinding, SnapshotPresentation,
+    WorkItemIdentity, WorkItemTarget, work_item_target,
 };
 use crate::workspace::TabId;
 
@@ -729,12 +730,67 @@ impl HomePage {
                 window,
                 cx,
             ),
-            // Other Issue/PR entry points are outside this navigation correction.
-            HomeAction::ActivateWorkItem(_)
-            | HomeAction::ActivateFeed(_)
-            | HomeAction::Refresh(_)
-            | HomeAction::LoadMoreFeed(_) => {}
+            HomeAction::ActivateWorkItem(identity) => {
+                // A deferred action can outlive an account switch, a refresh or a tab change. Never
+                // let a hidden page, or a row the page no longer shows, navigate on behalf of the
+                // account it used to display.
+                if !self.is_navigable(cx) || !self.is_current_row(&identity, cx) {
+                    return;
+                }
+                self.open_work_item(identity, window, cx);
+            }
+            HomeAction::ActivateFeed(_) | HomeAction::Refresh(_) | HomeAction::LoadMoreFeed(_) => {}
         }
+    }
+
+    /// Opens the workspace destination of one Home Issue/PR row.
+    ///
+    /// The destination is derived once from the typed work-item identity by
+    /// [`work_item_target`], never from the displayed title. Only kinds with a real workspace route
+    /// navigate; an unusable identity or an Issue (whose detail route is owned by another task and
+    /// not yet in this baseline) stays inert rather than inventing a route.
+    fn open_work_item(
+        &mut self,
+        identity: WorkItemIdentity,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = work_item_target(&identity) else {
+            return;
+        };
+        match target {
+            WorkItemTarget::PullRequest {
+                namespace,
+                name,
+                number,
+            } => (self.navigation)(
+                PageNavigation::Open(Route::PullRequest {
+                    namespace,
+                    name,
+                    number,
+                }),
+                window,
+                cx,
+            ),
+            // `Route::Issue` is produced by the issue-detail task and is not in this baseline.
+            // Opening a temporary or title-derived stand-in is out of scope.
+            WorkItemTarget::Issue { .. } => {}
+        }
+    }
+
+    /// Whether this page may navigate right now: it is the shown tab and its captured session is
+    /// still the verified, current account session.
+    fn is_navigable(&self, cx: &mut Context<Self>) -> bool {
+        self.view.read(cx).is_active() && self.has_current_session()
+    }
+
+    /// Whether `identity` is still a row of the Home snapshot this page published.
+    ///
+    /// A rebind or an account switch replaces the snapshot, so an action emitted from the previous
+    /// one finds no matching row and is dropped instead of opening a destination for content the
+    /// user is no longer looking at.
+    fn is_current_row(&self, identity: &WorkItemIdentity, cx: &mut Context<Self>) -> bool {
+        self.view.read(cx).has_work_item(identity)
     }
 
     fn index(column: Column) -> usize {
@@ -1948,6 +2004,10 @@ impl HomePage {
 #[cfg(test)]
 #[path = "home/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "home/shell_nav_tests.rs"]
+mod shell_nav_tests;
 
 impl Render for HomePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

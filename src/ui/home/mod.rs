@@ -9,6 +9,10 @@
 // Production Shell mounting intentionally remains a separate integration task.
 #![allow(dead_code)]
 
+mod navigation;
+#[cfg(test)]
+#[path = "navigation_tests.rs"]
+mod navigation_tests;
 mod presentation;
 mod rows;
 #[cfg(test)]
@@ -37,6 +41,8 @@ use crate::ui::surface;
 
 use presentation::home_summary;
 use rows::{feed_row, home_row};
+
+pub use navigation::{WorkItemTarget, work_item_target};
 
 /// An opaque, host-selected request scope. Include the stable account/page
 /// identity; do not put a PAT or other credential in this value.
@@ -550,6 +556,33 @@ impl HomeView {
             self.cancel_activity();
         }
         cx.notify();
+    }
+
+    /// Whether this page is the tab the shell currently shows.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Whether `identity` still addresses a row of the current Home snapshot.
+    ///
+    /// A host uses this to drop an action that was emitted from a snapshot the page has since
+    /// replaced (rebind, refresh, account switch), so a stale row cannot navigate.
+    pub fn has_work_item(&self, identity: &WorkItemIdentity) -> bool {
+        self.home.state.data().is_some_and(|outcome| {
+            outcome.items.iter().any(|item| {
+                item.id == identity.id
+                    && item.kind == identity.kind
+                    && item.number == identity.number
+                    && item
+                        .repository
+                        .owner
+                        .eq_ignore_ascii_case(&identity.repository.owner)
+                    && item
+                        .repository
+                        .name
+                        .eq_ignore_ascii_case(&identity.repository.name)
+            })
+        })
     }
 
     fn cancel_activity(&mut self) {

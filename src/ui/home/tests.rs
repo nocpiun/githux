@@ -2136,3 +2136,88 @@ fn read_more_requires_a_repository_and_positive_pr_number() {
         Some(HomeAction::OpenPullRequest { number: 1, .. })
     ));
 }
+
+/// The host decides whether a deferred row activation may still navigate. The view exposes only
+/// facts it owns: whether its tab is shown, and whether the identity is still a row of the snapshot
+/// it published.
+#[gpui::test]
+fn stale_or_hidden_rows_are_not_reported_as_navigable_identities(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let identity = |index: usize| {
+        let item = home_item(
+            index,
+            if index.is_multiple_of(2) {
+                HomeItemKind::Issue
+            } else {
+                HomeItemKind::PullRequest
+            },
+        );
+        WorkItemIdentity {
+            id: item.id,
+            kind: item.kind,
+            number: item.number,
+            repository: RepositoryIdentity {
+                id: None,
+                owner: item.repository.owner,
+                name: item.repository.name,
+            },
+        }
+    };
+    assert!(view.read_with(cx, |view, _| view.is_active()));
+    assert!(view.read_with(cx, |view, _| view.has_work_item(&identity(0))));
+    assert!(view.read_with(cx, |view, _| view.has_work_item(&identity(1))));
+
+    // Kind, number, repository and global id are all part of the identity: no single field is
+    // enough to make a row current.
+    let mut wrong_kind = identity(0);
+    wrong_kind.kind = HomeItemKind::PullRequest;
+    assert!(!view.read_with(cx, |view, _| view.has_work_item(&wrong_kind)));
+    let mut wrong_number = identity(0);
+    wrong_number.number += 1;
+    assert!(!view.read_with(cx, |view, _| view.has_work_item(&wrong_number)));
+    let mut wrong_repository = identity(0);
+    wrong_repository.repository.name.push_str("-other");
+    assert!(!view.read_with(cx, |view, _| { view.has_work_item(&wrong_repository) }));
+    let mut wrong_id = identity(0);
+    wrong_id.id += 1;
+    assert!(!view.read_with(cx, |view, _| view.has_work_item(&wrong_id)));
+
+    // A hidden page reports itself inactive, so the host can refuse a deferred activation.
+    view.update(cx, |view, cx| view.set_active(false, cx));
+    assert!(!view.read_with(cx, |view, _| view.is_active()));
+}
+
+/// Replacing the snapshot (refresh or rebind) drops every identity from the previous one, so a row
+/// that was activated just before the replacement cannot navigate afterwards.
+#[gpui::test]
+fn a_replaced_snapshot_no_longer_reports_its_old_rows(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let old = home_item(0, HomeItemKind::Issue);
+    let old_identity = WorkItemIdentity {
+        id: old.id,
+        kind: old.kind,
+        number: old.number,
+        repository: RepositoryIdentity {
+            id: None,
+            owner: old.repository.owner.clone(),
+            name: old.repository.name.clone(),
+        },
+    };
+    assert!(view.read_with(cx, |view, _| view.has_work_item(&old_identity)));
+    let replacement = vec![home_item(3, HomeItemKind::PullRequest)];
+    view.update(cx, |view, cx| {
+        assert!(view.apply_home(
+            &binding(),
+            1,
+            home_outcome(replacement, HomeReadiness::Complete),
+            cx,
+        ));
+    });
+    cx.run_until_parked();
+    assert!(
+        !view.read_with(cx, |view, _| view.has_work_item(&old_identity)),
+        "a refreshed snapshot must not keep the previous row navigable"
+    );
+}
