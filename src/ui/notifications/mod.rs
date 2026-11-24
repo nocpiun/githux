@@ -46,6 +46,9 @@ pub struct SubjectNavigation {
     pub target: NotificationTarget,
 }
 pub type OnSubject = Rc<dyn Fn(SubjectNavigation, &mut Window, &mut App)>;
+/// Host advertises which matched targets it can actually open. Unsupported
+/// targets keep the plain, non-interactive title.
+pub type CanOpenSubject = Rc<dyn Fn(&NotificationTarget) -> bool>;
 
 pub struct NotificationsView {
     controller: Notifications,
@@ -68,6 +71,7 @@ pub struct NotificationsView {
     cooldown_wake: Option<gpui::Task<()>>,
     on_repository: OnRepository,
     on_subject: Option<OnSubject>,
+    can_open_subject: Option<CanOpenSubject>,
     _activation: Subscription,
     _visibility: Subscription,
     _release: Subscription,
@@ -120,6 +124,7 @@ impl NotificationsView {
             cooldown_wake: None,
             on_repository,
             on_subject: None,
+            can_open_subject: None,
             _activation: activation,
             _visibility: visibility,
             _release: release,
@@ -137,10 +142,20 @@ impl NotificationsView {
         cx.notify();
     }
 
-    /// Install the host callback for reliable Issue/Pull Request targets. The
-    /// host remains responsible for its tab/incarnation and account checks.
-    pub fn on_subject(&mut self, callback: OnSubject) {
+    /// Install the host callback and its supported-kind advertisement. A
+    /// target is only exposed as a link when the host says it can open it;
+    /// the host remains responsible for tab/incarnation and account checks.
+    pub fn on_subject(&mut self, callback: OnSubject, can_open: CanOpenSubject) {
         self.on_subject = Some(callback);
+        self.can_open_subject = Some(can_open);
+    }
+
+    fn subject_is_supported(&self, target: &NotificationTarget) -> bool {
+        self.on_subject.is_some()
+            && self
+                .can_open_subject
+                .as_ref()
+                .is_some_and(|can_open| can_open(target))
     }
 
     /// A retained page's host calls this when switching tabs. No elapsed-time
@@ -566,7 +581,10 @@ impl NotificationsView {
                 FontWeight::NORMAL
             })
             .child(item.subject.title.clone());
-        if let Some(target) = item.target() {
+        if let Some(target) = item
+            .target()
+            .filter(|target| self.subject_is_supported(target))
+        {
             let number = target.number();
             let label = format!("Open {} #{number} in {repository}", target.noun());
             let weak = cx.entity().downgrade();

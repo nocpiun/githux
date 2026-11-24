@@ -86,7 +86,10 @@ impl NotificationsPage {
                 window,
                 cx,
             );
-            view.on_subject(on_subject);
+            view.on_subject(
+                on_subject,
+                Rc::new(|target| matches!(target, NotificationTarget::PullRequest { .. })),
+            );
             view
         });
         this._changed = Some(cx.observe(&view, |_, _, cx| cx.notify()));

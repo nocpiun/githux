@@ -32,11 +32,11 @@
 - subject 类型与路径一致：Issue 只接受 `issues`，PullRequest 只接受 `pulls`；其它类型（Release/Commit/Discussion/Unknown）一律不匹配；
 - 编号是正的十进制整数，拒绝 `0`、符号、空白、前导零和溢出。
 
-缺 URL、错 host、错仓库、错路径/类型或编号不合法时返回 `None`，标题仍是不可点击的普通文本，不跳 GitHub、不请求 URL、不猜测详情地址。匹配成功时标题是独立 link（tooltip/无障碍名称标明目标），点击只发出 typed `SubjectNavigation(context, target)`；仓库链接和 Done/Unsubscribe/Save for later 三个按钮保持各自动作，click 都会停止向父级传播。
+缺 URL、错 host、错仓库、错路径/类型或编号不合法时返回 `None`，标题仍是不可点击的普通文本，不跳 GitHub、不请求 URL、不猜测详情地址。匹配成功且宿主声明支持该类型时，标题才是独立 link（tooltip/无障碍名称标明目标），点击只发出 typed `SubjectNavigation(context, target)`；宿主未声明的类型（当前是 Issue）保持普通文本，不制造无效链接。仓库链接和 Done/Unsubscribe/Save for later 三个按钮保持各自动作，click 都会停止向父级传播。
 
-宿主 `src/app/pages/notifications.rs` 在打开路由前重新核验 `RepoService::is_current(context)`；组件自身也先用 `controller.verify()` 拒绝账户切换后的旧行。PullRequest 使用已有 `Route::PullRequest`；当前基线还没有 `Route::Issue`，因此匹配的 Issue 先不消费并记录依赖，等 issue-detail 落 main 后在本宿主补上。
+宿主 `src/app/pages/notifications.rs` 通过 `on_subject(callback, can_open)` 声明能力，并在打开路由前重新核验 `RepoService::is_current(context)`；组件自身也先用 `controller.verify()` 拒绝账户切换后的旧行。PullRequest 使用已有 `Route::PullRequest`，所以只有 PR 标题成为链接；当前基线还没有 `Route::Issue`，因此匹配的 Issue 先保持普通标题并记录依赖，等 issue-detail 落 main 后在宿主能力声明中补上。
 
-回归覆盖 domain 的 host/owner/repo/type/number 正反例，UI 的“可靠行打开、不可靠行不打开、仓库链接与按钮独立、切账号旧行无效”，以及正式 Shell 中 Issue 标题保持原位、PullRequest 标题打开 `Route::PullRequest`。
+回归覆盖 domain 的 host/owner/repo/type/number 正反例，UI 的“可靠且已声明支持的行打开、不可靠或未声明支持的行保持普通文本、仓库链接与按钮独立、切账号旧行无效”，以及正式 Shell 中 Issue 标题保持原位、PullRequest 标题打开 `Route::PullRequest`。
 
 ## 数据和控制器
 

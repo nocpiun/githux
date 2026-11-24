@@ -295,7 +295,7 @@ fn only_verified_subject_targets_navigate_and_stale_account_events_are_ignored(
             cx,
         );
         view.sync(cx);
-        view.on_subject(on_subject);
+        view.on_subject(on_subject, Rc::new(|_| true));
         view
     });
     cx.update(|window, _| window.activate_window());
@@ -384,6 +384,47 @@ fn only_verified_subject_targets_navigate_and_stale_account_events_are_ignored(
         "stale account events are ignored"
     );
     assert_eq!(*repository_clicks.borrow(), 1);
+}
+
+/// The reusable view must not expose a target the host cannot open. Production
+/// currently supports Pull Request routes only, so an otherwise valid Issue URL
+/// stays plain text instead of becoming a dead link.
+#[gpui::test]
+fn unsupported_subject_kinds_stay_plain_text(cx: &mut TestAppContext) {
+    let (_accounts, controller, executor, _fixture) = setup_targets(cx);
+    let targets = Rc::new(RefCell::new(Vec::new()));
+    let sink = targets.clone();
+    let on_subject: OnSubject = Rc::new(move |nav, _, _| sink.borrow_mut().push(nav.target));
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        let mut view =
+            NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx);
+        view.sync(cx);
+        view.on_subject(
+            on_subject,
+            Rc::new(|target| matches!(target, NotificationTarget::PullRequest { .. })),
+        );
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(960.0), px(740.0)));
+    cx.run_until_parked();
+
+    let issue = cx.debug_bounds("notification-title-0").unwrap();
+    cx.simulate_click(issue.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        targets.borrow().is_empty(),
+        "an unsupported Issue target must not be a dead link"
+    );
+
+    let pull = cx.debug_bounds("notification-title-1").unwrap();
+    cx.simulate_click(pull.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(targets.borrow().len(), 1);
+    assert!(matches!(
+        targets.borrow()[0],
+        NotificationTarget::PullRequest { number: 77, .. }
+    ));
 }
 
 /// The repository link in a notification row is the repository name, not the row's trailing blank
