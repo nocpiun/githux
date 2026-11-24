@@ -1,4 +1,8 @@
 //! Read-only notification observations. Thread IDs are not Issue/PR IDs.
+mod target;
+
+pub use target::NotificationTarget;
+
 use crate::domain::error::GitHubError;
 use crate::domain::repository::RepositoryIdentity;
 use thiserror::Error;
@@ -45,6 +49,15 @@ pub struct NotificationThread {
     pub unread: bool,
     pub updated_at: String,
     pub last_read_at: Option<String>,
+}
+
+impl NotificationThread {
+    /// The Issue/PR this thread can open in Githux, but only when the subject
+    /// URL exactly matches this thread's repository and subject type. Callers
+    /// must keep the old non-navigating behavior when this is `None`.
+    pub fn target(&self) -> Option<NotificationTarget> {
+        NotificationTarget::from_subject(&self.repository, &self.subject)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

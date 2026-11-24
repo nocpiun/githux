@@ -23,6 +23,21 @@
 - 时间复用 Home 已验收的 `relative`（抽取到 `src/ui/relative_time.rs`），显示 Just now / N minutes ago / N hours ago / Yesterday / N days ago，绝对时间只放 tooltip；无效为 Time unavailable、未来为 In the future，不伪装成功 ago。可见时一个 30 秒低频本地时钟刷新，隐藏/释放/失活不留下计时任务，且不触发任何 GitHub 请求。
 - 顶部只显示已加载行数 `N`（无 `loaded` 字样），tooltip/无障碍说明它只是当前视图已加载数量，不是远端未读总数。
 
+## 主题直达（2026-11-24）
+
+标题只有在能可靠识别为 Issue/PR 时才成为应用内链接，其他通知保持原有“标题无动作”行为。识别在 domain 层完成，不读取 subject URL：只接受 `https://api.github.com/repos/{owner}/{repo}/(issues|pulls)/{number}`，且要求
+
+- scheme 为 `https`、host 精确为 `api.github.com`、默认 443 端口，拒绝 userinfo、query、fragment；
+- `owner/repo` 与本条通知的 typed `RepositoryIdentity` 精确一致；
+- subject 类型与路径一致：Issue 只接受 `issues`，PullRequest 只接受 `pulls`；其它类型（Release/Commit/Discussion/Unknown）一律不匹配；
+- 编号是正的十进制整数，拒绝 `0`、符号、空白、前导零和溢出。
+
+缺 URL、错 host、错仓库、错路径/类型或编号不合法时返回 `None`，标题仍是不可点击的普通文本，不跳 GitHub、不请求 URL、不猜测详情地址。匹配成功时标题是独立 link（tooltip/无障碍名称标明目标），点击只发出 typed `SubjectNavigation(context, target)`；仓库链接和 Done/Unsubscribe/Save for later 三个按钮保持各自动作，click 都会停止向父级传播。
+
+宿主 `src/app/pages/notifications.rs` 在打开路由前重新核验 `RepoService::is_current(context)`；组件自身也先用 `controller.verify()` 拒绝账户切换后的旧行。PullRequest 使用已有 `Route::PullRequest`；当前基线还没有 `Route::Issue`，因此匹配的 Issue 先不消费并记录依赖，等 issue-detail 落 main 后在本宿主补上。
+
+回归覆盖 domain 的 host/owner/repo/type/number 正反例，UI 的“可靠行打开、不可靠行不打开、仓库链接与按钮独立、切账号旧行无效”，以及正式 Shell 中 Issue 标题保持原位、PullRequest 标题打开 `Route::PullRequest`。
+
 ## 数据和控制器
 
 - `src/domain/notification.rs` 定义 thread、subject、partial 和错误。未知 subject 类型保留为 `Unknown`；未知 reason 安全显示 Other notification。subject/comment/repository URL 不发起读取、不变成导航地址。

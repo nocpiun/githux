@@ -182,7 +182,7 @@ impl Transport for PageTransport {
                             "updated_at": "2026-11-03T10:00:00Z", "last_read_at": null,
                             "subject": {
                                 "title": "Fix the login flow", "type": "Issue",
-                                "url": "https://github.com/alice/demo/issues/1",
+                                "url": "https://api.github.com/repos/alice/demo/issues/1",
                                 "latest_comment_url": null
                             },
                             "repository": {
@@ -196,7 +196,7 @@ impl Transport for PageTransport {
                             "updated_at": "2026-11-03T09:00:00Z", "last_read_at": null,
                             "subject": {
                                 "title": "Update the pull request", "type": "PullRequest",
-                                "url": "https://github.com/alice/demo/pull/2",
+                                "url": "https://api.github.com/repos/alice/demo/pulls/2",
                                 "latest_comment_url": null
                             },
                             "repository": {
@@ -1561,6 +1561,38 @@ fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut Tes
     wait_for_bounds(cx, "notification-row-0");
     assert!(cx.debug_bounds("notification-row-1").is_some());
     assert!(transport.seen("/notifications") >= 1, "the inbox is read");
+
+    // An Issue subject is matched but this base has no Issue detail route yet,
+    // so its title stays a no-op instead of falling back to another page.
+    let issue_title = cx
+        .debug_bounds("notification-title-0")
+        .expect("issue title");
+    cx.simulate_click(issue_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Notifications
+    );
+
+    // A matching Pull Request subject opens the existing typed route.
+    let pull_title = cx
+        .debug_bounds("notification-title-1")
+        .expect("pull request title");
+    cx.simulate_click(pull_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::PullRequest {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 2,
+        }
+    );
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-row-0");
 
     // The repository link is a real typed navigation into the application, never a browser hop.
     let repository_link = cx

@@ -5,6 +5,7 @@ use std::rc::Rc;
 use gpui::{AnyElement, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
 
 use crate::app::accounts::AccountServices;
+use crate::domain::notification::NotificationTarget;
 use crate::ui::notifications::NotificationsView;
 use crate::workspace::Route;
 
@@ -33,8 +34,10 @@ impl NotificationsPage {
         let Ok(controller) = repos.notifications() else {
             return this;
         };
-        let on_repository: crate::ui::notifications::OnRepository =
-            Rc::new(move |nav, window, cx| {
+        let on_repository: crate::ui::notifications::OnRepository = Rc::new({
+            let repos = repos.clone();
+            let navigation = navigation.clone();
+            move |nav, window, cx| {
                 // The component already re-checks its captured context, but the host repeats the
                 // current-account check so an old account's link can never open under a new one.
                 if !repos.is_current(&nav.context) {
@@ -49,15 +52,42 @@ impl NotificationsPage {
                     window,
                     cx,
                 );
-            });
+            }
+        });
+        let on_subject: crate::ui::notifications::OnSubject = Rc::new(move |nav, window, cx| {
+            // Re-check the captured account before turning an old row into a
+            // route under a newly selected account.
+            if !repos.is_current(&nav.context) {
+                return;
+            }
+            match nav.target {
+                NotificationTarget::PullRequest { repository, number } => {
+                    let locator = repository.locator();
+                    navigation(
+                        PageNavigation::Open(Route::PullRequest {
+                            namespace: locator.owner().to_string(),
+                            name: locator.name().to_string(),
+                            number,
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+                // This base has no `Route::Issue` yet. Matching Issue
+                // subjects stay non-navigating until that page lands.
+                NotificationTarget::Issue { .. } => {}
+            }
+        });
         let view = cx.new(|cx| {
-            NotificationsView::new(
+            let mut view = NotificationsView::new(
                 controller,
                 services.executor().clone(),
                 on_repository,
                 window,
                 cx,
-            )
+            );
+            view.on_subject(on_subject);
+            view
         });
         this._changed = Some(cx.observe(&view, |_, _, cx| cx.notify()));
         this.view = Some(view);

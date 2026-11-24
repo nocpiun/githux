@@ -55,6 +55,7 @@ impl Preview {
         cx: &mut Context<Self>,
     ) -> Self {
         let callback = Self::callback(cx);
+        let subject = Self::subject_callback(cx);
         let view = cx.new(|cx| {
             let mut view = NotificationsView::new(
                 accounts.repo_service().notifications().unwrap(),
@@ -63,6 +64,7 @@ impl Preview {
                 window,
                 cx,
             );
+            view.on_subject(subject);
             // The synthetic rows use timestamps relative to this fixed clock
             // (5 min, 2 hours, 3 days, future, invalid, just now, 1 min, 1 hour).
             view.set_now(
@@ -96,12 +98,30 @@ impl Preview {
             });
         })
     }
+    fn subject_callback(cx: &Context<Self>) -> ui::notifications::OnSubject {
+        let weak = cx.entity().downgrade();
+        Rc::new(move |action, _, cx| {
+            let _ = weak.update(cx, |preview, cx| {
+                if preview.accounts.repo_service().is_current(&action.context) {
+                    preview.action = format!(
+                        "{} #{} {}/{}",
+                        action.target.noun(),
+                        action.target.number(),
+                        action.target.repository().locator().owner(),
+                        action.target.repository().locator().name()
+                    );
+                    cx.notify();
+                }
+            });
+        })
+    }
     fn select(&mut self, scene: Scene, window: &mut Window, cx: &mut Context<Self>) {
         self.view
             .update(cx, |view, cx| view.cancel_interactions(cx));
         self.fixture.set_scene(scene);
         self.scene = scene;
         let callback = Self::callback(cx);
+        let subject = Self::subject_callback(cx);
         self.view = cx.new(|cx| {
             let mut view = NotificationsView::new(
                 self.accounts.repo_service().notifications().unwrap(),
@@ -110,6 +130,7 @@ impl Preview {
                 window,
                 cx,
             );
+            view.on_subject(subject);
             view.set_now(
                 Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1793534400)),
                 cx,
