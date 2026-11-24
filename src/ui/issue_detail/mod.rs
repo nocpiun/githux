@@ -596,7 +596,19 @@ impl IssueDetailView {
                 }
             }));
             reader.on_action(Rc::new(move |action, window, cx| {
-                if let ReaderAction::Link(LinkTarget::External { url }) = action
+                let target_url = match action {
+                    ReaderAction::Link(LinkTarget::External { url }) => Some(url),
+                    ReaderAction::Link(LinkTarget::Repository(link)) => {
+                        resolve_relative_issue_link(
+                            &link.owner,
+                            &link.name,
+                            &link.path,
+                            link.anchor.as_deref(),
+                        )
+                    }
+                    ReaderAction::Link(_) => None,
+                };
+                if let Some(url) = target_url
                     && let Some(owner) = link_owner.upgrade()
                 {
                     owner.update(cx, |view, cx| {
@@ -621,6 +633,31 @@ fn body_digest(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Resolve a relative Markdown link inside an Issue body or comment (which has no pinned commit
+/// SHA) to the corresponding GitHub web URL on `HEAD`, preserving any fragment.
+pub(super) fn resolve_relative_issue_link(
+    owner: &str,
+    name: &str,
+    path: &str,
+    anchor: Option<&str>,
+) -> Option<String> {
+    let mut url = reqwest::Url::parse("https://github.com").ok()?;
+    {
+        let mut segments = url.path_segments_mut().ok()?;
+        segments.push(owner);
+        segments.push(name);
+        segments.push("blob");
+        segments.push("HEAD");
+        for segment in path.split('/').filter(|s| !s.is_empty()) {
+            segments.push(segment);
+        }
+    }
+    if let Some(anchor) = anchor.filter(|a| !a.is_empty()) {
+        url.set_fragment(Some(anchor));
+    }
+    Some(url.to_string())
 }
 
 impl Focusable for IssueDetailView {

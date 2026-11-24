@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui::{Entity, TestAppContext, VisualContext, VisualTestContext, px, size};
 use serde_json::json;
 
 use super::controller::CommentsRequestMode;
@@ -533,5 +533,61 @@ fn attached_image_provider_receives_requests_from_issue_body_and_comments(cx: &m
         view.read_with(cx, |view, _| view.pending_cache_reads),
         0,
         "all cache read tasks must settle cleanly"
+    );
+}
+
+#[gpui::test]
+fn relative_markdown_link_in_issue_body_resolves_to_github_head_url(cx: &mut TestAppContext) {
+    let harness = Harness::new(false);
+    harness.transport.set(
+        "/repos/acme/widgets/issues/78",
+        vec![json_response(
+            200,
+            &json!({
+                "id": 9078,
+                "number": 78,
+                "title": "Issue with relative link",
+                "state": "open",
+                "user": { "id": 7, "login": "octocat" },
+                "body": "See [details](docs/details.md#sec).",
+                "comments": 0,
+                "labels": [],
+                "created_at": "2026-11-01T10:00:00Z",
+                "updated_at": "2026-11-01T11:00:00Z"
+            })
+            .to_string(),
+        )],
+    );
+    harness.transport.set(
+        "/repos/acme/widgets/issues/78/comments?per_page=30&page=1",
+        vec![json_response(200, "[]")],
+    );
+
+    let locator = IssueLocator::new("acme", "widgets", 78).unwrap();
+    let (view, cx) = harness.mount(locator, cx);
+    let emitted = Arc::new(Mutex::new(Vec::<String>::new()));
+    let emitted_sink = emitted.clone();
+    view.update(cx, |view, _| {
+        view.on_action(Rc::new(move |action, _, _| {
+            if let IssueDetailAction::External(url) = action {
+                emitted_sink.lock().unwrap().push(url);
+            }
+        }));
+    });
+    harness.settle(cx);
+
+    let body_reader = view
+        .read_with(cx, |view, _| {
+            view.body_reader.as_ref().map(|r| r.view.clone())
+        })
+        .expect("body reader");
+    cx.update_window_entity(&body_reader, |reader, window, cx| {
+        reader.handle_link("docs/details.md#sec", window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        emitted.lock().unwrap().as_slice(),
+        &["https://github.com/acme/widgets/blob/HEAD/docs/details.md#sec"]
     );
 }

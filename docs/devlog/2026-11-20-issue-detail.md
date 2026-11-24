@@ -20,6 +20,7 @@
 2. 并发缓存预读与在线刷新竞态：当瞬态 503 早于 `spawn_blocking` 缓存读取完成时，原先 `apply_cached_issue` 未将 `revalidation_failed` 置为 `true`（且未拦截 404/403 后晚到的旧缓存）；已修正 `Controller::apply_cached_issue` / `apply_cached_comments` 在同代次按当前错误语义结算。
 3. 后台 Tokio 线程直接通过 `tokio::sync::oneshot` 唤醒 GPUI `cx.spawn` 会在 `TestScheduler` 触发跨线程非确定性 panic；改为项目统一的 `Mutex<VecDeque<Reply>>` 收件箱 + 前台轻量 drain。
 4. 首轮 Codex 审查修复：修复 `read_cached_comments_first_page` 在单页评论（`has_next == false`）时提前返回 `None` 导致缓存未命中的问题；新增 `pending_cache_reads` 计数使前台 drain 持续至并行缓存读取全部落袋；为 `IssueDetailPage` / `IssueDetailView` 的正文与评论 `ReaderView` 接入账户作用域 `RepositoryImageService`（复用外部图片无凭据读取与缓存）。
+5. 第二轮 Codex 审查修复：在发起网络请求前预取 `CacheWrite` ticket（`begin_cache_write`），防止并发失效后晚到的旧响应重新污染缓存；将 Issue/评论 Markdown 内的相对链接（`LinkTarget::Repository`）规范解析为 `https://github.com/{owner}/{name}/blob/HEAD/{path}` 并走外部链接回调，不再静默丢弃。
 
 ## 验证记录与边界
 

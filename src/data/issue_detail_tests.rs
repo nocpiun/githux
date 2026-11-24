@@ -24,6 +24,12 @@ use crate::storage::{
 struct ScriptedTransport {
     routes: Mutex<HashMap<String, Vec<HttpResponse>>>,
     default_issue_body: Mutex<String>,
+    gate: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 
 impl ScriptedTransport {
@@ -31,7 +37,16 @@ impl ScriptedTransport {
         Arc::new(Self {
             routes: Mutex::new(HashMap::new()),
             default_issue_body: Mutex::new("Initial body".into()),
+            gate: Mutex::new(None),
         })
+    }
+
+    fn set_gate(
+        &self,
+        entered: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        *self.gate.lock().unwrap() = Some((entered, resume));
     }
 
     fn push(&self, path: &str, response: HttpResponse) {
@@ -74,6 +89,11 @@ impl Transport for ScriptedTransport {
                 && !queue.is_empty()
             {
                 return Ok(queue.remove(0));
+            }
+            let gate = self.gate.lock().unwrap().take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
             }
             if url.path().ends_with("/comments") {
                 return Ok(json_response(200, "[]"));
@@ -368,4 +388,60 @@ async fn no_store_and_missing_or_forbidden_invalidate_cache_while_transient_pres
         .await
         .unwrap_err();
     assert_eq!(stale, IssueDetailError::GitHub(GitHubError::StaleContext));
+}
+
+#[tokio::test]
+async fn in_flight_read_does_not_repopulate_snapshot_invalidated_before_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = ScriptedTransport::new();
+    let service = open_with_cache(&temp, transport.clone()).await;
+    let repos = service.repo_service();
+    let session = repos.issue_detail_session().unwrap();
+    let locator = IssueLocator::new("acme", "widgets", 99).unwrap();
+    let limits = IssueDetailLimits::default();
+
+    // Gate the first online fetch so we can invalidate the cache while it is in flight.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    transport.set_gate(entered_tx, resume_rx);
+
+    let session_in_flight = session.clone();
+    let locator_in_flight = locator.clone();
+    let limits_in_flight = limits.clone();
+    let in_flight = tokio::spawn(async move {
+        session_in_flight
+            .fetch_issue(
+                &locator_in_flight,
+                &limits_in_flight,
+                CancellationToken::default(),
+            )
+            .await
+    });
+
+    // Wait until the first fetch has acquired its write ticket and entered transport.
+    entered_rx.await.unwrap();
+
+    // Concurrent 404 invalidates the slot while the first fetch is still in flight.
+    transport.push(
+        "/repos/acme/widgets/issues/99",
+        response_with_headers(404, "{}", &[]),
+    );
+    let err = session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap_err();
+    assert!(err.is_missing());
+
+    // Release the older in-flight fetch; its stale write ticket must NOT repopulate the cache.
+    let _ = resume_tx.send(());
+    let _ = in_flight.await.unwrap().unwrap();
+
+    assert!(
+        session
+            .read_cached_issue(&locator, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_none(),
+        "stale in-flight fetch must not repopulate a cache slot invalidated while it was running"
+    );
 }

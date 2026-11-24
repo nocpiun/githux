@@ -23,7 +23,7 @@ use crate::github::{
     issue_detail::{self, IssueDetailLimits},
 };
 use crate::network::cancel::CancellationToken;
-use crate::storage::cache::{CacheAuthorization, CacheKey, CacheRead};
+use crate::storage::cache::{CacheAuthorization, CacheKey, CacheRead, CacheWrite};
 
 const SNAPSHOT_VERSION: u32 = 1;
 const ISSUE_REPRESENTATION: &str = "githux-issue-detail-v1";
@@ -341,6 +341,10 @@ impl IssueDetailSession {
         limits: &IssueDetailLimits,
         cancel: CancellationToken,
     ) -> Result<Scoped<IssueDetail>, IssueDetailError> {
+        // Acquire the write ticket BEFORE the network read so any concurrent invalidation or
+        // newer write supersedes this in-flight response.
+        let write_ticket = self.begin_cache_write(self.issue_cache_key(locator)).await;
+
         let result = self
             .repository
             .read(cancel, async move |pat, cancel| {
@@ -352,14 +356,13 @@ impl IssueDetailSession {
             Ok(scoped) => {
                 let response = scoped.value;
                 if self.verify()
-                    && let Some(cache) = self.cache.clone()
-                    && let Some(key) = self.issue_cache_key(locator)
+                    && let (Some(cache), Some(ticket)) = (self.cache.clone(), write_ticket)
                 {
                     let dto = IssueSnapshotDto::from_detail(&response.value);
                     let no_store = response.no_store;
                     let etag = response.etag.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        write_snapshot(&cache, &key, &dto, no_store, etag);
+                        put_snapshot(&cache, ticket, &dto, no_store, etag);
                     })
                     .await;
                 }
@@ -393,6 +396,13 @@ impl IssueDetailSession {
         cancel: CancellationToken,
     ) -> Result<Scoped<IssueCommentsPage>, IssueDetailError> {
         let is_first_page = cursor.is_none();
+        let write_ticket = if is_first_page {
+            self.begin_cache_write(self.comments_p1_cache_key(locator, limits.comments_per_page))
+                .await
+        } else {
+            None
+        };
+
         let result = self
             .repository
             .read(cancel, async move |pat, cancel| {
@@ -413,8 +423,7 @@ impl IssueDetailSession {
                 let response = scoped.value;
                 if is_first_page
                     && self.verify()
-                    && let Some(cache) = self.cache.clone()
-                    && let Some(key) = self.comments_p1_cache_key(locator, limits.comments_per_page)
+                    && let (Some(cache), Some(ticket)) = (self.cache.clone(), write_ticket)
                 {
                     let dto = CommentsPageSnapshotDto {
                         comments: response.value.comments.clone(),
@@ -424,7 +433,7 @@ impl IssueDetailSession {
                     let no_store = response.no_store;
                     let etag = response.etag.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        write_snapshot(&cache, &key, &dto, no_store, etag);
+                        put_snapshot(&cache, ticket, &dto, no_store, etag);
                     })
                     .await;
                 }
@@ -450,6 +459,18 @@ impl IssueDetailSession {
                 Err(error)
             }
         }
+    }
+
+    async fn begin_cache_write(&self, key: Option<CacheKey>) -> Option<CacheWrite> {
+        if !self.verify() {
+            return None;
+        }
+        let cache = self.cache.clone()?;
+        let key = key?;
+        tokio::task::spawn_blocking(move || cache.store().begin_write(cache.scope(), &key).ok())
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn invalidate_issue_caches(&self, locator: &IssueLocator, per_page: u32) {
@@ -492,16 +513,13 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn write_snapshot<T: Serialize>(
+fn put_snapshot<T: Serialize>(
     cache: &AccountCache,
-    key: &CacheKey,
+    ticket: CacheWrite,
     dto: &T,
     no_store: bool,
     etag: Option<String>,
 ) {
-    let Ok(ticket) = cache.store().begin_write(cache.scope(), key) else {
-        return;
-    };
     let Ok(bytes) = serde_json::to_vec(dto) else {
         return;
     };
