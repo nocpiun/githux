@@ -2,12 +2,18 @@
 //! [`IssueDetailView`] and routes repository, author profile and external links through Shell.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{AnyElement, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
 
 use crate::app::accounts::AccountServices;
+use crate::data::AccountCache;
+use crate::data::reader_images::RepositoryImageService;
 use crate::domain::issue_detail::IssueLocator;
+use crate::domain::repository::RepositoryIdentity;
+use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
 use crate::ui::issue_detail::{IssueDetailAction, IssueDetailView};
+use crate::ui::reader::{ImageLimits, ImageProvider};
 use crate::workspace::Route;
 
 use super::{NavigationSink, PageAvatars, PageNavigation};
@@ -44,8 +50,29 @@ impl IssueDetailPage {
             return this;
         }
         let active_account = services.accounts().active_summary();
+        let image_provider: Option<Arc<dyn ImageProvider>> =
+            ReqwestExternalImages::new().ok().and_then(|external| {
+                let session = repos.session().ok()?;
+                let context = session.context().clone();
+                let cache = repos.cache(&context).map(|account_cache: AccountCache| {
+                    let (store, scope) = account_cache.into_parts();
+                    (store, scope, false)
+                });
+                let repository = RepositoryIdentity {
+                    id: 0,
+                    locator: locator.repository().clone(),
+                };
+                Some(Arc::new(RepositoryImageService::with_cache(
+                    session,
+                    repository,
+                    services.executor().clone(),
+                    Arc::new(external) as Arc<dyn ExternalImageBytes>,
+                    ImageLimits::default(),
+                    cache,
+                )) as Arc<dyn ImageProvider>)
+            });
         let view = cx.new(|cx| {
-            IssueDetailView::new(
+            let mut view = IssueDetailView::new(
                 repos.clone(),
                 services.executor().clone(),
                 locator,
@@ -53,7 +80,9 @@ impl IssueDetailPage {
                 window,
                 cx,
             )
-            .expect("the account session was verified before construction")
+            .expect("the account session was verified before construction");
+            view.set_image_provider(image_provider, cx);
+            view
         });
         view.update(cx, |view, _| {
             let on_action: crate::ui::issue_detail::OnIssueDetailAction =

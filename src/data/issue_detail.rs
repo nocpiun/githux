@@ -296,14 +296,16 @@ impl IssueDetailSession {
                     }
                     let hit = lease.snapshot().ok().flatten()?;
                     let dto: CommentsPageSnapshotDto = serde_json::from_slice(&hit.bytes).ok()?;
-                    let next = dto.has_next.then(|| {
-                        origin.map(|origin| IssueCommentsCursor {
+                    let next = if dto.has_next {
+                        Some(IssueCommentsCursor {
                             locator: locator_clone.clone(),
                             page: 2,
                             per_page: dto.per_page,
-                            origin,
+                            origin: origin?,
                         })
-                    })?;
+                    } else {
+                        None
+                    };
                     Some(CachedCommentsSnapshot {
                         page: IssueCommentsPage {
                             comments: dto.comments,

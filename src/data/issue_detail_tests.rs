@@ -185,6 +185,49 @@ async fn caches_issue_and_comments_and_isolates_across_accounts_and_repos() {
         "same issue number in another repo must not hit"
     );
 
+    // Single-page comments (no next page) and confirmed empty comments both hit cache.
+    transport.push(
+        "/repos/acme/one/issues/42/comments",
+        json_response(
+            200,
+            &json!([{
+                "id": 701,
+                "user": { "id": 1, "login": "account-a" },
+                "body": "Single page cached comment",
+                "created_at": "2026-11-01T12:00:00Z",
+                "updated_at": "2026-11-01T12:00:00Z"
+            }])
+            .to_string(),
+        ),
+    );
+    let live_comments = session_a
+        .fetch_comments_page(&locator_one, None, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    assert_eq!(live_comments.value.comments.len(), 1);
+    assert!(live_comments.value.next.is_none());
+    let cached_comments = session_a
+        .read_cached_comments_first_page(&alias, &limits, CancellationToken::default())
+        .await
+        .unwrap()
+        .expect("single-page comments with has_next=false must hit cache");
+    assert_eq!(cached_comments.value.page.comments.len(), 1);
+    assert!(cached_comments.value.page.next.is_none());
+
+    // Confirmed empty comments page also hits cache.
+    let empty_comments = session_a
+        .fetch_comments_page(&locator_two, None, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    assert!(empty_comments.value.comments.is_empty());
+    let cached_empty = session_a
+        .read_cached_comments_first_page(&locator_two, &limits, CancellationToken::default())
+        .await
+        .unwrap()
+        .expect("confirmed empty comments page must hit cache");
+    assert!(cached_empty.value.page.comments.is_empty());
+    assert!(cached_empty.value.page.next.is_none());
+
     // Switch to account-b: account-a's cached snapshot must never appear.
     service
         .login(Pat::new("ghp_account-b".to_string()))

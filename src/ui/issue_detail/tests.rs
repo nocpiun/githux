@@ -455,3 +455,83 @@ fn cached_snapshot_survives_transient_error_but_clears_on_missing_or_account_swi
     cx.run_until_parked();
     assert!(cx.debug_bounds("issue-detail-account-changed").is_some());
 }
+
+#[gpui::test]
+fn attached_image_provider_receives_requests_from_issue_body_and_comments(cx: &mut TestAppContext) {
+    struct RecordingProvider {
+        requested: Mutex<Vec<String>>,
+    }
+    impl crate::ui::reader::ImageProvider for RecordingProvider {
+        fn start(
+            &self,
+            request: crate::ui::reader::ImageRequest,
+            _sink: crate::ui::reader::ImageSink,
+        ) {
+            if let crate::ui::reader::ImageTarget::External { url } = request.target {
+                self.requested.lock().unwrap().push(url);
+            }
+        }
+        fn cancel(&self, _scope: crate::ui::reader::ImageScope) {}
+    }
+
+    let harness = Harness::new(false);
+    harness.transport.set(
+        "/repos/acme/widgets/issues/77",
+        vec![json_response(
+            200,
+            &json!({
+                "id": 9077,
+                "number": 77,
+                "title": "Issue with screenshots",
+                "state": "open",
+                "user": { "id": 7, "login": "octocat" },
+                "body": "Body screenshot:\n\n![body](https://example.com/body.png)",
+                "comments": 1,
+                "labels": [],
+                "created_at": "2026-11-01T10:00:00Z",
+                "updated_at": "2026-11-01T11:00:00Z"
+            })
+            .to_string(),
+        )],
+    );
+    harness.transport.set(
+        "/repos/acme/widgets/issues/77/comments?per_page=30&page=1",
+        vec![json_response(
+            200,
+            &json!([{
+                "id": 7701,
+                "user": { "id": 8, "login": "alice" },
+                "body": "Comment screenshot:\n\n![comment](https://example.com/comment.png)",
+                "created_at": "2026-11-01T12:00:00Z",
+                "updated_at": "2026-11-01T12:00:00Z"
+            }])
+            .to_string(),
+        )],
+    );
+
+    let provider = Arc::new(RecordingProvider {
+        requested: Mutex::new(Vec::new()),
+    });
+    let locator = IssueLocator::new("acme", "widgets", 77).unwrap();
+    let (view, cx) = harness.mount(locator, cx);
+    let provider_trait: Arc<dyn crate::ui::reader::ImageProvider> = provider.clone();
+    view.update(cx, |view, cx| {
+        view.set_image_provider(Some(provider_trait), cx);
+    });
+    harness.settle(cx);
+
+    let urls = provider.requested.lock().unwrap().clone();
+    assert!(
+        urls.iter().any(|u| u == "https://example.com/body.png"),
+        "issue body reader must request images through the attached provider: {urls:?}"
+    );
+    assert!(
+        urls.iter().any(|u| u == "https://example.com/comment.png"),
+        "comment reader must request images through the attached provider: {urls:?}"
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.pending_cache_reads),
+        0,
+        "all cache read tasks must settle cleanly"
+    );
+}

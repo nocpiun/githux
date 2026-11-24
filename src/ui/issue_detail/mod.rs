@@ -30,7 +30,8 @@ use crate::domain::repository::RepositoryLocator;
 use crate::github::issue_detail::IssueDetailLimits;
 use crate::network::executor::BackgroundExecutor;
 use crate::ui::reader::{
-    DocumentKind, LinkTarget, MarkdownLayout, ReaderAction, ReaderView, ResourceContext,
+    DocumentKind, ImageProvider, LinkTarget, MarkdownLayout, ReaderAction, ReaderView,
+    ResourceContext,
 };
 use crate::ui::scroll::{self, Bars, Motion};
 
@@ -86,9 +87,11 @@ pub struct IssueDetailView {
     executor: Arc<BackgroundExecutor>,
     limits: IssueDetailLimits,
     avatars: PageAvatars,
+    image_provider: Option<Arc<dyn ImageProvider>>,
     on_action: Option<OnIssueDetailAction>,
 
     inbox: Arc<Mutex<VecDeque<Reply>>>,
+    pending_cache_reads: usize,
     drain_task: Option<Task<()>>,
 
     body_reader: Option<CachedReader>,
@@ -136,8 +139,10 @@ impl IssueDetailView {
             executor,
             limits: IssueDetailLimits::default(),
             avatars,
+            image_provider: None,
             on_action: None,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
+            pending_cache_reads: 0,
             drain_task: None,
             body_reader: None,
             comment_readers: HashMap::new(),
@@ -160,6 +165,25 @@ impl IssueDetailView {
 
     pub fn on_action(&mut self, callback: OnIssueDetailAction) {
         self.on_action = Some(callback);
+    }
+
+    /// Attach an account-scoped [`ImageProvider`] to the issue body and comment readers.
+    pub fn set_image_provider(
+        &mut self,
+        provider: Option<Arc<dyn ImageProvider>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_provider = provider.clone();
+        if let Some(reader) = &self.body_reader {
+            reader.view.update(cx, |reader, cx| {
+                reader.set_image_provider(provider.clone(), cx)
+            });
+        }
+        for reader in self.comment_readers.values() {
+            reader.view.update(cx, |reader, cx| {
+                reader.set_image_provider(provider.clone(), cx)
+            });
+        }
     }
 
     #[allow(dead_code)]
@@ -215,6 +239,7 @@ impl IssueDetailView {
     fn shutdown_activity(&mut self, cx: &mut Context<Self>) {
         self.controller.cancel_all();
         self.drain_task = None;
+        self.pending_cache_reads = 0;
         self.inbox.lock().expect("issue detail inbox").clear();
         self.cancel_activity(cx);
     }
@@ -310,6 +335,7 @@ impl IssueDetailView {
                     .update(cx, |view, cx| {
                         view.drain_inbox(cx);
                         let has_pending = view.controller.is_busy()
+                            || view.pending_cache_reads > 0
                             || !view.inbox.lock().expect("issue detail inbox").is_empty();
                         if !has_pending {
                             view.drain_task = None;
@@ -342,12 +368,14 @@ impl IssueDetailView {
         for reply in replies {
             changed |= match reply {
                 Reply::IssueCached { request, snapshot } => {
+                    self.pending_cache_reads = self.pending_cache_reads.saturating_sub(1);
                     self.controller.apply_cached_issue(&request, snapshot)
                 }
                 Reply::IssueOnline { request, result } => {
                     self.controller.finish_issue(&request, result)
                 }
                 Reply::CommentsCached { request, snapshot } => {
+                    self.pending_cache_reads = self.pending_cache_reads.saturating_sub(1);
                     self.controller.apply_cached_comments(&request, snapshot)
                 }
                 Reply::CommentsOnline { request, result } => {
@@ -362,8 +390,11 @@ impl IssueDetailView {
         if read_cache && self.controller.issue.is_none() {
             let cache_req = request.clone();
             let inbox = self.inbox.clone();
-            let _ = self.executor.handle().spawn(async move {
-                if let Ok(snapshot) = cache_req.execute_cache().await {
+            if self
+                .executor
+                .handle()
+                .spawn(async move {
+                    let snapshot = cache_req.execute_cache().await.ok().flatten();
                     inbox
                         .lock()
                         .expect("issue detail inbox")
@@ -371,8 +402,11 @@ impl IssueDetailView {
                             request: cache_req,
                             snapshot,
                         });
-                }
-            });
+                })
+                .is_ok()
+            {
+                self.pending_cache_reads = self.pending_cache_reads.saturating_add(1);
+            }
         }
 
         let online_req = request.clone();
@@ -416,8 +450,11 @@ impl IssueDetailView {
             let cache_req = request.clone();
             let limits = self.limits.clone();
             let inbox = self.inbox.clone();
-            let _ = self.executor.handle().spawn(async move {
-                if let Ok(snapshot) = cache_req.execute_cache(&limits).await {
+            if self
+                .executor
+                .handle()
+                .spawn(async move {
+                    let snapshot = cache_req.execute_cache(&limits).await.ok().flatten();
                     inbox
                         .lock()
                         .expect("issue detail inbox")
@@ -425,8 +462,11 @@ impl IssueDetailView {
                             request: cache_req,
                             snapshot,
                         });
-                }
-            });
+                })
+                .is_ok()
+            {
+                self.pending_cache_reads = self.pending_cache_reads.saturating_add(1);
+            }
         }
 
         let online_req = request.clone();
@@ -541,9 +581,11 @@ impl IssueDetailView {
         let context = ResourceContext::new(owner, name, "", path);
         let owner_entity = cx.entity().downgrade();
         let link_owner = cx.entity().downgrade();
+        let image_provider = self.image_provider.clone();
         cx.new(|cx| {
             let mut reader = ReaderView::new(body, DocumentKind::Markdown, context, window, cx);
             reader.set_markdown_layout(MarkdownLayout::Flow, cx);
+            reader.set_image_provider(image_provider, cx);
             let reader_weak = cx.entity().downgrade();
             reader.on_layout_changed(Rc::new(move |_, cx| {
                 if let Some(view) = reader_weak.upgrade() {
@@ -595,6 +637,7 @@ impl Render for IssueDetailView {
         let current = self.controller.current();
         if !current {
             scroll::cancel_region(&mut self.bars, &self.motion);
+            self.image_provider = None;
             self.body_reader = None;
             self.comment_readers.clear();
         } else {
