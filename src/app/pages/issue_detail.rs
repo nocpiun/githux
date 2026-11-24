@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use gpui::{AnyElement, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
 
 use crate::app::accounts::AccountServices;
-use crate::content::images::{ImageFailure, ImageRequest, ImageScope, ImageSink, ImageTarget};
+use crate::content::images::{
+    ImageFailure, ImageRenderOptions, ImageRequest, ImageScope, ImageSink, ImageTarget,
+};
 use crate::data::reader_images::RepositoryImageService;
 use crate::data::{AccountCache, RepoService, RepositorySession};
 use crate::domain::issue_detail::IssueLocator;
@@ -232,13 +234,23 @@ impl IssueImageProvider {
 }
 
 impl ImageProvider for IssueImageProvider {
-    fn start(&self, mut request: ImageRequest, sink: ImageSink) {
+    fn start(&self, request: ImageRequest, sink: ImageSink) {
+        self.start_with_options(request, sink, ImageRenderOptions::default());
+    }
+
+    fn start_with_options(
+        &self,
+        mut request: ImageRequest,
+        sink: ImageSink,
+        options: ImageRenderOptions,
+    ) {
         let needs_revision = matches!(
             &request.target,
             ImageTarget::Repository { commit, .. } if commit.is_empty()
         );
         if !needs_revision {
-            self.external_service.start(request, sink);
+            self.external_service
+                .start_with_options(request, sink, options);
             return;
         }
         if !self.session.verify() {
@@ -336,7 +348,7 @@ impl ImageProvider for IssueImageProvider {
             if let ImageTarget::Repository { commit, .. } = &mut request.target {
                 *commit = sha.clone();
             }
-            service.start(request, sink);
+            service.start_with_options(request, sink, options);
         });
     }
 
