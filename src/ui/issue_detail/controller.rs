@@ -457,9 +457,7 @@ impl Controller {
                 if error.is_cancelled() {
                     return true;
                 }
-                if request.mode == CommentsRequestMode::Replace
-                    && (error.is_missing() || error.is_auth_or_permission())
-                {
+                if error.is_missing() || error.is_auth_or_permission() {
                     self.comments.clear();
                     self.comments_next = None;
                     self.comments_loaded = false;

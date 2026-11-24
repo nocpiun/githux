@@ -446,8 +446,7 @@ impl IssueDetailSession {
                 })
             }
             Err(error) => {
-                if is_first_page
-                    && (error.is_missing() || error.is_auth_or_permission())
+                if (error.is_missing() || error.is_auth_or_permission())
                     && let Some(cache) = self.cache.clone()
                     && let Some(key) = self.comments_p1_cache_key(locator, limits.comments_per_page)
                 {

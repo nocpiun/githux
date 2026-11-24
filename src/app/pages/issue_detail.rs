@@ -190,7 +190,7 @@ struct IssueImageProvider {
     executor: Arc<BackgroundExecutor>,
     external: Arc<dyn ExternalImageBytes>,
     external_service: RepositoryImageService,
-    resolved_repo: Arc<tokio::sync::OnceCell<Option<(String, RepositoryImageService)>>>,
+    resolved_repo: Arc<tokio::sync::OnceCell<(String, RepositoryImageService)>>,
     pending: Mutex<HashMap<ImageScope, Vec<CancellationTokenSource>>>,
 }
 
@@ -269,14 +269,14 @@ impl ImageProvider for IssueImageProvider {
 
         let _ = self.executor.handle().spawn(async move {
             let resolved = resolved_repo
-                .get_or_init(|| async {
+                .get_or_try_init(|| async {
                     let limits = RepositoryLimits::default();
                     let details = session
                         .repository(locator.clone(), &limits, cancel.clone())
                         .await
-                        .ok()?
+                        .map_err(|_| ImageFailure::Network)?
                         .value;
-                    let branch = details.default_branch?;
+                    let branch = details.default_branch.ok_or(ImageFailure::NotFound)?;
                     let snapshot = session
                         .revision(
                             &details.identity,
@@ -285,7 +285,7 @@ impl ImageProvider for IssueImageProvider {
                             cancel.clone(),
                         )
                         .await
-                        .ok()?
+                        .map_err(|_| ImageFailure::Network)?
                         .value;
                     let sha = snapshot.commit().as_str().to_string();
                     let is_private = details.visibility != RepoVisibility::Public;
@@ -304,7 +304,7 @@ impl ImageProvider for IssueImageProvider {
                         ImageLimits::default(),
                         cache,
                     );
-                    Some((sha, service))
+                    Ok((sha, service))
                 })
                 .await;
 
@@ -322,14 +322,14 @@ impl ImageProvider for IssueImageProvider {
                 );
                 return;
             }
-            let Some((sha, service)) = resolved.as_ref() else {
+            let Ok((sha, service)) = resolved else {
                 sink.publish(
                     request.scope,
                     request.key,
                     0,
                     true,
                     None,
-                    Err(ImageFailure::NotFound),
+                    Err(resolved.err().unwrap_or(ImageFailure::NotFound)),
                 );
                 return;
             };
@@ -352,7 +352,7 @@ impl ImageProvider for IssueImageProvider {
             }
         }
         self.external_service.cancel(scope);
-        if let Some(Some((_, service))) = self.resolved_repo.get() {
+        if let Some((_, service)) = self.resolved_repo.get() {
             service.cancel(scope);
         }
     }
