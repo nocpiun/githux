@@ -457,14 +457,19 @@ impl Controller {
                 if error.is_cancelled() {
                     return true;
                 }
-                if error.is_missing() || error.is_auth_or_permission() {
+                let cleared = error.is_missing() || error.is_auth_or_permission();
+                if cleared {
                     self.comments.clear();
                     self.comments_next = None;
                     self.comments_loaded = false;
                     self.comments_origin = IssueOrigin::Network;
                 }
                 self.comments_error = Some(error);
-                self.comments_failed_mode = Some(request.mode);
+                self.comments_failed_mode = Some(if cleared {
+                    CommentsRequestMode::Replace
+                } else {
+                    request.mode
+                });
             }
         }
         true
