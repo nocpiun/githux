@@ -445,3 +445,50 @@ async fn in_flight_read_does_not_repopulate_snapshot_invalidated_before_completi
         "stale in-flight fetch must not repopulate a cache slot invalidated while it was running"
     );
 }
+
+#[tokio::test]
+async fn unauthorized_response_quarantines_entire_account_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = ScriptedTransport::new();
+    let service = open_with_cache(&temp, transport.clone()).await;
+    let repos = service.repo_service();
+    let session = repos.issue_detail_session().unwrap();
+    let issue_one = IssueLocator::new("acme", "one", 1).unwrap();
+    let issue_two = IssueLocator::new("acme", "two", 2).unwrap();
+    let limits = IssueDetailLimits::default();
+
+    // Populate cache for issue_two.
+    session
+        .fetch_issue(&issue_two, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    let cached_before = session
+        .read_cached_issue(&issue_two, CancellationToken::default())
+        .await
+        .unwrap()
+        .expect("issue_two should be cached before 401");
+    assert!(cached_before.value.authorization.is_current());
+
+    // A 401 on issue_one must quarantine the whole account cache, revoking issue_two as well.
+    transport.push(
+        "/repos/acme/one/issues/1",
+        response_with_headers(401, "{}", &[]),
+    );
+    let err = session
+        .fetch_issue(&issue_one, &limits, CancellationToken::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, IssueDetailError::GitHub(GitHubError::Unauthorized));
+    assert!(
+        !cached_before.value.authorization.is_current(),
+        "existing authorization token must be invalidated by 401 quarantine"
+    );
+    assert!(
+        session
+            .read_cached_issue(&issue_two, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_none(),
+        "quarantined account cache must deny reads for other issues"
+    );
+}

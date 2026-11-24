@@ -118,6 +118,7 @@ struct CommentsPageSnapshotDto {
 /// Account-bound session for reading a single Issue and its paginated comments.
 #[derive(Clone)]
 pub struct IssueDetailSession {
+    repos: RepoService,
     repository: RepositorySession,
     client: Arc<GitHubClient>,
     cache: Option<AccountCache>,
@@ -138,6 +139,7 @@ impl RepoService {
         let repository = self.session().map_err(|_| GitHubError::StaleContext)?;
         let cache = self.cache(repository.context());
         Ok(IssueDetailSession {
+            repos: self.clone(),
             repository,
             client: self.client.clone(),
             cache,
@@ -375,6 +377,9 @@ impl IssueDetailSession {
                 })
             }
             Err(error) => {
+                if matches!(error, IssueDetailError::GitHub(GitHubError::Unauthorized)) {
+                    let _ = self.repos.credential_rejected(self.context()).await;
+                }
                 if error.is_missing()
                     || error.is_auth_or_permission()
                     || matches!(error, IssueDetailError::NotAnIssue)
@@ -446,6 +451,9 @@ impl IssueDetailSession {
                 })
             }
             Err(error) => {
+                if matches!(error, IssueDetailError::GitHub(GitHubError::Unauthorized)) {
+                    let _ = self.repos.credential_rejected(self.context()).await;
+                }
                 if (error.is_missing() || error.is_auth_or_permission())
                     && let Some(cache) = self.cache.clone()
                     && let Some(key) = self.comments_p1_cache_key(locator, limits.comments_per_page)
