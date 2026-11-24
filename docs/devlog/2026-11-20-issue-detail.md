@@ -21,6 +21,7 @@
 3. 后台 Tokio 线程直接通过 `tokio::sync::oneshot` 唤醒 GPUI `cx.spawn` 会在 `TestScheduler` 触发跨线程非确定性 panic；改为项目统一的 `Mutex<VecDeque<Reply>>` 收件箱 + 前台轻量 drain。
 4. 首轮 Codex 审查修复：修复 `read_cached_comments_first_page` 在单页评论（`has_next == false`）时提前返回 `None` 导致缓存未命中的问题；新增 `pending_cache_reads` 计数使前台 drain 持续至并行缓存读取全部落袋；为 `IssueDetailPage` / `IssueDetailView` 的正文与评论 `ReaderView` 接入账户作用域 `RepositoryImageService`（复用外部图片无凭据读取与缓存）。
 5. 第二轮 Codex 审查修复：在发起网络请求前预取 `CacheWrite` ticket（`begin_cache_write`），防止并发失效后晚到的旧响应重新污染缓存；将 Issue/评论 Markdown 内的相对链接（`LinkTarget::Repository`）规范解析为 `https://github.com/{owner}/{name}/blob/HEAD/{path}` 并走外部链接回调，不再静默丢弃。
+6. 第三轮 Codex 审查修复：缓存第 1 页评论未完成在线重验证前禁止触发 `Append` 翻页（避免混合不同时刻分页导致静默漏项）；新增 `IssueImageProvider`，外部图片直通 `RepositoryImageService`，仓库相对路径图片懒解析仓库默认分支 HEAD commit 与真实 `RepositoryIdentity` 后再按权限读取。
 
 ## 验证记录与边界
 

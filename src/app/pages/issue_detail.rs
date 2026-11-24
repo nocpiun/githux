@@ -1,16 +1,22 @@
 //! Production single-Issue detail host. It joins the account-scoped issue/comments reader to
 //! [`IssueDetailView`] and routes repository, author profile and external links through Shell.
 
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui::{AnyElement, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
 
 use crate::app::accounts::AccountServices;
-use crate::data::AccountCache;
+use crate::content::images::{ImageFailure, ImageRequest, ImageScope, ImageSink, ImageTarget};
 use crate::data::reader_images::RepositoryImageService;
+use crate::data::{AccountCache, RepoService, RepositorySession};
 use crate::domain::issue_detail::IssueLocator;
-use crate::domain::repository::RepositoryIdentity;
+use crate::domain::repo::RepoVisibility;
+use crate::domain::repository::{RepositoryIdentity, RepositoryLocator, RevisionSpec};
+use crate::github::RepositoryLimits;
+use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::network::executor::BackgroundExecutor;
 use crate::network::reader_images::{ExternalImageBytes, ReqwestExternalImages};
 use crate::ui::issue_detail::{IssueDetailAction, IssueDetailView};
 use crate::ui::reader::{ImageLimits, ImageProvider};
@@ -53,22 +59,12 @@ impl IssueDetailPage {
         let image_provider: Option<Arc<dyn ImageProvider>> =
             ReqwestExternalImages::new().ok().and_then(|external| {
                 let session = repos.session().ok()?;
-                let context = session.context().clone();
-                let cache = repos.cache(&context).map(|account_cache: AccountCache| {
-                    let (store, scope) = account_cache.into_parts();
-                    (store, scope, false)
-                });
-                let repository = RepositoryIdentity {
-                    id: 0,
-                    locator: locator.repository().clone(),
-                };
-                Some(Arc::new(RepositoryImageService::with_cache(
+                Some(Arc::new(IssueImageProvider::new(
+                    repos.clone(),
                     session,
-                    repository,
+                    locator.repository().clone(),
                     services.executor().clone(),
                     Arc::new(external) as Arc<dyn ExternalImageBytes>,
-                    ImageLimits::default(),
-                    cache,
                 )) as Arc<dyn ImageProvider>)
             });
         let view = cx.new(|cx| {
@@ -179,4 +175,185 @@ fn placeholder<E: 'static>(message: &str, cx: &mut Context<E>) -> AnyElement {
         .text_color(cx.theme().colors.fg_subtle)
         .child(message.to_string())
         .into_any_element()
+}
+
+/// Account-scoped image provider for Issue bodies and comments.
+///
+/// External `https://` images go directly to [`RepositoryImageService`] without extra GitHub API
+/// calls. Repository-relative images (which carry an empty commit in issue Markdown) lazily
+/// resolve the repository's default branch HEAD commit and real `RepositoryIdentity` once, then
+/// delegate to a properly scoped [`RepositoryImageService`] with that pinned SHA.
+struct IssueImageProvider {
+    repos: RepoService,
+    session: RepositorySession,
+    locator: RepositoryLocator,
+    executor: Arc<BackgroundExecutor>,
+    external: Arc<dyn ExternalImageBytes>,
+    external_service: RepositoryImageService,
+    resolved_repo: Arc<tokio::sync::OnceCell<Option<(String, RepositoryImageService)>>>,
+    pending: Mutex<HashMap<ImageScope, Vec<CancellationTokenSource>>>,
+}
+
+impl IssueImageProvider {
+    fn new(
+        repos: RepoService,
+        session: RepositorySession,
+        locator: RepositoryLocator,
+        executor: Arc<BackgroundExecutor>,
+        external: Arc<dyn ExternalImageBytes>,
+    ) -> Self {
+        let context = session.context().clone();
+        let cache = repos.cache(&context).map(|account_cache: AccountCache| {
+            let (store, scope) = account_cache.into_parts();
+            (store, scope, false)
+        });
+        let external_service = RepositoryImageService::with_cache(
+            session.clone(),
+            RepositoryIdentity {
+                id: 0,
+                locator: locator.clone(),
+            },
+            executor.clone(),
+            external.clone(),
+            ImageLimits::default(),
+            cache,
+        );
+        Self {
+            repos,
+            session,
+            locator,
+            executor,
+            external,
+            external_service,
+            resolved_repo: Arc::new(tokio::sync::OnceCell::new()),
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl ImageProvider for IssueImageProvider {
+    fn start(&self, mut request: ImageRequest, sink: ImageSink) {
+        let needs_revision = matches!(
+            &request.target,
+            ImageTarget::Repository { commit, .. } if commit.is_empty()
+        );
+        if !needs_revision {
+            self.external_service.start(request, sink);
+            return;
+        }
+        if !self.session.verify() {
+            sink.publish(
+                request.scope,
+                request.key,
+                0,
+                true,
+                None,
+                Err(ImageFailure::StaleContext),
+            );
+            return;
+        }
+        let (cancel, source) = CancellationToken::new();
+        self.pending
+            .lock()
+            .expect("issue image pending lock")
+            .entry(request.scope)
+            .or_default()
+            .push(source);
+
+        let repos = self.repos.clone();
+        let session = self.session.clone();
+        let locator = self.locator.clone();
+        let executor = self.executor.clone();
+        let external = self.external.clone();
+        let resolved_repo = self.resolved_repo.clone();
+
+        let _ = self.executor.handle().spawn(async move {
+            let resolved = resolved_repo
+                .get_or_init(|| async {
+                    let limits = RepositoryLimits::default();
+                    let details = session
+                        .repository(locator.clone(), &limits, cancel.clone())
+                        .await
+                        .ok()?
+                        .value;
+                    let branch = details.default_branch?;
+                    let snapshot = session
+                        .revision(
+                            &details.identity,
+                            RevisionSpec::Ref(branch),
+                            &limits,
+                            cancel.clone(),
+                        )
+                        .await
+                        .ok()?
+                        .value;
+                    let sha = snapshot.commit().as_str().to_string();
+                    let is_private = details.visibility != RepoVisibility::Public;
+                    let cache =
+                        repos
+                            .cache(session.context())
+                            .map(|account_cache: AccountCache| {
+                                let (store, scope) = account_cache.into_parts();
+                                (store, scope, is_private)
+                            });
+                    let service = RepositoryImageService::with_cache(
+                        session.clone(),
+                        details.identity,
+                        executor.clone(),
+                        external.clone(),
+                        ImageLimits::default(),
+                        cache,
+                    );
+                    Some((sha, service))
+                })
+                .await;
+
+            if cancel.is_cancelled() {
+                return;
+            }
+            if !session.verify() {
+                sink.publish(
+                    request.scope,
+                    request.key,
+                    0,
+                    true,
+                    None,
+                    Err(ImageFailure::StaleContext),
+                );
+                return;
+            }
+            let Some((sha, service)) = resolved.as_ref() else {
+                sink.publish(
+                    request.scope,
+                    request.key,
+                    0,
+                    true,
+                    None,
+                    Err(ImageFailure::NotFound),
+                );
+                return;
+            };
+            if let ImageTarget::Repository { commit, .. } = &mut request.target {
+                *commit = sha.clone();
+            }
+            service.start(request, sink);
+        });
+    }
+
+    fn cancel(&self, scope: ImageScope) {
+        if let Some(sources) = self
+            .pending
+            .lock()
+            .expect("issue image pending lock")
+            .remove(&scope)
+        {
+            for source in sources {
+                source.cancel();
+            }
+        }
+        self.external_service.cancel(scope);
+        if let Some(Some((_, service))) = self.resolved_repo.get() {
+            service.cancel(scope);
+        }
+    }
 }

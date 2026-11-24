@@ -247,7 +247,10 @@ impl Controller {
         if self.comments_busy == Some(mode) {
             return None;
         }
-        if mode == CommentsRequestMode::Append && self.comments_busy.is_some() {
+        if mode == CommentsRequestMode::Append
+            && (self.comments_busy.is_some()
+                || matches!(self.comments_origin, IssueOrigin::Cached { .. }))
+        {
             return None;
         }
         let cursor = match mode {
@@ -346,7 +349,9 @@ impl Controller {
                 .as_ref()
                 .is_some_and(IssueDetailError::is_transient);
         self.comments = scoped.value.page.comments;
-        self.comments_next = scoped.value.page.next;
+        // Never allow live page-2 append against an un-revalidated cached page 1:
+        // deleted/shifted comments between snapshots would silently skip entries.
+        self.comments_next = None;
         self.comments_loaded = true;
         self.comments_origin = IssueOrigin::Cached {
             verified_at_ms: scoped.value.verified_at_ms,

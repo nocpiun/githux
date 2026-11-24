@@ -591,3 +591,86 @@ fn relative_markdown_link_in_issue_body_resolves_to_github_head_url(cx: &mut Tes
         &["https://github.com/acme/widgets/blob/HEAD/docs/details.md#sec"]
     );
 }
+
+#[gpui::test]
+fn cached_comments_page_one_does_not_enable_live_append_before_revalidation(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(true);
+    let locator = IssueLocator::new("acme", "widgets", 88).unwrap();
+    harness.transport.set(
+        "/repos/acme/widgets/issues/88",
+        vec![json_response(
+            200,
+            &json!({
+                "id": 9088,
+                "number": 88,
+                "title": "Cached comments issue",
+                "state": "open",
+                "user": { "id": 7, "login": "octocat" },
+                "body": "Body text",
+                "comments": 2,
+                "labels": [],
+                "created_at": "2026-11-01T10:00:00Z",
+                "updated_at": "2026-11-01T11:00:00Z"
+            })
+            .to_string(),
+        )],
+    );
+    // First call seeds cache with a next-page Link header; second call fails with 503.
+    harness.transport.set(
+        "/repos/acme/widgets/issues/88/comments?per_page=30&page=1",
+        vec![
+            response(
+                200,
+                &json!([{
+                    "id": 8801,
+                    "user": { "id": 8, "login": "alice" },
+                    "body": "Cached page 1 comment",
+                    "created_at": "2026-11-01T12:00:00Z",
+                    "updated_at": "2026-11-01T12:00:00Z"
+                }])
+                .to_string(),
+                &[(
+                    "link",
+                    r#"<https://api.github.com/repos/acme/widgets/issues/88/comments?per_page=30&page=2>; rel="next""#,
+                )],
+            ),
+            json_response(503, "{}"),
+        ],
+    );
+
+    // Seed cache for page 1 (which has next=page 2).
+    let session = harness
+        .service
+        .repo_service()
+        .issue_detail_session()
+        .unwrap();
+    let seeded = harness
+        .runtime
+        .block_on(session.fetch_comments_page(
+            &locator,
+            None,
+            &IssueDetailLimits::default(),
+            CancellationToken::default(),
+        ))
+        .unwrap();
+    assert!(seeded.value.next.is_some());
+
+    // Open view when online page-1 revalidation fails with 503:
+    // cached comment 8801 is visible, but Load more (Append) MUST NOT be enabled.
+    let (view, cx) = harness.mount(locator, cx);
+    harness.settle(cx);
+
+    assert!(cx.debug_bounds("issue-comment-8801").is_some());
+    assert!(
+        cx.debug_bounds("issue-detail-comments-footer").is_none(),
+        "cached page 1 must not expose Load more before online page-1 revalidation succeeds"
+    );
+    view.update(cx, |view, cx| {
+        assert!(
+            !view.request_comments(CommentsRequestMode::Append, false, cx),
+            "append must be rejected while comments are from a cached snapshot"
+        );
+    });
+}
