@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1040" height="792" viewBox="0 0 1040 792" role="img" aria-labelledby="title desc">
   <title id="title">Githux · right sidebar, open and closed</title>
-  <desc id="desc">The same six tabs, active Home page and fixed right-panel toggle in both frames. The open pane displays a tree of tabs. The closed pane occupies no space.</desc>
+  <desc id="desc">The same six tabs, active Home page and fixed right-panel toggle in both frames. The open pane has two levels: full repository names with their open tabs directly underneath. Home stands alone at the root. The closed pane occupies no space.</desc>
   <style>
     text{font-family:'Segoe UI',Arial,sans-serif;fill:#ededed;font-size:13px}.note{font-size:12px;fill:#aaa}.kicker{font-weight:600;font-size:10px;letter-spacing:1.8px;fill:#a0a0a0}.h{font-weight:600;font-size:18px}.label{font-weight:600}.muted{fill:#b5b5b5}.rule{stroke:#363636;fill:none}.i{stroke:#cecece;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;fill:none}.s{font-size:11px;fill:#bbb}
   </style>
@@ -27,7 +27,7 @@
     <use xlink:href="#homeContent" x="174" y="111"/><g transform="translate(426 111)"><rect y="25" width="283" height="103" rx="6" fill="#272727" stroke="#343434"/><rect x="10" y="81" width="263" height="34" rx="5" fill="#181818"/><use xlink:href="#feedText"/></g>
     <path class="rule" d="M728 75v201"/><rect x="727" y="144" width="3" height="53" rx="1.5" fill="#777"/><use xlink:href="#tree" x="746" y="82"/><path d="M737 105h33" stroke="#ddd" stroke-width="2"/><path class="rule" d="M770 105h180"/>
     <text x="742" y="123" class="s">Open tabs</text><rect x="738" y="130" width="209" height="21" rx="4" fill="#353535"/><rect x="733" y="133" width="2" height="15" rx="1" fill="#ddd"/><use xlink:href="#home" x="745" y="133"/><text x="767" y="145" class="label">Home</text>
-    <path class="rule" d="M751 171v14h12m6 8v35m0-23h10m-10 22h10"/><path class="i" d="m745 161 4 4 4-4m11 20 4 4 4-4m-27 62 4 4-4 4"/><text x="759" y="166">studio</text><text x="779" y="186">atlas</text><text x="786" y="210">PR #24</text><text x="786" y="232">README.md</text><text x="759" y="253">team</text>
+    <g id="open-tab-tree"><path class="rule" d="M752 171v32h11m-11-19h11M752 235v13h11"/><path class="i" d="m745 161 4 4 4-4m-8 64 4 4 4-4"/><text x="767" y="166" class="label">studio/atlas</text><text x="785" y="188">PR #24</text><text x="785" y="207">README.md</text><text x="767" y="230" class="label">team/desk</text><text x="785" y="252">Issue #8</text></g>
   </g>
   <text x="36" y="426" class="h">02  Collapsed</text><text x="180" y="425" class="note">No rail or sash; the toggle stays in the same place</text>
   <g transform="translate(36 445)"><use xlink:href="#app"/><use xlink:href="#panel" x="929" y="48"/><use xlink:href="#homeContent" x="174" y="111"/>
