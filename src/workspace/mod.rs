@@ -49,6 +49,11 @@ pub enum RouteKey {
     },
     Notifications,
     Issues,
+    Issue {
+        namespace: String,
+        name: String,
+        number: u64,
+    },
     PullRequests,
     PullRequest {
         namespace: String,
@@ -81,6 +86,13 @@ pub enum Route {
     Notifications,
     /// Cross-repository personal issues. Content is not designed yet.
     Issues,
+    /// One read-only issue in Githux, addressed by normalized owner/repo and repository-local
+    /// number. Distinct from [`Route::PullRequest`] even when both share a repository and number.
+    Issue {
+        namespace: String,
+        name: String,
+        number: u64,
+    },
     /// Cross-repository personal pull requests. Content is not designed yet.
     PullRequests,
     /// One pull request in Githux. The detail surface is a separate task.
@@ -140,6 +152,15 @@ impl Route {
             },
             Self::Notifications => RouteKey::Notifications,
             Self::Issues => RouteKey::Issues,
+            Self::Issue {
+                namespace,
+                name,
+                number,
+            } => RouteKey::Issue {
+                namespace: namespace.to_ascii_lowercase(),
+                name: name.to_ascii_lowercase(),
+                number: *number,
+            },
             Self::PullRequests => RouteKey::PullRequests,
             Self::PullRequest {
                 namespace,
@@ -167,6 +188,11 @@ impl Route {
             Self::UserProfile { login, .. } => login.clone(),
             Self::Notifications => "Notifications".to_string(),
             Self::Issues => "Issues".to_string(),
+            Self::Issue {
+                namespace,
+                name,
+                number,
+            } => format!("{namespace}/{name} #{number}"),
             Self::PullRequests => "Pull requests".to_string(),
             Self::PullRequest {
                 namespace,
@@ -648,6 +674,52 @@ mod tests {
                 workspace.open(route("owner", "other", 41), cx),
                 OpenResult::Opened(_)
             ));
+            assert_eq!(workspace.sessions().len(), 4);
+        });
+    }
+
+    #[gpui::test]
+    fn issue_sessions_reuse_case_aliases_and_never_collide_with_prs_or_other_repos(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut workspace = Workspace::new(cx);
+            let issue = |owner: &str, repo: &str, number| Route::Issue {
+                namespace: owner.into(),
+                name: repo.into(),
+                number,
+            };
+            let pr = |owner: &str, repo: &str, number| Route::PullRequest {
+                namespace: owner.into(),
+                name: repo.into(),
+                number,
+            };
+
+            let opened = match workspace.open(issue("Owner", "Repo", 41), cx) {
+                OpenResult::Opened(id) => id,
+                other => panic!("expected a new issue session, got {other:?}"),
+            };
+            assert_eq!(
+                workspace.open(issue("owner", "repo", 41), cx),
+                OpenResult::Activated(opened),
+                "case aliases must reuse the same issue tab"
+            );
+            assert_eq!(workspace.route().title(), "Owner/Repo #41");
+
+            // Same repository and number as a Pull Request must open a distinct session.
+            let pr_tab = match workspace.open(pr("owner", "repo", 41), cx) {
+                OpenResult::Opened(id) => id,
+                other => panic!("expected distinct PR session, got {other:?}"),
+            };
+            assert_ne!(pr_tab, opened);
+
+            // Same issue number in a different repository must open a distinct session.
+            let other_repo = match workspace.open(issue("owner", "other", 41), cx) {
+                OpenResult::Opened(id) => id,
+                other => panic!("expected distinct repo issue session, got {other:?}"),
+            };
+            assert_ne!(other_repo, opened);
+
             assert_eq!(workspace.sessions().len(), 4);
         });
     }

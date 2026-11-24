@@ -45,6 +45,15 @@ pub struct RepositoryNavigation {
 }
 pub type OnRepository = Rc<dyn Fn(RepositoryNavigation, &mut Window, &mut App)>;
 
+/// Issue detail navigation emitted when the user activates an Issue row's title.
+#[derive(Clone, Debug)]
+pub struct IssueNavigation {
+    pub context: crate::data::RepositoryReadContext,
+    pub repository: WorkRepository,
+    pub number: u64,
+}
+pub type OnIssue = Rc<dyn Fn(IssueNavigation, &mut Window, &mut App)>;
+
 pub struct WorkItemsView {
     pub controller: Controller,
     repos: RepoService,
@@ -65,6 +74,7 @@ pub struct WorkItemsView {
     fixed_now: bool,
     time_task: Option<Task<()>>,
     on_repository: Option<OnRepository>,
+    on_issue: Option<OnIssue>,
     _activation: Subscription,
     _visibility: Subscription,
 }
@@ -109,6 +119,7 @@ impl WorkItemsView {
             fixed_now: false,
             time_task: None,
             on_repository: None,
+            on_issue: None,
             _activation: activation,
             _visibility: visibility,
         };
@@ -158,12 +169,21 @@ impl WorkItemsView {
             fixed_now: false,
             time_task: None,
             on_repository: None,
+            on_issue: None,
             _activation: activation,
             _visibility: visibility,
         }
     }
     pub fn on_repository(&mut self, callback: OnRepository) {
         self.on_repository = Some(callback);
+    }
+
+    pub fn on_issue(&mut self, callback: OnIssue) {
+        self.on_issue = Some(callback);
+    }
+
+    pub(super) fn has_issue_handler(&self) -> bool {
+        self.on_issue.is_some()
     }
 
     pub fn kind(&self) -> WorkItemKind {
@@ -366,6 +386,14 @@ impl WorkItemsView {
         if self.active
             && self.repos.is_current(&navigation.context)
             && let Some(callback) = &self.on_repository
+        {
+            callback(navigation, window, cx);
+        }
+    }
+    fn navigate_issue(&self, navigation: IssueNavigation, window: &mut Window, cx: &mut App) {
+        if self.active
+            && self.repos.is_current(&navigation.context)
+            && let Some(callback) = &self.on_issue
         {
             callback(navigation, window, cx);
         }
@@ -686,7 +714,14 @@ impl WorkItemsView {
                 insets.item(
                     index,
                     count,
-                    rows::row(&item, view.selected == Some(item.id), context, view.now, cx),
+                    rows::row(
+                        &item,
+                        view.selected == Some(item.id),
+                        context,
+                        view.has_issue_handler(),
+                        view.now,
+                        cx,
+                    ),
                 )
             }),
         )

@@ -14,11 +14,12 @@
 
 没有新增 PAT、HTTP 客户端、SQLite、测试账户或页面级缓存。`examples/*` 与 fixture 仍是独立开发 target，不在产品模块树或路由中（组件源文件现在同时被产品与 preview 复用，但 preview 仍不能证明正式接线）。
 
-### 全局页面（Notifications / Issues / PR）
+### 全局页面与 Issue 详情（Notifications / Issues / PR / Issue Detail）
 
 - `Route::Notifications` 挂载 `NotificationsPage`：`AccountServices.repositories().notifications()` 建控制器，仓库链接经 `RepoService::is_current` 复核后打开应用内 `Route::Repository`。
-- `Route::Issues` / `Route::PullRequests` 挂载 `WorkItemsPage`（`WorkItemKind::Issue`/`PullRequest`），默认 Assigned+Open，仓库链接同一复核后导航。
-- 这两类页面都拥有自己的局部 viewport/`Motion`/`Bars`，与 Home/Profile/Repository 一样不走 Shell 外层 page 滚动器。`Route::PullRequest` 详情仍按产品约定留空。Settings 沿用既有 Shell 账户设置实现。
+- `Route::Issues` / `Route::PullRequests` 挂载 `WorkItemsPage`（`WorkItemKind::Issue`/`PullRequest`），默认 Assigned+Open，仓库链接同一复核后导航；全局 Issues 列表的条目标题经同一 `RepoService::is_current` 复核后打开或复用应用内 `Route::Issue { namespace, name, number }`（全局 PR 列表标题与仓库链接保持原行为）。
+- `Route::Issue { namespace, name, number }` 挂载 `IssueDetailPage`（`src/app/pages/issue_detail.rs`），消费 `domain::issue_detail`、`github::issue_detail`、`data::issue_detail` 与 `ui::issue_detail`：只读展示编号、状态、标题、作者、标签、Markdown 正文（复用 `ReaderView` `MarkdownLayout::Flow`）与分页普通评论（`Load more comments`）。`RouteKey::Issue` 以规范化小写 `owner/repo` + 仓库内编号区分与复用，与 `RouteKey::PullRequest` 及其他仓库同号互不冲突。同账户已授权缓存快照在后台刷新期间保留正文，瞬态错误显示 `Cached` + Retry，确认缺失（404/410）或失权（401/403）失效旧快照并显示对应状态；评论分页失败不抹除正文或已加载评论。
+- 这几类页面都拥有自己的局部 viewport/`Motion`/`Bars`，与 Home/Profile/Repository 一样不走 Shell 外层 page 滚动器。`Route::PullRequest` 详情仍按产品约定留空。Settings 沿用既有 Shell 账户设置实现。
 
 ## 页面生命周期
 
@@ -119,6 +120,7 @@ Home、Profile、Repository、Notifications 与全局 Issues/PR 都拥有自己�
 | `Route::Repository` | 适用（需有效活动会话） | 复用 `refresh_repository` 重验证仓库摘要、分支列表、当前分支固定快照/已展开目录/当前正文、overview 四组与 OPEN Issues/PR 计数；不遍历未展开目录，不触发任何写操作；通过 `Work` 在途计数与 `extras.has_in_flight()` 跨阶段追踪直到全部收尾 |
 | `Route::Notifications` | 适用（需有效会话且不在冷却期） | 触发收件箱刷新，保留现有行与在途条目动作；服务端 `X-Poll-Interval` / 限流冷却期间禁用并提示冷却 |
 | `Route::Issues` / `Route::PullRequests` | 适用（需有效账户会话） | 触发当前筛选的替换刷新，保留旧快照直到结果返回 |
+| `Route::Issue` | 适用（需有效账户会话） | 重新验证单条 Issue 正文与第 1 页评论，保留当前正文和已显示内容直到结果返回 |
 | `Route::Settings` | 禁用（无操作） | 本地账户设置页无远端数据刷新语义，不凭空发请求 |
 | `Route::PullRequest` | 禁用（无操作） | 未设计详情空白路由，不凭空发请求 |
 | 任一路由未登录 / 未挂载 / 授权失效 | 禁用（无操作） | 保持禁用，点击零请求 |

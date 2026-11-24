@@ -206,6 +206,57 @@ impl Transport for PageTransport {
                     .to_string(),
                 });
             }
+            if url.contains("/repos/alice/demo/issues/21/comments") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 301,
+                        "user": { "id": 2, "login": "bob", "avatar_url": null },
+                        "body": "Looks good to me!",
+                        "created_at": "2026-10-28T11:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z",
+                        "author_association": "CONTRIBUTOR"
+                    }]),
+                ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/21") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10001,
+                        "number": 21,
+                        "title": "Synthetic issue",
+                        "state": "open",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": "Detailed **Markdown** description for demo #21.",
+                        "comments": 1,
+                        "labels": [{ "name": "bug" }],
+                        "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/other/issues/21/comments") {
+                return Ok(json(200, serde_json::json!([])));
+            }
+            if url.ends_with("/repos/alice/other/issues/21") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10002,
+                        "number": 21,
+                        "title": "Other repository issue #21",
+                        "state": "closed",
+                        "state_reason": "completed",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": null,
+                        "comments": 0,
+                        "labels": [],
+                        "created_at": "2026-10-28T09:00:00Z",
+                        "updated_at": "2026-10-28T09:30:00Z"
+                    }),
+                ));
+            }
             if url.contains("/search/issues") {
                 // Global work lists use `is:issue`/`is:pr`; Home uses `involves:`. Decode the
                 // query so the two product surfaces never share a response shape.
@@ -1371,4 +1422,140 @@ fn issues_and_pull_requests_read_distinct_lists_and_reuse_their_tabs(cx: &mut Te
         "re-opening Pull requests reuses the same tab"
     );
     assert!(transport.seen("/search/issues") >= 2);
+}
+
+#[gpui::test]
+fn global_issues_title_opens_reuses_and_isolates_issue_detail_while_repo_link_stays_separate(
+    cx: &mut TestAppContext,
+) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+
+    // 1. Open Global Issues list.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-10001");
+    let issues_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+
+    // 2. Click the issue title -> opens Route::Issue and renders body + comments.
+    let title_bounds = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(title_bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+    let demo_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21,
+        }
+    );
+
+    // 3. Re-opening the same issue from the Issues list reuses the existing detail tab.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-10001");
+    let title_bounds = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(title_bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        demo_issue_tab,
+        "clicking the same issue title twice must reuse its tab"
+    );
+
+    // 4. Repository link on the same row still opens Route::Repository.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-repo-10001");
+    let repo_bounds = cx.debug_bounds("work-repo-10001").expect("repo link");
+    cx.simulate_click(repo_bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Repository {
+            namespace: "alice".into(),
+            name: "demo".into(),
+        }
+    );
+
+    // 5. Same number in another repository and same repo+number as PR get distinct tabs.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "other".into(),
+                number: 21,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-empty-body");
+    wait_for_bounds(cx, "issue-detail-empty-comments");
+    let other_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(other_issue_tab, demo_issue_tab);
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::PullRequest {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 21,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let pr_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(pr_tab, demo_issue_tab);
+    assert_ne!(pr_tab, other_issue_tab);
+
+    // 6. Trigger tab-refresh on active Issue detail tab.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 21,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let before_issue_reads = transport.seen("/repos/alice/demo/issues/21");
+    let refreshed = cx.update_window_entity(&view, |shell, _, cx| shell.refresh_active_page(cx));
+    assert!(refreshed, "tab-refresh must be enabled on Route::Issue");
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-body");
+    assert!(transport.seen("/repos/alice/demo/issues/21") > before_issue_reads);
+
+    // 7. Closing the issue detail tab returns cleanly to the Issues list with its rows intact.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.workspace().close(demo_issue_tab, cx);
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        issues_tab
+    );
+    wait_for_bounds(cx, "work-item-10001");
 }

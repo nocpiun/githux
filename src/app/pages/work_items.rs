@@ -42,14 +42,16 @@ impl WorkItemsPage {
                 .expect("the account session was verified before construction")
         });
         view.update(cx, |view, _| {
+            let repo_nav = navigation.clone();
+            let repo_service = repos.clone();
             let on_repository: crate::ui::global_work_items::OnRepository =
                 Rc::new(move |nav, window, cx| {
                     // The component already re-checks its captured context; the host repeats the
                     // current-account check so an old account's link can never open under a new one.
-                    if !repos.is_current(&nav.context) {
+                    if !repo_service.is_current(&nav.context) {
                         return;
                     }
-                    navigation(
+                    repo_nav(
                         PageNavigation::Open(Route::Repository {
                             namespace: nav.repository.owner.clone(),
                             name: nav.repository.name.clone(),
@@ -59,6 +61,25 @@ impl WorkItemsPage {
                     );
                 });
             view.on_repository(on_repository);
+
+            if kind == WorkItemKind::Issue {
+                let on_issue: crate::ui::global_work_items::OnIssue =
+                    Rc::new(move |nav, window, cx| {
+                        if !repos.is_current(&nav.context) {
+                            return;
+                        }
+                        navigation(
+                            PageNavigation::Open(Route::Issue {
+                                namespace: nav.repository.owner.clone(),
+                                name: nav.repository.name.clone(),
+                                number: nav.number,
+                            }),
+                            window,
+                            cx,
+                        );
+                    });
+                view.on_issue(on_issue);
+            }
         });
         this._changed = Some(cx.observe(&view, |_, _, cx| cx.notify()));
         this.view = Some(view);

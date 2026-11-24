@@ -35,6 +35,7 @@ mod account_concurrency_tests;
 mod account_tests;
 mod accounts;
 pub mod avatar_cache;
+pub mod issue_detail;
 pub mod notifications;
 pub mod page_cache;
 #[cfg(test)]

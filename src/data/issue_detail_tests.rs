@@ -1,0 +1,328 @@
+//! Account isolation, cache snapshot, no-store, revocation/missing invalidation and
+//! transient-error retention tests for `IssueDetailSession`.
+
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+use serde_json::json;
+
+use super::*;
+use crate::auth::{InMemoryCredentialStore, token::Pat};
+use crate::data::AccountService;
+use crate::domain::{AccountKey, HostId};
+use crate::github::GitHubClient;
+use crate::network::{
+    executor::BackgroundExecutor,
+    transport::{HttpRequest, HttpResponse, Transport, TransportError, json_response},
+};
+use crate::storage::{
+    accounts::AccountDatabaseConfig,
+    cache::{CacheConfig, CacheStore},
+};
+
+struct ScriptedTransport {
+    routes: Mutex<HashMap<String, Vec<HttpResponse>>>,
+    default_issue_body: Mutex<String>,
+}
+
+impl ScriptedTransport {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            routes: Mutex::new(HashMap::new()),
+            default_issue_body: Mutex::new("Initial body".into()),
+        })
+    }
+
+    fn push(&self, path: &str, response: HttpResponse) {
+        self.routes
+            .lock()
+            .unwrap()
+            .entry(path.to_string())
+            .or_default()
+            .push(response);
+    }
+
+    fn set_default_body(&self, body: &str) {
+        *self.default_issue_body.lock().unwrap() = body.to_string();
+    }
+}
+
+impl Transport for ScriptedTransport {
+    fn execute<'a>(
+        &'a self,
+        request: HttpRequest,
+        _: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            let url = reqwest::Url::parse(&request.url).unwrap();
+            if url.path() == "/user" {
+                let second = request
+                    .headers
+                    .iter()
+                    .any(|(_, value)| value.ends_with("account-b"));
+                return Ok(json_response(
+                    200,
+                    &json!({
+                        "id": if second { 2 } else { 1 },
+                        "login": if second { "account-b" } else { "account-a" }
+                    })
+                    .to_string(),
+                ));
+            }
+            if let Some(queue) = self.routes.lock().unwrap().get_mut(url.path())
+                && !queue.is_empty()
+            {
+                return Ok(queue.remove(0));
+            }
+            if url.path().ends_with("/comments") {
+                return Ok(json_response(200, "[]"));
+            }
+            let body = self.default_issue_body.lock().unwrap().clone();
+            Ok(json_response(
+                200,
+                &json!({
+                    "id": 100,
+                    "number": 42,
+                    "title": "Sample issue",
+                    "state": "open",
+                    "user": { "id": 1, "login": "account-a" },
+                    "body": body,
+                    "comments": 0,
+                    "labels": [],
+                    "created_at": "2026-11-01T10:00:00Z",
+                    "updated_at": "2026-11-01T10:00:00Z"
+                })
+                .to_string(),
+            ))
+        })
+    }
+
+    fn execute_bounded<'a>(
+        &'a self,
+        request: HttpRequest,
+        cancel: CancellationToken,
+        max: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self.execute(request, cancel).await?;
+            if response.body.len() > max {
+                return Err(TransportError::ResponseTooLarge { limit: max });
+            }
+            Ok(response)
+        })
+    }
+}
+
+fn response_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> HttpResponse {
+    HttpResponse {
+        status,
+        headers: headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        body: body.to_string(),
+    }
+}
+
+async fn open_with_cache(
+    temp: &tempfile::TempDir,
+    transport: Arc<ScriptedTransport>,
+) -> AccountService {
+    let cache = CacheStore::open(CacheConfig::at(temp.path().join("cache"))).unwrap();
+    let executor = Arc::new(BackgroundExecutor::new(4));
+    let client = Arc::new(GitHubClient::new(Default::default(), transport));
+    let service = AccountService::open_with_cache(
+        AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+        Arc::new(InMemoryCredentialStore::new()),
+        client,
+        executor,
+        cache,
+    )
+    .await
+    .unwrap();
+    service
+        .login(Pat::new("ghp_account-a".to_string()))
+        .await
+        .unwrap();
+    service
+}
+
+#[tokio::test]
+async fn caches_issue_and_comments_and_isolates_across_accounts_and_repos() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = ScriptedTransport::new();
+    let service = open_with_cache(&temp, transport.clone()).await;
+    let repos = service.repo_service();
+    let session_a = repos.issue_detail_session().unwrap();
+    let locator_one = IssueLocator::new("acme", "one", 42).unwrap();
+    let locator_two = IssueLocator::new("acme", "two", 42).unwrap();
+    let limits = IssueDetailLimits::default();
+
+    // Online fetch populates cache for acme/one #42 under account-a.
+    let fetched = session_a
+        .fetch_issue(&locator_one, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    assert_eq!(fetched.value.body.as_deref(), Some("Initial body"));
+
+    // Cached read hits for acme/one #42 (case-insensitively), misses for acme/two #42.
+    let alias = IssueLocator::new("ACME", "ONE", 42).unwrap();
+    let hit = session_a
+        .read_cached_issue(&alias, CancellationToken::default())
+        .await
+        .unwrap()
+        .expect("cached hit for same issue");
+    assert_eq!(hit.value.issue.body.as_deref(), Some("Initial body"));
+    assert!(hit.value.authorization.is_current());
+
+    let other_repo = session_a
+        .read_cached_issue(&locator_two, CancellationToken::default())
+        .await
+        .unwrap();
+    assert!(
+        other_repo.is_none(),
+        "same issue number in another repo must not hit"
+    );
+
+    // Switch to account-b: account-a's cached snapshot must never appear.
+    service
+        .login(Pat::new("ghp_account-b".to_string()))
+        .await
+        .unwrap();
+    let session_b = repos.issue_detail_session().unwrap();
+    assert!(!session_a.verify());
+    let b_cached = session_b
+        .read_cached_issue(&locator_one, CancellationToken::default())
+        .await
+        .unwrap();
+    assert!(
+        b_cached.is_none(),
+        "account-b must not read account-a's cached issue"
+    );
+}
+
+#[tokio::test]
+async fn no_store_and_missing_or_forbidden_invalidate_cache_while_transient_preserves_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = ScriptedTransport::new();
+    let service = open_with_cache(&temp, transport.clone()).await;
+    let repos = service.repo_service();
+    let session = repos.issue_detail_session().unwrap();
+    let locator = IssueLocator::new("acme", "widgets", 42).unwrap();
+    let limits = IssueDetailLimits::default();
+
+    // Populate cache.
+    session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    assert!(
+        session
+            .read_cached_issue(&locator, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Transient 503 preserves the cached snapshot.
+    transport.push(
+        "/repos/acme/widgets/issues/42",
+        response_with_headers(503, "{}", &[]),
+    );
+    let err = session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap_err();
+    assert!(err.is_transient());
+    assert!(
+        session
+            .read_cached_issue(&locator, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_some(),
+        "transient 503 must preserve cached snapshot"
+    );
+
+    // 404 invalidates the cached snapshot.
+    transport.push(
+        "/repos/acme/widgets/issues/42",
+        response_with_headers(404, "{}", &[]),
+    );
+    let err = session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap_err();
+    assert!(err.is_missing());
+    assert!(
+        session
+            .read_cached_issue(&locator, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_none(),
+        "404 must invalidate cached snapshot"
+    );
+
+    // Re-populate cache, then verify Cache-Control: no-store invalidates it (L020).
+    transport.set_default_body("Fresh body");
+    session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    assert!(
+        session
+            .read_cached_issue(&locator, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    transport.push(
+        "/repos/acme/widgets/issues/42",
+        response_with_headers(
+            200,
+            &json!({
+                "id": 100,
+                "number": 42,
+                "title": "Sample issue",
+                "state": "open",
+                "user": { "id": 1, "login": "account-a" },
+                "body": "Secret body",
+                "comments": 0,
+                "labels": [],
+                "created_at": "2026-11-01T10:00:00Z",
+                "updated_at": "2026-11-01T10:00:00Z"
+            })
+            .to_string(),
+            &[("cache-control", "no-store")],
+        ),
+    );
+    let live = session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap();
+    assert_eq!(live.value.body.as_deref(), Some("Secret body"));
+    assert!(
+        session
+            .read_cached_issue(&locator, CancellationToken::default())
+            .await
+            .unwrap()
+            .is_none(),
+        "no-store must invalidate any prior cached snapshot"
+    );
+
+    // Switching back and forth advances epoch so stale session is rejected.
+    service
+        .login(Pat::new("ghp_account-b".to_string()))
+        .await
+        .unwrap();
+    service
+        .set_active(AccountKey::new(1, HostId::github()))
+        .await
+        .unwrap();
+    let stale = session
+        .fetch_issue(&locator, &limits, CancellationToken::default())
+        .await
+        .unwrap_err();
+    assert_eq!(stale, IssueDetailError::GitHub(GitHubError::StaleContext));
+}
