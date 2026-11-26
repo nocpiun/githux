@@ -150,6 +150,9 @@ impl Transport for PageTransport {
             // Notifications: a two-thread unread inbox over the account-scoped endpoint. Done and
             // Unsubscribe keep their real REST semantics (204 for Done, ignored=true for the
             // subscription step).
+            // Notification subjects are opaque server data: the fixture uses the official REST
+            // shape with https://github.com/... URLs, which must stay non-navigating, plus the
+            // matched API shapes for issue/PR rows the product is allowed to open.
             if url.starts_with("https://api.github.com/notifications") {
                 match request.method {
                     crate::network::transport::HttpMethod::Delete => {
@@ -182,7 +185,7 @@ impl Transport for PageTransport {
                             "updated_at": "2026-11-03T10:00:00Z", "last_read_at": null,
                             "subject": {
                                 "title": "Fix the login flow", "type": "Issue",
-                                "url": "https://github.com/alice/demo/issues/1",
+                                "url": "https://api.github.com/repos/alice/demo/issues/42",
                                 "latest_comment_url": null
                             },
                             "repository": {
@@ -196,7 +199,35 @@ impl Transport for PageTransport {
                             "updated_at": "2026-11-03T09:00:00Z", "last_read_at": null,
                             "subject": {
                                 "title": "Update the pull request", "type": "PullRequest",
-                                "url": "https://github.com/alice/demo/pull/2",
+                                "url": "https://api.github.com/repos/alice/demo/pulls/42",
+                                "latest_comment_url": null
+                            },
+                            "repository": {
+                                "id": 10, "name": "demo",
+                                "owner": {"login": "alice"},
+                                "url": "https://api.github.com/repos/alice/demo"
+                            }
+                        },
+                        {
+                            "id": "9003", "unread": true, "reason": "mention",
+                            "updated_at": "2026-11-03T08:00:00Z", "last_read_at": null,
+                            "subject": {
+                                "title": "Other repository issue with the same number", "type": "Issue",
+                                "url": "https://api.github.com/repos/alice/other/issues/42",
+                                "latest_comment_url": null
+                            },
+                            "repository": {
+                                "id": 11, "name": "other",
+                                "owner": {"login": "alice"},
+                                "url": "https://api.github.com/repos/alice/other"
+                            }
+                        },
+                        {
+                            "id": "9004", "unread": true, "reason": "subscribed",
+                            "updated_at": "2026-11-03T07:00:00Z", "last_read_at": null,
+                            "subject": {
+                                "title": "Opaque HTML subject URL", "type": "Issue",
+                                "url": "https://github.com/alice/demo/issues/43",
                                 "latest_comment_url": null
                             },
                             "repository": {
@@ -259,6 +290,56 @@ impl Transport for PageTransport {
                     response.headers.push(("link".into(),format!("<https://api.github.com/repos/alice/demo/issues?state=open&sort=created&direction=desc&per_page=30&page={next}>; rel=\"next\"")));
                 }
                 return Ok(response);
+            }
+            if url.contains("/repos/alice/demo/issues/42/comments") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 401,
+                        "user": { "id": 2, "login": "bob", "avatar_url": null },
+                        "body": "Notification issue comment body.",
+                        "created_at": "2026-10-28T11:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z",
+                        "author_association": "CONTRIBUTOR"
+                    }]),
+                ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/42") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10042,
+                        "number": 42,
+                        "title": "Notification issue forty two",
+                        "state": "open",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": "Issue body reached from a notification click.",
+                        "comments": 1,
+                        "labels": [{ "name": "bug" }],
+                        "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/other/issues/42/comments") {
+                return Ok(json(200, serde_json::json!([])));
+            }
+            if url.ends_with("/repos/alice/other/issues/42") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10043,
+                        "number": 42,
+                        "title": "Other repository issue forty two",
+                        "state": "open",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": "Same number, different repository.",
+                        "comments": 0,
+                        "labels": [],
+                        "created_at": "2026-10-28T09:00:00Z",
+                        "updated_at": "2026-10-28T09:30:00Z"
+                    }),
+                ));
             }
             if url.contains("/repos/alice/demo/issues/21/comments") {
                 let page = reqwest::Url::parse(url)
@@ -515,9 +596,12 @@ impl Transport for PageTransport {
                 {
                     let vars = &payload["variables"];
                     let number = vars["number"].as_u64().unwrap();
+                    // #42 is the notification-driven PR fixture; its body differs from the
+                    // Issue #42 body so the test proves the PR conversation itself was read.
                     let body = match number {
                         5 => PR_FIXTURE_BODY,
                         21 => "PR **description** for demo #21.",
+                        42 => "Pull request body reached from a notification click.",
                         _ => "",
                     };
                     return Ok(graphql_ok(serde_json::json!({"repository": {
@@ -1559,10 +1643,128 @@ fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut Tes
     });
     cx.run_until_parked();
     wait_for_bounds(cx, "notification-row-0");
-    assert!(cx.debug_bounds("notification-row-1").is_some());
+    assert!(cx.debug_bounds("notification-row-3").is_some());
     assert!(transport.seen("/notifications") >= 1, "the inbox is read");
+    let notifications_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
 
-    // The repository link is a real typed navigation into the application, never a browser hop.
+    // A verified Issue subject opens the real Issue detail surface and reads that issue's body,
+    // not just a route value: the fixture only serves #42 from the issue endpoints.
+    let issue_title = cx
+        .debug_bounds("notification-title-0")
+        .expect("issue title");
+    cx.simulate_click(issue_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 42,
+        }
+    );
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-401");
+    assert!(transport.seen("/repos/alice/demo/issues/42") >= 1);
+    let demo_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(demo_issue_tab, notifications_tab);
+
+    // Reopening the same notification reuses the same Issue tab instead of duplicating it.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-0");
+    let issue_title = cx
+        .debug_bounds("notification-title-0")
+        .expect("issue title");
+    cx.simulate_click(issue_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        demo_issue_tab,
+        "the same notification issue reuses its tab"
+    );
+
+    // A Pull Request notification with the same repository and number is a distinct typed
+    // destination: PR conversation mounting belongs to the pr-conversation task.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-1");
+    let pull_title = cx
+        .debug_bounds("notification-title-1")
+        .expect("pull request title");
+    cx.simulate_click(pull_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::PullRequest {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 42,
+        }
+    );
+    // The PR conversation page (delivered by #109) reads its own body and comments.
+    wait_for_bounds(cx, "pr-conversation-body");
+    wait_for_bounds(cx, "pr-comment-401");
+    view.read_with(cx, |shell, cx| {
+        let pr = shell
+            .pull_request_summary_for_test(cx)
+            .expect("mounted PR summary");
+        assert_eq!(
+            pr.body.as_deref(),
+            Some("Pull request body reached from a notification click."),
+            "the notification PR must open its own real conversation body"
+        );
+    });
+    let pull_request_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(pull_request_tab, demo_issue_tab);
+
+    // The same issue number in another repository opens its own issue, proving the repository
+    // identity is part of the target rather than only the number.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-2");
+    let other_title = cx
+        .debug_bounds("notification-title-2")
+        .expect("other repository issue title");
+    cx.simulate_click(other_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "other".into(),
+            number: 42,
+        }
+    );
+    wait_for_bounds(cx, "issue-detail-body");
+    let other_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(other_issue_tab, demo_issue_tab);
+    assert_ne!(other_issue_tab, pull_request_tab);
+
+    // An official-shape `github.com` subject URL is not a match: the title stays inert.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-3");
+    let opaque = cx
+        .debug_bounds("notification-title-3")
+        .expect("opaque subject title");
+    cx.simulate_click(opaque.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Notifications,
+        "an unreliable subject keeps the previous non-navigating behavior"
+    );
+
+    // The repository link is a real typed navigation into the application, never a browser hop,
+    // and stays independent of the subject title on the same row.
     let repository_link = cx
         .debug_bounds("notification-repository-0")
         .expect("repository link");
@@ -1583,13 +1785,18 @@ fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut Tes
     cx.run_until_parked();
     wait_for_bounds(cx, "notification-row-0");
 
-    // Done is the real DELETE semantics; the confirmed thread leaves the inbox row set.
+    // Done is the real DELETE semantics; the confirmed thread leaves the inbox row set and never
+    // fires a subject navigation.
     let done = cx
         .debug_bounds("notification-action-done-0")
         .expect("Done control");
     cx.simulate_click(done.center(), gpui::Modifiers::none());
     cx.run_until_parked();
-    wait_for_gone(cx, "notification-row-1");
+    wait_for_gone(cx, "notification-row-3");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Notifications
+    );
     assert!(transport.wrote("DELETE") >= 1);
     assert!(transport.wrote("notifications/threads/9001") >= 1);
 }

@@ -40,6 +40,33 @@ fn setup(
     (controller, executor, fixture)
 }
 
+fn setup_targets(
+    cx: &mut TestAppContext,
+) -> (
+    AccountService,
+    crate::data::notifications::Notifications,
+    Arc<BackgroundExecutor>,
+    Arc<fixture::Fixture>,
+) {
+    cx.update(ely_core::init_for_tests);
+    let executor = Arc::new(BackgroundExecutor::new(2));
+    let fixture = Arc::new(fixture::Fixture::new(fixture::Scene::Targets));
+    let accounts = AccountService::new(
+        Arc::new(InMemoryCredentialStore::new()),
+        Arc::new(GitHubClient::new(GitHubConfig::default(), fixture.clone())),
+        executor.clone(),
+    );
+    let controller = executor.raw_handle().block_on(async {
+        accounts.login(Pat::from_str("synthetic")).await.unwrap();
+        let controller = accounts.repo_service().notifications().unwrap();
+        controller
+            .execute(controller.begin(RequestKind::First).unwrap().unwrap())
+            .await;
+        controller
+    });
+    (accounts, controller, executor, fixture)
+}
+
 /// Home's panel header adds an 8px inset inside the 16px page gutter (`home-header` px_2), so its
 /// title starts at gutter + 8 while its rows start at the gutter. Notifications must reproduce
 /// that split: the heading takes the same inset, but the list and the empty state keep only the
@@ -243,6 +270,161 @@ fn bounded_narrow_keyboard_and_exact_repository_callback(cx: &mut TestAppContext
     // Rendering, keyboard movement and repository activation never fetch a
     // subject, mark a thread read or refresh the inbox.
     assert_eq!(fixture.requests().len(), 3);
+}
+
+/// Only rows whose subject URL exactly matches this repository + type open an
+/// Issue/PR. The repository link stays an independent action, and an old row
+/// cannot navigate after the account session goes stale.
+#[gpui::test]
+fn only_verified_subject_targets_navigate_and_stale_account_events_are_ignored(
+    cx: &mut TestAppContext,
+) {
+    let (accounts, controller, executor, fixture) = setup_targets(cx);
+    let targets = Rc::new(RefCell::new(Vec::new()));
+    let sink = targets.clone();
+    let on_subject: OnSubject = Rc::new(move |nav, _, _| sink.borrow_mut().push(nav.target));
+    let repository_clicks = Rc::new(RefCell::new(0usize));
+    let sink = repository_clicks.clone();
+    let on_repository: OnRepository = Rc::new(move |_, _, _| *sink.borrow_mut() += 1);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = NotificationsView::new(
+            controller.clone(),
+            executor.clone(),
+            on_repository,
+            window,
+            cx,
+        );
+        view.sync(cx);
+        view.on_subject(on_subject, Rc::new(|_| true));
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(960.0), px(740.0)));
+    cx.run_until_parked();
+
+    // Unreliable rows keep the non-navigating title: wrong repository, wrong
+    // path/type, missing URL, foreign host, zero and leading-zero numbers.
+    for selector in [
+        "notification-title-2",
+        "notification-title-3",
+        "notification-title-4",
+        "notification-title-5",
+        "notification-title-6",
+        "notification-title-7",
+    ] {
+        let title = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector}"));
+        cx.simulate_click(title.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(targets.borrow().is_empty(), "{selector} must not navigate");
+    }
+
+    let title = cx.debug_bounds("notification-title-0").unwrap();
+    cx.simulate_click(title.center(), Modifiers::none());
+    let title = cx.debug_bounds("notification-title-1").unwrap();
+    cx.simulate_click(title.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(targets.borrow().len(), 2);
+    match &targets.borrow()[0] {
+        NotificationTarget::Issue { repository, number } => {
+            assert_eq!(*number, 123);
+            assert_eq!(repository.locator().owner(), "synthetic-owner");
+            assert_eq!(repository.locator().name(), "desktop-client");
+        }
+        other => panic!("row 0 must be an Issue target, got {other:?}"),
+    }
+    match &targets.borrow()[1] {
+        NotificationTarget::PullRequest { repository, number } => {
+            assert_eq!(*number, 77);
+            assert_eq!(repository.locator().owner(), "synthetic-owner");
+            assert_eq!(repository.locator().name(), "desktop-client");
+        }
+        other => panic!("row 1 must be a Pull Request target, got {other:?}"),
+    }
+    assert_eq!(*repository_clicks.borrow(), 0);
+
+    // The repository link remains independent of the title action.
+    let link = cx.debug_bounds("notification-repository-0").unwrap();
+    cx.simulate_click(link.center(), Modifiers::none());
+    assert_eq!(*repository_clicks.borrow(), 1);
+    let requests = fixture.requests().len();
+    assert_eq!(targets.borrow().len(), 2, "clicks never fetched a subject");
+    assert_eq!(fixture.requests().len(), requests);
+
+    // The right-hand action column stays independent: Done removes its row but
+    // never emits the title's subject navigation.
+    let done = cx.debug_bounds("notification-action-done-0").unwrap();
+    cx.simulate_click(done.center(), Modifiers::none());
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if view.read_with(cx, |view, _| view.snapshot.items.len()) == 7 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(view.read_with(cx, |view, _| view.snapshot.items.len()), 7);
+    assert_eq!(targets.borrow().len(), 2, "Done must not open the subject");
+
+    // A replaced credential makes the session stale. Even a direct call using
+    // the retained old row must not emit a navigation.
+    executor.raw_handle().block_on(async {
+        accounts
+            .login(Pat::from_str("synthetic-second"))
+            .await
+            .unwrap();
+    });
+    assert!(!controller.verify());
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.navigate_subject(0, window, cx));
+    });
+    assert_eq!(
+        targets.borrow().len(),
+        2,
+        "stale account events are ignored"
+    );
+    assert_eq!(*repository_clicks.borrow(), 1);
+}
+
+/// The reusable view must not expose a target the host cannot open. Production
+/// currently supports Pull Request routes only, so an otherwise valid Issue URL
+/// stays plain text instead of becoming a dead link.
+#[gpui::test]
+fn unsupported_subject_kinds_stay_plain_text(cx: &mut TestAppContext) {
+    let (_accounts, controller, executor, _fixture) = setup_targets(cx);
+    let targets = Rc::new(RefCell::new(Vec::new()));
+    let sink = targets.clone();
+    let on_subject: OnSubject = Rc::new(move |nav, _, _| sink.borrow_mut().push(nav.target));
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        let mut view =
+            NotificationsView::new(controller, executor, Rc::new(|_, _, _| {}), window, cx);
+        view.sync(cx);
+        view.on_subject(
+            on_subject,
+            Rc::new(|target| matches!(target, NotificationTarget::PullRequest { .. })),
+        );
+        view
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(960.0), px(740.0)));
+    cx.run_until_parked();
+
+    let issue = cx.debug_bounds("notification-title-0").unwrap();
+    cx.simulate_click(issue.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        targets.borrow().is_empty(),
+        "an unsupported Issue target must not be a dead link"
+    );
+
+    let pull = cx.debug_bounds("notification-title-1").unwrap();
+    cx.simulate_click(pull.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(targets.borrow().len(), 1);
+    assert!(matches!(
+        targets.borrow()[0],
+        NotificationTarget::PullRequest { number: 77, .. }
+    ));
 }
 
 /// The repository link in a notification row is the repository name, not the row's trailing blank
