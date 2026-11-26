@@ -101,3 +101,25 @@
 - **真实正文已验证**：Issue #21 打开后渲染 issue-detail 的真实正文与评论（生产者 #106 的读取路径）。
 - **尚未验证真实正文**：`Route::PullRequest` 目前仍是未设计空白页；PR 正文由 pr-conversation 负责，需在其正式详情整合后复验目标正文，不能以「打开了正确标签」代替。
 - **原生边界**：GPUI 测试平台的 keystroke 不经过 Windows 原生输入分发（L002），真实窗口的键鼠手感与观感仍由负责人验收。
+
+## 2026-11-26 负责人批次决定与合入 main
+
+负责人对本轮 Issue/PR 阅读批次的决定：**观感（appearance）整批临时放行**，最终人工视觉验收在整批交付后合并进行；该决定取代此前「每个任务保持 pending、等负责人看图后才可合并」的指令。因此本任务不再为观感添加 `pending`，也不以「等负责人看图」为合并前提；同时不得声称做过未执行的人工或真实账户验证。协调者已处理 #106 并移除五个仅因观感设置的 pending 标签。
+
+集成状态与动作：
+
+- #106 已 squash 合入 main（`951da32`）。本分支用 `git rebase --onto origin/main ab24dd94` 只把本任务三个提交重放到 main 上，**最终 diff 只包含本任务文件**（`git diff --stat origin/main HEAD` 无生产者文件）；生产者快照 `ab24dd94` 仅用于 rebase 参照，未推改他人分支、未合并进依赖分支。重放前的分支保留为本地 `backup/home-nav-pre-restack`。
+- PR #107 base 改回 `main`，同一个 PR、同一分支、同一会话继续交付。
+- PR 正文（`Route::PullRequest` 内容）由 #109（`feat/pr-conversation`，`bf3854d`，尚未合入 main）负责。为不把空白页当完成，在**本地** `tmp/home-nav-plus-pr-conversation` 分支（`bf3854d` + 本任务提交）上准备了组合验证并实际运行：Home PR 标题、Feed PR 图标、Feed 标题、Feed `Read more` 都进入正确的 `Route::PullRequest` 标签，并渲染出 `pr-conversation-body` 与 `pr-comment-501`；Feed 三处复用同一标签且指向 Feed 合并的 #5，Home 行指向 #7，两者不同。该组合测试不进入交付提交（它依赖未合入的 #109），分支保留供 #109 落 main 后复验。
+
+验证证据（本机 `scripts/verify.mjs`）：
+
+- 交付分支（main base）：`cargo test --locked --bins --tests`、`clippy -D warnings`、`build --locked`、`fmt --check` 全绿。
+- 组合分支（+ #109）：`combined_with_pr_conversation_every_entry_point_reaches_the_pull_request_body` 通过（`81ba4cac-e08c-436e-9850-828bf9daa76f`）。
+
+剩余观感验收（按批次合并进行，不在本任务单列 pending）：
+
+- Feed 合并卡片：图标、标题、`Read more` 与选中卡片 Enter 的单击/键盘手感。
+- Home 行：标题、图标、`#number` 的指针热区与选中反馈；标题旁空白保持惰性。
+- Issue 详情与 PR Conversation 的真实窗口观感、字体、滚动与多 DPI；本任务只用 GPUI 测试平台与离线 fixture 验证，未做真实账户/原生输入验证（L002）。
+- PR 正文的最终验证归属 #109：#109 落 main 后应在 main 上复跑组合场景（本地组合分支可直接对照）。
