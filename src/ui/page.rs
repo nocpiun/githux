@@ -22,6 +22,16 @@ pub(super) fn page(session: &Session, data: PageData, cx: &App) -> AnyElement {
             "This page needs an active account and verified online access. No saved page content is available.",
             cx,
         ),
+        Route::Issue {
+            namespace,
+            name,
+            number,
+        } => unavailable(
+            &format!(
+                "{namespace}/{name} #{number} cannot be read until an active account's online service is available."
+            ),
+            cx,
+        ),
         // The pull-request detail surface is a separate task and stays intentionally empty.
         Route::PullRequest { .. } => blank(),
         Route::Home | Route::Profile | Route::UserProfile { .. } => unavailable(

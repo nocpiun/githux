@@ -24,6 +24,7 @@ pub mod client;
 pub mod error;
 pub mod headers;
 pub mod home;
+pub mod issue_detail;
 pub mod notifications;
 pub mod permission;
 pub mod profile;

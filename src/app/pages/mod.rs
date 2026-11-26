@@ -6,11 +6,13 @@
 //! narrow update methods. No host performs I/O from `render`.
 
 mod home;
+mod issue_detail;
 mod notifications;
 mod profile;
 mod work_items;
 
 pub use home::HomePage;
+pub use issue_detail::IssueDetailPage;
 pub use notifications::NotificationsPage;
 pub use profile::ProfilePage;
 pub use work_items::WorkItemsPage;
@@ -32,6 +34,7 @@ pub enum MountedPage {
     Repository { page: Entity<RepositoryPage> },
     Notifications(Entity<NotificationsPage>),
     WorkItems(Entity<WorkItemsPage>),
+    IssueDetail(Entity<IssueDetailPage>),
 }
 
 impl MountedPage {
@@ -42,6 +45,7 @@ impl MountedPage {
             Self::Repository { page } => page.clone().into_any_element(),
             Self::Notifications(page) => page.clone().into_any_element(),
             Self::WorkItems(page) => page.clone().into_any_element(),
+            Self::IssueDetail(page) => page.clone().into_any_element(),
         }
     }
 
@@ -52,6 +56,7 @@ impl MountedPage {
             Self::Repository { page } => page.update(cx, |page, cx| page.suspend(cx)),
             Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
+            Self::IssueDetail(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
         }
     }
 
@@ -65,6 +70,7 @@ impl MountedPage {
             }
             Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
+            Self::IssueDetail(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
         }
     }
 }

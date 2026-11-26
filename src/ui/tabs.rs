@@ -194,7 +194,7 @@ pub(super) fn route_icon(route: &Route) -> IconName {
         Route::Settings => IconName::Settings,
         Route::Profile | Route::UserProfile { .. } => IconName::User,
         Route::Notifications => IconName::Bell,
-        Route::Issues => IconName::CircleDot,
+        Route::Issues | Route::Issue { .. } => IconName::CircleDot,
         Route::PullRequests | Route::PullRequest { .. } => IconName::GitPullRequest,
         Route::Repository { .. } => IconName::Folder,
     }

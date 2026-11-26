@@ -43,6 +43,7 @@ pub mod global_work_items;
 pub mod home;
 pub(crate) mod interaction;
 mod island;
+pub mod issue_detail;
 pub mod notifications;
 mod page;
 pub(crate) mod page_layout;
@@ -586,6 +587,15 @@ impl Shell {
                     cx,
                 )
             }))),
+            Route::Issue {
+                namespace,
+                name,
+                number,
+            } => Some(crate::app::pages::MountedPage::IssueDetail(cx.new(|cx| {
+                crate::app::pages::IssueDetailPage::new(
+                    namespace, name, *number, services, navigation, avatars, window, cx,
+                )
+            }))),
             Route::PullRequests => Some(crate::app::pages::MountedPage::WorkItems(cx.new(|cx| {
                 crate::app::pages::WorkItemsPage::new(
                     crate::domain::work_item::WorkItemKind::PullRequest,
@@ -831,7 +841,8 @@ impl Shell {
             }
             Some(
                 crate::app::pages::MountedPage::Notifications(_)
-                | crate::app::pages::MountedPage::WorkItems(_),
+                | crate::app::pages::MountedPage::WorkItems(_)
+                | crate::app::pages::MountedPage::IssueDetail(_),
             ) => ("global", ([0, 0], false)),
             None => ("none", ([0, 0], false)),
         }
@@ -901,7 +912,8 @@ impl Shell {
                     crate::app::pages::drain_repository_for_test(page, window, cx);
                 }
                 crate::app::pages::MountedPage::Notifications(_)
-                | crate::app::pages::MountedPage::WorkItems(_) => {}
+                | crate::app::pages::MountedPage::WorkItems(_)
+                | crate::app::pages::MountedPage::IssueDetail(_) => {}
             }
         }
     }

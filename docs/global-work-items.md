@@ -53,7 +53,7 @@ page.update(cx, |view, _| view.on_repository(callback));
 
 `RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
 
-正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`。
+正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`；当类型为 `WorkItemKind::Issue` 时，条目标题同时接线 `WorkItemsView::on_issue`，经同一 `RepoService::is_current` 复核后打开/复用应用内 `Route::Issue { namespace, name, number }`（`WorkItemKind::PullRequest` 与未接线 `on_issue` 的预览仍保持标题无链接语义）。
 
 元数据行顺序和对齐以上述共享组件为准，不再使用旧的 baseline + 1px 相对上移方案；长仓库名在受限 slot 内截断，编号、状态与时间保留各自空间。
 
