@@ -99,6 +99,8 @@ pub(crate) struct Selectors {
 
 /// How the repository part of the metadata line is presented.
 pub(crate) enum RepositoryLink {
+    /// The repository-scoped list omits the repository label from each row.
+    Omitted,
     /// One link carrying `owner/name` (global lists).
     Whole { label: String, action: RowAction },
     /// An owner profile link, a separator, then the repository link (Home).
@@ -342,6 +344,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
     // Only the repository slot grows. Its nested horizontal flex rows keep each link at
     // its intrinsic text width (or its truncated width), leaving the trailing slack inert.
     match row.repository {
+        RepositoryLink::Omitted => {}
         RepositoryLink::Whole { label, action } => {
             metadata = metadata.child(action_link(
                 LinkCell {

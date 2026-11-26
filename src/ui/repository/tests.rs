@@ -156,7 +156,7 @@ fn open<'a>(
 }
 
 /// Runs the page's own drain plus a few frames until `done` holds.
-fn settle(
+pub(super) fn settle(
     page: &Entity<RepositoryPage>,
     cx: &mut VisualTestContext,
     mut done: impl FnMut(&RepositoryPage) -> bool,
@@ -245,7 +245,7 @@ fn the_normal_fixture_renders_its_readme_at_a_real_path_and_single_selection(
         RepositoryTab::Code
     );
     assert!(RepositoryTab::Code.has_content());
-    assert!(!RepositoryTab::Issues.has_content());
+    assert!(RepositoryTab::Issues.has_content());
 
     // The README is the real Markdown reader at its descriptor path.
     assert_eq!(
@@ -716,8 +716,8 @@ fn switching_to_another_tab_clears_the_code_area_and_returning_restores_it(
         RepositoryTab::Issues
     );
     assert!(
-        cx.debug_bounds("repository-tab-empty").is_some(),
-        "undesigned tab content stays empty"
+        cx.debug_bounds("repository-issues").is_some(),
+        "Issues owns the content area"
     );
     assert!(
         cx.debug_bounds("repository-tree-column").is_none(),

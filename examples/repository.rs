@@ -247,6 +247,13 @@ impl Preview {
                     PageAction::Overview(action) => {
                         format!("overview action (not opened): {action:?}")
                     }
+                    PageAction::OpenIssue {
+                        locator, number, ..
+                    } => format!(
+                        "open issue {}/{} #{number}",
+                        locator.owner(),
+                        locator.name()
+                    ),
                     PageAction::OpenExternal(url) => format!("external link (not opened): {url}"),
                     PageAction::LinkNotFollowed { path, reason } => {
                         format!("link not followed: {path} — {reason}")

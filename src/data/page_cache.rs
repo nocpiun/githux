@@ -29,6 +29,7 @@ mod localhost_tests;
 #[cfg(test)]
 mod readme_tests;
 mod reads;
+mod repository_issues;
 #[cfg(test)]
 mod revocation_tests;
 #[cfg(test)]

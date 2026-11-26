@@ -153,6 +153,7 @@ pub fn repository_page(
     // Captured once for the contributor route, so a contributor link resolves like every other
     // profile link without reaching back into the service from the action closure.
     let active_account = services.accounts().active_summary();
+    let repositories = services.repositories();
     let page = cx.new(|cx| {
         let mut page = RepositoryPage::new(page_services, locator, intent, window, cx);
         page.on_action(Rc::new(move |action, window, cx| match action {
@@ -176,8 +177,25 @@ pub fn repository_page(
                 html_url: Some(url),
                 ..
             }) => navigation(PageNavigation::External(url), window, cx),
+            PageAction::OpenIssue {
+                context,
+                locator,
+                number,
+            } => {
+                if repositories.is_current(&context) {
+                    navigation(
+                        PageNavigation::Open(Route::Issue {
+                            namespace: locator.owner().to_string(),
+                            name: locator.name().to_string(),
+                            number,
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+            }
             // Star is handled inside RepositoryPage through RepositoryActionService. Fork and
-            // unsupported links stay inert; neither is reported as a successful host action.
+            // unsupported links stay inert.
             PageAction::StarRequested { .. }
             | PageAction::ForkRequested { .. }
             | PageAction::LinkNotFollowed { .. }
