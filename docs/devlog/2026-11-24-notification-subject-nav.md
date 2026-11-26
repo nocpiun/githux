@@ -12,10 +12,10 @@
 
 ## 依赖与未完成（2026-11-26 更新）
 
-2026-11-24 那一轮交付时本基线没有 `Route::Issue`，所以 Issue 标题保持普通文本。负责人验收反馈要求打通 Issue，因此本分支现在以 `feat/issue-detail`（`1ac899e22a4e7f1da42c71ecd85b87ff5705666a`，实施时重新核对过远端）为开发基础 rebase，宿主消费该生产者的 `Route::Issue`；`#106` 自身仍以 `main` 为 base。
+2026-11-24 那一轮交付时本基线没有 `Route::Issue`，所以 Issue 标题保持普通文本。负责人验收反馈要求打通 Issue，因此先以 `feat/issue-detail` 为开发基础 rebase 并消费其 `Route::Issue`。`#106` 已以 squash 提交 `951da32` 合入 main（其树与生产者 head `ab24dd9` 一致），本分支随后 rebase 到 `origin/main`，diff 只剩本任务自己的提交。
 
 - 未新增/修改 `src/workspace/mod.rs` 路由注册、`src/ui/mod.rs` 页面挂载、共享网络层、全局列表或 Home；Issue 详情页、`Route::Issue`、`IssueDetailPage` 全部来自生产者分支。
-- PR 对话正文由 pr-conversation 任务负责挂载；本任务只验证通知能到达正确的 `Route::PullRequest`（同仓库同号与 Issue 是不同路由/tab），组合后再验 PR 正文。
+- PR 对话正文由 pr-conversation（#109）负责挂载。已在本机把 `feat/pr-conversation`（`098cdbd`）+ 本分支合成临时 integration 分支，真实 Shell 点击通知 PR #42 后断言 `pr-conversation-body`、`pr-comment-401` 与 PR 正文 `Pull request body reached from a notification click.`；该验证分支不推送。合入 main 仍等 #109 落地，否则 PR 通知只会打开空白页。
 
 ## 文件
 
@@ -49,11 +49,17 @@
 
 验证（经 `scripts/verify.mjs`）：rebase 到生产者最新 head `ab24dd9` 后重新执行，`cargo fmt --all -- --check` `34298b2e`；`cargo clippy --locked --all-targets -- -D warnings` `f7db54cb`；`cargo test --locked --bins --tests` `3817677b`（1563 passed / 0 failed）；`cargo build --locked --all-targets` `8c8f27b2`；聚焦回归 `cargo test --locked --bins notifications_route_reads_routes_repositories_and_completes_done` 在 rebase 前 `4aaff0df`、rebase 后 `c858b0d2` 均通过。
 
-## 2026-11-26 stacked PR 形态
+## 2026-11-26 stacked PR 形态（已于 #106 落 main 后解除）
 
-负责人要求避免对 main 重复 diff，因此 PR #105 的 base 从 `main` 改为 `feat/issue-detail`（#106，head `ab24dd9`）。本分支只在本任务提交（domain 匹配、UI/宿主消费、测试与文档）之上叠加，不含生产者的任何提交，也未推/改生产者分支。#106 落 main 后本 PR 再转回 `main` base、清掉 stacked 关系并重跑 CI/审查。
+负责人要求避免对 main 重复 diff，因此 PR #105 的 base 曾从 `main` 改为 `feat/issue-detail`（#106，head `ab24dd9`），分支只叠加本任务提交，未推/改生产者分支。`#106` 以 `951da32` 落 main 后，本分支用 `git rebase --onto origin/main ab24dd9` 只重放本任务的 5 个提交，PR base 转回 `main`，stacked 关系解除。
 
-`pending` 保留给负责人验收；本轮未合并、未摘标签。
+负责人 2026-11-26 决定：本批 Issue/PR 阅读任务的 `pending` 仅表示外观验收、已由协调者移除；不再为外观新增 `pending` 或等待逐任务目视批准，最终外观验收合并后统一进行。本轮不合并依赖分支、不改他人分支。
+
+## 2026-11-26 后续集成：main rebase 与 PR 整合验证
+
+- `#106` 以 `951da32` 合入 main 后，确认其树与生产者 head `ab24dd9` 一致；用 `git rebase --onto origin/main ab24dd9` 只重放本任务 5 个提交，`git diff origin/main` 仅含本任务文件（11 个），不含生产者提交。PR #105 base 转回 `main`。
+- 本机临时 integration 分支（不推送）合并 `feat/pr-conversation`（`098cdbd`）与本分支后，真实 Shell 点击通知 PR #42 断言 `pr-conversation-body`、`pr-comment-401` 和正文 `Pull request body reached from a notification click.`；同一测试仍断言 Issue #42 正文/评论、同资源复用、另一仓库同号 Issue、HTML URL 保持原位、仓库链接与 Done 独立。
+- main rebase 后验证：`cargo fmt --all -- --check` `e10781e6`；`cargo clippy --locked --all-targets -- -D warnings` `7712e37f`；`cargo test --locked --bins --tests` 首跑遇到与本任务无关的 `cold_start...issue_detail` 时序失败与两个 localhost transport 边界失败，单独重跑均通过，随后全量 `18ffe496` 通过（1563 passed / 0 failed）；聚焦通知回归 `48df122e`（integration 分支）通过。
 
 ## 审查反馈
 
