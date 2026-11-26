@@ -26,3 +26,5 @@ node scripts/verify.mjs -- cargo run --locked --example pr_conversation_probe
 ## 合入 main 的基线
 
 #106 squash 为 `951da323a114d3d2dd6e8cb2955779c12f2f1a13`，文件树与已审查的生产者快照 `ab24dd9` 一致。#109 保留原 PR，把 PR Conversation 差异重放到该提交并改以 `main` 为目标。按负责人决定，最终外观由 Issue/PR 阅读批次共同验收。
+
+在 `main` 基线的重放中运行 `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages:: -- --test-threads=1`，76 项全部通过（`919fefe0`）。共享构建槽等待 60.7 秒，命令执行 99.5 秒。正式 Shell 测试通过 Feed 的 Read more 显示 PR 摘要、Markdown 正文和普通评论，并区分空内容、评论失败及失权。
