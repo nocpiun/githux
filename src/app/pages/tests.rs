@@ -290,6 +290,7 @@ impl Transport for PageTransport {
                     response.headers.push(("link".into(),format!("<https://api.github.com/repos/alice/demo/issues?state=open&sort=created&direction=desc&per_page=30&page={next}>; rel=\"next\"")));
                 }
                 return Ok(response);
+            }
             if url.contains("/repos/alice/demo/issues/42/comments") {
                 return Ok(json(
                     200,
