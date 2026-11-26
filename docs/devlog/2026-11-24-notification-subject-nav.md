@@ -15,7 +15,7 @@
 2026-11-24 那一轮交付时本基线没有 `Route::Issue`，所以 Issue 标题保持普通文本。负责人验收反馈要求打通 Issue，因此先以 `feat/issue-detail` 为开发基础 rebase 并消费其 `Route::Issue`。`#106` 已以 squash 提交 `951da32` 合入 main（其树与生产者 head `ab24dd9` 一致），本分支随后 rebase 到 `origin/main`，diff 只剩本任务自己的提交。
 
 - 未新增/修改 `src/workspace/mod.rs` 路由注册、`src/ui/mod.rs` 页面挂载、共享网络层、全局列表或 Home；Issue 详情页、`Route::Issue`、`IssueDetailPage` 全部来自生产者分支。
-- PR 对话正文由 pr-conversation（#109）负责挂载。已在本机把 `feat/pr-conversation`（`098cdbd`）+ 本分支合成临时 integration 分支，真实 Shell 点击通知 PR #42 后断言 `pr-conversation-body`、`pr-comment-401` 与 PR 正文 `Pull request body reached from a notification click.`；该验证分支不推送。合入 main 仍等 #109 落地，否则 PR 通知只会打开空白页。
+- PR 对话正文由 pr-conversation（#109）负责挂载。先在临时 integration 分支验证组合行为；#109 以 `3ca98b0` 合入 main 后，本分支 rebase 到最新 main，并把该断言永久加入通知 Shell 回归：点击通知 PR #42 后 `pr-conversation-body`、`pr-comment-401` 与 PR 正文 `Pull request body reached from a notification click.` 出现。
 
 ## 文件
 
@@ -59,7 +59,8 @@
 
 - `#106` 以 `951da32` 合入 main 后，确认其树与生产者 head `ab24dd9` 一致；用 `git rebase --onto origin/main ab24dd9` 只重放本任务 5 个提交，`git diff origin/main` 仅含本任务文件（11 个），不含生产者提交。PR #105 base 转回 `main`。
 - 本机临时 integration 分支（不推送）合并 `feat/pr-conversation`（`098cdbd`）与本分支后，真实 Shell 点击通知 PR #42 断言 `pr-conversation-body`、`pr-comment-401` 和正文 `Pull request body reached from a notification click.`；同一测试仍断言 Issue #42 正文/评论、同资源复用、另一仓库同号 Issue、HTML URL 保持原位、仓库链接与 Done 独立。
-- main rebase 后验证：`cargo fmt --all -- --check` `e10781e6`；`cargo clippy --locked --all-targets -- -D warnings` `7712e37f`；`cargo test --locked --bins --tests` 首跑遇到与本任务无关的 `cold_start...issue_detail` 时序失败与两个 localhost transport 边界失败，单独重跑均通过，随后全量 `18ffe496` 通过（1563 passed / 0 failed）；聚焦通知回归 `48df122e`（integration 分支）通过。
+- 依赖落地顺序：`#106` → `951da32`，`#108` → `15b3a6d`，`#109` → `3ca98b0`；每次 main 前进都 rebase 本分支并只重放本任务提交（与 #108 的 `src/app/pages/tests.rs` fixture 冲突按双方都保留的方式解决）。
+- 最终 main rebase（`3ca98b0`）验证：`cargo fmt --all -- --check` `64edfc4d`；`cargo clippy --locked --all-targets -- -D warnings` `d57116b1`；`cargo test --locked --bins --tests` `de762843`（1570 passed / 0 failed）；`cargo build --locked --all-targets` `2f99efda`；聚焦通知回归（含 Issue 与 PR 正文断言）`2ab8ea7e` 通过。
 
 ## 审查反馈
 

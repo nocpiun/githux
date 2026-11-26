@@ -596,9 +596,12 @@ impl Transport for PageTransport {
                 {
                     let vars = &payload["variables"];
                     let number = vars["number"].as_u64().unwrap();
+                    // #42 is the notification-driven PR fixture; its body differs from the
+                    // Issue #42 body so the test proves the PR conversation itself was read.
                     let body = match number {
                         5 => PR_FIXTURE_BODY,
                         21 => "PR **description** for demo #21.",
+                        42 => "Pull request body reached from a notification click.",
                         _ => "",
                     };
                     return Ok(graphql_ok(serde_json::json!({"repository": {
@@ -1702,6 +1705,19 @@ fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut Tes
             number: 42,
         }
     );
+    // The PR conversation page (delivered by #109) reads its own body and comments.
+    wait_for_bounds(cx, "pr-conversation-body");
+    wait_for_bounds(cx, "pr-comment-401");
+    view.read_with(cx, |shell, cx| {
+        let pr = shell
+            .pull_request_summary_for_test(cx)
+            .expect("mounted PR summary");
+        assert_eq!(
+            pr.body.as_deref(),
+            Some("Pull request body reached from a notification click."),
+            "the notification PR must open its own real conversation body"
+        );
+    });
     let pull_request_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
     assert_ne!(pull_request_tab, demo_issue_tab);
 
