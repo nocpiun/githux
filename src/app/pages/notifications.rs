@@ -73,9 +73,20 @@ impl NotificationsPage {
                         cx,
                     );
                 }
-                // This base has no `Route::Issue` yet. Matching Issue
-                // subjects stay non-navigating until that page lands.
-                NotificationTarget::Issue { .. } => {}
+                // `Route::Issue` is mounted by the Issue detail producer; the
+                // dependency is recorded in docs/notifications.md.
+                NotificationTarget::Issue { repository, number } => {
+                    let locator = repository.locator();
+                    navigation(
+                        PageNavigation::Open(Route::Issue {
+                            namespace: locator.owner().to_string(),
+                            name: locator.name().to_string(),
+                            number,
+                        }),
+                        window,
+                        cx,
+                    );
+                }
             }
         });
         let view = cx.new(|cx| {
@@ -86,10 +97,8 @@ impl NotificationsPage {
                 window,
                 cx,
             );
-            view.on_subject(
-                on_subject,
-                Rc::new(|target| matches!(target, NotificationTarget::PullRequest { .. })),
-            );
+            // Both Issue and Pull Request targets have a mounted detail page.
+            view.on_subject(on_subject, Rc::new(|_| true));
             view
         });
         this._changed = Some(cx.observe(&view, |_, _, cx| cx.notify()));
