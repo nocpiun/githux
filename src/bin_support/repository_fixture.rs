@@ -572,6 +572,7 @@ impl FixtureTransport {
             }
             "" => Ok(json_response(200, &self.details_body(scene).to_string())),
             "/branches" => Ok(self.branches(scene, url)),
+            "/issues" => Ok(self.issues(query.unwrap_or_default(), url)),
             "/releases" | "/releases/latest" | "/contributors" | "/languages" => {
                 Ok(self.extras(rest, query, scene, url))
             }
@@ -591,6 +592,47 @@ impl FixtureTransport {
                 Ok(self.mismatch(url))
             }
         }
+    }
+
+    fn issues(&self, query: &str, url: &str) -> HttpResponse {
+        let params = reqwest::Url::parse(url).expect("fixture URL");
+        let params: BTreeMap<_, _> = params.query_pairs().collect();
+        let state = params.get("state").map(|value| value.as_ref());
+        let page = params.get("page").map(|value| value.as_ref());
+        let issue = |number, state| {
+            serde_json::json!({
+                "number": number, "title": format!("Fixture issue {number}"),
+                "state": state, "updated_at": "2026-11-01T12:00:00Z"
+            })
+        };
+        let (rows, next) = match (state, page) {
+            (Some("open"), Some("1")) => (
+                (71..=100)
+                    .rev()
+                    .map(|number| issue(number, "open"))
+                    .collect(),
+                Some(2),
+            ),
+            (Some("open"), Some("2")) => (
+                vec![serde_json::json!({"number": 70, "pull_request": {}})],
+                Some(3),
+            ),
+            (Some("open"), Some("3")) => (vec![issue(69, "open")], None),
+            (Some("closed"), Some("1")) => (vec![issue(42, "closed")], None),
+            _ => return self.mismatch(url),
+        };
+        let mut response = json_response(200, &serde_json::json!(rows).to_string());
+        if let Some(next) = next {
+            let query = query.replace(&format!("page={}", next - 1), &format!("page={next}"));
+            response.headers.push((
+                "link".into(),
+                format!(
+                    "<https://api.github.com{}/issues?{query}>; rel=\"next\"",
+                    locator_path()
+                ),
+            ));
+        }
+        response
     }
 
     fn answer_star(

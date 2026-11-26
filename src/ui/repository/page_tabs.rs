@@ -4,12 +4,8 @@
 //! then horizontal content tabs, then the Code area — and they are deliberately
 //! separate from the application-level workspace tab strip in `ui::tabs`.
 //!
-//! This round implements only the Code tab. The other entries reuse the
-//! confirmed repository naming and are drawn as normal tabs whose content area
-//! stays empty, exactly as the product convention requires: no placeholder
-//! cards, no fake settings, no copied GitHub feature menus. Releases,
-//! Contributors and Languages are owned by the separate overview component and
-//! are not wired here.
+//! Code and Issues have their own content areas. The other tabs reuse the confirmed
+//! repository names and keep their content areas empty.
 
 /// One in-page content tab of a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,8 +59,8 @@ impl RepositoryTab {
         }
     }
 
-    /// Whether this round has content for the tab. Only Code does.
+    /// Whether this tab has a content view.
     pub fn has_content(self) -> bool {
-        matches!(self, Self::Code)
+        matches!(self, Self::Code | Self::Issues)
     }
 }
