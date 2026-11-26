@@ -85,6 +85,10 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签并显示对应 [PR Conversation](pr-conversation.md)。
 
+2026-11-25：Home 工作条目的标题激活经 `HomeAction::ActivateWorkItem` 接入同一迟延导航通道。目标先由 `ui::home::work_item_target` 从 typed 身份（kind + 仓库 + 仓库内编号）一次性得出，不从标题推断；`PullRequest` 走 `Route::PullRequest`，`Issue` 走 `issue-detail` 提供的 `Route::Issue { namespace, name, number }`。同资源在同一账户内复用标签，同号不同库或同库 Issue/PR 不合并。Home 行的左侧图标与 metadata 中的 `#number` 发出同一激活（仅 pointer，title 仍是唯一键盘入口）；owner/仓库链接保持各自目标。投递前 host 核对 `HomeView::is_active` 与 `HomeView::has_work_item`，因此隐藏标签、切换账户或已替换快照后到达的旧激活不导航。
+
+2026-11-26：合并 PR 卡片的 PR 图标、包含 `#number` 的标题、`Read more` 以及选中卡片后的 Enter 统一发出 `HomeAction::OpenPullRequest`，因此单击或键盘都能进入同一个 `Route::PullRequest` 标签；正文被截断与否都不影响标题入口。目标无法从事件解析出可用仓库/编号时，标题退回纯文本而不加 Link 角色或 Tab stop。Home 与 Feed 的这三类入口在真实 Shell 组合中有离线 fixture 回归（`src/app/pages/home/shell_nav_tests.rs`）；Issue 详情与 PR Conversation 都已在 main，fixture 同时断言真实正文与评论渲染（`issue-detail-body`/`issue-comment-301`、`pr-conversation-body`/`pr-comment-501`/`pr-comment-601`），因此不以空白标签页作为成功证据。
+
 ## 页面内容几何与共享行（2026-11-04 视觉返工）
 
 - `src/ui/page_layout.rs` 提供四个正式页面共用的内容几何：`PAGE_GUTTER = 16`、`PAGE_TOP = 16`、`PAGE_BOTTOM = 8`、`PAGE_HEADER_HEIGHT = 40`，与 Home 已有的 `px_4 / pt_4 / pb_2` 和 40px 列头一致。Home、Notifications 与全局 Issues/PR 都据此布局，页面 body 负责留白，标题行不再各自叠加内边距。

@@ -337,6 +337,9 @@ fn issue_row(
             show_selected_bar: false,
             on_row_click: Some(open),
             on_title_click: Some(Rc::new(move |_, window, cx| open_title(window, cx))),
+            // The repository Issues list keeps the title as its single activation target; the
+            // icon and number stay decorative here (the Home column opts in separately).
+            on_identity_click: None,
         },
         cx,
     )
