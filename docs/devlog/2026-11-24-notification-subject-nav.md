@@ -49,6 +49,12 @@
 
 验证（经 `scripts/verify.mjs`）：rebase 到生产者最新 head `ab24dd9` 后重新执行，`cargo fmt --all -- --check` `34298b2e`；`cargo clippy --locked --all-targets -- -D warnings` `f7db54cb`；`cargo test --locked --bins --tests` `3817677b`（1563 passed / 0 failed）；`cargo build --locked --all-targets` `8c8f27b2`；聚焦回归 `cargo test --locked --bins notifications_route_reads_routes_repositories_and_completes_done` 在 rebase 前 `4aaff0df`、rebase 后 `c858b0d2` 均通过。
 
+## 2026-11-26 stacked PR 形态
+
+负责人要求避免对 main 重复 diff，因此 PR #105 的 base 从 `main` 改为 `feat/issue-detail`（#106，head `ab24dd9`）。本分支只在本任务提交（domain 匹配、UI/宿主消费、测试与文档）之上叠加，不含生产者的任何提交，也未推/改生产者分支。#106 落 main 后本 PR 再转回 `main` base、清掉 stacked 关系并重跑 CI/审查。
+
+`pending` 保留给负责人验收；本轮未合并、未摘标签。
+
 ## 审查反馈
 
 Codex P2：生产页面把匹配的 Issue 标题渲染成 link，但宿主明确忽略 Issue，造成 dead link。修复为视图要求宿主通过 `CanOpenSubject` 声明可打开类型；生产宿主只声明 PullRequest，Issue 保持普通文本，等 `Route::Issue` 落 main 后再声明。新增 `unsupported_subject_kinds_stay_plain_text` 回归：同一场景下 Issue 点击无回调，PR 点击正常发出 target。
