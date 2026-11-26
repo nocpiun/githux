@@ -457,8 +457,10 @@ impl Transport for PageTransport {
                 if query.starts_with("is:issue") || query.starts_with("is:pr") {
                     let pr = query.starts_with("is:pr");
                     let item = if pr {
+                        // Same repository and number as the Feed's merged PR so the global list also
+                        // exercises a non-empty Conversation, not only an empty one.
                         serde_json::json!({
-                            "id": 20001, "number": 7, "title": "Synthetic pull request",
+                            "id": 20001, "number": 5, "title": "Synthetic pull request",
                             "state": "open", "updated_at": "2026-10-28T10:00:00Z",
                             "repository_url": "https://api.github.com/repos/alice/demo",
                             "pull_request": {"merged_at": null}
@@ -2097,7 +2099,7 @@ fn global_pull_request_title_opens_reuses_and_returns_from_the_list(cx: &mut Tes
         |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
     );
 
-    // 1. Open Global Pull Requests. The fixture's PR row is `alice/demo #7`.
+    // 1. Open Global Pull Requests. The fixture's PR row is `alice/demo #5`.
     cx.update_window_entity(&view, |shell, window, cx| {
         shell.navigate(Route::PullRequests, window, cx);
     });
@@ -2114,11 +2116,16 @@ fn global_pull_request_title_opens_reuses_and_returns_from_the_list(cx: &mut Tes
         Route::PullRequest {
             namespace: "alice".into(),
             name: "demo".into(),
-            number: 7,
+            number: 5,
         }
     );
     let detail_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
     assert_ne!(detail_tab, pr_tab, "the detail is its own workspace tab");
+    // The destination is the real Conversation page, not just a tab key: this PR has a Markdown
+    // description and an ordinary comment, and both must actually render.
+    wait_for_bounds(cx, "pr-conversation-body");
+    wait_for_bounds(cx, "markdown-heading-0");
+    wait_for_bounds(cx, "pr-comment-501");
 
     // 3. Re-activating the same row reuses that tab instead of opening a second one.
     cx.update_window_entity(&view, |shell, window, cx| {
@@ -2206,7 +2213,7 @@ fn work_item_titles_keep_issue_and_pull_request_destinations_distinct(cx: &mut T
         Route::PullRequest {
             namespace: "alice".into(),
             name: "demo".into(),
-            number: 7,
+            number: 5,
         },
         "the PR list never opens the Issue route"
     );

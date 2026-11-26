@@ -1,6 +1,6 @@
 # 2026-11-26 全局 PR 列表的详情入口（global-pr-detail-nav）
 
-- 分支 `feat/global-pr-detail-nav`，基线 `951da323a114d3d2dd6e8cb2955779c12f2f1a13`（main，含 #106 Issue 详情）。
+- 分支 `feat/global-pr-detail-nav`。基线 `951da323a114d3d2dd6e8cb2955779c12f2f1a13`（main，含 #106 Issue 详情）；实现后 rebase 到 main `f12a9e2f`（含 #109 PR Conversation、#108 仓库 Issue 列表、#107 Home 导航、#105 通知导航），交付树即集成基线，不再有待合入的前置 PR。
 - 交付范围：`src/app/pages/work_items.rs`、`src/ui/global_work_items`、本任务定点回归与文档。
 
 ## 实际缺口与最小复现
@@ -40,17 +40,22 @@
 
 ## 验证
 
-自动化（均在 `node scripts/verify.mjs` 记录的 run 下执行）：
+自动化（均在 `node scripts/verify.mjs` 记录的 run 下执行，最终树基于 main `f12a9e2f`）：
 
 ```sh
-node scripts/verify.mjs -- cargo fmt --all
-node scripts/verify.mjs -- cargo test --locked --bins ui::global_work_items
+node scripts/verify.mjs -- cargo fmt --all -- --check   # dc36a369
+node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings   # 4b5a42bd
+node scripts/verify.mjs -- cargo test --locked --bins --tests   # ca0c39bd, 1593 passed / 8 ignored
+node scripts/verify.mjs -- cargo build --locked --example global_work_items   # 81abaa26
 ```
 
-组件测试 18 项通过（run `5d412a1a-88be-462d-bcdb-189356f717a1`，共享构建槽等待 130.1 秒，命令执行 256.3 秒）。Shell 集成与最终 fmt/clippy/test 的 run 记录见 PR 描述。
+- 组件测试（`cargo test --locked --bins ui::global_work_items`）18 项，含两条新增用例；首轮在 rebase 前的基线上通过（run `5d412a1a`），其后的 `--bins --tests` 全量运行覆盖同一代码。
+- Shell 集成（`cargo test --locked --bins app::pages::tests`）含两条新增用例，已在 `ca0c39bd` 全量运行中通过。
+- **集成路径的非空 Conversation 证据**：Shell fixture 的全局 PR 行与 Feed 使用同一 `alice/demo #5`，`global_pull_request_title_opens_reuses_and_returns_from_the_list` 点击行标题后在断言 `Route::PullRequest` 与标签复用之外，等待 `pr-conversation-body`、`markdown-heading-0` 与 `pr-comment-501`，即列表入口真的渲染了该 PR 的正文和评论，而不是仅切换到一个标签。随后再次点击复用同一标签、同行仓库链接仍去 `Route::Repository`，关闭详情后回到原 PR 列表且行仍在。
+- 同一 fixture 中 Issues 行仍为 `alice/demo #21`，`work_item_titles_keep_issue_and_pull_request_destinations_distinct` 与既有 `global_issues_title_...` 用例校验 Issues 行为未变。
 
 ## 边界与后续
 
 - 本任务只接「列表标题 → 既有详情路线」。PR Conversation 的正文、评论、图片、刷新和失权处理仍由 #109 负责；本任务不重新实现、也不改其内部。
-- 断言目标是「标题点击产生正确的 `Route::PullRequest` 且复用标签」，不是 Conversation 的内部渲染：#109 合入 main 后需在集成基线上确认 `pr-conversation-*` 实际出现在该路由，本任务不预置该断言以免重复其回归。
-- 原生外观（间距、相对时间、滚动观感）按负责人 2026-11-26 的决定并入 Issue/PR 阅读批次统一验收，本任务不为此重新添加 `pending`。
+- 自动化覆盖的是路由、标签复用和 Conversation 的实际挂载与非空内容（事务 fixture），不是原生外观。原生外观（间距、相对时间、滚动观感）与外部视觉检查按负责人 2026-11-26 的决定并入 Issue/PR 阅读批次统一验收，本任务不为此重新添加 `pending`，也未在真实 PAT 账户下重跑。
+- 失权/旧账户：组件已在存在号回调前检查 `active` 与 `repos.is_current(&context)`，Shell 宿主在发出 `PageNavigation::Open` 前重复同一检查；新用例覆盖了 `set_active(false)` 和切换账户后旧 context 为 stale 两种情况。
