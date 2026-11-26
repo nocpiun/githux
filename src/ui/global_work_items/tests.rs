@@ -226,6 +226,18 @@ fn open(
     Entity<WorkItemsView>,
     &mut VisualTestContext,
 ) {
+    open_kind(cx, scene, WorkItemKind::Issue)
+}
+
+fn open_kind(
+    cx: &mut TestAppContext,
+    scene: Scene,
+    kind: WorkItemKind,
+) -> (
+    FixtureRuntime,
+    Entity<WorkItemsView>,
+    &mut VisualTestContext,
+) {
     let fixture = FixtureRuntime::new(scene);
     cx.update(ely_core::init_for_tests);
     let repos = fixture.accounts.repo_service();
@@ -234,7 +246,7 @@ fn open(
         .enable_all()
         .build()
         .unwrap();
-    let mut controller = Controller::new(repos.work_item_session().unwrap(), WorkItemKind::Issue);
+    let mut controller = Controller::new(repos.work_item_session().unwrap(), kind);
     let request = controller.begin(RequestMode::Replace).unwrap();
     let result = runtime.block_on(request.execute(&WorkItemLimits::default()));
     assert!(controller.finish(&request, result));
@@ -800,5 +812,147 @@ fn pull_request_rows_also_render_relative_time_from_the_same_row(cx: &mut TestAp
     assert!(
         cx.debug_bounds(Box::leak(format!("work-updated-{id}").into_boxed_str()))
             .is_some()
+    );
+}
+
+/// A title becomes the row's detail target only when the host installed a callback, and it always
+/// reports the clicked row's own repository and number. Pull Request rows get the same treatment
+/// the Issue list has, which is what lets the global PR list open its Conversation.
+#[gpui::test]
+fn pull_request_titles_report_their_own_row_identity(cx: &mut TestAppContext) {
+    let (fixture, view, cx) = open_kind(cx, Scene::Mixed, WorkItemKind::PullRequest);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+    let rows = view.read_with(cx, |view, _| view.controller.rows.clone());
+    let first = rows[0].clone();
+    assert_eq!(first.kind, WorkItemKind::PullRequest);
+
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = opened.clone();
+    view.update(cx, |view, cx| {
+        view.on_open(Rc::new(move |navigation, _, _| {
+            sink.borrow_mut()
+                .push((navigation.repository.clone(), navigation.number));
+        }));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let title = cx
+        .debug_bounds(Box::leak(
+            format!("work-title-{}", first.id).into_boxed_str(),
+        ))
+        .expect("title is an activation target once the host connects it");
+    cx.simulate_click(title.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(opened.borrow().len(), 1);
+    let (repository, number) = opened.borrow()[0].clone();
+    assert_eq!(repository, first.repository);
+    assert_eq!(number, first.number);
+
+    // Selection alone is not navigation, and the repository link keeps its own destination.
+    view.update(cx, |view, cx| {
+        view.selected = Some(first.id);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(opened.borrow().len(), 1);
+    let repo = cx
+        .debug_bounds(Box::leak(
+            format!("work-repo-{}", first.id).into_boxed_str(),
+        ))
+        .expect("repository link");
+    cx.simulate_click(repo.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        opened.borrow().len(),
+        1,
+        "the repository link must not also open the detail route"
+    );
+    assert!(!fixture.transport.requests().is_empty());
+
+    // An unconnected preview keeps the title as plain text: no activation, so no detail route.
+    view.update(cx, |view, cx| {
+        view.on_open = None;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let plain = cx
+        .debug_bounds(Box::leak(
+            format!("work-title-{}", first.id).into_boxed_str(),
+        ))
+        .expect("title bounds");
+    cx.simulate_click(plain.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(opened.borrow().len(), 1);
+}
+
+/// A stale title activation must be inert. Both the component and the Shell host re-check the
+/// captured account context, so a row rendered for account A can never open a detail tab while B
+/// is active — and an inactive (background) list does not navigate either.
+#[gpui::test]
+fn title_navigation_requires_the_captured_account_and_an_active_list(cx: &mut TestAppContext) {
+    let (fixture, view, cx) = open_kind(cx, Scene::Mixed, WorkItemKind::PullRequest);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+    let first = view.read_with(cx, |view, _| view.controller.rows[0].clone());
+    let context = view.read_with(cx, |view, _| view.controller.context().clone());
+    let opened = Rc::new(RefCell::new(0usize));
+    let sink = opened.clone();
+    view.update(cx, |view, cx| {
+        view.on_open(Rc::new(move |_, _, _| *sink.borrow_mut() += 1));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let navigation = WorkItemNavigation {
+        context: context.clone(),
+        repository: first.repository.clone(),
+        number: first.number,
+    };
+    let activate = |cx: &mut VisualTestContext, navigation: WorkItemNavigation| {
+        let navigation = navigation.clone();
+        cx.update_window_entity(&view, |view, window, cx| {
+            view.navigate_open(navigation, window, cx)
+        });
+        cx.run_until_parked();
+    };
+
+    // A captured account that is still current navigates.
+    activate(cx, navigation.clone());
+    assert_eq!(*opened.borrow(), 1);
+
+    // The same list while it is not the displayed tab stays inert.
+    view.update(cx, |view, cx| view.set_active(false, cx));
+    activate(cx, navigation.clone());
+    assert_eq!(*opened.borrow(), 1, "an inactive list does not navigate");
+    view.update(cx, |view, cx| view.set_active(true, cx));
+
+    // After the account changes, the previously captured context is stale.
+    fixture
+        .accounts
+        .repo_service()
+        .session()
+        .expect("repository service");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(
+            fixture
+                .accounts
+                .login(crate::auth::token::Pat::from_str("synthetic-next-account")),
+        )
+        .unwrap();
+    assert!(
+        !view.read_with(cx, |view, _| view.repos.is_current(&context)),
+        "the captured context must be stale after an account change"
+    );
+    activate(cx, navigation);
+    assert_eq!(
+        *opened.borrow(),
+        1,
+        "a stale-account title must not navigate"
     );
 }

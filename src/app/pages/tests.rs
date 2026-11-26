@@ -2082,6 +2082,136 @@ fn global_issues_title_opens_reuses_and_isolates_issue_detail_while_repo_link_st
     wait_for_bounds(cx, "work-item-10001");
 }
 
+/// The global Pull Requests list owns the same title-as-detail contract as Global Issues: the
+/// clicked row's own repository and number become `Route::PullRequest`, the repository link stays
+/// independent, the destination tab is reused, and closing the detail returns to the list with its
+/// filter and rows intact. Before this wiring the PR list installed no title callback at all.
+#[gpui::test]
+fn global_pull_request_title_opens_reuses_and_returns_from_the_list(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+
+    // 1. Open Global Pull Requests. The fixture's PR row is `alice/demo #7`.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-20001");
+    let pr_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+
+    // 2. The title is the row's detail target and keeps the row's repository and number.
+    let title = cx.debug_bounds("work-title-20001").expect("PR title");
+    cx.simulate_click(title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::PullRequest {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 7,
+        }
+    );
+    let detail_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(detail_tab, pr_tab, "the detail is its own workspace tab");
+
+    // 3. Re-activating the same row reuses that tab instead of opening a second one.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-20001");
+    let again = cx.debug_bounds("work-title-20001").expect("PR title");
+    cx.simulate_click(again.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        detail_tab,
+        "the same pull request must reuse its tab"
+    );
+
+    // 4. The repository link on the same row stays an independent destination.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-repo-20001");
+    let repo = cx.debug_bounds("work-repo-20001").expect("repo link");
+    cx.simulate_click(repo.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Repository {
+            namespace: "alice".into(),
+            name: "demo".into(),
+        }
+    );
+
+    // 5. Closing the detail tab returns to the PR list with its rows intact.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.workspace().close(detail_tab, cx);
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.active_tab_id()), pr_tab);
+    wait_for_bounds(cx, "work-item-20001");
+}
+
+/// The Issues list must not change: its own rows still open `Route::Issue`, and the PR list must
+/// not accept an Issue row or vice versa. A stale account can never route through either title.
+#[gpui::test]
+fn work_item_titles_keep_issue_and_pull_request_destinations_distinct(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-10001");
+    let issue_title = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(issue_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21,
+        },
+        "the Issues list keeps its own destination"
+    );
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::PullRequests, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-20001");
+    let pr_title = cx.debug_bounds("work-title-20001").expect("PR title");
+    cx.simulate_click(pr_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::PullRequest {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 7,
+        },
+        "the PR list never opens the Issue route"
+    );
+}
+
 #[gpui::test]
 fn cold_start_async_account_restore_opens_visible_issue_detail_once_paginates_returns_and_reopens(
     cx: &mut TestAppContext,

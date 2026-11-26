@@ -53,13 +53,15 @@ page.update(cx, |view, _| view.on_repository(callback));
 
 `RepositoryNavigation { context, repository }` 只由仓库名链接触发，含稳定 host + canonical owner/name；Search 不提供数字 repository id，因此不伪造 id。host 再验证 workspace incarnation、TabId 和 context 后打开应用内 Repository。链接自身再次检查捕获授权 context，旧账户链接不触发回调。
 
-正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`；当类型为 `WorkItemKind::Issue` 时，条目标题同时接线 `WorkItemsView::on_issue`，经同一 `RepoService::is_current` 复核后打开/复用应用内 `Route::Issue { namespace, name, number }`（`WorkItemKind::PullRequest` 与未接线 `on_issue` 的预览仍保持标题无链接语义）。
+正式 Shell 宿主见 [`src/app/pages/work_items.rs`](../src/app/pages/work_items.rs)：构造前以 `work_item_session()` 预检，无账户/控制器不可用时显示 unavailable 占位；仓库链接触发同一 `RepoService::is_current` 复核后转 `Route::Repository`。两个列表的条目标题都接线同一个 `WorkItemsView::on_open`，按当前列表的 `WorkItemKind` 落到对应详情路线：Issues → `Route::Issue { namespace, name, number }`，Pull Requests → `Route::PullRequest { namespace, name, number }`；仓库和编号取自被点击行，不取自标题文本，且同样先经 `RepoService::is_current` 复核再交给 Shell（打开或复用该路线已有标签）。未接线 `on_open` 的预览、或 payload 的 kind 与当前列表不符的行，标题保持无链接的纯文本语义，不会打开另一类资源的路线。
+
+这条接线只增加详情入口。PR 列表本身的会话、筛选、分页、刷新和行呈现不变；`Route::PullRequest` 的目标内容由 PR Conversation 页面负责，本模块不重新实现其读取或缓存。
 
 元数据行顺序和对齐以上述共享组件为准，不再使用旧的 baseline + 1px 相对上移方案；长仓库名在受限 slot 内截断，编号、状态与时间保留各自空间。
 
 时间显示：主行只显示相对年龄（`Just now`、`3 minutes ago`、`2 hours ago`、`Yesterday`、`4 days ago`），不再显示 `Updated` 前缀或 ISO 日期；精确 RFC3339 值只保留在 tooltip 与无障碍说明。解析与格式化复用 `src/ui/home/time.rs` 的同一纯函数（本模块以 `#[path]` 引用该源文件，不复制 parser），因此 offset、小数秒、无效和未来值得到与 Home 一致的诚实结果。页面可见且有行时，本地 wall clock 每 30 秒更新一次以刷新相对文本；窗口失活、隐藏、切离前台或视图释放时停止计时，不产生 GitHub 刷新或后台轮询。这是过渡消费者接点，Notifications 的共享 helper 落地后由协调者统一为单一公共模块。
 
-标题和行没有详情动作、浏览器跳转或替代仓库跳转，也不建立空详情路由。列表 Up/Down/Home/End 改变选择并 reveal；仓库名是独立 Tab/Enter 键盘入口，刷新、筛选和 Load more 使用 Ely 控件。每个视图使用有界 GPUI ListState、共享 Bars/Motion 和 FocusHandle，按可见行渲染；追加不重置滚动，失活/窗口 activation 变化清理 motion/drag。
+标题是每行唯一的详情入口，行本身不承担详情动作。仓库名仍是独立的仓库入口，不与详情共用点击目标。列表 Up/Down/Home/End 改变选择并 reveal；仓库名是独立 Tab/Enter 键盘入口，刷新、筛选和 Load more 使用 Ely 控件。每个视图使用有界 GPUI ListState、共享 Bars/Motion 和 FocusHandle，按可见行渲染；追加不重置滚动，失活/窗口 activation 变化清理 motion/drag。
 
 **已修复：** 早先原生长标题越界问题已定位为 Ely `Ellipsis` 隐藏全文污染 `ListState` intrinsic width 加旧 viewport 兜底，现改为 GPUI 原生 `truncate()` 且行由列表实际可用宽度约束；DPI 感知原生帧与 460px 受限 pane 回归均通过。交付 PR 仍保持 `pending`，等待负责人本轮相对时间改动的原生验收。
 

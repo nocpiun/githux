@@ -62,24 +62,30 @@ impl WorkItemsPage {
                 });
             view.on_repository(on_repository);
 
-            if kind == WorkItemKind::Issue {
-                let on_issue: crate::ui::global_work_items::OnIssue =
-                    Rc::new(move |nav, window, cx| {
-                        if !repos.is_current(&nav.context) {
-                            return;
-                        }
-                        navigation(
-                            PageNavigation::Open(Route::Issue {
-                                namespace: nav.repository.owner.clone(),
-                                name: nav.repository.name.clone(),
-                                number: nav.number,
-                            }),
-                            window,
-                            cx,
-                        );
-                    });
-                view.on_issue(on_issue);
-            }
+            // Both lists own one detail destination for their own kind; the route carries the
+            // clicked row's repository and number, never a value inferred from the title.
+            let on_open: crate::ui::global_work_items::OnOpen = Rc::new(move |nav, window, cx| {
+                if !repos.is_current(&nav.context) {
+                    return;
+                }
+                let namespace = nav.repository.owner.clone();
+                let name = nav.repository.name.clone();
+                let number = nav.number;
+                let route = match kind {
+                    WorkItemKind::Issue => Route::Issue {
+                        namespace,
+                        name,
+                        number,
+                    },
+                    WorkItemKind::PullRequest => Route::PullRequest {
+                        namespace,
+                        name,
+                        number,
+                    },
+                };
+                navigation(PageNavigation::Open(route), window, cx);
+            });
+            view.on_open(on_open);
         });
         this._changed = Some(cx.observe(&view, |_, _, cx| cx.notify()));
         this.view = Some(view);

@@ -17,7 +17,7 @@
 ### 全局页面与 Issue 详情（Notifications / Issues / PR / Issue Detail）
 
 - `Route::Notifications` 挂载 `NotificationsPage`：`AccountServices.repositories().notifications()` 建控制器，仓库链接经 `RepoService::is_current` 复核后打开应用内 `Route::Repository`。
-- `Route::Issues` / `Route::PullRequests` 挂载 `WorkItemsPage`（`WorkItemKind::Issue`/`PullRequest`），默认 Assigned+Open，仓库链接同一复核后导航；全局 Issues 列表的条目标题经同一 `RepoService::is_current` 复核后打开或复用应用内 `Route::Issue { namespace, name, number }`（全局 PR 列表标题与仓库链接保持原行为）。
+- `Route::Issues` / `Route::PullRequests` 挂载 `WorkItemsPage`（`WorkItemKind::Issue`/`PullRequest`），默认 Assigned+Open，仓库链接同一复核后导航；两个列表的条目标题都经同一 `RepoService::is_current` 复核后打开或复用本类详情的标签：Issues → `Route::Issue { namespace, name, number }`，Pull Requests → `Route::PullRequest { namespace, name, number }`（目标内容见 [PR Conversation](pr-conversation.md)，本任务不改其内部）。
 - `Route::Issue { namespace, name, number }` 挂载 `IssueDetailPage`（`src/app/pages/issue_detail.rs`），消费 `domain::issue_detail`、`github::issue_detail`、`data::issue_detail` 与 `ui::issue_detail`：只读展示编号、状态、标题、作者、标签、Markdown 正文（复用 `ReaderView` `MarkdownLayout::Flow`）与分页普通评论（`Load more comments`）。`RouteKey::Issue` 以规范化小写 `owner/repo` + 仓库内编号区分与复用，与 `RouteKey::PullRequest` 及其他仓库同号互不冲突。同账户已授权缓存快照在后台刷新期间保留正文，瞬态错误显示 `Cached` + Retry，确认缺失（404/410）或失权（401/403）失效旧快照并显示对应状态；评论分页失败不抹除正文或已加载评论。
 - `Route::PullRequest { namespace, name, number }` 挂载 `PullRequestPage`，包含 PR 摘要、Markdown 正文和分页普通评论。详见 [PR Conversation](pr-conversation.md)。Settings 沿用既有 Shell 账户设置实现。
 
