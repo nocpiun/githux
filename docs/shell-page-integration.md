@@ -19,7 +19,7 @@
 - `Route::Notifications` 挂载 `NotificationsPage`：`AccountServices.repositories().notifications()` 建控制器，仓库链接经 `RepoService::is_current` 复核后打开应用内 `Route::Repository`。
 - `Route::Issues` / `Route::PullRequests` 挂载 `WorkItemsPage`（`WorkItemKind::Issue`/`PullRequest`），默认 Assigned+Open，仓库链接同一复核后导航；全局 Issues 列表的条目标题经同一 `RepoService::is_current` 复核后打开或复用应用内 `Route::Issue { namespace, name, number }`（全局 PR 列表标题与仓库链接保持原行为）。
 - `Route::Issue { namespace, name, number }` 挂载 `IssueDetailPage`（`src/app/pages/issue_detail.rs`），消费 `domain::issue_detail`、`github::issue_detail`、`data::issue_detail` 与 `ui::issue_detail`：只读展示编号、状态、标题、作者、标签、Markdown 正文（复用 `ReaderView` `MarkdownLayout::Flow`）与分页普通评论（`Load more comments`）。`RouteKey::Issue` 以规范化小写 `owner/repo` + 仓库内编号区分与复用，与 `RouteKey::PullRequest` 及其他仓库同号互不冲突。同账户已授权缓存快照在后台刷新期间保留正文，瞬态错误显示 `Cached` + Retry，确认缺失（404/410）或失权（401/403）失效旧快照并显示对应状态；评论分页失败不抹除正文或已加载评论。
-- 这几类页面都拥有自己的局部 viewport/`Motion`/`Bars`，与 Home/Profile/Repository 一样不走 Shell 外层 page 滚动器。`Route::PullRequest` 详情仍按产品约定留空。Settings 沿用既有 Shell 账户设置实现。
+- `Route::PullRequest { namespace, name, number }` 挂载 `PullRequestPage`，包含 PR 摘要、Markdown 正文和分页普通评论。详见 [PR Conversation](pr-conversation.md)。Settings 沿用既有 Shell 账户设置实现。
 
 ## 页面生命周期
 
@@ -83,7 +83,7 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 `Route::Profile` 仍是本人；新增 `Route::UserProfile { host, login }` 承载他人页面，key 使用 host + 小写 login。相同 alias 复用同一会话，服务器返回后只更新该资源的 canonical 展示名。
 
-2026-11-01：Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签，保留仓库/编号，不走浏览器外链；其他 Issue/PR 入口未扩展。PR 详情内容、通知、搜索和所有写操作未扩展；未设计页面仍按产品约定留空。
+Feed PR 摘要的 Read more 经 `HomeAction::OpenPullRequest` 和延迟 `PageNavigation::Open` 打开应用内 `Route::PullRequest { namespace, name, number }`。同账户同一目标复用标签并显示对应 [PR Conversation](pr-conversation.md)。
 
 ## 页面内容几何与共享行（2026-11-04 视觉返工）
 
@@ -93,7 +93,7 @@ Profile 不把 hash/login/0 当作稳定数字 id：路由先保留请求 login�
 
 ## 滚动
 
-Home、Profile、Repository、Notifications 与全局 Issues/PR 都拥有自己的局部 viewport、`Motion`/`Bar`/`Bars`。Shell 不会在外层再给它们包一个抢占 wheel 的页面滚动器；该外层 scrolling 现在只用于 Settings、尚未设计的空白页（如 PR 详情）与无账户控制器时未挂载页面的回退。页面内滚动条仍使用共享 `ui::scroll`，没有第二套几何或 fade。
+Home、Profile、Repository、Notifications、Issue 详情与全局 Issues/PR 拥有局部 viewport。Settings、PR Conversation 和未挂载页的回退使用 Shell 会话 viewport。各页面使用共享 `ui::scroll`。
 
 ## 紧凑状态与布局精修（2026-10-29 第二轮反馈）
 
@@ -122,7 +122,7 @@ Home、Profile、Repository、Notifications 与全局 Issues/PR 都拥有自己�
 | `Route::Issues` / `Route::PullRequests` | 适用（需有效账户会话） | 触发当前筛选的替换刷新，保留旧快照直到结果返回 |
 | `Route::Issue` | 适用（需有效账户会话） | 重新验证单条 Issue 正文与第 1 页评论，保留当前正文和已显示内容直到结果返回 |
 | `Route::Settings` | 禁用（无操作） | 本地账户设置页无远端数据刷新语义，不凭空发请求 |
-| `Route::PullRequest` | 禁用（无操作） | 未设计详情空白路由，不凭空发请求 |
+| `Route::PullRequest` | 适用（需有效账户会话） | 重读 PR 摘要与正文，随后重读评论第一页；瞬态失败保留仍授权的内容 |
 | 任一路由未登录 / 未挂载 / 授权失效 | 禁用（无操作） | 保持禁用，点击零请求 |
 
 - **跨页签与生命周期隔离**：`Shell` 按 `TabId` 订阅已挂载页面实体，仅当活动 tab 状态变化时通知 `Shell` 重绘工具栏。切换到相邻 tab、关闭刷新中的 tab 或切换账户时，每个 tab 呈现自身真实状态；旧 tab 或旧账户的异步晚到回复不会影响新活动页面。

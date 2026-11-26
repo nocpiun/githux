@@ -596,33 +596,17 @@ fn signed_out_and_local_routes_keep_tab_refresh_disabled_with_zero_requests(
     assert_eq!(transport.seen("/search/issues"), 0);
     assert_eq!(transport.seen("/received_events"), 0);
 
-    // Sign in and verify Settings and PullRequest detail routes are disabled with zero requests.
+    // Settings stays local after sign-in.
     sign_in_token(&view, &controller, cx, "token-alice", 1);
-    for route in [
-        Route::Settings,
-        Route::PullRequest {
-            namespace: "alice".into(),
-            name: "demo".into(),
-            number: 5,
-        },
-    ] {
-        cx.update_window_entity(&view, |shell, window, cx| {
-            shell.navigate(route.clone(), window, cx);
-        });
-        pump_all(&view, &controller, cx);
-        assert!(
-            view.read_with(cx, |shell, cx| shell.active_refresh_state(cx).is_disabled()),
-            "route {route:?} must disable tab-refresh"
-        );
-        let reads_before = transport.reads.lock().unwrap().len();
-        click_tab_refresh(cx);
-        pump_all(&view, &controller, cx);
-        assert_eq!(
-            transport.reads.lock().unwrap().len(),
-            reads_before,
-            "clicking disabled tab-refresh on {route:?} must not issue requests"
-        );
-    }
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Settings, window, cx);
+    });
+    pump_all(&view, &controller, cx);
+    assert!(view.read_with(cx, |shell, cx| shell.active_refresh_state(cx).is_disabled()));
+    let reads_before = transport.reads.lock().unwrap().len();
+    click_tab_refresh(cx);
+    pump_all(&view, &controller, cx);
+    assert_eq!(transport.reads.lock().unwrap().len(), reads_before);
 }
 
 #[gpui::test]

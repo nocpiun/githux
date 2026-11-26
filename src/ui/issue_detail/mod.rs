@@ -635,8 +635,7 @@ fn body_digest(text: &str) -> u64 {
     hasher.finish()
 }
 
-/// Resolve a relative Markdown link inside an Issue body or comment (which has no pinned commit
-/// SHA) to the corresponding GitHub web URL on `HEAD`, preserving any fragment.
+/// Resolve a repository-relative link in work-item Markdown to GitHub's `HEAD` view.
 pub(super) fn resolve_relative_issue_link(
     owner: &str,
     name: &str,
