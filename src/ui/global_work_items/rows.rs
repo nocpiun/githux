@@ -126,6 +126,9 @@ pub(super) fn row(
             show_selected_bar: false,
             on_row_click: Some(select),
             on_title_click: open_issue,
+            // The icon and number stay decorative here: this list already exposes the title as
+            // its single activation target.
+            on_identity_click: None,
         },
         cx,
     )

@@ -68,3 +68,36 @@
 - **阻塞项（交协调者）**：Issue 行需要 `Route::Issue { namespace, name, number }`（生产者：`feat/issue-detail`，该 worktree 中此 route 尚未提交，也无 PR）。合入 main 后，本任务只需在 `open_work_item` 的 `WorkItemTarget::Issue` 分支调用 `PageNavigation::Open(Route::Issue { .. })` 并补一条 Shell 组合断言；映射、守卫与测试已在位。
 - 本任务未改：`src/ui/work_item_row.rs`、全局 Issues/PR 列表、Notifications、workspace/route 定义、shell 宿主、Feed 数据拉取。
 - Feed Read more 本次只补回归验证，未改行为与目的地。
+
+## 2026-11-26 负责人验收返工（可见入口）
+
+负责人否决了第一版：图三圈出的 Feed「PR 图标＋标题（含 `#number`）」与「Read more」必须都能单击/键盘进入同一个 PR；Home 的标题、可见编号与图标也要指向同一详情，且不得吞掉 owner/repo 链接；不能用原地选中、空白页或临时路由冒充成功。
+
+根因（第一版遗漏）：
+
+1. Feed 合并卡片的 PR 标题本来走 `HomeView::activate` → `ActivateFeed`，host 忽略；只有 `Read more` 走 `OpenPullRequest`。短正文没有 `Read more` 时，鼠标与键盘都进不去。
+2. Home 行只有标题可激活；旁边的图标和 metadata 里的 `#number` 是惰性的。`Issue` 行也因 `Route::Issue` 未接入而 inert。
+3. 我给 `work_item_row` 的整条 title line 加了点击层，结果扩到了标题右侧的空白区——既有回归 `blank title activated` 立刻失败，说明热区超出了「可见身份元素」。改为只包住图标本身。
+
+本轮改动：
+
+- `src/ui/home/rows.rs`：新增 `feed_pull_request_title` 与 `feed_pull_request_icon`，与 `Read more` 共用同一个 `feed_pull_request_action`；标题包含 `#number`，短正文没有 `Read more` 时标题仍可单击/键盘 Enter 进入；无法解析目标时标题退回纯文本（无 Link 角色/Tab stop）。Home 行新增 `identity_action`：图标与 `#number` 做 pointer 激活（select + activate），选中/键盘入口仍是标题。
+- `src/ui/home/mod.rs`：`feed_action` 对可寻址的合并 PR 返回 `OpenPullRequest`，所以列表级 Enter 与卡片内入口一致；星标/建库卡片保留 `ActivateFeed`。
+- `src/ui/work_item_row.rs`：新增可选 `on_identity_click`，仅作用于图标与 `#number` 两个可见身份元素；全局 Issues/PR 列表传 `None`。空白区域保持惰性（既有 `blank title activated` 回归继续通过）。
+- `src/app/pages/home.rs`：`open_work_item` 现在把 `WorkItemTarget::Issue` 映射到 `Route::Issue { namespace, name, number }`，`PullRequest` 保持 `Route::PullRequest`；隐藏/旧账号/旧快照守卫不变。
+- 依赖与 stacked PR：#106 未获用户验收，不得合入 main。本分支 rebase 到生产者 `feat/issue-detail`（远端核对 `1ac899e22a4e7f1da42c71ecd85b87ff5705666a`），PR #107 base 改为 `feat/issue-detail` 并注明依赖；未推改他人分支、未复制其实现。生产者变动或落 main 后需再次核对，落 main 后转回 `main`、消除重复提交并重查 CI/review。
+- `src/app/pages/home/shell_nav_tests.rs`：改为一份代表性离线 fixture（Home 混合列表 Issue #21 / PR #7 同库、另一库 Issue #21 + Feed 合并 PR #5 截断正文），用真实 UI 点击 Home Issue 标题、Home PR 标题、Home `#number`、Home 图标、Feed PR 图标、Feed 标题、Feed `Read more`，并核对：Issue 打开 `Route::Issue` 后由 issue-detail 真实渲染 `issue-detail-body`/评论；PR 打开/复用同一 `Route::PullRequest`；owner/repo 链接保持各自目标；返回 Home 复用原标签。
+
+### 本轮验证
+
+- `cargo test --locked --bin githux -- ui::home::`：72 passed（含新增图标/标题/Read more 一致性、无 Read more 的键盘路径、不可寻址标题纯文本、Home 图标+编号、列表级 Enter）。
+- `cargo test --locked --bin githux -- app::pages::home::`：含更新后的 `home_work_item_rows_navigate_by_identity_and_reuse_one_tab` 与真实 Shell 组合 `home_and_feed_work_item_surfaces_open_their_own_workspace_tab`。
+- `cargo test --locked --bins --tests`：1576 passed, 8 ignored（`09c9dff7-92f0-4c5a-ab7d-d388b2d48ed2`）。
+- `cargo clippy --locked --all-targets -- -D warnings`（`679cac21-3eb5-4428-980d-06184c289fe5`）、`cargo build --locked`（`1921598f-c970-446f-8570-925a84e817a1`）、`cargo fmt --all -- --check`（`bb7d806c-d934-4f3f-80f6-f2955b9255ce`）均通过。
+
+### 返工后的验证边界
+
+- **可实际点击**：`feat/home-work-item-nav`（stacked 在 `feat/issue-detail` 上）。Home Issue/PR 标题与图标、`#number`、Feed PR 图标/标题/`Read more`/列表 Enter 在真实 Shell 组合中均已点击验证。
+- **真实正文已验证**：Issue #21 打开后渲染 issue-detail 的真实正文与评论（生产者 #106 的读取路径）。
+- **尚未验证真实正文**：`Route::PullRequest` 目前仍是未设计空白页；PR 正文由 pr-conversation 负责，需在其正式详情整合后复验目标正文，不能以「打开了正确标签」代替。
+- **原生边界**：GPUI 测试平台的 keystroke 不经过 Windows 原生输入分发（L002），真实窗口的键鼠手感与观感仍由负责人验收。

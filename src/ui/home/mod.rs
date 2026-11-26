@@ -1288,6 +1288,14 @@ impl HomeView {
 
     fn feed_action(&self, index: usize) -> Option<HomeAction> {
         let activity = self.feed.state.data()?.activities.get(index)?;
+        // A merged contribution that addresses a usable Githux pull request opens it, so the
+        // list-level keyboard activation and the card's own title/icon/Read more agree. Cards that
+        // do not address a workspace resource keep the plain event activation.
+        if let Some(target) = &activity.pull_request
+            && let Some(action) = rows::feed_pull_request_action(&activity.event, target.number)
+        {
+            return Some(action);
+        }
         let event = &activity.event;
         let (owner, name) = event
             .repository

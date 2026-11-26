@@ -1,13 +1,20 @@
-//! Shell composition for Home Issue/PR row navigation.
+//! Shell composition and offline acceptance for Home and Feed work-item navigation.
 //!
-//! The page-level suite proves the host maps a row identity onto a workspace destination and that
-//! keyboard activation emits exactly one typed action. This file drives the real `Shell` +
-//! `Accounts` + `HomePage` + `Workspace` together, because the user-visible promise is "the row's
-//! own tab opens, the same resource reuses it, and an Issue row never borrows the Pull request tab".
+//! The page-level suites prove the host maps a row identity onto a workspace destination and that
+//! each surface emits exactly one typed action. This file drives the real `Shell` + `Accounts` +
+//! `HomePage`/`IssueDetailPage` + `Workspace` together with one representative fixture (mixed Home
+//! list plus a merged Feed pull request) and clicks the real UI regions: the Home Issue title, the
+//! Home Pull request title, the Home icon and `#number`, the Feed pull-request icon, the Feed title
+//! and "Read more".
 //!
-//! Activation here is a pointer click on the visible title control; the keyboard path through the
-//! focused list is covered by `src/app/pages/home/tests.rs` and `src/ui/home/tests.rs`. Native
-//! Windows input dispatch stays out of scope (LESSONS L002).
+//! What "success" means here:
+//! - a Home Issue click opens `Route::Issue` and the real body from the issue detail host renders;
+//! - a Home Pull request click opens `Route::PullRequest` (its body is owned by pr-conversation);
+//! - the three Feed entry points and the Home rows reuse one tab per resource;
+//! - owner/repository links keep their own destinations.
+//!
+//! In-place selection, a blank tab or a title-derived stand-in never counts as success. Native
+//! Windows input dispatch is still out of scope (LESSONS L002).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -43,9 +50,16 @@ fn json(status: u16, body: serde_json::Value) -> HttpResponse {
     }
 }
 
-/// Routes by request identity (never a FIFO), so the concurrent Home and Feed reads cannot consume
-/// each other's response. Four Home rows: Issue #7 and Pull request #7 in the same repository, Issue
-/// #7 in another repository, and Issue #8 — all sharing one title on purpose.
+/// Routes by request identity (never a FIFO), so the concurrent Home/Feed reads cannot consume each
+/// other's response.
+///
+/// Home rows, all sharing one displayed title on purpose:
+/// - Issue #21 in `alice/demo`
+/// - Pull request #7 in `alice/demo`
+/// - Issue #21 in `alice/other` (same number, different repository)
+///
+/// Feed: one merged contribution to a pull request in `alice/demo` with a truncated body, so the
+/// card shows the PR icon, the title with `#number`, and "Read more".
 #[derive(Default)]
 struct NavTransport {
     reads: Mutex<Vec<String>>,
@@ -96,6 +110,15 @@ impl Transport for NavTransport {
             if url.ends_with("/user") {
                 return Ok(json(200, serde_json::json!({"id": 1, "login": "alice"})));
             }
+            if url.ends_with("/users/alice") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 1, "login": "alice", "name": "Alice", "avatar_url": null,
+                        "bio": null, "followers": 0, "following": 0
+                    }),
+                ));
+            }
             if url.contains("/user/repos") {
                 return Ok(json(
                     200,
@@ -111,34 +134,27 @@ impl Transport for NavTransport {
                 return Ok(json(
                     200,
                     serde_json::json!({
-                        "total_count": 4, "incomplete_results": false,
+                        "total_count": 3, "incomplete_results": false,
                         "items": [
                             {
-                                "id": 9001, "number": 7, "title": "Shared row title",
-                                "html_url": "https://github.com/alice/demo/issues/7",
+                                "id": 9001, "number": 21, "title": "Shared Home row",
+                                "html_url": "https://github.com/alice/demo/issues/21",
                                 "state": "open", "updated_at": "2026-10-28T10:00:00Z",
                                 "repository_url": "https://api.github.com/repos/alice/demo",
                                 "pull_request": null
                             },
                             {
-                                "id": 9002, "number": 7, "title": "Shared row title",
+                                "id": 9002, "number": 7, "title": "Shared Home row",
                                 "html_url": "https://github.com/alice/demo/pull/7",
                                 "state": "open", "updated_at": "2026-10-28T09:00:00Z",
                                 "repository_url": "https://api.github.com/repos/alice/demo",
                                 "pull_request": {"merged_at": null}
                             },
                             {
-                                "id": 9003, "number": 7, "title": "Shared row title",
-                                "html_url": "https://github.com/alice/other/issues/7",
+                                "id": 9003, "number": 21, "title": "Shared Home row",
+                                "html_url": "https://github.com/alice/other/issues/21",
                                 "state": "open", "updated_at": "2026-10-28T08:00:00Z",
                                 "repository_url": "https://api.github.com/repos/alice/other",
-                                "pull_request": null
-                            },
-                            {
-                                "id": 9004, "number": 8, "title": "Shared row title",
-                                "html_url": "https://github.com/alice/demo/issues/8",
-                                "state": "open", "updated_at": "2026-10-28T07:00:00Z",
-                                "repository_url": "https://api.github.com/repos/alice/demo",
                                 "pull_request": null
                             }
                         ]
@@ -148,20 +164,87 @@ impl Transport for NavTransport {
             if url.contains("/user/following") {
                 return Ok(json(
                     200,
-                    serde_json::json!([{"id": 7, "login": "bob", "avatar_url": null}]),
+                    serde_json::json!([
+                        {"id": 7, "login": "bob", "avatar_url": null},
+                        {"id": 8, "login": "carol", "avatar_url": null}
+                    ]),
                 ));
             }
             if url.contains("/received_events") {
                 return Ok(json(
                     200,
                     serde_json::json!([{
-                        "id": "evt-1", "type": "WatchEvent",
-                        "actor": {"id": 7, "login": "bob", "avatar_url": null},
+                        "id": "evt-pr", "type": "PullRequestEvent",
+                        "actor": {"id": 8, "login": "carol", "avatar_url": null},
                         "repo": {"id": 10, "name": "alice/demo",
                                  "url": "https://api.github.com/repos/alice/demo"},
-                        "payload": {"action": "started"},
+                        "payload": {
+                            "action": "merged", "number": 5,
+                            "pull_request": {
+                                "url": "https://api.github.com/repos/alice/demo/pulls/5",
+                                "id": 505, "number": 5,
+                                "head": {"ref": "feature", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                                "base": {"ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+                            }
+                        },
                         "created_at": "2026-10-28T09:00:00Z"
                     }]),
+                ));
+            }
+            if url.contains("/repos/alice/demo/pulls/5") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 505, "number": 5, "state": "closed", "merged": true,
+                        "title": "Merge the navigation work",
+                        "html_url": "https://github.com/alice/demo/pull/5",
+                        "user": {"id": 7, "login": "bob", "avatar_url": null},
+                        "body": "A detailed pull request description that exceeds the Feed preview limit. ".repeat(8)
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/demo/issues/21/comments") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 301,
+                        "user": {"id": 2, "login": "bob", "avatar_url": null},
+                        "body": "Confirmed while reviewing the navigation change.",
+                        "created_at": "2026-10-28T11:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z",
+                        "author_association": "CONTRIBUTOR"
+                    }]),
+                ));
+            }
+            if url.contains("/repos/alice/other/issues/21/comments") {
+                return Ok(json(200, serde_json::json!([])));
+            }
+            if url.ends_with("/repos/alice/demo/issues/21") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10001, "number": 21, "title": "Shared Home row",
+                        "state": "open",
+                        "user": {"id": 1, "login": "alice", "avatar_url": null},
+                        "body": "Real issue body rendered by the issue detail host.",
+                        "comments": 1,
+                        "labels": [{"name": "bug"}],
+                        "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.ends_with("/repos/alice/other/issues/21") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10002, "number": 21, "title": "Other repository issue",
+                        "state": "open",
+                        "user": {"id": 1, "login": "alice", "avatar_url": null},
+                        "body": null, "comments": 0, "labels": [],
+                        "created_at": "2026-10-28T09:00:00Z",
+                        "updated_at": "2026-10-28T09:30:00Z"
+                    }),
                 ));
             }
             if url.contains("/repos/alice/demo") {
@@ -171,7 +254,7 @@ impl Transport for NavTransport {
                         "id": 10, "name": "demo", "owner": {"id": 1, "login": "alice"},
                         "visibility": "public", "private": false, "default_branch": "main",
                         "fork": false, "archived": false, "stargazers_count": 0,
-                        "forks_count": 0, "open_issues_count": 0, "size": 1,
+                        "forks_count": 0, "open_issues_count": 1, "size": 1,
                         "description": "Synthetic repository",
                         "html_url": "https://github.com/alice/demo"
                     }),
@@ -219,9 +302,11 @@ fn open_shell(
     (view, controller, cx)
 }
 
-fn pump_home(shell: &Entity<Shell>, controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
+fn pump_all(shell: &Entity<Shell>, controller: &Entity<Accounts>, cx: &mut VisualTestContext) {
     controller.update(cx, |accounts, cx| accounts.drain_for_test(cx));
-    shell.update(cx, |shell, cx| shell.drain_home_for_test(cx));
+    cx.update_window_entity(shell, |shell, window, cx| {
+        shell.drain_all_pages_for_test(window, cx);
+    });
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
@@ -232,7 +317,7 @@ fn wait_for_home_ready(
     cx: &mut VisualTestContext,
 ) {
     for _ in 0..800 {
-        pump_home(shell, controller, cx);
+        pump_all(shell, controller, cx);
         if shell.read_with(cx, |shell, cx| shell.home_is_ready_for_test(cx)) {
             return;
         }
@@ -241,16 +326,36 @@ fn wait_for_home_ready(
     panic!("Home did not settle");
 }
 
-fn click(selector: &'static str, cx: &mut VisualTestContext) {
-    let target = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("{selector} was not drawn"));
+fn wait_for_bounds(
+    shell: &Entity<Shell>,
+    controller: &Entity<Accounts>,
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+) {
+    for _ in 0..800 {
+        pump_all(shell, controller, cx);
+        if cx.debug_bounds(selector).is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("{selector} did not appear");
+}
+
+fn click(
+    shell: &Entity<Shell>,
+    controller: &Entity<Accounts>,
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+) {
+    wait_for_bounds(shell, controller, cx, selector);
+    let target = cx.debug_bounds(selector).expect("bounds were just checked");
     cx.simulate_click(target.center(), Modifiers::none());
     cx.run_until_parked();
 }
 
 #[gpui::test]
-fn home_rows_open_their_own_tab_and_reuse_it(cx: &mut TestAppContext) {
+fn home_and_feed_work_item_surfaces_open_their_own_workspace_tab(cx: &mut TestAppContext) {
     let transport = Arc::new(NavTransport::default());
     let (shell, controller, cx) = open_shell(cx, transport.clone());
     // Sign in through the real account controller.
@@ -278,33 +383,138 @@ fn home_rows_open_their_own_tab_and_reuse_it(cx: &mut TestAppContext) {
     });
     wait_for_home_ready(&shell, &controller, cx);
     assert!(transport.seen("/search/issues") >= 1);
-    assert!(
-        cx.debug_bounds("home-item-row-3").is_some(),
-        "all four fixture rows are visible"
-    );
     let home_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    assert!(
+        cx.debug_bounds("home-item-row-2").is_some(),
+        "the mixed Home list shows all three rows"
+    );
+    wait_for_bounds(&shell, &controller, cx, "feed-pr-read-more-0");
 
-    // Row 1 is the Pull request. The Issue above it shares title, repository and number, so a
-    // title- or number-only destination would land on the same tab instead of opening this one.
-    click("home-title-1", cx);
+    // 1. Home Issue title -> Route::Issue, with the real body from the issue detail host.
+    click(&shell, &controller, cx, "home-title-0");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21,
+        }
+    );
+    wait_for_bounds(&shell, &controller, cx, "issue-detail-body");
+    wait_for_bounds(&shell, &controller, cx, "issue-comment-301");
+    let demo_issue_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(demo_issue_tab, home_tab);
+
+    // 2. Home Pull request title -> Route::PullRequest (its body is owned by pr-conversation).
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.active_tab_id()),
+        home_tab,
+        "returning to Home reuses the retained Home tab"
+    );
+    click(&shell, &controller, cx, "home-title-1");
     assert_eq!(
         shell.read_with(cx, |shell, _| shell.route()),
         Route::PullRequest {
             namespace: "alice".into(),
             name: "demo".into(),
             number: 7,
-        },
-        "the Pull request row opens the pull-request destination"
+        }
     );
-    let pr_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
-    assert_ne!(pr_tab, home_tab);
+    let home_pr_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(home_pr_tab, home_tab);
+    assert_ne!(home_pr_tab, demo_issue_tab);
+
+    // 3. Home `#number` and icon address the same Issue as its title (reuse, no duplicate tab).
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    click(&shell, &controller, cx, "home-0-number");
     assert_eq!(
-        shell.update(cx, |shell, _| shell.workspace().sessions().len()),
-        2,
-        "Home plus one Pull request tab"
+        shell.read_with(cx, |shell, _| shell.active_tab_id()),
+        demo_issue_tab,
+        "the #number opens the same issue tab"
+    );
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    click(&shell, &controller, cx, "home-icon-0");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.active_tab_id()),
+        demo_issue_tab,
+        "the icon opens the same issue tab"
     );
 
-    // Leaving Home and returning reuses the retained Home page rather than rebuilding it.
+    // 4. Feed pull-request icon, title and Read more are one destination.
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    click(&shell, &controller, cx, "feed-pr-icon-0");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.route()),
+        Route::PullRequest {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 5,
+        },
+        "the Feed pull-request icon opens the merged pull request"
+    );
+    let feed_pr_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    for selector in ["feed-title-0", "feed-pr-read-more-0"] {
+        cx.update_window_entity(&shell, |shell, window, cx| {
+            shell.navigate(Route::Home, window, cx);
+        });
+        cx.run_until_parked();
+        click(&shell, &controller, cx, selector);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.active_tab_id()),
+            feed_pr_tab,
+            "{selector} reuses the same pull-request tab"
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.route()),
+            Route::PullRequest {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 5,
+            }
+        );
+    }
+    assert_ne!(feed_pr_tab, home_pr_tab, "the Feed merge is a different PR");
+
+    // 5. The owner and repository links beside the title keep their own destinations.
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    click(&shell, &controller, cx, "home-0-owner");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.route()),
+        Route::Profile,
+        "the owner link still opens a profile, not the Issue"
+    );
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    click(&shell, &controller, cx, "home-0-repository");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.route()),
+        Route::Repository {
+            namespace: "alice".into(),
+            name: "demo".into(),
+        },
+        "the repository link still opens the repository"
+    );
+
+    // 6. Returning Home keeps the retained rows (position/selection are covered page-locally by
+    // `returning_to_home_keeps_the_selected_row_navigable`).
     cx.update_window_entity(&shell, |shell, window, cx| {
         shell.navigate(Route::Home, window, cx);
     });
@@ -313,35 +523,5 @@ fn home_rows_open_their_own_tab_and_reuse_it(cx: &mut TestAppContext) {
         shell.read_with(cx, |shell, _| shell.active_tab_id()),
         home_tab
     );
-    assert!(cx.debug_bounds("home-item-row-3").is_some());
-
-    // Activating the same Pull request row again reuses its tab; it does not open a second page.
-    click("home-title-1", cx);
-    assert_eq!(
-        shell.read_with(cx, |shell, _| shell.active_tab_id()),
-        pr_tab,
-        "the same resource reuses its tab"
-    );
-    assert_eq!(
-        shell.update(cx, |shell, _| shell.workspace().sessions().len()),
-        2
-    );
-
-    // The Issue rows have no destination in this baseline: activating one must neither open a
-    // stand-in tab nor fall through to the Pull request tab that happens to share the number.
-    cx.update_window_entity(&shell, |shell, window, cx| {
-        shell.navigate(Route::Home, window, cx);
-    });
-    cx.run_until_parked();
-    click("home-title-0", cx);
-    assert_eq!(
-        shell.update(cx, |shell, _| shell.workspace().sessions().len()),
-        2,
-        "an Issue row must not open a stand-in tab"
-    );
-    assert_eq!(
-        shell.read_with(cx, |shell, _| shell.route()),
-        Route::Home,
-        "an Issue row leaves the workspace where it was"
-    );
+    assert!(cx.debug_bounds("home-item-row-2").is_some());
 }

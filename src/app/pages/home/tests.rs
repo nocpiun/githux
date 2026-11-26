@@ -2124,8 +2124,8 @@ fn home_work_item_rows_navigate_by_identity_and_reuse_one_tab(cx: &mut TestAppCo
     unique.dedup();
     assert_eq!(unique.len(), 4, "each row keeps its own stable id: {ids:?}");
 
-    // Activate rows by addressable identity, the same action the row's title emits. Issue rows are
-    // inert in this baseline because `Route::Issue` belongs to the issue-detail task.
+    // Activate rows by addressable identity, the same action the row's title, icon and number
+    // emit. The two kinds share the same pull-request/issue number on purpose.
     for index in 0..4 {
         let action = page.read_with(cx, |page, cx| page.view.read(cx).work_item_action(index));
         let action = action.expect("a row identity for the requested index");
@@ -2136,12 +2136,29 @@ fn home_work_item_rows_navigate_by_identity_and_reuse_one_tab(cx: &mut TestAppCo
     }
     assert_eq!(
         *navigated.lock().unwrap(),
-        vec![Route::PullRequest {
-            namespace: "octo".into(),
-            name: "repo".into(),
-            number: 7,
-        }],
-        "only the pull request row has a route in this baseline; Issue rows stay inert"
+        vec![
+            Route::Issue {
+                namespace: "octo".into(),
+                name: "repo".into(),
+                number: 7,
+            },
+            Route::PullRequest {
+                namespace: "octo".into(),
+                name: "repo".into(),
+                number: 7,
+            },
+            Route::Issue {
+                namespace: "other".into(),
+                name: "repo".into(),
+                number: 7,
+            },
+            Route::Issue {
+                namespace: "octo".into(),
+                name: "repo".into(),
+                number: 8,
+            },
+        ],
+        "each row opens its own kind, repository and number; nothing shares one tab"
     );
 }
 

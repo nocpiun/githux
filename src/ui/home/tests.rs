@@ -1069,8 +1069,10 @@ fn the_visible_feed_is_the_policy_output_not_the_raw_event_list(cx: &mut TestApp
     cx.simulate_keystrokes("end enter");
     cx.run_until_parked();
     assert!(
-        matches!(actions.borrow().last(), Some(HomeAction::ActivateFeed(identity))
-        if identity.id == "event-7" && identity.repository.full_name() == "subsurface/libdc")
+        matches!(actions.borrow().last(), Some(HomeAction::OpenPullRequest { repository, number })
+            if *number == 144 && repository.full_name() == "subsurface/libdc"),
+        "the retained merged card opens its own pull request: {:?}",
+        actions.borrow()
     );
 }
 
@@ -1270,7 +1272,15 @@ fn content_links_use_canonical_logins_and_never_double_dispatch(cx: &mut TestApp
         })
     );
     assert!(matches!(&actions[4], HomeAction::Repository(repo) if repo.id == Some(700)));
-    assert!(matches!(&actions[5], HomeAction::ActivateFeed(event) if event.id == "event-0"));
+    assert!(
+        matches!(
+            &actions[5],
+            HomeAction::OpenPullRequest { repository, number }
+                if *number == 40 && repository.full_name() == "owner/repo"
+        ),
+        "the pull-request title opens the same internal destination as Read more: {:?}",
+        actions[5]
+    );
 }
 
 #[gpui::test]
@@ -2219,5 +2229,216 @@ fn a_replaced_snapshot_no_longer_reports_its_old_rows(cx: &mut TestAppContext) {
     assert!(
         !view.read_with(cx, |view, _| view.has_work_item(&old_identity)),
         "a refreshed snapshot must not keep the previous row navigable"
+    );
+}
+
+/// The Feed pull-request icon, its title (which carries `#number`) and "Read more" are one
+/// destination. The title must work even when the body is short enough that no "Read more" exists.
+#[gpui::test]
+fn feed_pull_request_icon_title_and_read_more_enter_the_same_pull_request(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+
+    // Card 0: truncated body, so "Read more" exists.
+    let mut long = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut long.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "A long body excerpt that exceeds the compact limit and ends with…".into(),
+            is_truncated: true,
+        });
+    }
+    // Card 1: short body, so there is no "Read more" at all.
+    let mut short = merged_activity(1, author(902, "author-1"));
+    if let Some(target) = &mut short.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "Short body.".into(),
+            is_truncated: false,
+        });
+    }
+    let outcome = feed_outcome(vec![long, short], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("feed-pr-read-more-0").is_some());
+    assert!(
+        cx.debug_bounds("feed-pr-read-more-1").is_none(),
+        "a short body has no Read more; the title must remain the way in"
+    );
+
+    click("feed-pr-icon-0", cx);
+    click("feed-title-0", cx);
+    click("feed-pr-read-more-0", cx);
+    click("feed-title-1", cx);
+    let captured = actions.borrow().clone();
+    assert_eq!(captured.len(), 4, "each control fires exactly once");
+    let expected = |number: u64| HomeAction::OpenPullRequest {
+        repository: RepositoryIdentity {
+            id: Some(700 + (number - 40)),
+            owner: "owner".into(),
+            name: "repo".into(),
+        },
+        number,
+    };
+    assert_eq!(captured[0], expected(40), "the icon opens the PR");
+    assert_eq!(captured[1], expected(40), "the title opens the same PR");
+    assert_eq!(captured[2], expected(40), "Read more opens the same PR");
+    assert_eq!(
+        captured[3],
+        expected(41),
+        "without Read more the title still opens its own PR"
+    );
+}
+
+/// Keyboard: the pull-request title is a Tab stop and Enter opens its destination, with or without
+/// a truncated body. Exercised through native focus traversal and key events, not a click.
+#[gpui::test]
+fn the_feed_pull_request_title_opens_by_keyboard_without_read_more(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    let mut short = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut short.pull_request {
+        target.body_preview = Some(BodyPreview {
+            excerpt: "Short body.".into(),
+            is_truncated: false,
+        });
+    }
+    let outcome = feed_outcome(vec![short], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("feed-pr-read-more-0").is_none());
+
+    for _ in 0..24 {
+        actions.borrow_mut().clear();
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+        if actions
+            .borrow()
+            .iter()
+            .any(|action| matches!(action, HomeAction::OpenPullRequest { .. }))
+        {
+            break;
+        }
+    }
+    let captured = actions.borrow().clone();
+    assert_eq!(captured.len(), 1, "{captured:?}");
+    assert_eq!(
+        captured[0],
+        HomeAction::OpenPullRequest {
+            repository: RepositoryIdentity {
+                id: Some(700),
+                owner: "owner".into(),
+                name: "repo".into()
+            },
+            number: 40,
+        }
+    );
+}
+
+/// A merged card whose pull request cannot be addressed in Githux keeps plain text: no Link role,
+/// no pointer cursor, no action. Nothing is invented from the card's sentence.
+#[gpui::test]
+fn a_pull_request_title_without_a_usable_target_stays_plain_text(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let actions = action_sink(&view, cx);
+    let mut unknown = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut unknown.pull_request {
+        target.number = None;
+    }
+    let outcome = feed_outcome(vec![unknown], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("feed-pr-icon-0").is_some());
+    assert!(
+        cx.debug_bounds("feed-title-0").is_some(),
+        "the title text is still rendered"
+    );
+    assert!(cx.debug_bounds("feed-pr-read-more-0").is_none());
+    click("feed-pr-icon-0", cx);
+    click("feed-title-0", cx);
+    assert!(
+        actions.borrow().is_empty(),
+        "an unaddressable pull request must not emit a navigation: {:?}",
+        actions.borrow()
+    );
+}
+
+/// Home rows follow the same rule for the icon and the `#number` cell: they address the item the
+/// title addresses, while owner/repository links keep their own destinations.
+#[gpui::test]
+fn home_icon_and_number_address_the_same_item_as_the_title(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    apply(&view, cx);
+    let actions = action_sink(&view, cx);
+    click("home-icon-1", cx);
+    click("home-1-number", cx);
+    click("home-title-1", cx);
+    let captured = actions.borrow().clone();
+    assert_eq!(captured.len(), 3, "each surface activates exactly once");
+    assert!(
+        captured.iter().all(
+            |action| matches!(action, HomeAction::ActivateWorkItem(item) if item.number == 101)
+        ),
+        "the icon, the number and the title address the same Home item: {captured:?}"
+    );
+    // The metadata links next to the number still navigate on their own.
+    actions.borrow_mut().clear();
+    click("home-1-owner", cx);
+    click("home-1-repository", cx);
+    let captured = actions.borrow().clone();
+    assert_eq!(captured.len(), 2);
+    assert!(matches!(&captured[0], HomeAction::Profile(_)));
+    assert!(matches!(&captured[1], HomeAction::Repository(_)));
+}
+
+/// List-level keyboard activation on a merged pull-request card opens the same destination as its
+/// title, icon and "Read more"; cards without a workspace resource keep the event activation.
+#[gpui::test]
+fn enter_on_the_selected_feed_card_opens_its_pull_request(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let mut merged = merged_activity(0, author(901, "author-0"));
+    if let Some(target) = &mut merged.pull_request {
+        target.body_preview = None;
+    }
+    let outcome = feed_outcome(vec![merged, starred_activity(1)], FeedReadiness::Complete);
+    view.update(cx, |view, cx| {
+        assert!(view.apply_feed(&binding(), 1, outcome, cx));
+    });
+    cx.run_until_parked();
+    let actions = action_sink(&view, cx);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.feed_view.focus.focus(window, cx));
+    });
+    cx.simulate_keystrokes("home enter");
+    cx.run_until_parked();
+    assert_eq!(
+        actions.borrow().as_slice(),
+        &[HomeAction::OpenPullRequest {
+            repository: RepositoryIdentity {
+                id: Some(700),
+                owner: "owner".into(),
+                name: "repo".into()
+            },
+            number: 40,
+        }],
+        "the selected pull-request card opens its own pull request"
+    );
+
+    // The starred card has no workspace resource, so it keeps the plain event activation.
+    actions.borrow_mut().clear();
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(
+        matches!(actions.borrow().last(), Some(HomeAction::ActivateFeed(identity)) if identity.id == "event-1"),
+        "a starred card keeps ActivateFeed: {:?}",
+        actions.borrow()
     );
 }

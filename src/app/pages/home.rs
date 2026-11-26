@@ -746,9 +746,8 @@ impl HomePage {
     /// Opens the workspace destination of one Home Issue/PR row.
     ///
     /// The destination is derived once from the typed work-item identity by
-    /// [`work_item_target`], never from the displayed title. Only kinds with a real workspace route
-    /// navigate; an unusable identity or an Issue (whose detail route is owned by another task and
-    /// not yet in this baseline) stays inert rather than inventing a route.
+    /// [`work_item_target`], never from the displayed title. An unusable identity opens nothing
+    /// rather than inventing a route.
     fn open_work_item(
         &mut self,
         identity: WorkItemIdentity,
@@ -758,24 +757,27 @@ impl HomePage {
         let Some(target) = work_item_target(&identity) else {
             return;
         };
-        match target {
+        let route = match target {
+            WorkItemTarget::Issue {
+                namespace,
+                name,
+                number,
+            } => Route::Issue {
+                namespace,
+                name,
+                number,
+            },
             WorkItemTarget::PullRequest {
                 namespace,
                 name,
                 number,
-            } => (self.navigation)(
-                PageNavigation::Open(Route::PullRequest {
-                    namespace,
-                    name,
-                    number,
-                }),
-                window,
-                cx,
-            ),
-            // `Route::Issue` is produced by the issue-detail task and is not in this baseline.
-            // Opening a temporary or title-derived stand-in is out of scope.
-            WorkItemTarget::Issue { .. } => {}
-        }
+            } => Route::PullRequest {
+                namespace,
+                name,
+                number,
+            },
+        };
+        (self.navigation)(PageNavigation::Open(route), window, cx);
     }
 
     /// Whether this page may navigate right now: it is the shown tab and its captured session is
