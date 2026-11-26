@@ -5,4 +5,10 @@
 正式 PR 详情在已核对的 `main`（`f888a31`）上仍是空白。从 Home Feed 进入单条 PR 时，Shell 对 `Route::PullRequest` 没有挂载页，页面分支返回空白。后续接入点、接口与本地验收命令见 [PR Files changed](../pr-files-changed.md)。独立预览使用临时账户数据库和合成凭据。 [Shell 挂载入口](../../src/ui/mod.rs#L598) · [空白回退](../../src/ui/page.rs#L26)
 
 - Windows 聚焦测试共 4 项通过，覆盖变更类型和行号、缺失与截断、文件上限、保留当前页并重试、长行横向滚动范围及旧 PR 和旧账户响应。命令运行 32 秒，构建槽等待 631 秒，runner `7c86af0f-bddf-470a-bb6a-724965eb34e0`。
-- Windows 原生预览编译通过。命令运行 12 秒，构建槽等待 103 秒，runner `553f38cf-bc93-4605-8169-c32dcf968804`。在真实 Ely 窗口通过 Windows UI Automation 打开 PR #1，触发 Next、Retry 和 Previous，确认次页文件出现、首页文件恢复，随后切至 PR #2 确认旧文件行消失。空态静态文案和正式 Conversation 组合仍待验收。
+- Windows 原生预览编译通过。命令运行 12 秒，构建槽等待 103 秒，runner `553f38cf-bc93-4605-8169-c32dcf968804`。在真实 Ely 窗口通过 Windows UI Automation 打开 PR #1，触发 Next、Retry 和 Previous，确认次页文件出现、首页文件恢复，随后切至 PR #2 确认旧文件行消失。
+
+## 2026-11-26 · 正式 Shell 接线
+
+在 [Conversation PR #109](https://github.com/nocpiun/githux/pull/109) 的 `98b9bcb486357e678139ac8aae057af2fb450ac8` 快照上接入真实 `PullRequestPage`。Files changed 与 Conversation 共用同一账户作用域。文件视图有界，选中时由其自身滚动并接收顶部刷新。离开工作区标签时取消文件在途请求，返回已读取的 PR 时复用视图。
+
+Windows 通过 `node scripts/verify.mjs -- cargo test --locked --bin githux files_changed_` 的 5 项回归，包含正式 Shell 的 GPUI 测试。该测试打开两条 PR，确认 Conversation 零文件请求、切入后绘制文本 diff、PNG 和纯重命名显示不可用、另一 PR 显示空状态且没有旧行，最后返回原 PR 并切回 Conversation。命令运行 64 秒，构建槽等待 335 秒，runner `b241568f-1e0d-4512-96cc-0d9e49382d51`。本轮使用离线 fixture，负责人已将最终人工外观验收安排到 Issue/PR 阅读批次统一进行。

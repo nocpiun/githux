@@ -49,6 +49,7 @@ mod page;
 pub(crate) mod page_layout;
 mod palette;
 pub(crate) mod pr_conversation;
+pub(crate) mod pr_files;
 pub mod profile;
 pub mod reader;
 pub(crate) mod relative_time;
@@ -2422,9 +2423,10 @@ impl Shell {
         let session_id = self.workspace.active_id();
         let settings = settings_route.then(|| self.settings_accounts(window, cx));
         let pull_request_route = matches!(self.workspace.route(), Route::PullRequest { .. });
+        let files_selected = matches!(self.pages.get(&session_id), Some(crate::app::pages::MountedPage::PullRequest(page)) if page.read(cx).files_selected());
         let mounted = self.mounted_page(session_id, window, cx);
-        let outer_scroll = mounted.is_none() || pull_request_route;
-        let page_bar = settings_route || pull_request_route;
+        let outer_scroll = mounted.is_none() || (pull_request_route && !files_selected);
+        let page_bar = settings_route || (pull_request_route && !files_selected);
         let (body, scroll, smooth, focus) = {
             let session = self.workspace.active();
             (
@@ -2501,11 +2503,11 @@ impl Shell {
                             .id(("island-page", session_id_value))
                             .debug_selector(|| "island-page".to_string())
                             .size_full()
-                            .overflow_y_scroll()
+                            .when(!files_selected, |page| page.overflow_y_scroll())
                             // Content never paints past the island's right edge; wide text is
                             // cut inside.
                             .overflow_x_hidden()
-                            .track_scroll(&scroll)
+                            .when(!files_selected, |page| page.track_scroll(&scroll))
                             .track_focus(&focus)
                             .when(page_bar, |page| {
                                 // The account page region owns one `Bars`: its bar only shows while

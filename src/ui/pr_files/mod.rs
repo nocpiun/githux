@@ -52,6 +52,8 @@ impl FilesView {
         }
     }
 
+    // The offline preview reuses one entity while the Shell mounts one per PR.
+    #[allow(dead_code)]
     pub fn rebind(&mut self, session: FilesSession, cx: &mut Context<Self>) {
         self.cancel();
         self.session = session;
@@ -74,8 +76,12 @@ impl FilesView {
         cx.notify();
     }
 
+    pub fn is_current(&self) -> bool {
+        self.session.verify()
+    }
+
     pub fn is_loading(&self) -> bool {
-        self.request.is_some() && self.session.verify()
+        self.request.is_some() && self.is_current()
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) -> bool {
@@ -143,7 +149,21 @@ impl FilesView {
                     },
                 ))
             }
-            Err(error) => self.failure = Some((number, error)),
+            Err(error) => {
+                if matches!(
+                    error,
+                    RepositoryError::GitHub(
+                        GitHubError::Unauthorized
+                            | GitHubError::Forbidden
+                            | GitHubError::NotFound
+                            | GitHubError::SsoRequired { .. }
+                    )
+                ) {
+                    self.page = None;
+                    self.reset_selection();
+                }
+                self.failure = Some((number, error));
+            }
         }
         cx.notify();
     }
@@ -177,23 +197,27 @@ impl FilesView {
         self.page.as_ref()?.files.get(self.selected)
     }
 
-    fn render_file(&self, index: usize, cx: &mut Context<Self>) -> Button {
+    fn render_file(&self, index: usize, cx: &mut Context<Self>) -> gpui::Div {
         let file = &self.page.as_ref().expect("file list is loaded").files[index];
         let label = format!("{}  {}", status(&file.status), visible_text(&file.filename));
-        Button::new(("pr-file", index), label)
-            .full_width()
-            .variant(if index == self.selected {
-                ButtonVariant::Secondary
-            } else {
-                ButtonVariant::Ghost
-            })
-            .size(ControlSize::Sm)
-            .on_click(cx.listener(move |view, _, _, cx| {
-                if view.selected != index {
-                    view.select_file(index);
-                    cx.notify();
-                }
-            }))
+        div()
+            .debug_selector(move || format!("pr-file-{index}"))
+            .child(
+                Button::new(("pr-file", index), label)
+                    .full_width()
+                    .variant(if index == self.selected {
+                        ButtonVariant::Secondary
+                    } else {
+                        ButtonVariant::Ghost
+                    })
+                    .size(ControlSize::Sm)
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if view.selected != index {
+                            view.select_file(index);
+                            cx.notify();
+                        }
+                    })),
+            )
     }
 
     fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -234,7 +258,14 @@ impl FilesView {
                 )),
         );
         let (rows, partial) = match &file.patch {
-            Patch::Unavailable => return pane.child(div().p_2().child("Text diff unavailable.")),
+            Patch::Unavailable => {
+                return pane.child(
+                    div()
+                        .debug_selector(|| "pr-text-diff-unavailable".into())
+                        .p_2()
+                        .child("Text diff unavailable."),
+                );
+            }
             Patch::Text { rows, partial } => (rows, *partial),
         };
         if partial {
@@ -279,6 +310,7 @@ impl FilesView {
                                 .child(line.map_or_else(String::new, |line| line.to_string()))
                         };
                         div()
+                            .debug_selector(move || format!("pr-diff-row-{index}"))
                             .flex()
                             .items_center()
                             .h(px(24.))
@@ -388,13 +420,16 @@ impl Render for FilesView {
             return root;
         };
         if page.files.is_empty() {
-            return root.child(div().p_3().child(
-                if page.number == 1 && page.end == PageEnd::Complete {
-                    "No changed files."
-                } else {
-                    "No changed files on this page."
-                },
-            ));
+            return root.child(
+                div()
+                    .debug_selector(|| "pr-files-empty".into())
+                    .p_3()
+                    .child(if page.number == 1 && page.end == PageEnd::Complete {
+                        "No changed files."
+                    } else {
+                        "No changed files on this page."
+                    }),
+            );
         }
         let files = uniform_list(
             "pr-files-list",

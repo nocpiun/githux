@@ -4,7 +4,7 @@
 mod auth;
 #[path = "../src/content/mod.rs"]
 mod content;
-#[path = "../src/bin_support/pr_files_data.rs"]
+#[path = "../src/data/mod.rs"]
 mod data;
 #[path = "../src/diagnostics/mod.rs"]
 mod diagnostics;
@@ -17,7 +17,7 @@ mod fixture;
 use ui::pr_files::tests::fixture;
 #[path = "../src/platform/fonts.rs"]
 mod fonts;
-#[path = "../src/bin_support/pr_files_github.rs"]
+#[path = "../src/github/mod.rs"]
 mod github;
 #[path = "../src/network/mod.rs"]
 mod network;
