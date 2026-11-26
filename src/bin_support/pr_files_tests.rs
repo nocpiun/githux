@@ -101,10 +101,19 @@ fn files_changed_keeps_page_on_failure_and_rejects_old_pr_and_account_replies(
         assert_eq!(view.file().unwrap().filename, "docs/page-two.md");
     });
     cx.run_until_parked();
-    assert!(view.read_with(
-        cx,
-        |view, _| view.diff_scroll.0.borrow().base_handle.max_offset().x > px(0.)
-    ));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.widest_row,
+            Some(2),
+            "escaped bidi controls shape wider than the longer ASCII input"
+        );
+        let handle = view.diff_scroll.0.borrow();
+        let reach = handle.base_handle.max_offset().x;
+        assert!(reach > px(0.));
+        assert!(reach + handle.base_handle.bounds().size.width >= view.widest_text);
+    });
     let requests = fixture.transport.paths.lock().unwrap().clone();
     assert_eq!(requests[2], requests[3]);
     assert!(requests[2].ends_with("/pulls/1/files?per_page=30&page=2"));

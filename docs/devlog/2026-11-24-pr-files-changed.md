@@ -12,3 +12,7 @@
 在 [Conversation PR #109](https://github.com/nocpiun/githux/pull/109) 的 `98b9bcb486357e678139ac8aae057af2fb450ac8` 快照上接入真实 `PullRequestPage`。Files changed 与 Conversation 共用同一账户作用域。文件视图有界，选中时由其自身滚动并接收顶部刷新。离开工作区标签时取消文件在途请求，返回已读取的 PR 时复用视图。
 
 Windows 通过 `node scripts/verify.mjs -- cargo test --locked --bin githux files_changed_` 的 5 项回归，包含正式 Shell 的 GPUI 测试。该测试打开两条 PR，确认 Conversation 零文件请求、切入后绘制文本 diff、PNG 和纯重命名显示不可用、另一 PR 显示空状态且没有旧行，最后返回原 PR 并切回 Conversation。命令运行 64 秒，构建槽等待 335 秒，runner `b241568f-1e0d-4512-96cc-0d9e49382d51`。本轮使用离线 fixture，负责人已将最终人工外观验收安排到 Issue/PR 阅读批次统一进行。
+
+#109 合入后，仅将本任务的两个提交移到包含 Home 和 Notifications 的 `f12a9e2`。Windows 格式检查和 20 项正式页面测试通过。测试命令运行 69 秒，构建槽等待 28 秒，runner `e20ebee2-61db-45de-955e-05ab56201125`。
+
+PR #111 首轮审查复现了 UTF-8 字节数不能代表 diff 行实际宽度的问题。现在用 GPUI 布局测量可见行，滚动时更新宽度参考。包含转义双向控制字符的回归会检查最宽行及横向可达范围。首轮 Ubuntu Clippy 报告只编译数据模块的预览中存在未用的 `RowKind` 重导出，已改为由 Files changed 视图直接引用类型。Windows 修订后 5 项 Files changed 回归通过，命令运行 65 秒，构建槽等待 4 秒，runner `2b594c4f-c9a9-4f4a-b4c3-d89487ca871f`。

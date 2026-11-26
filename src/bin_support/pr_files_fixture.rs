@@ -75,8 +75,8 @@ impl FilesTransport {
                     response.status = 200;
                     response.body = serde_json::json!([{
                         "filename": "docs/page-two.md", "status": "added",
-                        "additions": 1, "deletions": 0, "changes": 1,
-                        "patch": format!("@@ -0,0 +1 @@\n+{} end of line", "long text ".repeat(38)),
+                        "additions": 2, "deletions": 0, "changes": 2,
+                        "patch": format!("@@ -0,0 +1,2 @@\n+{}\n+{} end of line", "a".repeat(500), "\u{202e}".repeat(100)),
                     }])
                     .to_string();
                 }

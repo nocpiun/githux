@@ -4,7 +4,7 @@
 pub(crate) mod tests;
 use crate::data::{Scoped, pr_files::FilesSession};
 use crate::domain::{error::GitHubError, repository::RepositoryError};
-use crate::github::pr_files::{FILE_LIMIT, File, Page, PageEnd, Patch, RowKind, Status};
+use crate::github::pr_files::{FILE_LIMIT, File, Page, PageEnd, Patch, Status, patch::RowKind};
 use crate::network::{
     cancel::{CancellationToken, CancellationTokenSource},
     executor::BackgroundExecutor,
@@ -28,6 +28,7 @@ pub struct FilesView {
     page: Option<Page>,
     selected: usize,
     widest_row: Option<usize>,
+    widest_text: gpui::Pixels,
     request: Option<CancellationTokenSource>,
     receiver: Option<Task<()>>,
     failure: Option<(u32, RepositoryError)>,
@@ -44,6 +45,7 @@ impl FilesView {
             page: None,
             selected: 0,
             widest_row: None,
+            widest_text: gpui::Pixels::ZERO,
             request: None,
             receiver: None,
             failure: None,
@@ -183,14 +185,8 @@ impl FilesView {
     fn select_file(&mut self, index: usize) {
         self.selected = index;
         self.diff_scroll = UniformListScrollHandle::new();
-        self.widest_row = match self.file().map(|file| &file.patch) {
-            Some(Patch::Text { rows, .. }) => rows
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, row)| visible_width(&row.text))
-                .map(|(index, _)| index),
-            _ => None,
-        };
+        self.widest_row = None;
+        self.widest_text = gpui::Pixels::ZERO;
     }
 
     fn file(&self) -> Option<&File> {
@@ -320,11 +316,36 @@ impl FilesView {
                             .text_color(color)
                             .child(number(row.old))
                             .child(number(row.new))
-                            .child(div().flex_shrink_0().px_2().child(format!(
-                                "{}{}",
-                                row.kind.prefix(),
-                                visible_text(&row.text)
-                            )))
+                            .child({
+                                let entity = cx.entity().downgrade();
+                                // Text layout accounts for fallbacks and expanded escapes. Keep the
+                                // measured row as a sizing reference after it scrolls out of view.
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .on_children_prepainted(move |bounds, window, cx| {
+                                        if let Some(text) = bounds.first() {
+                                            let grew = entity
+                                                .update(cx, |view, _| {
+                                                    if text.size.width <= view.widest_text {
+                                                        return false;
+                                                    }
+                                                    view.widest_text = text.size.width;
+                                                    view.widest_row = Some(index);
+                                                    true
+                                                })
+                                                .unwrap_or(false);
+                                            if grew {
+                                                window.request_animation_frame();
+                                            }
+                                        }
+                                    })
+                                    .child(format!(
+                                        "{}{}",
+                                        row.kind.prefix(),
+                                        visible_text(&row.text)
+                                    ))
+                            })
                     })
                     .collect::<Vec<_>>()
             }),
@@ -599,8 +620,4 @@ fn visible_text(text: &str) -> String {
         }
     }
     display
-}
-
-fn visible_width(text: &str) -> usize {
-    text.bytes().filter(|byte| *byte == b'\t').count() * 3 + text.len()
 }

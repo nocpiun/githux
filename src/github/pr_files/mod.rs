@@ -1,6 +1,6 @@
 //! Read one bounded page of GitHub's pull request files representation.
-mod patch;
-pub use patch::{Patch, RowKind};
+pub(crate) mod patch;
+pub use patch::Patch;
 
 use crate::auth::token::Pat;
 use crate::domain::{
