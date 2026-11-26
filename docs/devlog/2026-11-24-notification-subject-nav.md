@@ -47,7 +47,7 @@
 - 正式 Shell 回归重写为真实宿主点击：通知 Issue #42 打开 `Route::Issue{alice,demo,42}` 并渲染该 issue 的正文与评论（fixture 只为 #42 提供 issue/comments 端点，route 字符串正确但未读到正文会失败）；重复点击同一通知复用同一 tab；同仓库同号 PR 打开 `Route::PullRequest` 且 tab 不同；另一个仓库的同号 Issue 打开自己的 tab；`https://github.com/...` 形状的 subject 仍不匹配并保持在 Notifications。
 - `PageTransport` 的通知 fixture 扩为 4 条（demo Issue #42、demo PR #42、other Issue #42、HTML URL 行）并新增两条 issue/一条 comments 端点；Done 断言改为等待 `notification-row-3` 消失。
 
-验证（经 `scripts/verify.mjs`）：`cargo fmt --all` `35b190f8`；`cargo test --locked --bins notifications_route_reads_routes_repositories_and_completes_done` `4aaff0df` 通过。
+验证（经 `scripts/verify.mjs`）：rebase 到生产者最新 head `ab24dd9` 后重新执行，`cargo fmt --all -- --check` `34298b2e`；`cargo clippy --locked --all-targets -- -D warnings` `f7db54cb`；`cargo test --locked --bins --tests` `3817677b`（1563 passed / 0 failed）；`cargo build --locked --all-targets` `8c8f27b2`；聚焦回归 `cargo test --locked --bins notifications_route_reads_routes_repositories_and_completes_done` 在 rebase 前 `4aaff0df`、rebase 后 `c858b0d2` 均通过。
 
 ## 审查反馈
 
