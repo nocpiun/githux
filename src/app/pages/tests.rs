@@ -207,17 +207,53 @@ impl Transport for PageTransport {
                 });
             }
             if url.contains("/repos/alice/demo/issues/21/comments") {
+                let page = reqwest::Url::parse(url)
+                    .ok()
+                    .and_then(|parsed| {
+                        parsed
+                            .query_pairs()
+                            .find(|(k, _)| k == "page")
+                            .and_then(|(_, v)| v.parse::<u32>().ok())
+                    })
+                    .unwrap_or(1);
+                if page == 1 {
+                    return Ok(HttpResponse {
+                        status: 200,
+                        headers: vec![
+                            ("content-type".into(), "application/json".into()),
+                            (
+                                "link".into(),
+                                r#"<https://api.github.com/repos/alice/demo/issues/21/comments?per_page=30&page=2>; rel="next""#.into(),
+                            ),
+                        ],
+                        body: serde_json::json!([{
+                            "id": 301,
+                            "user": { "id": 2, "login": "bob", "avatar_url": null },
+                            "body": "Looks good to me!",
+                            "created_at": "2026-10-28T11:00:00Z",
+                            "updated_at": "2026-10-28T11:00:00Z",
+                            "author_association": "CONTRIBUTOR"
+                        }])
+                        .to_string(),
+                    });
+                }
                 return Ok(json(
                     200,
                     serde_json::json!([{
-                        "id": 301,
-                        "user": { "id": 2, "login": "bob", "avatar_url": null },
-                        "body": "Looks good to me!",
-                        "created_at": "2026-10-28T11:00:00Z",
-                        "updated_at": "2026-10-28T11:00:00Z",
-                        "author_association": "CONTRIBUTOR"
+                        "id": 302,
+                        "user": { "id": 3, "login": "carol", "avatar_url": null },
+                        "body": "Second page comment verified!",
+                        "created_at": "2026-10-28T12:00:00Z",
+                        "updated_at": "2026-10-28T12:00:00Z",
+                        "author_association": "MEMBER"
                     }]),
                 ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/404") {
+                return Ok(json(404, serde_json::json!({ "message": "Not Found" })));
+            }
+            if url.ends_with("/repos/alice/demo/issues/403") {
+                return Ok(json(403, serde_json::json!({ "message": "Forbidden" })));
             }
             if url.ends_with("/repos/alice/demo/issues/21") {
                 return Ok(json(
@@ -1558,4 +1594,173 @@ fn global_issues_title_opens_reuses_and_isolates_issue_detail_while_repo_link_st
         issues_tab
     );
     wait_for_bounds(cx, "work-item-10001");
+}
+
+#[gpui::test]
+fn cold_start_async_account_restore_opens_visible_issue_detail_once_paginates_returns_and_reopens(
+    cx: &mut TestAppContext,
+) {
+    // Prepare an AccountService with an already-saved signed-in account (just like
+    // `examples/issue_detail.rs` and cold-start with a saved account directory).
+    let transport = Arc::new(PageTransport::default());
+    let temp = tempfile::tempdir().unwrap();
+    let executor = Arc::new(BackgroundExecutor::new(4));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let accounts_service = runtime.block_on(async {
+        let service = AccountService::open(
+            AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+            Arc::new(InMemoryCredentialStore::new()),
+            Arc::new(GitHubClient::new(
+                GitHubConfig::default(),
+                transport.clone() as Arc<dyn Transport>,
+            )),
+            executor.clone(),
+        )
+        .await
+        .unwrap();
+        service
+            .login(crate::auth::token::Pat::new(
+                "ghp_cold_start_token".to_string(),
+            ))
+            .await
+            .unwrap();
+        service
+    });
+    std::mem::forget(temp);
+    let account_runtime = Arc::new(AccountRuntime::new(accounts_service, executor));
+
+    cx.update(|cx| {
+        ely_core::init_for_tests(cx);
+        crate::app::theme::install(cx);
+        crate::ui::Shell::bind_keys(cx);
+    });
+
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let controller = cx.new(|cx| Accounts::new(Some(account_runtime.clone()), window, cx));
+        cx.set_global(AccountsHandle(controller.clone()));
+        let shell = Shell::new(window, cx);
+
+        // Product Shell itself still starts on Home until the preview observer reacts to the
+        // async account restoration.
+        assert_eq!(shell.route(), Route::Home);
+
+        // Same one-shot event-driven bootstrap used by `examples/issue_detail.rs` (no sleep).
+        let shell_weak = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let mut opened = false;
+        cx.observe(&controller, move |_, accounts, cx| {
+            if opened || accounts.read(cx).snapshot().active.is_none() {
+                return;
+            }
+            opened = true;
+            let shell_weak = shell_weak.clone();
+            let _ = window_handle.update(cx, move |_, window, cx| {
+                window.defer(cx, move |window, cx| {
+                    let _ = shell_weak.update(cx, |shell, cx| {
+                        shell.navigate(Route::Issues, window, cx);
+                        shell.navigate(
+                            Route::Issue {
+                                namespace: "alice".into(),
+                                name: "demo".into(),
+                                number: 21,
+                            },
+                            window,
+                            cx,
+                        );
+                    });
+                });
+            });
+        })
+        .detach();
+        shell
+    });
+    let controller = cx.read(AccountsHandle::get).expect("installed controller");
+
+    // Wait for async account restore -> Shell::sync_accounts -> one-shot preview bootstrap.
+    wait_until(&controller, cx, |accounts| {
+        accounts.snapshot().active.is_some()
+    });
+    cx.run_until_parked();
+
+    // 1. Landed directly on `alice/demo #21` with real visible body and page-1 comment.
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21,
+        }
+    );
+    wait_for_bounds(cx, "issue-detail-title");
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+    wait_for_bounds(cx, "issue-detail-load-more");
+
+    // 2. Paginate comments via Load more button: page 2 appends without wiping body or page 1.
+    let load_more = cx
+        .debug_bounds("issue-detail-load-more")
+        .expect("Load more comments button");
+    cx.simulate_click(load_more.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-comment-302");
+    assert!(cx.debug_bounds("issue-detail-body").is_some());
+    assert!(cx.debug_bounds("issue-comment-301").is_some());
+
+    // 3. Close the detail tab -> automatically activates left neighbour `Route::Issues`.
+    let detail_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    cx.update_window_entity(&view, |shell, _, cx| {
+        shell.workspace().close(detail_tab, cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.route()), Route::Issues);
+    wait_for_bounds(cx, "work-title-10001");
+
+    // A later Accounts notification must NOT re-trigger the one-shot bootstrap.
+    controller.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issues,
+        "one-shot bootstrap must not fire again after closing detail"
+    );
+
+    // 4. Reopen `alice/demo #21` by clicking its title in Global Issues.
+    let title = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+
+    // 5. Missing (404) and permission denied (403) render distinct error states in Shell.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 404,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-error-missing");
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 403,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-error-permission");
 }

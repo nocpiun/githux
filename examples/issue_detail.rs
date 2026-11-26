@@ -144,7 +144,7 @@ impl Transport for IssueDetailPreviewTransport {
                                 {
                                     "id": 4202, "number": 42,
                                     "title": "Same issue number (#42) in another repository (no body, no comments)",
-                                    "state": "closed", "updated_at": "2026-11-17T09:15:00Z",
+                                    "state": "open", "updated_at": "2026-11-17T09:15:00Z",
                                     "repository_url": "https://api.github.com/repos/acme/other",
                                     "pull_request": null
                                 },
@@ -248,8 +248,8 @@ impl Transport for IssueDetailPreviewTransport {
                     "id": 4202,
                     "number": 42,
                     "title": "Same issue number (#42) in another repository (no body, no comments)",
-                    "state": "closed",
-                    "state_reason": "not_planned",
+                    "state": "open",
+                    "state_reason": null,
                     "user": { "id": 12, "login": "alice", "avatar_url": null },
                     "body": null,
                     "comments": 0,
@@ -317,6 +317,53 @@ impl Transport for IssueDetailPreviewTransport {
     }
 }
 
+/// Wait for the real signed-in account workspace to become active (handling async account
+/// directory restoration without fixed sleeps or altering product default Home), then open
+/// `Route::Issues` followed by `acme/widgets #42` exactly once.
+fn install_preview_bootstrap(
+    controller: &gpui::Entity<Accounts>,
+    shell: &gpui::Entity<Shell>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) {
+    let shell_weak = shell.downgrade();
+    let window_handle = window.window_handle();
+    let mut opened = false;
+    let mut maybe_open = move |accounts: gpui::Entity<Accounts>, cx: &mut App| {
+        if opened || accounts.read(cx).snapshot().active.is_none() {
+            return;
+        }
+        opened = true;
+        let shell_weak = shell_weak.clone();
+        let _ = window_handle.update(cx, move |_, window, cx| {
+            // Defer one turn so Shell's own Accounts observer has already run `sync_accounts`
+            // and switched to the signed-in account's workspace.
+            window.defer(cx, move |window, cx| {
+                let _ = shell_weak.update(cx, |shell, cx| {
+                    // Open Global Issues first so closing the detail tab returns to it as the
+                    // left neighbour, then open `acme/widgets #42` directly for out-of-box review.
+                    shell.navigate(Route::Issues, window, cx);
+                    shell.navigate(
+                        Route::Issue {
+                            namespace: "acme".into(),
+                            name: "widgets".into(),
+                            number: 42,
+                        },
+                        window,
+                        cx,
+                    );
+                });
+            });
+        });
+    };
+
+    maybe_open(controller.clone(), cx);
+    cx.observe(controller, move |accounts, cx| {
+        maybe_open(accounts, cx);
+    })
+    .detach();
+}
+
 fn main() {
     let temp = tempfile::tempdir().expect("temp dir");
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -372,11 +419,9 @@ fn main() {
                 },
                 move |window, cx| {
                     let controller = cx.new(|cx| Accounts::new(Some(runtime.clone()), window, cx));
-                    cx.set_global(AccountsHandle(controller));
+                    cx.set_global(AccountsHandle(controller.clone()));
                     let shell = cx.new(|cx| Shell::new(window, cx));
-                    shell.update(cx, |shell, cx| {
-                        shell.navigate(Route::Issues, window, cx);
-                    });
+                    install_preview_bootstrap(&controller, &shell, window, cx);
                     shell
                 },
             )

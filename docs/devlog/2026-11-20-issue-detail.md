@@ -23,6 +23,7 @@
 5. 第二轮 Codex 审查修复：在发起网络请求前预取 `CacheWrite` ticket（`begin_cache_write`），防止并发失效后晚到的旧响应重新污染缓存；将 Issue/评论 Markdown 内的相对链接（`LinkTarget::Repository`）规范解析为 `https://github.com/{owner}/{name}/blob/HEAD/{path}` 并走外部链接回调，不再静默丢弃。
 6. 第三轮 Codex 审查修复：缓存第 1 页评论未完成在线重验证前禁止触发 `Append` 翻页（避免混合不同时刻分页导致静默漏项）；新增 `IssueImageProvider`，外部图片直通 `RepositoryImageService`，仓库相对路径图片懒解析仓库默认分支 HEAD commit 与真实 `RepositoryIdentity` 后再按权限读取。
 7. 第四/五/六轮 Codex 审查修复：`IssueImageProvider` 改为 `OnceCell::get_or_try_init`，避免瞬态失败或取消将 `None` 永久缓存；评论翻页遇到确认缺失或失权错误（404/410/401/403）时同样失效已缓存的第 1 页评论、清空展示并将重试模式切回 `Replace`；`fetch_issue` / `fetch_comments_page` 遇到当前会话 `401 Unauthorized` 时经 `RepoService::credential_rejected` 隔离整个账户缓存分区（C4）。
+8. 2026-11-26 负责人验收返工：修复 `examples/issue_detail.rs` 在 `Shell::new` 后立即 `navigate(Route::Issues)` 落在未登录 workspace、随后被 `Accounts` 异步恢复触发 `Shell::sync_accounts`/`workspace.show` 切回 Home 的时序问题。现通过一次性 `Accounts` observer + `window.defer` 在正式账户 workspace 就绪后自动且仅首次打开 `Route::Issues` 与 `acme/widgets #42` 详情（不改产品默认首页、不靠固定 sleep），关闭 `#42` 回到保留样例列表（含 `#42`/`#43`/同号另一仓库 `acme/other #42`、404/403）的全局 Issues 标签。补充 `cold_start_async_account_restore_opens_visible_issue_detail_once_paginates_returns_and_reopens` 正式宿主冷启动到可见正文、翻页、关闭返回、重开与 404/403 回归。
 
 ## 验证记录与边界
 

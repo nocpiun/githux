@@ -703,19 +703,29 @@ impl IssueDetailView {
                     .items_center()
                     .gap_2()
                     .child(
-                        Button::new(
-                            "issue-detail-load-more",
-                            if appending {
-                                "Loading more…"
-                            } else {
-                                "Load more comments"
-                            },
-                        )
-                        .size(ControlSize::Sm)
-                        .disabled(self.controller.comments_busy.is_some())
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.request_comments(CommentsRequestMode::Append, false, cx);
-                        })),
+                        div()
+                            .debug_selector(|| "issue-detail-load-more".into())
+                            .child(
+                                Button::new(
+                                    "issue-detail-load-more",
+                                    if appending {
+                                        "Loading more…"
+                                    } else {
+                                        "Load more comments"
+                                    },
+                                )
+                                .size(ControlSize::Sm)
+                                .disabled(self.controller.comments_busy.is_some())
+                                .on_click(cx.listener(
+                                    |view, _, _, cx| {
+                                        view.request_comments(
+                                            CommentsRequestMode::Append,
+                                            false,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            ),
                     )
                     .when(appending, |footer| {
                         footer
