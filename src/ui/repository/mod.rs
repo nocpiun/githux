@@ -38,6 +38,7 @@
 #![allow(dead_code)]
 
 mod extras;
+mod issues;
 mod locator_index;
 mod navigation;
 mod page_tabs;
@@ -175,6 +176,12 @@ pub enum PageAction {
     },
     /// Validated repository-scoped release or contributor navigation.
     Overview(crate::ui::repository_overview::OverviewAction),
+    /// Open a numbered issue using the verified repository and account.
+    OpenIssue {
+        context: RepositoryReadContext,
+        locator: RepositoryLocator,
+        number: u64,
+    },
     /// An absolute `http(s)` URL the user pressed. The page never opens it.
     OpenExternal(String),
     /// A repository link that this page generation did not follow.
@@ -512,8 +519,9 @@ pub struct RepositoryPage {
     reader_status: ReaderStatus,
     /// A page-level failure (repository summary, branch list, revision).
     error: Option<PageError>,
-    /// The in-page content tab. Only `Code` has content this round.
+    /// The in-page content tab.
     tab: RepositoryTab,
+    issues: issues::Issues,
     /// True while a browsing generation is running.
     active: bool,
     /// Set when authorization changed under a running generation.
@@ -609,6 +617,7 @@ impl RepositoryPage {
             reader_status: ReaderStatus::Loading,
             error: None,
             tab: RepositoryTab::Code,
+            issues: issues::Issues::new(cx.focus_handle().tab_stop(true)),
             active: false,
             authorization_lost: false,
             displayed_authorizations: Default::default(),
@@ -888,7 +897,9 @@ impl RepositoryPage {
     /// Whether any non-preliminary repository read (summary, branches, revision, tree/file
     /// replacement, overview sections, or OPEN counts) is currently in flight.
     pub fn is_refreshing(&self) -> bool {
-        self.work.as_ref().is_some_and(Work::has_in_flight) || self.extras.has_in_flight()
+        self.work.as_ref().is_some_and(Work::has_in_flight)
+            || self.extras.has_in_flight()
+            || self.issues.busy()
     }
 
     /// Revalidates this repository page only when idle and authorized, coalescing duplicate
@@ -912,6 +923,7 @@ impl RepositoryPage {
             self.activate(cx);
             return;
         }
+        self.request_issues(true, cx);
         self.stop_star();
         self.extras.cancel_reads();
         if let Some(view) = &self.extras.view {
@@ -1005,7 +1017,9 @@ impl RepositoryPage {
             return;
         }
         self.tree_bars.cancel(&self.tree_motion);
+        self.issues.cancel_scroll();
         self.tab = tab;
+        self.sync_issues(cx);
         if tab != RepositoryTab::Code {
             // Hidden content must not keep a gesture alive.
             self.cancel_reader_interactions(cx);
@@ -1328,6 +1342,7 @@ impl RepositoryPage {
     }
 
     fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
+        self.issues.cancel_scroll();
         self.tree_bars.cancel(&self.tree_motion);
         cx.notify();
     }
@@ -1678,6 +1693,7 @@ impl RepositoryPage {
         // overview keeps its own token; it is checked here too because the page
         // renders its release/contributor/language states.
         self.extras.authorization_current()
+            && self.issues.current()
             && self
                 .displayed_authorizations
                 .iter()
@@ -1694,6 +1710,7 @@ impl RepositoryPage {
 
     /// Drops every cache-authorization binding held for the current generation.
     fn reset_authorization(&mut self) {
+        self.issues.clear();
         self.cache_failures = [false; 3];
         self.displayed_authorizations = Default::default();
     }
@@ -1792,6 +1809,7 @@ impl RepositoryPage {
         }
         self.drain_overview(cx);
         self.drain_star(cx);
+        self.drain_issues(cx);
         if was_refreshing != self.is_refreshing() {
             cx.notify();
         }

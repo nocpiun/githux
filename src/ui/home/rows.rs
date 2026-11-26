@@ -128,10 +128,36 @@ fn timestamp(value: Option<&str>, name: String, now: SystemTime, cx: &App) -> An
         .into_any_element()
 }
 
-fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>) -> AnyElement {
-    let name = format!("{}-title-{index}", super::column_name(column));
+/// A Feed pull-request title. When the activity addresses a usable Githux destination the title
+/// opens that destination by pointer or keyboard, whether or not its body preview was truncated —
+/// "Read more" is an extra affordance, never the only way in. A card whose target cannot be
+/// addressed keeps plain text with no Link role, pointer cursor or Tab stop, so it never promises
+/// an action that does nothing (LESSONS L017).
+fn feed_pull_request_title(
+    index: usize,
+    label: String,
+    navigation: Option<HomeAction>,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
+    let name = format!("{}-title-{index}", super::column_name(Column::Feed));
     let hover_id = name.clone();
     let tooltip_selector = format!("{name}-tooltip");
+    let Some(navigation) = navigation else {
+        let plain = div()
+            .id(name.clone())
+            .debug_selector(move || name.clone())
+            .min_w_0()
+            .font_weight(FontWeight::MEDIUM)
+            .truncate()
+            .tooltip(text_tooltip(label.clone(), tooltip_selector))
+            .child(label);
+        return div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .child(plain)
+            .into_any_element();
+    };
     let weak = cx.entity().downgrade();
     let target = div()
         .id(name.clone())
@@ -150,11 +176,14 @@ fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
             let pointer = !matches!(event, gpui::ClickEvent::Keyboard(_));
+            let navigation = navigation.clone();
             let _ = weak.update(cx, |view, cx| {
                 if pointer {
-                    view.select(column, index, window, cx);
+                    view.select(Column::Feed, index, window, cx);
                 }
-                view.activate(column, index, window, cx);
+                // The title and the "Read more" affordance both address the same pull request
+                // through the same typed action.
+                view.emit(navigation.clone(), window, cx);
             });
         })
         .tooltip(text_tooltip(label.clone(), tooltip_selector))
@@ -166,6 +195,45 @@ fn title(column: Column, index: usize, label: String, cx: &mut Context<HomeView>
         .min_w_0()
         .child(text_target(target, hover_id))
         .into_any_element()
+}
+
+/// The pull-request icon of a Feed card. It addresses the same destination as the title beside it:
+/// a click (or keyboard activation on the title) must never produce two different results.
+fn feed_pull_request_icon(
+    index: usize,
+    kind: FeedActivityKind,
+    colors: &ely_core::theme::Palette,
+    navigation: Option<HomeAction>,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
+    let mut slot = div()
+        .id(("feed-pr-icon", index))
+        .debug_selector(move || format!("feed-pr-icon-{index}"))
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(
+            Icon::new(IconName::GitPullRequest)
+                .size(IconSize::Sm)
+                .color(feed_pr_icon_color(kind, colors)),
+        );
+    if let Some(navigation) = navigation {
+        let weak = cx.entity().downgrade();
+        slot = slot
+            .cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                let navigation = navigation.clone();
+                let _ = weak.update(cx, |view, cx| {
+                    view.select(Column::Feed, index, window, cx);
+                    view.emit(navigation.clone(), window, cx);
+                });
+            });
+    }
+    slot.into_any_element()
 }
 
 pub(super) fn home_row(
@@ -225,6 +293,18 @@ pub(super) fn home_row(
             });
         })
     };
+    // The icon and the `#number` cell address the same item as the title. Pointer activation
+    // selects the row and then emits the typed activation, exactly like a pointer title click;
+    // the owner/repo links keep their own destinations because they stop propagation.
+    let identity_action: work_item_row::RowAction = {
+        let weak = weak.clone();
+        Rc::new(move |window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.select(Column::Home, index, window, cx);
+                view.activate(Column::Home, index, window, cx);
+            });
+        })
+    };
     let title_label = nonempty(&item.title, &format!("{} #{}", kind.label(), item.number));
     let title_action: work_item_row::TitleAction = {
         let weak = weak.clone();
@@ -270,6 +350,7 @@ pub(super) fn home_row(
             show_selected_bar: true,
             on_row_click: None,
             on_title_click: Some(title_action),
+            on_identity_click: Some(identity_action),
         },
         cx,
     )
@@ -469,6 +550,9 @@ pub(super) fn feed_row(
         if let Some(number) = target.number {
             label.push_str(&format!(" #{number}"));
         }
+        // One validated destination for every entry point on this card: the pull-request title,
+        // its icon and "Read more".
+        let navigation = feed_pull_request_action(event, target.number);
         inset = inset.child(
             div()
                 .flex()
@@ -476,17 +560,23 @@ pub(super) fn feed_row(
                 .gap_2()
                 .min_w_0()
                 .text_size(body_size)
-                .child(
-                    Icon::new(IconName::GitPullRequest)
-                        .size(IconSize::Sm)
-                        .color(feed_pr_icon_color(activity.kind, &colors)),
-                )
-                .child(title(Column::Feed, index, label, cx)),
+                .child(feed_pull_request_icon(
+                    index,
+                    activity.kind,
+                    &colors,
+                    navigation.clone(),
+                    cx,
+                ))
+                .child(feed_pull_request_title(
+                    index,
+                    label,
+                    navigation.clone(),
+                    cx,
+                )),
         );
         if let Some(preview) = &target.body_preview
             && !preview.excerpt.trim().is_empty()
         {
-            let navigation = feed_pull_request_action(event, target.number);
             let body_div = div()
                 .id(format!("feed-pr-body-{index}"))
                 .debug_selector(move || format!("feed-pr-body-{index}"))

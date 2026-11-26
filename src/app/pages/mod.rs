@@ -6,13 +6,17 @@
 //! narrow update methods. No host performs I/O from `render`.
 
 mod home;
+mod issue_detail;
 mod notifications;
 mod profile;
+mod pull_request;
 mod work_items;
 
 pub use home::HomePage;
+pub use issue_detail::IssueDetailPage;
 pub use notifications::NotificationsPage;
 pub use profile::ProfilePage;
+pub use pull_request::PullRequestPage;
 pub use work_items::WorkItemsPage;
 
 use gpui::{App, AppContext, Entity, IntoElement, Window};
@@ -32,6 +36,8 @@ pub enum MountedPage {
     Repository { page: Entity<RepositoryPage> },
     Notifications(Entity<NotificationsPage>),
     WorkItems(Entity<WorkItemsPage>),
+    IssueDetail(Entity<IssueDetailPage>),
+    PullRequest(Entity<PullRequestPage>),
 }
 
 impl MountedPage {
@@ -42,6 +48,8 @@ impl MountedPage {
             Self::Repository { page } => page.clone().into_any_element(),
             Self::Notifications(page) => page.clone().into_any_element(),
             Self::WorkItems(page) => page.clone().into_any_element(),
+            Self::IssueDetail(page) => page.clone().into_any_element(),
+            Self::PullRequest(page) => page.clone().into_any_element(),
         }
     }
 
@@ -52,6 +60,8 @@ impl MountedPage {
             Self::Repository { page } => page.update(cx, |page, cx| page.suspend(cx)),
             Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
+            Self::IssueDetail(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
+            Self::PullRequest(page) => page.update(cx, |page, cx| page.suspend(cx)),
         }
     }
 
@@ -65,6 +75,8 @@ impl MountedPage {
             }
             Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
+            Self::IssueDetail(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
+            Self::PullRequest(_) => {}
         }
     }
 }
@@ -147,6 +159,7 @@ pub fn repository_page(
     // Captured once for the contributor route, so a contributor link resolves like every other
     // profile link without reaching back into the service from the action closure.
     let active_account = services.accounts().active_summary();
+    let repositories = services.repositories();
     let page = cx.new(|cx| {
         let mut page = RepositoryPage::new(page_services, locator, intent, window, cx);
         page.on_action(Rc::new(move |action, window, cx| match action {
@@ -170,8 +183,25 @@ pub fn repository_page(
                 html_url: Some(url),
                 ..
             }) => navigation(PageNavigation::External(url), window, cx),
+            PageAction::OpenIssue {
+                context,
+                locator,
+                number,
+            } => {
+                if repositories.is_current(&context) {
+                    navigation(
+                        PageNavigation::Open(Route::Issue {
+                            namespace: locator.owner().to_string(),
+                            name: locator.name().to_string(),
+                            number,
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+            }
             // Star is handled inside RepositoryPage through RepositoryActionService. Fork and
-            // unsupported links stay inert; neither is reported as a successful host action.
+            // unsupported links stay inert.
             PageAction::StarRequested { .. }
             | PageAction::ForkRequested { .. }
             | PageAction::LinkNotFollowed { .. }

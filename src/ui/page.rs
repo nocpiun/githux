@@ -2,8 +2,7 @@
 //!
 //! Home, Profile, Repository, Notifications, Issues and Pull Requests are mounted from
 //! `app::pages`. This module contains only the transitional Settings surface, the fallback for
-//! unmounted global pages, and the intentionally blank, not-yet-designed pull-request detail route.
-//! It never supplies fixture activity or a second page implementation.
+//! unmounted pages. It never supplies fixture activity or a second page implementation.
 use ely_core::theme::{ActiveTheme, TextSize};
 use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div, prelude::*};
 
@@ -22,8 +21,21 @@ pub(super) fn page(session: &Session, data: PageData, cx: &App) -> AnyElement {
             "This page needs an active account and verified online access. No saved page content is available.",
             cx,
         ),
-        // The pull-request detail surface is a separate task and stays intentionally empty.
-        Route::PullRequest { .. } => blank(),
+        Route::Issue {
+            namespace,
+            name,
+            number,
+        }
+        | Route::PullRequest {
+            namespace,
+            name,
+            number,
+        } => unavailable(
+            &format!(
+                "{namespace}/{name} #{number} cannot be read until an active account's online service is available."
+            ),
+            cx,
+        ),
         Route::Home | Route::Profile | Route::UserProfile { .. } => unavailable(
             "This page needs an active account and verified online access. No saved page content is available.",
             cx,
@@ -35,10 +47,6 @@ pub(super) fn page(session: &Session, data: PageData, cx: &App) -> AnyElement {
             cx,
         ),
     }
-}
-
-fn blank() -> AnyElement {
-    div().size_full().into_any_element()
 }
 
 fn unavailable(message: &str, cx: &App) -> AnyElement {

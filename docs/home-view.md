@@ -61,10 +61,18 @@ pub fn set_refresh_availability(&mut self, column, binding, generation, RefreshA
 | `OpenPullRequest { repository, number }` | PR 正文“Read more”的应用内目标：仓库身份与仓库内 PR 编号；host 打开对应的 Githux PR 标签 |
 | `Repository(RepositoryIdentity)` | `id`（Feed 有，Home 搜索模型无）、owner、name |
 | `Profile(ProfileIdentity)` | `Option<u64>` id 与 canonical 登录名；actor 保留真实 id，owner-only 为 None |
-| `ActivateWorkItem(WorkItemIdentity)` | Home 条目的全局 id、number、Issue/PR kind、仓库 |
-| `ActivateFeed(FeedIdentity)` | Feed 卡片来源事件的真实 id、typed event kind、仓库 |
+| `ActivateWorkItem(WorkItemIdentity)` | Home 条目的全局 id、number、Issue/PR kind、仓库；host 打开对应 Issue/PR 标签 |
+| `ActivateFeed(FeedIdentity)` | Feed 卡片的通用激活（card 级键盘/选中）；可寻址的合并 PR 卡片改为发出 `OpenPullRequest` |
 
-Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会把仓库内 `number` 冒充为全局 id。Read more 使用独立的 `OpenPullRequest`，以仓库与编号定位资源，不依赖全局 id 或外部 URL。
+Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会把仓库内 `number` 冒充为全局 id。合并 PR 卡片的所有入口（PR 图标、包含 `#number` 的标题、`Read more`、选中卡片后按 Enter）统一发出 `OpenPullRequest`，以仓库与编号定位资源，不依赖全局 id 或外部 URL。
+
+### 行目标映射（2026-11-24）
+
+`src/ui/home/navigation.rs` 的 `work_item_target(&WorkItemIdentity) -> Option<WorkItemTarget>` 把同一份 typed 身份一次性映射成工作区坐标：`kind` 来自 `HomeItemKind`，repository 与 number 来自被点击的行，**绝不从标题推断**。因此同库同号的 Issue 与 PR 是两个不同目标，同号不同库也是两个目标；编号为 0 或 owner/name 不能作为仓库段（空、含 `/`、控制字符）时返回 `None`，不构造猜测的路线。目标保留行上显示的大小写，别名复用由工作区按 `RouteKey` 决定。
+
+目标在 host 侧按 kind 变成真实工作区路线：Issue → `Route::Issue { namespace, name, number }`（详情由 issue-detail 提供），Pull request → `Route::PullRequest`。Home 行的标题、左侧图标和 metadata 中的 `#number` 都指向同一目标；owner 与仓库名仍是各自独立的链接，点击它们不会被行激活吞掉。图标与编号只做 pointer 入口，title 仍是唯一键盘/Tab 入口，空白区域保持惰性。
+
+host 侧的延迟投递还有两道门：页面必须仍是当前显示的标签且捕获的 session 仍有效（`HomeView::is_active`），并且该身份仍是当前 Home 快照中的一行（`HomeView::has_work_item`，同时比对全局 id、kind、number、owner/name）。因此切换账户、隐藏标签或替换快照之后到达的旧激活不会导航。
 
 ## 呈现与失败语义
 
@@ -74,7 +82,8 @@ Feed 的领域 payload 不保存 Issue/PR 全局 id，因此 Feed 激活不会�
 - Feed 是紧凑的活动卡片，页面背景使用 `surface::page`（`surface`），未选中卡片使用 `surface::raised`（`overlay`），卡内详情区使用 `surface::well`（`sunken`），选中卡片保持 `active` 底色并配 `border_strong` 边框；avatar、可点击的 credited 用户、动作句与相对时间组成 header，inset repository panel 放目标仓库及相关内容：
   - **星标仓库**：使用主题 `warning` 颜色的星标图标（其他 Feed 活动保留原有图标与颜色），在仓库链接下方展示与仓库文字左沿对齐（`pl_5`）的真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
   - **合并 PR**：PR 标题左侧图标使用主题 `chart[4]` 紫色（仅 `PullRequestMerged` 上色，其他状态/活动不上色），展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本），摘要与“Read more”均与 PR 标题文字左沿对齐（`pl_6`，不扩增“Read more”点击热区）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮（沿用主题 `accent` 原色）。
-  - **Read more 交互**：点击或键盘激活经宿主的延迟导航通道打开 `Route::PullRequest { namespace, name, number }`。标签显示 `owner/repo #number` 和 PR 图标；同账户同仓库同编号复用标签，仓库名大小写别名不重复开页。当前仅接入内部导航，详情内容仍待独立实现；不打开系统浏览器、不在卡片内展开全文；阻止事件冒泡，不触发卡片选中或次级激活。
+  - **PR 图标与标题**：合并卡片的 PR 图标与标题（标题末尾带 `#number`）都是进入同一个 PR 的入口，与 `Read more` 使用同一个 `OpenPullRequest` 动作；正文是否被截断都不影响标题可用性，短正文（没有 `Read more`）时标题仍可单击或键盘 Enter 进入。图标是可点击的同一目标但不新增 Tab stop，标题仍是唯一键盘入口；无法解析出可用仓库/编号时标题退回纯文本，不加 Link 角色、指针或 Tab stop。
+  - **Read more 交互**：点击或键盘激活经宿主的延迟导航通道打开 `Route::PullRequest { namespace, name, number }`。标签显示 `owner/repo #number` 和 PR 图标；同账户同仓库同编号复用标签，仓库名大小写别名不重复开页。目标页是正式 PR Conversation（摘要、Markdown 正文、分页评论）；不打开系统浏览器、不在卡片内展开全文；阻止事件冒泡，不触发卡片选中或次级激活。
   - 没有 branch/ref/SHA/commit 数等技术噪声 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
 - 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。

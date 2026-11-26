@@ -22,6 +22,7 @@ pub enum Scene {
     FirstFailure,
     SsoPartial,
     Unknown,
+    Targets,
     Delayed,
     Long,
     DoneFailure,
@@ -31,13 +32,14 @@ pub enum Scene {
     DoneAlwaysFails,
 }
 impl Scene {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Mixed,
         Self::Empty,
         Self::AppendFailure,
         Self::FirstFailure,
         Self::SsoPartial,
         Self::Unknown,
+        Self::Targets,
         Self::Delayed,
         Self::Long,
         Self::DoneFailure,
@@ -54,6 +56,7 @@ impl Scene {
             Self::FirstFailure => "Load error",
             Self::SsoPartial => "SSO partial",
             Self::Unknown => "Unknown",
+            Self::Targets => "Subject targets",
             Self::Delayed => "Delayed",
             Self::Long => "Long list",
             Self::DoneFailure => "Done failure",
@@ -250,9 +253,17 @@ impl Fixture {
             );
         }
         let long = scene == Scene::Long;
-        let pages = if long { 20 } else { 2 };
+        let pages = if long {
+            20
+        } else if scene == Scene::Targets {
+            1
+        } else {
+            2
+        };
         let rows: Vec<_> = if scene == Scene::Empty {
             vec![]
+        } else if scene == Scene::Targets {
+            target_threads(state.now)
         } else if long {
             ((page - 1) * 50..page * 50)
                 .map(|index| timed_thread(index, state.now))
@@ -379,6 +390,59 @@ pub fn thread(index: usize, updated_at: &str, unread: bool) -> Value {
             "url":"https://evil.example/opaque-subject", "latest_comment_url":null},
         "repository":{"id":100 + index % 3, "name":repository,
             "owner":{"login":"synthetic-owner"}, "url":"https://evil.example/opaque-repository"}})
+}
+
+/// Subject-URL matching scene. Rows 0 and 1 are reliable Issue/Pull Request
+/// targets; 2..7 are wrong repository, wrong path/type, missing, foreign host
+/// and invalid numbers and must keep the non-navigating title.
+fn target_threads(now: u64) -> Vec<Value> {
+    let specs: [(&str, Option<&str>); 8] = [
+        (
+            "Issue",
+            Some("https://api.github.com/repos/synthetic-owner/desktop-client/issues/123"),
+        ),
+        (
+            "PullRequest",
+            Some("https://api.github.com/repos/synthetic-owner/desktop-client/pulls/77"),
+        ),
+        (
+            "Issue",
+            Some("https://api.github.com/repos/synthetic-owner/other/issues/5"),
+        ),
+        (
+            "PullRequest",
+            Some("https://api.github.com/repos/synthetic-owner/desktop-client/issues/9"),
+        ),
+        ("Issue", None),
+        ("Issue", Some("https://evil.example/opaque-subject")),
+        (
+            "Issue",
+            Some("https://api.github.com/repos/synthetic-owner/desktop-client/issues/0"),
+        ),
+        (
+            "Issue",
+            Some("https://api.github.com/repos/synthetic-owner/desktop-client/issues/007"),
+        ),
+    ];
+    specs
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, url))| {
+            let mut row = timed_thread(index, now);
+            row["subject"]["type"] = json!(kind);
+            row["subject"]["url"] = match url {
+                Some(url) => json!(url),
+                None => Value::Null,
+            };
+            row["repository"] = json!({
+                "id": 100,
+                "name": "desktop-client",
+                "owner": {"login": "synthetic-owner"},
+                "url": "https://evil.example/opaque-repository"
+            });
+            row
+        })
+        .collect()
 }
 
 /// Clock-relative fixtures share exactly the preview's captured clock.

@@ -38,6 +38,8 @@ fn json(status: u16, body: serde_json::Value) -> HttpResponse {
     }
 }
 
+const PR_FIXTURE_BODY: &str = "## [Conversation fixture](docs/design.md#decisions)\n\nStream the index without buffering the whole file.\n\n![Index diagram](index.svg)";
+
 fn graphql_ok(data: serde_json::Value) -> HttpResponse {
     json(200, serde_json::json!({"data": data}))
 }
@@ -50,6 +52,7 @@ struct PageTransport {
     writes: Mutex<Vec<String>>,
     starred: Mutex<bool>,
     long_pr_body: bool,
+    pr_comments_status: std::sync::atomic::AtomicU16,
 }
 
 impl PageTransport {
@@ -147,6 +150,9 @@ impl Transport for PageTransport {
             // Notifications: a two-thread unread inbox over the account-scoped endpoint. Done and
             // Unsubscribe keep their real REST semantics (204 for Done, ignored=true for the
             // subscription step).
+            // Notification subjects are opaque server data: the fixture uses the official REST
+            // shape with https://github.com/... URLs, which must stay non-navigating, plus the
+            // matched API shapes for issue/PR rows the product is allowed to open.
             if url.starts_with("https://api.github.com/notifications") {
                 match request.method {
                     crate::network::transport::HttpMethod::Delete => {
@@ -179,7 +185,7 @@ impl Transport for PageTransport {
                             "updated_at": "2026-11-03T10:00:00Z", "last_read_at": null,
                             "subject": {
                                 "title": "Fix the login flow", "type": "Issue",
-                                "url": "https://github.com/alice/demo/issues/1",
+                                "url": "https://api.github.com/repos/alice/demo/issues/42",
                                 "latest_comment_url": null
                             },
                             "repository": {
@@ -193,7 +199,35 @@ impl Transport for PageTransport {
                             "updated_at": "2026-11-03T09:00:00Z", "last_read_at": null,
                             "subject": {
                                 "title": "Update the pull request", "type": "PullRequest",
-                                "url": "https://github.com/alice/demo/pull/2",
+                                "url": "https://api.github.com/repos/alice/demo/pulls/42",
+                                "latest_comment_url": null
+                            },
+                            "repository": {
+                                "id": 10, "name": "demo",
+                                "owner": {"login": "alice"},
+                                "url": "https://api.github.com/repos/alice/demo"
+                            }
+                        },
+                        {
+                            "id": "9003", "unread": true, "reason": "mention",
+                            "updated_at": "2026-11-03T08:00:00Z", "last_read_at": null,
+                            "subject": {
+                                "title": "Other repository issue with the same number", "type": "Issue",
+                                "url": "https://api.github.com/repos/alice/other/issues/42",
+                                "latest_comment_url": null
+                            },
+                            "repository": {
+                                "id": 11, "name": "other",
+                                "owner": {"login": "alice"},
+                                "url": "https://api.github.com/repos/alice/other"
+                            }
+                        },
+                        {
+                            "id": "9004", "unread": true, "reason": "subscribed",
+                            "updated_at": "2026-11-03T07:00:00Z", "last_read_at": null,
+                            "subject": {
+                                "title": "Opaque HTML subject URL", "type": "Issue",
+                                "url": "https://github.com/alice/demo/issues/43",
                                 "latest_comment_url": null
                             },
                             "repository": {
@@ -205,6 +239,194 @@ impl Transport for PageTransport {
                     ])
                     .to_string(),
                 });
+            }
+            if url.contains("/repos/alice/demo/issues/5/comments") {
+                let status = self
+                    .pr_comments_status
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if status != 0 {
+                    return Ok(json(status, serde_json::json!({})));
+                }
+                let second = url.contains("&page=2");
+                let mut page = json(
+                    200,
+                    serde_json::json!([{
+                        "id": if second { 502 } else { 501 }, "user": {"id": 2, "login": "bob"},
+                        "body": if second { "Second comment **page**" } else { "First comment **page**\n\n![Index diagram](index.svg)" },
+                        "created_at": "2026-10-28T11:00:00Z", "updated_at": "2026-10-28T11:00:00Z"
+                    }]),
+                );
+                if !second {
+                    page.headers.push(("link".into(), "<https://api.github.com/repos/alice/demo/issues/5/comments?per_page=30&page=2>; rel=\"next\"".into()));
+                }
+                return Ok(page);
+            }
+            if url.contains("/repos/alice/demo/issues/7/comments") {
+                return Ok(json(200, serde_json::json!([])));
+            }
+            if let Ok(repo_url) = reqwest::Url::parse(url)
+                && repo_url.path() == "/repos/alice/demo/issues"
+            {
+                let page = repo_url
+                    .query_pairs()
+                    .find(|(key, _)| key == "page")
+                    .map(|(_, value)| value.into_owned());
+                let row = |number| {
+                    serde_json::json!({
+                        "number": number,"title":format!("Issue #{number}"),"state":"open","updated_at":"2026-10-28T11:00:00Z"
+                    })
+                };
+                let (rows, next) = match page.as_deref() {
+                    Some("1") => ((30..60).rev().map(row).collect::<Vec<_>>(), Some(2)),
+                    Some("2") => (
+                        vec![serde_json::json!({"number":29,"pull_request":{}})],
+                        Some(3),
+                    ),
+                    Some("3") => (vec![row(21)], None),
+                    _ => return Ok(json(599, serde_json::json!({}))),
+                };
+                let mut response = json(200, serde_json::json!(rows));
+                if let Some(next) = next {
+                    response.headers.push(("link".into(),format!("<https://api.github.com/repos/alice/demo/issues?state=open&sort=created&direction=desc&per_page=30&page={next}>; rel=\"next\"")));
+                }
+                return Ok(response);
+            }
+            if url.contains("/repos/alice/demo/issues/42/comments") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 401,
+                        "user": { "id": 2, "login": "bob", "avatar_url": null },
+                        "body": "Notification issue comment body.",
+                        "created_at": "2026-10-28T11:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z",
+                        "author_association": "CONTRIBUTOR"
+                    }]),
+                ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/42") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10042,
+                        "number": 42,
+                        "title": "Notification issue forty two",
+                        "state": "open",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": "Issue body reached from a notification click.",
+                        "comments": 1,
+                        "labels": [{ "name": "bug" }],
+                        "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/other/issues/42/comments") {
+                return Ok(json(200, serde_json::json!([])));
+            }
+            if url.ends_with("/repos/alice/other/issues/42") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10043,
+                        "number": 42,
+                        "title": "Other repository issue forty two",
+                        "state": "open",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": "Same number, different repository.",
+                        "comments": 0,
+                        "labels": [],
+                        "created_at": "2026-10-28T09:00:00Z",
+                        "updated_at": "2026-10-28T09:30:00Z"
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/demo/issues/21/comments") {
+                let page = reqwest::Url::parse(url)
+                    .ok()
+                    .and_then(|parsed| {
+                        parsed
+                            .query_pairs()
+                            .find(|(k, _)| k == "page")
+                            .and_then(|(_, v)| v.parse::<u32>().ok())
+                    })
+                    .unwrap_or(1);
+                if page == 1 {
+                    return Ok(HttpResponse {
+                        status: 200,
+                        headers: vec![
+                            ("content-type".into(), "application/json".into()),
+                            (
+                                "link".into(),
+                                r#"<https://api.github.com/repos/alice/demo/issues/21/comments?per_page=30&page=2>; rel="next""#.into(),
+                            ),
+                        ],
+                        body: serde_json::json!([{
+                            "id": 301,
+                            "user": { "id": 2, "login": "bob", "avatar_url": null },
+                            "body": "Looks good to me!",
+                            "created_at": "2026-10-28T11:00:00Z",
+                            "updated_at": "2026-10-28T11:00:00Z",
+                            "author_association": "CONTRIBUTOR"
+                        }])
+                        .to_string(),
+                    });
+                }
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 302,
+                        "user": { "id": 3, "login": "carol", "avatar_url": null },
+                        "body": "Second page comment verified!",
+                        "created_at": "2026-10-28T12:00:00Z",
+                        "updated_at": "2026-10-28T12:00:00Z",
+                        "author_association": "MEMBER"
+                    }]),
+                ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/404") {
+                return Ok(json(404, serde_json::json!({ "message": "Not Found" })));
+            }
+            if url.ends_with("/repos/alice/demo/issues/403") {
+                return Ok(json(403, serde_json::json!({ "message": "Forbidden" })));
+            }
+            if url.ends_with("/repos/alice/demo/issues/21") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10001,
+                        "number": 21,
+                        "title": "Synthetic issue",
+                        "state": "open",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": "Detailed **Markdown** description for demo #21.",
+                        "comments": 1,
+                        "labels": [{ "name": "bug" }],
+                        "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/other/issues/21/comments") {
+                return Ok(json(200, serde_json::json!([])));
+            }
+            if url.ends_with("/repos/alice/other/issues/21") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10002,
+                        "number": 21,
+                        "title": "Other repository issue #21",
+                        "state": "closed",
+                        "state_reason": "completed",
+                        "user": { "id": 1, "login": "alice", "avatar_url": null },
+                        "body": null,
+                        "comments": 0,
+                        "labels": [],
+                        "created_at": "2026-10-28T09:00:00Z",
+                        "updated_at": "2026-10-28T09:30:00Z"
+                    }),
+                ));
             }
             if url.contains("/search/issues") {
                 // Global work lists use `is:issue`/`is:pr`; Home uses `involves:`. Decode the
@@ -366,6 +588,31 @@ impl Transport for PageTransport {
                 });
             }
             if url.ends_with("/graphql") {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(
+                    request.body.as_deref().unwrap_or_default(),
+                ) && payload["query"]
+                    .as_str()
+                    .is_some_and(|query| query.starts_with("query PRConversation"))
+                {
+                    let vars = &payload["variables"];
+                    let number = vars["number"].as_u64().unwrap();
+                    // #42 is the notification-driven PR fixture; its body differs from the
+                    // Issue #42 body so the test proves the PR conversation itself was read.
+                    let body = match number {
+                        5 => PR_FIXTURE_BODY,
+                        21 => "PR **description** for demo #21.",
+                        42 => "Pull request body reached from a notification click.",
+                        _ => "",
+                    };
+                    return Ok(graphql_ok(serde_json::json!({"repository": {
+                        "nameWithOwner": format!("{}/{}", vars["owner"].as_str().unwrap(), vars["name"].as_str().unwrap()),
+                        "pullRequest": {"number": number, "title": "Stream the index",
+                            "state": if number == 5 { "MERGED" } else { "OPEN" }, "isDraft": number == 7,
+                            "author": {"login": "bob"}, "body": body,
+                            "baseRefName": "main", "headRefName": "feature/stream", "headRef": null,
+                            "headRepository": {"nameWithOwner": "bob/demo"}}
+                    }})));
+                }
                 // Home/Profile tests can distinguish the profile query from repository counts by
                 // the fixed variables/fields in the body.
                 if body.contains("Pinned") || body.contains("itemShowcase") {
@@ -398,6 +645,33 @@ impl Transport for PageTransport {
                         "bio": "Another user", "followers": 2, "following": 1
                     }),
                 ));
+            }
+            if self.long_pr_body {
+                const COMMIT: &str = "2222222222222222222222222222222222222222";
+                const TREE: &str = "3333333333333333333333333333333333333333";
+                const BLOB: &str = "5c7e77fdc11e53409b877f790a77782f75d92ea9";
+                if url.ends_with("/repos/alice/demo/commits/main")
+                    || url.ends_with(&format!("/repos/alice/demo/commits/{COMMIT}"))
+                {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({"sha": COMMIT, "commit": {"message": "Index diagram fixture", "tree": {"sha": TREE}}}),
+                    ));
+                }
+                if url.ends_with(&format!("/repos/alice/demo/git/trees/{TREE}")) {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({"sha": TREE, "truncated": false, "tree": [
+                            {"path": "index.svg", "type": "blob", "mode": "100644", "size": 111, "sha": BLOB}
+                        ]}),
+                    ));
+                }
+                if url.ends_with(&format!("/repos/alice/demo/git/blobs/{BLOB}")) {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({"sha": BLOB, "size": 111, "encoding": "base64", "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIyNCI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjI0IiBmaWxsPSJibHVlIi8+PC9zdmc+"}),
+                    ));
+                }
             }
             if url == "https://api.github.com/repos/alice/demo" {
                 return Ok(json(
@@ -1199,7 +1473,7 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
         long_pr_body: true,
         ..Default::default()
     });
-    let (shell, controller, cx) = open_shell(cx, transport);
+    let (shell, controller, cx) = open_shell(cx, transport.clone());
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(1100.0)));
     login(&controller, cx);
     wait_until(&controller, cx, |accounts| {
@@ -1233,6 +1507,26 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
                 number: 5,
             }
         );
+        wait_for_bounds(cx, "pr-conversation-body");
+        wait_for_bounds(cx, "markdown-heading-0");
+        wait_for_bounds(cx, "pr-comment-501");
+        shell.read_with(cx, |shell, cx| {
+            let pr = shell
+                .pull_request_summary_for_test(cx)
+                .expect("mounted PR summary");
+            assert_eq!(pr.body.as_deref(), Some(PR_FIXTURE_BODY));
+            assert_eq!(pr.state, crate::domain::pr_conversation::State::Merged);
+            assert_eq!(
+                (&*pr.base_branch, &*pr.head_branch),
+                ("main", "feature/stream")
+            );
+            assert_eq!(
+                pr.source_branch,
+                crate::domain::pr_conversation::SourceBranch::Deleted {
+                    repository: "bob/demo".into()
+                }
+            );
+        });
         let active = shell.update(cx, |shell, _| {
             assert_eq!(
                 shell.workspace().sessions().len(),
@@ -1251,6 +1545,63 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
         });
         cx.run_until_parked();
     }
+    assert_eq!(transport.seen("/repos/alice/demo/issues/5/comments"), 1);
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.activate_tab_for_test(first_tab.unwrap(), window, cx);
+    });
+    wait_for_bounds(cx, "markdown-picture-frame-2");
+    wait_for_bounds(cx, "markdown-picture-frame-1");
+    let heading = cx.debug_bounds("markdown-heading-0").unwrap();
+    cx.simulate_click(
+        gpui::point(heading.left() + gpui::px(8.0), heading.center().y),
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/alice/demo/blob/HEAD/docs/design.md#decisions")
+    );
+    wait_for_bounds(cx, "pr-comments-load-more");
+    let more = cx.debug_bounds("pr-comments-load-more").unwrap();
+    cx.simulate_click(
+        gpui::point(more.left() + gpui::px(35.0), more.center().y),
+        gpui::Modifiers::none(),
+    );
+    wait_for_bounds(cx, "pr-comment-502");
+    assert!(cx.debug_bounds("pr-comment-501").is_some());
+
+    transport
+        .pr_comments_status
+        .store(503, std::sync::atomic::Ordering::Relaxed);
+    wait_for_bounds(cx, "tab-refresh");
+    let refresh = cx.debug_bounds("tab-refresh").unwrap();
+    cx.simulate_click(refresh.center(), gpui::Modifiers::none());
+    wait_for_bounds(cx, "pr-comments-retry");
+    assert!(cx.debug_bounds("pr-conversation-body").is_some());
+    assert!(cx.debug_bounds("pr-comment-502").is_some());
+    assert!(cx.debug_bounds("pr-comments-empty").is_none());
+
+    transport
+        .pr_comments_status
+        .store(403, std::sync::atomic::Ordering::Relaxed);
+    let retry = cx.debug_bounds("pr-comments-retry").unwrap();
+    cx.simulate_click(retry.center(), gpui::Modifiers::none());
+    wait_for_bounds(cx, "compact-failed-Could not read this pull request");
+    assert!(cx.debug_bounds("pr-conversation-body").is_none());
+    assert!(cx.debug_bounds("pr-comment-501").is_none());
+
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(
+            Route::PullRequest {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 7,
+            },
+            window,
+            cx,
+        )
+    });
+    wait_for_bounds(cx, "pr-conversation-empty-body");
+    wait_for_bounds(cx, "pr-comments-empty");
 }
 
 fn wait_for_bounds(cx: &mut VisualTestContext, selector: &'static str) {
@@ -1292,10 +1643,128 @@ fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut Tes
     });
     cx.run_until_parked();
     wait_for_bounds(cx, "notification-row-0");
-    assert!(cx.debug_bounds("notification-row-1").is_some());
+    assert!(cx.debug_bounds("notification-row-3").is_some());
     assert!(transport.seen("/notifications") >= 1, "the inbox is read");
+    let notifications_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
 
-    // The repository link is a real typed navigation into the application, never a browser hop.
+    // A verified Issue subject opens the real Issue detail surface and reads that issue's body,
+    // not just a route value: the fixture only serves #42 from the issue endpoints.
+    let issue_title = cx
+        .debug_bounds("notification-title-0")
+        .expect("issue title");
+    cx.simulate_click(issue_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 42,
+        }
+    );
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-401");
+    assert!(transport.seen("/repos/alice/demo/issues/42") >= 1);
+    let demo_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(demo_issue_tab, notifications_tab);
+
+    // Reopening the same notification reuses the same Issue tab instead of duplicating it.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-0");
+    let issue_title = cx
+        .debug_bounds("notification-title-0")
+        .expect("issue title");
+    cx.simulate_click(issue_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        demo_issue_tab,
+        "the same notification issue reuses its tab"
+    );
+
+    // A Pull Request notification with the same repository and number is a distinct typed
+    // destination: PR conversation mounting belongs to the pr-conversation task.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-1");
+    let pull_title = cx
+        .debug_bounds("notification-title-1")
+        .expect("pull request title");
+    cx.simulate_click(pull_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::PullRequest {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 42,
+        }
+    );
+    // The PR conversation page (delivered by #109) reads its own body and comments.
+    wait_for_bounds(cx, "pr-conversation-body");
+    wait_for_bounds(cx, "pr-comment-401");
+    view.read_with(cx, |shell, cx| {
+        let pr = shell
+            .pull_request_summary_for_test(cx)
+            .expect("mounted PR summary");
+        assert_eq!(
+            pr.body.as_deref(),
+            Some("Pull request body reached from a notification click."),
+            "the notification PR must open its own real conversation body"
+        );
+    });
+    let pull_request_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(pull_request_tab, demo_issue_tab);
+
+    // The same issue number in another repository opens its own issue, proving the repository
+    // identity is part of the target rather than only the number.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-2");
+    let other_title = cx
+        .debug_bounds("notification-title-2")
+        .expect("other repository issue title");
+    cx.simulate_click(other_title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "other".into(),
+            number: 42,
+        }
+    );
+    wait_for_bounds(cx, "issue-detail-body");
+    let other_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(other_issue_tab, demo_issue_tab);
+    assert_ne!(other_issue_tab, pull_request_tab);
+
+    // An official-shape `github.com` subject URL is not a match: the title stays inert.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Notifications, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "notification-title-3");
+    let opaque = cx
+        .debug_bounds("notification-title-3")
+        .expect("opaque subject title");
+    cx.simulate_click(opaque.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Notifications,
+        "an unreliable subject keeps the previous non-navigating behavior"
+    );
+
+    // The repository link is a real typed navigation into the application, never a browser hop,
+    // and stays independent of the subject title on the same row.
     let repository_link = cx
         .debug_bounds("notification-repository-0")
         .expect("repository link");
@@ -1316,13 +1785,18 @@ fn notifications_route_reads_routes_repositories_and_completes_done(cx: &mut Tes
     cx.run_until_parked();
     wait_for_bounds(cx, "notification-row-0");
 
-    // Done is the real DELETE semantics; the confirmed thread leaves the inbox row set.
+    // Done is the real DELETE semantics; the confirmed thread leaves the inbox row set and never
+    // fires a subject navigation.
     let done = cx
         .debug_bounds("notification-action-done-0")
         .expect("Done control");
     cx.simulate_click(done.center(), gpui::Modifiers::none());
     cx.run_until_parked();
-    wait_for_gone(cx, "notification-row-1");
+    wait_for_gone(cx, "notification-row-3");
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Notifications
+    );
     assert!(transport.wrote("DELETE") >= 1);
     assert!(transport.wrote("notifications/threads/9001") >= 1);
 }
@@ -1371,4 +1845,394 @@ fn issues_and_pull_requests_read_distinct_lists_and_reuse_their_tabs(cx: &mut Te
         "re-opening Pull requests reuses the same tab"
     );
     assert!(transport.seen("/search/issues") >= 2);
+}
+
+#[gpui::test]
+fn repository_issue_list_opens_real_detail_and_returns_to_the_same_scroll(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (shell, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(&controller, cx, |accounts| {
+        matches!(&accounts.snapshot().repositories.preview,
+        crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2)
+    });
+    let repository = Route::Repository {
+        namespace: "alice".into(),
+        name: "demo".into(),
+    };
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(repository.clone(), window, cx)
+    });
+    let repo_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    wait_for_bounds(cx, "repository-tab-issues");
+    let tab = cx.debug_bounds("repository-tab-issues").unwrap();
+    cx.simulate_click(tab.center(), gpui::Modifiers::none());
+    let drain_until = |selector: &'static str, cx: &mut VisualTestContext| {
+        for _ in 0..400 {
+            cx.update_window_entity(&shell, |shell, window, cx| {
+                shell.drain_all_pages_for_test(window, cx)
+            });
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            if cx.debug_bounds(selector).is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("{selector} did not appear");
+    };
+    drain_until("repository-issues-more", cx);
+    let more = cx.debug_bounds("repository-issues-more").unwrap();
+    cx.simulate_click(more.center(), gpui::Modifiers::none());
+    for _ in 0..400 {
+        cx.update_window_entity(&shell, |shell, window, cx| {
+            shell.drain_all_pages_for_test(window, cx)
+        });
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        if cx.debug_bounds("repository-issues-more").is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(transport.seen("/repos/alice/demo/issues?"), 3);
+    let viewport = cx.debug_bounds("repository-issues-viewport").unwrap();
+    cx.simulate_event(gpui::ScrollEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-3000.))),
+        modifiers: gpui::Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+        ..Default::default()
+    });
+    drain_until("repository-issue-title-21", cx);
+    let title = cx.debug_bounds("repository-issue-title-21").unwrap();
+    assert!(viewport.contains(&title.center()));
+    cx.simulate_click(title.center(), gpui::Modifiers::none());
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21
+        }
+    );
+    let detail = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.close_tab(detail, window, cx)
+    });
+    wait_for_bounds(cx, "repository-issue-title-21");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.active_tab_id()),
+        repo_tab
+    );
+    assert_eq!(cx.debug_bounds("repository-issue-title-21").unwrap(), title);
+    assert_eq!(transport.seen("/repos/alice/demo/issues?"), 3);
+}
+
+#[gpui::test]
+fn global_issues_title_opens_reuses_and_isolates_issue_detail_while_repo_link_stays_separate(
+    cx: &mut TestAppContext,
+) {
+    let transport = Arc::new(PageTransport::default());
+    let (view, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(
+        &controller,
+        cx,
+        |accounts| matches!(&accounts.snapshot().repositories.preview, crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2),
+    );
+
+    // 1. Open Global Issues list.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-10001");
+    let issues_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+
+    // 2. Click the issue title -> opens Route::Issue and renders body + comments.
+    let title_bounds = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(title_bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+    let demo_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21,
+        }
+    );
+
+    // 3. Re-opening the same issue from the Issues list reuses the existing detail tab.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-title-10001");
+    let title_bounds = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(title_bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        demo_issue_tab,
+        "clicking the same issue title twice must reuse its tab"
+    );
+
+    // 4. Repository link on the same row still opens Route::Repository.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "work-repo-10001");
+    let repo_bounds = cx.debug_bounds("work-repo-10001").expect("repo link");
+    cx.simulate_click(repo_bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Repository {
+            namespace: "alice".into(),
+            name: "demo".into(),
+        }
+    );
+
+    // 5. Same number in another repository and same repo+number as PR get distinct tabs.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "other".into(),
+                number: 21,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-empty-body");
+    wait_for_bounds(cx, "issue-detail-empty-comments");
+    let other_issue_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(other_issue_tab, demo_issue_tab);
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::PullRequest {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 21,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let pr_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    assert_ne!(pr_tab, demo_issue_tab);
+    assert_ne!(pr_tab, other_issue_tab);
+
+    // 6. Trigger tab-refresh on active Issue detail tab.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 21,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let before_issue_reads = transport.seen("/repos/alice/demo/issues/21");
+    let refreshed = cx.update_window_entity(&view, |shell, window, cx| {
+        shell.refresh_active_page(window, cx)
+    });
+    assert!(refreshed, "tab-refresh must be enabled on Route::Issue");
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-body");
+    assert!(transport.seen("/repos/alice/demo/issues/21") > before_issue_reads);
+
+    // 7. Closing the issue detail tab returns cleanly to the Issues list with its rows intact.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.workspace().close(demo_issue_tab, cx);
+        shell.navigate(Route::Issues, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.active_tab_id()),
+        issues_tab
+    );
+    wait_for_bounds(cx, "work-item-10001");
+}
+
+#[gpui::test]
+fn cold_start_async_account_restore_opens_visible_issue_detail_once_paginates_returns_and_reopens(
+    cx: &mut TestAppContext,
+) {
+    // Prepare an AccountService with an already-saved signed-in account (just like
+    // `examples/issue_detail.rs` and cold-start with a saved account directory).
+    let transport = Arc::new(PageTransport::default());
+    let temp = tempfile::tempdir().unwrap();
+    let executor = Arc::new(BackgroundExecutor::new(4));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let accounts_service = runtime.block_on(async {
+        let service = AccountService::open(
+            AccountDatabaseConfig::at(temp.path().join("accounts.sqlite3")),
+            Arc::new(InMemoryCredentialStore::new()),
+            Arc::new(GitHubClient::new(
+                GitHubConfig::default(),
+                transport.clone() as Arc<dyn Transport>,
+            )),
+            executor.clone(),
+        )
+        .await
+        .unwrap();
+        service
+            .login(crate::auth::token::Pat::new(
+                "ghp_cold_start_token".to_string(),
+            ))
+            .await
+            .unwrap();
+        service
+    });
+    std::mem::forget(temp);
+    let account_runtime = Arc::new(AccountRuntime::new(accounts_service, executor));
+
+    cx.update(|cx| {
+        ely_core::init_for_tests(cx);
+        crate::app::theme::install(cx);
+        crate::ui::Shell::bind_keys(cx);
+    });
+
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let controller = cx.new(|cx| Accounts::new(Some(account_runtime.clone()), window, cx));
+        cx.set_global(AccountsHandle(controller.clone()));
+        let shell = Shell::new(window, cx);
+
+        // Product Shell itself still starts on Home until the preview observer reacts to the
+        // async account restoration.
+        assert_eq!(shell.route(), Route::Home);
+
+        // Same one-shot event-driven bootstrap used by `examples/issue_detail.rs` (no sleep).
+        let shell_weak = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let mut opened = false;
+        cx.observe(&controller, move |_, accounts, cx| {
+            if opened || accounts.read(cx).snapshot().active.is_none() {
+                return;
+            }
+            opened = true;
+            let shell_weak = shell_weak.clone();
+            let _ = window_handle.update(cx, move |_, window, cx| {
+                window.defer(cx, move |window, cx| {
+                    let _ = shell_weak.update(cx, |shell, cx| {
+                        shell.navigate(Route::Issues, window, cx);
+                        shell.navigate(
+                            Route::Issue {
+                                namespace: "alice".into(),
+                                name: "demo".into(),
+                                number: 21,
+                            },
+                            window,
+                            cx,
+                        );
+                    });
+                });
+            });
+        })
+        .detach();
+        shell
+    });
+    let controller = cx.read(AccountsHandle::get).expect("installed controller");
+
+    // Wait for async account restore -> Shell::sync_accounts -> one-shot preview bootstrap.
+    wait_until(&controller, cx, |accounts| {
+        accounts.snapshot().active.is_some()
+    });
+    cx.run_until_parked();
+
+    // 1. Landed directly on `alice/demo #21` with real visible body and page-1 comment.
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21,
+        }
+    );
+    wait_for_bounds(cx, "issue-detail-title");
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+    wait_for_bounds(cx, "issue-detail-load-more");
+
+    // 2. Paginate comments via Load more button: page 2 appends without wiping body or page 1.
+    let load_more = cx
+        .debug_bounds("issue-detail-load-more")
+        .expect("Load more comments button");
+    cx.simulate_click(load_more.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-comment-302");
+    assert!(cx.debug_bounds("issue-detail-body").is_some());
+    assert!(cx.debug_bounds("issue-comment-301").is_some());
+
+    // 3. Close the detail tab -> automatically activates left neighbour `Route::Issues`.
+    let detail_tab = view.read_with(cx, |shell, _| shell.active_tab_id());
+    cx.update_window_entity(&view, |shell, _, cx| {
+        shell.workspace().close(detail_tab, cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |shell, _| shell.route()), Route::Issues);
+    wait_for_bounds(cx, "work-title-10001");
+
+    // A later Accounts notification must NOT re-trigger the one-shot bootstrap.
+    controller.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.route()),
+        Route::Issues,
+        "one-shot bootstrap must not fire again after closing detail"
+    );
+
+    // 4. Reopen `alice/demo #21` by clicking its title in Global Issues.
+    let title = cx.debug_bounds("work-title-10001").expect("issue title");
+    cx.simulate_click(title.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+
+    // 5. Missing (404) and permission denied (403) render distinct error states in Shell.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 404,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-error-missing");
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(
+            Route::Issue {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 403,
+            },
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    wait_for_bounds(cx, "issue-detail-error-permission");
 }

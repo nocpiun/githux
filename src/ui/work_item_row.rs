@@ -99,6 +99,8 @@ pub(crate) struct Selectors {
 
 /// How the repository part of the metadata line is presented.
 pub(crate) enum RepositoryLink {
+    /// The repository-scoped list omits the repository label from each row.
+    Omitted,
     /// One link carrying `owner/name` (global lists).
     Whole { label: String, action: RowAction },
     /// An owner profile link, a separator, then the repository link (Home).
@@ -127,6 +129,12 @@ pub(crate) struct Row {
     pub show_selected_bar: bool,
     pub on_row_click: Option<RowAction>,
     pub on_title_click: Option<TitleAction>,
+    /// Pointer activation for the row's visible identity decorations: the leading icon and the
+    /// `#number` cell. They address the same work item as the title, so a click anywhere on those
+    /// identity bits must do the same thing. They stay out of the tab order: the title remains the
+    /// single keyboard and screen-reader entry point. `None` leaves them purely decorative (global
+    /// lists and rows whose caller supplied no destination).
+    pub on_identity_click: Option<RowAction>,
 }
 
 /// One linking text cell.
@@ -332,9 +340,21 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         metadata = metadata.debug_selector(move || debug);
     }
     let mut number = div()
+        .id(SharedString::from(format!("{}-number", selectors.row)))
         .flex_none()
         .font_family(mono)
         .child(format!("#{}", row.number));
+    if let Some(action) = row.on_identity_click.clone() {
+        number = number
+            .cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                action(window, cx);
+            });
+    }
     if let Some(debug) = selectors.number.clone() {
         number = number.debug_selector(move || debug);
     }
@@ -342,6 +362,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
     // Only the repository slot grows. Its nested horizontal flex rows keep each link at
     // its intrinsic text width (or its truncated width), leaving the trailing slack inert.
     match row.repository {
+        RepositoryLink::Omitted => {}
         RepositoryLink::Whole { label, action } => {
             metadata = metadata.child(action_link(
                 LinkCell {
@@ -461,10 +482,25 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .text_size(body)
         .child({
             let mut icon_slot = div()
+                .id(SharedString::from(format!("{}-icon-target", selectors.row)))
                 .flex_none()
                 .flex()
                 .items_center()
                 .child(Icon::new(icon).size(IconSize::Sm).color(color));
+            // The icon is part of the row's identity, so a pointer click on it must do what a
+            // title click does. The hit area stays the icon itself: the blank space beside the
+            // title stays inert, and the title remains the single keyboard entry point.
+            if let Some(action) = row.on_identity_click.clone() {
+                icon_slot = icon_slot
+                    .cursor_pointer()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                        window.prevent_default()
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        action(window, cx);
+                    });
+            }
             if let Some(debug) = selectors.icon.clone() {
                 icon_slot = icon_slot.debug_selector(move || debug);
             }

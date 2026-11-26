@@ -23,6 +23,27 @@
 - 时间复用 Home 已验收的 `relative`（抽取到 `src/ui/relative_time.rs`），显示 Just now / N minutes ago / N hours ago / Yesterday / N days ago，绝对时间只放 tooltip；无效为 Time unavailable、未来为 In the future，不伪装成功 ago。可见时一个 30 秒低频本地时钟刷新，隐藏/释放/失活不留下计时任务，且不触发任何 GitHub 请求。
 - 顶部只显示已加载行数 `N`（无 `loaded` 字样），tooltip/无障碍说明它只是当前视图已加载数量，不是远端未读总数。
 
+## 主题直达（2026-11-24，2026-11-26 打通 Issue）
+
+标题只有在能可靠识别为 Issue/PR 时才成为应用内链接，其他通知保持原有“标题无动作”行为。识别在 domain 层完成，不读取 subject URL：只接受 `https://api.github.com/repos/{owner}/{repo}/(issues|pulls)/{number}`，且要求
+
+- scheme 为 `https`、host 精确为 `api.github.com`、默认 443 端口，拒绝 userinfo、query、fragment；
+- `owner/repo` 与本条通知的 typed `RepositoryIdentity` 精确一致；
+- subject 类型与路径一致：Issue 只接受 `issues`，PullRequest 只接受 `pulls`；其它类型（Release/Commit/Discussion/Unknown）一律不匹配；
+- 编号是正的十进制整数，拒绝 `0`、符号、空白、前导零和溢出。
+
+缺 URL、错 host、错仓库、错路径/类型或编号不合法时返回 `None`，标题仍是不可点击的普通文本，不跳 GitHub、不请求 URL、不猜测详情地址。匹配成功且宿主声明支持该类型时，标题才是独立 link（tooltip/无障碍名称标明目标），点击只发出 typed `SubjectNavigation(context, target)`；宿主未声明的类型保持普通文本，不制造无效链接。仓库链接和 Done/Unsubscribe/Save for later 三个按钮保持各自动作，click 都会停止向父级传播。
+
+宿主 `src/app/pages/notifications.rs` 通过 `on_subject(callback, can_open)` 声明能力，并在打开路由前重新核验 `RepoService::is_current(context)`；组件自身也先用 `controller.verify()` 拒绝账户切换后的旧行。Issue 与 PullRequest 都路由到各自的 typed 详情页：Issue 用 `Route::Issue`（#106），PullRequest 用 `Route::PullRequest`（#109 的对话页）。二者即便同仓库同编号也是不同路由与不同 tab。两者都已落 main，Shell 回归同时断言通知 Issue #42 的正文/评论与通知 PR #42 的对话正文/评论。
+
+回归覆盖 domain 的 host/owner/repo/type/number 正反例，UI 的“可靠且已声明支持的行打开、不可靠或未声明支持的行保持普通文本、仓库链接与按钮独立、切账号旧行无效”，以及正式 Shell 中通知 Issue #42 真正渲染 issue 正文与评论、同通知复用同一 tab、同仓库同编号的 PR 走另一条路由、另一个仓库的同号 Issue 另开 tab、`github.com` HTML subject 保持原位、仓库链接与 Done 独立。
+
+### 无真实未读通知时的验收方式
+
+1. `node scripts/verify.mjs -- cargo test --locked --bins notifications_route_reads_routes_repositories_and_completes_done`：这是真实 Shell + 真实页面宿主 + 真实通知控制器，只把 GitHub 换成确定性 fixture；它断言点击通知 Issue 行后 `issue-detail-body` 与 `issue-comment-401` 出现，点击通知 PR 行后 `pr-conversation-body`、`pr-comment-401` 与该 PR 自己的正文出现。
+2. `node scripts/verify.mjs -- cargo run --locked --example notifications`：离线预览，`Subject targets` 场景里前两条提供可靠 Issue/PR 目标；宿主回调在底部状态行显示解析出的 `issue #123` / `pull request #77`，可直接观察哪些行成为链接、哪些保持普通文本。
+3. 若要在正式应用里看到真实 Issue 正文，需要账户确有未读通知；没有时用上面的 fixture 断言作为等价证据，或先在该账户任意仓库制造一条通知（例如给自己参与 issue 留言）后刷新 Notifications。
+
 ## 数据和控制器
 
 - `src/domain/notification.rs` 定义 thread、subject、partial 和错误。未知 subject 类型保留为 `Unknown`；未知 reason 安全显示 Other notification。subject/comment/repository URL 不发起读取、不变成导航地址。

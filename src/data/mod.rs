@@ -35,11 +35,13 @@ mod account_concurrency_tests;
 mod account_tests;
 mod accounts;
 pub mod avatar_cache;
+pub mod issue_detail;
 pub mod notifications;
 pub mod page_cache;
 #[cfg(test)]
 mod page_read_tests;
 mod page_reads;
+mod pr_conversation;
 pub mod reader_image_cache;
 pub mod reader_images;
 pub mod repository;

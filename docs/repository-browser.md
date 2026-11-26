@@ -16,9 +16,17 @@
 
 ## 页面结构
 
-沿用已确认的仓库页面结构：仓库摘要 → 横向页内内容 Tabs → Code 区域的左文件树/右阅读器。页内 Tabs 与应用级 workspace 标签是两层不同导航，不共用状态。本轮只有 **Code** 有内容，其余 Tabs（Issues、Pull requests、Releases、Settings）沿用确认的名称、样式与顺序，内容区直接留空，不添加“未实现”卡片、假设置或复制的 GitHub 功能菜单。Releases/Contributors/Languages 由内嵌的独立 overview 组件渲染；内部仍可复用，不复制其摘要实现。
+沿用已确认的仓库页面结构：仓库摘要 → 横向页内内容 Tabs → Code 区域的左文件树/右阅读器，或 Issues 列表。页内 Tabs 与应用级 workspace 标签各自保存状态。Pull requests、Releases、Settings 的内容区留空。Releases/Contributors/Languages 由内嵌的独立 overview 组件渲染；内部仍可复用，不复制其摘要实现。
 
 切出 Code 不再绘制树与正文，但保留 Code 导航意图（分支/选中路径/展开目录）；切回时若当前授权仍有效则恢复，失效则先重新验证，绝不恢复旧授权。
+
+## 仓库 Issues
+
+Issues 默认选中 Open，可切换为 Closed。页面使用当前已授权仓库的 `GET /repos/{owner}/{repo}/issues`，按创建时间降序读取，每个源页 30 条。只展示没有 `pull_request` 字段的条目，保留 GitHub 续页游标。每批最多检查四个源页，过滤空页会继续直到找到问题、到达末页或发生错误。有可见结果时通过 **Load more** 续页。按仓库内编号去重。成功到达末页且未找到 Issue 时显示空状态。失败可重试原请求。 [GitHub 仓库 Issues](https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#list-repository-issues) · [GitHub REST 分页](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)
+
+首批快照按账户分区、仓库数字 ID 和筛选隔离。进入列表可先显示允许使用的缓存，并并行在线刷新。手动刷新保留当前行直到收到新结果。网络失败可保留已有行，缓存回退显示 `Cached`。明确的读取权限失败清空列表并提供重试，沿用缓存授权账本处理凭据拒绝、确认撤权及模糊 403/404。续页只加入同一次在线读取的列表，缓存快照要在线验证后才可继续翻页。
+
+条目复用共享工作条目行，显示标题、编号、状态和更新时间。方向键、Home/End 移动列表选择，Enter、标题或整行点击发出携带账户上下文、仓库和编号的 `PageAction::OpenIssue`。普通工作区切换保留仓库页实例，因此也保留筛选、翻页结果与滚动位置。正式 Shell 复核当前账户后用 `Route::Issue` 打开或复用对应详情标签。无 PAT 预览与组合验收步骤见[开发日志](devlog/2026-11-24-repo-issue-list.md)。
 
 ## 正式 Shell 接入（2026-10-29）
 

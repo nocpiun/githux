@@ -100,12 +100,19 @@ pub(crate) fn state_for_active_page(
             Some(MountedPage::WorkItems(page)) => page.read(cx).refresh_state(cx),
             _ => RefreshState::disabled("Sign in to refresh Issues"),
         },
+        Route::Issue { .. } => match page {
+            Some(MountedPage::IssueDetail(page)) => page.read(cx).refresh_state(cx),
+            _ => RefreshState::disabled("Sign in to refresh Issue"),
+        },
         Route::PullRequests => match page {
             Some(MountedPage::WorkItems(page)) => page.read(cx).refresh_state(cx),
             _ => RefreshState::disabled("Sign in to refresh Pull Requests"),
         },
         Route::Settings => RefreshState::disabled("Settings has no remote data to refresh"),
-        Route::PullRequest { .. } => RefreshState::disabled("Nothing to refresh on this page"),
+        Route::PullRequest { .. } => match page {
+            Some(MountedPage::PullRequest(page)) => page.read(cx).refresh_state(cx),
+            _ => RefreshState::disabled("Sign in to refresh pull request"),
+        },
     }
 }
 
@@ -113,7 +120,12 @@ pub(crate) fn state_for_active_page(
 ///
 /// Returns `true` only when a real refresh pass was started. Disabled routes, unmounted pages,
 /// cooldown windows, and already-refreshing pages return `false` without issuing duplicate work.
-pub(crate) fn refresh_active_page(route: &Route, page: Option<&MountedPage>, cx: &mut App) -> bool {
+pub(crate) fn refresh_active_page(
+    route: &Route,
+    page: Option<&MountedPage>,
+    window: &gpui::Window,
+    cx: &mut App,
+) -> bool {
     if !state_for_active_page(route, page, cx).is_ready() {
         return false;
     }
@@ -132,6 +144,12 @@ pub(crate) fn refresh_active_page(route: &Route, page: Option<&MountedPage>, cx:
         }
         (Route::Issues | Route::PullRequests, Some(MountedPage::WorkItems(page))) => {
             page.update(cx, |page, cx| page.refresh(cx))
+        }
+        (Route::Issue { .. }, Some(MountedPage::IssueDetail(page))) => {
+            page.update(cx, |page, cx| page.refresh(cx))
+        }
+        (Route::PullRequest { .. }, Some(MountedPage::PullRequest(page))) => {
+            page.update(cx, |page, cx| page.refresh(window, cx))
         }
         _ => false,
     }
@@ -167,6 +185,16 @@ pub(crate) fn observe_page(
             }
         }),
         MountedPage::WorkItems(entity) => cx.observe(entity, move |shell, _, cx| {
+            if shell.workspace.active_id() == tab {
+                cx.notify();
+            }
+        }),
+        MountedPage::IssueDetail(entity) => cx.observe(entity, move |shell, _, cx| {
+            if shell.workspace.active_id() == tab {
+                cx.notify();
+            }
+        }),
+        MountedPage::PullRequest(entity) => cx.observe(entity, move |shell, _, cx| {
             if shell.workspace.active_id() == tab {
                 cx.notify();
             }

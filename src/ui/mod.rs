@@ -43,10 +43,12 @@ pub mod global_work_items;
 pub mod home;
 pub(crate) mod interaction;
 mod island;
+pub mod issue_detail;
 pub mod notifications;
 mod page;
 pub(crate) mod page_layout;
 mod palette;
+pub(crate) mod pr_conversation;
 pub mod profile;
 pub mod reader;
 pub(crate) mod relative_time;
@@ -586,6 +588,15 @@ impl Shell {
                     cx,
                 )
             }))),
+            Route::Issue {
+                namespace,
+                name,
+                number,
+            } => Some(crate::app::pages::MountedPage::IssueDetail(cx.new(|cx| {
+                crate::app::pages::IssueDetailPage::new(
+                    namespace, name, *number, services, navigation, avatars, window, cx,
+                )
+            }))),
             Route::PullRequests => Some(crate::app::pages::MountedPage::WorkItems(cx.new(|cx| {
                 crate::app::pages::WorkItemsPage::new(
                     crate::domain::work_item::WorkItemKind::PullRequest,
@@ -595,7 +606,15 @@ impl Shell {
                     cx,
                 )
             }))),
-            Route::PullRequest { .. } => None,
+            Route::PullRequest {
+                namespace,
+                name,
+                number,
+            } => Some(crate::app::pages::MountedPage::PullRequest(cx.new(|cx| {
+                crate::app::pages::PullRequestPage::new(
+                    namespace, name, *number, services, window, cx,
+                )
+            }))),
         };
         if let Some(page) = page {
             self.insert_page(id, page, cx);
@@ -618,10 +637,10 @@ impl Shell {
         shell_refresh::state_for_active_page(self.workspace.route(), self.pages.get(&id), cx)
     }
 
-    pub(crate) fn refresh_active_page(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn refresh_active_page(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         let id = self.workspace.active_id();
         let route = self.workspace.route().clone();
-        let started = shell_refresh::refresh_active_page(&route, self.pages.get(&id), cx);
+        let started = shell_refresh::refresh_active_page(&route, self.pages.get(&id), window, cx);
         if started {
             cx.notify();
         }
@@ -831,7 +850,9 @@ impl Shell {
             }
             Some(
                 crate::app::pages::MountedPage::Notifications(_)
-                | crate::app::pages::MountedPage::WorkItems(_),
+                | crate::app::pages::MountedPage::WorkItems(_)
+                | crate::app::pages::MountedPage::IssueDetail(_)
+                | crate::app::pages::MountedPage::PullRequest(_),
             ) => ("global", ([0, 0], false)),
             None => ("none", ([0, 0], false)),
         }
@@ -901,8 +922,21 @@ impl Shell {
                     crate::app::pages::drain_repository_for_test(page, window, cx);
                 }
                 crate::app::pages::MountedPage::Notifications(_)
-                | crate::app::pages::MountedPage::WorkItems(_) => {}
+                | crate::app::pages::MountedPage::WorkItems(_)
+                | crate::app::pages::MountedPage::IssueDetail(_)
+                | crate::app::pages::MountedPage::PullRequest(_) => {}
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pull_request_summary_for_test<'a>(
+        &self,
+        cx: &'a App,
+    ) -> Option<&'a crate::domain::pr_conversation::Conversation> {
+        match self.pages.get(&self.workspace.active_id())? {
+            crate::app::pages::MountedPage::PullRequest(page) => page.read(cx).summary_for_test(cx),
+            _ => None,
         }
     }
 
@@ -2387,8 +2421,10 @@ impl Shell {
         let settings_route = self.workspace.route() == &Route::Settings;
         let session_id = self.workspace.active_id();
         let settings = settings_route.then(|| self.settings_accounts(window, cx));
+        let pull_request_route = matches!(self.workspace.route(), Route::PullRequest { .. });
         let mounted = self.mounted_page(session_id, window, cx);
-        let outer_scroll = mounted.is_none();
+        let outer_scroll = mounted.is_none() || pull_request_route;
+        let page_bar = settings_route || pull_request_route;
         let (body, scroll, smooth, focus) = {
             let session = self.workspace.active();
             (
@@ -2403,7 +2439,7 @@ impl Shell {
         // its bar targets the very `Motion` the page's wheel overlay already drives. One handle,
         // one easing, one fade and one drag owner; nothing here re-implements `ui::scroll`.
         let now = self.tab_now_ms();
-        let settings_bar = if settings_route {
+        let settings_bar = if page_bar {
             let owner = cx.entity_id();
             let bars = self
                 .workspace
@@ -2416,7 +2452,11 @@ impl Shell {
                     target: &bars.smooth,
                     id: scroll::BarId {
                         owner,
-                        name: "settings-scrollbar-y",
+                        name: if settings_route {
+                            "settings-scrollbar-y"
+                        } else {
+                            "pr-conversation-scrollbar"
+                        },
                         axis: gpui::Axis::Vertical,
                     },
                     placement: scroll::Placement::overlay(1.5, 8.0),
@@ -2467,7 +2507,7 @@ impl Shell {
                             .overflow_x_hidden()
                             .track_scroll(&scroll)
                             .track_focus(&focus)
-                            .when(settings_route, |page| {
+                            .when(page_bar, |page| {
                                 // The account page region owns one `Bars`: its bar only shows while
                                 // the pointer is inside this region, exactly like the sidebar and
                                 // the tab strip.
@@ -2593,9 +2633,9 @@ impl Shell {
         let refresh = self.active_refresh_state(cx);
         let on_refresh: tabs::Run = {
             let entity = cx.entity().downgrade();
-            Rc::new(move |_, cx| {
+            Rc::new(move |window, cx| {
                 let _ = entity.update(cx, |shell, cx| {
-                    shell.refresh_active_page(cx);
+                    shell.refresh_active_page(window, cx);
                 });
             })
         };
@@ -2982,10 +3022,13 @@ impl Render for Shell {
         // and only request frames while the fade or the content easing is actually running.
         {
             let session_id = self.workspace.active_id();
-            let settings_route = self.workspace.route() == &Route::Settings;
+            let page_bar = matches!(
+                self.workspace.route(),
+                Route::Settings | Route::PullRequest { .. }
+            );
             let now_ms = self.tab_now_ms();
             if let Some(state) = self.workspace.state_mut(session_id) {
-                if settings_route {
+                if page_bar {
                     if state.bars.dragging().is_some() && !cx.has_active_drag() {
                         let target = state.smooth.clone();
                         if state.bars.settle(&target, now_ms, reduced) {

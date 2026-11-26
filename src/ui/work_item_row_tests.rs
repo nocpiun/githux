@@ -48,6 +48,7 @@ impl Render for ListRow {
                         selected_clicks.set(selected_clicks.get() + 1)
                     })),
                     on_title_click: None,
+                    on_identity_click: None,
                 },
                 cx,
             ))

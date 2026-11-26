@@ -29,6 +29,8 @@ use crate::github::repository_extras::RepositoryExtrasLimits;
 use crate::github::{self, RepositoryLimits};
 use crate::network::cancel::CancellationToken;
 
+mod repository_issues;
+
 /// One captured active-account context shared by every page-domain read.
 /// Clone it for independent concurrent calls; never recapture it between the
 /// steps of a profile README read. It contains no credential.

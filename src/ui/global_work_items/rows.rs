@@ -1,8 +1,10 @@
 //! Global Issues / Pull Requests rows, rendered by the row presentation shared with Home.
-use super::{RepositoryNavigation, WorkItemsView};
-use crate::ui::work_item_row::{self, Glyph, RepositoryLink, Row, RowAction, Selectors, Tone};
+use super::{IssueNavigation, RepositoryNavigation, WorkItemsView};
+use crate::ui::work_item_row::{
+    self, Glyph, RepositoryLink, Row, RowAction, Selectors, TitleAction, Tone,
+};
 use crate::{data::RepositoryReadContext, domain::work_item::*};
-use gpui::{AnyElement, Context};
+use gpui::{AnyElement, Context, Window};
 use std::rc::Rc;
 
 /// The height every global list reserves in its virtual list state; it is the shared row height.
@@ -22,6 +24,7 @@ pub(super) fn row(
     item: &WorkItem,
     selected: bool,
     context: Option<RepositoryReadContext>,
+    has_issue_handler: bool,
     now: std::time::SystemTime,
     cx: &mut Context<WorkItemsView>,
 ) -> AnyElement {
@@ -29,6 +32,35 @@ pub(super) fn row(
     let weak = cx.entity().downgrade();
     let repository = item.repository.clone();
     let label = repository.full_name();
+    let open_issue: Option<TitleAction> = (item.kind == WorkItemKind::Issue && has_issue_handler)
+        .then(|| {
+            let weak = cx.entity().downgrade();
+            let repository = item.repository.clone();
+            let number = item.number;
+            let context = context.clone();
+            Rc::new(
+                move |pointer: bool, window: &mut Window, cx: &mut gpui::App| {
+                    let _ = weak.update(cx, |view, cx| {
+                        if pointer {
+                            view.selected = Some(id);
+                            view.focus.focus(window, cx);
+                            cx.notify();
+                        }
+                        if let Some(context) = &context {
+                            view.navigate_issue(
+                                IssueNavigation {
+                                    context: context.clone(),
+                                    repository: repository.clone(),
+                                    number,
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+                },
+            ) as TitleAction
+        });
     let open_repository: RowAction = Rc::new(move |window, cx| {
         if let Some(context) = &context {
             let _ = weak.update(cx, |view, cx| {
@@ -92,10 +124,11 @@ pub(super) fn row(
             ),
             selected,
             show_selected_bar: false,
-            // The title has no detail destination: selection and activation stay the repository
-            // link's job, exactly as before the shared row.
             on_row_click: Some(select),
-            on_title_click: None,
+            on_title_click: open_issue,
+            // The icon and number stay decorative here: this list already exposes the title as
+            // its single activation target.
+            on_identity_click: None,
         },
         cx,
     )
