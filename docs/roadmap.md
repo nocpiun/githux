@@ -1,6 +1,6 @@
 # 开发路线图
 
-更新：2026-11-06。**首版功能取舍已确认；本文的开发顺序和任务拆分为讨论稿。** 正式 Home/Profile/统一 Repository 页面、Notifications 与全局 Issues/PR 已接线，仓库 Star/Unstar 已接入；缓存存储核心、账户生命周期与各适配器已合并，正式 Shell 已组装唯一应用级 `CacheStore`，Home/Profile（#72/#69）与 Repository（本批 `repository-offline`）已消费快照。最终 Settings 设计与原生整体验收仍需后续交付。本文不承诺日期，也不把路线图建议变成新产品授权。
+更新：2026-11-26。**仓库 Issues 列表、Issue 详情和 PR Conversation 已合入；进入 Windows 日常试用前，先补齐仓库 PR 列表、全局 PR 标题跳转及 Files changed，再统一验收。** [仓库和用户主页的后续功能](#仓库与用户主页的后续功能)单独排期，列入路线图不等于已批准开工。
 
 功能范围以 [产品约定](product.md#首版范围) 为准；状态边界、数据策略及交付规则分别见 [架构方案](architecture.md)、[缓存策略](cache-strategy.md)、[Agent 工作流](agent-workflow.md)。路线图只维护顺序、依赖和完成标准，不复制另一套产品规则。
 
@@ -10,19 +10,19 @@
 
 做出可以实际使用的 **Windows GitHub 桌面客户端**：启动 Home，通过固定侧边栏与基础多标签访问仓库、个人主页和设置；仓库能读取真实分支、文件与 README，在紧凑摘要区展示 Releases、Contributors，并在页面底边展示 Languages；Profile Overview 包含个人 README、Pinned/Popular Repos 和贡献热力图；支持安全登录、多账户保存但单账户活动，以及已缓存内容的离线阅读。
 
-Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范围，须逐项确定最小功能。它们不是被自动排除的功能，也不能由执行者自由扩成完整 GitHub 功能集。
+Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索、New 和新增远程写操作逐项确定最小范围。它们不是被自动排除的功能，也不能由执行者自由扩成完整 GitHub 功能集。
 
-本轮不建设 Packages、Environments、Contribution Activity、Profile 其他 Tabs、标签进阶操作、安装更新系统或 macOS/Linux 产品适配。Issue/PR 详情和仓库其他未设计 Tabs 继续按产品约定留空。保留既有四平台 Debug 编译与 artifact，不把编译通过称为跨平台产品支持。
+按既有首版边界，Packages、Environments、Profile 的 Repositories/Stars 和 Contribution Activity 延后；其中 Packages 和用户仓库列表已明确进入产品路线图，具体交付批次可单独调整。进阶标签、安装更新和 macOS/Linux 产品适配仍延后。仓库 Issues、单条 Issue 和 PR Conversation 已接入，仓库 PR 列表与改动文件按下文排期；其他未设计 Tabs 维持原约定。保留既有四平台 Debug 编译与 artifact，不把编译通过称为跨平台产品支持。
 
 ## 当前证据与下一步
 
-本节依据 main `abae289`（2026-11-06，含已合并的正式页面接线、Star 写动作、应用级缓存组装 #68、Home/Profile 缓存消费 #72/#69 与全局组件挂载）的实际源码记录能力；具体 PR/CI/review 状态到 GitHub 核验。已派发但未合并的任务不因派发而算作正式产品接线。
+阅读进度以 2026-11-26 的 `main@f12a9e2` 为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
 | 正式 Rust / GPUI / Ely 外壳 | 单 Cargo package、固定依赖；[`app::run`](../src/app/mod.rs)、[`ui::Shell`](../src/ui/mod.rs) 与 workspace 标签已存在 | 窗口拖动、双击最大化、贴靠、Tall 标题栏等已有各自原生证据，见[外壳记录](devlog/2026-10-22-shell-layout.md)与 [Tall 记录](devlog/2026-10-23-tall-caption.md)。多标签完整交互、中文 IME、多 DPI/跨屏和字体回退仍待整体验收 |
 | 真实账户、仓库侧栏与每账户工作区 | PR #38 已合并；[`app::accounts`](../src/app/accounts/mod.rs)、[`storage::accounts`](../src/storage/accounts.rs) 接入正式 Shell。真实 `/user/repos` 自动读取、独立账户标签、真实圆头像、空 mask 防护和头像有限总超时已实现 | Settings › Accounts 是过渡入口，不是最终 Settings 设计。真实 PAT 登录、Settings/footer 同屏交互、部分原生滚动手感与多 DPI 产品路径仍待验收，见[account-shell 记录](devlog/2026-10-28-account-shell.md) |
-| Home / Feed | [`app::pages::home`](../src/app/pages/home.rs) 正式挂载 HomeView；open Issues/PRs、关注账号的三类 Feed、自动续页和描述摘要已接入 | Read more 导航到内部 PR 标签，详情留空；Events 来源仍有 API 范围限制，不能承诺与 GitHub 网页 Feed 完全一致。见 [Home](home-view.md) |
+| Home / Feed | [`app::pages::home`](../src/app/pages/home.rs) 接入 open Issues/PRs、三类 Feed 和自动续页；[#107](https://github.com/nocpiun/githux/pull/107) 接通 Home 条目及 Feed 中有明确目标的标题和 Read more | 仓库和用户链接仍去各自页面；Events API 的覆盖范围不等于 GitHub 网页 Feed。见 [Home](home-view.md) |
 | Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
 | 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合；Star/Unstar 已接入真实写路径（[PR #63](https://github.com/nocpiun/githux/pull/63)） | Fork 仍只有禁用入口，没有写 API；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md) |
 | 全局组件（Settings/Notifications/Issues-PR） | 独立组件与数据适配已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)）；Notifications 与全局 Issues/PR 已由 [#71](https://github.com/nocpiun/githux/pull/71) 注册进正式 Shell 路由 | Settings 仍是过渡 Accounts 入口；`SettingsView` 组件已合并但未挂载，最终分类与设置项仍待独立设计 |
@@ -32,14 +32,53 @@ Notifications、全局 Issues/PRs、New 和远程写操作保留为待细化范�
 
 ### 下一步依赖（当前排期，不新增产品授权）
 
-1. **正式页面基础已接线**：后续页面复用既有账户上下文、typed 导航和每会话生命周期；组合验收仍必须来自产品路由，不能由独立 examples 推断。
-2. **Settings 独立设计与验收**：过渡 Accounts 功能可继续服务开发，但最终页面不能直接沿用。先确认全局/仓库分类与首批项目，再实现本地设置持久化；local-only 提案未获批准，不是接线依赖或共享规则。
-3. **持久业务内容缓存与离线**：存储核心、账户生命周期与适配器已合并，#68 已组装应用级 `CacheStore`，Home/Profile/Repository 已接入消费者。剩余工作是整体验证失效、授权撤权与清理、给出容量/验证间隔的实测依据，并决定在线/离线模式的产品行为；已接线不等于这些参数或模式策略已确认。
-4. **README 图片与 HTML 已接入**：Reader 图片/Flow 与 HTML 任务已合并并整合到正式 Profile/Repository 页面；保留固定版本、来源和图片请求边界，详见[阅读器](content-reader.md)。
-5. **输入、DPI 与首版整体验收**：在正式接线后的真实 Windows 窗口核验中文 IME、文本选择、键盘/焦点、触控板/滚动、多 DPI/跨屏、长内容和账户切换。各组件已有的局部原生证据保留，但不代替端到端验收。
-6. **保留首版剩余范围**：H1–H4/H7、command palette 搜索范围及最终 Settings 项目仍待逐项决定；Issue/PR 详情等已排除/留空项不借接线恢复。最终 Settings 挂载与真实 Windows 端到端验收未做完前，不能宣布首版完成。
+[仓库 Issues 列表](devlog/2026-11-24-repo-issue-list.md)按仓库读取；[全局 Issues/PR 列表](global-work-items.md)按 Assigned/Created、Open/Closed/All 读取与当前用户有关的条目。两者可以共用行组件，不能共用查询语义。[Issue 详情](devlog/2026-11-20-issue-detail.md)和 [PR Conversation](pr-conversation.md) 已有正式页面。
+
+以下是这条阅读路径的交付进度和整体验收条件。单个 PR 合并不等于真实账户试用已经通过。
+
+| 路径 | 用户目标 | 交付进度与验收条件 |
+| --- | --- | --- |
+| 1 · 仓库 Issues → 单条 Issue | 找到问题，阅读正文和讨论，再回到列表原位置 | 已合入 [#108](https://github.com/nocpiun/githux/pull/108)（仓库列表、筛选及续页）和 [#106](https://github.com/nocpiun/githux/pull/106)（详情、正文与普通评论）。整体验收应覆盖同号不同仓库、列表不混入 PR，以及返回后的筛选和滚动位置。 |
+| 2 · 仓库 PRs → 单条 PR | 了解改动目的、目标分支、合并状态和文件差异 | [#109](https://github.com/nocpiun/githux/pull/109) 已交付 Conversation。待交付：仓库 PR 列表和 [Files changed（#111）](https://github.com/nocpiun/githux/pull/111)。文件清单需区分可读文本 diff、二进制及截断或不可用的 patch；Commits、Checks 与行内评审线程另定。 |
+| 3 · 跨入口打开与刷新 | 同账户从不同入口打开同一条 Issue/PR，复用同一份详情 | Home/Feed（#107）、可识别目标的通知（[#105](https://github.com/nocpiun/githux/pull/105)）及全局 Issue 标题（#106）已接通；[全局 PR 标题（#110）](https://github.com/nocpiun/githux/pull/110)待合入。统一验收缓存首屏、刷新不闪白、失败重试、切账户后不接收旧响应；通知 thread ID 不能当作资源编号。 |
+| 4 · 定下试用要做的其他事 | 不仅能读，还能明确哪些日常工作要在客户端完成 | 分别定稿全局/仓库 Settings 的首批项目、命令面板搜索范围、收件箱剩余交互以及 New/H7。建议优先讨论发普通评论和创建 Issue，再决定是否需要状态修改、评审提交或合并 PR。每项写明“试用前必需 / 后续 / 不做”；只实现选定项，注明失败反馈及数据更新方式。 |
+
+**可并行的工作：** 仓库 PR 列表、全局 PR 标题接线与文件差异可以按各自边界推进，最后用同一条阅读路径验收。新入口沿用既有资源标识（账户上下文、仓库、类型、编号）和[缓存约定](cache-strategy.md)。Settings 和搜索范围可同时讨论。
+
+**何时开始 Windows 日常试用：** 在正式应用里能分别从仓库列表打开 Issue 和 PR，读到正文及已约定的讨论/改动信息，从 Home 或全局入口打开同一目标，再回到原列表；能区分确实为空与无权限/加载失败，切换账户不串数据。第 4 步选为试用必需的项目也须可用。各任务仍可先做小范围真窗验证；达到这些条件后再开始整套日常试用。最终 R6 另验真实 PAT、断网/重连与缓存清理、中文 IME、键盘、长列表、多 DPI 和跨屏。
 
 已有 CI 的分支规则是否启用，以仓库实际设置为准。路线图不替负责人修改规则。负责人已于 2026-10-22 解除首次试跑的单实现者限制，并明确按依赖、文件冲突、编译资源与审查积压安排并行；这不改变同一任务同一时刻只有一个有效写入者的要求。
+
+## 仓库与用户主页的后续功能
+
+看完代码、Issue 或 PR 后，用户往往要找“哪个版本包含它”“哪里能拿到发布物”“作者还有哪些仓库”。这三条路径单独排期。下表是建议顺序；之前首版只确认 Releases 摘要、延后 Packages 和 Profile 其他 Tabs 的约定并未因本次规划自动改变。
+
+| 工作项 | 当前基础与建议依赖 | 第一段可验收的体验 |
+| --- | --- | --- |
+| Releases：版本列表与详情 | [仓库摘要](repository-overview.md)已有 latest/计数；仓库 Releases Tab 仍为空。先复用[发布元数据读取](repository-extras-service.md)，不依赖 Issue/PR 详情。建议在核心阅读主线旁优先推进。 | 从摘要打开对应版本，从 Releases Tab 分页浏览历史；能看 tag、发布日期、Markdown 发布说明和附件名称/大小。能区分最新正式版、预发布与当前账户可见的草稿；只有预发布时仍能浏览。确认无版本时隐藏摘要；请求失败不显示“0 个版本”。附件先提供用户主动打开下载的入口，发布、上传、删除不在这一步。 |
+| Profile → Repositories：按用户找仓库 | [Profile Overview](profile-view.md) 只有 Pinned/Popular 摘要；侧栏的仓库范围是登录账户可访问的集合。独立于 Releases，可复用仓库卡片及应用内仓库导航。 | 从本人或他人主页进入 Repositories，分页浏览该用户拥有且当前身份可见的仓库，按名称查找并打开仓库，回来仍在原位置。对他人先保证公开仓库；本人可见的私有仓库须按授权读取。协作仓库不误算成该用户拥有，局部名称筛选不冒充搜完所有分页。 |
+| Packages：仓库关联的包与版本 | 当前没有产品页面。先验证包归属、仓库关联与读取权限，再选一种有样例的包类型打通（建议优先容器镜像）；后续再扩展包类型。此项无需等 Releases 做完。 | 从一个有关联包的仓库进入，看到包名、类型和版本；选中版本能查看标识，并复制已核实的安装或拉取命令。用同一 owner 下两个不同仓库验证不串包；查不到关联不能把 owner 的全部包挂到仓库。已确认无包则隐藏摘要，权限不足或数据不全单独处理。不发布、删除或自动执行安装命令。 |
+
+接口核验入口：[GitHub Releases](https://docs.github.com/en/rest/releases/releases)、[用户与仓库列表](https://docs.github.com/en/rest/repos/repos)、[GitHub Packages](https://docs.github.com/en/rest/packages/packages)。开工时用目标账户和代表性样例分别核对，不把产品草案当作 API 能力证明。
+
+除这三项外，后续按使用路径维护候选清单。以下不是已批准的首版菜单：
+
+| 路径 | 可独立交付的一步 | 与已有功能的边界 |
+| --- | --- | --- |
+| 从代码追历史 | 分支与 Tags 列表 → 提交历史 → 单次提交的文件差异 | 先保留所选 ref 与路径，不把现有分支切换器当历史页；与 PR 的 Files changed 可复用差异展示。 |
+| 从仓库找到维护者，再发现项目 | Contributors 完整列表 → Profile；后续是 Stars、Followers/Following | 先贯通已有贡献者摘要、用户主页和仓库入口；个人收藏、关注关系、贡献时间线分别排期。 |
+| 从变更看交付结果 | Actions 运行列表与只读结果；Environments / Deployments 的环境和部署记录 | PR Checks、工作流运行、部署记录分别呈现；无权限不报作“没有运行”。重跑、审批与部署另议。 |
+| 从提醒找到下一项工作 | 通知直达可识别资源、跨仓库搜索、Settings 和 New 的最小操作 | 复用上方已规划的详情路由。搜索类别和写操作逐项定稿，不引入网页全部菜单。 |
+
+**排期建议：** 先收齐上述三项阅读工作并统一验收。Releases 与用户仓库列表可独立细化，Packages 先验证仓库关联与读取权限。进入 Windows 日常试用前，再据实际使用任务选定是否必须包含这些扩展。
+
+## 工作区导航：右侧栏与标签树
+
+**已列入规划；本轮交付设计，实施批次待定。** 多个标签横向滚出视野时，可以从右栏按两层树切换：第一层为完整 `owner/repo` 或独立页面，第二层为仓库已打开的资源；没有所有者层或文件夹层。顶部标签与树共享同一工作区；右栏完全收起时把宽度还给正文。参见[展开 / 收起对照和交互说明](right-sidebar.md)。这条外壳工作可先用当前已有路由设计与验证，不改变仓库 Issue/PR 阅读的近期优先级。
+
+1. 先验收右栏在 Home/Feed 与窄窗口中的位置和宽度：展开/收起、圆头 resize sash、活动行背景动效复用左栏；开关留在面板外，收起后没有图标列。
+2. 用已有标签接通双向选择、关闭、排序与账户隔离。后续 Issue 或文件有独立标签身份时再纳入相应子节点；不将仓库文件树复制进标签树。
+3. 右栏顶部保留仅图标的视图切换栏，首项为标签树。其他视图有真实用途再立项；本轮不添加占位入口。
 
 ## 推进方式
 
@@ -59,9 +98,12 @@ flowchart TD
     S --> X[R5 已确定的全局入口与动作]
     A --> X
     D --> X
-    H --> V[R6 Windows 首版综合验收]
-    I --> V
-    X --> V
+    R --> W[仓库 Issues/PR 列表与详情]
+    W --> T[列表与详情贯通、试用必需项就绪]
+    H --> T
+    I --> T
+    X --> T
+    T --> V[Windows 日常试用与 R6 综合验收]
 ```
 
 R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体动作涉及某页面或数据类型，只增加那一项依赖。缓存、输入、性能和诊断随各条链路交付，R6 是整体验证，不是第一次处理这些问题。
@@ -137,16 +179,16 @@ Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确�
 
 ## R5：补齐全局入口与选定动作
 
-**状态：功能范围待细化，不能直接派发成“大而全”的协作中心。** H1–H4 与 H7 其余动作仍在待定范围内（H7 已有仓库 Star/Unstar 首个实现），先逐项确定最小目标，之后按依赖交付，不必等待所有 R4 页面。
+**已有列表与动作继续使用。** 下表只安排剩余范围；新增入口与动作先确定最小目标，再按依赖交付，不必等待所有 R4 页面。
 
 | 项目 | 需要决定的最小范围 |
 | --- | --- |
-| H1 Notifications | 列表范围、未读语义、筛选、是否首版标记已读，以及条目去向 |
-| H2/H3 全局 Issues/PRs | 默认查询、是否包含关闭/合并条目、筛选与分页；保持与仓库页内 Tabs 的区别 |
+| H1 Notifications | 已接入收件箱、已确认的通知操作及可可靠识别的 Issue/PR 详情跳转（#105）。其他类型保留原行为，不猜测跳转目标。 |
+| H2/H3 全局 Issues/PRs | 已有个人列表、筛选与分页；全局 Issue 标题已可打开详情，全局 PR 标题跟踪 #110。仓库列表独立查询；新增筛选按使用场景决定。 |
 | H4 New | 实际可创建的资源清单、所需输入、权限与提交结果；入口存在不代表已承诺创建组织等所有动作 |
 | H7 远程写操作 | 明确选哪些动作、影响哪些页面、权限与确认/失败反馈；仓库 Star/Unstar 已作为首个动作实现，标记已读等仍是候选，不是已批准清单 |
 
-涉及 Issue/PR 详情编辑区的动作，与当前详情留空约定存在依赖冲突，须先重新确认设计范围，不能由执行者顺手补出详情/编辑器。列表条目在详情暂空时如何导航，也需要最小交互约定。
+Issue/PR 阅读按上方新顺序规划。阅读已有评论与发布评论是两个交付；有详情入口不代表已批准编辑器、审批或合并操作。
 
 **写操作共同验收：** 仅按确认范围在线执行；服务端结果驱动页面和缓存更新；较旧读取不能盖掉成功写入后的状态；超时后核对是否已生效，不无条件重发。离线草稿和自动重放队列未被纳入本轮。
 
@@ -154,9 +196,9 @@ Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确�
 
 ## R6：Windows 首版综合验收
 
-验证完整用户路径和长期使用质量，不再新增业务范围。无需等待安装包或自动更新系统；通过当前构建和可执行文件验收。
+在上述列表、详情与试用必需项就绪后，验证完整用户路径和长期使用质量。无需等待安装包或自动更新系统；通过当前构建和可执行文件验收。
 
-- 从启动 Home、登录/切账户到多标签阅读、搜索、Settings、已选定的全局入口与动作，完整走通。
+- 从启动 Home、登录/切账户到仓库与全局列表、Issue/PR 详情、多标签阅读、搜索、Settings 及已选定的操作，完整走通。
 - 各保留数据类型验证离线/重连、权限变化、分页、刷新与缓存清理；清缓存不得删除设置或账户引用。重启可用的内容缓存与 H6 的会话恢复分开验证。
 - 在真实 Windows 窗口验证多 DPI、跨屏、中文 IME、文本选择、焦点恢复、长列表、长 README、频繁切换及标签关闭后的资源释放。
 - 记录启动、交互延迟、滚动、内存、图片资源、网络次数和磁盘占用的可复现条件。性能基线从 R1/R3 开始采集，再确定预算；不凭截图宣布“丝滑”，也不把 Debug 与未来其他构建模式的结果混比。
@@ -184,10 +226,10 @@ Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确�
 - H1–H4/H7、搜索范围和设置首批项目在相关实现前消除范围歧义；基础标签、账户切换恢复、Home/Feed/Profile 默认规则及仓库摘要位置已经确定，不重复裁决。
 - 输入/DPI 与综合验收随正式链路推进，不把组件预览或 CI 当最终证据。
 
-仍需讨论的优先决策：PAT 引导的最小权限清单、私有内容授权失效/账户移除保留政策、缓存参数、H1–H4/H7 的最小清单、首批搜索与设置项。任何一项未决都不允许执行者自行补成产品要求。
+近期还需决定是否在试用前读取行内评审线程，以及哪些写操作、搜索与设置项是试用必需的。PAT 权限引导和缓存参数结合所选能力细化；私有内容撤权/移除遵循现有 C1–C5，仍需端到端验证。
 
 ## 维护方式
 
 范围变化先更新 [产品约定](product.md)，再调整本路线图的依赖与验收。实现结论更新对应主题及任务开发日志，引用实际 PR/源码；只有验收证据充分时才把任务标为完成。CI 构建成功、页面截图、模拟数据通过和真实产品可用分别记录。
 
-首版结束后再按使用反馈选择后续范围：已延后的功能可以重新讨论，但不预先承诺一次性补齐。开发路线图不能替代任务授权，也不能恢复已排除的功能。
+后续候选见[仓库与用户主页的后续功能](#仓库与用户主页的后续功能)：先记录用户路径与依赖，再结合使用反馈确定批次。开发路线图不能替代任务授权，也不能恢复已排除的功能。

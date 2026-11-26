@@ -1,6 +1,6 @@
 # 产品约定
 
-更新：2026-11-03。以下是已确认基线的共享摘要，具体未定项在末尾。概念图用于讨论布局，不替代真实 Ely 窗口的视觉验收。
+更新：2026-11-26。以下是已确认基线的共享摘要，具体未定项在末尾。概念图用于讨论布局，不替代真实 Ely 窗口的视觉验收。
 
 “已确认”表示产品决定；“已合并”表示组件存在于 main；“正式接线”表示产品 binary 的实际路由使用它；“原生已验证”必须另有真实窗口证据。四者不能互相替代。当前合并基线、源码证据和剩余缺口见[开发路线图](roadmap.md#当前证据与下一步)。
 
@@ -20,13 +20,14 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 ## 首版范围
 
-以下依据负责人 2026-10-21 最后一次范围调整；编号沿用功能讨论清单。这里维护功能范围，[开发路线图](roadmap.md) 维护建议顺序、依赖与验收。排除项是首版延后项，不代表取消长期方向，也不因后续任务方便而自动恢复。
+以下沿用 2026-10-21 首版功能清单的编号；2026-11-22 补入日常试用前必须打通的列表与详情。这里维护功能范围，[开发路线图](roadmap.md) 维护建议顺序、依赖与验收。排除项是首版延后项，不代表取消长期方向，也不因后续任务方便而自动恢复。
 
 | 分类 | 首版保留 |
 | --- | --- |
 | A1–A6 外壳 | 自定义标题栏、island、固定侧边栏、全部仓库的有界列表、基础多标签、command palette 入口 |
 | B1–B3 Home | 启动首页、最近参与且有更新的 Issues/PRs、关注动态 |
 | C1–C5、C8–C9 仓库 | 资料、分支与文件树、README、源码阅读；Releases、Contributors 位于资料后的紧凑摘要区，Languages 位于页面底边 |
+| 仓库 Issue/PR 阅读 | 仓库内两类列表和单条详情纳入试用前主线；具体读取深度与写操作分别确认 |
 | D1–D4 Profile | 基本资料和 Overview 结构、个人 README、Pinned/Popular Repos、贡献热力图 |
 | E1–E2 设置 | 全局与仓库设置；最终设计及具体项目仍需确定。现有 Settings 仅是过渡账户功能入口，见[设置过渡边界](#设置过渡边界) |
 | F1–F4 账户和数据 | 登录与安全凭据保存、多账户保存但单账户活动、离线阅读、联网刷新 |
@@ -34,9 +35,9 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 
 | 编号 | 首版排除 |
 | --- | --- |
-| C6、C7 | Packages、Environments 的展示及相关功能 |
+| C6、C7 | Packages、Environments 首版延后；Packages 的包与版本浏览已列入后续路线图 |
 | D5 | Profile 的 Contribution Activity 列表；D4 贡献热力图仍保留 |
-| H5 | Profile 的其他内容 Tabs，例如 Repositories、Stars |
+| H5 | Profile 的其他内容 Tabs 首版延后；用户仓库列表（Repositories）已单列后续路线，Stars 等仍分别定范围 |
 | H6 | 标签剩余的进阶操作：专门的溢出菜单、固定标签、把标签拖出新窗口、重复资源标签扩展、前进/后退历史、重启恢复等；A5 基础多标签、标签条水平滚动与标签拖拽排序已于 2026-10-25 移出排除 |
 | H8 | 安装包、应用签名、自动更新与正式分发渠道建设 |
 | G3、G4 | macOS/Linux 原生运行、交互适配及产品支持验收；不删除既有编译任务 |
@@ -52,12 +53,12 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 - 侧边栏直接从顶部导航开始，没有额外 Logo/品牌块。上方 Home、Settings，中间仓库列表，底部账户信息与快捷入口。
 - 仓库显示 namespace 头像和 `namespace/repo`。全部仓库通过分页加载到有界区域，只有仓库 group 独立滚动，上方与底部保持固定；不能让侧栏无限增长。范围确定为 `GET /user/repos` 在当前活动账户、token 与组织授权下返回的集合（owner、collaborator、organization_member），不限定单个组织；排序与局部筛选待定。
 - 仓库 namespace 与账户使用 GitHub 返回的**真实头像**（`RepoOwner.avatar_url`、`AccountIdentity.avatar_url`），图片不可用（无 URL、加载中、404/超时、损坏或解码失败）时以同尺寸 initials fallback 稳定占位，不显示破图图标也不推动布局。头像以 host + 稳定 owner/账户 ID + URL 为身份，重复 owner 与重绘不重复下载，账户切换或 URL 变化不串图；请求不带 PAT，并有覆盖连接、响应头和完整正文的有限总超时。真实图与 fallback 均为圆形；完全离屏时跳过头像绘制，避免空内容 mask 经设备像素取整后露出细条。收起侧栏同样显示正确图像。实现见 [`app::avatar`](../src/app/avatar.rs) 与 [`ui::avatar`](../src/ui/avatar.rs)；验证边界见 [account-shell 记录](devlog/2026-10-28-account-shell.md)。
-- 仓库列表**自动加载**：正常启动时若已有活动保存账户，先用现有凭据走真实 `/user/repos` 读取（保存身份不等于已验证，必须实际验证）；登录新增、切换账户、替换 PAT、重新验证成功 settle 后也自动读取完整分页。侧栏不再有常驻“Refresh”或“Complete set of N repositories”文案；成功非空只保留 `Repositories (N)` 与列表，成功零仓库给简短空态。加载中显示轻量指示，真实失败（SSO/权限/限流/网络/失效）保留可区分提示并只在失败时提供一次性重试；失败不会被显示成空列表，也不会自动无限重试。重绘、resize、展开/收起侧栏、打开 Settings 不重复读取。标签条固定工具栏的禁用 Refresh 仍是独立占位，不承载此列表刷新。
+- 仓库列表**自动加载**：正常启动时若已有活动保存账户，先用现有凭据走真实 `/user/repos` 读取（保存身份不等于已验证，必须实际验证）；登录新增、切换账户、替换 PAT、重新验证成功 settle 后也自动读取完整分页。侧栏不再有常驻“Refresh”或“Complete set of N repositories”文案；成功非空只保留 `Repositories (N)` 与列表，成功零仓库给简短空态。加载中显示轻量指示，真实失败（SSO/权限/限流/网络/失效）保留可区分提示并只在失败时提供一次性重试；失败不会被显示成空列表，也不会自动无限重试。重绘、resize、展开/收起侧栏、打开 Settings 不重复读取。标签条固定工具栏的 Refresh 刷新活动页面，不承载侧栏仓库列表的刷新。
 - 底部点击头像/名称进入 Profile；展开时下方横向四等分图标入口为 Theme（明暗切换）、Issues、PRs、New。侧栏支持受限 resize 和 56px 图标栏收起，收起后四入口合为“...”菜单；New 在创建范围未批准前继续禁用。仓库列表与固定 footer 之间有细分割线；账号区只有头像/名字/@ID 打开 Profile，展开时右侧另有 Notifications 铃铛（沿用原快捷入口的收件箱导航，点击不导航 Profile），收起时隐藏；收起态下 Notifications 与主题切换都保留在 More 菜单里。仓库/页面/palette 的滚轮使用共享平滑适配，触控板像素滚动直接响应。账号区独立间隔、客户区外留白、行外活动线与交互契约见 [侧栏布局](sidebar-layout.md)，最终视觉与滚动手感等待负责人真实窗口验收。
 - 右上角固定搜索入口，点击打开 command palette；具体搜索范围与快捷键待定。R1 首份外壳交付只提供本地导航命令（各页与当前仓库列表），不调用 GitHub，也不据此确定未来全局搜索范围。
 - 侧栏以外的页面主区域采用 island，与窗口边缘留微小距离，内外圆角协调。不是所有子面板都变成浮动卡片；精确间距、圆角和最大化行为待真实窗口确认。
 - island 顶部为应用级会话标签（tab strip），可同时保留多个仓库、Issue/PR、个人主页等；它和页面内的横向内容 Tabs 是两层不同导航，不共用状态。页面内容内的大标题保留，不再显示重复页面名称的占位标题条，也不保留其高度。Profile 首版只实现 Overview。
-- 基础标签规则（负责人 2026-10-23 确认）：点击侧边栏仓库、底部入口或通过 command palette 选择页面时，统一执行“打开或激活”——同一资源已打开则切换到该标签，否则新建。Home、Settings 及当前全局占位页（Notifications、Issues、Pull requests）按路由单例，仓库按 `owner/repo` 单例；单条 PR 的 Read more 导航按 `owner/repo` 与 PR 编号单例（详情内容仍依下表留空）。GitHub 名称大小写不敏感，同一资源的别名不生成重复会话。不支持同资源重复标签。启动仍只有 Home，不恢复上次会话。
+- 基础标签规则（负责人 2026-10-23 确认）：点击侧边栏仓库、底部入口或通过 command palette 选择页面时，统一执行“打开或激活”——同一资源已打开则切换到该标签，否则新建。Home、Settings 及全局页面（Notifications、Issues、Pull requests）按路由单例，仓库按 `owner/repo` 单例；单条 Issue/PR 按类型、`owner/repo` 与编号打开或复用，分别显示 Issue 正文与评论或 PR Conversation。GitHub 名称大小写不敏感，同一资源的别名不生成重复会话。不支持同资源重复标签。启动仍只有 Home，不恢复上次会话。
 - 账户与标签（负责人 2026-10-28 确认）：每个账户拥有自己的打开标签集合，切换回某账户即恢复该账户自己的标签、顺序与活动标签；全局式标签（如 Settings）同样属于当前活动账户的 workspace。账户身份是 host + 稳定账户 ID，不是登录文本或 PAT，因此账户 A 与 B 拥有同一仓库或相同本地标签编号时，标签与异步身份都不会互相串。这是进程内内存状态：重启仍从 Home 开始，不扩展 workspace 持久化。
 - 关闭非活动标签不切换当前标签；关闭活动标签切换到左邻标签，没有左邻则右邻；关闭最后一个标签后新建 Home 标签。
 - 标签可鼠标打开/切换/关闭，键盘可到达（Tab 焦点与 Enter/Space），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换标签；这些组合键不与输入法候选确认（Enter/Esc/方向键）或文本输入争用。
@@ -69,11 +70,13 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 - 标签支持水平拖拽排序（负责人 2026-10-25 新增，取代此前 H6 对重排的排除）：按稳定标签 ID 移动会话顺序，不关闭、不重建、不换 ID，页面滚动/焦点/仓库会话状态与资源身份随原标签；松开后只调整一次顺序。拖到横向可视区边缘时有界自动滚动，使未显示的目标也能到达。取消、失焦或无效投放保持原顺序与当前标签，不跨窗口搬运。排序后 `Ctrl+Tab` 与关闭邻居按新的视觉顺序。固定标签、拖出新窗口、导航历史与重启恢复仍不做。
 - 标签图标与标题之间保留适当间距（约 7 logical px），图标、标题与关闭按钮三个槽位的间距不同步放大，标题仍以省略号截断并保留完整名称。
 - 每个标签的关闭按钮仅在该标签 hover 或处于活动状态时出现，即时显示/隐藏、无渐变动画；槽位始终保留宽度，所以显示与否不移动标题或其他标签。隐藏时不可点击、不留下不可见的键盘焦点目标；键盘聚焦不算第三种常显条件。`Ctrl+W` 与中键关闭始终可用。
-- 标签条最右侧有一个固定的工具栏，不参与横向滚动、不挤出可视区；本轮只放一个禁用状态的刷新图标入口（tooltip 为 Refresh），不接任何刷新逻辑、请求或导航。
+- 标签条最右侧有一个固定的工具栏，不参与横向滚动、不挤出可视区；现有 Refresh 用于刷新当前活动页已挂载的数据，进行中在原位显示加载动画，无可刷新数据时禁用，见[活动页刷新记录](devlog/2026-11-19-active-page-refresh.md)。
 - 标签条内边距与 island 到窗口边缘的间距一致（约 7 logical px），上方与左侧相同；不计 island 的 1px 边框，滚动条带固定保留，所以滚动条出现/消失不移动标签。标签内容区域与 island 外框之间保持清晰边界。
 - 鼠标中键在标签任意区域（图标、标题、空白、关闭按钮）只关闭该标签一次：不先激活非活动标签，不重复执行关闭，不触发滚动或其他点击动作。关闭语义与左键关闭按钮、`Ctrl+W` 一致。左键激活与键盘 Enter/Space 行为不变。
 - 标签只用中性色表达状态：不显示彩色（含 focus 蓝色）描边，hover/active/按下也不出现；键盘焦点用中性文字色变化表达，不把非活动但聚焦的标签画成活动状态。
 - H6 其余进阶交互（专门的溢出菜单、固定标签、拖出新窗口、前进/后退历史、重启恢复、重复资源标签扩展）仍不在本轮范围。
+
+**规划中的右侧栏。** 作为顶部应用标签的另一种切换方式，仅展示当前账户工作区已打开的页面。标签树最多两层：第一层是 `owner/repo` 仓库行或独立页面，仓库的已打开资源只缩进一级。顶部可承载多个仅图标的视图，当前只确定标签树。收起后不保留图标列，不使用左栏的中部圆按钮。开关位置与宽度方案见[右侧栏设计稿](right-sidebar.md)；此处记录方向，不表示已上线或已列为首版门槛。
 
 ## 页面
 
@@ -81,16 +84,16 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | --- | --- |
 | Home | 启动进入首页；左栏标题严格为 **Home**，展示最近参与且有更新的 Issues/PRs；右栏标题严格为 **Feed**，展示关注动态 |
 | Repository | 顶部仓库资料与横向内容 Tabs；下方左文件树、右文件查看器，默认 README，处理没有 README 的仓库 |
-| 仓库附加资料 | Releases、Contributors 统一放在资料后的紧凑摘要区；Languages 以页面底边比例色条展示，不另开右侧纵栏，也不恢复旧的顶部 Languages 组。首版仅实现这三项，Packages/Environments 延后 |
-| Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；不实现 Contribution Activity 和其他内容 Tabs |
+| 仓库附加资料 | Releases、Contributors 统一放在资料后的紧凑摘要区；Languages 以页面底边比例色条展示，不另开右侧纵栏，也不恢复旧的顶部 Languages 组。首版摘要范围仅这三项。版本历史/详情与 Packages 包列表、版本浏览见[后续路线](roadmap.md#仓库与用户主页的后续功能)，不把摘要当成完整页面 |
+| Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；当前首版不实现 Contribution Activity 和其他内容 Tabs。后续用户仓库列表按目标用户与登录身份单独读取，不以 Pinned/Popular 或账户侧栏替代 |
 | Global Settings | 借鉴 Magpie 的分类与行式设置组织，具体分类布局与首批选项待定 |
 | Repository Settings | 首轮提供简单设置，风格与全局 Settings 一致，具体选项待定 |
-| Issue/PR 详情 | 原型旧设计弃用，首轮内容区直接留空 |
-| 仓库其他未设计 Tabs | 除仓库 Settings 外，首轮内容区直接留空，不添加“未实现”卡片 |
+| Issue/PR 列表与详情 | 全局个人列表、仓库 Issues 列表、Issue 详情及 PR Conversation 已接入。试用前还需贯通仓库 PR 列表、全局 PR 标题入口和 Files changed，进度见[路线图](roadmap.md#当前证据与下一步)。发布评论、提交评审与合并等写操作另定。 |
+| 仓库其他未设计 Tabs | 除单独规划的 Issues、PR 与 Settings 外，未设计的内容区仍留空，不添加“未实现”卡片 |
 
 留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 已排除出首版，不套用仓库的留空约定补出额外内容页。
 
-**截至 main `d217116`（2026-11-03），正式 [`app::pages`](../src/app/pages/mod.rs) 已把 Home/Feed、Profile Overview 与统一 RepositoryPage 挂到正式 Shell 路由；[`ui::home`](../src/ui/home/mod.rs)、[`ui::profile`](../src/ui/profile/mod.rs) 与 [`ui::repository`](../src/ui/repository/mod.rs) 既是可复用组件也是正式页面实现。** 仓库 Star/Unstar 已接入正式写路径（见 [仓库 Star](repository-star.md)），Fork 仍只有禁用入口。Settings Accounts、Notifications 与全局 Issues/PR 组件已合并但尚未挂载，见[共享文档索引](README.md#当前状态)。组件验收不自动代表整条产品路径已验收。
+**截至 main `d217116`（2026-11-03），正式 [`app::pages`](../src/app/pages/mod.rs) 已把 Home/Feed、Profile Overview 与统一 RepositoryPage 挂到正式 Shell 路由；[`ui::home`](../src/ui/home/mod.rs)、[`ui::profile`](../src/ui/profile/mod.rs) 与 [`ui::repository`](../src/ui/repository/mod.rs) 既是可复用组件也是正式页面实现。** 仓库 Star/Unstar 已接入正式写路径（见 [仓库 Star](repository-star.md)），Fork 仍只有禁用入口。后续 Notifications 与全局 Issues/PR 已挂载，Settings 仍走过渡 Accounts 入口，见[共享文档索引](README.md#当前状态)。组件验收不自动代表整条产品路径已验收。
 
 ### 设置过渡边界
 
