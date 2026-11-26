@@ -85,7 +85,7 @@
 - `src/ui/home/mod.rs`：`feed_action` 对可寻址的合并 PR 返回 `OpenPullRequest`，所以列表级 Enter 与卡片内入口一致；星标/建库卡片保留 `ActivateFeed`。
 - `src/ui/work_item_row.rs`：新增可选 `on_identity_click`，仅作用于图标与 `#number` 两个可见身份元素；全局 Issues/PR 列表传 `None`。空白区域保持惰性（既有 `blank title activated` 回归继续通过）。
 - `src/app/pages/home.rs`：`open_work_item` 现在把 `WorkItemTarget::Issue` 映射到 `Route::Issue { namespace, name, number }`，`PullRequest` 保持 `Route::PullRequest`；隐藏/旧账号/旧快照守卫不变。
-- 依赖与 stacked PR：#106 未获用户验收，不得合入 main。本分支 rebase 到生产者 `feat/issue-detail`（远端核对 `1ac899e22a4e7f1da42c71ecd85b87ff5705666a`），PR #107 base 改为 `feat/issue-detail` 并注明依赖；未推改他人分支、未复制其实现。生产者变动或落 main 后需再次核对，落 main 后转回 `main`、消除重复提交并重查 CI/review。
+- 依赖与 stacked PR：#106 未获用户验收，不得合入 main。本分支 rebase 到生产者 `feat/issue-detail`。生产者在本轮实施期间从 `1ac899e22a4e7f1da42c71ecd85b87ff5705666a` 前进到 `ab24dd949424d392400abc5b5cb23828b662039d`（`fix(issues): open issue detail once after async account restore`），已重新核对并再次 rebase；PR #107 base 改为 `feat/issue-detail` 并注明依赖；未推改他人分支、未复制其实现。生产者变动或落 main 后需再次核对，落 main 后转回 `main`、消除重复提交并重查 CI/review。
 - `src/app/pages/home/shell_nav_tests.rs`：改为一份代表性离线 fixture（Home 混合列表 Issue #21 / PR #7 同库、另一库 Issue #21 + Feed 合并 PR #5 截断正文），用真实 UI 点击 Home Issue 标题、Home PR 标题、Home `#number`、Home 图标、Feed PR 图标、Feed 标题、Feed `Read more`，并核对：Issue 打开 `Route::Issue` 后由 issue-detail 真实渲染 `issue-detail-body`/评论；PR 打开/复用同一 `Route::PullRequest`；owner/repo 链接保持各自目标；返回 Home 复用原标签。
 
 ### 本轮验证
