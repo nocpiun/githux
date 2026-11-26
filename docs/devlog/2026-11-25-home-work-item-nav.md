@@ -123,3 +123,14 @@
 - Home 行：标题、图标、`#number` 的指针热区与选中反馈；标题旁空白保持惰性。
 - Issue 详情与 PR Conversation 的真实窗口观感、字体、滚动与多 DPI；本任务只用 GPUI 测试平台与离线 fixture 验证，未做真实账户/原生输入验证（L002）。
 - PR 正文的最终验证归属 #109：#109 落 main 后应在 main 上复跑组合场景（本地组合分支可直接对照）。
+
+## 2026-11-26 终段：main 前进后的重排与真实正文验证
+
+main 在等待审查期间前进：`15b3a6d`（#108 仓库 Issues 列表）与 `3ca98b0`（#109 PR Conversation）先后合入。处理如下：
+
+- 再次 `git rebase origin/main` 重放到 `3ca98b0`，PR #107 base 保持 `main`；重放前的分支保留为本地 `backup/home-nav-pre-main-advance`。
+- #108 新增的 `src/ui/repository/issues/view.rs` 也构造共享 `work_item_row::Row`，本任务新增的可选字段在那里补 `on_identity_click: None`（该列表仍以标题为唯一激活入口，未扩大其热区）。这是 main 前进带来的编译修复，不改 #108 的行为。
+- #109 已在 main，因此把组合验证并入交付测试：`shell_nav_tests.rs` 的 fixture 增加 `query PRConversation` 与 `/repos/alice/demo/issues/{5,7}/comments`，断言 Home PR 标题打开 `Route::PullRequest` 后渲染 `pr-conversation-body` 与 `pr-comment-501`；Feed 图标/标题/`Read more` 共享同一 PR 标签并渲染 `pr-conversation-body` 与 `pr-comment-601`。至此“左栏 Home 标题 + 右栏 Feed 图标/标题/Read more 到达正确 Issue/PR 正文”在 main 基线上有真实 UI 点击证据。
+- 本机最终检查（main base `3ca98b0`）：`cargo test --locked --bins --tests`、`clippy -D warnings`、`build --locked`、`fmt --check` 全部通过；head 变化后重新请求 Codex 审查并核对 CI。
+
+观感验收仍按批次合并进行：本轮未做真实窗口/真实账户/原生输入验证，不声称完成人工观感验收。

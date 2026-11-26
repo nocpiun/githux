@@ -105,8 +105,47 @@ impl Transport for NavTransport {
     > {
         Box::pin(async move {
             self.reads.lock().unwrap().push(request.url.clone());
-            assert_eq!(request.method, HttpMethod::Get, "{}", request.url);
             let url = request.url.as_str();
+            if url.ends_with("/graphql") {
+                // The pull-request conversation reads its body through GraphQL; comments stay on
+                // the REST issue-comments endpoint.
+                let body = request.body.clone().unwrap_or_default();
+                let payload: serde_json::Value =
+                    serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                assert!(
+                    payload["query"]
+                        .as_str()
+                        .is_some_and(|query| query.starts_with("query PRConversation")),
+                    "unmodelled graphql query: {body}"
+                );
+                let vars = &payload["variables"];
+                let number = vars["number"].as_u64().unwrap();
+                return Ok(json(
+                    200,
+                    serde_json::json!({"data": {"repository": {
+                        "nameWithOwner": format!(
+                            "{}/{}",
+                            vars["owner"].as_str().unwrap(),
+                            vars["name"].as_str().unwrap()
+                        ),
+                        "pullRequest": {
+                            "number": number,
+                            "title": "Shared Home row",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "author": {"login": "alice"},
+                            "body": format!(
+                                "Real pull request body for #{number}, rendered by the conversation host."
+                            ),
+                            "baseRefName": "main",
+                            "headRefName": "feature",
+                            "headRef": null,
+                            "headRepository": {"nameWithOwner": "alice/demo"}
+                        }
+                    }}}),
+                ));
+            }
+            assert_eq!(request.method, HttpMethod::Get, "{}", request.url);
             if url.ends_with("/user") {
                 return Ok(json(200, serde_json::json!({"id": 1, "login": "alice"})));
             }
@@ -230,6 +269,58 @@ impl Transport for NavTransport {
                         "comments": 1,
                         "labels": [{"name": "bug"}],
                         "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.contains("/repos/alice/demo/issues/7/comments") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 501,
+                        "user": {"id": 2, "login": "bob", "avatar_url": null},
+                        "body": "Pull request conversation comment.",
+                        "created_at": "2026-10-28T11:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z",
+                        "author_association": "CONTRIBUTOR"
+                    }]),
+                ));
+            }
+            if url.contains("/repos/alice/demo/issues/5/comments") {
+                return Ok(json(
+                    200,
+                    serde_json::json!([{
+                        "id": 601,
+                        "user": {"id": 2, "login": "bob", "avatar_url": null},
+                        "body": "Merged pull request conversation comment.",
+                        "created_at": "2026-10-28T11:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z",
+                        "author_association": "CONTRIBUTOR"
+                    }]),
+                ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/7") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10007, "number": 7, "title": "Shared Home row",
+                        "state": "open",
+                        "user": {"id": 1, "login": "alice", "avatar_url": null},
+                        "body": null, "comments": 1, "labels": [],
+                        "created_at": "2026-10-28T10:00:00Z",
+                        "updated_at": "2026-10-28T11:00:00Z"
+                    }),
+                ));
+            }
+            if url.ends_with("/repos/alice/demo/issues/5") {
+                return Ok(json(
+                    200,
+                    serde_json::json!({
+                        "id": 10005, "number": 5, "title": "Merge the navigation work",
+                        "state": "closed",
+                        "user": {"id": 7, "login": "bob", "avatar_url": null},
+                        "body": null, "comments": 1, "labels": [],
+                        "created_at": "2026-10-28T09:00:00Z",
                         "updated_at": "2026-10-28T11:00:00Z"
                     }),
                 ));
@@ -427,6 +518,10 @@ fn home_and_feed_work_item_surfaces_open_their_own_workspace_tab(cx: &mut TestAp
     let home_pr_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
     assert_ne!(home_pr_tab, home_tab);
     assert_ne!(home_pr_tab, demo_issue_tab);
+    // The pull-request target is a real page now: the conversation body and comments render, so a
+    // blank tab is not mistaken for success.
+    wait_for_bounds(&shell, &controller, cx, "pr-conversation-body");
+    wait_for_bounds(&shell, &controller, cx, "pr-comment-501");
 
     // 3. Home `#number` and icon address the same Issue as its title (reuse, no duplicate tab).
     cx.update_window_entity(&shell, |shell, window, cx| {
@@ -466,6 +561,8 @@ fn home_and_feed_work_item_surfaces_open_their_own_workspace_tab(cx: &mut TestAp
         "the Feed pull-request icon opens the merged pull request"
     );
     let feed_pr_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    wait_for_bounds(&shell, &controller, cx, "pr-conversation-body");
+    wait_for_bounds(&shell, &controller, cx, "pr-comment-601");
     for selector in ["feed-title-0", "feed-pr-read-more-0"] {
         cx.update_window_entity(&shell, |shell, window, cx| {
             shell.navigate(Route::Home, window, cx);
@@ -485,6 +582,8 @@ fn home_and_feed_work_item_surfaces_open_their_own_workspace_tab(cx: &mut TestAp
                 number: 5,
             }
         );
+        wait_for_bounds(&shell, &controller, cx, "pr-conversation-body");
+        wait_for_bounds(&shell, &controller, cx, "pr-comment-601");
     }
     assert_ne!(feed_pr_tab, home_pr_tab, "the Feed merge is a different PR");
 

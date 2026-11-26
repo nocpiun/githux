@@ -83,7 +83,7 @@ host 侧的延迟投递还有两道门：页面必须仍是当前显示的标签
   - **星标仓库**：使用主题 `warning` 颜色的星标图标（其他 Feed 活动保留原有图标与颜色），在仓库链接下方展示与仓库文字左沿对齐（`pl_5`）的真实描述（通过 `set_repository_description` 异步丰富），三行限制截断；描述缺失或为空时直接静默，不画空占位、不保留额外边距，也绝不渲染“Unavailable / Retry”错误段落。
   - **合并 PR**：PR 标题左侧图标使用主题 `chart[4]` 紫色（仅 `PullRequestMerged` 上色，其他状态/活动不上色），展示 PR 标题与紧凑的正文摘要（`BodyPreview`，自动剥除 Markdown 标记、HTML 注释与标签，保证只展示纯净可读文本），摘要与“Read more”均与 PR 标题文字左沿对齐（`pl_6`，不扩增“Read more”点击热区）；内容较短时完整展示、无展开按钮；内容超出上限（约 200 字符）时截断至单词边界并附省略号，附“Read more”按钮（沿用主题 `accent` 原色）。
   - **PR 图标与标题**：合并卡片的 PR 图标与标题（标题末尾带 `#number`）都是进入同一个 PR 的入口，与 `Read more` 使用同一个 `OpenPullRequest` 动作；正文是否被截断都不影响标题可用性，短正文（没有 `Read more`）时标题仍可单击或键盘 Enter 进入。图标是可点击的同一目标但不新增 Tab stop，标题仍是唯一键盘入口；无法解析出可用仓库/编号时标题退回纯文本，不加 Link 角色、指针或 Tab stop。
-  - **Read more 交互**：点击或键盘激活经宿主的延迟导航通道打开 `Route::PullRequest { namespace, name, number }`。标签显示 `owner/repo #number` 和 PR 图标；同账户同仓库同编号复用标签，仓库名大小写别名不重复开页。当前仅接入内部导航，PR 正文由 pr-conversation 独立交付；不打开系统浏览器、不在卡片内展开全文；阻止事件冒泡，不触发卡片选中或次级激活。
+  - **Read more 交互**：点击或键盘激活经宿主的延迟导航通道打开 `Route::PullRequest { namespace, name, number }`。标签显示 `owner/repo #number` 和 PR 图标；同账户同仓库同编号复用标签，仓库名大小写别名不重复开页。目标页是正式 PR Conversation（摘要、Markdown 正文、分页评论）；不打开系统浏览器、不在卡片内展开全文；阻止事件冒泡，不触发卡片选中或次级激活。
   - 没有 branch/ref/SHA/commit 数等技术噪声 prose，也不为被过滤事件补造正文。
 - 头像使用真实模型的名称首字母，忽略可选 `avatar_url`，没有网络图片路径。
 - 不再渲染 count/order 行，也不为它预留高度；metadata 仍保留在输入模型。`incomplete_results=true`、搜索超过 1,000 上限及 Partial 仍明确警示，不声称完整历史或未读列表。两列不画外框或 header/body 分割线，仅 Feed 卡片有细边框。
