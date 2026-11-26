@@ -33,6 +33,8 @@ pub mod relative_time;
 pub mod repository;
 #[path = "../ui/repository_overview/mod.rs"]
 pub mod repository_overview;
+#[path = "../ui/repository_pulls.rs"]
+pub mod repository_pulls;
 #[path = "../ui/scroll/mod.rs"]
 pub mod scroll;
 #[path = "../ui/tab_underline.rs"]

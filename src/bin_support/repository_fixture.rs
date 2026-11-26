@@ -83,11 +83,15 @@ pub enum Scene {
     /// A write succeeds but its first summary refresh fails once; Retry uses
     /// two GETs to restore the authoritative count without replaying the write.
     StarSummaryFailure,
+    /// Pull requests are a confirmed, complete empty list.
+    NoPulls,
+    /// The first read of the second pull request page fails; a retry succeeds.
+    PullPageFailure,
 }
 
 impl Scene {
     /// Every scene the preview toolbar offers, in display order.
-    pub const ALL: [Scene; 31] = [
+    pub const ALL: [Scene; 33] = [
         Scene::Normal,
         Scene::EmptyRepository,
         Scene::ReadmeUncertain,
@@ -119,6 +123,8 @@ impl Scene {
         Scene::StarTimeoutNotApplied,
         Scene::StarTimeoutUnknown,
         Scene::StarSummaryFailure,
+        Scene::NoPulls,
+        Scene::PullPageFailure,
     ];
 
     pub fn label(self) -> &'static str {
@@ -141,6 +147,8 @@ impl Scene {
             Scene::StarTimeoutNotApplied => "Star · timeout not applied",
             Scene::StarTimeoutUnknown => "Star · outcome unknown",
             Scene::StarSummaryFailure => "Star · summary retry",
+            Scene::NoPulls => "Pull requests · none",
+            Scene::PullPageFailure => "Pull requests · page retry",
             Scene::Normal => "Normal",
             Scene::EmptyRepository => "Empty repository",
             Scene::ReadmeUncertain => "README uncertain",
@@ -204,6 +212,10 @@ impl Scene {
             }
             Scene::StarTimeoutUnknown => {
                 "The write and reconciliation time out. The warning preserves the last observed state and retries with GET only."
+            }
+            Scene::NoPulls => "The Pull requests tab has a confirmed, complete empty list.",
+            Scene::PullPageFailure => {
+                "The second pull request page fails once; Retry continues without losing page one."
             }
             Scene::StarSummaryFailure => {
                 "The write succeeds but its first count refresh fails. Retry re-reads status and summary with GET only; the warning remains until the count recovers."
@@ -393,6 +405,7 @@ enum ArmedFailure {
     Directory,
     File,
     StarSummary,
+    PullPage,
 }
 
 /// A deterministic, request-addressed repository.
@@ -573,6 +586,7 @@ impl FixtureTransport {
             "" => Ok(json_response(200, &self.details_body(scene).to_string())),
             "/branches" => Ok(self.branches(scene, url)),
             "/issues" => Ok(self.issues(query.unwrap_or_default(), url)),
+            "/pulls" => Ok(self.pulls(query.unwrap_or_default(), url, scene)),
             "/releases" | "/releases/latest" | "/contributors" | "/languages" => {
                 Ok(self.extras(rest, query, scene, url))
             }
@@ -629,6 +643,66 @@ impl FixtureTransport {
                 format!(
                     "<https://api.github.com{}/issues?{query}>; rel=\"next\"",
                     locator_path()
+                ),
+            ));
+        }
+        response
+    }
+
+    /// Repository-scoped pull requests. GitHub answers the continuation by repository
+    /// id and drops `sort`/`direction`, so the fixture reproduces that shape instead of
+    /// echoing the request back.
+    fn pulls(&self, _query: &str, url: &str, scene: Scene) -> HttpResponse {
+        let params = reqwest::Url::parse(url).expect("fixture URL");
+        let params: BTreeMap<_, _> = params.query_pairs().collect();
+        let state = params.get("state").map(|value| value.as_ref());
+        let page = params.get("page").map(|value| value.as_ref());
+        let pulled = |number, state, draft, merged| {
+            serde_json::json!({
+                "id": 9000 + number, "number": number,
+                "title": format!("Fixture pull request {number}"),
+                "state": state, "draft": draft, "merged_at": merged,
+                "user": {"login": "octo"},
+                "head": {"ref": "feature/fixture"}, "base": {"ref": "main"},
+                "created_at": "2026-10-20T12:00:00Z",
+                "updated_at": "2026-11-01T12:00:00Z"
+            })
+        };
+        let (rows, next) = match (state, page, scene) {
+            // A page with no pull requests at all proves a real empty result.
+            (_, _, Scene::NoPulls) => (vec![], None),
+            // The second page fails once so the tab can retry without losing page one.
+            (Some("open"), Some("2"), Scene::PullPageFailure)
+                if self.take_armed(ArmedFailure::PullPage) =>
+            {
+                return json_response(503, "{}");
+            }
+            (Some("open"), Some("1"), _) => (
+                vec![
+                    pulled(12, "open", false, None),
+                    pulled(11, "open", true, None),
+                ],
+                Some(2),
+            ),
+            (Some("open"), Some("2"), _) => (vec![pulled(10, "open", false, None)], None),
+            (Some("closed"), Some("1"), _) => (
+                vec![
+                    pulled(9, "closed", false, Some("2026-10-30T12:00:00Z")),
+                    pulled(8, "closed", false, None),
+                    pulled(7, "closed", true, None),
+                ],
+                None,
+            ),
+            _ => return self.mismatch(url),
+        };
+        let mut response = json_response(200, &serde_json::json!(rows).to_string());
+        if let Some(next) = next {
+            // The real continuation is rewritten to the repository id and keeps only
+            // `state`/`per_page`/`page`; the client must rebuild the rest itself.
+            response.headers.push((
+                "link".into(),
+                format!(
+                    "<https://api.github.com/repositories/42/pulls?state=open&per_page=30&page={next}>; rel=\"next\""
                 ),
             ));
         }
@@ -1038,6 +1112,7 @@ fn armed_for(scene: Scene) -> Option<ArmedFailure> {
         Scene::ReleasesFailure => Some(ArmedFailure::Releases),
         Scene::FileFailure => Some(ArmedFailure::File),
         Scene::StarSummaryFailure => Some(ArmedFailure::StarSummary),
+        Scene::PullPageFailure => Some(ArmedFailure::PullPage),
         _ => None,
     }
 }

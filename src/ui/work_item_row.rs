@@ -116,6 +116,10 @@ pub(crate) struct Row {
     pub selectors: Selectors,
     pub glyph: Glyph,
     pub tone: Tone,
+    /// Visible state wording when it is not the tone's own label. A draft pull request is an
+    /// open change not yet ready for review: it keeps the open colour but must read "Draft",
+    /// so the label is independent of the colour token. `None` uses the tone's label.
+    pub state_label: Option<&'static str>,
     pub number: u64,
     pub title: String,
     /// Full title for the tooltip; the visible title truncates.
@@ -454,7 +458,7 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
                 let debug = format!("{}-state", selectors.row);
                 move || debug.clone()
             })
-            .child(row.tone.label()),
+            .child(state_text(row.state_label, row.tone)),
     );
     let mut updated = div()
         .id(SharedString::from(format!("{}-updated", selectors.row)))
@@ -578,6 +582,12 @@ pub(crate) fn render(row: Row, cx: &App) -> AnyElement {
         .child(title_line)
         .child(metadata)
         .into_any_element()
+}
+
+/// The visible state wording for a row: an explicit label wins over the tone's own name, so a
+/// draft pull request can stay open-coloured while reading "Draft".
+pub(crate) fn state_text(state_label: Option<&'static str>, tone: Tone) -> &'static str {
+    state_label.unwrap_or_else(|| tone.label())
 }
 
 fn tone_color(tone: Tone, colors: &ely_core::theme::Palette) -> gpui::Hsla {

@@ -36,6 +36,7 @@ pub mod repository;
 pub mod repository_counts;
 pub mod repository_extras;
 pub(crate) mod repository_issues;
+pub mod repository_pulls;
 pub mod revision;
 pub mod starring;
 pub mod tree;
