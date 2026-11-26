@@ -254,6 +254,13 @@ impl Preview {
                         locator.owner(),
                         locator.name()
                     ),
+                    PageAction::OpenPullRequest {
+                        locator, number, ..
+                    } => format!(
+                        "open pull request {}/{} #{number}",
+                        locator.owner(),
+                        locator.name()
+                    ),
                     PageAction::OpenExternal(url) => format!("external link (not opened): {url}"),
                     PageAction::LinkNotFollowed { path, reason } => {
                         format!("link not followed: {path} — {reason}")

@@ -4,8 +4,8 @@
 //! then horizontal content tabs, then the Code area — and they are deliberately
 //! separate from the application-level workspace tab strip in `ui::tabs`.
 //!
-//! Code and Issues have their own content areas. The other tabs reuse the confirmed
-//! repository names and keep their content areas empty.
+//! Code, Issues and Pull requests have their own content areas. The other tabs reuse the
+//! confirmed repository names and keep their content areas empty.
 
 /// One in-page content tab of a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -61,6 +61,6 @@ impl RepositoryTab {
 
     /// Whether this tab has a content view.
     pub fn has_content(self) -> bool {
-        matches!(self, Self::Code | Self::Issues)
+        matches!(self, Self::Code | Self::Issues | Self::PullRequests)
     }
 }

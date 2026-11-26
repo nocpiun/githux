@@ -200,6 +200,25 @@ pub fn repository_page(
                     );
                 }
             }
+            PageAction::OpenPullRequest {
+                context,
+                locator,
+                number,
+            } => {
+                // The same identity/account check as the Issue entry: a PR number is only
+                // unique inside one repository, and an old reply must not open a tab.
+                if repositories.is_current(&context) {
+                    navigation(
+                        PageNavigation::Open(Route::PullRequest {
+                            namespace: locator.owner().to_string(),
+                            name: locator.name().to_string(),
+                            number,
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+            }
             // Star is handled inside RepositoryPage through RepositoryActionService. Fork and
             // unsupported links stay inert.
             PageAction::StarRequested { .. }

@@ -32,6 +32,7 @@ impl Render for ListRow {
                     },
                     glyph: self.glyph,
                     tone: Tone::Open,
+                    state_label: None,
                     number: 1136,
                     title: "Review changes".into(),
                     title_tooltip: "Review changes".into(),
@@ -123,4 +124,14 @@ fn global_issue_and_pr_row_hit_targets_and_selected_geometry(cx: &mut TestAppCon
             );
         }
     }
+}
+
+/// A draft pull request keeps the open colour but must read "Draft" in the visible state cell;
+/// the explicit label exists so the four-state contract is visible, not only in aria.
+#[test]
+fn explicit_state_label_overrides_the_tone_name() {
+    assert_eq!(state_text(Some("Draft"), Tone::Open), "Draft");
+    assert_eq!(state_text(None, Tone::Open), "Open");
+    assert_eq!(state_text(None, Tone::Merged), "Merged");
+    assert_eq!(state_text(None, Tone::Closed), "Closed");
 }

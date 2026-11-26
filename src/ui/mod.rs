@@ -55,6 +55,7 @@ pub mod reader;
 pub(crate) mod relative_time;
 pub mod repository;
 pub mod repository_overview;
+pub mod repository_pulls;
 pub(crate) mod scroll;
 pub(crate) mod shell_refresh;
 mod sidebar;

@@ -55,6 +55,7 @@ mod repository_cache_tests;
 #[cfg(test)]
 mod repository_content_tests;
 mod repository_list_cache;
+pub mod repository_pulls;
 #[cfg(test)]
 mod repository_tests;
 pub mod work_items;

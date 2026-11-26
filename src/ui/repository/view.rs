@@ -56,6 +56,7 @@ pub(super) fn render(
     let browsing = page.selected_branch().is_some();
     let body: AnyElement = match page.tab() {
         RepositoryTab::Issues => page.render_issues(window, cx),
+        RepositoryTab::PullRequests => page.render_pulls(window, cx),
         RepositoryTab::Code => match page.error().cloned() {
             // A page-level failure replaces the browsing area: an empty tree
             // would read as "no files", which a failed read never proves.

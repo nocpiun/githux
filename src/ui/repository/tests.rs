@@ -114,7 +114,7 @@ impl Fixture {
         });
     }
 
-    fn switch_scene(&self, scene: Scene) {
+    pub(super) fn switch_scene(&self, scene: Scene) {
         self.transport.set_scene(scene);
     }
 

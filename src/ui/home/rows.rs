@@ -334,6 +334,7 @@ pub(super) fn home_row(
             selectors,
             glyph: kind,
             tone,
+            state_label: None,
             number: item.number,
             title: title_label,
             title_tooltip: nonempty(&item.title, &format!("{} #{}", kind.label(), item.number)),

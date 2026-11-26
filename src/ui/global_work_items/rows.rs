@@ -109,6 +109,7 @@ pub(super) fn row(
             },
             glyph,
             tone: Tone::from_state(item.state.label()),
+            state_label: None,
             number: item.number,
             title: item.title.clone(),
             title_tooltip: item.title.clone(),

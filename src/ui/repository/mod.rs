@@ -42,12 +42,13 @@ mod issues;
 mod locator_index;
 mod navigation;
 mod page_tabs;
+mod pulls;
 mod refresh;
 #[cfg(test)]
 mod tests;
 mod view;
 
-pub use page_tabs::RepositoryTab;
+use page_tabs::RepositoryTab;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
@@ -178,6 +179,14 @@ pub enum PageAction {
     Overview(crate::ui::repository_overview::OverviewAction),
     /// Open a numbered issue using the verified repository and account.
     OpenIssue {
+        context: RepositoryReadContext,
+        locator: RepositoryLocator,
+        number: u64,
+    },
+    /// Open a numbered pull request of this repository. Carries the identity and
+    /// account context it was listed under, because a PR number is only unique
+    /// inside one repository.
+    OpenPullRequest {
         context: RepositoryReadContext,
         locator: RepositoryLocator,
         number: u64,
@@ -522,6 +531,7 @@ pub struct RepositoryPage {
     /// The in-page content tab.
     tab: RepositoryTab,
     issues: issues::Issues,
+    pulls: pulls::Pulls,
     /// True while a browsing generation is running.
     active: bool,
     /// Set when authorization changed under a running generation.
@@ -618,6 +628,7 @@ impl RepositoryPage {
             error: None,
             tab: RepositoryTab::Code,
             issues: issues::Issues::new(cx.focus_handle().tab_stop(true)),
+            pulls: pulls::Pulls::new(cx.focus_handle().tab_stop(true)),
             active: false,
             authorization_lost: false,
             displayed_authorizations: Default::default(),
@@ -804,6 +815,7 @@ impl RepositoryPage {
     /// already verified content stays available; unlike `deactivate`, this is not an authorization
     /// invalidation and does not force a network re-read on reactivation.
     pub fn suspend(&mut self, cx: &mut Context<Self>) {
+        self.suspend_pulls();
         self.cancel_scroll(cx);
         self.cancel_reader_interactions(cx);
     }
@@ -900,6 +912,7 @@ impl RepositoryPage {
         self.work.as_ref().is_some_and(Work::has_in_flight)
             || self.extras.has_in_flight()
             || self.issues.busy()
+            || self.pulls.busy()
     }
 
     /// Revalidates this repository page only when idle and authorized, coalescing duplicate
@@ -924,6 +937,7 @@ impl RepositoryPage {
             return;
         }
         self.request_issues(true, cx);
+        self.request_pulls(true, cx);
         self.stop_star();
         self.extras.cancel_reads();
         if let Some(view) = &self.extras.view {
@@ -1018,8 +1032,10 @@ impl RepositoryPage {
         }
         self.tree_bars.cancel(&self.tree_motion);
         self.issues.cancel_scroll();
+        self.pulls.cancel_scroll();
         self.tab = tab;
         self.sync_issues(cx);
+        self.sync_pulls(cx);
         if tab != RepositoryTab::Code {
             // Hidden content must not keep a gesture alive.
             self.cancel_reader_interactions(cx);
@@ -1343,6 +1359,7 @@ impl RepositoryPage {
 
     fn cancel_scroll(&mut self, cx: &mut Context<Self>) {
         self.issues.cancel_scroll();
+        self.pulls.cancel_scroll();
         self.tree_bars.cancel(&self.tree_motion);
         cx.notify();
     }
@@ -1694,6 +1711,7 @@ impl RepositoryPage {
         // renders its release/contributor/language states.
         self.extras.authorization_current()
             && self.issues.current()
+            && self.pulls.current()
             && self
                 .displayed_authorizations
                 .iter()
@@ -1711,6 +1729,7 @@ impl RepositoryPage {
     /// Drops every cache-authorization binding held for the current generation.
     fn reset_authorization(&mut self) {
         self.issues.clear();
+        self.pulls.clear();
         self.cache_failures = [false; 3];
         self.displayed_authorizations = Default::default();
     }
@@ -1810,6 +1829,7 @@ impl RepositoryPage {
         self.drain_overview(cx);
         self.drain_star(cx);
         self.drain_issues(cx);
+        self.drain_pulls(cx);
         if was_refreshing != self.is_refreshing() {
             cx.notify();
         }

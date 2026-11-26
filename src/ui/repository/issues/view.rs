@@ -320,6 +320,7 @@ fn issue_row(
                 updated: None,
             },
             glyph: Glyph::Issue,
+            state_label: None,
             tone,
             number,
             title: item.title.clone(),
