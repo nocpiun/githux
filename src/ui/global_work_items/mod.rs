@@ -45,14 +45,16 @@ pub struct RepositoryNavigation {
 }
 pub type OnRepository = Rc<dyn Fn(RepositoryNavigation, &mut Window, &mut App)>;
 
-/// Issue detail navigation emitted when the user activates an Issue row's title.
+/// Detail navigation emitted when the user activates a row's title. The kind is the view's own
+/// fixed [`WorkItemKind`]; the repository and number come from the activated row, never from the
+/// title text. The host decides which internal route the kind owns.
 #[derive(Clone, Debug)]
-pub struct IssueNavigation {
+pub struct WorkItemNavigation {
     pub context: crate::data::RepositoryReadContext,
     pub repository: WorkRepository,
     pub number: u64,
 }
-pub type OnIssue = Rc<dyn Fn(IssueNavigation, &mut Window, &mut App)>;
+pub type OnOpen = Rc<dyn Fn(WorkItemNavigation, &mut Window, &mut App)>;
 
 pub struct WorkItemsView {
     pub controller: Controller,
@@ -74,7 +76,7 @@ pub struct WorkItemsView {
     fixed_now: bool,
     time_task: Option<Task<()>>,
     on_repository: Option<OnRepository>,
-    on_issue: Option<OnIssue>,
+    on_open: Option<OnOpen>,
     _activation: Subscription,
     _visibility: Subscription,
 }
@@ -119,7 +121,7 @@ impl WorkItemsView {
             fixed_now: false,
             time_task: None,
             on_repository: None,
-            on_issue: None,
+            on_open: None,
             _activation: activation,
             _visibility: visibility,
         };
@@ -169,7 +171,7 @@ impl WorkItemsView {
             fixed_now: false,
             time_task: None,
             on_repository: None,
-            on_issue: None,
+            on_open: None,
             _activation: activation,
             _visibility: visibility,
         }
@@ -178,12 +180,14 @@ impl WorkItemsView {
         self.on_repository = Some(callback);
     }
 
-    pub fn on_issue(&mut self, callback: OnIssue) {
-        self.on_issue = Some(callback);
+    /// Detail navigation for rows of this view's kind. Issue and Pull Request lists each own one
+    /// destination; a preview that never installs a callback keeps plain, non-interactive titles.
+    pub fn on_open(&mut self, callback: OnOpen) {
+        self.on_open = Some(callback);
     }
 
-    pub(super) fn has_issue_handler(&self) -> bool {
-        self.on_issue.is_some()
+    pub(super) fn has_open_handler(&self) -> bool {
+        self.on_open.is_some()
     }
 
     pub fn kind(&self) -> WorkItemKind {
@@ -390,10 +394,10 @@ impl WorkItemsView {
             callback(navigation, window, cx);
         }
     }
-    fn navigate_issue(&self, navigation: IssueNavigation, window: &mut Window, cx: &mut App) {
+    fn navigate_open(&self, navigation: WorkItemNavigation, window: &mut Window, cx: &mut App) {
         if self.active
             && self.repos.is_current(&navigation.context)
-            && let Some(callback) = &self.on_issue
+            && let Some(callback) = &self.on_open
         {
             callback(navigation, window, cx);
         }
@@ -711,14 +715,16 @@ impl WorkItemsView {
                 }
                 let item = view.controller.rows[index].clone();
                 let context = Some(view.controller.context().clone());
+                let kind = view.controller.query.kind;
                 insets.item(
                     index,
                     count,
                     rows::row(
                         &item,
+                        kind,
                         view.selected == Some(item.id),
                         context,
-                        view.has_issue_handler(),
+                        view.has_open_handler(),
                         view.now,
                         cx,
                     ),
