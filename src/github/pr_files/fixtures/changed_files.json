@@ -1,0 +1,9 @@
+[
+  {"filename":"docs/变更说明.md","status":"added","additions":2,"deletions":0,"changes":2,"patch":"@@ -0,0 +1,2 @@\n+# Changes\n+新增说明"},
+  {"filename":"src/obsolete.rs","status":"removed","additions":0,"deletions":2,"changes":2,"patch":"@@ -1,2 +0,0 @@\n-fn old() {}\n-// retired\n\\ No newline at end of file"},
+  {"filename":"src/new name.rs","previous_filename":"src/old name.rs","status":"renamed","additions":2,"deletions":2,"changes":4,"patch":"@@ -2,2 +2,2 @@ fn example()\n-    let n = 1;\n+    let n = 2;\n     println!(\"{n}\");\n@@ -90 +90 @@\n-    old();\n+    new();"},
+  {"filename":"assets/logo.png","status":"modified","additions":0,"deletions":0,"changes":0},
+  {"filename":"docs/large.txt","status":"modified","additions":6,"deletions":1,"changes":7,"patch":"@@ -7 +7,6 @@\n-old\n+first\n+second"},
+  {"filename":"src/moved.rs","previous_filename":"src/original.rs","status":"renamed","additions":0,"deletions":0,"changes":0},
+  {"filename":"docs/later-hunk.txt","status":"modified","additions":4,"deletions":2,"changes":6,"patch":"@@ -10 +10 @@\n-old\n+new"}
+]

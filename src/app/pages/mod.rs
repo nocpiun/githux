@@ -76,7 +76,7 @@ impl MountedPage {
             Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
             Self::IssueDetail(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
-            Self::PullRequest(_) => {}
+            Self::PullRequest(page) => page.update(cx, |page, cx| page.resume(cx)),
         }
     }
 }

@@ -4,6 +4,9 @@
 //! ones. Only external boundaries are injected: a temporary SQLite directory, an in-memory
 //! credential store and a deterministic transport.
 
+#[path = "pr_files_integration_tests.rs"]
+mod pr_files_integration_tests;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -239,6 +242,17 @@ impl Transport for PageTransport {
                     ])
                     .to_string(),
                 });
+            }
+            if url.ends_with("/repos/alice/demo/pulls/5/files?per_page=30&page=1") {
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: include_str!("../../github/pr_files/fixtures/changed_files.json")
+                        .to_owned(),
+                });
+            }
+            if url.ends_with("/repos/alice/demo/pulls/21/files?per_page=30&page=1") {
+                return Ok(json(200, serde_json::json!([])));
             }
             if url.contains("/repos/alice/demo/issues/5/comments") {
                 let status = self
