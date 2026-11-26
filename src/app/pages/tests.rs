@@ -38,6 +38,8 @@ fn json(status: u16, body: serde_json::Value) -> HttpResponse {
     }
 }
 
+const PR_FIXTURE_BODY: &str = "## [Conversation fixture](docs/design.md#decisions)\n\nStream the index without buffering the whole file.\n\n![Index diagram](index.svg)";
+
 fn graphql_ok(data: serde_json::Value) -> HttpResponse {
     json(200, serde_json::json!({"data": data}))
 }
@@ -50,6 +52,7 @@ struct PageTransport {
     writes: Mutex<Vec<String>>,
     starred: Mutex<bool>,
     long_pr_body: bool,
+    pr_comments_status: std::sync::atomic::AtomicU16,
 }
 
 impl PageTransport {
@@ -205,6 +208,30 @@ impl Transport for PageTransport {
                     ])
                     .to_string(),
                 });
+            }
+            if url.contains("/repos/alice/demo/issues/5/comments") {
+                let status = self
+                    .pr_comments_status
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if status != 0 {
+                    return Ok(json(status, serde_json::json!({})));
+                }
+                let second = url.contains("&page=2");
+                let mut page = json(
+                    200,
+                    serde_json::json!([{
+                        "id": if second { 502 } else { 501 }, "user": {"id": 2, "login": "bob"},
+                        "body": if second { "Second comment **page**" } else { "First comment **page**\n\n![Index diagram](index.svg)" },
+                        "created_at": "2026-10-28T11:00:00Z", "updated_at": "2026-10-28T11:00:00Z"
+                    }]),
+                );
+                if !second {
+                    page.headers.push(("link".into(), "<https://api.github.com/repos/alice/demo/issues/5/comments?per_page=30&page=2>; rel=\"next\"".into()));
+                }
+                return Ok(page);
+            }
+            if url.contains("/repos/alice/demo/issues/7/comments") {
+                return Ok(json(200, serde_json::json!([])));
             }
             if url.contains("/repos/alice/demo/issues/21/comments") {
                 let page = reqwest::Url::parse(url)
@@ -453,6 +480,28 @@ impl Transport for PageTransport {
                 });
             }
             if url.ends_with("/graphql") {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(
+                    request.body.as_deref().unwrap_or_default(),
+                ) && payload["query"]
+                    .as_str()
+                    .is_some_and(|query| query.starts_with("query PRConversation"))
+                {
+                    let vars = &payload["variables"];
+                    let number = vars["number"].as_u64().unwrap();
+                    let body = match number {
+                        5 => PR_FIXTURE_BODY,
+                        21 => "PR **description** for demo #21.",
+                        _ => "",
+                    };
+                    return Ok(graphql_ok(serde_json::json!({"repository": {
+                        "nameWithOwner": format!("{}/{}", vars["owner"].as_str().unwrap(), vars["name"].as_str().unwrap()),
+                        "pullRequest": {"number": number, "title": "Stream the index",
+                            "state": if number == 5 { "MERGED" } else { "OPEN" }, "isDraft": number == 7,
+                            "author": {"login": "bob"}, "body": body,
+                            "baseRefName": "main", "headRefName": "feature/stream", "headRef": null,
+                            "headRepository": {"nameWithOwner": "bob/demo"}}
+                    }})));
+                }
                 // Home/Profile tests can distinguish the profile query from repository counts by
                 // the fixed variables/fields in the body.
                 if body.contains("Pinned") || body.contains("itemShowcase") {
@@ -485,6 +534,33 @@ impl Transport for PageTransport {
                         "bio": "Another user", "followers": 2, "following": 1
                     }),
                 ));
+            }
+            if self.long_pr_body {
+                const COMMIT: &str = "2222222222222222222222222222222222222222";
+                const TREE: &str = "3333333333333333333333333333333333333333";
+                const BLOB: &str = "5c7e77fdc11e53409b877f790a77782f75d92ea9";
+                if url.ends_with("/repos/alice/demo/commits/main")
+                    || url.ends_with(&format!("/repos/alice/demo/commits/{COMMIT}"))
+                {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({"sha": COMMIT, "commit": {"message": "Index diagram fixture", "tree": {"sha": TREE}}}),
+                    ));
+                }
+                if url.ends_with(&format!("/repos/alice/demo/git/trees/{TREE}")) {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({"sha": TREE, "truncated": false, "tree": [
+                            {"path": "index.svg", "type": "blob", "mode": "100644", "size": 111, "sha": BLOB}
+                        ]}),
+                    ));
+                }
+                if url.ends_with(&format!("/repos/alice/demo/git/blobs/{BLOB}")) {
+                    return Ok(json(
+                        200,
+                        serde_json::json!({"sha": BLOB, "size": 111, "encoding": "base64", "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIyNCI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjI0IiBmaWxsPSJibHVlIi8+PC9zdmc+"}),
+                    ));
+                }
             }
             if url == "https://api.github.com/repos/alice/demo" {
                 return Ok(json(
@@ -1286,7 +1362,7 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
         long_pr_body: true,
         ..Default::default()
     });
-    let (shell, controller, cx) = open_shell(cx, transport);
+    let (shell, controller, cx) = open_shell(cx, transport.clone());
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(1100.0)));
     login(&controller, cx);
     wait_until(&controller, cx, |accounts| {
@@ -1320,6 +1396,26 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
                 number: 5,
             }
         );
+        wait_for_bounds(cx, "pr-conversation-body");
+        wait_for_bounds(cx, "markdown-heading-0");
+        wait_for_bounds(cx, "pr-comment-501");
+        shell.read_with(cx, |shell, cx| {
+            let pr = shell
+                .pull_request_summary_for_test(cx)
+                .expect("mounted PR summary");
+            assert_eq!(pr.body.as_deref(), Some(PR_FIXTURE_BODY));
+            assert_eq!(pr.state, crate::domain::pr_conversation::State::Merged);
+            assert_eq!(
+                (&*pr.base_branch, &*pr.head_branch),
+                ("main", "feature/stream")
+            );
+            assert_eq!(
+                pr.source_branch,
+                crate::domain::pr_conversation::SourceBranch::Deleted {
+                    repository: "bob/demo".into()
+                }
+            );
+        });
         let active = shell.update(cx, |shell, _| {
             assert_eq!(
                 shell.workspace().sessions().len(),
@@ -1338,6 +1434,63 @@ fn feed_read_more_opens_and_reuses_the_internal_pr_tab(cx: &mut TestAppContext) 
         });
         cx.run_until_parked();
     }
+    assert_eq!(transport.seen("/repos/alice/demo/issues/5/comments"), 1);
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.activate_tab_for_test(first_tab.unwrap(), window, cx);
+    });
+    wait_for_bounds(cx, "markdown-picture-frame-2");
+    wait_for_bounds(cx, "markdown-picture-frame-1");
+    let heading = cx.debug_bounds("markdown-heading-0").unwrap();
+    cx.simulate_click(
+        gpui::point(heading.left() + gpui::px(8.0), heading.center().y),
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/alice/demo/blob/HEAD/docs/design.md#decisions")
+    );
+    wait_for_bounds(cx, "pr-comments-load-more");
+    let more = cx.debug_bounds("pr-comments-load-more").unwrap();
+    cx.simulate_click(
+        gpui::point(more.left() + gpui::px(35.0), more.center().y),
+        gpui::Modifiers::none(),
+    );
+    wait_for_bounds(cx, "pr-comment-502");
+    assert!(cx.debug_bounds("pr-comment-501").is_some());
+
+    transport
+        .pr_comments_status
+        .store(503, std::sync::atomic::Ordering::Relaxed);
+    wait_for_bounds(cx, "tab-refresh");
+    let refresh = cx.debug_bounds("tab-refresh").unwrap();
+    cx.simulate_click(refresh.center(), gpui::Modifiers::none());
+    wait_for_bounds(cx, "pr-comments-retry");
+    assert!(cx.debug_bounds("pr-conversation-body").is_some());
+    assert!(cx.debug_bounds("pr-comment-502").is_some());
+    assert!(cx.debug_bounds("pr-comments-empty").is_none());
+
+    transport
+        .pr_comments_status
+        .store(403, std::sync::atomic::Ordering::Relaxed);
+    let retry = cx.debug_bounds("pr-comments-retry").unwrap();
+    cx.simulate_click(retry.center(), gpui::Modifiers::none());
+    wait_for_bounds(cx, "compact-failed-Could not read this pull request");
+    assert!(cx.debug_bounds("pr-conversation-body").is_none());
+    assert!(cx.debug_bounds("pr-comment-501").is_none());
+
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(
+            Route::PullRequest {
+                namespace: "alice".into(),
+                name: "demo".into(),
+                number: 7,
+            },
+            window,
+            cx,
+        )
+    });
+    wait_for_bounds(cx, "pr-conversation-empty-body");
+    wait_for_bounds(cx, "pr-comments-empty");
 }
 
 fn wait_for_bounds(cx: &mut VisualTestContext, selector: &'static str) {
@@ -1577,7 +1730,9 @@ fn global_issues_title_opens_reuses_and_isolates_issue_detail_while_repo_link_st
     });
     cx.run_until_parked();
     let before_issue_reads = transport.seen("/repos/alice/demo/issues/21");
-    let refreshed = cx.update_window_entity(&view, |shell, _, cx| shell.refresh_active_page(cx));
+    let refreshed = cx.update_window_entity(&view, |shell, window, cx| {
+        shell.refresh_active_page(window, cx)
+    });
     assert!(refreshed, "tab-refresh must be enabled on Route::Issue");
     cx.run_until_parked();
     wait_for_bounds(cx, "issue-detail-body");

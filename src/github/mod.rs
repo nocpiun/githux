@@ -27,6 +27,7 @@ pub mod home;
 pub mod issue_detail;
 pub mod notifications;
 pub mod permission;
+pub(crate) mod pr_conversation;
 pub mod profile;
 pub mod readme;
 pub mod repos;

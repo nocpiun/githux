@@ -185,7 +185,7 @@ fn placeholder<E: 'static>(message: &str, cx: &mut Context<E>) -> AnyElement {
 /// calls. Repository-relative images (which carry an empty commit in issue Markdown) lazily
 /// resolve the repository's default branch HEAD commit and real `RepositoryIdentity` once, then
 /// delegate to a properly scoped [`RepositoryImageService`] with that pinned SHA.
-struct IssueImageProvider {
+pub(super) struct IssueImageProvider {
     repos: RepoService,
     session: RepositorySession,
     locator: RepositoryLocator,
@@ -197,7 +197,7 @@ struct IssueImageProvider {
 }
 
 impl IssueImageProvider {
-    fn new(
+    pub(super) fn new(
         repos: RepoService,
         session: RepositorySession,
         locator: RepositoryLocator,
