@@ -23,8 +23,12 @@ pub mod geometry;
 pub mod interaction;
 #[path = "../ui/island.rs"]
 pub mod island;
+#[path = "../ui/page_layout.rs"]
+pub mod page_layout;
 #[path = "../ui/reader/mod.rs"]
 pub mod reader;
+#[path = "../ui/relative_time.rs"]
+pub mod relative_time;
 #[path = "../ui/repository/mod.rs"]
 pub mod repository;
 #[path = "../ui/repository_overview/mod.rs"]
@@ -35,3 +39,5 @@ pub mod scroll;
 pub mod tab_underline;
 #[path = "../ui/tooltip.rs"]
 pub mod tooltip;
+#[path = "../ui/work_item_row.rs"]
+pub mod work_item_row;

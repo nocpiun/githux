@@ -233,6 +233,33 @@ impl Transport for PageTransport {
             if url.contains("/repos/alice/demo/issues/7/comments") {
                 return Ok(json(200, serde_json::json!([])));
             }
+            if let Ok(repo_url) = reqwest::Url::parse(url)
+                && repo_url.path() == "/repos/alice/demo/issues"
+            {
+                let page = repo_url
+                    .query_pairs()
+                    .find(|(key, _)| key == "page")
+                    .map(|(_, value)| value.into_owned());
+                let row = |number| {
+                    serde_json::json!({
+                        "number": number,"title":format!("Issue #{number}"),"state":"open","updated_at":"2026-10-28T11:00:00Z"
+                    })
+                };
+                let (rows, next) = match page.as_deref() {
+                    Some("1") => ((30..60).rev().map(row).collect::<Vec<_>>(), Some(2)),
+                    Some("2") => (
+                        vec![serde_json::json!({"number":29,"pull_request":{}})],
+                        Some(3),
+                    ),
+                    Some("3") => (vec![row(21)], None),
+                    _ => return Ok(json(599, serde_json::json!({}))),
+                };
+                let mut response = json(200, serde_json::json!(rows));
+                if let Some(next) = next {
+                    response.headers.push(("link".into(),format!("<https://api.github.com/repos/alice/demo/issues?state=open&sort=created&direction=desc&per_page=30&page={next}>; rel=\"next\"")));
+                }
+                return Ok(response);
+            }
             if url.contains("/repos/alice/demo/issues/21/comments") {
                 let page = reqwest::Url::parse(url)
                     .ok()
@@ -1611,6 +1638,89 @@ fn issues_and_pull_requests_read_distinct_lists_and_reuse_their_tabs(cx: &mut Te
         "re-opening Pull requests reuses the same tab"
     );
     assert!(transport.seen("/search/issues") >= 2);
+}
+
+#[gpui::test]
+fn repository_issue_list_opens_real_detail_and_returns_to_the_same_scroll(cx: &mut TestAppContext) {
+    let transport = Arc::new(PageTransport::default());
+    let (shell, controller, cx) = open_shell(cx, transport.clone());
+    login(&controller, cx);
+    wait_until(&controller, cx, |accounts| {
+        matches!(&accounts.snapshot().repositories.preview,
+        crate::ui::accounts::RepositoryPreview::Ready(outcome) if outcome.repositories.len() == 2)
+    });
+    let repository = Route::Repository {
+        namespace: "alice".into(),
+        name: "demo".into(),
+    };
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.navigate(repository.clone(), window, cx)
+    });
+    let repo_tab = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    wait_for_bounds(cx, "repository-tab-issues");
+    let tab = cx.debug_bounds("repository-tab-issues").unwrap();
+    cx.simulate_click(tab.center(), gpui::Modifiers::none());
+    let drain_until = |selector: &'static str, cx: &mut VisualTestContext| {
+        for _ in 0..400 {
+            cx.update_window_entity(&shell, |shell, window, cx| {
+                shell.drain_all_pages_for_test(window, cx)
+            });
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            if cx.debug_bounds(selector).is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("{selector} did not appear");
+    };
+    drain_until("repository-issues-more", cx);
+    let more = cx.debug_bounds("repository-issues-more").unwrap();
+    cx.simulate_click(more.center(), gpui::Modifiers::none());
+    for _ in 0..400 {
+        cx.update_window_entity(&shell, |shell, window, cx| {
+            shell.drain_all_pages_for_test(window, cx)
+        });
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        if cx.debug_bounds("repository-issues-more").is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(transport.seen("/repos/alice/demo/issues?"), 3);
+    let viewport = cx.debug_bounds("repository-issues-viewport").unwrap();
+    cx.simulate_event(gpui::ScrollEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-3000.))),
+        modifiers: gpui::Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+        ..Default::default()
+    });
+    drain_until("repository-issue-title-21", cx);
+    let title = cx.debug_bounds("repository-issue-title-21").unwrap();
+    assert!(viewport.contains(&title.center()));
+    cx.simulate_click(title.center(), gpui::Modifiers::none());
+    wait_for_bounds(cx, "issue-detail-body");
+    wait_for_bounds(cx, "issue-comment-301");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.route()),
+        Route::Issue {
+            namespace: "alice".into(),
+            name: "demo".into(),
+            number: 21
+        }
+    );
+    let detail = shell.read_with(cx, |shell, _| shell.active_tab_id());
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.close_tab(detail, window, cx)
+    });
+    wait_for_bounds(cx, "repository-issue-title-21");
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.active_tab_id()),
+        repo_tab
+    );
+    assert_eq!(cx.debug_bounds("repository-issue-title-21").unwrap(), title);
+    assert_eq!(transport.seen("/repos/alice/demo/issues?"), 3);
 }
 
 #[gpui::test]

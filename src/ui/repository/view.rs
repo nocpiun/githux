@@ -54,40 +54,37 @@ pub(super) fn render(
     let header = header(page, window, cx);
     let tabs = tab_strip(page, cx);
     let browsing = page.selected_branch().is_some();
-    let body: AnyElement =
-        if !RepositoryTab::Code.has_content() || page.tab() != RepositoryTab::Code {
-            // Undesigned repository tabs stay empty by product convention: no
-            // "not implemented" card, no copied GitHub feature menu.
-            div()
-                .debug_selector(|| "repository-tab-empty".to_string())
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .into_any_element()
-        } else {
-            match page.error().cloned() {
-                // A page-level failure replaces the browsing area: an empty tree
-                // would read as "no files", which a failed read never proves.
-                Some(error) if !browsing => {
-                    failure_panel("repository-error", &error, page.is_active(), false, cx)
-                }
-                _ => {
-                    let tree = tree_column(page, rows, window, cx);
-                    let reader = reader_column(page, cx);
-                    div()
-                        .debug_selector(|| "repository-body".to_string())
-                        .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .w_full()
-                        .overflow_hidden()
-                        .child(tree)
-                        .child(reader)
-                        .into_any_element()
-                }
+    let body: AnyElement = match page.tab() {
+        RepositoryTab::Issues => page.render_issues(window, cx),
+        RepositoryTab::Code => match page.error().cloned() {
+            // A page-level failure replaces the browsing area: an empty tree
+            // would read as "no files", which a failed read never proves.
+            Some(error) if !browsing => {
+                failure_panel("repository-error", &error, page.is_active(), false, cx)
             }
-        };
+            _ => {
+                let tree = tree_column(page, rows, window, cx);
+                let reader = reader_column(page, cx);
+                div()
+                    .debug_selector(|| "repository-body".to_string())
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(tree)
+                    .child(reader)
+                    .into_any_element()
+            }
+        },
+        _ => div()
+            .debug_selector(|| "repository-tab-empty".to_string())
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .into_any_element(),
+    };
     div()
         .id("repository-page-root")
         .debug_selector(|| "repository-page-root".to_string())

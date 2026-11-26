@@ -1,6 +1,12 @@
 //! Standalone interactive preview for the Global Issues -> Issue Detail flow inside the real Shell.
 //!
-//! Run with `cargo run --locked --example issue_detail`.
+//! Run the repository flow with `node scripts/verify.mjs -- cargo build --locked --example issue_detail`,
+//! then `target/debug/examples/issue_detail.exe --repository`. Select `acme/widgets` in the
+//! sidebar, then choose its Issues tab.
+//! Open has a full page, a PR-only page, then #42 and #43. Closed fails once and retries to empty.
+//! `acme/other` has an empty Closed list and a distinct #42 under Open.
+//!
+//! Without `--repository`, the preview starts at the Issue detail example.
 //!
 //! Opens the real product `Shell` backed by an in-memory credential store, a temporary SQLite
 //! directory + `CacheStore`, and a deterministic fixture transport so the reviewer can:
@@ -70,6 +76,7 @@ use workspace::Route;
 #[derive(Default)]
 struct IssueDetailPreviewTransport {
     flaky_comments_attempts: AtomicU64,
+    closed_list_attempts: AtomicU64,
 }
 
 fn json_ok(body: serde_json::Value) -> HttpResponse {
@@ -179,6 +186,43 @@ impl Transport for IssueDetailPreviewTransport {
                         })))
                     }
                 }
+                "/graphql"
+                    if request
+                        .body
+                        .as_deref()
+                        .is_some_and(|body| body.contains("RepositoryOpenCounts")) =>
+                {
+                    let body: serde_json::Value =
+                        serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+                    let widgets = body["variables"]["name"] == "widgets";
+                    Ok(json_ok(json!({"data":{"repository":{
+                        "databaseId": if widgets { 10 } else { 11 },
+                        "issues":{"totalCount": if widgets { 32 } else { 1 }},
+                        "pullRequests":{"totalCount": if widgets { 1 } else { 0 }}
+                    }}})))
+                }
+                "/repos/acme/widgets/releases"
+                | "/repos/acme/other/releases"
+                | "/repos/acme/widgets/contributors"
+                | "/repos/acme/other/contributors"
+                | "/repos/acme/widgets/branches"
+                | "/repos/acme/other/branches" => Ok(json_ok(json!([]))),
+                "/repos/acme/widgets/languages" | "/repos/acme/other/languages" => {
+                    Ok(json_ok(json!({})))
+                }
+                "/repos/acme/widgets" | "/repos/acme/other" => {
+                    let name = path.rsplit('/').next().unwrap();
+                    Ok(json_ok(json!({
+                        "id": if name == "widgets" { 10 } else { 11 },
+                        "name": name, "owner": {"id":2,"login":"acme"},
+                        "private":false,"default_branch":null,"fork":false,"archived":false,
+                        "stargazers_count":0,"forks_count":0,"open_issues_count":32,"size":1,
+                        "html_url": format!("https://github.com/acme/{name}")
+                    })))
+                }
+                "/repos/acme/widgets/issues"
+                | "/repositories/10/issues"
+                | "/repos/acme/other/issues" => Ok(self.repository_issues(&url)),
                 "/repos/acme/widgets/issues/42" => Ok(json_ok(json!({
                     "id": 4201,
                     "number": 42,
@@ -294,6 +338,22 @@ impl Transport for IssueDetailPreviewTransport {
                 "/repos/acme/widgets/issues/45" => {
                     Ok(json_status(403, json!({ "message": "Forbidden" })))
                 }
+                _ if sample_number(path).is_some() => {
+                    let number = sample_number(path).unwrap();
+                    Ok(json_ok(json!({
+                        "id": number + 10000, "number":number, "title":format!("Sample issue #{number}"),
+                        "state":"open","user":{"id":1,"login":"octocat"},
+                        "body":format!("This is the Markdown body for **widgets #{number}**."),
+                        "comments":0,"created_at":"2026-11-19T00:00:00Z","updated_at":"2026-11-19T00:00:00Z"
+                    })))
+                }
+                _ if path
+                    .strip_suffix("/comments")
+                    .and_then(sample_number)
+                    .is_some() =>
+                {
+                    Ok(json_ok(json!([])))
+                }
                 _ => Ok(json_status(404, json!({ "message": "Not Found" }))),
             }
         })
@@ -315,6 +375,82 @@ impl Transport for IssueDetailPreviewTransport {
             Ok(response)
         })
     }
+}
+
+impl IssueDetailPreviewTransport {
+    fn repository_issues(&self, url: &reqwest::Url) -> HttpResponse {
+        let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        let state = params.get("state").map(|value| value.as_ref());
+        let page = params.get("page").map(|value| value.as_ref());
+        let row = |number, title: String, state: &str| {
+            json!({
+                "number":number,"title":title,"state":state,"updated_at":"2026-11-19T00:00:00Z"
+            })
+        };
+        let other = url.path() == "/repos/acme/other/issues";
+        let (rows, next) = match (other, state, page) {
+            (true, Some("closed"), Some("1")) => (vec![], None),
+            (true, Some("open"), Some("1")) => (
+                vec![row(
+                    42,
+                    "Same issue number (#42) in another repository (no body, no comments)".into(),
+                    "open",
+                )],
+                None,
+            ),
+            (false, Some("closed"), Some("1")) => {
+                if self.closed_list_attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                    return json_status(503, json!({"message":"Synthetic list failure"}));
+                }
+                (vec![], None)
+            }
+            (false, Some("open"), Some("1")) => (
+                (101..=130)
+                    .rev()
+                    .map(|number| row(number, format!("Sample issue #{number}"), "open"))
+                    .collect(),
+                Some(2),
+            ),
+            (false, Some("open"), Some("2")) => {
+                (vec![json!({"number":100,"pull_request":{}})], Some(3))
+            }
+            (false, Some("open"), Some("3")) => (
+                vec![
+                    row(
+                        42,
+                        "Render read-only Issue detail with Markdown and paginated comments".into(),
+                        "open",
+                    ),
+                    row(
+                        43,
+                        "Comments fail once with 503 while body stays visible (click Retry)".into(),
+                        "open",
+                    ),
+                ],
+                None,
+            ),
+            _ => {
+                return json_status(
+                    599,
+                    json!({"message":"Unmodelled repository Issues request"}),
+                );
+            }
+        };
+        let mut response = json_ok(json!(rows));
+        if let Some(next) = next {
+            response.headers.push(("link".into(), format!(
+                "<https://api.github.com/repositories/10/issues?state=open&sort=created&direction=desc&per_page=30&page={next}&after=preview-{next}>; rel=\"next\""
+            )));
+        }
+        response
+    }
+}
+
+fn sample_number(path: &str) -> Option<u64> {
+    path.strip_prefix("/repos/acme/widgets/issues/")?
+        .parse()
+        .ok()
+        .filter(|number| (101..=130).contains(number))
 }
 
 /// Wait for the real signed-in account workspace to become active (handling async account
@@ -365,6 +501,7 @@ fn install_preview_bootstrap(
 }
 
 fn main() {
+    let repository_preview = std::env::args().any(|arg| arg == "--repository");
     let temp = tempfile::tempdir().expect("temp dir");
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -421,7 +558,9 @@ fn main() {
                     let controller = cx.new(|cx| Accounts::new(Some(runtime.clone()), window, cx));
                     cx.set_global(AccountsHandle(controller.clone()));
                     let shell = cx.new(|cx| Shell::new(window, cx));
-                    install_preview_bootstrap(&controller, &shell, window, cx);
+                    if !repository_preview {
+                        install_preview_bootstrap(&controller, &shell, window, cx);
+                    }
                     shell
                 },
             )
