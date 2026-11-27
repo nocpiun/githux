@@ -19,6 +19,11 @@ pub async fn fetch_releases(
     let mut url = endpoint(client, repository.locator(), &["releases"])?;
     url.query_pairs_mut()
         .append_pair("per_page", &limits.per_page.to_string());
+    // Only Releases adopts GitHub's canonical `/repositories/{id}/releases`
+    // continuation; Contributors/Packages keep their current path rule.
+    let continuation_paths = canonical_continuation_path(client, repository.id(), &["releases"])
+        .into_iter()
+        .collect();
     let outcome = paginated(
         client,
         token,
@@ -27,6 +32,7 @@ pub async fn fetch_releases(
             limits,
             cancel,
             allow_no_content: false,
+            continuation_paths,
         },
         parse_page,
         |items, page| items.append(page),

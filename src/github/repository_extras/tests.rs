@@ -856,3 +856,157 @@ fn limits_reject_unbounded_or_invalid_requests() {
         ));
     }
 }
+
+/// Real public responses continue `GET /repos/{owner}/{repo}/releases` at
+/// `/repositories/{id}/releases` (observed on cli/cli, id 212613049). The list
+/// must follow that canonical continuation for the *same* repository only.
+#[tokio::test]
+async fn releases_follow_the_canonical_repository_id_continuation() {
+    let canonical = |page: u32, repository_id: u64| {
+        (
+            "link".to_owned(),
+            format!(
+                r#"<https://api.github.com/repositories/{repository_id}/releases?per_page=100&page={page}>; rel="next", <https://api.github.com/repositories/{repository_id}/releases?per_page=100&page=3>; rel="last""#
+            ),
+        )
+    };
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(HttpResponse {
+        headers: vec![canonical(2, 42)],
+        ..response(200, &format!("[{}]", release(1, false, false)))
+    }))
+    .await;
+    mock.enqueue(Ok(HttpResponse {
+        headers: vec![(
+            "link".to_owned(),
+            r#"<https://api.github.com/repositories/42/releases?per_page=100&page=1>; rel="prev", <https://api.github.com/repositories/42/releases?per_page=100&page=2>; rel="last""#
+                .to_owned(),
+        )],
+        ..response(200, &format!("[{}]", release(2, false, false)))
+    }))
+    .await;
+    let outcome = fetch_releases(
+        &client(mock.clone()),
+        &token(),
+        &repository(),
+        &RepositoryExtrasLimits::default(),
+        CancellationToken::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.completeness,
+        ExtrasCompleteness::Complete,
+        "both pages were fully read: {:?}",
+        outcome.completeness
+    );
+    assert_eq!(outcome.releases.len(), 2);
+    assert_eq!(outcome.page_metadata.len(), 2);
+    let recorded = mock.recorded().await;
+    assert_eq!(
+        recorded[0].0,
+        "https://api.github.com/repos/owner/repo/releases?per_page=100"
+    );
+    assert_eq!(
+        recorded[1].0,
+        "https://api.github.com/repositories/42/releases?per_page=100&page=2"
+    );
+    // The continuation is still the same trusted API source, so it keeps the PAT.
+    assert!(
+        recorded[1]
+            .1
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value.contains("ghp_synthetic_only"))
+    );
+}
+
+/// The canonical continuation is admitted only for the current repository id and
+/// the releases resource. Anything else still stops as a typed Partial.
+#[tokio::test]
+async fn canonical_continuation_rejects_other_ids_resources_and_endpoints() {
+    for (link, expected) in [
+        (
+            r#"<https://api.github.com/repositories/7/releases?page=2>; rel="next""#,
+            "invalid",
+        ),
+        (
+            r#"<https://api.github.com/repositories/42/contributors?page=2>; rel="next""#,
+            "invalid",
+        ),
+        (
+            r#"<https://api.github.com/repositories/42?page=2>; rel="next""#,
+            "invalid",
+        ),
+        (
+            r#"<https://api.github.com/repositories/42/releases/1?page=2>; rel="next""#,
+            "invalid",
+        ),
+        (
+            r#"<https://api.github.com/users/octocat/repos?page=2>; rel="next""#,
+            "invalid",
+        ),
+        (
+            r#"<https://evil.invalid/repositories/42/releases?page=2>; rel="next""#,
+            "untrusted",
+        ),
+    ] {
+        let mock = Arc::new(MockTransport::new());
+        mock.enqueue(Ok(HttpResponse {
+            headers: vec![("link".to_owned(), link.to_owned())],
+            ..response(200, &format!("[{}]", release(1, false, false)))
+        }))
+        .await;
+        let outcome = fetch_releases(
+            &client(mock.clone()),
+            &token(),
+            &repository(),
+            &RepositoryExtrasLimits::default(),
+            CancellationToken::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome.completeness,
+                ExtrasCompleteness::Partial { ref reasons }
+                    if reasons.iter().any(|reason| matches!(reason,
+                        ExtrasIncompleteReason::UntrustedPagination if expected == "untrusted")
+                        || matches!(reason, ExtrasIncompleteReason::InvalidPagination if expected == "invalid"))
+            ),
+            "{link} should stay rejected"
+        );
+        assert_eq!(outcome.releases.len(), 1);
+        assert_eq!(mock.recorded().await.len(), 1, "{link} must not be fetched");
+    }
+}
+
+/// Contributors keep the exact-initial-path rule: the canonical releases
+/// allowance must not leak into the other extras readers.
+#[tokio::test]
+async fn contributors_do_not_gain_the_releases_canonical_continuation() {
+    let mock = Arc::new(MockTransport::new());
+    mock.enqueue(Ok(HttpResponse {
+        headers: vec![(
+            "link".to_owned(),
+            r#"<https://api.github.com/repositories/42/contributors?anon=true&page=2>; rel="next""#
+                .to_owned(),
+        )],
+        ..response(200, "[]")
+    }))
+    .await;
+    let outcome = fetch_contributors(
+        &client(mock.clone()),
+        &token(),
+        &repository(),
+        &RepositoryExtrasLimits::default(),
+        CancellationToken::default(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome.completeness,
+        ExtrasCompleteness::Partial { ref reasons }
+            if reasons.contains(&ExtrasIncompleteReason::InvalidPagination)
+    ));
+    assert_eq!(mock.recorded().await.len(), 1);
+}

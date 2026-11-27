@@ -27,6 +27,9 @@ pub async fn fetch_contributors(
             limits,
             cancel,
             allow_no_content: true,
+            // Contributors keep the exact-initial-path rule until a canonical
+            // continuation is actually observed for them.
+            continuation_paths: Vec::new(),
         },
         parse_page,
         |items, page| items.append(page),

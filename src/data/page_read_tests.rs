@@ -465,6 +465,68 @@ async fn extras_preserve_distinct_models_metadata_and_share_one_account() {
     }
 }
 
+/// The visible Releases summary reads through the formal `PageReadSession`
+/// adapter. This proves the canonical `/repositories/{id}/releases` second page
+/// is reached on that path too (not only in the low-level reader test), with the
+/// same account-scoped authorization and no leaked request policy.
+#[tokio::test]
+async fn session_release_summary_reads_the_canonical_second_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = Arc::new(Controlled::default());
+    let svc = service(&temp, transport.clone(), 3).await;
+    login(&svc, &transport, 1, "viewer", "viewer-token").await;
+    let repo = svc.repo_service().session().unwrap();
+    transport.push(200, extras_details());
+    let repository = repo
+        .repository(locator(), &Default::default(), Default::default())
+        .await
+        .unwrap()
+        .value
+        .identity;
+    assert_eq!(repository.id(), 42);
+    let session = svc.page_session().unwrap();
+    transport.push_response(HttpResponse {
+        status: 200,
+        headers: vec![(
+            "link".into(),
+            "<https://api.github.com/repositories/42/releases?per_page=100&page=2>; rel=\"next\""
+                .into(),
+        )],
+        body: json!([{"id":1,"tag_name":"v1","draft":false,"prerelease":false}]).to_string(),
+    });
+    transport.push_response(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: json!([{"id":2,"tag_name":"v2","draft":false,"prerelease":false}]).to_string(),
+    });
+    let releases = session
+        .releases(
+            &repository,
+            &RepositoryExtrasLimits::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .value;
+    // Both pages were read, so the summary can stop reporting an incomplete list.
+    assert_eq!(releases.completeness, ExtrasCompleteness::Complete);
+    assert_eq!(releases.releases.len(), 2);
+    assert_eq!(releases.releases[1].tag_name, "v2");
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4, "login, details and two release pages");
+    assert_eq!(
+        requests[2].url,
+        "https://api.github.com/repos/octo/repo/releases?per_page=100"
+    );
+    assert_eq!(
+        requests[3].url,
+        "https://api.github.com/repositories/42/releases?per_page=100&page=2"
+    );
+    // Same API source, so the shared authorization policy is unchanged.
+    assert_eq!(auth(&requests[2]), "Bearer viewer-token");
+    assert_eq!(auth(&requests[3]), "Bearer viewer-token");
+}
+
 /// End-to-end through the **real adapters**: live-shaped received events, a real
 /// `/user/following` page set and a real pull-request detail response produce the
 /// visible Feed. This is the regression for the failures found against live data:

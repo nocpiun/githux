@@ -68,6 +68,28 @@ impl RepositoryExtrasLimits {
     }
 }
 
+/// Continuation path GitHub may use for a list read of this same repository.
+///
+/// The REST API sometimes answers `GET /repos/{owner}/{repo}/<resource>` with a
+/// `Link: rel="next"` pointing at `/repositories/{repository_id}/<resource>`.
+/// Both address the same resource for the same repository, so pagination must
+/// accept either. The path is built from the canonical numeric id this read was
+/// addressed with and from the same resource segments, so it cannot be reused
+/// for another repository or another endpoint.
+pub(crate) fn canonical_continuation_path(
+    client: &GitHubClient,
+    repository_id: u64,
+    suffix: &[&str],
+) -> Option<String> {
+    let mut url = Url::parse(&client.config().base_url).ok()?;
+    url.path_segments_mut()
+        .ok()?
+        .pop_if_empty()
+        .extend(["repositories", &repository_id.to_string()])
+        .extend(suffix.iter().copied());
+    Some(url.path().to_owned())
+}
+
 pub(crate) fn metadata(response: &HttpResponse) -> ResponseMetadata {
     ResponseMetadata {
         etag: response.header("etag").map(str::to_owned),
@@ -154,6 +176,10 @@ pub(crate) struct Pagination<'a> {
     pub limits: &'a RepositoryExtrasLimits,
     pub cancel: CancellationToken,
     pub allow_no_content: bool,
+    /// Continuation paths GitHub may legitimately switch to, beyond the exact
+    /// initial path. Derived from the same repository identity the request was
+    /// addressed to, so an unrelated resource can never be admitted.
+    pub continuation_paths: Vec<String>,
 }
 
 pub(crate) async fn paginated<T, F>(
@@ -171,6 +197,7 @@ where
         limits,
         cancel,
         allow_no_content,
+        continuation_paths,
     } = pagination;
     enum Fetched<T> {
         NoContent(HttpResponse),
@@ -280,7 +307,14 @@ where
                     reasons.push(ExtrasIncompleteReason::UntrustedPagination);
                     break;
                 }
-                if next.path() != initial_path
+                // GitHub sometimes continues a list under
+                // `/repositories/{id}/<resource>`. Only the id this read was
+                // addressed to is accepted, and only for the same resource.
+                let known_path = next.path() == initial_path
+                    || continuation_paths
+                        .iter()
+                        .any(|allowed| next.path() == allowed);
+                if !known_path
                     || !next.username().is_empty()
                     || next.password().is_some()
                     || next.fragment().is_some()
