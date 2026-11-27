@@ -16,17 +16,17 @@ Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索
 
 ## 当前证据与下一步
 
-阅读进度以 2026-11-27 的 `main@38fb8e0` 为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
+阅读进度以 2026-11-27 的 `main@322b3cb`（含 #115 PR Conversation 离线缓存、#116 正式 Shell 挂载 `SettingsView`）为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
 | 正式 Rust / GPUI / Ely 外壳 | 单 Cargo package、固定依赖；[`app::run`](../src/app/mod.rs)、[`ui::Shell`](../src/ui/mod.rs) 与 workspace 标签已存在 | 窗口拖动、双击最大化、贴靠、Tall 标题栏等已有各自原生证据，见[外壳记录](devlog/2026-10-22-shell-layout.md)与 [Tall 记录](devlog/2026-10-23-tall-caption.md)。多标签完整交互、中文 IME、多 DPI/跨屏和字体回退仍待整体验收 |
-| 真实账户、仓库侧栏与每账户工作区 | PR #38 已合并；[`app::accounts`](../src/app/accounts/mod.rs)、[`storage::accounts`](../src/storage/accounts.rs) 接入正式 Shell。真实 `/user/repos` 自动读取、独立账户标签、真实圆头像、空 mask 防护和头像有限总超时已实现 | Settings › Accounts 是过渡入口，不是最终 Settings 设计。真实 PAT 登录、Settings/footer 同屏交互、部分原生滚动手感与多 DPI 产品路径仍待验收，见[account-shell 记录](devlog/2026-10-28-account-shell.md) |
+| 真实账户、仓库侧栏与每账户工作区 | PR #38 已合并；[`app::accounts`](../src/app/accounts/mod.rs)、[`storage::accounts`](../src/storage/accounts.rs) 接入正式 Shell。真实 `/user/repos` 自动读取、独立账户标签、真实圆头像、空 mask 防护和头像有限总超时已实现；#116 已在正式 Shell 挂载 `SettingsView` 替代过渡 Accounts 表单 | 最终 Settings 分类与设置项仍待设计；真实 PAT 登录、Settings/footer 同屏交互、部分原生滚动手感与多 DPI 产品路径仍待验收，见[account-shell 记录](devlog/2026-10-28-account-shell.md)与[Settings 挂载记录](devlog/2026-11-27-settings-accounts-shell.md) |
 | Home / Feed | [`app::pages::home`](../src/app/pages/home.rs) 接入 open Issues/PRs、三类 Feed 和自动续页；[#107](https://github.com/nocpiun/githux/pull/107) 接通 Home 条目及 Feed 中有明确目标的标题和 Read more | 仓库和用户链接仍去各自页面；Events API 的覆盖范围不等于 GitHub 网页 Feed。见 [Home](home-view.md) |
 | Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
 | 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合；Star/Unstar 已接入真实写路径（[PR #63](https://github.com/nocpiun/githux/pull/63)） | Fork 仍只有禁用入口，没有写 API；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md) |
-| 全局组件（Settings/Notifications/Issues-PR） | 独立组件与数据适配已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)）；Notifications 与全局 Issues/PR 已由 [#71](https://github.com/nocpiun/githux/pull/71) 注册进正式 Shell 路由 | Settings 仍是过渡 Accounts 入口；`SettingsView` 组件已合并但未挂载，最终分类与设置项仍待独立设计 |
-| Issue/PR 阅读 | 仓库 Issues 列表与详情（#108、#106）、仓库 PR 列表（#112）、PR Conversation（#109）、Files changed（#111）、全局 Issue/PR 标题接线（#106、#110）、Home/Feed（#107）与通知（#105）到同一详情的入口均已合并；Releases 摘要续页由 #113 修复 | 合成测试覆盖路由、标签复用与返回状态；真实账户窗口验收见[试用清单](#windows-日常试用issuepr-阅读清单) |
+| 全局组件（Settings/Notifications/Issues-PR） | 独立组件与数据适配已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)）；Notifications 与全局 Issues/PR 已由 [#71](https://github.com/nocpiun/githux/pull/71) 注册进正式 Shell 路由；`SettingsView` 已由 [#116](https://github.com/nocpiun/githux/pull/116) 挂载进正式 Shell | 最终 Settings 分类与设置项仍待独立设计；原生窗口观感与真实 PAT 交互仍待整体验收 |
+| Issue/PR 阅读 | 仓库 Issues 列表与详情（#108、#106）、仓库 PR 列表（#112）、PR Conversation（#109；离线缓存由 [#115](https://github.com/nocpiun/githux/pull/115) 接入）、Files changed（#111）、全局 Issue/PR 标题接线（#106、#110）、Home/Feed（#107）与通知（#105）到同一详情的入口均已合并；Releases 摘要续页由 #113 修复 | 合成测试覆盖路由、标签复用与返回状态；真实账户窗口验收见[试用清单](#windows-日常试用issuepr-阅读清单) |
 | 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用；[cache-core](cache-core.md) 存储/授权门槛、[账户生命周期](cache-account-lifecycle.md) 绑定、[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器均已合并；#68 在正式启动打开唯一应用级 `CacheStore`，#72/#69 与仓库页面消费其快照 | 仓库/Home/Profile 已支持重启后读取已缓存内容并区分历史快照，但账户 workspace 仍是内存态、重启先回 Home。C1–C5 政策已确认，容量与验证间隔仍属工程测量起点；清缓存、授权失效与跨账户隔离的端到端原生验收仍待整体验证 |
 | CI 与交付流程 | PR #1/#2 起已有检查；PR #7 起 Ubuntu code-check，四平台 Debug build 与最终 `CI` 汇总保留；PR #31 增加 PR Check 门槛 | 具体 required checks 和当前 head 结果必须到 GitHub 核验；编译通过不是 Windows 以外原生产品支持，也不是 GUI 验收 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用 | 派发 skill 和完整并行调度未产品化；并行工作不能成为 main 的实现证据 |
@@ -58,7 +58,7 @@ Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索
 
 1. 取最新 main 并确认无未提交改动：`git switch main && git pull --ff-only && git status --short`。
 2. 用 [README](../README.md#windows-安装与运行) 的正常启动命令 `cargo run --locked` 启动正式应用；首次构建等待编译完成即可，不需要 `cargo build`、测试或预览 example。
-3. 在 Settings › Accounts（过渡入口）添加一个真实 Classic PAT 并登录，确认侧栏出现真实仓库列表。
+3. 在 Settings › Accounts 添加一个真实 Classic PAT 并登录，确认侧栏出现真实仓库列表。
 
 ### 1 · 仓库 Issues 列表 → 单条 Issue
 
@@ -166,7 +166,7 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 
 - 放置右上角 command palette 入口和底部四入口，先完成焦点、弹出/关闭和路由约定。具体搜索结果由后续选定范围接入。**入口、本地导航结果、焦点返回已交付**；真实搜索范围未接入。
 - 首次接入文本输入与阅读控件时验证中文 IME、选择复制、字形回退和 DPI。原型补丁先重现再决定是否采用，不默认整体搬入正式工程。**首次文本输入已出现**；组合态逻辑有测试平台用例，真实 IME 与多 DPI 仍待人工验收。
-- 形成最小共享组合：仓库行、元信息、设置行与页面状态显示。由实际复用产生组件，不预建庞大通用 UI 框架。**仓库行、页面外壳与过渡 Accounts 设置行已产生**；更多正式页面状态随 shell-pages 接线，最终设置分类仍待设计。
+- 形成最小共享组合：仓库行、元信息、设置行与页面状态显示。由实际复用产生组件，不预建庞大通用 UI 框架。**仓库行、页面外壳与 `SettingsView`（#116）已产生并挂载**；最终设置分类仍待设计。
 
 **验收：** 启动 Home；侧边栏只有仓库区域滚动；能同时打开仓库 A/B 与 Profile 并保持各自状态；窗口拖动、最大化、贴靠、键盘焦点与中文候选确认正常；未设计的详情内容仍留空。
 
@@ -222,7 +222,7 @@ R4 各页面可以独立交付；R5 不依赖所有 R4 页面完成。若具体�
 
 Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确认只保留合并 PR、星标仓库、创建仓库三类活动、保持服务顺序，且每条卡片主语必须是当前账户关注的人（合并贡献取 PR 作者，需读 PR 详情确认），初始手动刷新，不自动轮询，也不承诺复刻网站全部 Feed；Follow 两类事件卡片暂缓。Home 查询为 `involves:` + `is:open`、无时间窗口、按 updated 降序；Profile 的公开同名根 README、pins/gist 提示、仅无 pin 才 Popular 与最近一年范围已确认。具体边界统一见[产品约定](product.md#home-与-feed-的数据范围)。
 
-**当前状态：** Home/Profile/Repository 三个产品路由已统一接入真实数据入口，Notifications 与全局 Issues/PR 也已注册进正式路由；Settings 仍是过渡 Accounts 页面。远程搜索、最终 Settings 与整体原生验收尚未完成。
+**当前状态：** Home/Profile/Repository 三个产品路由已统一接入真实数据入口，Notifications、全局 Issues/PR 与 `SettingsView`（#116）也已注册进正式路由。远程搜索、最终 Settings 分类与整体原生验收尚未完成。
 
 **验收：** 保留页面全部使用真实数据入口，不保留假数据冒充已接入；加载、部分失败、权限不足、旧值与离线行为遵循统一约定。远端设置若包含写入，依赖 R5 选定的写操作契约，不绕开权限与失败处理。
 
@@ -250,7 +250,7 @@ Issue/PR 阅读按上方新顺序规划。阅读已有评论与发布评论是�
 - 从启动 Home、登录/切账户到仓库与全局列表、Issue/PR 详情、多标签阅读、搜索、Settings 及已选定的操作，完整走通。
 - 各保留数据类型验证离线/重连、权限变化、分页、刷新与缓存清理；清缓存不得删除设置或账户引用。重启可用的内容缓存与 H6 的会话恢复分开验证。
 - 在真实 Windows 窗口验证多 DPI、跨屏、中文 IME、文本选择、焦点恢复、长列表、长 README、频繁切换及标签关闭后的资源释放。
-- 记录启动、交互延迟、滚动、内存、图片资源、网络次数和磁盘占用的可复现条件。性能基线从 R1/R3 开始采集，再确定预算；不凭截图宣布“丝滑”，也不把 Debug 与未来其他构建模式的结果混比。
+- 记录启动、交互延迟、滚动、内存、图片资源、网络次数和磁盘占用的可复现条件。性能基线从 R1/R3 开始采集，再确定预算；当前首份 Windows 阅读路径基线见 [Windows 阅读路径基线](windows-reading-baseline.md)（含冷/暖重开、长文档与分页、9 标签内存与隔离磁盘占用），大图专项记录见 [README 原图性能日志](devlog/2026-11-12-reader-image-performance.md)。不凭截图宣布“丝滑”，也不把 Debug 与未来其他构建模式的结果混比。
 - 检查依赖/字体许可证、脱敏诊断、存储版本升级和错误后的可恢复性。H8 延后不等于可以损坏持久数据。
 - 当最新提交的 CI、代码审查和相关真实交互验收均通过，并且保留项没有未决范围时，记录首版交付证据。现有合并规则按每个 PR 执行，不等到此处才开始审查。
 
