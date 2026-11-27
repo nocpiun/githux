@@ -1,13 +1,14 @@
 # Third-Party Notices
 
 Githux redistributes the third-party components listed here. This file is an
-attribution index for packaging; the exact versions, hashes, distribution form
-and the list of things still uncovered are in
+attribution index for the CI debug artifacts; the exact versions, hashes,
+distribution form and the list of things still uncovered are in
 [docs/third-party-assets.md](docs/third-party-assets.md).
 
-This is **not legal advice**, and the presence of a file in this repository does
-not mean a packaged binary already carries it. **Packaging is not complete.** See
-"Required files at packaging time" below.
+This is **not legal advice**. The CI debug artifacts carry this index and the
+checked-in texts listed below at repository-relative paths. This does not resolve
+the remaining direct/transitive crate texts or dual-license choices documented as
+unresolved, and it is not a complete release compliance review.
 
 Baseline: `730d2292dcd5bb981928341259c971e42ff497b5`.
 
@@ -95,23 +96,33 @@ pinned NuGet packages, and that script already copies each package's
 - `microsoft.windowsappsdk.foundation 1.8.260803002`
 - `microsoft.windowsappsdk.interactiveexperiences 1.8.260708001`
 
-## Required files at packaging time
+## Files staged with CI debug artifacts
 
-1. `assets/fonts/githux-ui/OFL-NotoSansSC.txt` and `assets/fonts/google-sans-code/OFL.txt`
-   (not embedded in the binary).
+The paths below are relative to the artifact root, so the notice links above
+resolve to the actual packaged text rather than to a source-checkout-only path.
+
+1. `assets/fonts/githux-ui/OFL-NotoSansSC.txt` and
+   `assets/fonts/google-sans-code/OFL.txt` (not embedded in the binary). The
+   previous root-level `OFL-NotoSansSC.txt` and `OFL-GoogleSansCode.txt` names
+   are retained as identical copies.
 2. `assets/licenses/ibm-plex-sans-ofl.txt`.
 3. `assets/licenses/ely-mit.txt`.
 4. `assets/licenses/lucide-icons-isc.txt`.
 5. `assets/licenses/gpui-pre-apache-2.0.txt` and
-   `assets/licenses/pulldown-cmark-mit.txt`, plus the license files of the
-   remaining direct dependencies (and a resolved choice for dual-licensed
-   crates).
+   `assets/licenses/pulldown-cmark-mit.txt`.
 6. The `resvg-0.46.0-license-*`, `usvg-0.46.0-license-*` and
-   `tiny-skia-0.11.4-license.txt` files in `assets/licenses/` (retain both
-   alternatives until the distribution license choice is recorded).
-7. `assets/licenses/sqlite-public-domain.txt` (informational).
-8. Each Windows App SDK package's `license.txt` (copied by the runtime script).
-9. This file.
+   `tiny-skia-0.11.4-license.txt` files in `assets/licenses/` (both alternatives
+   are retained; no distribution license choice is recorded here).
+7. `assets/licenses/linguist-mit.txt`.
+8. `assets/licenses/sqlite-public-domain.txt` (informational).
+9. `docs/third-party-assets.md` and this file.
+10. On Windows only, `githux-wasdk.manifest` and each Windows App SDK package's
+    `license.txt`, copied beside the executable as
+    `microsoft.windowsappsdk.foundation.LICENSE.txt` and
+    `microsoft.windowsappsdk.interactiveexperiences.LICENSE.txt` by the runtime
+    script.
 
-No installer or release artifact exists yet; this task does not complete release
-acceptance.
+License files of the remaining direct dependencies, the unresolved license
+choices and transitive texts described in the asset inventory are **not claimed
+to be included** by this list. No installer or release is published by this CI
+job, and this packaging evidence does not complete release acceptance.
