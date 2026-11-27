@@ -143,6 +143,9 @@ impl ConversationSession {
         page: u32,
         collection: Option<CommentCollection>,
     ) -> Option<CacheKey> {
+        // A replacement always publishes to the replay entry point. Only continuations
+        // are keyed by the collection created by a successful first page.
+        let collection = collection.filter(|_| page > 1);
         self.key(
             "pr-conversation-comments",
             Some(scope),

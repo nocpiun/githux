@@ -12,6 +12,14 @@ const UPDATED: u8 = 2;
 const DENIED: u8 = 3;
 const NO_STORE_FAILURE: u8 = 4;
 
+fn no_store_failure() -> HttpResponse {
+    let mut response = json(503, serde_json::json!({}));
+    response
+        .headers
+        .push(("cache-control".into(), "private, no-store".into()));
+    response
+}
+
 struct ConversationTransport {
     base: PageTransport,
     mode: AtomicU8,
@@ -72,13 +80,7 @@ impl Transport for ConversationTransport {
                 return match mode {
                     OFFLINE => Err(offline()),
                     DENIED => Ok(json(403, serde_json::json!({"message": "Forbidden"}))),
-                    NO_STORE_FAILURE => {
-                        let mut response = json(503, serde_json::json!({}));
-                        response
-                            .headers
-                            .push(("cache-control".into(), "private, no-store".into()));
-                        Ok(response)
-                    }
+                    NO_STORE_FAILURE => Ok(no_store_failure()),
                     _ => {
                         let body = if mode == UPDATED {
                             "Fresh PR body"
@@ -98,6 +100,9 @@ impl Transport for ConversationTransport {
             if request.url.contains("/repos/alice/demo/issues/5/comments") {
                 if mode == OFFLINE {
                     return Err(offline());
+                }
+                if mode == NO_STORE_FAILURE {
+                    return Ok(no_store_failure());
                 }
                 let second = request.url.ends_with("&page=2");
                 let id = if mode == UPDATED {
@@ -340,7 +345,7 @@ fn pr_conversation_reopens_offline_retries_and_clears_on_denial(cx: &mut TestApp
 }
 
 #[test]
-fn pr_conversation_invalidates_a_failed_no_store_response_and_honors_repository_revocation() {
+fn pr_conversation_replaces_and_invalidates_snapshots_under_the_replay_key() {
     use crate::data::pr_conversation::ConversationSession;
     use crate::domain::{
         issue_detail::IssueLocator, pr_conversation::Target, repository::RepositoryLocator,
@@ -366,12 +371,43 @@ fn pr_conversation_invalidates_a_failed_no_store_response_and_honors_repository_
             || conversation.cached(IssueDetailLimits::default(), CancellationToken::default());
         let refresh = || conversation.refresh(CancellationToken::default());
 
-        assert!(refresh().await.result.is_ok());
-        assert!(cached().await.is_some());
+        let scope = refresh().await.result.unwrap().cache_scope;
+        let refresh_comments = |collection| {
+            conversation.refresh_comments(
+                scope.clone(),
+                collection,
+                None,
+                IssueDetailLimits::default(),
+                CancellationToken::default(),
+                true,
+            )
+        };
+        let first = refresh_comments(None).await.result.unwrap();
+        assert_eq!(
+            cached().await.unwrap().comments.unwrap().comments[0].id,
+            501
+        );
+
+        harness.transport.mode.store(UPDATED, Ordering::Release);
+        let replacement = refresh_comments(first.collection).await.result.unwrap();
+        let saved = cached().await.unwrap().comments.unwrap();
+        assert_eq!(
+            saved
+                .comments
+                .iter()
+                .map(|comment| comment.id)
+                .collect::<Vec<_>>(),
+            [601]
+        );
+        assert!(!saved.partial);
+
         harness
             .transport
             .mode
             .store(NO_STORE_FAILURE, Ordering::Release);
+        let failed_comments = refresh_comments(replacement.collection).await;
+        assert!(failed_comments.no_store && failed_comments.result.is_err());
+        assert!(cached().await.unwrap().comments.is_none());
         let failed = refresh().await;
         assert!(failed.no_store && failed.result.is_err());
         assert!(cached().await.is_none());
