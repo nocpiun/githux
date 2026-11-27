@@ -41,7 +41,7 @@ pub mod page_cache;
 #[cfg(test)]
 mod page_read_tests;
 mod page_reads;
-mod pr_conversation;
+pub(crate) mod pr_conversation;
 pub(crate) mod pr_files;
 pub mod reader_image_cache;
 pub mod reader_images;

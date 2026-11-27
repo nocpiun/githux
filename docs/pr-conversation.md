@@ -6,7 +6,15 @@
 
 The page uses the shared Markdown Flow reader and account-scoped attachments provider for the description and ordinary comments. Repository-relative Markdown links open the base repository's default-branch file on GitHub and keep the fragment. Blank descriptions display **No description provided.** The comments use the #106 `CommentsRequest` and `Controller` with the PR's base repository and number. **Load more comments** follows the shared validated cursor. Empty success displays **No comments yet.** A failed page offers a retry and retains previously loaded comments when access remains valid. [GitHub ordinary comments endpoint](https://docs.github.com/en/rest/issues/comments#list-issue-comments)
 
-The Shell refresh rechecks PR details and then the first page of comments while keeping visible content. Access denial or resource invisibility from either read clears the mounted content. The PR mounts only after capturing matching account scopes for both services. The page keeps its successful results in memory and reads comments online through the shared service.
+The Shell refresh rechecks PR details and then the first page of comments while keeping visible content. The PR mounts only after capturing matching account scopes for both services.
+
+## Offline Conversation
+
+The formal page reads authorized snapshots from the app's `CacheStore` before requesting GitHub. The normalized route resolves to a numeric repository ID in the saved account's partition. The body and ordinary comment pages use that repository's authorization gate. When a replacement PAT has cleared the route index and quarantined the repository, a successful PR read identifies the repository and a fresh metadata request proves access to that same numeric ID before caching resumes. Keys include the PR number and API representation. Comments also include the requested page and page size. The snapshot contains the description and the summary fields used to read it in context. Checks, approvals, changes and write operations are outside Conversation storage.
+
+A restart restores the contiguous prefix of up to ten previously read comment pages from the same first-page generation. A gap, further unread pages or the replay limit leaves the list partial. A successful refresh replaces the displayed comment collection from page one, and **Load more comments** follows the new validated cursor. The cache never joins continuations from different first-page generations.
+
+The body and comments remain visible while refresh runs. If a transient failure leaves a saved snapshot visible, that section shows **Cached** with a retry. A successful retry replaces the stale content. An access denial or invisible resource from either request clears the page. Credential rejection uses the shared account lifecycle, and repository revocation invalidates the cached display authorization. A `no-store` response, including a failed response, invalidates the corresponding durable snapshot. The page can still read online when cache storage or binding is unavailable.
 
 ## Integration and verification
 

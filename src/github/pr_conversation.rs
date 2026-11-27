@@ -3,7 +3,7 @@
 use crate::auth::token::Pat;
 use crate::domain::{
     error::{GitHubError, RateLimitKind, RetryAfter},
-    pr_conversation::{Conversation, SourceBranch, State, Target, access_denied},
+    pr_conversation::{ConversationReading, SourceBranch, State, Target, access_denied},
     profile::{GraphqlErrorKind, ProfileError},
 };
 use crate::github::{
@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 const QUERY: &str = "query PRConversation($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
-    nameWithOwner
+    nameWithOwner databaseId
     pullRequest(number: $number) {
       number title state isDraft author { login } body
       baseRefName headRefName headRef { name } headRepository { nameWithOwner }
@@ -32,6 +32,7 @@ struct Response {
 #[serde(rename_all = "camelCase")]
 struct Repository {
     name_with_owner: String,
+    database_id: Option<u64>,
     pull_request: Option<PullRequest>,
 }
 
@@ -73,7 +74,7 @@ pub(crate) async fn fetch(
     pat: &Pat,
     target: Target,
     cancel: CancellationToken,
-) -> Result<Conversation, GitHubError> {
+) -> Result<(Option<u64>, ConversationReading), GitHubError> {
     let variables = serde_json::json!({
         "owner": target.repository.owner(),
         "name": target.repository.name(),
@@ -101,7 +102,10 @@ pub(crate) async fn fetch(
     decode(target, outcome.data.ok_or_else(invalid_response)?)
 }
 
-fn decode(target: Target, data: serde_json::Value) -> Result<Conversation, GitHubError> {
+fn decode(
+    target: Target,
+    data: serde_json::Value,
+) -> Result<(Option<u64>, ConversationReading), GitHubError> {
     let response: Response = serde_json::from_value(data).map_err(|_| invalid_response())?;
     let repository = response.repository.ok_or(GitHubError::NotFound)?;
     let expected = format!("{}/{}", target.repository.owner(), target.repository.name());
@@ -126,20 +130,22 @@ fn decode(target: Target, data: serde_json::Value) -> Result<Conversation, GitHu
         (None, _) => SourceBranch::Unavailable,
         _ => return Err(invalid_response()),
     };
-    Ok(Conversation {
-        target,
-        title: pr.title,
-        state: pr.state,
-        draft: pr.is_draft,
-        author: pr
-            .author
-            .map(|author| author.login)
-            .filter(|login| !login.is_empty()),
-        body: (!pr.body.trim().is_empty()).then_some(pr.body),
-        base_branch: pr.base_ref_name,
-        head_branch: pr.head_ref_name,
-        source_branch,
-    })
+    Ok((
+        repository.database_id.filter(|id| *id > 0),
+        ConversationReading {
+            title: pr.title,
+            state: pr.state,
+            draft: pr.is_draft,
+            author: pr
+                .author
+                .map(|author| author.login)
+                .filter(|login| !login.is_empty()),
+            body: (!pr.body.trim().is_empty()).then_some(pr.body),
+            base_branch: pr.base_ref_name,
+            head_branch: pr.head_ref_name,
+            source_branch,
+        },
+    ))
 }
 
 fn invalid_response() -> GitHubError {
