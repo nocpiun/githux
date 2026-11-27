@@ -16,7 +16,7 @@ Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索
 
 ## 当前证据与下一步
 
-阅读进度以 2026-11-27 的 `main@322b3cb`（含 #115 PR Conversation 离线缓存、#116 正式 Shell 挂载 `SettingsView`）为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
+阅读进度以 2026-11-27 的 `main@e175fed`（含 #115 PR Conversation 离线缓存、#116 正式 Shell 挂载 `SettingsView`、#118 Issue 详情离线缓存、#119 通知离线缓存与 #121 第三方 notices）为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索
 | Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
 | 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合；Star/Unstar 已接入真实写路径（[PR #63](https://github.com/nocpiun/githux/pull/63)） | Fork 仍只有禁用入口，没有写 API；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md) |
 | 全局组件（Settings/Notifications/Issues-PR） | 独立组件与数据适配已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)）；Notifications 与全局 Issues/PR 已由 [#71](https://github.com/nocpiun/githux/pull/71) 注册进正式 Shell 路由；`SettingsView` 已由 [#116](https://github.com/nocpiun/githux/pull/116) 挂载进正式 Shell | 最终 Settings 分类与设置项仍待独立设计；原生窗口观感与真实 PAT 交互仍待整体验收 |
-| Issue/PR 阅读 | 仓库 Issues 列表与详情（#108、#106）、仓库 PR 列表（#112）、PR Conversation（#109；离线缓存由 [#115](https://github.com/nocpiun/githux/pull/115) 接入）、Files changed（#111）、全局 Issue/PR 标题接线（#106、#110）、Home/Feed（#107）与通知（#105）到同一详情的入口均已合并；Releases 摘要续页由 #113 修复 | 合成测试覆盖路由、标签复用与返回状态；真实账户窗口验收见[试用清单](#windows-日常试用issuepr-阅读清单) |
+| Issue/PR 阅读 | 仓库 Issues 列表与详情（#108、#106；离线缓存由 [#118](https://github.com/nocpiun/githux/pull/118) 接入）、仓库 PR 列表（#112）、PR Conversation（#109；离线缓存由 [#115](https://github.com/nocpiun/githux/pull/115) 接入）、Files changed（#111）、全局 Issue/PR 标题接线（#106、#110）、Home/Feed（#107）与通知（#105；离线缓存由 [#119](https://github.com/nocpiun/githux/pull/119) 接入）到同一详情的入口均已合并；Releases 摘要续页由 #113 修复 | 合成测试覆盖路由、标签复用与返回状态；真实账户窗口验收见[试用清单](#windows-日常试用issuepr-阅读清单) |
 | 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用；[cache-core](cache-core.md) 存储/授权门槛、[账户生命周期](cache-account-lifecycle.md) 绑定、[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器均已合并；#68 在正式启动打开唯一应用级 `CacheStore`，#72/#69 与仓库页面消费其快照 | 仓库/Home/Profile 已支持重启后读取已缓存内容并区分历史快照，但账户 workspace 仍是内存态、重启先回 Home。C1–C5 政策已确认，容量与验证间隔仍属工程测量起点；清缓存、授权失效与跨账户隔离的端到端原生验收仍待整体验证 |
 | CI 与交付流程 | PR #1/#2 起已有检查；PR #7 起 Ubuntu code-check，四平台 Debug build 与最终 `CI` 汇总保留；PR #31 增加 PR Check 门槛 | 具体 required checks 和当前 head 结果必须到 GitHub 核验；编译通过不是 Windows 以外原生产品支持，也不是 GUI 验收 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用 | 派发 skill 和完整并行调度未产品化；并行工作不能成为 main 的实现证据 |

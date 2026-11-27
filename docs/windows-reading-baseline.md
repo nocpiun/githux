@@ -4,7 +4,7 @@
 
 ## 测试环境与基线范围
 
-- **基线提交**：`322b3cb974c6d30746aded90c48858e46860e7a6`（含 PR #115 PR Conversation 离线缓存与 PR #116 正式 Shell 挂载 `SettingsView`），在此之上仅新增隔离测量探针。
+- **基线提交**：`e175fedf3e8944c4ae01aef80f53183743d56354`（含 PR #115 PR Conversation 离线缓存、#116 正式 Shell 挂载 `SettingsView`、#118 Issue 详情离线缓存、#119 通知离线缓存与 #121 第三方 notices），在此之上仅新增隔离测量探针。
 - **构建配置**：`debug` profile（`unoptimized + debuginfo`，其中 `fast_image_resize` 与 `crates/image-resize` 按 `Cargo.toml` 固定配置为 `opt-level = 3`），Rust `1.98.1`，`--locked`。未与未来 `release` 构建混比。
 - **Windows 环境**：Microsoft Windows 11 Pro（`10.0.26300`, 64-bit），16 核 / 32 线程 x86_64 CPU，31.8 GiB RAM。
 - **隔离与合成数据**：全部运行使用临时目录（`tempfile::tempdir()`）、内存凭据存储（`InMemoryCredentialStore`）与确定性本地 `Transport`；不访问真实 GitHub，不写入真实账户目录或用户配置，不窃取桌面焦点。
@@ -38,39 +38,39 @@ node scripts/verify.mjs -- cargo build --locked --example reading_baseline_nativ
 
 | 指标（ms） | Min | Median | Max | 说明与请求数 |
 | --- | ---: | ---: | ---: | --- |
-| 冷启动 Home 首个可用内容（`home-item-row-0`） | 131.8 | 172.3 | 214.3 | 计时起点在 `add_window_view` 之前 |
-| 冷启动 Home 首个网络空闲（`home_is_ready`） | 185.8 | 241.2 | 300.8 | 5 次 mock HTTP 请求 |
-| 暖重开 Home 缓存首屏（150ms 延迟下） | 161.0 | 165.5 | 178.7 | 远早于后台重验证完成 |
-| 暖重开 Home 后台重验证空闲 | 501.3 | 516.6 | 535.7 | 4 次 mock HTTP 请求 |
-| 冷打开 Repository（`markdown-heading-0`） | 223.5 | 283.7 | 307.7 | 12.5 KB README + 4 PNG + 60 树项 |
-| 冷打开 Repository 首个网络空闲 | 244.6 | 314.3 | 342.4 | 17 次 mock HTTP 请求 |
-| 暖重开 Repository 缓存首屏（150ms 延迟下） | 96.4 | 111.6 | 139.8 | 磁盘缓存首屏（早于 150ms 重验证） |
-| 暖重开 Repository 后台重验证空闲 | 740.9 | 806.4 | 810.4 | **10 次 mock HTTP 请求**（减少 7 次） |
+| 冷启动 Home 首个可用内容（`home-item-row-0`） | 130.6 | 167.3 | 181.3 | 计时起点在 `add_window_view` 之前 |
+| 冷启动 Home 首个网络空闲（`home_is_ready`） | 184.1 | 238.3 | 257.6 | 5 次 mock HTTP 请求 |
+| 暖重开 Home 缓存首屏（150ms 延迟下） | 139.6 | 149.1 | 169.7 | 远早于后台重验证完成 |
+| 暖重开 Home 后台重验证空闲 | 499.7 | 515.1 | 516.8 | 4 次 mock HTTP 请求 |
+| 冷打开 Repository（`markdown-heading-0`） | 197.6 | 255.5 | 272.1 | 12.5 KB README + 4 PNG + 60 树项 |
+| 冷打开 Repository 首个网络空闲 | 218.1 | 284.0 | 302.0 | 17 次 mock HTTP 请求 |
+| 暖重开 Repository 缓存首屏（150ms 延迟下） | 88.4 | 104.0 | 106.6 | 磁盘缓存首屏（早于 150ms 重验证） |
+| 暖重开 Repository 后台重验证空闲 | 740.0 | 760.3 | 790.9 | **10 次 mock HTTP 请求**（减少 7 次） |
 
 ### 2. 长文档滚动、分页、详情与多标签切换（`gpui_test_platform_headless`）
 
 | 场景 | Min (ms) | Median (ms) | Max (ms) | 观测条件 |
 | --- | ---: | ---: | ---: | --- |
-| 长 README 滚动（20 次向下 + 20 次向上） | 881.3 | 1229.4 | 1283.7 | 约 30.7 ms/步（Debug 无优化 UI） |
-| 仓库 Issues 第 2 页加载并滚至 `#50` | 126.2 | 171.6 | 186.6 | 验证 `repository-issue-title-50` 可见 |
-| Issue #42 详情加载（3.1 KB 正文 + 25 评论） | 200.2 | 277.8 | 284.8 | 验证 `issue-detail-body` 可见 |
-| PR #5 Files changed 懒加载（15 文件 diff） | 72.3 | 106.0 | 117.3 | 验证 `pr-file-0` 可见 |
-| 5 次暖标签切换（Home↔Repo↔Issue↔PR↔Home） | 239.9 | 269.3 | 282.6 | 约 53.9 ms/次，**0 次**新增 HTTP 请求 |
+| 长 README 滚动（20 次向下 + 20 次向上） | 835.2 | 1148.8 | 1326.7 | 约 28.7 ms/步（Debug 无优化 UI） |
+| 仓库 Issues 第 2 页加载并滚至 `#50` | 118.1 | 157.7 | 184.3 | 验证 `repository-issue-title-50` 可见 |
+| Issue #42 详情加载（3.1 KB 正文 + 25 评论） | 202.7 | 279.9 | 300.2 | 验证 `issue-detail-body` 可见 |
+| PR #5 Files changed 懒加载（15 文件 diff） | 70.4 | 103.6 | 105.0 | 验证 `pr-file-0` 可见 |
+| 5 次暖标签切换（Home↔Repo↔Issue↔PR↔Home） | 201.4 | 235.6 | 243.8 | 约 47.1 ms/次，**0 次**新增 HTTP 请求 |
 
 ### 3. 进程内存生命周期（Run 0，`K32GetProcessMemoryInfo`）
 
 | 阶段 | Working Set (MiB) | Peak WS (MiB) | Private Commit (MiB) |
 | --- | ---: | ---: | ---: |
-| 挂载 `Shell` 前 | 22.18 | 22.18 | 7.10 |
-| Home 就绪（1 个标签） | 43.81 | 44.05 | 16.15 |
-| 打开全部 9 个阅读标签后（Home + 8 页） | 76.76 | 80.40 | 41.26 |
-| 关闭 8 个标签仅留 Home 后 | 68.03 | 80.40 | 32.16 |
+| 挂载 `Shell` 前 | 22.05 | 22.05 | 7.16 |
+| Home 就绪（1 个标签） | 42.31 | 43.95 | 14.55 |
+| 打开全部 9 个阅读标签后（Home + 8 页） | 81.01 | 81.01 | 45.13 |
+| 关闭 8 个标签仅留 Home 后 | 67.45 | 81.06 | 31.19 |
 
-关闭 8 个标签后，Private Commit 立即回落 9.10 MiB（占 9 标签阶段增量的约 36.2%）；相对初始 Home 仍高出 16.01 MiB，反映分配器/字体/共享缓存保留，且无头平台不含原生 GPU 显存。
+关闭 8 个标签后，Private Commit 立即回落 13.94 MiB（占 9 标签阶段增量的约 45.6%）；相对初始 Home 仍高出 16.64 MiB，反映分配器/字体/共享缓存保留，且无头平台不含原生 GPU 显存。
 
 ### 4. 隔离磁盘缓存占用（冷+暖完整阅读后）
 
-- `cache/` 目录：2 个文件（`cache.sqlite3` 与 `cache.lock`），总计 **425,984 B**（416.0 KiB）。
+- `cache/` 目录：2 个文件（`cache.sqlite3` 与 `cache.lock`），总计 **430,080 B**（420.0 KiB）。
 - `accounts.sqlite3*`：总计 **32,768 B**（32.0 KiB）。
 
 ### 5. Windows 原生进程启动与内存基线（`reading_baseline_native.exe`，N=5）
