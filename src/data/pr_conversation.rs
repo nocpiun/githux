@@ -11,16 +11,17 @@ use crate::domain::{
         IssueComment, IssueCommentsCursor, IssueCommentsPage, IssueDetailError, IssueLocator,
     },
     pr_conversation::{Conversation, ConversationReading, Target, access_denied},
+    repository::RepositoryError,
 };
 use crate::github::{
-    GitHubClient,
+    GitHubClient, RepositoryLimits,
     home::cache::PageTransport,
     issue_detail::{self, IssueDetailLimits},
     pr_conversation,
 };
 use crate::network::cancel::CancellationToken;
 use crate::storage::cache::{
-    CacheAuthorization, CacheKey, CacheRead, CacheWrite, Revalidation, WriteOutcome,
+    CacheAuthorization, CacheError, CacheKey, CacheRead, CacheWrite, WriteOutcome,
 };
 
 const VERSION: u32 = 1;
@@ -83,7 +84,6 @@ struct BodyWrite {
     route: CacheWrite,
     previous: Option<ReadingScope>,
     body: Option<CacheWrite>,
-    proof: Option<Revalidation>,
     authorization: Option<CacheAuthorization>,
 }
 
@@ -226,13 +226,6 @@ impl ConversationSession {
                     .begin_write(cache.scope(), &session.body_key(scope)?)
                     .ok()
             });
-            let proof = previous.as_ref().and_then(|scope| {
-                session
-                    .session
-                    .service()
-                    .begin_revalidation(session.session.context(), Some(scope.repository))
-                    .ok()
-            });
             let authorization = previous.as_ref().and_then(|scope| {
                 cache
                     .store()
@@ -243,7 +236,6 @@ impl ConversationSession {
                 route,
                 previous,
                 body,
-                proof,
                 authorization,
             })
         })
@@ -271,13 +263,14 @@ impl ConversationSession {
         let result = match result {
             Ok(scoped) => {
                 let (repository, reading) = scoped.value;
-                let cache_scope = if let Some(write) = write {
-                    self.finish_body_write(write, repository, &reading, no_store, &cancel)
-                        .await
-                } else {
-                    None
+                let scope = match write {
+                    Some(write) => {
+                        self.finish_body_write(write, repository, &reading, no_store, &cancel)
+                            .await
+                    }
+                    None => Ok(None),
                 };
-                Ok(LiveConversation {
+                scope.map(|cache_scope| LiveConversation {
                     conversation: Conversation {
                         target: self.target.clone(),
                         reading,
@@ -287,13 +280,7 @@ impl ConversationSession {
                 })
             }
             Err(error) => {
-                if matches!(error, GitHubError::Unauthorized) {
-                    let _ = self
-                        .session
-                        .service()
-                        .credential_rejected(self.session.context())
-                        .await;
-                } else if (no_store || access_denied(&error))
+                if (no_store || access_denied(&error))
                     && let Some(write) = write
                 {
                     self.forget_route(write, cancel.clone()).await;
@@ -301,6 +288,13 @@ impl ConversationSession {
                 Err(error)
             }
         };
+        if matches!(result, Err(GitHubError::Unauthorized)) {
+            let _ = self
+                .session
+                .service()
+                .credential_rejected(self.session.context())
+                .await;
+        }
         let result = result.and_then(|live| {
             if authorization
                 .as_ref()
@@ -323,53 +317,126 @@ impl ConversationSession {
         reading: &ConversationReading,
         no_store: bool,
         cancel: &CancellationToken,
-    ) -> Option<ReadingScope> {
-        if no_store || repository.is_none() {
+    ) -> Result<Option<ReadingScope>, GitHubError> {
+        let Some(repository) = repository.filter(|_| !no_store) else {
             self.forget_route(write, cancel.clone()).await;
-            return None;
+            return Ok(None);
+        };
+        self.check(cancel)?;
+        if write
+            .authorization
+            .as_ref()
+            .is_some_and(|stamp| !stamp.is_current())
+        {
+            return Err(GitHubError::StaleContext);
         }
-        self.check(cancel).ok()?;
-        let repository = repository?;
+        let repository_changed = write
+            .previous
+            .as_ref()
+            .is_some_and(|scope| scope.repository != repository);
         let previous = write
             .previous
+            .take()
             .filter(|scope| scope.repository == repository);
-        if previous.is_some()
-            && let Some(proof) = write.proof.take()
-        {
-            self.session
-                .service()
-                .permission_confirmed(self.session.context(), proof)
+        let (scope, ticket) = if let (Some(scope), Some(ticket)) = (previous, write.body.take()) {
+            (scope, ticket)
+        } else {
+            // A new binding owns a distinct body key. The pre-request route ticket
+            // must still be current before a reader can discover this new body.
+            let scope = ReadingScope {
+                repository,
+                generation: uuid::Uuid::new_v4().into_bytes(),
+            };
+            let Some(key) = self.body_key(&scope) else {
+                return Ok(None);
+            };
+            match self
+                .new_body_ticket(&write.cache, key, repository, cancel)
                 .await
-                .ok()?;
-        }
+            {
+                Ok(Some(ticket)) => (scope, ticket),
+                Ok(None) => {
+                    if repository_changed {
+                        self.forget_route(write, cancel.clone()).await;
+                    }
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.forget_route(write, cancel.clone()).await;
+                    return Err(error);
+                }
+            }
+        };
         let session = self.clone();
         let reading = reading.clone();
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || {
+        let stored = tokio::task::spawn_blocking(move || {
             session.check(&cancel).ok()?;
             let cache = &write.cache;
-            let (scope, ticket) = if let Some(scope) = previous {
-                (scope, write.body?)
-            } else {
-                // New route bindings have a unique body key. If the pre-request route
-                // ticket has gone stale, the unreferenced body cannot be read on restart.
-                let scope = ReadingScope {
-                    repository,
-                    generation: uuid::Uuid::new_v4().into_bytes(),
-                };
-                let ticket = cache
-                    .store()
-                    .begin_write(cache.scope(), &session.body_key(&scope)?)
-                    .ok()?;
-                (scope, ticket)
-            };
             save(cache, ticket, &reading, CacheCompleteness::Complete)?;
             save(cache, write.route, &scope, CacheCompleteness::Complete)?;
             Some(scope)
         })
         .await
         .ok()
-        .flatten()
+        .flatten();
+        Ok(stored)
+    }
+
+    async fn new_body_ticket(
+        &self,
+        cache: &AccountCache,
+        key: CacheKey,
+        repository: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Option<CacheWrite>, GitHubError> {
+        let begin_write = || {
+            let cache = cache.clone();
+            let key = key.clone();
+            tokio::task::spawn_blocking(move || cache.store().begin_write(cache.scope(), &key))
+        };
+        match begin_write().await {
+            Ok(Ok(ticket)) => return Ok(Some(ticket)),
+            Ok(Err(CacheError::AccessDenied)) => {}
+            _ => return Ok(None),
+        }
+        // PAT replacement removes the account-scoped route index. The PR reply supplies
+        // the numeric ID, then a fresh repository request can prove it under a new ticket.
+        let session = self.session.clone();
+        let proof = tokio::task::spawn_blocking(move || {
+            session
+                .service()
+                .begin_revalidation(session.context(), Some(repository))
+        })
+        .await;
+        let Ok(Ok(proof)) = proof else {
+            return Ok(None);
+        };
+        self.check(cancel)?;
+        match self
+            .session
+            .repository(
+                self.target.repository.clone(),
+                &RepositoryLimits::default(),
+                cancel.clone(),
+            )
+            .await
+        {
+            Ok(reply) if reply.value.identity.id() == repository => {}
+            Err(RepositoryError::GitHub(error)) if access_denied(&error) => return Err(error),
+            _ => return Ok(None),
+        }
+        if self
+            .session
+            .service()
+            .permission_confirmed(self.session.context(), proof)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        self.check(cancel)?;
+        Ok(begin_write().await.ok().and_then(Result::ok))
     }
 
     async fn forget_route(&self, write: BodyWrite, cancel: CancellationToken) {

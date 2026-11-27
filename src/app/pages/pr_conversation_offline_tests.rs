@@ -366,7 +366,7 @@ fn pr_conversation_replaces_and_invalidates_snapshots_under_the_replay_key() {
         let repository = RepositoryLocator::new("alice", "demo").unwrap();
         let locator = IssueLocator::from_repository(repository.clone(), 5).unwrap();
         let target = Target::new(repository, 5).unwrap();
-        let conversation = ConversationSession::new(session, target, locator);
+        let conversation = ConversationSession::new(session, target.clone(), locator.clone());
         let cached =
             || conversation.cached(IssueDetailLimits::default(), CancellationToken::default());
         let refresh = || conversation.refresh(CancellationToken::default());
@@ -425,5 +425,43 @@ fn pr_conversation_replaces_and_invalidates_snapshots_under_the_replay_key() {
             refresh().await.result.is_ok(),
             "cache denial preserves the live read path"
         );
+
+        runtime
+            .accounts
+            .replace(
+                AccountKey::new(1, HostId::github()),
+                Pat::from_str("synthetic-replacement-conversation"),
+            )
+            .await
+            .unwrap();
+        let conversation = ConversationSession::new(repos.session().unwrap(), target, locator);
+        let cancel = CancellationToken::default();
+        let limits = IssueDetailLimits::default();
+        assert!(
+            conversation
+                .cached(limits.clone(), cancel.clone())
+                .await
+                .is_none()
+        );
+        let scope = conversation
+            .refresh(cancel.clone())
+            .await
+            .result
+            .unwrap()
+            .cache_scope;
+        assert!(
+            scope.is_some(),
+            "a successful Conversation read must restore repository caching after PAT replacement"
+        );
+        assert!(
+            conversation
+                .refresh_comments(scope, None, None, limits.clone(), cancel.clone(), true)
+                .await
+                .result
+                .is_ok()
+        );
+        let restored = conversation.cached(limits, cancel).await.unwrap();
+        assert_eq!(restored.reading.body.as_deref(), Some("Original PR body"));
+        assert_eq!(restored.comments.unwrap().comments[0].id, 501);
     });
 }
