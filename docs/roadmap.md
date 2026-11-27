@@ -1,6 +1,6 @@
 # 开发路线图
 
-更新：2026-11-26。**仓库 Issues 列表、Issue 详情和 PR Conversation 已合入；进入 Windows 日常试用前，先补齐仓库 PR 列表、全局 PR 标题跳转及 Files changed，再统一验收。** [仓库和用户主页的后续功能](#仓库与用户主页的后续功能)单独排期，列入路线图不等于已批准开工。
+更新：2026-11-27。**Issue/PR 阅读主线已全部合入 main：仓库 Issues 列表与详情、仓库 PR 列表、PR Conversation、Files changed，以及 Home/Feed、通知和全局 Issues/PRs 到同一详情的标题接线（#105–#112）；Releases 摘要的续页读取由 #113 修复，不新增 Releases 页面。进入 Windows 日常试用前，按[试用清单](#windows-日常试用issuepr-阅读清单)做一次统一验收。** [仓库和用户主页的后续功能](#仓库与用户主页的后续功能)单独排期，列入路线图不等于已批准开工。
 
 功能范围以 [产品约定](product.md#首版范围) 为准；状态边界、数据策略及交付规则分别见 [架构方案](architecture.md)、[缓存策略](cache-strategy.md)、[Agent 工作流](agent-workflow.md)。路线图只维护顺序、依赖和完成标准，不复制另一套产品规则。
 
@@ -12,11 +12,11 @@
 
 Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索、New 和新增远程写操作逐项确定最小范围。它们不是被自动排除的功能，也不能由执行者自由扩成完整 GitHub 功能集。
 
-按既有首版边界，Packages、Environments、Profile 的 Repositories/Stars 和 Contribution Activity 延后；其中 Packages 和用户仓库列表已明确进入产品路线图，具体交付批次可单独调整。进阶标签、安装更新和 macOS/Linux 产品适配仍延后。仓库 Issues、单条 Issue 和 PR Conversation 已接入，仓库 PR 列表与改动文件按下文排期；其他未设计 Tabs 维持原约定。保留既有四平台 Debug 编译与 artifact，不把编译通过称为跨平台产品支持。
+按既有首版边界，Packages、Environments、Profile 的 Repositories/Stars 和 Contribution Activity 延后；其中 Packages 和用户仓库列表已明确进入产品路线图，具体交付批次可单独调整。进阶标签、安装更新和 macOS/Linux 产品适配仍延后。仓库 Issues/PR 列表与详情、PR Conversation 和 Files changed 已接入；其他未设计 Tabs 维持原约定。保留既有四平台 Debug 编译与 artifact，不把编译通过称为跨平台产品支持。
 
 ## 当前证据与下一步
 
-阅读进度以 2026-11-26 的 `main@f12a9e2` 为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
+阅读进度以 2026-11-27 的 `main@38fb8e0` 为基线。下表区分已进入正式应用的能力、仍在开发的任务，以及需要真实账户验证的体验。
 
 | 能力 | 已合并与源码证据 | 正式接线 / 原生验证边界 |
 | --- | --- | --- |
@@ -26,6 +26,7 @@ Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索
 | Profile Overview | [`app::pages::profile`](../src/app/pages/profile.rs) 接入目标用户、公开同名根 README、最近一年贡献、pins/gist/Popular 与内部导航 | README 按自然高度显示、缺失时省略；Pinned 描述最多三行。图片/HTML 与 Flow 已组合；全局 IME/多 DPI 验收仍独立 |
 | 统一 Repository browser + overview + reader | 正式 Shell 复用 RepositoryPage 的账户 session、分支/路径/tree/reader 状态与紧凑摘要；底边 language bar、列 header、滚动条与字体修复已整合；Star/Unstar 已接入真实写路径（[PR #63](https://github.com/nocpiun/githux/pull/63)） | Fork 仍只有禁用入口，没有写 API；各页的状态与旧响应保护见[正式页面接入](shell-page-integration.md)与[仓库 Star](repository-star.md) |
 | 全局组件（Settings/Notifications/Issues-PR） | 独立组件与数据适配已合并（[PR #56](https://github.com/nocpiun/githux/pull/56)、[#55](https://github.com/nocpiun/githux/pull/55)、[#57](https://github.com/nocpiun/githux/pull/57)）；Notifications 与全局 Issues/PR 已由 [#71](https://github.com/nocpiun/githux/pull/71) 注册进正式 Shell 路由 | Settings 仍是过渡 Accounts 入口；`SettingsView` 组件已合并但未挂载，最终分类与设置项仍待独立设计 |
+| Issue/PR 阅读 | 仓库 Issues 列表与详情（#108、#106）、仓库 PR 列表（#112）、PR Conversation（#109）、Files changed（#111）、全局 Issue/PR 标题接线（#106、#110）、Home/Feed（#107）与通知（#105）到同一详情的入口均已合并；Releases 摘要续页由 #113 修复 | 合成测试覆盖路由、标签复用与返回状态；真实账户窗口验收见[试用清单](#windows-日常试用issuepr-阅读清单) |
 | 账户持久化与业务缓存 | PR #18/#38 的账户目录与凭据引用；[cache-core](cache-core.md) 存储/授权门槛、[账户生命周期](cache-account-lifecycle.md) 绑定、[仓库](repository-cache.md)/[页面](page-cache.md)/[头像](avatar-cache.md)/[图片](reader-images.md)适配器均已合并；#68 在正式启动打开唯一应用级 `CacheStore`，#72/#69 与仓库页面消费其快照 | 仓库/Home/Profile 已支持重启后读取已缓存内容并区分历史快照，但账户 workspace 仍是内存态、重启先回 Home。C1–C5 政策已确认，容量与验证间隔仍属工程测量起点；清缓存、授权失效与跨账户隔离的端到端原生验收仍待整体验证 |
 | CI 与交付流程 | PR #1/#2 起已有检查；PR #7 起 Ubuntu code-check，四平台 Debug build 与最终 `CI` 汇总保留；PR #31 增加 PR Check 门槛 | 具体 required checks 和当前 head 结果必须到 GitHub 核验；编译通过不是 Windows 以外原生产品支持，也不是 GUI 验收 |
 | Agent 协作 | 独立任务、可见执行会话、PR 与审查循环已有实际使用 | 派发 skill 和完整并行调度未产品化；并行工作不能成为 main 的实现证据 |
@@ -39,15 +40,63 @@ Notifications 与全局 Issues/PRs 的现有功能保留；其余筛选、搜索
 | 路径 | 用户目标 | 交付进度与验收条件 |
 | --- | --- | --- |
 | 1 · 仓库 Issues → 单条 Issue | 找到问题，阅读正文和讨论，再回到列表原位置 | 已合入 [#108](https://github.com/nocpiun/githux/pull/108)（仓库列表、筛选及续页）和 [#106](https://github.com/nocpiun/githux/pull/106)（详情、正文与普通评论）。整体验收应覆盖同号不同仓库、列表不混入 PR，以及返回后的筛选和滚动位置。 |
-| 2 · 仓库 PRs → 单条 PR | 了解改动目的、目标分支、合并状态和文件差异 | [#109](https://github.com/nocpiun/githux/pull/109) 已交付 Conversation。待交付：仓库 PR 列表和 [Files changed（#111）](https://github.com/nocpiun/githux/pull/111)。文件清单需区分可读文本 diff、二进制及截断或不可用的 patch；Commits、Checks 与行内评审线程另定。 |
-| 3 · 跨入口打开与刷新 | 同账户从不同入口打开同一条 Issue/PR，复用同一份详情 | Home/Feed（#107）、可识别目标的通知（[#105](https://github.com/nocpiun/githux/pull/105)）及全局 Issue 标题（#106）已接通；[全局 PR 标题（#110）](https://github.com/nocpiun/githux/pull/110)待合入。统一验收缓存首屏、刷新不闪白、失败重试、切账户后不接收旧响应；通知 thread ID 不能当作资源编号。 |
+| 2 · 仓库 PRs → 单条 PR | 了解改动目的、目标分支、合并状态和文件差异 | [#109](https://github.com/nocpiun/githux/pull/109) 交付 Conversation、[#112](https://github.com/nocpiun/githux/pull/112) 交付仓库 PR 列表（筛选/续页/返回保持）、[#111](https://github.com/nocpiun/githux/pull/111) 交付 Files changed。文件清单区分可读文本 diff、二进制及截断或不可用的 patch；Commits、Checks 与行内评审线程另定。 |
+| 3 · 跨入口打开与刷新 | 同账户从不同入口打开同一条 Issue/PR，复用同一份详情 | Home/Feed（#107）、可识别目标的通知（[#105](https://github.com/nocpiun/githux/pull/105)）、全局 Issue 标题（#106）与全局 PR 标题（[#110](https://github.com/nocpiun/githux/pull/110)）均已合入。统一验收缓存首屏、刷新不闪白、失败重试、切账户后不接收旧响应；通知 thread ID 不能当作资源编号。 |
 | 4 · 定下试用要做的其他事 | 不仅能读，还能明确哪些日常工作要在客户端完成 | 分别定稿全局/仓库 Settings 的首批项目、命令面板搜索范围、收件箱剩余交互以及 New/H7。建议优先讨论发普通评论和创建 Issue，再决定是否需要状态修改、评审提交或合并 PR。每项写明“试用前必需 / 后续 / 不做”；只实现选定项，注明失败反馈及数据更新方式。 |
 
-**可并行的工作：** 仓库 PR 列表、全局 PR 标题接线与文件差异可以按各自边界推进，最后用同一条阅读路径验收。新入口沿用既有资源标识（账户上下文、仓库、类型、编号）和[缓存约定](cache-strategy.md)。Settings 和搜索范围可同时讨论。
+**本批阅读路径已全部合入 main，剩余的是整套试用验收。** 新入口沿用既有资源标识（账户上下文、仓库、类型、编号）和[缓存约定](cache-strategy.md)。Settings 和搜索范围仍可同时讨论；第 4 步的范围决定与发布评论、提交评审、合并等写操作仍未批准。
 
-**何时开始 Windows 日常试用：** 在正式应用里能分别从仓库列表打开 Issue 和 PR，读到正文及已约定的讨论/改动信息，从 Home 或全局入口打开同一目标，再回到原列表；能区分确实为空与无权限/加载失败，切换账户不串数据。第 4 步选为试用必需的项目也须可用。各任务仍可先做小范围真窗验证；达到这些条件后再开始整套日常试用。最终 R6 另验真实 PAT、断网/重连与缓存清理、中文 IME、键盘、长列表、多 DPI 和跨屏。
+**何时开始 Windows 日常试用：** 阅读主线已在 main 可用，先按[试用清单](#windows-日常试用issuepr-阅读清单)做一次 Issue/PR 阅读验收，再继续第 4 步的范围决定与 R6 综合验收。第 4 步选为试用必需的项目仍需可用后才能整套日常试用；最终 R6 另验真实 PAT、断网/重连与缓存清理、中文 IME、键盘、长列表、多 DPI 和跨屏。
 
 已有 CI 的分支规则是否启用，以仓库实际设置为准。路线图不替负责人修改规则。负责人已于 2026-10-22 解除首次试跑的单实现者限制，并明确按依赖、文件冲突、编译资源与审查积压安排并行；这不改变同一任务同一时刻只有一个有效写入者的要求。
+
+## Windows 日常试用：Issue/PR 阅读清单
+
+负责人只需最新 main，不用切任务分支或建预览 worktree。一次登录后按下面顺序走一遍；无法取得的真实数据单独标为“未覆盖”，不要用合成数据冒充。
+
+### 准备（干净最新 main）
+
+1. 取最新 main 并确认无未提交改动：`git switch main && git pull --ff-only && git status --short`。
+2. 用 [README](../README.md#windows-安装与运行) 的正常启动命令 `cargo run --locked` 启动正式应用；首次构建等待编译完成即可，不需要 `cargo build`、测试或预览 example。
+3. 在 Settings › Accounts（过渡入口）添加一个真实 Classic PAT 并登录，确认侧栏出现真实仓库列表。
+
+### 1 · 仓库 Issues 列表 → 单条 Issue
+
+1. 侧栏点开一个确有多条 Issue 的仓库，切到页内 **Issues** Tab。
+2. 核对列表只含该仓库的 Issue（不混入 PR），Open/Closed 筛选切换，滚动到底出现 **Load more** 并能续页。
+3. 点一条标题 → 打开新标签，看到 Issue 正文（Markdown）与普通评论，空正文显示 “No description provided.”，评论可 **Load more comments**。
+4. 关掉详情标签，回到仓库页：筛选与滚动位置保持，不重读列表。
+
+### 2 · 仓库 PRs 列表 → Conversation → Files changed
+
+1. 同一仓库切到 **Pull requests** Tab，Open/Closed 筛选，**Load more** 续页，Draft/Open/Merged/Closed 状态可见。
+2. 点一条标题 → PR Conversation：摘要（作者、base/head 分支、合并状态）、正文与普通评论；切到 **Files changed** Tab。
+3. Files changed 首次点击才读取；文本 diff 有增删与行号，重命名显示原路径，无 patch 显示不可用；**Previous/Next** 分页，空 PR 显示 “No changed files.”。
+4. 关掉详情回到仓库页：筛选与分页位置保持。
+
+### 3 · 全局列表与跨入口同一目标
+
+1. 侧栏底部 **Issues** / **PRs** 入口分别打开全局个人列表；核对 Assigned/Created × Open/Closed/All 筛选与 **Load more**。
+2. Issue 标题 → Issue 详情，PR 标题 → PR Conversation；同行仓库名链接仍去仓库页，不与标题共用目标。
+3. 从 Home 左栏条目标题（或图标、`#number`）打开同一 Issue/PR；Feed 的合并 PR 图标、含 `#number` 的标题与 **Read more** 打开同一 PR。
+4. 同账户同一目标从不同入口打开时复用同一标签，不重复建标签；同号不同仓库、同库 Issue/PR 不串。
+
+### 4 · 通知（需真实可识别目标，无则跳过并标注）
+
+1. 账号行右侧铃铛打开 Notifications；只点击 Issue/PR 主题可打开对应详情，其余类型保持纯文本、不猜测跳转。
+2. **回退**：若该账户没有相关通知，从全局列表或仓库列表打开同一 Issue/PR 完成跨入口验收，并把“通知直达”标为未覆盖，不要伪造通知。
+
+### 5 · 导航状态与刷新
+
+1. 详情打开后按标签条右侧 Refresh：保留可见内容重读，失败显示 Retry 而不抹掉正文/评论；未登录或授权失效时禁用。
+2. 切账户后再打开同一仓库：旧账户标签不复活，旧响应不进入新账户页面。
+
+### 哪些步骤需要真实 Windows / 真实账户数据
+
+- 全部点击、滚动、筛选与视觉观感都需要真实 Windows 窗口与真实 PAT（本清单全部如此）。
+- 合成/本地已验证的只是：路由与标签复用、列表筛选/续页/返回保持、Issue/PR 正文与评论渲染、Files changed 懒加载与分页、跨入口目标解析，证据在 `src/app/pages/tests.rs`、`home/shell_nav_tests.rs` 与 `pr_files_integration_tests.rs`；它们不能替代本清单的真实窗口验收。
+- 需要真实数据的步骤：登录、通知收件箱（第 4 步）、Feed 关注动态、私有仓库可见性、限流/断网/授权失效提示。若账户没有相关通知或 Feed 事件，按回退执行并标注，不能把“无数据”当作验收通过。
+
 
 ## 仓库与用户主页的后续功能
 
@@ -184,7 +233,7 @@ Feed 已选择 Events API，负责人接受其延迟；负责人 2026-10-30 确�
 | 项目 | 需要决定的最小范围 |
 | --- | --- |
 | H1 Notifications | 已接入收件箱、已确认的通知操作及可可靠识别的 Issue/PR 详情跳转（#105）。其他类型保留原行为，不猜测跳转目标。 |
-| H2/H3 全局 Issues/PRs | 已有个人列表、筛选与分页；全局 Issue 标题已可打开详情，全局 PR 标题跟踪 #110。仓库列表独立查询；新增筛选按使用场景决定。 |
+| H2/H3 全局 Issues/PRs | 已有个人列表、筛选与分页；全局 Issue 与 PR 标题均已可打开对应详情（#106、#110）。仓库列表独立查询；新增筛选按使用场景决定。 |
 | H4 New | 实际可创建的资源清单、所需输入、权限与提交结果；入口存在不代表已承诺创建组织等所有动作 |
 | H7 远程写操作 | 明确选哪些动作、影响哪些页面、权限与确认/失败反馈；仓库 Star/Unstar 已作为首个动作实现，标记已读等仍是候选，不是已批准清单 |
 
