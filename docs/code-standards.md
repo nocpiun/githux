@@ -27,7 +27,8 @@ CI 在 workflow 层按 workflow 名称与 github.ref 分组，并启用 cancel-i
 
 | 改动范围 | Ubuntu Rust code-check / 四平台 Debug build | Windows Agent script-check |
 | --- | --- | --- |
-| 仅 `docs/**`、根目录 Markdown、skills 内 Markdown | 跳过 | 跳过 |
+| 仅 `docs/**`、根目录 Markdown、skills 内 Markdown（不含 `THIRD_PARTY_NOTICES.md` 与 `docs/third-party-assets.md` 两个打包输入） | 跳过 | 跳过 |
+| `THIRD_PARTY_NOTICES.md` 或 `docs/third-party-assets.md`（包括与其他文档混合） | 运行 | 按脚本范围判断 |
 | `.agents/skills/**` 非 Markdown 脚本或资料 | 跳过（无其他应用变更时） | 运行 |
 | 应用源码、资源、Cargo/工具链/构建配置，以及未明确排除的新路径 | 运行 | 按脚本范围判断 |
 | `.github/**`，包括工作流与范围/门槛脚本 | 运行 | 运行 |

@@ -4,7 +4,7 @@
 
 本文记录当前首版**实际分发**的字体、图标、复制的 Markdown 代码、Rust 依赖与 Windows App SDK 运行时的来源、固定版本、哈希、许可证文本与实际分发形态，并区分已验证与未覆盖。它是后续打包的依据，不是法律结论，也不代表整个应用已通过发布验收。
 
-> **打包尚未完成。** 源码仓库里存在许可文件，不等于未来安装包/可执行文件会自动携带。本文末尾列出发布时必须随附的文件。当前没有任何安装包或发布产物，只有源码树与开发构建。
+> **CI Debug artifact 已携带下列已入库 notices；完整发布许可核验仍未完成。** 四平台 CI 在 executable 旁保留 `THIRD_PARTY_NOTICES.md`、本清单及第 8 节的实际文本，路径与源码树一致，因此主要 notice 链接可在 artifact 内解析。Windows App SDK 许可证只加入 Windows artifact。其余直接/传递 crate 文本与双许可选择仍未解决；没有安装包或正式发布，也不把构建产物等同于跨平台产品支持。
 
 ## 范围与方法
 
@@ -197,23 +197,33 @@ grep -c '^\[\[package\]\]' Cargo.lock
 | manifest | [`assets/windows/app.manifest`](../assets/windows/app.manifest)（SHA-256 `0d9d20203d3fef11d6f814849a4f354e4f57f0d9490f2be30532ee27b6c81bf2`）由 [`scripts/generate-windows-manifest.ps1`](../scripts/generate-windows-manifest.ps1) 从上述固定包生成；`caption_tall.rs` 在运行时按 `githux-wasdk.manifest` 名称激活 |
 | 许可证 | **已由现有脚本处理**：`windows-runtime-lib.ps1` 校验并复制每个固定包的 `license.txt` 到可执行文件旁。这是仓库里少数“分发时已自动携带许可”的路径 |
 
-## 8. 打包时必须随附的文件
+## 8. CI Debug artifact 随附的文件
 
-当前没有任何安装包/发布产物。未来打包/分发时，至少需要随附：
+四平台 Debug build 的 staging helper 是
+`.github/scripts/stage-third-party-notices.mjs`；CI 对下列每项与仓库实际文本逐字节比较，非 Windows 在验证后保持原目录层级生成 `.tar.gz`，Windows 直接上传目录。旧 artifact 根目录的 `OFL-NotoSansSC.txt` 与 `OFL-GoogleSansCode.txt` 继续作为相同内容的兼容副本保留，不作为另一份来源。
 
 1. UI 来源 OFL（`assets/fonts/githux-ui/OFL-NotoSansSC.txt`）及 `assets/fonts/google-sans-code/OFL.txt`。
-2. IBM Plex Sans 的 OFL：`assets/licenses/ibm-plex-sans-ofl.txt`（binary 内也有一份 asset，但打包仍应显式随附）。
+2. IBM Plex Sans 的 OFL：`assets/licenses/ibm-plex-sans-ofl.txt`（binary 内也有一份 asset，但 artifact 仍显式随附）。
 3. Ely MIT：`assets/licenses/ely-mit.txt`（覆盖 `ely-core`/`ely-settings`/`ely-canvas` 与提取的 Markdown 派生代码）。
 4. Lucide 图标 ISC + Feather MIT：`assets/licenses/lucide-icons-isc.txt`。
-5. GPUI（Apache-2.0）与其余 Rust crate 的许可文本：至少 `assets/licenses/gpui-pre-apache-2.0.txt`、`assets/licenses/pulldown-cmark-mit.txt`，以及第 5 节各直接依赖的 registry 许可文本；双许可项需先定选。
+5. GPUI Apache-2.0：`assets/licenses/gpui-pre-apache-2.0.txt`；pulldown-cmark MIT：`assets/licenses/pulldown-cmark-mit.txt`。
 6. GitHub Linguist MIT：`assets/licenses/linguist-mit.txt`（语言颜色表为 MIT 数据的派生）。
 7. SQLite 公有领域说明：`assets/licenses/sqlite-public-domain.txt`（信息性）。
-8. Windows App SDK 各包 `license.txt`：由 `windows-runtime-lib.ps1` 复制到可执行文件旁。
-9. 合并入口：[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。
+8. resvg / usvg 的 MIT 与 Apache-2.0 全文，以及 tiny-skia BSD-3-Clause 全文：均保留 `assets/licenses/` 下的现有文件；不替项目选择双许可项。
+9. 合并入口：[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，以及本清单。
+10. 仅 Windows：App SDK 各包 `license.txt` 由 `windows-runtime-lib.ps1` 复制为 `microsoft.windowsappsdk.foundation.LICENSE.txt` 与 `microsoft.windowsappsdk.interactiveexperiences.LICENSE.txt`；验证同时要求 `githux-wasdk.manifest` 非空。
+
+本清单中的源码、脚本及未列入上述路径的设计文档链接仍以源码仓库为阅读入口；随 artifact 保留的是 notices、许可文本与清单，不是完整源码镜像。第 5 节其余直接依赖及第 6 节传递依赖的 registry 文本、双许可选择和目标分发集合仍需另行收敛，**不声称已全部随附**。
 
 ## 9. 已验证与未覆盖
 
-**本轮已验证：**
+**CI artifact 打包契约与本地确定性验证（2026-11-27，`debug-artifact-notices`）：**
+
+- `.github/workflows/ci.yml` 的 `changes` job 运行 staging 离线测试；四平台 build 都在 runtime 准备（仅 Windows）之后、上传之前执行同一 verify。non-Windows 在 verify 成功后才生成 tarball；矩阵 target、Debug 模式、artifact 名称、可执行文件名、原有执行位与 Cargo/rust-cache 均不变。
+- 本地 fixture 覆盖 16 个 canonical notice 路径和两个旧字体文件名、缺失/篡改文本、缺失 Windows manifest/单个 SDK license、Linux/macOS 不要求 Windows runtime，以及符号链接不作为普通文件接受。它不替代 CI 对真实构建产物的验证。
+- 实际四平台 artifact 的内容与链接以本 PR 最新 head 的 CI 下载核验为准；源码实现与离线测试本身不冒充已下载产物证据。未新增 installer、release、目标平台或许可选择。
+
+**依赖与字体清单原始核验：**
 
 - 五份打包 ttf 的 SHA-256 与 [`assets/fonts/README.md`](../assets/fonts/README.md) 一致；三个来源的 OFL 与其字体匹配。Noto 归档的 SHA-256 本轮已按官方 release 重新下载核验为 `0c34df07…`。
 - Noto v2.015 与 Google Sans Code v7.001 的官方 release tag 存在（GitHub API 核验）。
