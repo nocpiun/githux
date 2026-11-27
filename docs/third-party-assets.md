@@ -1,6 +1,6 @@
 # 第三方资产与依赖许可清单
 
-字体章节更新：2026-10-30（ui-fonts）；其余章节为 2026-10-29 任务 `dependency-licenses`，基线 `730d2292dcd5bb981928341259c971e42ff497b5`。
+字体章节更新：2026-10-30（ui-fonts）；其余章节为 2026-10-29 任务 `dependency-licenses`，基线 `730d2292dcd5bb981928341259c971e42ff497b5`。第 5、8、9 节另含 2026-11-27 任务 `current-dependency-notices` 的补充：chrono 0.4.45、sha1_smol 1.0.1 与 fast_image_resize 5.1.4 的四份原文。
 
 本文记录当前首版**实际分发**的字体、图标、复制的 Markdown 代码、Rust 依赖与 Windows App SDK 运行时的来源、固定版本、哈希、许可证文本与实际分发形态，并区分已验证与未覆盖。它是后续打包的依据，不是法律结论，也不代表整个应用已通过发布验收。
 
@@ -118,6 +118,9 @@ cargo metadata --locked --offline --format-version 1
 | `resvg` | 0.46.0 | Apache-2.0 OR MIT | 编译进 binary；原先由 GPUI 传递引入，现在 Reader 直接使用 | [`MIT`](../assets/licenses/resvg-0.46.0-license-mit.txt)、[`Apache-2.0`](../assets/licenses/resvg-0.46.0-license-apache.txt) |
 | `simplecss` / `svgtypes` | 0.2.2 / 0.16.1 | Apache-2.0 OR MIT | 已由 usvg 传递引入；Reader timeline 直接使用 | registry `LICENSE-MIT` / `LICENSE-APACHE` |
 | `pulldown-cmark` | 0.13.5 | MIT | 编译进 binary | `assets/licenses/pulldown-cmark-mit.txt` |
+| `chrono` | 0.4.45 | MIT OR Apache-2.0 | 编译进 binary（Reader 图片 HTTP `Date` 解析） | [`assets/licenses/chrono-0.4.45-license.txt`](../assets/licenses/chrono-0.4.45-license.txt)（同一个 crate 文件含 MIT 与 Apache-2.0 全文） |
+| `sha1_smol` | 1.0.1 | BSD-3-Clause | 编译进 binary（Git blob 对象校验） | [`assets/licenses/sha1_smol-1.0.1-license.txt`](../assets/licenses/sha1_smol-1.0.1-license.txt)（同一文件另含 `src/simd.rs` 的 MIT 段落） |
+| `fast_image_resize` | 5.1.4 | MIT OR Apache-2.0 | 经 `githux-image-resize` path crate 编译进 binary | [`MIT`](../assets/licenses/fast_image_resize-5.1.4-license-mit.txt)、[`Apache-2.0`](../assets/licenses/fast_image_resize-5.1.4-license-apache.txt) |
 | `reqwest` | 0.13.5 | MIT OR Apache-2.0 | 编译进 binary | registry（`native-tls`/`http2`/`system-proxy`，关闭默认 feature） |
 | `rusqlite` | 0.37.0 | MIT | 编译进 binary | registry `LICENSE`；`bundled` 另含公有领域 SQLite，见 [`assets/licenses/sqlite-public-domain.txt`](../assets/licenses/sqlite-public-domain.txt) |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 | 编译进 binary | registry |
@@ -148,6 +151,30 @@ cargo metadata --locked --offline --format-version 1
 | `tiny-skia-0.11.4-license.txt` | BSD-3-Clause；Copyright (c) 2011 Google Inc.; Copyright (c) 2020 Yevhenii Reizner | `6d41e05f1d54fe726997cb0334ec539f1dff50600b1d5d90462ec2b392770ced` |
 
 随发布携带上述文本；resvg/usvg 保留双许可选项，此处不替项目选择其一。测试专用 `src/content/images/fixtures/embedded-font.woff` 为既有 Google Sans Code v7.001 的 OFL 子集，改名为 Githux SVG Fixture（5,312 B，SHA-256 `20de0d77199053950d57640b4ce7a4b2063a0532a5f7f57d7ce7369958c6b7aa`），保留版权/许可 name 记录；只在 cfg(test) 中使用，不进入应用字体集，源码再分发仍随附既有 Google Sans Code OFL，来源说明见相邻 README。远程 README 返回的用户 SVG 仅为本地调查证据，不因获取公开响应而被纳入可分发素材；提交的动画回归使用原创最小几何与示例文案，并注明观测的 CSS 形状来源。
+
+### 图片阅读依赖许可文本补充（2026-11-27，current-dependency-notices）
+
+`chrono 0.4.45`（Reader 图片 HTTP `Date` 解析）与 `sha1_smol 1.0.1`（Git blob 对象校验）是根 crate 的直接依赖；`fast_image_resize 5.1.4` 由我们的 path crate `githux-image-resize`（[`crates/image-resize`](../crates/image-resize/Cargo.toml)，`publish = false`）以 `=5.1.4` 固定引入。**`githux-image-resize` 是 Githux 自己的 crate，不是上游 `fast_image_resize`**；下面的文本只覆盖上游 crate。三者都进入当前分发的 binary，但在此之前既不在 notice 索引也不在 staging 列表中。本轮只补原文与索引、打包路径，不改依赖、`Cargo.lock`、运行时行为或平台范围。
+
+| 文件 | 上游归档（`Cargo.lock` checksum） | 归档内路径 | 文本 SHA-256 |
+| --- | --- | --- | --- |
+| `assets/licenses/chrono-0.4.45-license.txt` | `chrono-0.4.45.crate`，`1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327` | `LICENSE.txt` | `946c9835d8034d24404f8cfec5f4654cee5dad17e944afc3d06d742cf2882831` |
+| `assets/licenses/sha1_smol-1.0.1-license.txt` | `sha1_smol-1.0.1.crate`，`bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d` | `LICENSE` | `282a21b0710441c364025461a447362daf18f5798a7b72ae2f801a2aa536da51` |
+| `assets/licenses/fast_image_resize-5.1.4-license-apache.txt` | `fast_image_resize-5.1.4.crate`，`d372ab3252d8f162d858d675a3d88a8c33ba24a6238837c50c8851911c7e89cd` | `LICENSE-APACHE` | `5caa63b85f1c4683ed495f09991128fd777fda36066e2fcdf0f8533212776ed1` |
+| `assets/licenses/fast_image_resize-5.1.4-license-mit.txt` | 同上 | `LICENSE-MIT` | `59c7bec3a007a291de2369c504545cb61b5f4d7ac9893e50d523f2aff4fcc7c6` |
+
+四份文件均按归档内字节完整复制，未改写版权行或删减段落：`chrono/LICENSE.txt` 本身同时含 MIT 与 Apache-2.0；`sha1_smol/LICENSE` 除 BSD-3-Clause 外还带有 `src/simd.rs` 的 MIT 段落及其版权行，也一并保留。fast_image_resize 的 MIT/Apache-2.0 两个选项都保留，**未替项目选择其一**。Windows 检出可能按 `core.autocrlf` 把行尾转成 CRLF；这是行尾转换而非内容改动，下表文本 SHA-256 与离线回归都按 LF 归一后的文本计算，artifact 的 verify 仍逐字节比较源文件与暂存副本。可复现命令（使用本机已获取的精确版本，不需重新下载或安装）：
+
+```sh
+cache=~/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f
+sha256sum "$cache/chrono-0.4.45.crate"        # 必须等于 Cargo.lock 的 checksum
+tar -xzOf "$cache/chrono-0.4.45.crate" chrono-0.4.45/LICENSE.txt | sha256sum
+tar -xzOf "$cache/sha1_smol-1.0.1.crate" sha1_smol-1.0.1/LICENSE | sha256sum
+tar -xzOf "$cache/fast_image_resize-5.1.4.crate" fast_image_resize-5.1.4/LICENSE-APACHE | sha256sum
+tar -xzOf "$cache/fast_image_resize-5.1.4.crate" fast_image_resize-5.1.4/LICENSE-MIT | sha256sum
+```
+
+离线回归 [`stage-third-party-notices.test.mjs`](../.github/scripts/stage-third-party-notices.test.mjs) 固定了上表四个文本 SHA-256（按 LF 归一），并从 `Cargo.lock` 读取同名 crate 的 checksum 比对归档摘要，因此本地文本被替换或与锁文件脱钩会直接失败；它不重建也不下载归档。四份文本同时加入 staging 列表，索引内的 `assets/licenses/` 链接必须指向存在且被 staging 的文件。
 
 ## 6. 传递依赖清单
 
@@ -210,8 +237,9 @@ grep -c '^\[\[package\]\]' Cargo.lock
 6. GitHub Linguist MIT：`assets/licenses/linguist-mit.txt`（语言颜色表为 MIT 数据的派生）。
 7. SQLite 公有领域说明：`assets/licenses/sqlite-public-domain.txt`（信息性）。
 8. resvg / usvg 的 MIT 与 Apache-2.0 全文，以及 tiny-skia BSD-3-Clause 全文：均保留 `assets/licenses/` 下的现有文件；不替项目选择双许可项。
-9. 合并入口：[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，以及本清单。
-10. 仅 Windows：App SDK 各包 `license.txt` 由 `windows-runtime-lib.ps1` 复制为 `microsoft.windowsappsdk.foundation.LICENSE.txt` 与 `microsoft.windowsappsdk.interactiveexperiences.LICENSE.txt`；验证同时要求 `githux-wasdk.manifest` 非空。
+9. chrono 的 MIT+Apache-2.0 合一原文 `assets/licenses/chrono-0.4.45-license.txt`、sha1_smol BSD-3-Clause（含 `src/simd.rs` MIT 段落）的 `assets/licenses/sha1_smol-1.0.1-license.txt`，以及 fast_image_resize 的 `assets/licenses/fast_image_resize-5.1.4-license-apache.txt` / `-mit.txt`；双许可项不替项目选择。
+10. 合并入口：[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，以及本清单。
+11. 仅 Windows：App SDK 各包 `license.txt` 由 `windows-runtime-lib.ps1` 复制为 `microsoft.windowsappsdk.foundation.LICENSE.txt` 与 `microsoft.windowsappsdk.interactiveexperiences.LICENSE.txt`；验证同时要求 `githux-wasdk.manifest` 非空。
 
 本清单中的源码、脚本及未列入上述路径的设计文档链接仍以源码仓库为阅读入口；随 artifact 保留的是 notices、许可文本与清单，不是完整源码镜像。第 5 节其余直接依赖及第 6 节传递依赖的 registry 文本、双许可选择和目标分发集合仍需另行收敛，**不声称已全部随附**。
 
@@ -220,8 +248,14 @@ grep -c '^\[\[package\]\]' Cargo.lock
 **CI artifact 打包契约与本地确定性验证（2026-11-27，`debug-artifact-notices`）：**
 
 - `.github/workflows/ci.yml` 的 `changes` job 运行 staging 离线测试；四平台 build 都在 runtime 准备（仅 Windows）之后、上传之前执行同一 verify。non-Windows 在 verify 成功后才生成 tarball；矩阵 target、Debug 模式、artifact 名称、可执行文件名、原有执行位与 Cargo/rust-cache 均不变。
-- 本地 fixture 覆盖 16 个 canonical notice 路径和两个旧字体文件名、缺失/篡改文本、缺失 Windows manifest/单个 SDK license、Linux/macOS 不要求 Windows runtime，以及符号链接不作为普通文件接受。它不替代 CI 对真实构建产物的验证。
+- 本地 fixture 覆盖 20 个 canonical notice 路径和两个旧字体文件名、缺失/篡改文本、缺失 Windows manifest/单个 SDK license、Linux/macOS 不要求 Windows runtime，以及符号链接不作为普通文件接受。它不替代 CI 对真实构建产物的验证。
 - 实际四平台 artifact 的内容与链接以本 PR 最新 head 的 CI 下载核验为准；源码实现与离线测试本身不冒充已下载产物证据。未新增 installer、release、目标平台或许可选择。
+
+**阅读图片依赖原文与归档来源核验（2026-11-27，`current-dependency-notices`）：**
+
+- 三个 crate 归档的 SHA-256 与 `Cargo.lock` 的 `checksum` 完全一致（`chrono 0.4.45`、`sha1_smol 1.0.1`、`fast_image_resize 5.1.4`）；归档取自本机 registry 缓存，未下载或安装新依赖。
+- 四份文本从归档直接解出后与仓库副本字节一致，SHA-256 已记入第 5 节补充表；`sha1_smol/LICENSE` 与 `chrono/LICENSE.txt` 的内部多段许可与版权行原样保留。
+- staging 列表从 16 增至 20 个 canonical 路径；新增离线回归固定四份文本摘要并从 `Cargo.lock` 比对归档摘要，同时要求两份索引里的 `assets/licenses/` 链接都存在且被 staging。这是打包与文档变更，因此本轮未运行 Cargo。
 
 **依赖与字体清单原始核验：**
 
@@ -235,6 +269,7 @@ grep -c '^\[\[package\]\]' Cargo.lock
 **本轮未覆盖：**
 
 - 字体归档已重新下载并核对 SHA-256；仍不核验归档内未打包的其他字面。
+- 2026-11-27 的补充只覆盖 `chrono`、`sha1_smol`、`fast_image_resize` 三个 crate 的原文；其余直接依赖的 registry 文本与 748 个 package 中的传递依赖仍未逐项读取或随附，双许可项仍未选择。本次不声称已完成发布许可核验。
 - 未反汇编最终 binary，图标实际链接集合、`ely-canvas` 是否被链接均未以二进制证据固定。
 - 未逐项读取 748 个 package 的许可证原文；传递依赖只有 SPDX 声明分类。
 - 未把 build-only / dev-only / 非目标平台 crate 从“分发集合”中剔除。
