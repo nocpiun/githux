@@ -329,8 +329,8 @@ impl BaselineFixture {
                 }))
                 .collect::<Vec<_>>())
         };
-        let issue_42_comments_p1_json = make_comments(4201, 15);
-        let issue_42_comments_p2_json = make_comments(4216, 10);
+        let issue_42_comments_p1_json = make_comments(4201, 25);
+        let issue_42_comments_p2_json = serde_json::json!([]);
 
         let pr_5_json = serde_json::json!({
             "id": 5005,
@@ -353,8 +353,8 @@ impl BaselineFixture {
             "created_at": "2026-11-21T09:00:00Z",
             "updated_at": "2026-11-27T09:30:00Z"
         });
-        let pr_5_comments_p1_json = make_comments(501, 12);
-        let pr_5_comments_p2_json = make_comments(513, 8);
+        let pr_5_comments_p1_json = make_comments(501, 20);
+        let pr_5_comments_p2_json = serde_json::json!([]);
         let pr_5_files_json = serde_json::json!((0..15)
             .map(|i| serde_json::json!({
                 "sha": format!("f{i:039x}"),
@@ -848,10 +848,16 @@ fn wait_settled_from(
         }
         if let Some(first) = first_content
             && transport.in_flight() == 0
+            && !shell.read_with(cx, |s, cx| s.active_refresh_state(cx).is_refreshing())
             && extra_ready(shell, cx)
         {
             pump_shell(shell, controller, cx);
-            return (first, t0.elapsed());
+            if transport.in_flight() == 0
+                && !shell.read_with(cx, |s, cx| s.active_refresh_state(cx).is_refreshing())
+                && extra_ready(shell, cx)
+            {
+                return (first, t0.elapsed());
+            }
         }
         assert!(
             t0.elapsed() < timeout,
@@ -1142,8 +1148,9 @@ fn windows_reading_baseline_harness() {
             vcx.update_window_entity(&shell, |shell, window, cx| {
                 shell.navigate(route, window, cx);
             });
-            wait_until(&shell, &controller, vcx, Duration::from_secs(15), |_| {
+            wait_until(&shell, &controller, vcx, Duration::from_secs(15), |cx| {
                 cold_transport.in_flight() == 0
+                    && !shell.read_with(cx, |s, cx| s.active_refresh_state(cx).is_refreshing())
             });
         }
         if run == 0 {

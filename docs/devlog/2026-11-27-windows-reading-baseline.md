@@ -9,7 +9,7 @@
 
 ## 验证证据
 
-- `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::tests::reading_baseline_tests -- --ignored --nocapture --test-threads=1`：run `508aac3c-03c8-4762-aa95-754d72186d45` 通过（running 101,476ms, slot wait 24,150ms），5 轮冷/暖与真实 `CacheStore` 关闭重开均成功。
+- `node scripts/verify.mjs -- cargo test --locked --bin githux app::pages::tests::reading_baseline_tests -- --ignored --nocapture --test-threads=1`：run `5ca8d10a-76c2-4f8c-bbcb-be8258af9627` 通过（running 98,128ms, slot wait 189ms），5 轮冷/暖与真实 `CacheStore` 关闭重开均成功（已按审查反馈等待页面 `active_refresh_state().is_refreshing() == false` 并提供完整 25 条 Issue 评论与 20 条 PR 评论）。
 - `node scripts/verify.mjs -- cargo build --locked --example reading_baseline_native`：run `3dfd8361-cac1-4455-a0f5-f2f47ba14cdb` 通过（running 31,813ms, slot wait 57,189ms），随后连续 5 次独立运行 `./target/debug/examples/reading_baseline_native.exe` 均输出 `NATIVE_PROBE_REPORT` 并正常退出。
 
 ## 未覆盖与后续
