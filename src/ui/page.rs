@@ -8,15 +8,9 @@ use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div, prelude::*}
 
 use crate::workspace::{Route, Session};
 
-pub(super) struct PageData {
-    pub settings: Option<AnyElement>,
-}
-
-pub(super) fn page(session: &Session, data: PageData, cx: &App) -> AnyElement {
+pub(super) fn page(session: &Session, cx: &App) -> AnyElement {
     match session.route() {
-        Route::Settings => data.settings.unwrap_or_else(|| {
-            unavailable("Account services are not available in this build.", cx)
-        }),
+        Route::Settings => unavailable("Account services are not available in this build.", cx),
         Route::Notifications | Route::Issues | Route::PullRequests => unavailable(
             "This page needs an active account and verified online access. No saved page content is available.",
             cx,

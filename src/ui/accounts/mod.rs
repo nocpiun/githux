@@ -9,6 +9,9 @@ mod form;
 
 use crate::domain::repo::ReposOutcome;
 
+// `AccountsSection`, `TokenForm`, and `accounts_section` remain in use by `examples/account.rs`
+// via `bin_support/account_example.rs`.
+#[allow(unused_imports)]
 pub(crate) use form::{AccountCallbacks, AccountsSection, TokenForm, accounts_section};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

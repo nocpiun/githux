@@ -1,5 +1,8 @@
 //! The account settings surface: saved accounts, the add/replace form and their status.
 //!
+//! Used by `examples/account.rs` via `bin_support/account_example.rs`.
+#![allow(dead_code)]
+//!
 //! Two callers use this file: the product Settings page and the developer-only account example.
 //! Both hand over an `ely_core` text input they own and a precomputed map of decoded avatars, so
 //! nothing here constructs a service, reads a credential, keeps the token or starts an image fetch.

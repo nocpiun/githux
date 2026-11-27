@@ -31,6 +31,11 @@ mod profile_fixture_tests;
 #[path = "bin_support/profile_fixtures.rs"]
 mod profile_fixtures;
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "bin_support/settings_fixture.rs"]
+mod settings_fixture;
+
 // Shared development fixture for README picture tests; preview-only helpers stay unused in this
 // test assembly while `examples/reader_images.rs` still compiles them.
 #[cfg(test)]
