@@ -1,6 +1,6 @@
 # 仓库顶部资料 low-level API
 
-更新：2026-10-25。已实现 R4 顶部信息栏的独立 Releases、Contributors、Languages REST 读取；源码为 `src/github/repository_extras/**` 与 `src/domain/repository_extras.rs`。它们是后续顶部资料的真实数据入口，**不是已接入 data/auth context 或 UI 的业务服务**。本切片没有 Packages、Environments、Release 管理写操作、顶部栏布局、缓存、数据库或高频轮询。
+更新：2026-11-27（Releases 规范续页）；其余内容截至 2026-10-25。已实现 R4 顶部信息栏的独立 Releases、Contributors、Languages REST 读取；源码为 `src/github/repository_extras/**` 与 `src/domain/repository_extras.rs`。它们是后续顶部资料的真实数据入口，**不是已接入 data/auth context 或 UI 的业务服务**。本切片没有 Packages、Environments、Release 管理写操作、顶部栏布局、缓存、数据库或高频轮询。
 
 ## 方法与返回
 
@@ -43,6 +43,8 @@ let languages = fetch_languages(
 
 `Link` 只允许同源且留在本资源 path 的绝对 URL；userinfo、fragment、跨源、端口/scheme 变化、循环或畸形链接停止并标 Partial。仓库 locator 沿用已有独立 segment 编码与校验。`build_get` 只对受信源注入 PAT，既有传输只跟随同源重定向；没有跟随响应体里的 URL。
 
+Releases 额外接受 GitHub 的真实续页形状：初始 `GET /repos/{owner}/{repo}/releases` 的 `rel="next"` 可能指向 `/repositories/{repository_id}/releases`（公开观测见 `cli/cli` 等仓库）。只放行由**当前读取的仓库 id** 与同一资源 `releases` 生成的规范 path，其余 id、其他资源、`/repositories/{id}` 本身及跨源/userinfo/fragment 仍判 `InvalidPagination` 或 `UntrustedPagination`。该 allowlist 只传给 Releases；Contributors/latest/languages 仍要求与初始 path 完全一致，等真实观测到同类续页再单独放行。
+
 ## 刷新验证器与后续 data/UI 整合
 
 `ResponseMetadata` 保存每响应的 `ETag`、`Last-Modified`、`Cache-Control` 与可选 `X-Poll-Interval`。分页结果用 `page_metadata` 保持页与验证器的对应关系，不能拿一页 ETag 验证整个聚合。latest/languages 可传相同请求表示的验证器生成 `If-None-Match` / `If-Modified-Since`；测试验证了真实 localhost 请求头。条件请求仍需相同账户/授权、仓库、端点、参数和媒体类型，并尊重 Cache-Control 与服务端限流。没有实现自动重试、调度或 poll。
@@ -59,4 +61,6 @@ let languages = fetch_languages(
 
 实现前以无认证读取核对了 GitHub 官方 `rest-api-description` 的 `api.github.com.2022-11-28` 描述及对应官方 REST 文档：[Releases](https://docs.github.com/en/rest/releases/releases)、[List repository contributors](https://docs.github.com/en/rest/repos/repos#list-repository-contributors)、[List repository languages](https://docs.github.com/en/rest/repos/repos#list-repository-languages)。这些来源确认 draft 可见性、latest 语义、Contributors 204/匿名/500 邮箱上限与 Languages 字节数；本仓库未将它们当作真实账户联调证据。
 
-测试使用合成 PAT、可控 MockTransport 和 localhost HTTP server；没有读取用户 PAT、gh token 或 Cookie，也没有访问真实 GitHub 业务资源。fixture 覆盖非空/空、204、404、403、预发布/草稿及原始字段、匿名贡献者、多页与截断、后续页错误/超限、SSO/限流、取消、零语言/比例/溢出、条件头和同源 URL。完整运行命令和结果见[开发日志](devlog/2026-10-25-repository-extras.md)。本地模拟不等同于真实 GitHub 的 TLS、组织 SSO、私有可见性或 GUI 验收；这些及四平台 CI 需分别核实。
+测试使用合成 PAT、可控 MockTransport 和 localhost HTTP server；没有读取用户 PAT、gh token 或 Cookie，也没有访问真实 GitHub 业务资源。fixture 覆盖非空/空、204、404、403、预发布/草稿及原始字段、匿名贡献者、多页与截断、后续页错误/超限、SSO/限流、取消、零语言/比例/溢出、条件头和同源 URL。
+
+Releases 规范续页的取样：2026-11-27 以无认证只读请求取得 `GET /repos/cli/cli/releases?per_page=2` 的 `Link`，next 为 `/repositories/212613049/releases?...`，与 `GET /repos/cli/cli` 的 `id` 一致。链接形状属于公开观测证据，读取行为仍用合成 fixture 与 MockTransport 回归；未拿它当作真实账户、私有仓库或四平台 CI 已验证。完整运行命令和结果见[开发日志](devlog/2026-10-25-repository-extras.md)与[分页修复日志](devlog/2026-11-27-release-pagination.md)。本地模拟不等同于真实 GitHub 的 TLS、组织 SSO、私有可见性或 GUI 验收；这些及四平台 CI 需分别核实。
