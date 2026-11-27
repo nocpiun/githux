@@ -84,6 +84,12 @@ impl Transport for FixtureTransport {
                     return Ok(last.clone());
                 }
             }
+            if url.path() == "/repos/acme/widgets" {
+                return Ok(json_response(
+                    200,
+                    r#"{"id": 10, "name": "widgets", "owner": {"login": "acme"}}"#,
+                ));
+            }
             Ok(json_response(404, "{}"))
         })
     }
@@ -268,7 +274,7 @@ fn renders_issue_body_and_paginates_comments_and_recovers_from_append_error(
 
     // Trigger Load more (page 2 fails with 503): issue body and comment 501 MUST remain visible.
     view.update(cx, |view, cx| {
-        assert!(view.request_comments(CommentsRequestMode::Append, false, cx));
+        assert!(view.request_comments(CommentsRequestMode::Append, cx));
     });
     harness.settle(cx);
 
@@ -287,7 +293,7 @@ fn renders_issue_body_and_paginates_comments_and_recovers_from_append_error(
 
     // Retry page 2: succeeds and appends comment 502.
     view.update(cx, |view, cx| {
-        assert!(view.request_comments(CommentsRequestMode::Append, false, cx));
+        assert!(view.request_comments(CommentsRequestMode::Append, cx));
     });
     harness.settle(cx);
 
@@ -342,7 +348,7 @@ fn distinguishes_empty_body_empty_comments_and_comments_error(cx: &mut TestAppCo
 
     // Retry comments page 1 -> now truly empty.
     view.update(cx, |view, cx| {
-        assert!(view.request_comments(CommentsRequestMode::Replace, false, cx));
+        assert!(view.request_comments(CommentsRequestMode::Replace, cx));
     });
     harness.settle(cx);
 
@@ -422,11 +428,12 @@ fn cached_snapshot_survives_transient_error_but_clears_on_missing_or_account_swi
         .unwrap();
     harness
         .runtime
-        .block_on(session.fetch_issue(
+        .block_on(session.refresh_issue(
             &locator,
             &IssueDetailLimits::default(),
             CancellationToken::default(),
         ))
+        .result
         .unwrap();
 
     // Open view when online refresh fails with 503: cached body stays visible with Cached badge!
@@ -529,11 +536,7 @@ fn attached_image_provider_receives_requests_from_issue_body_and_comments(cx: &m
         urls.iter().any(|u| u == "https://example.com/comment.png"),
         "comment reader must request images through the attached provider: {urls:?}"
     );
-    assert_eq!(
-        view.read_with(cx, |view, _| view.pending_cache_reads),
-        0,
-        "all cache read tasks must settle cleanly"
-    );
+    assert!(!view.read_with(cx, |view, _| view.is_refreshing()));
 }
 
 #[gpui::test]
@@ -646,16 +649,26 @@ fn cached_comments_page_one_does_not_enable_live_append_before_revalidation(
         .repo_service()
         .issue_detail_session()
         .unwrap();
+    let limits = IssueDetailLimits::default();
+    let live = harness
+        .runtime
+        .block_on(session.refresh_issue(&locator, &limits, CancellationToken::default()))
+        .result
+        .unwrap();
     let seeded = harness
         .runtime
-        .block_on(session.fetch_comments_page(
+        .block_on(session.refresh_comments(
             &locator,
+            live.scope.as_ref(),
             None,
-            &IssueDetailLimits::default(),
+            None,
+            &limits,
             CancellationToken::default(),
+            true,
         ))
+        .result
         .unwrap();
-    assert!(seeded.value.next.is_some());
+    assert!(seeded.page.value.next.is_some());
 
     // Open view when online page-1 revalidation fails with 503:
     // cached comment 8801 is visible, but Load more (Append) MUST NOT be enabled.
@@ -669,7 +682,7 @@ fn cached_comments_page_one_does_not_enable_live_append_before_revalidation(
     );
     view.update(cx, |view, cx| {
         assert!(
-            !view.request_comments(CommentsRequestMode::Append, false, cx),
+            !view.request_comments(CommentsRequestMode::Append, cx),
             "append must be rejected while comments are from a cached snapshot"
         );
     });

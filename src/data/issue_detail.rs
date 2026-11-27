@@ -6,10 +6,11 @@
 #[path = "issue_detail_tests.rs"]
 mod tests;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{AccountCache, RepoService, RepositoryReadContext, RepositorySession, Scoped};
 use crate::domain::cache::{CacheCompleteness, CacheMetadata};
@@ -18,33 +19,21 @@ use crate::domain::issue_detail::{
     IssueAuthor, IssueComment, IssueCommentsCursor, IssueCommentsPage, IssueDetail,
     IssueDetailError, IssueLabel, IssueLocator, IssueState, IssueStateReason,
 };
+use crate::domain::repository::{RepositoryError, RepositoryLocator};
 use crate::github::{
     GitHubClient,
+    home::cache::PageTransport,
     issue_detail::{self, IssueDetailLimits},
 };
 use crate::network::cancel::CancellationToken;
-use crate::storage::cache::{CacheAuthorization, CacheKey, CacheRead, CacheWrite};
+use crate::storage::cache::{
+    CacheAuthorization, CacheError, CacheKey, CacheRead, CacheWrite, WriteOutcome,
+};
 
 const SNAPSHOT_VERSION: u32 = 1;
-const ISSUE_REPRESENTATION: &str = "githux-issue-detail-v1";
-const COMMENTS_REPRESENTATION: &str = "githux-issue-comments-v1";
-
-/// Authorized cached snapshot of an Issue detail, paired with its [`CacheAuthorization`] token
-/// so the UI can reject revoked/retired data with a single atomic load (L022).
-#[derive(Clone, Debug)]
-pub struct CachedIssueSnapshot {
-    pub issue: IssueDetail,
-    pub verified_at_ms: i64,
-    pub authorization: CacheAuthorization,
-}
-
-/// Authorized cached snapshot of an Issue's first page of comments.
-#[derive(Clone, Debug)]
-pub struct CachedCommentsSnapshot {
-    pub page: IssueCommentsPage,
-    pub verified_at_ms: i64,
-    pub authorization: CacheAuthorization,
-}
+// Replay has both a page limit and a byte budget. Live pages still use the normal per-request limits.
+const MAX_REPLAY_PAGES: u32 = 10;
+const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct IssueSnapshotDto {
@@ -108,43 +97,77 @@ impl IssueSnapshotDto {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReadingScope {
+    pub(crate) repository: u64,
+    binding: [u8; 16],
+}
+
+pub(crate) struct CachedReading {
+    pub issue: IssueDetail,
+    pub comments: Option<SavedComments>,
+    pub scope: ReadingScope,
+    pub verified_at_ms: i64,
+    pub authorization: CacheAuthorization,
+}
+
 #[derive(Serialize, Deserialize)]
-struct CommentsPageSnapshotDto {
-    comments: Vec<IssueComment>,
-    has_next: bool,
+struct ReadingSnapshot {
+    issue: IssueSnapshotDto,
+    comments: Option<SavedComments>,
+    verified_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SavedComments {
+    collection: [u8; 16],
+    last_page: u32,
     per_page: u32,
+    pub partial: bool,
+    pub comments: Vec<IssueComment>,
+}
+
+pub(crate) struct Refresh<T> {
+    pub result: Result<T, IssueDetailError>,
+    pub no_store: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct LiveIssue {
+    pub issue: IssueDetail,
+    pub repository: Option<u64>,
+    pub scope: Option<ReadingScope>,
+    pub authorization: Option<CacheAuthorization>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LiveComments {
+    pub page: Scoped<IssueCommentsPage>,
+    pub collection: Option<[u8; 16]>,
 }
 
 /// Account-bound session for reading a single Issue and its paginated comments.
 #[derive(Clone)]
 pub struct IssueDetailSession {
-    repos: RepoService,
     repository: RepositorySession,
-    client: Arc<GitHubClient>,
     cache: Option<AccountCache>,
 }
 
-impl std::fmt::Debug for IssueDetailSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IssueDetailSession")
-            .field("context", self.context())
-            .field("has_cache", &self.cache.is_some())
-            .finish_non_exhaustive()
+impl RepoService {
+    pub fn issue_detail_session(&self) -> Result<IssueDetailSession, IssueDetailError> {
+        let repository = self.session().map_err(|_| GitHubError::StaleContext)?;
+        let cache = self
+            .cache(repository.context())
+            .filter(|cache| cache.scope().account() == &repository.context().auth().account);
+        Ok(IssueDetailSession { repository, cache })
     }
 }
 
-impl RepoService {
-    /// Capture an account-bound session for reading Issue details and comments.
-    pub fn issue_detail_session(&self) -> Result<IssueDetailSession, IssueDetailError> {
-        let repository = self.session().map_err(|_| GitHubError::StaleContext)?;
-        let cache = self.cache(repository.context());
-        Ok(IssueDetailSession {
-            repos: self.clone(),
-            repository,
-            client: self.client.clone(),
-            cache,
-        })
-    }
+struct BodyWrite {
+    route: CacheWrite,
+    old_scope: Option<ReadingScope>,
+    old_reading: Option<CacheWrite>,
+    authorization: Option<CacheAuthorization>,
 }
 
 impl IssueDetailSession {
@@ -156,389 +179,626 @@ impl IssueDetailSession {
         self.repository.verify()
     }
 
-    fn issue_cache_key(&self, locator: &IssueLocator) -> Option<CacheKey> {
-        let (owner, name, number) = locator.normalized_key();
-        let config = self.client.config();
-        let request = serde_json::json!({
-            "owner": owner,
-            "repo": name,
-            "number": number,
-            "base": config.base_url,
-            "accept": config.accept,
-            "api": config.api_version,
-        })
-        .to_string();
+    fn check(&self, cancel: &CancellationToken) -> Result<(), IssueDetailError> {
+        if !self.verify() {
+            return Err(GitHubError::StaleContext.into());
+        }
+        if cancel.is_cancelled() {
+            return Err(GitHubError::Cancelled.into());
+        }
+        Ok(())
+    }
+
+    fn key(&self, locator: &IssueLocator, scope: Option<&ReadingScope>) -> Option<CacheKey> {
+        let config = self.repository.client().config();
+        let request = serde_json::json!([
+            locator.normalized_key(),
+            config.base_url,
+            config.accept,
+            config.api_version,
+            scope.map(|scope| scope.binding),
+        ]);
         CacheKey::mutable(
-            None,
+            scope.map(|scope| scope.repository),
             true,
-            "issue-detail",
-            &request,
-            ISSUE_REPRESENTATION,
+            if scope.is_some() {
+                "issue-reading"
+            } else {
+                "issue-reading-route"
+            },
+            &request.to_string(),
+            "githux-issue-reading-v1",
             SNAPSHOT_VERSION,
         )
         .ok()
     }
 
-    fn comments_p1_cache_key(&self, locator: &IssueLocator, per_page: u32) -> Option<CacheKey> {
-        let (owner, name, number) = locator.normalized_key();
-        let config = self.client.config();
-        let request = serde_json::json!({
-            "owner": owner,
-            "repo": name,
-            "number": number,
-            "per_page": per_page,
-            "base": config.base_url,
-            "accept": config.accept,
-            "api": config.api_version,
-        })
-        .to_string();
-        CacheKey::mutable(
-            None,
-            true,
-            "issue-comments-p1",
-            &request,
-            COMMENTS_REPRESENTATION,
-            SNAPSHOT_VERSION,
-        )
-        .ok()
-    }
-
-    /// Best-effort read of a previously cached authorized snapshot for `locator`.
-    /// Never blocks the caller thread; returns `Ok(None)` when uncached, unauthorized or corrupt.
-    pub async fn read_cached_issue(
-        &self,
-        locator: &IssueLocator,
-        cancel: CancellationToken,
-    ) -> Result<Option<Scoped<CachedIssueSnapshot>>, IssueDetailError> {
-        if !self.verify() {
-            return Err(GitHubError::StaleContext.into());
-        }
-        if cancel.is_cancelled() {
-            return Err(GitHubError::Cancelled.into());
-        }
-        let Some(cache) = self.cache.clone() else {
-            return Ok(None);
-        };
-        let Some(key) = self.issue_cache_key(locator) else {
-            return Ok(None);
-        };
-        let context = self.context().clone();
-        let snapshot = tokio::task::spawn_blocking(move || {
-            let store = cache.store();
-            let scope = cache.scope();
-            let authorization = store.authorization(scope, None)?;
-            if !authorization.is_current() {
-                return None;
-            }
-            match store.read(scope, &key).ok()? {
-                CacheRead::Hit(lease) => {
-                    if !authorization.is_current() {
-                        return None;
-                    }
-                    let hit = lease.snapshot().ok().flatten()?;
-                    let dto: IssueSnapshotDto = serde_json::from_slice(&hit.bytes).ok()?;
-                    let issue = dto.into_detail()?;
-                    Some(CachedIssueSnapshot {
-                        issue,
-                        verified_at_ms: hit.metadata.verified_at_ms,
-                        authorization,
-                    })
-                }
-                CacheRead::Miss(_) => None,
-            }
-        })
-        .await
-        .ok()
-        .flatten();
-
-        if !self.verify() {
-            return Err(GitHubError::StaleContext.into());
-        }
-        if cancel.is_cancelled() {
-            return Err(GitHubError::Cancelled.into());
-        }
-        Ok(snapshot
-            .filter(|snap| snap.authorization.is_current())
-            .map(|value| Scoped { context, value }))
-    }
-
-    /// Best-effort read of a previously cached authorized first page of comments for `locator`.
-    pub async fn read_cached_comments_first_page(
+    pub(crate) async fn cached(
         &self,
         locator: &IssueLocator,
         limits: &IssueDetailLimits,
-        cancel: CancellationToken,
-    ) -> Result<Option<Scoped<CachedCommentsSnapshot>>, IssueDetailError> {
-        if !self.verify() {
-            return Err(GitHubError::StaleContext.into());
-        }
-        if cancel.is_cancelled() {
-            return Err(GitHubError::Cancelled.into());
-        }
-        let Some(cache) = self.cache.clone() else {
-            return Ok(None);
-        };
-        let Some(key) = self.comments_p1_cache_key(locator, limits.comments_per_page) else {
-            return Ok(None);
-        };
-        let locator_clone = locator.clone();
-        let origin = comments_origin(&self.client, locator);
-        let context = self.context().clone();
-        let snapshot = tokio::task::spawn_blocking(move || {
-            let store = cache.store();
-            let scope = cache.scope();
-            let authorization = store.authorization(scope, None)?;
-            if !authorization.is_current() {
-                return None;
-            }
-            match store.read(scope, &key).ok()? {
-                CacheRead::Hit(lease) => {
-                    if !authorization.is_current() {
-                        return None;
-                    }
-                    let hit = lease.snapshot().ok().flatten()?;
-                    let dto: CommentsPageSnapshotDto = serde_json::from_slice(&hit.bytes).ok()?;
-                    let next = if dto.has_next {
-                        Some(IssueCommentsCursor {
-                            locator: locator_clone.clone(),
-                            page: 2,
-                            per_page: dto.per_page,
-                            origin: origin?,
-                        })
-                    } else {
-                        None
-                    };
-                    Some(CachedCommentsSnapshot {
-                        page: IssueCommentsPage {
-                            comments: dto.comments,
-                            next,
-                            page: 1,
-                        },
-                        verified_at_ms: hit.metadata.verified_at_ms,
-                        authorization,
-                    })
-                }
-                CacheRead::Miss(_) => None,
-            }
-        })
-        .await
-        .ok()
-        .flatten();
-
-        if !self.verify() {
-            return Err(GitHubError::StaleContext.into());
-        }
-        if cancel.is_cancelled() {
-            return Err(GitHubError::Cancelled.into());
-        }
-        Ok(snapshot
-            .filter(|snap| snap.authorization.is_current())
-            .map(|value| Scoped { context, value }))
-    }
-
-    /// Fetch the authoritative Issue detail from GitHub and update/invalidate the cache accordingly.
-    pub async fn fetch_issue(
-        &self,
-        locator: &IssueLocator,
-        limits: &IssueDetailLimits,
-        cancel: CancellationToken,
-    ) -> Result<Scoped<IssueDetail>, IssueDetailError> {
-        // Acquire the write ticket BEFORE the network read so any concurrent invalidation or
-        // newer write supersedes this in-flight response.
-        let write_ticket = self.begin_cache_write(self.issue_cache_key(locator)).await;
-
-        let result = self
-            .repository
-            .read(cancel, async move |pat, cancel| {
-                issue_detail::fetch_issue(&self.client, &pat, locator, limits, cancel).await
-            })
-            .await;
-
-        match result {
-            Ok(scoped) => {
-                let response = scoped.value;
-                if self.verify()
-                    && let (Some(cache), Some(ticket)) = (self.cache.clone(), write_ticket)
-                {
-                    let dto = IssueSnapshotDto::from_detail(&response.value);
-                    let no_store = response.no_store;
-                    let etag = response.etag.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        put_snapshot(&cache, ticket, &dto, no_store, etag);
-                    })
-                    .await;
-                }
-                if !self.verify() {
-                    return Err(GitHubError::StaleContext.into());
-                }
-                Ok(Scoped {
-                    context: scoped.context,
-                    value: response.value,
-                })
-            }
-            Err(error) => {
-                if matches!(error, IssueDetailError::GitHub(GitHubError::Unauthorized)) {
-                    let _ = self.repos.credential_rejected(self.context()).await;
-                }
-                if error.is_missing()
-                    || error.is_auth_or_permission()
-                    || matches!(error, IssueDetailError::NotAnIssue)
-                {
-                    self.invalidate_issue_caches(locator, limits.comments_per_page)
-                        .await;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// Fetch one bounded page of plain comments from GitHub and update/invalidate page-1 cache.
-    pub async fn fetch_comments_page(
-        &self,
-        locator: &IssueLocator,
-        cursor: Option<&IssueCommentsCursor>,
-        limits: &IssueDetailLimits,
-        cancel: CancellationToken,
-    ) -> Result<Scoped<IssueCommentsPage>, IssueDetailError> {
-        let is_first_page = cursor.is_none();
-        let write_ticket = if is_first_page {
-            self.begin_cache_write(self.comments_p1_cache_key(locator, limits.comments_per_page))
-                .await
-        } else {
-            None
-        };
-
-        let result = self
-            .repository
-            .read(cancel, async move |pat, cancel| {
-                issue_detail::fetch_comments_page(
-                    &self.client,
-                    &pat,
-                    locator,
-                    cursor,
-                    limits,
-                    cancel,
-                )
-                .await
-            })
-            .await;
-
-        match result {
-            Ok(scoped) => {
-                let response = scoped.value;
-                if is_first_page
-                    && self.verify()
-                    && let (Some(cache), Some(ticket)) = (self.cache.clone(), write_ticket)
-                {
-                    let dto = CommentsPageSnapshotDto {
-                        comments: response.value.comments.clone(),
-                        has_next: response.value.next.is_some(),
-                        per_page: limits.comments_per_page,
-                    };
-                    let no_store = response.no_store;
-                    let etag = response.etag.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        put_snapshot(&cache, ticket, &dto, no_store, etag);
-                    })
-                    .await;
-                }
-                if !self.verify() {
-                    return Err(GitHubError::StaleContext.into());
-                }
-                Ok(Scoped {
-                    context: scoped.context,
-                    value: response.value,
-                })
-            }
-            Err(error) => {
-                if matches!(error, IssueDetailError::GitHub(GitHubError::Unauthorized)) {
-                    let _ = self.repos.credential_rejected(self.context()).await;
-                }
-                if (error.is_missing() || error.is_auth_or_permission())
-                    && let Some(cache) = self.cache.clone()
-                    && let Some(key) = self.comments_p1_cache_key(locator, limits.comments_per_page)
-                {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = cache.store().invalidate(cache.scope(), &key);
-                    })
-                    .await;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    async fn begin_cache_write(&self, key: Option<CacheKey>) -> Option<CacheWrite> {
-        if !self.verify() {
-            return None;
-        }
+        cancel: &CancellationToken,
+    ) -> Option<CachedReading> {
+        self.check(cancel).ok()?;
         let cache = self.cache.clone()?;
-        let key = key?;
-        tokio::task::spawn_blocking(move || cache.store().begin_write(cache.scope(), &key).ok())
-            .await
-            .ok()
-            .flatten()
+        let session = self.clone();
+        let locator = locator.clone();
+        let per_page = limits.comments_per_page;
+        let cached = tokio::task::spawn_blocking(move || {
+            let route_auth = cache.store().authorization(cache.scope(), None)?;
+            let scope: ReadingScope = load(&cache, &session.key(&locator, None)?)?;
+            let authorization = cache
+                .store()
+                .authorization(cache.scope(), Some(scope.repository))?;
+            let snapshot: ReadingSnapshot = load(&cache, &session.key(&locator, Some(&scope))?)?;
+            let issue = snapshot.issue.into_detail()?;
+            if !route_auth.is_current()
+                || issue.number != locator.number()
+                || !same_repository(&issue.repository, locator.repository())
+            {
+                return None;
+            }
+            Some(CachedReading {
+                issue,
+                comments: snapshot
+                    .comments
+                    .filter(|comments| comments.per_page == per_page),
+                scope,
+                verified_at_ms: snapshot.verified_at_ms,
+                authorization,
+            })
+        })
+        .await
+        .ok()
+        .flatten()?;
+        self.check(cancel).ok()?;
+        cached.authorization.is_current().then_some(cached)
     }
 
-    async fn invalidate_issue_caches(&self, locator: &IssueLocator, per_page: u32) {
-        let Some(cache) = self.cache.clone() else {
-            return;
-        };
-        let issue_key = self.issue_cache_key(locator);
-        let comments_key = self.comments_p1_cache_key(locator, per_page);
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Some(key) = issue_key {
-                let _ = cache.store().invalidate(cache.scope(), &key);
-            }
-            if let Some(key) = comments_key {
-                let _ = cache.store().invalidate(cache.scope(), &key);
+    async fn prepare(
+        &self,
+        locator: &IssueLocator,
+        cancel: &CancellationToken,
+    ) -> Option<BodyWrite> {
+        let locator = locator.clone();
+        self.cache_commit(cancel, move |session, cache| {
+            let route_key = session.key(&locator, None)?;
+            let route = cache.store().begin_write(cache.scope(), &route_key).ok()?;
+            let old_scope = load::<ReadingScope>(&cache, &route_key);
+            let authorization = old_scope.as_ref().and_then(|scope| {
+                cache
+                    .store()
+                    .authorization(cache.scope(), Some(scope.repository))
+            });
+            let old_reading = old_scope.as_ref().and_then(|scope| {
+                cache
+                    .store()
+                    .begin_write(cache.scope(), &session.key(&locator, Some(scope))?)
+                    .ok()
+            });
+            Some(BodyWrite {
+                route,
+                old_scope,
+                old_reading,
+                authorization,
+            })
+        })
+        .await
+        .flatten()
+    }
+
+    /// Serialize the final context check and cache effect with account selection.
+    /// Network reads and proof requests run outside the account commit lock.
+    async fn cache_commit<T: Send + 'static>(
+        &self,
+        cancel: &CancellationToken,
+        work: impl FnOnce(&Self, AccountCache) -> T + Send + 'static,
+    ) -> Option<T> {
+        let cache = self.cache.clone()?;
+        let session = self.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = session.repository.service().credential_commit.lock().ok()?;
+            session.check(&cancel).ok()?;
+            Some(work(&session, cache))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn discard_reading(&self, cancel: &CancellationToken, write: BodyWrite) {
+        self.cache_commit(cancel, move |_, cache| {
+            discard(&cache, write.route);
+            if let Some(ticket) = write.old_reading {
+                discard(&cache, ticket);
             }
         })
         .await;
     }
+
+    pub(crate) async fn refresh_issue(
+        &self,
+        locator: &IssueLocator,
+        limits: &IssueDetailLimits,
+        cancel: CancellationToken,
+    ) -> Refresh<LiveIssue> {
+        let write = self.prepare(locator, &cancel).await;
+        let (client, transport) = self.read_client();
+        let response = self
+            .repository
+            .read(cancel.clone(), |pat, cancel| async move {
+                issue_detail::fetch_issue(&client, &pat, locator, limits, cancel).await
+            })
+            .await;
+        let no_store = response.as_ref().is_ok_and(|reply| reply.value.no_store)
+            || transport.is_some_and(|transport| transport.no_store());
+        self.reject_credential(&response).await;
+        let result = self
+            .finish_issue(locator, write, response, no_store, &cancel)
+            .await;
+        Refresh { result, no_store }
+    }
+
+    async fn finish_issue(
+        &self,
+        locator: &IssueLocator,
+        write: Option<BodyWrite>,
+        response: Result<Scoped<issue_detail::IssueResponse<IssueDetail>>, IssueDetailError>,
+        no_store: bool,
+        cancel: &CancellationToken,
+    ) -> Result<LiveIssue, IssueDetailError> {
+        self.check(cancel)?;
+        let Some((cache, mut write)) = self.cache.clone().zip(write) else {
+            return response.map(|reply| LiveIssue {
+                issue: reply.value.value,
+                repository: None,
+                scope: None,
+                authorization: None,
+            });
+        };
+        if write
+            .authorization
+            .as_ref()
+            .is_some_and(|auth| !auth.is_current())
+        {
+            return Err(GitHubError::StaleContext.into());
+        }
+        if no_store || matches!(&response, Err(error) if error.invalidates_reading()) {
+            self.discard_reading(cancel, write).await;
+            self.check(cancel)?;
+            return response.map(|reply| LiveIssue {
+                issue: reply.value.value,
+                repository: None,
+                scope: None,
+                authorization: None,
+            });
+        }
+        let issue = response?.value.value;
+        let (repository, identity_no_store) = self.confirm_repository(locator, cancel).await?;
+        self.check(cancel)?;
+        if write
+            .authorization
+            .as_ref()
+            .is_some_and(|auth| !auth.is_current())
+        {
+            return Err(GitHubError::StaleContext.into());
+        }
+        let Some(repository_id) = repository else {
+            if identity_no_store {
+                self.discard_reading(cancel, write).await;
+            }
+            self.check(cancel)?;
+            return Ok(LiveIssue {
+                issue,
+                repository,
+                scope: None,
+                authorization: None,
+            });
+        };
+        let authorization = cache.store().authorization(cache.scope(), repository);
+        let old_scope = write.old_scope.take();
+        let old_ticket = write.old_reading.take();
+        let repository_changed = old_scope
+            .as_ref()
+            .is_some_and(|scope| scope.repository != repository_id);
+        let (scope, ticket) =
+            if !repository_changed && let Some((scope, ticket)) = old_scope.zip(old_ticket) {
+                (scope, Some(ticket))
+            } else {
+                let scope = ReadingScope {
+                    repository: repository_id,
+                    binding: uuid::Uuid::new_v4().into_bytes(),
+                };
+                let key = self.key(locator, Some(&scope));
+                let ticket = self.new_ticket(locator, repository_id, key, cancel).await?;
+                (scope, ticket)
+            };
+        let key = self.key(locator, Some(&scope));
+        let dto = IssueSnapshotDto::from_detail(&issue);
+        let auth = authorization.clone();
+        let scope = self
+            .cache_commit(cancel, move |_, cache| {
+                if !auth.as_ref()?.is_current() {
+                    return None;
+                }
+                let comments =
+                    load::<ReadingSnapshot>(&cache, &key?).and_then(|saved| saved.comments);
+                let mut snapshot = ReadingSnapshot {
+                    issue: dto,
+                    comments,
+                    verified_at_ms: now_ms(),
+                };
+                let bytes = encode(&snapshot).or_else(|| {
+                    snapshot.comments = None;
+                    encode(&snapshot)
+                });
+                let stored = ticket.zip(bytes).is_some_and(|(ticket, bytes)| {
+                    store(
+                        &cache,
+                        ticket,
+                        &bytes,
+                        completeness(snapshot.comments.as_ref()),
+                        false,
+                    )
+                });
+                if !stored {
+                    if repository_changed {
+                        discard(&cache, write.route);
+                    }
+                    return None;
+                }
+                save(&cache, write.route, &scope, CacheCompleteness::Complete).then_some(scope)
+            })
+            .await
+            .flatten();
+        self.check(cancel)?;
+        if authorization
+            .as_ref()
+            .is_some_and(|auth| !auth.is_current())
+        {
+            return Err(GitHubError::StaleContext.into());
+        }
+        Ok(LiveIssue {
+            issue,
+            repository,
+            scope,
+            authorization,
+        })
+    }
+
+    async fn confirm_repository(
+        &self,
+        locator: &IssueLocator,
+        cancel: &CancellationToken,
+    ) -> Result<(Option<u64>, bool), IssueDetailError> {
+        let (client, transport) = self.read_client();
+        let client = &client;
+        let response = self
+            .repository
+            .read(cancel.clone(), |pat, cancel| async move {
+                issue_detail::fetch_repository_identity(client, &pat, locator, cancel).await
+            })
+            .await;
+        let no_store = transport.is_some_and(|transport| transport.no_store());
+        match response {
+            Ok(reply)
+                if !no_store
+                    && reply.value.id() > 0
+                    && same_repository(reply.value.locator(), locator.repository()) =>
+            {
+                Ok((Some(reply.value.id()), false))
+            }
+            Err(RepositoryError::GitHub(GitHubError::Unauthorized)) => {
+                let error = Err(GitHubError::Unauthorized.into());
+                self.reject_credential::<()>(&error).await;
+                error.map(|_| (None, no_store))
+            }
+            _ => Ok((None, no_store)),
+        }
+    }
+
+    async fn new_ticket(
+        &self,
+        locator: &IssueLocator,
+        repository: u64,
+        key: Option<CacheKey>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<CacheWrite>, IssueDetailError> {
+        let Some(key) = key else { return Ok(None) };
+        let begin = || {
+            let key = key.clone();
+            self.cache_commit(cancel, move |_, cache| {
+                cache.store().begin_write(cache.scope(), &key)
+            })
+        };
+        match begin().await {
+            Some(Ok(ticket)) => return Ok(Some(ticket)),
+            Some(Err(CacheError::AccessDenied)) => {}
+            _ => return Ok(None),
+        }
+        // Discovering the repo ID does not lift a quarantine. Establish a proof before
+        // asking GitHub to confirm access again with the current fixed credentials.
+        let session = self.repository.clone();
+        let proof = tokio::task::spawn_blocking(move || {
+            session
+                .service()
+                .begin_revalidation(session.context(), Some(repository))
+        })
+        .await;
+        let Ok(Ok(proof)) = proof else {
+            return Ok(None);
+        };
+        self.check(cancel)?;
+        if self.confirm_repository(locator, cancel).await?.0 != Some(repository) {
+            return Ok(None);
+        }
+        self.check(cancel)?;
+        if self
+            .repository
+            .service()
+            .permission_confirmed(self.context(), proof)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        Ok(begin().await.and_then(Result::ok))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn refresh_comments(
+        &self,
+        locator: &IssueLocator,
+        scope: Option<&ReadingScope>,
+        collection: Option<[u8; 16]>,
+        cursor: Option<&IssueCommentsCursor>,
+        limits: &IssueDetailLimits,
+        cancel: CancellationToken,
+        persist: bool,
+    ) -> Refresh<LiveComments> {
+        let page = cursor.map_or(1, IssueCommentsCursor::page);
+        let route = self.key(locator, None);
+        let requested_scope = scope.cloned();
+        let target = locator.clone();
+        let work = self
+            .cache_commit(&cancel, move |session, cache| {
+                let scope = load::<ReadingScope>(&cache, &route?)?;
+                if requested_scope
+                    .as_ref()
+                    .is_some_and(|requested| requested != &scope)
+                {
+                    return None;
+                }
+                let authorization = cache
+                    .store()
+                    .authorization(cache.scope(), Some(scope.repository))?;
+                let key = session.key(&target, Some(&scope))?;
+                let ticket = cache.store().begin_write(cache.scope(), &key).ok()?;
+                Some((
+                    authorization,
+                    key,
+                    ticket,
+                    persist && requested_scope.is_some(),
+                ))
+            })
+            .await
+            .flatten();
+        let (client, transport) = self.read_client();
+        let response = self
+            .repository
+            .read(cancel.clone(), |pat, cancel| async move {
+                issue_detail::fetch_comments_page(&client, &pat, locator, cursor, limits, cancel)
+                    .await
+            })
+            .await;
+        let no_store = response.as_ref().is_ok_and(|reply| reply.value.no_store)
+            || transport.is_some_and(|transport| transport.no_store());
+        self.reject_credential(&response).await;
+        let mut collection = if page == 1 {
+            Some(uuid::Uuid::new_v4().into_bytes())
+        } else {
+            collection
+        };
+        let result = self.check(&cancel).and(response);
+        if let Some((authorization, key, ticket, persist)) = work {
+            let invalidate = matches!(&result, Err(error) if error.invalidates_reading());
+            let response = result.as_ref().ok().map(|reply| reply.value.value.clone());
+            let per_page = limits.comments_per_page;
+            let stamp = authorization.clone();
+            let persisted = self
+                .cache_commit(&cancel, move |_, cache| {
+                    if !stamp.is_current() {
+                        return false;
+                    }
+                    if invalidate {
+                        discard(&cache, ticket);
+                        return false;
+                    }
+                    let Some(mut snapshot) = load::<ReadingSnapshot>(&cache, &key) else {
+                        return false;
+                    };
+                    if no_store {
+                        snapshot.comments = None;
+                        save(
+                            &cache,
+                            ticket,
+                            &snapshot,
+                            CacheCompleteness::Partial {
+                                reason: "comments are not saved".into(),
+                            },
+                        );
+                        return false;
+                    }
+                    let Some(response) = response.filter(|_| persist && page <= MAX_REPLAY_PAGES)
+                    else {
+                        return false;
+                    };
+                    let Some(id) = collection else { return false };
+                    if page == 1 {
+                        snapshot.comments = Some(SavedComments {
+                            collection: id,
+                            last_page: 1,
+                            per_page,
+                            partial: response.next.is_some(),
+                            comments: response.comments,
+                        });
+                    } else {
+                        let Some(saved) = snapshot.comments.as_mut().filter(|saved| {
+                            saved.collection == id
+                                && saved.last_page + 1 == page
+                                && saved.partial
+                                && saved.per_page == per_page
+                        }) else {
+                            return false;
+                        };
+                        let mut seen: HashSet<_> =
+                            saved.comments.iter().map(|comment| comment.id).collect();
+                        saved.comments.extend(
+                            response
+                                .comments
+                                .into_iter()
+                                .filter(|comment| seen.insert(comment.id)),
+                        );
+                        saved.last_page = page;
+                        saved.partial = response.next.is_some();
+                    }
+                    let Some(bytes) = encode(&snapshot) else {
+                        if page == 1 {
+                            snapshot.comments = None;
+                            save(&cache, ticket, &snapshot, completeness(None));
+                        }
+                        return false;
+                    };
+                    store(
+                        &cache,
+                        ticket,
+                        &bytes,
+                        completeness(snapshot.comments.as_ref()),
+                        false,
+                    )
+                })
+                .await
+                .unwrap_or(false);
+            if !authorization.is_current() {
+                return Refresh {
+                    result: Err(GitHubError::StaleContext.into()),
+                    no_store,
+                };
+            }
+            if !persisted && result.is_ok() {
+                collection = None;
+            }
+        }
+        Refresh {
+            result: self.check(&cancel).and(result).map(|reply| LiveComments {
+                page: Scoped {
+                    context: reply.context,
+                    value: reply.value.value,
+                },
+                collection,
+            }),
+            no_store,
+        }
+    }
+
+    async fn reject_credential<T>(&self, response: &Result<T, IssueDetailError>) {
+        if matches!(
+            response,
+            Err(IssueDetailError::GitHub(GitHubError::Unauthorized))
+        ) {
+            let _ = self
+                .repository
+                .service()
+                .credential_rejected(self.context())
+                .await;
+        }
+    }
+
+    fn read_client(&self) -> (Arc<GitHubClient>, Option<Arc<PageTransport>>) {
+        let client = self.repository.client();
+        if self.cache.is_none() {
+            return (client.clone(), None);
+        }
+        let transport = Arc::new(PageTransport::recording(client.transport().clone()));
+        (
+            Arc::new(GitHubClient::new(
+                client.config().clone(),
+                transport.clone(),
+            )),
+            Some(transport),
+        )
+    }
 }
 
-fn comments_origin(client: &GitHubClient, locator: &IssueLocator) -> Option<String> {
-    let mut url = reqwest::Url::parse(&client.config().base_url).ok()?;
-    {
-        let mut segments = url.path_segments_mut().ok()?;
-        segments.pop_if_empty();
-        segments.push("repos");
-        segments.push(locator.owner());
-        segments.push(locator.name());
-        segments.push("issues");
-        segments.push(&locator.number().to_string());
-        segments.push("comments");
+fn same_repository(left: &RepositoryLocator, right: &RepositoryLocator) -> bool {
+    left.owner().eq_ignore_ascii_case(right.owner())
+        && left.name().eq_ignore_ascii_case(right.name())
+}
+
+fn load<T: DeserializeOwned>(cache: &AccountCache, key: &CacheKey) -> Option<T> {
+    let CacheRead::Hit(lease) = cache.store().read(cache.scope(), key).ok()? else {
+        return None;
+    };
+    let hit = lease.snapshot().ok().flatten()?;
+    if hit.bytes.len() > MAX_SNAPSHOT_BYTES {
+        return None;
     }
-    Some(url.as_str().to_string())
+    serde_json::from_slice(&hit.bytes).ok()
+}
+
+fn completeness(comments: Option<&SavedComments>) -> CacheCompleteness {
+    match comments {
+        Some(comments) if !comments.partial => CacheCompleteness::Complete,
+        _ => CacheCompleteness::Partial {
+            reason: "comments have not been fully read".into(),
+        },
+    }
 }
 
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn put_snapshot<T: Serialize>(
+fn encode(value: &impl Serialize) -> Option<Vec<u8>> {
+    let bytes = serde_json::to_vec(value).ok()?;
+    (bytes.len() <= MAX_SNAPSHOT_BYTES).then_some(bytes)
+}
+
+fn save(
     cache: &AccountCache,
     ticket: CacheWrite,
-    dto: &T,
+    value: &impl Serialize,
+    completeness: CacheCompleteness,
+) -> bool {
+    encode(value).is_some_and(|bytes| store(cache, ticket, &bytes, completeness, false))
+}
+
+fn discard(cache: &AccountCache, ticket: CacheWrite) {
+    store(cache, ticket, &[], CacheCompleteness::Complete, true);
+}
+
+fn store(
+    cache: &AccountCache,
+    ticket: CacheWrite,
+    bytes: &[u8],
+    completeness: CacheCompleteness,
     no_store: bool,
-    etag: Option<String>,
-) {
-    let Ok(bytes) = serde_json::to_vec(dto) else {
-        return;
-    };
+) -> bool {
     let now = now_ms();
     let metadata = CacheMetadata {
         representation_version: SNAPSHOT_VERSION,
         fetched_at_ms: now,
         verified_at_ms: now,
-        completeness: CacheCompleteness::Complete,
-        etag,
+        completeness,
+        etag: None,
         last_modified: None,
-        cache_control: no_store.then(|| "no-store".to_string()),
+        cache_control: no_store.then(|| "no-store".into()),
     };
-    let _ = cache.store().put(ticket, &bytes, metadata);
+    matches!(
+        cache.store().put(ticket, bytes, metadata),
+        Ok(WriteOutcome::Stored)
+    )
 }

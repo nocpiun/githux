@@ -276,6 +276,11 @@ impl IssueDetailError {
         )
     }
 
+    /// A denial or changed resource identity invalidates the entire reading.
+    pub(crate) fn invalidates_reading(&self) -> bool {
+        self.is_missing() || self.is_auth_or_permission() || matches!(self, Self::NotAnIssue)
+    }
+
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::GitHub(GitHubError::Cancelled))
     }
