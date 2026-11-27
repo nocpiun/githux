@@ -255,9 +255,11 @@ async fn an_append_failure_keeps_the_loaded_pages_and_retries_the_same_cursor() 
     assert_eq!(
         model.finish(
             &request,
-            Err(RepositoryError::GitHub(GitHubError::Network {
-                message: "offline".into()
-            })),
+            Err(PullListError::Read(RepositoryError::GitHub(
+                GitHubError::Network {
+                    message: "offline".into(),
+                },
+            ))),
         ),
         PullFinish::Applied
     );
@@ -360,9 +362,11 @@ async fn an_empty_page_is_success_and_a_later_failure_is_not_emptiness() {
     let request = model.begin(PullRequestMode::Replace).unwrap();
     model.finish(
         &request,
-        Err(RepositoryError::GitHub(GitHubError::Network {
-            message: "offline".into(),
-        })),
+        Err(PullListError::Read(RepositoryError::GitHub(
+            GitHubError::Network {
+                message: "offline".into(),
+            },
+        ))),
     );
     assert!(!model.is_empty_result());
     assert!(model.error().is_some());
@@ -401,7 +405,9 @@ async fn stale_account_responses_never_publish_rows() {
     assert_eq!(
         rebound.finish(
             &request,
-            Err(RepositoryError::GitHub(GitHubError::Unauthorized)),
+            Err(PullListError::Read(RepositoryError::GitHub(
+                GitHubError::Unauthorized,
+            ))),
         ),
         PullFinish::Rejected
     );
@@ -541,9 +547,11 @@ async fn a_rejected_credential_clears_rows_while_a_network_failure_keeps_them() 
     let request = model.begin(PullRequestMode::Append).unwrap();
     model.finish(
         &request,
-        Err(RepositoryError::GitHub(GitHubError::Network {
-            message: "offline".into(),
-        })),
+        Err(PullListError::Read(RepositoryError::GitHub(
+            GitHubError::Network {
+                message: "offline".into(),
+            },
+        ))),
     );
     assert_eq!(model.rows().len(), 2);
     assert_eq!(model.failed_mode(), Some(PullRequestMode::Append));
@@ -554,7 +562,9 @@ async fn a_rejected_credential_clears_rows_while_a_network_failure_keeps_them() 
     assert_eq!(
         model.finish(
             &request,
-            Err(RepositoryError::GitHub(GitHubError::Unauthorized)),
+            Err(PullListError::Read(RepositoryError::GitHub(
+                GitHubError::Unauthorized,
+            ))),
         ),
         PullFinish::Applied
     );
@@ -683,4 +693,382 @@ fn row_display_fields_cover_state_author_title_and_update_time() {
     assert_eq!(row.state_label, "Merged");
     assert_eq!(row.author.as_deref(), Some("octocat"));
     assert_eq!(row.updated, "Time unavailable");
+}
+
+fn cached_reader(fixture: &Fixture) -> (tempfile::TempDir, CachedPageReadSession) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::storage::cache::CacheStore::open(crate::storage::cache::CacheConfig::at(
+        directory.path().to_path_buf(),
+    ))
+    .unwrap();
+    let session = fixture.accounts.page_session().unwrap();
+    let scope = store
+        .saved_account(session.context().auth().account.clone())
+        .unwrap();
+    (
+        directory,
+        CachedPageReadSession::new(session, store, scope).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn a_stored_first_page_paints_before_the_network_and_the_network_replaces_it() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    let cached_page = page(
+        &model.query(),
+        1,
+        vec![
+            summary(1, 11, PullState::Open),
+            summary(2, 12, PullState::Draft),
+        ],
+        Some(2),
+    );
+    assert!(model.apply_cached(&request, vec![cached_page], None));
+    assert!(model.is_historical());
+    assert!(model.loaded());
+    // The stored prefix stops where it was stored; a live continuation is never appended to
+    // it. The list is marked partial whenever the stored prefix is not the whole list.
+    assert!(model.is_partial());
+    assert!(!model.is_empty_result());
+    assert!(!model.is_cached_empty());
+    assert_eq!(model.failed_mode(), None);
+    assert!(model.begin(PullRequestMode::Append).is_none());
+
+    // The network replacement owns the list in place: same filter, fresh rows, no marker.
+    assert_eq!(
+        model.finish(
+            &request,
+            Ok(page(
+                &model.query(),
+                1,
+                vec![summary(3, 13, PullState::Open)],
+                None,
+            )),
+        ),
+        PullFinish::Applied
+    );
+    assert!(!model.is_historical());
+    assert!(!model.is_partial());
+    assert_eq!(model.rows().len(), 1);
+    assert_eq!(model.rows()[0].number, 13);
+}
+
+#[tokio::test]
+async fn a_late_cached_paint_cannot_overwrite_a_network_answer() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    model.finish(
+        &request,
+        Ok(page(
+            &model.query(),
+            1,
+            vec![summary(5, 15, PullState::Open)],
+            None,
+        )),
+    );
+    assert!(!model.is_historical());
+    // The network answer owns the list; the stored prefix arriving later is ignored.
+    assert!(!model.apply_cached(
+        &request,
+        vec![page(
+            &model.query(),
+            1,
+            vec![summary(1, 11, PullState::Open)],
+            Some(2),
+        )],
+        None,
+    ));
+    assert_eq!(model.rows().len(), 1);
+    assert_eq!(model.rows()[0].number, 15);
+    assert!(!model.is_historical());
+}
+
+#[tokio::test]
+async fn a_stored_prefix_survives_a_transient_failure_and_a_refused_credential_clears_it() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    assert!(model.apply_cached(
+        &request,
+        vec![page(
+            &model.query(),
+            1,
+            vec![summary(1, 11, PullState::Open)],
+            Some(2),
+        )],
+        None,
+    ));
+    // A transient failure keeps the bounded prefix and offers the first page again.
+    assert_eq!(
+        model.finish(
+            &request,
+            Err(PullListError::Read(RepositoryError::GitHub(
+                GitHubError::Network {
+                    message: "offline".into(),
+                },
+            ))),
+        ),
+        PullFinish::Applied
+    );
+    assert_eq!(model.rows().len(), 1);
+    assert!(model.is_historical());
+    assert!(model.is_partial());
+    assert_eq!(model.failed_mode(), Some(PullRequestMode::Replace));
+    // Retrying the replacement keeps the cached rows until the answer arrives.
+    let retry = model.retry().unwrap();
+    assert_eq!(model.rows().len(), 1);
+    assert!(!model.apply_cached(
+        &retry,
+        vec![page(
+            &model.query(),
+            1,
+            vec![summary(3, 13, PullState::Open)],
+            None,
+        )],
+        None,
+    ));
+    // A refused credential is not transient: the authorization-bound prefix must go.
+    assert_eq!(
+        model.finish(
+            &retry,
+            Err(PullListError::Read(RepositoryError::GitHub(
+                GitHubError::Unauthorized,
+            ))),
+        ),
+        PullFinish::Applied
+    );
+    assert!(model.rows().is_empty());
+    assert!(!model.is_historical());
+    assert!(!model.is_partial());
+    assert!(!model.loaded());
+    assert!(!model.is_empty_result());
+    assert!(!model.is_cached_empty());
+    assert_eq!(model.failed_mode(), Some(PullRequestMode::Replace));
+}
+
+#[tokio::test]
+async fn a_stored_empty_page_is_historical_not_a_confirmed_empty_result() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Closed)
+        .with_cache(Some(cached));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    // A page from another filter is never applied to this list.
+    let mut foreign = page(
+        &model.query(),
+        1,
+        vec![summary(1, 11, PullState::Open)],
+        None,
+    );
+    foreign.query = PullListQuery::new(
+        RepositoryLocator::new("octo", "repo").unwrap(),
+        PullFilter::Open,
+    );
+    assert!(!model.apply_cached(&request, vec![foreign], None));
+    assert!(model.apply_cached(&request, vec![page(&model.query(), 1, vec![], None)], None));
+    assert!(model.is_cached_empty());
+    assert!(!model.is_empty_result());
+    // A bounded stored empty page has no continuation; it is only a historical statement.
+    assert!(!model.is_partial());
+    // A stored paint is only admitted by the replacement that issued its restore, while the
+    // list is still empty. A refresh of already stored rows keeps them until the answer
+    // arrives, so a late replay of the old request is also refused.
+    model.cancel();
+    let fresh = model.begin(PullRequestMode::Replace).unwrap();
+    assert!(!model.apply_cached(
+        &request,
+        vec![page(
+            &model.query(),
+            1,
+            vec![summary(2, 12, PullState::Open)],
+            None
+        )],
+        None,
+    ));
+    assert!(!model.apply_cached(
+        &fresh,
+        vec![page(
+            &model.query(),
+            1,
+            vec![summary(2, 12, PullState::Open)],
+            None
+        )],
+        None,
+    ));
+    assert!(model.is_cached_empty());
+}
+
+#[tokio::test]
+async fn a_verified_replacement_installs_its_own_generation_and_a_stored_paint_keeps_the_old_one() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached));
+    // A replacement starts a generation; only a successful answer may install it.
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    let replacement = request.collection().expect("a persisted first page");
+    assert_eq!(model.collection(), None);
+    model.finish(
+        &request,
+        Ok(page(
+            &model.query(),
+            1,
+            vec![summary(1, 11, PullState::Open)],
+            Some(2),
+        )),
+    );
+    assert_eq!(model.collection(), Some(replacement));
+    // The next append belongs to that verified first page, not to some older epoch.
+    let append = model.begin(PullRequestMode::Append).unwrap();
+    assert_eq!(append.collection(), Some(replacement));
+    model.cancel();
+
+    // A stored paint carries the generation it was stored under, and the replacement's newer
+    // generation never relabels it.
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached_reader(&fixture).1));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    let stored = crate::data::page_cache::new_collection_generation();
+    assert_ne!(Some(stored), request.collection());
+    assert!(model.apply_cached(
+        &request,
+        vec![page(
+            &model.query(),
+            1,
+            vec![summary(2, 12, PullState::Open)],
+            Some(2)
+        )],
+        Some(stored),
+    ));
+    assert_eq!(model.collection(), Some(stored));
+    // Paging is not offered from a stored prefix; a replacement must re-read the first page.
+    assert!(model.begin(PullRequestMode::Append).is_none());
+}
+
+#[tokio::test]
+async fn a_duplicate_id_restored_from_two_pages_keeps_its_first_position_and_the_later_fields() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    // The same pull request id appears on page one and again on page two, where it has moved to
+    // merged. An online append keeps the first position and takes the newer fields; a stored
+    // restore must fold the same way instead of keeping the stale row.
+    let first = page(
+        &model.query(),
+        1,
+        vec![
+            summary_with(
+                7,
+                11,
+                PullState::Open,
+                "Still open",
+                Some("octocat"),
+                "2026-11-01T00:00:00Z",
+            ),
+            summary_with(
+                8,
+                12,
+                PullState::Open,
+                "Second row",
+                Some("octocat"),
+                "2026-11-01T00:00:00Z",
+            ),
+        ],
+        Some(2),
+    );
+    let second = page(
+        &model.query(),
+        2,
+        vec![summary_with(
+            7,
+            11,
+            PullState::Merged,
+            "Merged now",
+            Some("reviewer"),
+            "2026-11-20T00:00:00Z",
+        )],
+        None,
+    );
+    assert!(model.apply_cached(&request, vec![first, second], None));
+    let rows = model.rows();
+    assert_eq!(rows.len(), 2, "the duplicate id is folded, not added twice");
+    assert_eq!(rows[0].id, 7);
+    assert_eq!(rows[0].number, 11, "the first position is kept");
+    assert_eq!(
+        rows[0].state,
+        PullState::Merged,
+        "the later page's fields win"
+    );
+    assert_eq!(rows[0].title, "Merged now");
+    assert_eq!(rows[0].author.as_deref(), Some("reviewer"));
+    assert_eq!(rows[1].number, 12);
+
+    // The online append honours exactly the same fold.
+    let mut online = fixture.model("octo", "repo", PullFilter::Open);
+    let request = online.begin(PullRequestMode::Replace).unwrap();
+    online.finish(
+        &request,
+        Ok(page(
+            &online.query(),
+            1,
+            vec![
+                summary_with(
+                    7,
+                    11,
+                    PullState::Open,
+                    "Still open",
+                    Some("octocat"),
+                    "2026-11-01T00:00:00Z",
+                ),
+                summary_with(
+                    8,
+                    12,
+                    PullState::Open,
+                    "Second row",
+                    Some("octocat"),
+                    "2026-11-01T00:00:00Z",
+                ),
+            ],
+            Some(2),
+        )),
+    );
+    let append = online.begin(PullRequestMode::Append).unwrap();
+    online.finish(
+        &append,
+        Ok(page(
+            &online.query(),
+            2,
+            vec![summary_with(
+                7,
+                11,
+                PullState::Merged,
+                "Merged now",
+                Some("reviewer"),
+                "2026-11-20T00:00:00Z",
+            )],
+            None,
+        )),
+    );
+    assert_eq!(online.rows()[0].id, rows[0].id);
+    assert_eq!(online.rows()[0].state, rows[0].state);
+    assert_eq!(online.rows()[0].title, rows[0].title);
+    assert_eq!(online.rows()[0].author, rows[0].author);
 }

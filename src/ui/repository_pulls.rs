@@ -22,6 +22,9 @@
 #[path = "repository_pulls_tests.rs"]
 mod tests;
 
+use crate::data::page_cache::{
+    CachedPageReadSession, CollectionGeneration, PageCacheError, new_collection_generation,
+};
 use crate::data::repository_pulls::PullListSession;
 use crate::domain::error::GitHubError;
 use crate::domain::repository::{
@@ -32,7 +35,9 @@ use crate::domain::repository_pulls::{
 };
 use crate::github::repository_pulls::PullListLimits;
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::storage::cache::CacheError;
 use crate::ui::relative_time;
+use crate::ui::repository::PageError;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -41,6 +46,79 @@ use std::time::SystemTime;
 pub enum PullRequestMode {
     Replace,
     Append,
+}
+
+/// Why a pull request list read failed.
+///
+/// The list deliberately keeps the cache layer's distinction: an unusable local snapshot, a
+/// refused authorization and a failed GitHub read are different facts, and only the last one
+/// (or a transient cache failure) may leave already displayed rows on screen.
+#[derive(Debug)]
+pub enum PullListError {
+    /// The list read itself failed (network, server, rejected credential, partial).
+    Read(RepositoryError),
+    /// The persistent page could not be read or written.
+    Cache(CacheError),
+    /// The read is refused because its captured context is no longer current.
+    Context(GitHubError),
+}
+
+impl From<RepositoryError> for PullListError {
+    fn from(error: RepositoryError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl PullListError {
+    fn from_page_cache(error: PageCacheError<RepositoryError>) -> Self {
+        match error {
+            PageCacheError::Read(error) => Self::Read(error),
+            PageCacheError::Cache(error) => Self::Cache(error),
+            PageCacheError::Context(error) => Self::Context(error),
+        }
+    }
+
+    /// Whether this failure proves the current authorization may no longer read the list, as
+    /// opposed to a transient cache/transport/server failure. Mirrors the repository Issues
+    /// tab's access-failure set, including a revoked cache partition.
+    pub fn access_failure(&self) -> bool {
+        match self {
+            Self::Read(error) => access_failure(error),
+            Self::Cache(CacheError::AccessDenied | CacheError::Stale) => true,
+            Self::Cache(_) => false,
+            Self::Context(error) => matches!(
+                error,
+                GitHubError::Unauthorized
+                    | GitHubError::Forbidden
+                    | GitHubError::NotFound
+                    | GitHubError::SsoRequired { .. }
+                    | GitHubError::StaleContext
+            ),
+        }
+    }
+
+    /// The header failure this list may show.
+    pub fn page_error(&self) -> PageError {
+        match self {
+            Self::Read(error) => PageError::from_repository(error),
+            Self::Context(error) => {
+                PageError::from_repository(&RepositoryError::GitHub(error.clone()))
+            }
+            Self::Cache(CacheError::AccessDenied | CacheError::Stale) => PageError::new(
+                "Pull request access could not be verified.",
+                Some(
+                    "The cached list is unavailable under the current authorization. Retry while online to verify it; no empty result is inferred."
+                        .to_string(),
+                ),
+                true,
+            ),
+            Self::Cache(_) => PageError::new(
+                "The pull request cache could not be read.",
+                Some("Retry to read the list from GitHub; no empty result is inferred.".to_string()),
+                true,
+            ),
+        }
+    }
 }
 
 /// One issued request. It owns the cancellation source, so dropping the request is not
@@ -53,7 +131,12 @@ pub struct PullListRequest {
     page: u32,
     limits: PullListLimits,
     generation: u64,
+    /// The first-page generation this page belongs to, when the page is persisted. A
+    /// continuation under no generation is read live but never stored.
+    collection: Option<CollectionGeneration>,
     session: PullListSession,
+    /// The persistent page reader for this read, when the page has a cache partition.
+    cached: Option<CachedPageReadSession>,
     cancel: CancellationToken,
     source: CancellationTokenSource,
 }
@@ -106,7 +189,26 @@ impl PullListRequest {
         self.cancel.is_cancelled()
     }
 
-    pub async fn execute(&self) -> Result<PullListPage, RepositoryError> {
+    /// The first-page generation this request belongs to, if it is persisted.
+    #[cfg(test)]
+    pub fn collection(&self) -> Option<CollectionGeneration> {
+        self.collection
+    }
+
+    pub async fn execute(&self) -> Result<PullListPage, PullListError> {
+        if let Some(cached) = &self.cached {
+            return cached
+                .repository_pulls_online(
+                    self.session.identity(),
+                    self.filter,
+                    &self.limits,
+                    self.cursor.as_ref(),
+                    self.collection,
+                    self.cancel.clone(),
+                )
+                .await
+                .map_err(PullListError::from_page_cache);
+        }
         self.session
             .page(
                 self.filter,
@@ -116,6 +218,28 @@ impl PullListRequest {
             )
             .await
             .map(|scoped| scoped.value)
+            .map_err(PullListError::Read)
+    }
+
+    /// The stored pages of this list, for a cache-first paint that must not wait for the
+    /// network.
+    ///
+    /// Only a replacement restores. The result is every page the reader actually loaded under
+    /// the stored first page's generation, so a pull request first seen on page two is still
+    /// there after a restart. A live continuation is never appended to that prefix.
+    pub async fn restore(&self) -> Option<(Vec<PullListPage>, Option<CollectionGeneration>)> {
+        let cached = self.cached.as_ref()?;
+        if self.mode != PullRequestMode::Replace || self.cursor.is_some() {
+            return None;
+        }
+        cached
+            .repository_pulls_restore(
+                self.session.identity(),
+                self.filter,
+                &self.limits,
+                self.cancel.clone(),
+            )
+            .await
     }
 }
 
@@ -214,14 +338,28 @@ impl Drop for PullListModel {
 /// Pull requests tab.
 pub struct PullListModel {
     session: PullListSession,
+    /// The persistent first-page reader shared by this model's requests, when the page has a
+    /// cache partition. It carries the same account/repository context as `session`.
+    cached: Option<CachedPageReadSession>,
     filter: PullFilter,
     rows: Vec<PullSummary>,
     next: Option<PullPageCursor>,
     completeness: Option<Completeness>,
-    error: Option<RepositoryError>,
+    error: Option<PullListError>,
     failed_mode: Option<PullRequestMode>,
     busy: Option<PullRequestMode>,
     loaded: bool,
+    /// The rows currently drawn came from a stored first page and no network result has
+    /// replaced them yet. The prefix is bounded: its continuation is not stored.
+    historical: bool,
+    /// The stored first page has a real continuation that is not available offline. It is
+    /// visible as a partial list, never as a complete one.
+    cached_more: bool,
+    /// The first-page generation of the rows on screen. A continuation must belong to it, and
+    /// only a fresh first page starts a new one.
+    collection: Option<CollectionGeneration>,
+    /// The generation whose replacement may still publish its cache-first paint.
+    restore_generation: Option<u64>,
     generation: u64,
     flight: Option<PullListRequest>,
     scroll: Option<PullScrollAnchor>,
@@ -232,6 +370,7 @@ impl PullListModel {
     pub fn new(session: PullListSession, filter: PullFilter) -> Self {
         Self {
             session,
+            cached: None,
             filter,
             rows: Vec::new(),
             next: None,
@@ -240,11 +379,28 @@ impl PullListModel {
             failed_mode: None,
             busy: None,
             loaded: false,
+            historical: false,
+            cached_more: false,
+            collection: None,
+            restore_generation: None,
             generation: 0,
             flight: None,
             scroll: None,
             limits: PullListLimits::default(),
         }
+    }
+
+    /// Attach the persistent page reader. It must belong to the same account context and
+    /// repository as the plain session; otherwise it is ignored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_cache(mut self, cached: Option<CachedPageReadSession>) -> Self {
+        self.set_cache(cached);
+        self
+    }
+
+    pub fn set_cache(&mut self, cached: Option<CachedPageReadSession>) {
+        self.cached =
+            cached.filter(|cached| cached.context() == self.session.context() && cached.verify());
     }
 
     pub fn with_limits(mut self, limits: PullListLimits) -> Self {
@@ -274,7 +430,7 @@ impl PullListModel {
         self.next.as_ref()
     }
 
-    pub fn error(&self) -> Option<&RepositoryError> {
+    pub fn error(&self) -> Option<&PullListError> {
         self.error.as_ref()
     }
 
@@ -290,15 +446,35 @@ impl PullListModel {
         self.loaded
     }
 
+    /// Whether the rows on screen are a stored snapshot rather than a verified network
+    /// observation. Its continuation is not available and its emptiness is only historical.
+    pub fn is_historical(&self) -> bool {
+        self.historical
+    }
+
+    /// The first-page generation the displayed rows belong to, if they are persisted.
+    #[cfg(test)]
+    pub fn collection(&self) -> Option<CollectionGeneration> {
+        self.collection
+    }
+
+    /// A stored first page that confirmed no rows. This is not evidence that the repository
+    /// has no pull requests now.
+    pub fn is_cached_empty(&self) -> bool {
+        self.historical && self.loaded && self.rows.is_empty()
+    }
+
     #[cfg(test)]
     pub fn scroll(&self) -> Option<PullScrollAnchor> {
         self.scroll
     }
 
     /// A confirmed empty list: the page succeeded completely, has no rows and no pending
-    /// failure. An SSO-partial empty page is not evidence that the repository has none.
+    /// failure. An SSO-partial empty page, a cached historical page and a page still loading
+    /// are not evidence that the repository has none.
     pub fn is_empty_result(&self) -> bool {
         self.loaded
+            && !self.historical
             && self.rows.is_empty()
             && self.error.is_none()
             && self.busy.is_none()
@@ -306,9 +482,10 @@ impl PullListModel {
     }
 
     /// Some rows or the completeness marker may be missing because the server reported
-    /// partial results or a rejected continuation link.
+    /// partial results, a rejected continuation link, or because only a bounded cached first
+    /// page is available.
     pub fn is_partial(&self) -> bool {
-        matches!(self.completeness, Some(Completeness::Partial { .. }))
+        self.cached_more || matches!(self.completeness, Some(Completeness::Partial { .. }))
     }
 
     pub fn context(&self) -> &crate::data::RepositoryReadContext {
@@ -338,6 +515,9 @@ impl PullListModel {
         self.error = None;
         self.failed_mode = None;
         self.loaded = false;
+        self.historical = false;
+        self.cached_more = false;
+        self.collection = None;
         self.scroll = None;
         self.begin(PullRequestMode::Replace)
     }
@@ -345,12 +525,16 @@ impl PullListModel {
     /// Issue a replacement or continuation.
     ///
     /// A replacement may supersede an in-flight append; a second request of the same mode is
-    /// ignored. An append requires a next cursor and no request in flight.
+    /// ignored. An append requires a next cursor and no request in flight, and it is only
+    /// available for a list that was verified online: appending a live page to a bounded stored
+    /// prefix would join two different first-page generations.
     pub fn begin(&mut self, mode: PullRequestMode) -> Option<PullListRequest> {
         if !self.verify() || self.busy == Some(mode) {
             return None;
         }
-        if mode == PullRequestMode::Append && (self.busy.is_some() || self.next.is_none()) {
+        if mode == PullRequestMode::Append
+            && (self.busy.is_some() || self.next.is_none() || self.historical)
+        {
             return None;
         }
         self.cancel();
@@ -361,6 +545,16 @@ impl PullListModel {
             None
         };
         let page = cursor.as_ref().map_or(1, PullPageCursor::page);
+        // A replacement starts a fresh first-page generation; an append keeps the generation
+        // the displayed rows were read under, so two list versions cannot be joined.
+        let collection = if self.cached.is_some() {
+            match mode {
+                PullRequestMode::Replace => Some(new_collection_generation()),
+                PullRequestMode::Append => self.collection,
+            }
+        } else {
+            None
+        };
         let request = PullListRequest {
             mode,
             filter: self.filter,
@@ -368,10 +562,17 @@ impl PullListModel {
             page,
             limits: self.limits.clone(),
             generation: self.generation,
+            collection,
             session: self.session.clone(),
+            cached: self.cached.clone(),
             cancel,
             source,
         };
+        // Only a replacement of an empty list can still paint a stored first page. A refresh
+        // of rows already on screen keeps them until the network answers.
+        self.restore_generation =
+            (mode == PullRequestMode::Replace && self.cached.is_some() && !self.loaded)
+                .then_some(self.generation);
         self.busy = Some(mode);
         self.error = None;
         self.failed_mode = None;
@@ -390,11 +591,98 @@ impl PullListModel {
         if let Some(request) = self.flight.take() {
             request.abort();
         }
+        self.restore_generation = None;
         self.generation = self
             .generation
             .checked_add(1)
             .expect("request generation overflow");
         self.busy = None;
+    }
+
+    /// Publish stored pages while their replacement is still in flight.
+    ///
+    /// `pages` are the first page and every continuation that was actually loaded under its
+    /// generation, so a pull request first seen on page two survives a restart. The prefix
+    /// keeps that generation's next cursor, and the rows stop at the first page that was not
+    /// stored. A network result published before this arrives owns the list, and a late replay
+    /// after a rejected credential is refused, so a stored snapshot can neither overwrite
+    /// fresher rows nor resurrect rows the server just refused.
+    pub fn apply_cached(
+        &mut self,
+        request: &PullListRequest,
+        pages: Vec<PullListPage>,
+        collection: Option<CollectionGeneration>,
+    ) -> bool {
+        let Some(first) = pages.first() else {
+            return false;
+        };
+        if request.mode != PullRequestMode::Replace
+            || request.cursor.is_some()
+            || request.filter != self.filter
+            || first.page != 1
+            || first.query != self.query()
+            || self.restore_generation != Some(request.generation)
+            || self.loaded
+            || !self.verify()
+            || !request.session.verify()
+            || request.session.context() != self.session.context()
+        {
+            return false;
+        }
+        for (expected, page) in (1..).zip(pages.iter()) {
+            if page.page != expected || page.query != self.query() {
+                return false;
+            }
+        }
+        // A stored prefix is only as complete as the pages behind it. A partial page stops
+        // the prefix there, so its own continuation marker is not offered as readable.
+        //
+        // Duplicate ids are folded exactly like an online append: the row keeps the position
+        // where it first appeared but takes the later page's fields, so a cached restore cannot
+        // show an older state than the same pages read online.
+        let mut rows: Vec<PullSummary> = Vec::new();
+        let mut index: HashMap<u64, usize> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut partial = false;
+        let mut next = None;
+        for page in pages {
+            let page_partial = match page.completeness {
+                Completeness::Partial { reasons: page } => page,
+                Completeness::Complete => Vec::new(),
+            };
+            for reason in page_partial {
+                partial = true;
+                if !reasons.contains(&reason) {
+                    reasons.push(reason);
+                }
+            }
+            for pull in page.pulls {
+                if let Some(&existing) = index.get(&pull.id) {
+                    rows[existing] = pull;
+                } else {
+                    index.insert(pull.id, rows.len());
+                    rows.push(pull);
+                }
+            }
+            next = page.next;
+            if partial {
+                next = None;
+            }
+        }
+        self.next = next;
+        self.cached_more = self.next.is_some();
+        self.rows = rows;
+        self.completeness = Some(if partial {
+            Completeness::Partial { reasons }
+        } else {
+            Completeness::Complete
+        });
+        self.loaded = true;
+        self.historical = true;
+        self.restore_generation = None;
+        self.collection = collection;
+        self.scroll = None;
+        true
     }
 
     /// Publish one finished request.
@@ -405,7 +693,7 @@ impl PullListModel {
     pub fn finish(
         &mut self,
         request: &PullListRequest,
-        result: Result<PullListPage, RepositoryError>,
+        result: Result<PullListPage, PullListError>,
     ) -> PullFinish {
         let current = self
             .flight
@@ -427,13 +715,18 @@ impl PullListModel {
                 // A rejected credential or lost visibility is not a transient page failure:
                 // the rows already on screen were read under an authorization the server just
                 // refused, so they must not stay visible or activatable. A network/5xx failure
-                // keeps the loaded pages and retries only the failed one.
-                let denied = access_failure(&error);
+                // keeps the loaded pages (including a cached prefix) and retries only the
+                // failed page.
+                let denied = error.access_failure();
                 if denied {
                     self.rows.clear();
                     self.next = None;
                     self.completeness = None;
                     self.loaded = false;
+                    self.historical = false;
+                    self.cached_more = false;
+                    self.collection = None;
+                    self.restore_generation = None;
                     self.scroll = None;
                 }
                 self.error = Some(error);
@@ -472,6 +765,13 @@ impl PullListModel {
             }
         }
         self.next = page.next;
+        self.cached_more = false;
+        self.historical = false;
+        self.restore_generation = None;
+        // A verified first page owns the collection its continuations are stored under. An
+        // append must persist under exactly this generation, not whatever the model held
+        // before; a continuation from the previous first page is never joined to it.
+        self.collection = request.collection;
         // A continuation adds rows to the list already on screen. If an earlier page was
         // partial, those rows are not re-fetched, so its warning must survive a later complete
         // page. Replace, by contrast, has just re-read the whole list and resets it.

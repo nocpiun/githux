@@ -66,6 +66,15 @@ impl RepositoryPage {
         let failed = self.pulls_failed();
         let failed_now = failed.is_some();
         if let Some((first, error)) = failed {
+            // A stored prefix is only labelled "Cached" after the network read actually
+            // failed; a cache-first paint that is still being verified is not a fallback yet.
+            if self.pulls_historical() && !busy {
+                header = header.child(
+                    div()
+                        .debug_selector(|| "repository-pulls-cached".into())
+                        .child(crate::ui::badge::Badge::new("Cached").outline()),
+                );
+            }
             header = header.child(
                 div()
                     .min_w_0()
@@ -139,14 +148,15 @@ impl RepositoryPage {
 
         let rows = self.pulls_model().map_or(0, |model| model.rows().len());
         if rows == 0 {
-            // Only a confirmed complete and empty result is drawn as "No pull requests".
-            // A failure, a partial page or a page still loading keeps its own state.
-            if self
-                .pulls_model()
-                .is_some_and(|model| model.is_empty_result() || model.is_partial())
+            // Only a confirmed complete and empty network result is drawn as "No pull
+            // requests". A stored empty prefix, a failure, a partial page and a page still
+            // loading each keep their own honest state.
+            if let Some(model) = self.pulls_model()
+                && (model.is_empty_result() || model.is_partial() || model.is_cached_empty())
             {
-                let partial = self.pulls_model().is_some_and(|model| model.is_partial());
-                let message = if partial {
+                let message = if model.is_cached_empty() && !model.is_partial() {
+                    "No cached pull requests"
+                } else if model.is_partial() {
                     "No pull requests could be confirmed"
                 } else {
                     "No pull requests"
@@ -166,9 +176,11 @@ impl RepositoryPage {
             body = body.child(self.pull_list(window, cx));
         }
 
+        // A stored first page has a bounded prefix: its real continuation is not cached, so
+        // "Load more" would silently start a page from a different first-page generation.
         let more = self
             .pulls_model()
-            .is_some_and(|model| model.next().is_some())
+            .is_some_and(|model| model.next().is_some() && !model.is_historical())
             && !busy
             && !failed_now;
         if more {

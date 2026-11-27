@@ -30,6 +30,7 @@ use crate::github::{self, RepositoryLimits};
 use crate::network::cancel::CancellationToken;
 
 mod repository_issues;
+mod repository_pulls;
 
 /// One captured active-account context shared by every page-domain read.
 /// Clone it for independent concurrent calls; never recapture it between the
