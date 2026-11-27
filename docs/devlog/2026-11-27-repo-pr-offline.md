@@ -38,7 +38,7 @@
 | --- | --- | --- |
 | 定向模型/GitHub/数据/缓存 | `node scripts/verify.mjs -- cargo test --locked --bins repository_pulls` | 40 passed |
 | 仓库 PR 页面接线 | `node scripts/verify.mjs -- cargo test --locked --bins repository::pulls` | 通过 |
-| 真正重启离线集成 | `node scripts/verify.mjs -- cargo test --locked --bins pull_offline` | 2 passed |
+| 真正重启离线集成（含真实 Retry 替换） | `node scripts/verify.mjs -- cargo test --locked --bins pull_offline` | 2 passed |
 | 静态 | `node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings` | 通过 |
 
 重启集成测试的冷阶段在线读取 PR 页 1 与页 2（#10 只在页 2），关闭账户服务并 `quit` 整个 GPUI 上下文；热阶段在同一目录重新 `CacheStore::open`（成功即证明旧独占租约已释放），断网并暂扣 `/pulls` 请求。断言：
@@ -46,6 +46,7 @@
 - 网络仍挂起时 3 行（含 #10）已从磁盘恢复，`Cached`/Retry 都未出现；
 - 恢复请求只包含 `page=1`/`page=2`，没有未读页；
 - 放开后网络失败，才出现 `Cached` 与 Retry，行仍可用，点击 #10 仍产生带验证身份的 `OpenPullRequest`；
+- 在同一挂载页把网络恢复并暂扣 page=1，点击真实 Retry 按钮：旧 `[12, 11, 10]` 保持可见，`Cached`/Retry 在重试进行中消失；放开后网络首屏 `[12, 11]` 原位替换存储前缀，#10 消失且不再有历史标记/徽标；
 - 另一用例冷阶段读 Open 与 Closed，重启断网后两个筛选各自恢复自己的列表，互不串联。
 
 ## 边界与未覆盖

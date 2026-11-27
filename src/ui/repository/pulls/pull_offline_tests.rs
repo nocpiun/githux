@@ -487,6 +487,60 @@ fn a_second_page_pull_request_is_reachable_after_reopening_offline() {
             "{:?}",
             actions.borrow()
         );
+
+        // A real retry replaces the stored prefix. The network is back, page one is held: the
+        // old rows stay readable, and the fallback marker plus its button disappear as soon as
+        // the retry starts.
+        profile.transport.set_offline(false);
+        profile.transport.hold("page=1");
+        let retry = vcx
+            .debug_bounds("repository-pulls-retry")
+            .expect("the failed read offers one retry");
+        let reads = profile.transport.pull_requests().len();
+        vcx.simulate_click(retry.center(), gpui::Modifiers::none());
+        frames(vcx);
+        settle(&page, vcx, |page| page.pulls.busy());
+        assert_eq!(
+            page.read_with(vcx, |page, _| numbers(page)),
+            vec![12, 11, 10],
+            "the stored rows stay visible while the retry is pending"
+        );
+        assert!(
+            vcx.debug_bounds("repository-pulls-cached").is_none(),
+            "a running retry is not a fallback"
+        );
+        assert!(
+            vcx.debug_bounds("repository-pulls-retry").is_none(),
+            "the retry control hides while it runs"
+        );
+        assert!(
+            profile.transport.pull_requests().len() > reads,
+            "the retry actually issues a new read"
+        );
+
+        // Releasing the held first page publishes the verified list in place: the stored
+        // page-two row is gone and the list is no longer historical.
+        profile.transport.release_all();
+        settle(&page, vcx, |page| {
+            page.pulls_model()
+                .is_some_and(|model| model.loaded() && !model.is_historical())
+                && !page.pulls.busy()
+        });
+        assert_eq!(
+            page.read_with(vcx, |page, _| numbers(page)),
+            vec![12, 11],
+            "the network first page replaces the stored prefix"
+        );
+        page.read_with(vcx, |page, _| {
+            let model = page.pulls_model().expect("a verified model");
+            assert!(!model.is_historical());
+            assert!(!model.is_cached_empty());
+        });
+        frames(vcx);
+        assert!(vcx.debug_bounds("repository-pulls-cached").is_none());
+        assert!(vcx.debug_bounds("repository-pulls-retry").is_none());
+        assert!(vcx.debug_bounds("repository-pull-10").is_none());
+        assert!(vcx.debug_bounds("repository-pull-12").is_some());
         drop(page);
         drop(_host);
     }
