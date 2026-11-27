@@ -1,4 +1,6 @@
 //! One account-scoped inbox controller, using the existing authorization path.
+mod cache;
+
 use super::{RepoService, RepositoryReadContext, RepositorySession};
 use crate::domain::error::GitHubError;
 use crate::domain::notification::*;
@@ -7,6 +9,8 @@ use crate::github::notifications::{
     self, NotificationCursor, NotificationLimits, NotificationPage, PageFailure,
 };
 use crate::network::cancel::{CancellationToken, CancellationTokenSource};
+use crate::storage::cache::{CacheAuthorization, CacheWrite};
+use cache::InboxCache;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -31,10 +35,23 @@ pub struct InboxSnapshot {
     /// Rate-limit backoff that also blocks thread actions (poll cooldown does not).
     pub action_cooldown_seconds: u64,
     pub thread_states: HashMap<String, ThreadActionState>,
+    pub historical_at_ms: Option<i64>,
+    authorization: Option<CacheAuthorization>,
 }
 impl InboxSnapshot {
+    pub fn display_is_current(&self) -> bool {
+        self.authorization
+            .as_ref()
+            .is_none_or(CacheAuthorization::is_current)
+    }
+
+    pub fn has_display_authorization(&self) -> bool {
+        self.authorization.is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.loaded
+            && self.historical_at_ms.is_none()
             && self.items.is_empty()
             && !self.has_more
             && self.partial.is_empty()
@@ -47,6 +64,7 @@ struct State {
     generation: u64,
     next: Option<NotificationCursor>,
     validator: Option<String>,
+    cacheable: bool,
     refresh_after: Option<Instant>,
     request_after: Option<Instant>,
     cancel: CancellationToken,
@@ -74,6 +92,7 @@ impl Default for State {
             generation: 0,
             next: None,
             validator: None,
+            cacheable: true,
             refresh_after: None,
             request_after: None,
             cancel,
@@ -102,6 +121,8 @@ pub struct InboxRequest {
     kind: RequestKind,
     cursor: Option<NotificationCursor>,
     validator: Option<String>,
+    authorization: Option<CacheAuthorization>,
+    action_lifecycle: u64,
     cancel: CancellationToken,
 }
 
@@ -111,11 +132,17 @@ pub struct Notifications {
     client: Arc<crate::github::client::GitHubClient>,
     limits: NotificationLimits,
     state: Arc<Mutex<State>>,
+    cache: Option<InboxCache>,
 }
 impl RepoService {
     pub fn notifications(&self) -> Result<Notifications, RepositoryError> {
+        let session = self.session()?;
+        let cache = self
+            .cache(session.context())
+            .and_then(|account| InboxCache::new(account, self.client.config()));
         Ok(Notifications {
-            session: self.session()?,
+            session,
+            cache,
             client: self.client.clone(),
             limits: NotificationLimits::default(),
             state: Arc::new(Mutex::new(State::default())),
@@ -134,11 +161,24 @@ impl Notifications {
         if !self.verify() {
             return InboxSnapshot::default();
         }
-        let state = self.state.lock().expect("inbox state");
+        let mut state = self.state.lock().expect("inbox state");
+        Self::discard_revoked(&mut state);
         let mut snapshot = state.snapshot.clone();
         snapshot.cooldown_seconds = remaining(state.refresh_after.max(state.request_after));
         snapshot.action_cooldown_seconds = remaining(state.request_after);
         snapshot
+    }
+
+    fn discard_revoked(state: &mut State) {
+        if !state.snapshot.display_is_current() {
+            state.snapshot = InboxSnapshot {
+                busy: state.snapshot.busy,
+                ..Default::default()
+            };
+            state.next = None;
+            state.validator = None;
+            state.cacheable = false;
+        }
     }
 
     /// First entry is idempotent. Refresh may supersede an append; both old
@@ -155,8 +195,9 @@ impl Notifications {
             return Err(GitHubError::StaleContext.into());
         }
         let mut state = self.state.lock().expect("inbox state");
+        Self::discard_revoked(&mut state);
         if kind == RequestKind::First
-            && (state.snapshot.loaded
+            && ((state.snapshot.loaded && state.snapshot.historical_at_ms.is_none())
                 || state.snapshot.busy.is_some()
                 || state.snapshot.error.is_some())
         {
@@ -204,6 +245,8 @@ impl Notifications {
                 None
             },
             validator,
+            authorization: self.cache.as_ref().and_then(InboxCache::authorization),
+            action_lifecycle: state.action_lifecycle,
             cancel: state.cancel.clone(),
         }))
     }
@@ -211,18 +254,36 @@ impl Notifications {
     /// Run on the shared BackgroundExecutor, then notify the view through a
     /// channel. Completion checks authorization and generation before changing
     /// data, cooldowns, validators, errors or loading state.
+    #[cfg(test)]
     pub async fn execute(&self, request: InboxRequest) {
+        self.execute_with_history(request, || {}).await;
+    }
+
+    pub async fn execute_with_history(&self, request: InboxRequest, history_ready: impl FnOnce()) {
+        if request.kind == RequestKind::First && self.restore_history(&request).await {
+            history_ready();
+        }
+        let ticket = if request
+            .authorization
+            .as_ref()
+            .is_some_and(CacheAuthorization::is_current)
+        {
+            self.cache_work(InboxCache::begin_write).await.flatten()
+        } else {
+            None
+        };
         let result = self
             .session
             .read(request.cancel.clone(), async |pat, cancel| {
                 // Keep headers alongside an endpoint error through the shared read
                 // guard; only authorization failures use the outer error path.
+                let validator = self.validator_for(&request);
                 Ok::<_, GitHubError>(
                     notifications::fetch_page(
                         &self.client,
                         &pat,
                         request.cursor.as_ref(),
-                        request.validator.as_deref(),
+                        validator.as_deref(),
                         &self.limits,
                         cancel,
                     )
@@ -237,7 +298,133 @@ impl Notifications {
                 metadata: NotificationMetadata::default(),
             }),
         };
+        if let Err(failure) = &result {
+            self.record_rejection(&failure.error).await;
+        }
+        let forget = match &result {
+            Ok(page) => page.metadata.no_store || has_sso(&page.partial),
+            Err(failure) => failure.metadata.no_store || is_sso_required(&failure.error),
+        };
+        let update = result
+            .as_ref()
+            .is_ok_and(|page| !page.not_modified && page.partial.is_empty());
         self.finish(&request, result, Instant::now());
+        if let Some(ticket) = ticket {
+            self.persist(&request, ticket, forget, update).await;
+        }
+    }
+
+    fn validator_for(&self, request: &InboxRequest) -> Option<String> {
+        let validator = request.validator.as_ref()?;
+        let state = self.state.lock().expect("inbox state");
+        (state.generation == request.generation
+            && state.action_lifecycle == request.action_lifecycle
+            && state.snapshot.display_is_current()
+            && state.validator.as_ref() == Some(validator))
+        .then(|| validator.clone())
+    }
+
+    async fn cache_work<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&InboxCache) -> T + Send + 'static,
+    ) -> Option<T> {
+        let cache = self.cache.clone()?;
+        let session = self.session.clone();
+        tokio::task::spawn_blocking(move || {
+            let _commit = session.service().credential_commit.lock().ok()?;
+            session.verify().then(|| work(&cache))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn record_rejection(&self, error: &NotificationError) {
+        if matches!(error, NotificationError::GitHub(GitHubError::Unauthorized)) {
+            let _ = self
+                .session
+                .service()
+                .credential_rejected(self.context())
+                .await;
+        }
+    }
+
+    async fn restore_history(&self, request: &InboxRequest) -> bool {
+        let Some(auth) = &request.authorization else {
+            return false;
+        };
+        let result = self
+            .session
+            .clone()
+            .local()
+            .read(request.cancel.clone(), async |_, _| {
+                Ok::<_, GitHubError>(self.cache_work(InboxCache::read).await.flatten())
+            })
+            .await;
+        let Ok(super::Scoped {
+            value: Some((items, stamp)),
+            ..
+        }) = result
+        else {
+            return false;
+        };
+        let mut state = self.state.lock().expect("inbox state");
+        if !self.verify()
+            || state.generation != request.generation
+            || !auth.is_current()
+            || state.snapshot.loaded
+        {
+            return false;
+        }
+        state.snapshot.items = items;
+        state.snapshot.loaded = true;
+        state.snapshot.historical_at_ms = Some(stamp);
+        state.snapshot.authorization = Some(auth.clone());
+        true
+    }
+
+    async fn persist(
+        &self,
+        request: &InboxRequest,
+        ticket: CacheWrite,
+        forget: bool,
+        update: bool,
+    ) {
+        if request
+            .authorization
+            .as_ref()
+            .is_none_or(|auth| !auth.is_current())
+        {
+            return;
+        }
+        let items = {
+            let state = self.state.lock().expect("inbox state");
+            if forget {
+                None
+            } else if state.generation == request.generation
+                && update
+                && state.cacheable
+                && state.snapshot.display_is_current()
+                && state.snapshot.historical_at_ms.is_none()
+                && state.snapshot.partial.is_empty()
+                && state.action_lifecycle == request.action_lifecycle
+                && !actions_pending(&state)
+            {
+                Some(
+                    state
+                        .snapshot
+                        .items
+                        .iter()
+                        .take(cache::MAX_ROWS)
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                return;
+            }
+        };
+        self.cache_work(move |cache| cache.write(ticket, items))
+            .await;
     }
 
     fn finish(
@@ -254,12 +441,42 @@ impl Notifications {
             return;
         }
         state.snapshot.busy = None;
+        Self::discard_revoked(&mut state);
+        if request
+            .authorization
+            .as_ref()
+            .is_some_and(|auth| !auth.is_current())
+        {
+            if let Err(PageFailure {
+                error: error @ NotificationError::GitHub(GitHubError::Unauthorized),
+                ..
+            }) = result
+            {
+                state.snapshot.error = Some(error);
+            }
+            return;
+        }
         let metadata = match &result {
             Ok(page) => &page.metadata,
             Err(failure) => &failure.metadata,
         };
-        let poll = metadata.poll_interval_seconds.unwrap_or(60).max(1);
-        if let Some(deadline) = now.checked_add(Duration::from_secs(poll)) {
+        // A disconnected cache-first read received no server poll deadline.
+        let disconnected = state.snapshot.historical_at_ms.is_some()
+            && matches!(
+                &result,
+                Err(PageFailure {
+                    error: NotificationError::GitHub(
+                        GitHubError::Network { .. } | GitHubError::Timeout { .. }
+                    ),
+                    ..
+                })
+            );
+        let poll = metadata
+            .poll_interval_seconds
+            .or((!disconnected).then_some(60));
+        if let Some(deadline) =
+            poll.and_then(|poll| now.checked_add(Duration::from_secs(poll.max(1))))
+        {
             state.refresh_after = Some(match state.refresh_after {
                 Some(existing) if existing > deadline => existing,
                 _ => deadline,
@@ -293,8 +510,20 @@ impl Notifications {
             .max()
             .or(if rate_failure { Some(60) } else { None });
         extend_request_after(&mut state, retry, now);
+        if metadata.no_store {
+            state.cacheable = false;
+            state.validator = None;
+        }
         match result {
             Err(failure) => {
+                if is_sso_required(&failure.error) {
+                    state.cacheable = false;
+                }
+                if state.snapshot.historical_at_ms.is_some()
+                    && (failure.metadata.no_store || !failure.error.is_transient())
+                {
+                    state.snapshot = InboxSnapshot::default();
+                }
                 state.snapshot.error = Some(failure.error);
                 state.snapshot.failed_request = Some(request.kind);
                 state.validator = None;
@@ -306,7 +535,20 @@ impl Notifications {
                 state.snapshot.failed_request = None;
             }
             Ok(page) => {
+                if state.snapshot.historical_at_ms.is_some()
+                    && !page.partial.is_empty()
+                    && !page.metadata.no_store
+                    && !has_sso(&page.partial)
+                {
+                    state.snapshot.partial = page.partial;
+                    state.snapshot.error = None;
+                    state.snapshot.failed_request = None;
+                    return;
+                }
                 if request.kind != RequestKind::More {
+                    state.cacheable = !page.metadata.no_store && !actions_pending(&state);
+                    state.snapshot.historical_at_ms = None;
+                    state.snapshot.authorization = request.authorization.clone();
                     state.snapshot.items.clear();
                     state.snapshot.partial.clear();
                 }
@@ -345,7 +587,13 @@ impl Notifications {
                 state.snapshot.failed_request = None;
                 state.snapshot.has_more = state.next.is_some();
                 if request.kind != RequestKind::More {
-                    state.validator = page.metadata.last_modified;
+                    state.validator = if page.metadata.no_store
+                        || state.action_lifecycle != request.action_lifecycle
+                    {
+                        None
+                    } else {
+                        page.metadata.last_modified
+                    };
                 }
                 if !state.snapshot.partial.is_empty() {
                     state.validator = None;
@@ -375,6 +623,13 @@ impl Notifications {
             return Err(GitHubError::StaleContext.into());
         }
         let mut state = self.state.lock().expect("inbox state");
+        if !state.snapshot.display_is_current() {
+            Self::discard_revoked(&mut state);
+            return Ok(None);
+        }
+        if state.snapshot.historical_at_ms.is_some() {
+            return Ok(None);
+        }
         let acted_version = state
             .snapshot
             .items
@@ -396,6 +651,10 @@ impl Notifications {
                 seconds: seconds(deadline.duration_since(now)),
             });
         }
+        // A mutation changes the local representation even when the HTTP
+        // validator for an earlier list response is still available.
+        state.validator = None;
+        state.cacheable = false;
         state.action_lifecycle += 1;
         let action_generation = state.action_lifecycle;
         state
@@ -419,6 +678,9 @@ impl Notifications {
         let thread_id = request.thread_id.clone();
         let action = request.action;
         let client = self.client.clone();
+        // Invalidate older list writers before sending the mutation. Cancellation
+        // can hide a successful response from the controller.
+        self.cache_work(InboxCache::invalidate).await;
         let result = match action {
             ThreadAction::Done => {
                 let tid = thread_id.clone();
@@ -505,6 +767,15 @@ impl Notifications {
                 }
             }
         };
+        match &result {
+            Ok(notifications::UnsubscribeOutcome::Completed(_)) => {
+                self.cache_work(InboxCache::invalidate).await;
+            }
+            Ok(notifications::UnsubscribeOutcome::IgnoredDoneFailed { done_error, .. }) => {
+                self.record_rejection(done_error).await;
+            }
+            Err(failure) => self.record_rejection(&failure.error).await,
+        }
         self.finish_thread_action(&request, result, Instant::now());
     }
 
@@ -650,6 +921,27 @@ impl Notifications {
             .retain(|_, value| matches!(value, ThreadActionState::UnsubscribedPendingDone { .. }));
     }
 }
+fn has_sso(partial: &[NotificationPartial]) -> bool {
+    partial
+        .iter()
+        .any(|reason| matches!(reason, NotificationPartial::Sso { .. }))
+}
+
+fn is_sso_required(error: &NotificationError) -> bool {
+    matches!(
+        error,
+        NotificationError::GitHub(GitHubError::SsoRequired { .. })
+    )
+}
+
+fn actions_pending(state: &State) -> bool {
+    state
+        .snapshot
+        .thread_states
+        .values()
+        .any(|action| matches!(action, ThreadActionState::Busy(_)))
+}
+
 /// Concurrent completions may each report a rate-limit deadline. A later,
 /// shorter hint must never shorten an already outstanding longer restriction.
 fn extend_request_after(state: &mut State, retry: Option<u64>, now: Instant) {
