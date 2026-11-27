@@ -88,7 +88,7 @@ Githux 通过紧凑、清晰、顺畅的桌面界面访问 GitHub。Rust + GPUI 
 | Profile | 顶部头像、名字、ID 等资料及 Overview；内容依次为个人 README、Pinned Repos（没有则 Popular）、贡献热力图；当前首版不实现 Contribution Activity 和其他内容 Tabs。后续用户仓库列表按目标用户与登录身份单独读取，不以 Pinned/Popular 或账户侧栏替代 |
 | Global Settings | 借鉴 Magpie 的分类与行式设置组织，具体分类布局与首批选项待定 |
 | Repository Settings | 首轮提供简单设置，风格与全局 Settings 一致，具体选项待定 |
-| Issue/PR 列表与详情 | 全局个人列表、仓库 Issues 列表、Issue 详情及 PR Conversation 已接入。试用前还需贯通仓库 PR 列表、全局 PR 标题入口和 Files changed，进度见[路线图](roadmap.md#当前证据与下一步)。发布评论、提交评审与合并等写操作另定。 |
+| Issue/PR 列表与详情 | 全局个人列表、仓库 Issues/PR 列表、Issue 详情、PR Conversation 与 Files changed 均已接入 main（#105–#112）。试用清单见[路线图](roadmap.md#windows-日常试用issuepr-阅读清单)。发布评论、提交评审与合并等写操作另定。 |
 | 仓库其他未设计 Tabs | 除单独规划的 Issues、PR 与 Settings 外，未设计的内容区仍留空，不添加“未实现”卡片 |
 
 留空要求不能扩展成所有页面都无需设计，也不能用留空掩盖已实现页面的加载失败或空数据。Profile 其他 Tabs 已排除出首版，不套用仓库的留空约定补出额外内容页。
