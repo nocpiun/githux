@@ -551,6 +551,22 @@ impl IssueDetailView {
                 .text_color(colors.fg)
                 .child(heading_text),
         );
+        if self.controller.comments_origin.revalidation_failed() {
+            heading = heading.child(
+                div()
+                    .debug_selector(|| "issue-detail-comments-cached".into())
+                    .child(Badge::new("Cached").tone(Tone::Neutral)),
+            );
+        }
+        if self.controller.cached_comments_partial == Some(true) {
+            heading = heading.child(
+                div()
+                    .debug_selector(|| "issue-detail-comments-partial".into())
+                    .text_size(text_sm)
+                    .text_color(colors.fg_subtle)
+                    .child("Previously read comments"),
+            );
+        }
         if self.controller.comments_busy == Some(CommentsRequestMode::Replace) {
             heading = heading.child(Spinner::new("issue-comments-loading").size(IconSize::Xs));
         }
@@ -604,7 +620,7 @@ impl IssueDetailView {
                             .size(ControlSize::Sm)
                             .disabled(self.controller.comments_busy.is_some())
                             .on_click(cx.listener(move |view, _, _, cx| {
-                                view.request_comments(retry_mode, false, cx);
+                                view.request_comments(retry_mode, cx);
                             })),
                     ),
             );
@@ -612,7 +628,9 @@ impl IssueDetailView {
         }
 
         // Initial loading state (no cached comments yet).
-        if !self.controller.comments_loaded && self.controller.comments_busy.is_some() {
+        if !self.controller.comments_loaded
+            && (self.controller.issue_busy || self.controller.comments_busy.is_some())
+        {
             section = section.child(
                 div()
                     .debug_selector(|| "issue-detail-comments-loading".into())
@@ -678,7 +696,16 @@ impl IssueDetailView {
                                     .color(colors.danger),
                             )
                             .child(div().text_size(text_sm).text_color(colors.fg_muted).child(
-                                format!("Failed to load more comments: {}", error_summary(error)),
+                                format!(
+                                    "{}: {}",
+                                    match retry_mode {
+                                        CommentsRequestMode::Replace =>
+                                            "Failed to refresh comments",
+                                        CommentsRequestMode::Append =>
+                                            "Failed to load more comments",
+                                    },
+                                    error_summary(error)
+                                ),
                             )),
                     )
                     .child(
@@ -686,7 +713,7 @@ impl IssueDetailView {
                             .size(ControlSize::Sm)
                             .disabled(self.controller.comments_busy.is_some())
                             .on_click(cx.listener(move |view, _, _, cx| {
-                                view.request_comments(retry_mode, false, cx);
+                                view.request_comments(retry_mode, cx);
                             })),
                     ),
             );
@@ -718,11 +745,7 @@ impl IssueDetailView {
                                 .disabled(self.controller.comments_busy.is_some())
                                 .on_click(cx.listener(
                                     |view, _, _, cx| {
-                                        view.request_comments(
-                                            CommentsRequestMode::Append,
-                                            false,
-                                            cx,
-                                        );
+                                        view.request_comments(CommentsRequestMode::Append, cx);
                                     },
                                 )),
                             ),
@@ -855,7 +878,6 @@ impl IssueDetailView {
                         .size(ControlSize::Sm)
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.request_issue(false, cx);
-                            view.request_comments(CommentsRequestMode::Replace, false, cx);
                         })),
                 )
             })

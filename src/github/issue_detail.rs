@@ -48,7 +48,6 @@ impl Default for IssueDetailLimits {
 pub struct IssueResponse<T> {
     pub value: T,
     pub no_store: bool,
-    pub etag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +176,46 @@ fn check_http_status(response: &HttpResponse) -> Result<(), IssueDetailError> {
     Ok(())
 }
 
+/// Confirm the Issue route's numeric repository identity for private cache gating.
+/// The metadata request only needs the identity, so it uses a small independent byte budget.
+pub(crate) async fn fetch_repository_identity(
+    client: &GitHubClient,
+    pat: &Pat,
+    locator: &IssueLocator,
+    cancel: CancellationToken,
+) -> Result<crate::domain::repository::RepositoryIdentity, crate::domain::repository::RepositoryError>
+{
+    use crate::domain::repository::{RepositoryIdentity, RepositoryLocator};
+    use crate::github::repository::{check_single, endpoint};
+
+    #[derive(Deserialize)]
+    struct Identity {
+        id: u64,
+        name: String,
+        owner: RawUser,
+    }
+
+    const MAX_BYTES: usize = 256 * 1024;
+    let url = endpoint(client, locator.repository(), &[])?;
+    let response = client
+        .transport()
+        .execute_bounded(client.build_get(url.as_str(), pat), cancel, MAX_BYTES)
+        .await
+        .map_err(classify_transport)?;
+    if response.body.len() > MAX_BYTES {
+        return Err(GitHubError::ResponseTooLarge { limit: MAX_BYTES }.into());
+    }
+    check_single(&response)?;
+    let raw: Identity =
+        serde_json::from_str(&response.body).map_err(|error| GitHubError::Parse {
+            message: error.to_string(),
+        })?;
+    Ok(RepositoryIdentity {
+        id: raw.id,
+        locator: RepositoryLocator::new(raw.owner.login, raw.name)?,
+    })
+}
+
 /// Fetch one GitHub Issue by `(owner, repo, number)`.
 pub async fn fetch_issue(
     client: &GitHubClient,
@@ -221,9 +260,9 @@ pub async fn fetch_issue(
     if raw.pull_request.is_some() {
         return Err(IssueDetailError::NotAnIssue);
     }
-    if raw.number == 0 {
+    if raw.number != locator.number() {
         return Err(IssueDetailError::InvalidResponse {
-            message: "issue number must be positive".into(),
+            message: "issue number did not match the requested issue".into(),
         });
     }
 
@@ -260,7 +299,6 @@ pub async fn fetch_issue(
     Ok(IssueResponse {
         value: detail,
         no_store: response_no_store(&response),
-        etag: response.header("etag").map(str::to_string),
     })
 }
 
@@ -389,7 +427,6 @@ pub async fn fetch_comments_page(
             page,
         },
         no_store: response_no_store(&response),
-        etag: response.header("etag").map(str::to_string),
     })
 }
 
@@ -501,7 +538,6 @@ mod tests {
         .unwrap();
 
         assert!(response.no_store);
-        assert_eq!(response.etag.as_deref(), Some("\"abc\""));
         assert_eq!(response.value.number, 42);
         assert_eq!(response.value.title, "Render issue detail");
         assert_eq!(response.value.state, IssueState::Open);

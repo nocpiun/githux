@@ -12,6 +12,11 @@ test('documentation-only changes skip Rust and agent script jobs', () => {
   assert.deepEqual(classifyChanges(docs), { app: false, scripts: false });
   assert.deepEqual(classifyChanges([]), { app: false, scripts: false });
 });
+test('each staged notice document requires packaging without enabling unrelated script jobs', () => {
+  for (const path of ['THIRD_PARTY_NOTICES.md', 'docs/third-party-assets.md']) {
+    assert.deepEqual(classifyChanges([path]), { app: true, scripts: false });
+  }
+});
 test('application, bundled resources and unknown paths require Rust, even after many docs', () => {
   for (const path of ['src/main.rs', 'src/README.md', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
     'build.rs', '.cargo/config.toml', 'assets/fonts/README.md', 'assets/icon.png', 'tests/test.rs',

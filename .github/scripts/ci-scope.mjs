@@ -9,6 +9,9 @@ export function classifyChanges(files) {
   let app = false, scripts = false;
   for (const file of files) {
     if (file.startsWith('.github/')) { app = true; scripts = true; }
+    // These Markdown files are packaged beside every debug executable. Their
+    // changes must rebuild and verify artifacts; other docs keep the fast path.
+    else if (file === 'THIRD_PARTY_NOTICES.md' || file === 'docs/third-party-assets.md') app = true;
     else if (file.startsWith('docs/') || /^[^/]+\.md$/i.test(file)) continue;
     else if (file.startsWith('.agents/skills/')) {
       if (!/\.md$/i.test(file)) scripts = true;
