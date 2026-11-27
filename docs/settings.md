@@ -1,6 +1,6 @@
 # Settings 与 Accounts 原生组件
 
-本任务实现独立 GPUI/Ely Settings 组件和离线联合预览。正式 Shell 仍使用原账户页面；本 PR 不增加路由、不改现有账户控制器或存储实现。最终原生视觉与交互需负责人验收，PR 保持 `pending`。
+本任务实现独立 GPUI/Ely Settings 组件和离线联合预览，并已由 `settings-accounts-shell` 挂载到正式 `Shell` 的 `Route::Settings` 标签页（替代过渡 `accounts_section` 表单）。最终原生视觉与交互在集成 `main` 上由负责人验收。
 
 ## 已确认范围
 
@@ -24,7 +24,7 @@ PAT 表单默认收起。Add account 和账户行 Replace PAT 在列表下方打
 
 ## 宿主接口与状态归属
 
-源码在 [`src/ui/settings/`](../src/ui/settings/mod.rs)，当前由 [`examples/settings.rs`](../examples/settings.rs) 直接装配，尚未注册进 `ui/mod.rs`。
+源码在 [`src/ui/settings/`](../src/ui/settings/mod.rs)，已在 [`src/ui/mod.rs`](../src/ui/mod.rs) 注册为 `pub(crate) mod settings`，由正式 `Shell` 通过 `MountedPage::Settings`（[`src/app/pages/mod.rs`](../src/app/pages/mod.rs)）挂载，同时也由 [`examples/settings.rs`](../examples/settings.rs) 独立预览。
 
 ```rust
 let binding = cx.new(|cx| SettingsBinding::new(existing_accounts_controller, window, cx));
@@ -33,12 +33,17 @@ let settings = cx.new(|cx| SettingsView::new(binding, window, cx));
 
 - `SettingsBinding` 接收宿主既有的 `Entity<app::accounts::Accounts>`；不创建服务、网络、系统凭据或数据库。稳定身份继续使用 `AccountKey { host, id }`。
 - `SettingsView` 持有页面与分类条的真实 ScrollHandle、公共 Motion/Bars、分类焦点；按实际布局宽度响应，不从窗口宽度猜侧栏状态。生产 `fixtures = 0`，`Category::Accounts` 是唯一产品分类。
+- `Shell::ensure_active_page` 在 `Route::Settings` 且存在 app 级 `Accounts` 控制器时挂载 `MountedPage::Settings(view)`；无控制器时回退到 `page::page` 的不可用提示。
+- `Shell::sync_pages` 在 `AuthContext` 变化时保留 `MountedPage::Settings`（仅 `suspend` 交互），因为 Settings 绑定的是全局 `Accounts` 控制器而非某个 `AuthContext` 的数据服务；这样在活动账户 Replace PAT 或 Add 成功后，`SettingsBinding::settle` 仍能观测到代次前进、收起表单并通过 `window.defer` 把焦点还给原按钮（`Add account` 或对应行的 `Replace PAT`）。
+- `Shell::island` 在 `MountedPage::Settings` 已挂载时不开启外层 `outer_scroll` 与 `page_bar`，由 `SettingsView` 独占页面纵向滚动条与窄态横向分类滚动。
+- `Shell::focus_accounts_form`（例如登出态点击侧栏账户行）在当前 `MountedPage::Settings` 上打开 `FormMode::Add` 并聚焦 masked PAT 输入框。
+- 切换离开标签页时 `MountedPage::suspend` 调用 `SettingsView::cancel_interactions` 清理滚动交互；关闭标签页时从 `Shell::pages` 移除并释放实体。`Shell::sidebar_keys` 持有弱引用，确保关闭窗口时 `Shell -> SettingsView -> SettingsBinding -> Accounts` 链路正常析构并关闭后台运行时。
 - Binding 只持有表单模式、目标、帮助显隐、输入实体与返回焦点。输入为 Ely masked TextInput + PasswordInput，视图展示数据不含 PAT。
 - 提交把输入直接移交现有控制器 `submit`，立即重建输入实体以释放秘密与撤销历史。控制器负责验证、提交、in-flight、取消 generation、旧响应与权威对账，详见[现有账户契约](account-ui-preview.md)。关闭表单不宣称在途提交已回滚。
 - 成功收起根据权威账户目录的身份/授权代次变化判定，不依赖控制器最新状态；成功提交后的自动仓库读取失败属于独立消息，不会让已提交的表单保持打开或误报 PAT 未保存。控制器自身的失败与部分成功消息保留。完成/取消返回 Add account 或原行 Replace PAT；Enter/Esc 先检查 IME marked range，组合输入不被当作提交/取消。
 - 头像直接复用 `ui::avatar` 的圆形绘制与空 mask 防护。主题、字号、字体和公共滚动条均沿用当前 Ely/应用 token；不引入新的主题或 scrollbar 算法。
 
-未来 Shell 宿主由协调者注册本模块，传入同一 app 级控制器并保留实体生命周期。宿主隐藏/释放时调用 `SettingsView::cancel_interactions` 清理滚动交互；本任务不负责 Shell 会话集成。Rust 可见性沿用仓库内部组件的 `pub(crate)`，不是另发公共 crate API。
+未来 Shell 宿主细节见上文 `MountedPage::Settings` 接线。Rust 可见性沿用仓库内部组件的 `pub(crate)`，不是另发公共 crate API。
 
 ## 可重复离线预览
 

@@ -342,6 +342,8 @@ impl Accounts {
     }
 
     /// Whether a replacement PAT is being entered for a saved account.
+    /// Used by `examples/account.rs` (`bin_support/account_example.rs`) and controller tests.
+    #[allow(dead_code)]
     pub fn replacing(&self) -> Option<&AccountKey> {
         self.replacing.as_ref()
     }
@@ -1619,8 +1621,9 @@ impl Focusable for Accounts {
     }
 }
 
-/// The account callbacks the presentation layer invokes. One closure set, so the product Settings
-/// page and the example cannot drift apart.
+/// The account callbacks the presentation layer invokes. Used by `examples/account.rs` via
+/// `bin_support/account_example.rs`.
+#[allow(dead_code)]
 pub(crate) fn callbacks(
     controller: Entity<Accounts>,
     _status: Option<StatusMessage>,

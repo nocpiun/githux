@@ -306,8 +306,8 @@ fn show_settings(view: &Entity<Shell>, cx: &mut VisualTestContext) {
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("account-token-form").is_some(),
-        "the Settings page must mount the account form"
+        cx.debug_bounds("settings-accounts-content").is_some(),
+        "the Settings page must mount the SettingsView accounts content"
     );
 }
 
@@ -1034,17 +1034,15 @@ fn typing_a_token_enables_the_submit_button_without_another_operation(cx: &mut T
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
     let _ = &view;
+    // Typing enables the submit control; pressing Enter submits through SettingsBinding.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
     cx.simulate_input("synthetic-token");
     cx.run_until_parked();
-    // A plain simulated click on the submit button must reach the service.
-    let target = cx
-        .debug_bounds("account-token-submit")
-        .map(|bounds| bounds.center());
-    if let Some(target) = target {
-        cx.simulate_click(target, gpui::Modifiers::none());
-    } else {
-        submit(&controller, cx);
-    }
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
 }
 
@@ -1275,6 +1273,7 @@ fn dropping_the_window_runs_the_controller_teardown(cx: &mut TestAppContext) {
     drop(view);
     drop(controller);
     cx.cx.update(|cx| cx.clear_globals());
+    cx.run_until_parked();
 
     // The controller's Drop runs `shutdown`, which closes the account runtime off the UI thread.
     let mut released = false;
@@ -1307,27 +1306,38 @@ fn paste_and_cjk_text_stay_masked_and_submit(cx: &mut TestAppContext) {
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
     let _ = &view;
-    // Focus the masked field and paste from the clipboard, as Ctrl+V does.
-    focus_token(&controller, cx);
+    // Focus the masked field in the mounted Settings form and paste from the clipboard, as Ctrl+V does.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
     cx.update(|_, cx| {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("ghp_pasted".into()));
     });
     cx.simulate_keystrokes("ctrl-v");
-    cx.update_window_entity(&controller, |accounts, _, cx| {
-        let input = accounts.token_input().read(cx);
+    cx.run_until_parked();
+    let settings_input = view
+        .read_with(cx, |shell, cx| shell.settings_input_for_test(cx))
+        .expect("mounted Settings input");
+    cx.update_window_entity(&settings_input, |input, _, _| {
         assert_eq!(input.text(), "ghp_pasted", "paste reaches the field");
         assert!(input.is_masked(), "the field stays masked after pasting");
     });
     // A CJK composition replaces the value through the same input handler.
     cx.simulate_input("中文口令");
-    cx.update_window_entity(&controller, |accounts, _, cx| {
-        let input = accounts.token_input().read(cx);
+    cx.run_until_parked();
+    cx.update_window_entity(&settings_input, |input, _, _| {
         assert!(input.text().contains("中文口令"), "CJK text is accepted");
         assert!(input.is_masked(), "the field stays masked with CJK text");
     });
-    // No unmasked copy path: the field never renders the value as aria text.
-    put_token(&controller, cx, "ghp_final");
-    submit(&controller, cx);
+    // Submitting clears and rotates the mounted Settings input and reaches the controller.
+    cx.simulate_keystrokes("enter");
+    let next_input = view
+        .read_with(cx, |shell, cx| shell.settings_input_for_test(cx))
+        .expect("mounted Settings input");
+    assert_ne!(next_input.entity_id(), settings_input.entity_id());
+    assert!(next_input.read_with(cx, |input, _| input.is_empty()));
+    cx.run_until_parked();
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
     assert!(controller.read_with(cx, |accounts, cx| {
         accounts.token_input().read(cx).is_empty()
@@ -1343,14 +1353,23 @@ fn tab_reaches_the_submit_button_and_enter_submits(cx: &mut TestAppContext) {
     let store = Arc::new(InMemoryCredentialStore::new());
     let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
     let (view, controller, cx) = product_shell(cx, Some(runtime));
-    let _ = &view;
-    put_token(&controller, cx, "synthetic");
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("synthetic");
+    cx.run_until_parked();
     // Tab must move focus through the form without killing it, and the token field must still be
     // reachable and submit on Enter afterwards.
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     cx.update(|window, cx| assert!(window.focused(cx).is_some(), "focus stays live after Tab"));
-    focus_token(&controller, cx);
+    let settings_input = view
+        .read_with(cx, |shell, cx| shell.settings_input_for_test(cx))
+        .expect("mounted Settings input");
+    cx.update_window_entity(&settings_input, |input, window, cx| {
+        window.focus(&gpui::Focusable::focus_handle(input, cx), cx);
+    });
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
@@ -1614,25 +1633,41 @@ fn the_settings_accounts_page_is_one_compact_list_plus_a_form(cx: &mut TestAppCo
     });
     cx.run_until_parked();
 
-    // The Accounts surface is drawn once, with both saved accounts as rows.
-    assert!(cx.debug_bounds("settings-accounts").is_some());
-    assert!(cx.debug_bounds("saved-account-1").is_some());
-    assert!(cx.debug_bounds("saved-account-2").is_some());
-    // The add form and its masked submit control are present.
-    assert!(cx.debug_bounds("account-token-form").is_some());
-    // The current account is marked, but there is no duplicated active-summary block and no
-    // disabled "Current" button pretending to be an action.
+    // The SettingsView accounts surface is drawn once, with both saved accounts as rows and the
+    // PAT form collapsed by default.
+    assert!(cx.debug_bounds("settings-root").is_some());
+    assert!(cx.debug_bounds("settings-accounts-content").is_some());
+    assert!(cx.debug_bounds("settings-account-1").is_some());
+    assert!(cx.debug_bounds("settings-account-2").is_some());
     assert!(
-        cx.debug_bounds("account-current-badge").is_some(),
-        "the active account is marked with a status, not a disabled button"
+        cx.debug_bounds("settings-pat-form").is_none(),
+        "the PAT form starts collapsed until Add account or Replace PAT is clicked"
     );
+    // Account 2 (bob) was added last, so it is active and has no Switch button; account 1 does.
     assert!(
-        cx.debug_bounds("settings-current-account").is_none(),
-        "the active account is not repeated above the list"
+        cx.debug_bounds("settings-switch-2").is_none(),
+        "the active account is marked with a status, not a Switch button"
     );
+    assert!(cx.debug_bounds("settings-switch-1").is_some());
+
+    // Opening the Add account form mounts the masked PAT form inside the island without clipping.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-pat-form").is_some());
+
     // Every drawn row stays inside the island, so nothing is pushed past the edge at 880px.
     let island = cx.debug_bounds("island").expect("island");
-    for selector in ["settings-accounts", "saved-account-1", "account-token-form"] {
+    for selector in [
+        "settings-accounts-content",
+        "settings-account-1",
+        "settings-pat-form",
+    ] {
         let bounds = cx
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector}"));
@@ -1660,6 +1695,14 @@ fn the_current_mark_and_primary_button_keep_the_pre_theme_accent(cx: &mut TestAp
     wait_for(&controller, cx, |state| state.accounts.len() == 1);
     wait_idle(&controller, cx);
     show_settings(&view, cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
 
     // Typing enables the primary button, so its filled tone is actually painted.
     cx.simulate_input("synthetic-token");
@@ -1684,7 +1727,7 @@ fn the_current_mark_and_primary_button_keep_the_pre_theme_accent(cx: &mut TestAp
     // the primary control paints the accent fill there, so this asserts what is drawn rather than
     // what the palette constant claims.
     let form = cx
-        .debug_bounds("account-token-form")
+        .debug_bounds("settings-pat-form")
         .expect("the account form is mounted");
     cx.update(|window, _| {
         let scale = window.scale_factor();
@@ -1719,11 +1762,10 @@ fn the_current_mark_and_primary_button_keep_the_pre_theme_accent(cx: &mut TestAp
         );
     });
 
-    // The "Current" mark is text plus a check icon in the accent color, so it paints ink rather
-    // than a filled block; presence plus the pinned token trio above cover it.
+    // The active account keeps its row and Current status indicator.
     assert!(
-        cx.debug_bounds("account-current-badge").is_some(),
-        "the active account keeps its Current mark"
+        cx.debug_bounds("settings-account-1").is_some(),
+        "the active account keeps its row"
     );
 }
 
@@ -2933,4 +2975,260 @@ fn revocation_clears_online_rows_and_rejects_queued_replies_even_after_gate_reco
             "queued old reply cannot borrow the new gate"
         );
     }
+}
+
+#[gpui::test]
+fn formal_shell_mounts_settings_view_across_lifecycle_switches_and_reopen(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, _controller, cx) = product_shell(cx, Some(runtime));
+
+    // Formal Shell -> Settings mounts the accepted SettingsView, not the transitional form.
+    // (`product_shell` starts on Route::Settings.)
+    assert!(cx.debug_bounds("settings-root").is_some());
+    assert!(cx.debug_bounds("settings-accounts-content").is_some());
+    assert!(cx.debug_bounds("settings-pat-form").is_none());
+    assert!(cx.debug_bounds("settings-accounts").is_none());
+    assert!(cx.debug_bounds("account-token-form").is_none());
+
+    let settings_tab = view.read_with(cx, |shell, _| shell.active_tab_id_for_test());
+    let first_view_id = view
+        .read_with(cx, |shell, _| shell.settings_view_for_test())
+        .expect("mounted SettingsView")
+        .entity_id();
+
+    // Open Add form with draft text, leave to Home, then re-enter via focus_accounts_form:
+    // draft text is preserved and the PAT field is refocused.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("draft-token");
+    cx.run_until_parked();
+
+    // Switching away to Home and back preserves the mounted SettingsView entity.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Home, window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-root").is_none());
+
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.navigate(Route::Settings, window, cx);
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-root").is_some());
+    let input = view
+        .read_with(cx, |shell, cx| shell.settings_input_for_test(cx))
+        .expect("mounted Settings input");
+    assert_eq!(
+        input.read_with(cx, |i, _| i.text().to_owned()),
+        "draft-token"
+    );
+    assert!(
+        cx.update(
+            |window, cx| gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
+        )
+    );
+    assert_eq!(
+        view.read_with(cx, |shell, _| shell.settings_view_for_test())
+            .expect("preserved SettingsView")
+            .entity_id(),
+        first_view_id
+    );
+
+    // Closing the Settings tab and reopening Route::Settings mounts a fresh SettingsView.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.close_tab(settings_tab, window, cx);
+        shell.navigate(Route::Settings, window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-accounts-content").is_some());
+    let reopened_view_id = view
+        .read_with(cx, |shell, _| shell.settings_view_for_test())
+        .expect("reopened SettingsView")
+        .entity_id();
+    assert_ne!(reopened_view_id, first_view_id);
+}
+
+#[gpui::test]
+fn formal_shell_settings_drives_add_switch_replace_error_redaction_and_focus_return(
+    cx: &mut TestAppContext,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = Arc::new(AutoReposTransport::new());
+    mock.serve_repos("first", repos(1, "alice", &["a"]));
+    mock.serve_repos("second", repos(2, "bob", &["b"]));
+    mock.serve_repos("replacement-secret", repos(1, "alice", &["a"]));
+    mock.script_user(user(1, "alice"));
+    mock.script_user(user(2, "bob"));
+    // Failed replacement for alice, then revalidation of bob, then successful replacement for alice.
+    mock.script_user(HttpResponse {
+        status: 401,
+        headers: vec![],
+        body: "{}".into(),
+    });
+    mock.script_user(user(2, "bob"));
+    mock.script_user(user(1, "alice"));
+
+    let store = Arc::new(InMemoryCredentialStore::new());
+    let (runtime, _) = open(&temp.path().join("accounts.sqlite3"), store, mock);
+    let (view, controller, cx) = product_shell(cx, Some(runtime));
+
+    // Logged-out sidebar/Settings sign-in opens the Add form and focuses the masked input.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-pat-form").is_some());
+    cx.simulate_input("first");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    wait_for(&controller, cx, |state| state.accounts.len() == 1);
+    wait_idle(&controller, cx);
+
+    // Add second account through the mounted SettingsView.
+    show_settings(&view, cx);
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("second");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    wait_for(&controller, cx, |state| state.accounts.len() == 2);
+    wait_idle(&controller, cx);
+
+    // Open Settings in bob's workspace and switch active account to alice via Switch button.
+    show_settings(&view, cx);
+    assert!(cx.debug_bounds("settings-account-1").is_some());
+    assert!(cx.debug_bounds("settings-account-2").is_some());
+    assert!(cx.debug_bounds("settings-switch-2").is_none());
+    let switch_1 = cx
+        .debug_bounds("settings-switch-1")
+        .expect("Switch button for account 1")
+        .center();
+    cx.simulate_click(switch_1, gpui::Modifiers::none());
+    cx.run_until_parked();
+    wait_for(&controller, cx, |state| {
+        state.active == Some(AccountKey::new(1, HostId::github()))
+    });
+    wait_idle(&controller, cx);
+
+    // Open Settings in alice's workspace, open Replace PAT on account 1, and submit an invalid PAT.
+    show_settings(&view, cx);
+    let settings_view = view
+        .read_with(cx, |shell, _| shell.settings_view_for_test())
+        .expect("SettingsView in alice workspace");
+    let binding = settings_view.read_with(cx, |view, _| view.binding.clone());
+    let key1 = AccountKey::new(1, HostId::github());
+    let key2 = AccountKey::new(2, HostId::github());
+    cx.update_window_entity(&binding, |binding, window, cx| {
+        binding.open(
+            crate::ui::settings::FormMode::Replace(key1.clone()),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-pat-form").is_some());
+
+    cx.simulate_input("wrong-secret");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    wait_idle(&controller, cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-pat-form").is_some(),
+        "failed replacement keeps the form open"
+    );
+    assert!(cx.debug_bounds("settings-status").is_some());
+    if let Some(status) = snapshot(&controller, cx).status {
+        assert!(!status.text.contains("wrong-secret"));
+    }
+
+    // Unrelated revalidation of account 2 must not close account 1's failed Replace form.
+    binding.update(cx, |binding, cx| binding.revalidate(key2, cx));
+    wait_idle(&controller, cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-pat-form").is_some());
+
+    // Submit a valid replacement token and verify duplicate submit while busy is ignored,
+    // token is never leaked in status, form closes on settle, and focus returns to Replace PAT.
+    let input = binding.read_with(cx, |binding, _| binding.input.clone());
+    assert!(input.read_with(cx, |input, _| input.is_masked()));
+    cx.update_window_entity(&input, |input, window, cx| {
+        window.focus(&gpui::Focusable::focus_handle(input, cx), cx);
+    });
+    cx.simulate_input("replacement-secret");
+    cx.run_until_parked();
+    cx.update_window_entity(&binding, |binding, window, cx| {
+        binding.submit(window, cx);
+        // Duplicate submit while busy must be ignored.
+        binding.submit(window, cx);
+    });
+    cx.run_until_parked();
+    wait_idle(&controller, cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-pat-form").is_none(),
+        "successful replacement closes the form on settle"
+    );
+    if let Some(status) = snapshot(&controller, cx).status {
+        assert!(!status.text.contains("replacement-secret"));
+    }
+    let (replace_focus_restored, focused_id, expected_id) = cx.update(|window, cx| {
+        let expected = binding.read(cx).replace_focus.get(&key1).cloned();
+        let restored = expected
+            .as_ref()
+            .is_some_and(|handle| handle.is_focused(window));
+        (
+            restored,
+            window.focused(cx).map(|h| format!("{h:?}")),
+            expected.map(|h| format!("{h:?}")),
+        )
+    });
+    assert!(
+        replace_focus_restored,
+        "focus must return to the initiating Replace PAT button after replacement settles (focused={focused_id:?}, expected={expected_id:?})"
+    );
 }

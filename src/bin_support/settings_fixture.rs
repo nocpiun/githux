@@ -200,6 +200,18 @@ impl Fixture {
         }
     }
 }
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.runtime.shutdown();
+        let path = self.path.clone();
+        std::thread::spawn(move || {
+            crate::app::accounts::wait_for_shutdown();
+            let _ = std::fs::remove_dir_all(path);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,17 +250,6 @@ mod tests {
                     .status,
                 599
             );
-        });
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.runtime.shutdown();
-        let path = self.path.clone();
-        std::thread::spawn(move || {
-            crate::app::accounts::wait_for_shutdown();
-            let _ = std::fs::remove_dir_all(path);
         });
     }
 }

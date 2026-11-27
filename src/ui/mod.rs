@@ -57,6 +57,7 @@ pub mod repository;
 pub mod repository_overview;
 pub mod repository_pulls;
 pub(crate) mod scroll;
+pub(crate) mod settings;
 pub(crate) mod shell_refresh;
 mod sidebar;
 mod sidebar_active;
@@ -307,9 +308,9 @@ impl Shell {
             cx.notify();
         });
         let tab_scroll = ScrollHandle::new();
-        let this = cx.entity();
+        let this = cx.weak_entity();
         let sidebar_keys = cx.intercept_keystrokes(move |event, window, cx| {
-            this.update(cx, |shell, cx| {
+            let _ = this.update(cx, |shell, cx| {
                 if matches!(event.keystroke.key.as_str(), "tab") && shell.sidebar_menu {
                     // The menu is modal while open: Tab must not park focus behind it.
                     cx.stop_propagation();
@@ -468,9 +469,17 @@ impl Shell {
         if self.page_services != auth {
             // Drop hosts first: this cancels their work and guarantees no old-authorized data can
             // survive into the next workspace incarnation, including a same-account PAT replace.
-            self.page_observers.clear();
+            // Settings binds to the single app-wide Accounts controller rather than an
+            // AuthContext-scoped read service, so keep it alive across account mutations (PAT
+            // replace, add, revalidate) to let SettingsBinding::settle close the form and restore
+            // focus.
             for (id, page) in std::mem::take(&mut self.pages) {
                 page.suspend(cx);
+                if matches!(page, crate::app::pages::MountedPage::Settings(_)) {
+                    self.pages.insert(id, page);
+                    continue;
+                }
+                self.page_observers.remove(&id);
                 if let crate::app::pages::MountedPage::Repository { page, .. } = &page {
                     self.page_intents.insert(id, page.read(cx).navigation());
                 }
@@ -577,7 +586,19 @@ impl Shell {
                     id, &route, services, intent, navigation, avatars, window, cx,
                 )
             }),
-            Route::Settings => None,
+            Route::Settings => {
+                self.accounts
+                    .as_ref()
+                    .and_then(|weak| weak.upgrade())
+                    .map(|controller| {
+                        let binding = cx.new(|cx| {
+                            crate::ui::settings::SettingsBinding::new(controller, window, cx)
+                        });
+                        let view = cx
+                            .new(|cx| crate::ui::settings::SettingsView::new(binding, window, cx));
+                        crate::app::pages::MountedPage::Settings(view)
+                    })
+            }
             Route::Notifications => Some(crate::app::pages::MountedPage::Notifications(cx.new(
                 |cx| crate::app::pages::NotificationsPage::new(services, navigation, window, cx),
             ))),
@@ -854,7 +875,8 @@ impl Shell {
                 crate::app::pages::MountedPage::Notifications(_)
                 | crate::app::pages::MountedPage::WorkItems(_)
                 | crate::app::pages::MountedPage::IssueDetail(_)
-                | crate::app::pages::MountedPage::PullRequest(_),
+                | crate::app::pages::MountedPage::PullRequest(_)
+                | crate::app::pages::MountedPage::Settings(_),
             ) => ("global", ([0, 0], false)),
             None => ("none", ([0, 0], false)),
         }
@@ -926,8 +948,30 @@ impl Shell {
                 crate::app::pages::MountedPage::Notifications(_)
                 | crate::app::pages::MountedPage::WorkItems(_)
                 | crate::app::pages::MountedPage::IssueDetail(_)
-                | crate::app::pages::MountedPage::PullRequest(_) => {}
+                | crate::app::pages::MountedPage::PullRequest(_)
+                | crate::app::pages::MountedPage::Settings(_) => {}
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settings_view_for_test(&self) -> Option<gpui::Entity<settings::SettingsView>> {
+        match self.pages.get(&self.workspace.active_id())? {
+            crate::app::pages::MountedPage::Settings(view) => Some(view.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settings_input_for_test(
+        &self,
+        cx: &App,
+    ) -> Option<gpui::Entity<ely_core::forms::TextInput>> {
+        match self.pages.get(&self.workspace.active_id())? {
+            crate::app::pages::MountedPage::Settings(view) => {
+                Some(view.read(cx).binding.read(cx).input.clone())
+            }
+            _ => None,
         }
     }
 
@@ -2343,74 +2387,20 @@ impl Shell {
         )
     }
 
-    /// Settings › Accounts. The minimal account surface: only the operations the accepted account
-    /// preview already defined (add, select, replace PAT, revalidate), plus the current directory
-    /// state. No general settings design, no account deletion, no logout and no cache policy.
-    fn settings_accounts(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let Some(controller) = self.accounts.as_ref().and_then(|weak| weak.upgrade()) else {
-            return div()
-                .debug_selector(|| "settings-accounts-unavailable".to_string())
-                .p_6()
-                .child("Account services are not available in this build.")
-                .into_any_element();
-        };
-        let snapshot = controller.read(cx).snapshot().clone();
-        let replacing =
-            self.account_state.active.is_some() && controller.read(cx).replacing().is_some();
-        let busy = controller.read(cx).busy();
-        // Resolve each saved account's avatar. An unknown key queues one fetch through the same
-        // controller the sidebar uses, so the Settings list and the footer share one loader.
-        let mut avatars = std::collections::HashMap::new();
-        for summary in &snapshot.accounts {
-            let key = summary.identity.key.clone();
-            if let Some(avatar_key) = avatar::account_key(&summary.identity) {
-                let state =
-                    controller.update(cx, |accounts, _| accounts.avatar(avatar_key.clone()));
-                if let crate::app::avatar::AvatarState::Ready(image) = state {
-                    avatars.insert(key, gpui::ImageSource::Image(image));
-                }
-            }
-        }
-        let callbacks =
-            crate::app::accounts::callbacks(controller.clone(), snapshot.status.clone());
-        let section = crate::ui::accounts::accounts_section(
-            crate::ui::accounts::AccountsSection {
-                token: crate::ui::accounts::TokenForm {
-                    token_input: controller.read(cx).token_input().clone(),
-                    replacing,
-                    busy,
-                    callbacks: &callbacks,
-                },
-                accounts: snapshot.accounts,
-                active: snapshot.active,
-                replacing_account: controller.read(cx).replacing().cloned(),
-                avatars,
-                status: snapshot.status,
-            },
-            cx,
-        );
-        div()
-            .debug_selector(|| "page-settings".to_string())
-            .w_full()
-            .px_6()
-            .py_5()
-            .child(section)
-            .into_any_element()
-    }
-
-    /// Moves focus to the masked PAT field, used by the logged-out sidebar entry so it lands on a
-    /// real control instead of an empty page.
+    /// Opens the Add account form and focuses the masked PAT field, used by the logged-out
+    /// sidebar entry so it lands on a real control instead of an empty page.
     pub fn focus_accounts_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(controller) = self.accounts.as_ref().and_then(|weak| weak.upgrade()) else {
-            return;
-        };
-        let input = controller.read(cx).token_input().clone();
-        let focus = gpui::Focusable::focus_handle(input.read(cx), cx);
-        window.focus(&focus, cx);
+        let id = self.workspace.active_id();
+        if let Some(crate::app::pages::MountedPage::Settings(view)) = self.pages.get(&id) {
+            let binding = view.read(cx).binding.clone();
+            binding.update(cx, |binding, cx| {
+                binding.open(crate::ui::settings::FormMode::Add, window, cx);
+                if matches!(binding.mode, Some(crate::ui::settings::FormMode::Add)) {
+                    let input_focus = gpui::Focusable::focus_handle(binding.input.read(cx), cx);
+                    window.defer(cx, move |window, cx| window.focus(&input_focus, cx));
+                }
+            });
+        }
     }
 
     /// The island: the session tab strip, then the active page's own scroll area.
@@ -2422,16 +2412,16 @@ impl Shell {
         let strip = self.tab_strip(window, cx);
         let settings_route = self.workspace.route() == &Route::Settings;
         let session_id = self.workspace.active_id();
-        let settings = settings_route.then(|| self.settings_accounts(window, cx));
         let pull_request_route = matches!(self.workspace.route(), Route::PullRequest { .. });
         let files_selected = matches!(self.pages.get(&session_id), Some(crate::app::pages::MountedPage::PullRequest(page)) if page.read(cx).files_selected());
         let mounted = self.mounted_page(session_id, window, cx);
         let outer_scroll = mounted.is_none() || (pull_request_route && !files_selected);
-        let page_bar = settings_route || (pull_request_route && !files_selected);
+        let page_bar =
+            (settings_route && mounted.is_none()) || (pull_request_route && !files_selected);
         let (body, scroll, smooth, focus) = {
             let session = self.workspace.active();
             (
-                mounted.unwrap_or_else(|| page::page(session, page::PageData { settings }, cx)),
+                mounted.unwrap_or_else(|| page::page(session, cx)),
                 session.state().scroll.clone(),
                 session.state().smooth.clone(),
                 session.state().focus.clone(),

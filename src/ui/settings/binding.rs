@@ -36,8 +36,8 @@ pub(crate) struct SettingsBinding {
     origin: Option<FocusHandle>,
     before_submit: Vec<(AccountKey, AuthEpoch)>,
     changed: Subscription,
-    observed: Subscription,
-    keys: Option<Subscription>,
+    _observed: Subscription,
+    _keys: Option<Subscription>,
 }
 
 impl SettingsBinding {
@@ -82,8 +82,8 @@ impl SettingsBinding {
             origin: None,
             before_submit: Vec::new(),
             changed,
-            observed,
-            keys: Some(keys),
+            _observed: observed,
+            _keys: Some(keys),
         }
     }
 
@@ -230,8 +230,8 @@ impl SettingsBinding {
         if committed {
             self.mode = None;
             self.submitted = false;
-            if let Some(origin) = &self.origin {
-                window.focus(origin, cx);
+            if let Some(origin) = self.origin.clone() {
+                window.defer(cx, move |window, cx| window.focus(&origin, cx));
             }
             cx.notify();
             return;

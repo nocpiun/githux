@@ -199,5 +199,6 @@ pub(crate) fn observe_page(
                 cx.notify();
             }
         }),
+        MountedPage::Settings(entity) => cx.observe(entity, move |_, _, _| {}),
     }
 }

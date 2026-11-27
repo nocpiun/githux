@@ -21,8 +21,7 @@ mod network;
 #[path = "../src/platform/mod.rs"]
 #[allow(dead_code)]
 mod platform;
-#[path = "../src/ui/settings/mod.rs"]
-mod settings;
+use ui::settings;
 #[path = "../src/bin_support/settings_example.rs"]
 mod settings_example;
 #[path = "../src/bin_support/settings_fixture.rs"]

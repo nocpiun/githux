@@ -38,6 +38,7 @@ pub enum MountedPage {
     WorkItems(Entity<WorkItemsPage>),
     IssueDetail(Entity<IssueDetailPage>),
     PullRequest(Entity<PullRequestPage>),
+    Settings(Entity<crate::ui::settings::SettingsView>),
 }
 
 impl MountedPage {
@@ -50,6 +51,7 @@ impl MountedPage {
             Self::WorkItems(page) => page.clone().into_any_element(),
             Self::IssueDetail(page) => page.clone().into_any_element(),
             Self::PullRequest(page) => page.clone().into_any_element(),
+            Self::Settings(page) => page.clone().into_any_element(),
         }
     }
 
@@ -62,6 +64,7 @@ impl MountedPage {
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
             Self::IssueDetail(page) => page.update(cx, |page, cx| page.set_active(false, cx)),
             Self::PullRequest(page) => page.update(cx, |page, cx| page.suspend(cx)),
+            Self::Settings(page) => page.update(cx, |page, _| page.cancel_interactions()),
         }
     }
 
@@ -69,9 +72,10 @@ impl MountedPage {
         match self {
             Self::Home(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
             Self::Profile(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
-            Self::Repository { .. } => {
+            Self::Repository { .. } | Self::Settings(_) => {
                 // A still-valid repository session is retained; its own receiver and render check
                 // detect authorization loss. No re-read occurs for ordinary tab activation.
+                // Settings binds to the single app-wide Accounts controller and keeps its state.
             }
             Self::Notifications(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
             Self::WorkItems(page) => page.update(cx, |page, cx| page.set_active(true, cx)),
