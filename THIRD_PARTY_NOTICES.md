@@ -10,7 +10,9 @@ checked-in texts listed below at repository-relative paths. This does not resolv
 the remaining direct/transitive crate texts or dual-license choices documented as
 unresolved, and it is not a complete release compliance review.
 
-Baseline: `730d2292dcd5bb981928341259c971e42ff497b5`.
+Baseline: `730d2292dcd5bb981928341259c971e42ff497b5`. Updated 2026-11-27 to add
+`chrono 0.4.45`, `sha1_smol 1.0.1` and the `fast_image_resize 5.1.4` texts taken
+from their locked crate archives.
 
 ## Fonts compiled into the executable
 
@@ -59,6 +61,9 @@ Lucide icons, bundled by `ely-core` and embedded via `include_bytes!`.
 | Ely (`ely-core`, `ely-settings`, `ely-canvas`) | git `30c66fe1` | MIT | Copyright (c) 2026 Ely GPUI Component contributors — [ely-mit.txt](assets/licenses/ely-mit.txt) |
 | GPUI (`gpui-pre`, `gpui-pre-platform`, `gpui-pre-*`) | 0.3.10 | Apache-2.0 | Copyright 2022 - 2025 Zed Industries, Inc. — [gpui-pre-apache-2.0.txt](assets/licenses/gpui-pre-apache-2.0.txt) |
 | pulldown-cmark | 0.13.5 | MIT | Copyright 2015 Google Inc. — [pulldown-cmark-mit.txt](assets/licenses/pulldown-cmark-mit.txt) |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | Copyright (c) 2014–2026 Kang Seonghoon and contributors; the crate ships one file carrying both texts — [chrono-0.4.45-license.txt](assets/licenses/chrono-0.4.45-license.txt) |
+| sha1_smol | 1.0.1 | BSD-3-Clause | Copyright (c) 2018 the respective contributors (per its `AUTHORS`); the same crate file also carries the MIT text for `src/simd.rs` — [sha1_smol-1.0.1-license.txt](assets/licenses/sha1_smol-1.0.1-license.txt) |
+| fast_image_resize (reached through our `githux-image-resize` path crate) | 5.1.4 | MIT OR Apache-2.0 | Copyright (c) 2021 Kirill Kuzminykh — [MIT](assets/licenses/fast_image_resize-5.1.4-license-mit.txt), [Apache-2.0](assets/licenses/fast_image_resize-5.1.4-license-apache.txt) |
 | rusqlite | 0.37.0 | MIT | Copyright (c) 2014 The rusqlite developers (crate `LICENSE`) |
 | SQLite (bundled by `rusqlite`/`libsqlite3-sys`) | 3.x amalgamation | Public Domain | [sqlite-public-domain.txt](assets/licenses/sqlite-public-domain.txt) |
 | tokio | 1.54.1 | MIT | Copyright (c) Tokio Contributors (crate `LICENSE`) |
@@ -85,6 +90,10 @@ listed with their declared SPDX identifiers in
 multi-licensed; **no license choice has been made on the project's behalf**, and
 build-only / dev-only / non-target-platform crates have not yet been separated
 from the shipping set.
+
+`githux-image-resize` is Githux's own path crate (`crates/image-resize`,
+`publish = false`), not upstream `fast_image_resize`; the notices above cover only
+the upstream crate it depends on.
 
 ## Windows App SDK
 
@@ -113,10 +122,14 @@ resolve to the actual packaged text rather than to a source-checkout-only path.
 6. The `resvg-0.46.0-license-*`, `usvg-0.46.0-license-*` and
    `tiny-skia-0.11.4-license.txt` files in `assets/licenses/` (both alternatives
    are retained; no distribution license choice is recorded here).
-7. `assets/licenses/linguist-mit.txt`.
-8. `assets/licenses/sqlite-public-domain.txt` (informational).
-9. `docs/third-party-assets.md` and this file.
-10. On Windows only, `githux-wasdk.manifest` and each Windows App SDK package's
+7. `assets/licenses/chrono-0.4.45-license.txt`,
+   `assets/licenses/sha1_smol-1.0.1-license.txt` and both
+   `fast_image_resize-5.1.4-license-{apache,mit}.txt` files (both alternatives are
+   retained; no distribution license choice is recorded here).
+8. `assets/licenses/linguist-mit.txt`.
+9. `assets/licenses/sqlite-public-domain.txt` (informational).
+10. `docs/third-party-assets.md` and this file.
+11. On Windows only, `githux-wasdk.manifest` and each Windows App SDK package's
     `license.txt`, copied beside the executable as
     `microsoft.windowsappsdk.foundation.LICENSE.txt` and
     `microsoft.windowsappsdk.interactiveexperiences.LICENSE.txt` by the runtime
