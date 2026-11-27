@@ -28,6 +28,9 @@ struct Row {
     kind: SubjectKind,
     subject_route: Option<String>,
     reason: String,
+    // Earlier projections contained only read rows.
+    #[serde(default)]
+    unread: bool,
     updated_at: String,
 }
 
@@ -44,6 +47,7 @@ impl From<NotificationThread> for Row {
             kind: item.subject.kind,
             subject_route,
             reason: item.reason,
+            unread: item.unread,
             updated_at: item.updated_at,
         }
     }
@@ -65,7 +69,7 @@ impl Row {
                 latest_comment_url: None,
             },
             reason: self.reason,
-            unread: false,
+            unread: self.unread,
             updated_at: self.updated_at,
             last_read_at: None,
         })
@@ -159,7 +163,7 @@ impl InboxCache {
             fetched_at_ms: stamp,
             verified_at_ms: stamp,
             completeness: CacheCompleteness::Partial {
-                reason: "recent read rows".into(),
+                reason: "recent loaded rows".into(),
             },
             etag: None,
             last_modified: None,
@@ -169,7 +173,7 @@ impl InboxCache {
         if let Some(items) = items {
             let mut rows = Vec::new();
             let mut size = 2;
-            for item in items.into_iter().filter(|item| !item.unread).take(MAX_ROWS) {
+            for item in items.into_iter().take(MAX_ROWS) {
                 let row = Row::from(item);
                 let Ok(encoded) = serde_json::to_vec(&row) else {
                     continue;

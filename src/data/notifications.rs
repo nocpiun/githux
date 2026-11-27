@@ -415,7 +415,6 @@ impl Notifications {
                         .snapshot
                         .items
                         .iter()
-                        .filter(|item| !item.unread)
                         .take(cache::MAX_ROWS)
                         .cloned()
                         .collect(),

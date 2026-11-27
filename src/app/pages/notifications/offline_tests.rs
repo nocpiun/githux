@@ -64,6 +64,9 @@ impl Transport for InboxTransport {
     ) -> Pin<Box<dyn Future<Output = Reply> + Send + 'a>> {
         Box::pin(async move {
             let url = reqwest::Url::parse(&req.url).unwrap();
+            if url.path().starts_with("/notifications") {
+                self.requests.lock().unwrap().push(req.clone());
+            }
             let response = match (req.method, url.path()) {
                 (HttpMethod::Get, "/user") => {
                     let bob = req
@@ -78,7 +81,10 @@ impl Transport for InboxTransport {
                 }
                 (HttpMethod::Get, "/user/repos") => Ok(json_response(200, "[]")),
                 (HttpMethod::Get, "/notifications") => {
-                    self.requests.lock().unwrap().push(req);
+                    assert_eq!(
+                        url.query(),
+                        Some("all=false&participating=false&per_page=50&page=1")
+                    );
                     let gate = self.gate.lock().unwrap().take();
                     if let Some(gate) = gate {
                         tokio::select! {
@@ -88,12 +94,8 @@ impl Transport for InboxTransport {
                     }
                     self.reply.lock().unwrap().clone()
                 }
-                (HttpMethod::Delete, "/notifications/threads/1") => {
-                    self.requests.lock().unwrap().push(req);
-                    Ok(json_response(204, ""))
-                }
+                (HttpMethod::Delete, "/notifications/threads/1") => Ok(json_response(204, "")),
                 (HttpMethod::Put, "/notifications/threads/1/subscription") => {
-                    self.requests.lock().unwrap().push(req);
                     Ok(json_response(200, "{\"ignored\":true}"))
                 }
                 _ => panic!("unexpected fixture request path {}", url.path()),
@@ -123,11 +125,11 @@ fn response(status: u16, body: &str) -> HttpResponse {
 }
 
 fn rows() -> HttpResponse {
-    let items: Vec<_> = [(1, 10, "alpha", "issues", "Issue", false),
-        (2, 20, "beta", "pulls", "PullRequest", false),
-        (3, 20, "beta", "issues", "Issue", true)]
-        .into_iter().map(|(id, repo_id, repo, path, kind, unread)| json!({
-            "id": id.to_string(), "unread": unread, "reason": "mention", "updated_at": "2026-11-26T08:00:00Z",
+    let items: Vec<_> = [(1, 10, "alpha", "issues", "Issue"),
+        (2, 20, "beta", "pulls", "PullRequest"),
+        (3, 20, "beta", "issues", "Issue")]
+        .into_iter().map(|(id, repo_id, repo, path, kind)| json!({
+            "id": id.to_string(), "unread": true, "reason": "mention", "updated_at": "2026-11-26T08:00:00Z",
             "repository": {"id": repo_id, "name": repo, "owner": {"login": "acme"}},
             "subject": {"title": format!("Thread {id}"), "type": kind,
                 "url": format!("https://api.github.com/repos/acme/{repo}/{path}/42")}
@@ -198,7 +200,7 @@ fn wait_for(cx: &mut VisualTestContext, mut predicate: impl FnMut(&mut VisualTes
 }
 
 #[gpui::test]
-fn notifications_offline_reading_mount_keeps_routes_during_refresh_and_replaces_with_empty(
+fn notifications_offline_reading_mount_reopens_all_unread_threads_and_retry_replaces_with_empty(
     cx: &mut TestAppContext,
 ) {
     cx.executor().allow_parking();
@@ -232,10 +234,12 @@ fn notifications_offline_reading_mount_keeps_routes_during_refresh_and_replaces_
     });
 
     wait_for(cx, |cx| {
-        cx.debug_bounds("notifications-saved").is_some()
+        cx.debug_bounds("notification-row-0").is_some()
             && cx.debug_bounds("notification-row-1").is_some()
     });
-    assert!(cx.debug_bounds("notification-row-2").is_none());
+    assert!(cx.debug_bounds("notifications-saved").is_none());
+    assert!(cx.debug_bounds("notifications-error").is_none());
+    assert!(cx.debug_bounds("notification-row-2").is_some());
     for selector in ["notification-title-0", "notification-title-1"] {
         let title = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(title.center(), Modifiers::none());
@@ -283,10 +287,14 @@ fn notifications_offline_reading_mount_keeps_routes_during_refresh_and_replaces_
     cx.simulate_click(retry.center(), Modifiers::none());
     wait_for(cx, |_| transport.requests.lock().unwrap().len() == 2);
     assert!(cx.debug_bounds("notification-row-0").is_some());
+    assert!(cx.debug_bounds("notification-row-1").is_some());
+    assert!(cx.debug_bounds("notifications-saved").is_none());
+    assert!(cx.debug_bounds("notifications-error").is_none());
     release.send(()).unwrap();
     wait_for(cx, |cx| {
         cx.debug_bounds("notifications-saved").is_none()
             && cx.debug_bounds("notification-row-0").is_none()
+            && cx.debug_bounds("notification-row-1").is_none()
     });
     assert_eq!(transport.requests.lock().unwrap().len(), 2);
     *transport.reply.lock().unwrap() = offline();
@@ -329,7 +337,9 @@ fn notifications_offline_reading_isolated_and_revoked_mixed_projection_cannot_re
     assert!(other.items.is_empty() && other.historical_at_ms.is_none());
     handle.block_on(runtime.accounts.set_active(alice)).unwrap();
     let saved = read_first(&runtime.accounts, &runtime.executor);
-    assert_eq!(saved.snapshot().items.len(), 2);
+    let history = saved.snapshot();
+    assert_eq!(history.items.len(), 3);
+    assert!(history.items.iter().all(|item| item.unread));
     let repos = runtime.accounts.repo_service();
     let cache = repos.cache(saved.context()).unwrap();
     cache

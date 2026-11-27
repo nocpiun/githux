@@ -550,9 +550,14 @@ impl NotificationsView {
             item.repository.locator().name()
         );
         let reason = reason_label(&item.reason);
+        let read_state = match (self.snapshot.historical_at_ms.is_some(), item.unread) {
+            (true, true) => "Previously unread",
+            (true, false) => "Previously read",
+            (false, true) => "Unread",
+            (false, false) => "Read",
+        };
         let aria = format!(
-            "{} notification, {}, {repository}, {}, {}",
-            if item.unread { "Unread" } else { "Read" },
+            "{read_state} notification, {}, {repository}, {}, {}",
             type_label,
             item.subject.title,
             relative(Some(&item.updated_at), self.now)
@@ -986,48 +991,56 @@ impl Render for NotificationsView {
             } else {
                 refresh.into_any_element()
             });
-        let error = snapshot.error.as_ref().map(|error| {
-            let tooltip = format!("{} {}", error, error.recovery());
-            let kind = if snapshot.failed_request == Some(RequestKind::More) {
-                RequestKind::More
-            } else {
-                RequestKind::Refresh
-            };
-            div().debug_selector(|| "notifications-error".into()).child(
-                IconButton::new("notifications-error", IconName::CircleAlert)
-                    .size(ControlSize::Sm)
-                    .disabled(
-                        busy || (kind == RequestKind::Refresh && self.is_cooling())
-                            || !error.is_transient(),
-                    )
-                    .tooltip(tooltip)
-                    .on_click({
-                        let weak = cx.entity().downgrade();
-                        move |_, _, cx| {
-                            let _ = weak.update(cx, |view, cx| view.request(kind, cx));
-                        }
-                    }),
-            )
-        });
-        let historical = snapshot.historical_at_ms.map(|stamp| {
-            let time = chrono::DateTime::from_timestamp_millis(stamp)
-                .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string());
-            let label = if snapshot.error.is_some() && !busy {
-                "Saved notifications · refresh failed"
-            } else {
-                "Saved notifications"
-            };
-            div()
-                .id("notifications-saved")
-                .debug_selector(|| "notifications-saved".into())
-                .text_size(cx.theme().text_size(TextSize::Xs))
-                .text_color(colors.fg_subtle)
-                .tooltip(Tooltip::text(time.map_or_else(
-                    || "Showing previously loaded notifications".into(),
-                    |time| format!("Last synced {time}"),
-                )))
-                .child(label)
-        });
+        let error = snapshot
+            .error
+            .as_ref()
+            .filter(|_| !busy || snapshot.historical_at_ms.is_none())
+            .map(|error| {
+                let tooltip = format!("{} {}", error, error.recovery());
+                let kind = if snapshot.failed_request == Some(RequestKind::More) {
+                    RequestKind::More
+                } else {
+                    RequestKind::Refresh
+                };
+                div().debug_selector(|| "notifications-error".into()).child(
+                    IconButton::new("notifications-error", IconName::CircleAlert)
+                        .size(ControlSize::Sm)
+                        .disabled(
+                            busy || (kind == RequestKind::Refresh && self.is_cooling())
+                                || !error.is_transient(),
+                        )
+                        .tooltip(tooltip)
+                        .on_click({
+                            let weak = cx.entity().downgrade();
+                            move |_, _, cx| {
+                                let _ = weak.update(cx, |view, cx| view.request(kind, cx));
+                            }
+                        }),
+                )
+            });
+        let historical = snapshot
+            .historical_at_ms
+            .filter(|_| {
+                !busy
+                    && snapshot
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.is_transient())
+            })
+            .map(|stamp| {
+                let time = chrono::DateTime::from_timestamp_millis(stamp)
+                    .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string());
+                div()
+                    .id("notifications-saved")
+                    .debug_selector(|| "notifications-saved".into())
+                    .text_size(cx.theme().text_size(TextSize::Xs))
+                    .text_color(colors.fg_subtle)
+                    .tooltip(Tooltip::text(time.map_or_else(
+                        || "Showing previously loaded notifications".into(),
+                        |time| format!("Last synced {time}"),
+                    )))
+                    .child("Saved notifications · refresh failed")
+            });
         let partial = !snapshot.partial.is_empty();
         let empty = snapshot.is_empty();
         let no_rows = snapshot.items.is_empty();
@@ -1078,9 +1091,11 @@ impl Render for NotificationsView {
             .debug_selector(|| "notifications-rows".into())
             .track_focus(&self.focus)
             .role(gpui::Role::List)
-            .aria_label(
-                "Unread notifications. Arrow keys select; Enter opens the selected repository.",
-            )
+            .aria_label(if snapshot.historical_at_ms.is_some() {
+                "Saved notifications. Arrow keys select; Enter opens the selected repository."
+            } else {
+                "Unread notifications. Arrow keys select; Enter opens the selected repository."
+            })
             .relative()
             .flex_1()
             .min_h_0()
