@@ -19,7 +19,7 @@ impl Target {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum State {
     Open,
@@ -27,7 +27,7 @@ pub(crate) enum State {
     Merged,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum SourceBranch {
     Present { repository: String },
     Deleted { repository: String },
@@ -37,6 +37,19 @@ pub(crate) enum SourceBranch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Conversation {
     pub target: Target,
+    pub reading: ConversationReading,
+}
+
+impl std::ops::Deref for Conversation {
+    type Target = ConversationReading;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reading
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ConversationReading {
     pub title: String,
     pub state: State,
     pub draft: bool,

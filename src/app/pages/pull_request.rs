@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use crate::app::accounts::AccountServices;
+use crate::data::pr_conversation::ConversationSession;
 use crate::data::pr_files::FilesSession;
 use crate::domain::{
     issue_detail::IssueLocator, pr_conversation::Target, repository::RepositoryLocator,
@@ -48,7 +49,7 @@ impl PullRequestPage {
             let locator = IssueLocator::from_repository(repository, number).ok()?;
             let repos = services.repositories();
             let session = repos.session().ok()?;
-            let comments = Controller::new(repos.issue_detail_session().ok()?, locator);
+            let comments = Controller::new(repos.issue_detail_session().ok()?, locator.clone());
             if session.context() != comments.context() {
                 return None;
             }
@@ -71,7 +72,7 @@ impl PullRequestPage {
             let files = cx.new(|_| FilesView::new(files_session, services.executor().clone()));
             let view = cx.new(|cx| {
                 ConversationView::new(
-                    session,
+                    ConversationSession::new(session, target.clone(), locator),
                     comments,
                     target,
                     services.executor().handle(),

@@ -5,11 +5,14 @@ use ely_core::{
 use gpui::{App, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*};
 use std::{collections::HashSet, time::SystemTime};
 
+use crate::data::pr_conversation::{LiveComments, Refresh};
 use crate::domain::{error::GitHubError, issue_detail::IssueDetailError};
 use crate::github::issue_detail::IssueDetailLimits;
 use crate::ui::{compact_status, relative_time};
 
-use super::{CommentsRequestMode, ConversationView};
+use crate::ui::issue_detail::controller::CommentsRequest;
+
+use super::{CommentRead, CommentsRequestMode, ConversationView};
 
 impl ConversationView {
     pub(super) fn request_comments(
@@ -26,34 +29,77 @@ impl ConversationView {
         };
         self.comments.comments_error = None;
         let online = request.clone();
-        let work = self
-            .executor
-            .spawn(async move { online.execute_online(&IssueDetailLimits::default()).await });
-        self.comment_task = Some(cx.spawn_in(window, async move |view, cx| {
-            let result = match work {
-                Ok(work) => work.await.unwrap_or_else(|_| Err(super::request_interrupted().into())),
-                Err(_) => Err(super::request_interrupted().into()),
-            };
-            let _ = cx.update(|window, cx| {
-                let _ = view.update(cx, |view, cx| {
-                    view.comment_task = None;
-                    if matches!(&result, Err(error) if error.is_missing() || error.is_auth_or_permission()) {
-                        view.clear_conversation();
-                        view.error = Some(match result {
-                            Err(IssueDetailError::GitHub(error)) => error,
-                            _ => GitHubError::NotFound,
-                        });
-                    } else if view.comments.finish_comments(&request, result) {
-                        view.sync_comment_readers(window, cx);
-                    }
-                    cx.notify();
-                });
-            });
-        }));
+        let session = self.session.clone();
+        let scope = self.cache_scope.clone();
+        let collection = self.comment_collection;
+        let persist = !self.cached_body;
+        let work = self.executor.spawn(async move {
+            session
+                .refresh_comments(
+                    scope,
+                    collection,
+                    online.cursor,
+                    IssueDetailLimits::default(),
+                    online.cancel,
+                    persist,
+                )
+                .await
+        });
+        if let Ok(work) = work {
+            self.comment_task = Some(CommentRead { request, work });
+            self.ensure_drain_task(window, cx);
+        } else {
+            self.comments
+                .finish_comments(&request, Err(super::request_interrupted().into()));
+        }
         cx.notify();
     }
 
-    fn sync_comment_readers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn finish_comments(
+        &mut self,
+        request: &CommentsRequest,
+        refresh: Refresh<LiveComments, IssueDetailError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_current() || !self.cache_is_authorized() {
+            self.clear_conversation();
+            self.error = Some(GitHubError::StaleContext);
+        } else if matches!(&refresh.result, Err(error) if error.is_missing() || error.is_auth_or_permission())
+        {
+            self.clear_conversation();
+            self.error = Some(match refresh.result {
+                Err(IssueDetailError::GitHub(error)) => error,
+                _ => GitHubError::NotFound,
+            });
+        } else {
+            let result = refresh.result.map(|live| {
+                self.comment_collection = live.collection;
+                self.clear_comment_history();
+                live.page
+            });
+            if self.cached_comments_partial.is_some()
+                && matches!(&result, Err(error) if refresh.no_store || !error.is_transient())
+            {
+                self.comments.comments.clear();
+                self.comments.comments_loaded = false;
+                self.clear_comment_history();
+            }
+            if self.comments.finish_comments(request, result) {
+                self.sync_comment_readers(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_comment_history(&mut self) {
+        self.cached_comments_partial = None;
+        if !self.cached_body {
+            self.cache_authorization = None;
+        }
+    }
+
+    pub(super) fn sync_comment_readers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids: HashSet<_> = self
             .comments
             .comments
@@ -130,6 +176,17 @@ impl ConversationView {
                     }),
             );
         }
+        if self.cached_comments_partial == Some(true) {
+            content = content.child(
+                div()
+                    .debug_selector(|| "pr-comments-partial".into())
+                    .text_color(color)
+                    .child("Some comments are unavailable until refresh."),
+            );
+        }
+        if self.pending.is_some() {
+            return content;
+        }
         if let Some(mode) = self.comments.comments_busy {
             let label = match mode {
                 CommentsRequestMode::Replace => "Loading comments",
@@ -142,6 +199,11 @@ impl ConversationView {
                 .comments
                 .comments_failed_mode
                 .unwrap_or(CommentsRequestMode::Replace);
+            let label = if self.cached_comments_partial.is_some() {
+                "Cached · Comments refresh failed"
+            } else {
+                "Could not read comments."
+            };
             content = content.child(
                 div()
                     .flex()
@@ -150,7 +212,7 @@ impl ConversationView {
                     .text_color(color)
                     .child(compact_status::failed(
                         "pr-comments-retry",
-                        "Could not read comments",
+                        label,
                         error.to_string(),
                         Some(move |window: &mut Window, cx: &mut App| {
                             let _ =
@@ -159,9 +221,11 @@ impl ConversationView {
                         Some("pr-comments-retry"),
                         cx,
                     ))
-                    .child("Could not read comments."),
+                    .child(label),
             );
-        } else if self.comments.comments_confirmed_empty() && self.comments.comments_next.is_none()
+        } else if self.cached_comments_partial != Some(true)
+            && self.comments.comments_confirmed_empty()
+            && self.comments.comments_next.is_none()
         {
             content = content.child(
                 div()
