@@ -185,6 +185,12 @@ impl CachedPageReadSession {
                     value: PageValue::Value { value, .. },
                     ..
                 }) => {
+                    // Never overshoot the row budget: keep the contiguous prefix and leave the
+                    // page that would cross the budget unread, so the restored list stays a
+                    // bounded, honestly partial prefix even for a larger legal page size.
+                    if rows + value.pulls.len() > MAX_RESTORED_ROWS {
+                        break;
+                    }
                     rows += value.pulls.len();
                     pages.push(value);
                 }

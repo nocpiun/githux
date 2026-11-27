@@ -27,16 +27,33 @@ fn page_response(
     pulls: serde_json::Value,
     next: Option<u32>,
 ) -> crate::network::transport::HttpResponse {
+    page_response_with(repository_id, pulls, next, 30)
+}
+
+fn page_response_with(
+    repository_id: u64,
+    pulls: serde_json::Value,
+    next: Option<u32>,
+    per_page: u32,
+) -> crate::network::transport::HttpResponse {
     let mut response = json_response(200, &pulls.to_string());
     if let Some(next) = next {
         response.headers.push((
             "link".into(),
             format!(
-                "<https://api.github.com/repositories/{repository_id}/pulls?state=open&per_page=30&page={next}>; rel=\"next\""
+                "<https://api.github.com/repositories/{repository_id}/pulls?state=open&per_page={per_page}&page={next}>; rel=\"next\""
             ),
         ));
     }
     response
+}
+
+fn page_rows(start: u64, count: u64) -> serde_json::Value {
+    serde_json::Value::Array(
+        (0..count)
+            .map(|offset| pull(start + offset, "Restored row"))
+            .collect(),
+    )
 }
 
 fn identity(name: &str, id: u64) -> RepositoryIdentity {
@@ -459,4 +476,68 @@ async fn a_transient_refresh_failure_keeps_the_visited_pages_replayable() {
         value(read)
     };
     assert_eq!(origin, PageOrigin::HistoricalSnapshot);
+}
+
+#[tokio::test]
+async fn a_page_that_would_cross_the_row_budget_is_not_restored() {
+    let fixture = Fixture::new().await;
+    let (_directory, store) = temp();
+    let cached = fixture.cached(&store);
+    let limits = PullListLimits {
+        per_page: 75,
+        ..PullListLimits::default()
+    };
+    let repository = identity("first", 12);
+    let collection = new_collection_generation();
+    // Three legal pages of 75 rows each = 225 rows; the restore budget is 200.
+    let mut next = None;
+    for (page, first) in [(1u32, 100u64), (2, 200), (3, 300)] {
+        fixture
+            .mock
+            .enqueue(Ok(page_response_with(
+                12,
+                page_rows(first, 75),
+                (page < 3).then_some(page + 1),
+                limits.per_page,
+            )))
+            .await;
+        let response = cached
+            .repository_pulls_online(
+                &repository,
+                PullFilter::Open,
+                &limits,
+                next.as_ref(),
+                Some(collection),
+                CancellationToken::default(),
+            )
+            .await
+            .unwrap();
+        next = response.next;
+    }
+
+    let (restored, generation) = cached
+        .repository_pulls_restore(
+            &repository,
+            PullFilter::Open,
+            &limits,
+            CancellationToken::default(),
+        )
+        .await
+        .expect("the visited prefix is restored");
+    assert_eq!(generation, Some(collection));
+    assert_eq!(restored.len(), 2, "150 rows are inside the 200-row budget");
+    assert_eq!(
+        restored.iter().map(|page| page.pulls.len()).sum::<usize>(),
+        150
+    );
+    assert_eq!(restored[0].pulls[0].number, 100);
+    assert_eq!(restored[1].pulls[0].number, 200);
+    // The page that would have crossed the budget is not restored, and the last restored page
+    // still carries its real continuation marker: the prefix is honestly partial.
+    assert!(restored[1].next.is_some());
+    assert!(
+        restored
+            .iter()
+            .all(|page| page.pulls.iter().all(|row| row.number < 300))
+    );
 }

@@ -22,6 +22,11 @@
 | `src/ui/repository/pulls/pull_offline_tests.rs`（新增） | 真正退出重启的双 GPUI 上下文集成测试与两个筛选用例 |
 | `README.md` | 更正页面内容段：Home/Feed 标题入口、仓库 Issue/PR 列表、Conversation/Files changed、Notifications、全局列表、Settings，以及已验证的离线路径 |
 
+审查修复（2026-11-27）：
+
+- **恢复行数上限**：恢复循环原先只在读取下一页前检查 `rows < 200`，合法 `per_page=75` 的三页会 push 成 225 行。现在整页会越过预算时不 push，保留连续前缀并停止；最后一页仍保留真实续链，列表继续是“未完整”的前缀。回归 `a_page_that_would_cross_the_row_budget_is_not_restored`（3 页 × 75 行 → 恢复 150 行、最后一页仍有 next、不出现第 3 页行）。
+- **跨页重复 id**：在线 Append 保留首次出现的位置、采用后一页新字段；恢复原先用 `HashSet` 保留旧字段。现在 `apply_cached` 用与 Append 相同的 id 索引语义折叠，位置不变、后页字段胜出。回归 `a_duplicate_id_restored_from_two_pages_keeps_its_first_position_and_the_later_fields` 同时对照在线 Append 结果。
+
 缓存身份沿用既有 `CachedPageReadSession`：账户分区 + 数字仓库 id + owner/name + 筛选 + 页大小 + 响应上限 + 表示版本。请求集合由首屏代次绑定，首屏替换（刷新、筛选切换）后旧续页不可再读。恢复预算为最多 4 页 / 200 行，避免把列表当完整镜像；partial 页的续链不被信任，恢复在该页停止。`no-store`、撤权、凭据拒绝、原子发布与 lease 校验全部复用缓存核心，没有新增缓存 schema。
 
 页面行为：
@@ -40,6 +45,13 @@
 | 仓库 PR 页面接线 | `node scripts/verify.mjs -- cargo test --locked --bins repository::pulls` | 通过 |
 | 真正重启离线集成（含真实 Retry 替换） | `node scripts/verify.mjs -- cargo test --locked --bins pull_offline` | 2 passed |
 | 静态 | `node scripts/verify.mjs -- cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| 全量（修复后） | `node scripts/verify.mjs -- cargo test --locked --bins --tests` | 1680 passed / 0 failed / 9 ignored |
+
+全量首跑 `03d4b7c6` 有 1 项与本任务无关的既有网络传输测试
+`network::transport::bounded_tests::chunked_and_no_length_stop_before_eof_on_success_and_errors`
+失败（本机回环 socket 返回 `error sending request` 而非 `ResponseTooLarge`）；该测试隔离串行重跑 5/5
+通过（`b5b17cc6`、`a2c39a20`、`2214bd19`、`fd5a90a4`、`094c5b57`），随后全量重跑 `681b86bd` 通过。
+不把这次失败写成已通过，也不把它归因于本 PR 的改动。
 
 重启集成测试的冷阶段在线读取 PR 页 1 与页 2（#10 只在页 2），关闭账户服务并 `quit` 整个 GPUI 上下文；热阶段在同一目录重新 `CacheStore::open`（成功即证明旧独占租约已释放），断网并暂扣 `/pulls` 请求。断言：
 

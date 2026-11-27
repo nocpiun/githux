@@ -959,3 +959,116 @@ async fn a_verified_replacement_installs_its_own_generation_and_a_stored_paint_k
     // Paging is not offered from a stored prefix; a replacement must re-read the first page.
     assert!(model.begin(PullRequestMode::Append).is_none());
 }
+
+#[tokio::test]
+async fn a_duplicate_id_restored_from_two_pages_keeps_its_first_position_and_the_later_fields() {
+    let fixture = Fixture::new().await;
+    let (_directory, cached) = cached_reader(&fixture);
+    let mut model = fixture
+        .model("octo", "repo", PullFilter::Open)
+        .with_cache(Some(cached));
+    let request = model.begin(PullRequestMode::Replace).unwrap();
+    // The same pull request id appears on page one and again on page two, where it has moved to
+    // merged. An online append keeps the first position and takes the newer fields; a stored
+    // restore must fold the same way instead of keeping the stale row.
+    let first = page(
+        &model.query(),
+        1,
+        vec![
+            summary_with(
+                7,
+                11,
+                PullState::Open,
+                "Still open",
+                Some("octocat"),
+                "2026-11-01T00:00:00Z",
+            ),
+            summary_with(
+                8,
+                12,
+                PullState::Open,
+                "Second row",
+                Some("octocat"),
+                "2026-11-01T00:00:00Z",
+            ),
+        ],
+        Some(2),
+    );
+    let second = page(
+        &model.query(),
+        2,
+        vec![summary_with(
+            7,
+            11,
+            PullState::Merged,
+            "Merged now",
+            Some("reviewer"),
+            "2026-11-20T00:00:00Z",
+        )],
+        None,
+    );
+    assert!(model.apply_cached(&request, vec![first, second], None));
+    let rows = model.rows();
+    assert_eq!(rows.len(), 2, "the duplicate id is folded, not added twice");
+    assert_eq!(rows[0].id, 7);
+    assert_eq!(rows[0].number, 11, "the first position is kept");
+    assert_eq!(
+        rows[0].state,
+        PullState::Merged,
+        "the later page's fields win"
+    );
+    assert_eq!(rows[0].title, "Merged now");
+    assert_eq!(rows[0].author.as_deref(), Some("reviewer"));
+    assert_eq!(rows[1].number, 12);
+
+    // The online append honours exactly the same fold.
+    let mut online = fixture.model("octo", "repo", PullFilter::Open);
+    let request = online.begin(PullRequestMode::Replace).unwrap();
+    online.finish(
+        &request,
+        Ok(page(
+            &online.query(),
+            1,
+            vec![
+                summary_with(
+                    7,
+                    11,
+                    PullState::Open,
+                    "Still open",
+                    Some("octocat"),
+                    "2026-11-01T00:00:00Z",
+                ),
+                summary_with(
+                    8,
+                    12,
+                    PullState::Open,
+                    "Second row",
+                    Some("octocat"),
+                    "2026-11-01T00:00:00Z",
+                ),
+            ],
+            Some(2),
+        )),
+    );
+    let append = online.begin(PullRequestMode::Append).unwrap();
+    online.finish(
+        &append,
+        Ok(page(
+            &online.query(),
+            2,
+            vec![summary_with(
+                7,
+                11,
+                PullState::Merged,
+                "Merged now",
+                Some("reviewer"),
+                "2026-11-20T00:00:00Z",
+            )],
+            None,
+        )),
+    );
+    assert_eq!(online.rows()[0].id, rows[0].id);
+    assert_eq!(online.rows()[0].state, rows[0].state);
+    assert_eq!(online.rows()[0].title, rows[0].title);
+    assert_eq!(online.rows()[0].author, rows[0].author);
+}

@@ -636,8 +636,12 @@ impl PullListModel {
         }
         // A stored prefix is only as complete as the pages behind it. A partial page stops
         // the prefix there, so its own continuation marker is not offered as readable.
-        let mut rows = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        //
+        // Duplicate ids are folded exactly like an online append: the row keeps the position
+        // where it first appeared but takes the later page's fields, so a cached restore cannot
+        // show an older state than the same pages read online.
+        let mut rows: Vec<PullSummary> = Vec::new();
+        let mut index: HashMap<u64, usize> = HashMap::new();
         let mut reasons = Vec::new();
         let mut partial = false;
         let mut next = None;
@@ -653,7 +657,10 @@ impl PullListModel {
                 }
             }
             for pull in page.pulls {
-                if seen.insert(pull.id) {
+                if let Some(&existing) = index.get(&pull.id) {
+                    rows[existing] = pull;
+                } else {
+                    index.insert(pull.id, rows.len());
                     rows.push(pull);
                 }
             }
