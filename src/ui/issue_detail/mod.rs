@@ -25,6 +25,8 @@ use crate::app::pages::PageAvatars;
 use crate::content::PreparedBody;
 use crate::data::RepoService;
 use crate::data::RepositoryReadContext;
+use crate::data::issue_detail::{CachedReading, LiveComments, LiveIssue, Refresh};
+use crate::domain::error::GitHubError;
 use crate::domain::issue_detail::{IssueDetailError, IssueLocator};
 use crate::domain::repository::RepositoryLocator;
 use crate::github::issue_detail::IssueDetailLimits;
@@ -59,25 +61,17 @@ struct CachedReader {
 }
 
 enum Reply {
-    IssueCached {
+    Cached {
         request: IssueRequest,
-        snapshot: Option<crate::data::Scoped<crate::data::issue_detail::CachedIssueSnapshot>>,
+        snapshot: CachedReading,
     },
-    IssueOnline {
+    Issue {
         request: IssueRequest,
-        result:
-            Result<crate::data::Scoped<crate::domain::issue_detail::IssueDetail>, IssueDetailError>,
+        refresh: Refresh<LiveIssue>,
     },
-    CommentsCached {
+    Comments {
         request: CommentsRequest,
-        snapshot: Option<crate::data::Scoped<crate::data::issue_detail::CachedCommentsSnapshot>>,
-    },
-    CommentsOnline {
-        request: CommentsRequest,
-        result: Result<
-            crate::data::Scoped<crate::domain::issue_detail::IssueCommentsPage>,
-            IssueDetailError,
-        >,
+        refresh: Refresh<LiveComments>,
     },
 }
 
@@ -91,7 +85,6 @@ pub struct IssueDetailView {
     on_action: Option<OnIssueDetailAction>,
 
     inbox: Arc<Mutex<VecDeque<Reply>>>,
-    pending_cache_reads: usize,
     drain_task: Option<Task<()>>,
 
     body_reader: Option<CachedReader>,
@@ -142,7 +135,6 @@ impl IssueDetailView {
             image_provider: None,
             on_action: None,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
-            pending_cache_reads: 0,
             drain_task: None,
             body_reader: None,
             comment_readers: HashMap::new(),
@@ -159,7 +151,6 @@ impl IssueDetailView {
             _visibility: visibility,
         };
         view.request_issue(true, cx);
-        view.request_comments(CommentsRequestMode::Replace, true, cx);
         Ok(view)
     }
 
@@ -212,9 +203,7 @@ impl IssueDetailView {
         if !self.active || !self.controller.current() || self.controller.is_busy() {
             return false;
         }
-        let started_issue = self.request_issue(false, cx);
-        let started_comments = self.request_comments(CommentsRequestMode::Replace, false, cx);
-        started_issue || started_comments
+        self.request_issue(false, cx)
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -224,13 +213,12 @@ impl IssueDetailView {
         } else {
             if !self.controller.issue_loaded && !self.controller.issue_busy {
                 self.request_issue(self.controller.issue.is_none(), cx);
-            }
-            if !self.controller.comments_loaded && self.controller.comments_busy.is_none() {
-                self.request_comments(
-                    CommentsRequestMode::Replace,
-                    self.controller.comments.is_empty(),
-                    cx,
-                );
+            } else if self.controller.comments_busy.is_none()
+                && (!self.controller.comments_loaded
+                    || (self.controller.cached_comments_partial.is_some()
+                        && self.controller.comments_error.is_none()))
+            {
+                self.request_comments(CommentsRequestMode::Replace, cx);
             }
         }
         cx.notify();
@@ -239,7 +227,6 @@ impl IssueDetailView {
     fn shutdown_activity(&mut self, cx: &mut Context<Self>) {
         self.controller.cancel_all();
         self.drain_task = None;
-        self.pending_cache_reads = 0;
         self.inbox.lock().expect("issue detail inbox").clear();
         self.cancel_activity(cx);
     }
@@ -309,16 +296,16 @@ impl IssueDetailView {
     pub(super) fn request_comments(
         &mut self,
         mode: CommentsRequestMode,
-        read_cache: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.active {
+        if !self.active || self.controller.issue_busy || self.controller.issue.is_none() {
             return false;
         }
         let Some(request) = self.controller.begin_comments(mode) else {
             return false;
         };
-        self.dispatch_comments(request, read_cache, cx);
+        self.controller.prepare_comment_display();
+        self.dispatch_comments(request, cx);
         true
     }
 
@@ -335,7 +322,6 @@ impl IssueDetailView {
                     .update(cx, |view, cx| {
                         view.drain_inbox(cx);
                         let has_pending = view.controller.is_busy()
-                            || view.pending_cache_reads > 0
                             || !view.inbox.lock().expect("issue detail inbox").is_empty();
                         if !has_pending {
                             view.drain_task = None;
@@ -350,155 +336,103 @@ impl IssueDetailView {
         }));
     }
 
-    pub(crate) fn drain_inbox(&mut self, cx: &mut Context<Self>) {
-        if self.drain_inbox_quiet() {
+    fn drain_inbox(&mut self, cx: &mut Context<Self>) {
+        if self.apply_replies(cx) {
             cx.notify();
         }
     }
 
-    fn drain_inbox_quiet(&mut self) -> bool {
-        let replies: Vec<Reply> = {
-            let mut inbox = self.inbox.lock().expect("issue detail inbox");
-            inbox.drain(..).collect()
-        };
-        if replies.is_empty() {
-            return false;
-        }
-        let mut changed = false;
+    fn apply_replies(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = self.controller.enforce_cache_authorization();
+        let replies: Vec<_> = self
+            .inbox
+            .lock()
+            .expect("issue detail inbox")
+            .drain(..)
+            .collect();
         for reply in replies {
             changed |= match reply {
-                Reply::IssueCached { request, snapshot } => {
-                    self.pending_cache_reads = self.pending_cache_reads.saturating_sub(1);
-                    self.controller.apply_cached_issue(&request, snapshot)
+                Reply::Cached { request, snapshot } => {
+                    self.controller.apply_cached_reading(&request, snapshot)
                 }
-                Reply::IssueOnline { request, result } => {
-                    self.controller.finish_issue(&request, result)
+                Reply::Issue { request, refresh } => {
+                    let changed = self.controller.finish_issue(&request, refresh);
+                    if changed && self.controller.issue.is_some() {
+                        let weak = cx.weak_entity();
+                        cx.defer(move |cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                view.request_comments(CommentsRequestMode::Replace, cx);
+                            });
+                        });
+                    }
+                    changed
                 }
-                Reply::CommentsCached { request, snapshot } => {
-                    self.pending_cache_reads = self.pending_cache_reads.saturating_sub(1);
-                    self.controller.apply_cached_comments(&request, snapshot)
-                }
-                Reply::CommentsOnline { request, result } => {
-                    self.controller.finish_comments(&request, result)
+                Reply::Comments { request, refresh } => {
+                    self.controller.finish_issue_comments(&request, refresh)
                 }
             };
         }
-        changed
+        changed | self.controller.enforce_cache_authorization()
     }
 
     fn dispatch_issue(&mut self, request: IssueRequest, read_cache: bool, cx: &mut Context<Self>) {
-        if read_cache && self.controller.issue.is_none() {
-            let cache_req = request.clone();
-            let inbox = self.inbox.clone();
-            if self
-                .executor
-                .handle()
-                .spawn(async move {
-                    let snapshot = cache_req.execute_cache().await.ok().flatten();
-                    inbox
-                        .lock()
-                        .expect("issue detail inbox")
-                        .push_back(Reply::IssueCached {
-                            request: cache_req,
-                            snapshot,
-                        });
-                })
-                .is_ok()
-            {
-                self.pending_cache_reads = self.pending_cache_reads.saturating_add(1);
-            }
-        }
-
-        let online_req = request.clone();
+        let online = request.clone();
         let limits = self.limits.clone();
         let inbox = self.inbox.clone();
         let spawned = self.executor.handle().spawn(async move {
-            let result = online_req.execute_online(&limits).await;
+            // Publish both sections from the same cached read before starting revalidation.
+            if read_cache && let Some(snapshot) = online.execute_cache(&limits).await {
+                inbox
+                    .lock()
+                    .expect("issue detail inbox")
+                    .push_back(Reply::Cached {
+                        request: online.clone(),
+                        snapshot,
+                    });
+            }
+            let refresh = online.execute_online(&limits).await;
             inbox
                 .lock()
                 .expect("issue detail inbox")
-                .push_back(Reply::IssueOnline {
-                    request: online_req,
-                    result,
+                .push_back(Reply::Issue {
+                    request: online,
+                    refresh,
                 });
         });
         if spawned.is_err() {
-            self.controller.finish_issue(
-                &request,
-                Err(crate::domain::error::GitHubError::Network {
-                    message: "request executor unavailable".into(),
-                }
-                .into()),
-            );
-            cx.notify();
-            return;
+            self.controller
+                .finish_issue(&request, executor_unavailable());
+        } else {
+            self.ensure_drain_task(cx);
         }
-        self.ensure_drain_task(cx);
         cx.notify();
     }
 
-    fn dispatch_comments(
-        &mut self,
-        request: CommentsRequest,
-        read_cache: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if read_cache
-            && request.mode == CommentsRequestMode::Replace
-            && !self.controller.comments_loaded
-        {
-            let cache_req = request.clone();
-            let limits = self.limits.clone();
-            let inbox = self.inbox.clone();
-            if self
-                .executor
-                .handle()
-                .spawn(async move {
-                    let snapshot = cache_req.execute_cache(&limits).await.ok().flatten();
-                    inbox
-                        .lock()
-                        .expect("issue detail inbox")
-                        .push_back(Reply::CommentsCached {
-                            request: cache_req,
-                            snapshot,
-                        });
-                })
-                .is_ok()
-            {
-                self.pending_cache_reads = self.pending_cache_reads.saturating_add(1);
-            }
-        }
-
-        let online_req = request.clone();
+    fn dispatch_comments(&mut self, request: CommentsRequest, cx: &mut Context<Self>) {
+        let online = request.clone();
         let limits = self.limits.clone();
         let inbox = self.inbox.clone();
         let spawned = self.executor.handle().spawn(async move {
-            let result = online_req.execute_online(&limits).await;
+            let refresh = online.execute_online(&limits).await;
             inbox
                 .lock()
                 .expect("issue detail inbox")
-                .push_back(Reply::CommentsOnline {
-                    request: online_req,
-                    result,
+                .push_back(Reply::Comments {
+                    request: online,
+                    refresh,
                 });
         });
         if spawned.is_err() {
-            self.controller.finish_comments(
-                &request,
-                Err(crate::domain::error::GitHubError::Network {
-                    message: "request executor unavailable".into(),
-                }
-                .into()),
-            );
-            cx.notify();
-            return;
+            self.controller
+                .finish_issue_comments(&request, executor_unavailable());
+        } else {
+            self.ensure_drain_task(cx);
         }
-        self.ensure_drain_task(cx);
         cx.notify();
     }
 
     pub(super) fn emit(&self, action: IssueDetailAction, window: &mut Window, cx: &mut App) {
-        if !self.active || !self.controller.current() {
+        if !self.active || !self.controller.current() || !self.controller.reading_is_authorized() {
             return;
         }
         let context_ok = match &action {
@@ -629,6 +563,16 @@ impl IssueDetailView {
     }
 }
 
+fn executor_unavailable<T>() -> Refresh<T> {
+    Refresh {
+        result: Err(GitHubError::Network {
+            message: "request executor unavailable".into(),
+        }
+        .into()),
+        no_store: false,
+    }
+}
+
 fn body_digest(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
@@ -667,8 +611,7 @@ impl Focusable for IssueDetailView {
 
 impl Render for IssueDetailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.drain_inbox_quiet();
-        self.controller.enforce_cache_authorization();
+        self.apply_replies(cx);
         self.sync_time_task(window, cx);
         let current = self.controller.current();
         if !current {

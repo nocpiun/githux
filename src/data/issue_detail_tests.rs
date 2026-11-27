@@ -95,15 +95,34 @@ impl Transport for ScriptedTransport {
                 let _ = entered.send(());
                 let _ = resume.await;
             }
+            if url.path().starts_with("/repos/acme/") && !url.path().contains("/issues/") {
+                let name = url.path().rsplit('/').next().unwrap();
+                let id = match name {
+                    "one" => 10,
+                    "two" => 20,
+                    _ => 30,
+                };
+                return Ok(json_response(200, &json!({
+                    "id": id, "name": name, "owner": {"id": 1, "login": "acme"}, "private": true,
+                    "fork": false, "archived": false
+                }).to_string()));
+            }
             if url.path().ends_with("/comments") {
                 return Ok(json_response(200, "[]"));
             }
             let body = self.default_issue_body.lock().unwrap().clone();
+            let number = url
+                .path()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
             Ok(json_response(
                 200,
                 &json!({
                     "id": 100,
-                    "number": 42,
+                    "number": number,
                     "title": "Sample issue",
                     "state": "open",
                     "user": { "id": 1, "login": "account-a" },
@@ -168,327 +187,268 @@ async fn open_with_cache(
     service
 }
 
-#[tokio::test]
-async fn caches_issue_and_comments_and_isolates_across_accounts_and_repos() {
-    let temp = tempfile::tempdir().unwrap();
-    let transport = ScriptedTransport::new();
-    let service = open_with_cache(&temp, transport.clone()).await;
-    let repos = service.repo_service();
-    let session_a = repos.issue_detail_session().unwrap();
-    let locator_one = IssueLocator::new("acme", "one", 42).unwrap();
-    let locator_two = IssueLocator::new("acme", "two", 42).unwrap();
-    let limits = IssueDetailLimits::default();
+async fn read_issue(
+    session: &IssueDetailSession,
+    locator: &IssueLocator,
+) -> Result<LiveIssue, IssueDetailError> {
+    session
+        .refresh_issue(
+            locator,
+            &IssueDetailLimits::default(),
+            CancellationToken::default(),
+        )
+        .await
+        .result
+}
 
-    // Online fetch populates cache for acme/one #42 under account-a.
-    let fetched = session_a
-        .fetch_issue(&locator_one, &limits, CancellationToken::default())
+async fn cached(session: &IssueDetailSession, locator: &IssueLocator) -> Option<CachedReading> {
+    session
+        .cached(
+            locator,
+            &IssueDetailLimits::default(),
+            &CancellationToken::default(),
+        )
         .await
-        .unwrap();
-    assert_eq!(fetched.value.body.as_deref(), Some("Initial body"));
+}
 
-    // Cached read hits for acme/one #42 (case-insensitively), misses for acme/two #42.
-    let alias = IssueLocator::new("ACME", "ONE", 42).unwrap();
-    let hit = session_a
-        .read_cached_issue(&alias, CancellationToken::default())
+async fn first_comments(
+    session: &IssueDetailSession,
+    locator: &IssueLocator,
+    live: &LiveIssue,
+) -> Refresh<LiveComments> {
+    session
+        .refresh_comments(
+            locator,
+            live.scope.as_ref(),
+            None,
+            None,
+            &IssueDetailLimits::default(),
+            CancellationToken::default(),
+            true,
+        )
         .await
-        .unwrap()
-        .expect("cached hit for same issue");
-    assert_eq!(hit.value.issue.body.as_deref(), Some("Initial body"));
-    assert!(hit.value.authorization.is_current());
-
-    let other_repo = session_a
-        .read_cached_issue(&locator_two, CancellationToken::default())
-        .await
-        .unwrap();
-    assert!(
-        other_repo.is_none(),
-        "same issue number in another repo must not hit"
-    );
-
-    // Single-page comments (no next page) and confirmed empty comments both hit cache.
-    transport.push(
-        "/repos/acme/one/issues/42/comments",
-        json_response(
-            200,
-            &json!([{
-                "id": 701,
-                "user": { "id": 1, "login": "account-a" },
-                "body": "Single page cached comment",
-                "created_at": "2026-11-01T12:00:00Z",
-                "updated_at": "2026-11-01T12:00:00Z"
-            }])
-            .to_string(),
-        ),
-    );
-    let live_comments = session_a
-        .fetch_comments_page(&locator_one, None, &limits, CancellationToken::default())
-        .await
-        .unwrap();
-    assert_eq!(live_comments.value.comments.len(), 1);
-    assert!(live_comments.value.next.is_none());
-    let cached_comments = session_a
-        .read_cached_comments_first_page(&alias, &limits, CancellationToken::default())
-        .await
-        .unwrap()
-        .expect("single-page comments with has_next=false must hit cache");
-    assert_eq!(cached_comments.value.page.comments.len(), 1);
-    assert!(cached_comments.value.page.next.is_none());
-
-    // Confirmed empty comments page also hits cache.
-    let empty_comments = session_a
-        .fetch_comments_page(&locator_two, None, &limits, CancellationToken::default())
-        .await
-        .unwrap();
-    assert!(empty_comments.value.comments.is_empty());
-    let cached_empty = session_a
-        .read_cached_comments_first_page(&locator_two, &limits, CancellationToken::default())
-        .await
-        .unwrap()
-        .expect("confirmed empty comments page must hit cache");
-    assert!(cached_empty.value.page.comments.is_empty());
-    assert!(cached_empty.value.page.next.is_none());
-
-    // Switch to account-b: account-a's cached snapshot must never appear.
-    service
-        .login(Pat::new("ghp_account-b".to_string()))
-        .await
-        .unwrap();
-    let session_b = repos.issue_detail_session().unwrap();
-    assert!(!session_a.verify());
-    let b_cached = session_b
-        .read_cached_issue(&locator_one, CancellationToken::default())
-        .await
-        .unwrap();
-    assert!(
-        b_cached.is_none(),
-        "account-b must not read account-a's cached issue"
-    );
 }
 
 #[tokio::test]
-async fn no_store_and_missing_or_forbidden_invalidate_cache_while_transient_preserves_it() {
+async fn caches_complete_comments_and_isolates_account_repository_and_selection() {
     let temp = tempfile::tempdir().unwrap();
     let transport = ScriptedTransport::new();
     let service = open_with_cache(&temp, transport.clone()).await;
     let repos = service.repo_service();
     let session = repos.issue_detail_session().unwrap();
-    let locator = IssueLocator::new("acme", "widgets", 42).unwrap();
-    let limits = IssueDetailLimits::default();
+    let one = IssueLocator::new("acme", "one", 42).unwrap();
+    let two = IssueLocator::new("acme", "two", 42).unwrap();
+    let alias = IssueLocator::new("ACME", "ONE", 42).unwrap();
 
-    // Populate cache.
-    session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
+    let live = read_issue(&session, &one).await.unwrap();
+    let saved = cached(&session, &alias).await.unwrap();
+    assert_eq!(saved.scope.repository, 10);
+    assert_eq!(saved.issue.body.as_deref(), Some("Initial body"));
+    assert!(cached(&session, &two).await.is_none());
+    first_comments(&session, &one, &live).await.result.unwrap();
+    let empty = cached(&session, &one).await.unwrap().comments.unwrap();
+    assert!(empty.comments.is_empty());
+    assert!(!empty.partial);
+
+    service
+        .login(Pat::from_str("synthetic-account-b"))
+        .await
+        .unwrap();
+    assert!(!session.verify());
+    assert!(
+        cached(&repos.issue_detail_session().unwrap(), &one)
+            .await
+            .is_none()
+    );
+    service
+        .set_active(AccountKey::new(1, HostId::github()))
         .await
         .unwrap();
     assert!(
-        session
-            .read_cached_issue(&locator, CancellationToken::default())
+        !session.verify(),
+        "switching back must not revive the old session"
+    );
+    assert!(
+        cached(&repos.issue_detail_session().unwrap(), &one)
             .await
-            .unwrap()
             .is_some()
     );
+}
 
-    // Transient 503 preserves the cached snapshot.
-    transport.push(
-        "/repos/acme/widgets/issues/42",
-        response_with_headers(503, "{}", &[]),
-    );
-    let err = session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
-        .await
-        .unwrap_err();
-    assert!(err.is_transient());
-    assert!(
-        session
-            .read_cached_issue(&locator, CancellationToken::default())
-            .await
-            .unwrap()
-            .is_some(),
-        "transient 503 must preserve cached snapshot"
-    );
+#[tokio::test]
+async fn issue_and_comments_no_store_and_denial_invalidate_the_corresponding_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let transport = ScriptedTransport::new();
+    let service = open_with_cache(&temp, transport.clone()).await;
+    let session = service.repo_service().issue_detail_session().unwrap();
+    let target = IssueLocator::new("acme", "widgets", 42).unwrap();
+    let path = "/repos/acme/widgets/issues/42";
+    let comments = "/repos/acme/widgets/issues/42/comments";
 
-    // 404 invalidates the cached snapshot.
-    transport.push(
-        "/repos/acme/widgets/issues/42",
-        response_with_headers(404, "{}", &[]),
-    );
-    let err = session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
+    let live = read_issue(&session, &target).await.unwrap();
+    first_comments(&session, &target, &live)
         .await
-        .unwrap_err();
-    assert!(err.is_missing());
-    assert!(
-        session
-            .read_cached_issue(&locator, CancellationToken::default())
-            .await
-            .unwrap()
-            .is_none(),
-        "404 must invalidate cached snapshot"
-    );
-
-    // Re-populate cache, then verify Cache-Control: no-store invalidates it (L020).
-    transport.set_default_body("Fresh body");
-    session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
-        .await
+        .result
         .unwrap();
+    transport.push(path, json_response(503, "{}"));
     assert!(
-        session
-            .read_cached_issue(&locator, CancellationToken::default())
+        read_issue(&session, &target)
             .await
-            .unwrap()
-            .is_some()
+            .unwrap_err()
+            .is_transient()
     );
+    assert!(cached(&session, &target).await.unwrap().comments.is_some());
 
     transport.push(
-        "/repos/acme/widgets/issues/42",
+        comments,
+        response_with_headers(503, "{}", &[("cache-control", "no-store")]),
+    );
+    let attempt = first_comments(&session, &target, &live).await;
+    assert!(attempt.no_store && attempt.result.unwrap_err().is_transient());
+    assert!(cached(&session, &target).await.unwrap().comments.is_none());
+
+    first_comments(&session, &target, &live)
+        .await
+        .result
+        .unwrap();
+    transport.push(
+        path,
+        response_with_headers(503, "{}", &[("cache-control", "no-store")]),
+    );
+    assert!(
+        read_issue(&session, &target)
+            .await
+            .unwrap_err()
+            .is_transient()
+    );
+    assert!(cached(&session, &target).await.is_none());
+
+    let live = read_issue(&session, &target).await.unwrap();
+    transport.push(comments, json_response(403, "{}"));
+    assert!(
+        first_comments(&session, &target, &live)
+            .await
+            .result
+            .unwrap_err()
+            .is_auth_or_permission()
+    );
+    assert!(cached(&session, &target).await.is_none());
+
+    read_issue(&session, &target).await.unwrap();
+    transport.push(
+        path,
         response_with_headers(
             200,
             &json!({
-                "id": 100,
-                "number": 42,
-                "title": "Sample issue",
-                "state": "open",
-                "user": { "id": 1, "login": "account-a" },
-                "body": "Secret body",
-                "comments": 0,
-                "labels": [],
-                "created_at": "2026-11-01T10:00:00Z",
-                "updated_at": "2026-11-01T10:00:00Z"
+                "id": 100, "number": 42, "title": "Sample issue", "state": "open",
+                "body": "Do not retain", "created_at": "", "updated_at": ""
             })
             .to_string(),
             &[("cache-control", "no-store")],
         ),
     );
-    let live = session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
-        .await
-        .unwrap();
-    assert_eq!(live.value.body.as_deref(), Some("Secret body"));
-    assert!(
-        session
-            .read_cached_issue(&locator, CancellationToken::default())
-            .await
-            .unwrap()
-            .is_none(),
-        "no-store must invalidate any prior cached snapshot"
-    );
-
-    // Switching back and forth advances epoch so stale session is rejected.
-    service
-        .login(Pat::new("ghp_account-b".to_string()))
-        .await
-        .unwrap();
-    service
-        .set_active(AccountKey::new(1, HostId::github()))
-        .await
-        .unwrap();
-    let stale = session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
-        .await
-        .unwrap_err();
-    assert_eq!(stale, IssueDetailError::GitHub(GitHubError::StaleContext));
+    let live = read_issue(&session, &target).await.unwrap();
+    assert_eq!(live.issue.body.as_deref(), Some("Do not retain"));
+    assert!(live.scope.is_none());
+    assert!(cached(&session, &target).await.is_none());
 }
 
 #[tokio::test]
-async fn in_flight_read_does_not_repopulate_snapshot_invalidated_before_completion() {
+async fn in_flight_issue_cannot_restore_a_snapshot_after_concurrent_denial() {
     let temp = tempfile::tempdir().unwrap();
     let transport = ScriptedTransport::new();
     let service = open_with_cache(&temp, transport.clone()).await;
-    let repos = service.repo_service();
-    let session = repos.issue_detail_session().unwrap();
+    let session = service.repo_service().issue_detail_session().unwrap();
     let locator = IssueLocator::new("acme", "widgets", 99).unwrap();
-    let limits = IssueDetailLimits::default();
+    read_issue(&session, &locator).await.unwrap();
 
-    // Gate the first online fetch so we can invalidate the cache while it is in flight.
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
     transport.set_gate(entered_tx, resume_rx);
-
-    let session_in_flight = session.clone();
-    let locator_in_flight = locator.clone();
-    let limits_in_flight = limits.clone();
-    let in_flight = tokio::spawn(async move {
-        session_in_flight
-            .fetch_issue(
-                &locator_in_flight,
-                &limits_in_flight,
-                CancellationToken::default(),
-            )
-            .await
+    let pending = tokio::spawn({
+        let session = session.clone();
+        let locator = locator.clone();
+        async move { read_issue(&session, &locator).await }
     });
-
-    // Wait until the first fetch has acquired its write ticket and entered transport.
-    entered_rx.await.unwrap();
-
-    // Concurrent 404 invalidates the slot while the first fetch is still in flight.
-    transport.push(
-        "/repos/acme/widgets/issues/99",
-        response_with_headers(404, "{}", &[]),
-    );
-    let err = session
-        .fetch_issue(&locator, &limits, CancellationToken::default())
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered_rx)
         .await
-        .unwrap_err();
-    assert!(err.is_missing());
-
-    // Release the older in-flight fetch; its stale write ticket must NOT repopulate the cache.
-    let _ = resume_tx.send(());
-    let _ = in_flight.await.unwrap().unwrap();
-
+        .unwrap()
+        .unwrap();
+    transport.push("/repos/acme/widgets/issues/99", json_response(404, "{}"));
     assert!(
-        session
-            .read_cached_issue(&locator, CancellationToken::default())
+        read_issue(&session, &locator)
             .await
-            .unwrap()
-            .is_none(),
-        "stale in-flight fetch must not repopulate a cache slot invalidated while it was running"
+            .unwrap_err()
+            .is_missing()
     );
+    resume_tx.send(()).unwrap();
+    pending.await.unwrap().unwrap();
+    assert!(cached(&session, &locator).await.is_none());
 }
 
 #[tokio::test]
-async fn unauthorized_response_quarantines_entire_account_cache() {
+async fn repository_revocation_and_credential_rotation_require_fresh_authorized_reads() {
     let temp = tempfile::tempdir().unwrap();
     let transport = ScriptedTransport::new();
     let service = open_with_cache(&temp, transport.clone()).await;
     let repos = service.repo_service();
     let session = repos.issue_detail_session().unwrap();
-    let issue_one = IssueLocator::new("acme", "one", 1).unwrap();
-    let issue_two = IssueLocator::new("acme", "two", 2).unwrap();
-    let limits = IssueDetailLimits::default();
+    let target = IssueLocator::new("acme", "two", 2).unwrap();
+    read_issue(&session, &target).await.unwrap();
+    let old = cached(&session, &target).await.unwrap();
+    let cache = repos.cache(session.context()).unwrap();
+    cache
+        .store()
+        .revoke_repository(cache.scope(), Some(20))
+        .unwrap();
+    assert!(!old.authorization.is_current());
+    assert!(cached(&session, &target).await.is_none());
+    read_issue(&session, &target).await.unwrap();
+    let before_rotation = cached(&session, &target).await.unwrap();
 
-    // Populate cache for issue_two.
-    session
-        .fetch_issue(&issue_two, &limits, CancellationToken::default())
+    service
+        .replace(
+            AccountKey::new(1, HostId::github()),
+            Pat::from_str("synthetic-issue-replacement"),
+        )
         .await
         .unwrap();
-    let cached_before = session
-        .read_cached_issue(&issue_two, CancellationToken::default())
-        .await
-        .unwrap()
-        .expect("issue_two should be cached before 401");
-    assert!(cached_before.value.authorization.is_current());
-
-    // A 401 on issue_one must quarantine the whole account cache, revoking issue_two as well.
-    transport.push(
-        "/repos/acme/one/issues/1",
-        response_with_headers(401, "{}", &[]),
-    );
-    let err = session
-        .fetch_issue(&issue_one, &limits, CancellationToken::default())
-        .await
-        .unwrap_err();
-    assert_eq!(err, IssueDetailError::GitHub(GitHubError::Unauthorized));
+    let replacement = repos.issue_detail_session().unwrap();
+    assert!(!session.verify());
+    assert!(!before_rotation.authorization.is_current());
+    assert!(cached(&replacement, &target).await.is_none());
+    transport.push("/repos/acme/two", json_response(503, "{}"));
     assert!(
-        !cached_before.value.authorization.is_current(),
-        "existing authorization token must be invalidated by 401 quarantine"
-    );
-    assert!(
-        session
-            .read_cached_issue(&issue_two, CancellationToken::default())
+        read_issue(&replacement, &target)
             .await
             .unwrap()
-            .is_none(),
-        "quarantined account cache must deny reads for other issues"
+            .scope
+            .is_none()
     );
+    assert!(cached(&replacement, &target).await.is_none());
+    transport.set_default_body("Read under replacement credentials");
+    let live = read_issue(&replacement, &target).await.unwrap();
+    assert!(
+        live.scope.is_some(),
+        "fresh metadata must unlock the numeric repository gate"
+    );
+    first_comments(&replacement, &target, &live)
+        .await
+        .result
+        .unwrap();
+    let saved = cached(&replacement, &target).await.unwrap();
+    assert_eq!(
+        saved.issue.body.as_deref(),
+        Some("Read under replacement credentials")
+    );
+    assert!(saved.comments.is_some());
+
+    transport.push("/repos/acme/one/issues/1", json_response(401, "{}"));
+    let other = IssueLocator::new("acme", "one", 1).unwrap();
+    assert_eq!(
+        read_issue(&replacement, &other).await.unwrap_err(),
+        GitHubError::Unauthorized.into()
+    );
+    assert!(!saved.authorization.is_current());
+    assert!(cached(&replacement, &target).await.is_none());
 }

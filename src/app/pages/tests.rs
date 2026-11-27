@@ -4,6 +4,8 @@
 //! ones. Only external boundaries are injected: a temporary SQLite directory, an in-memory
 //! credential store and a deterministic transport.
 
+#[path = "issue_detail_offline_tests.rs"]
+mod issue_detail_offline_tests;
 #[path = "pr_conversation_offline_tests.rs"]
 mod pr_conversation_offline_tests;
 #[path = "pr_files_integration_tests.rs"]
