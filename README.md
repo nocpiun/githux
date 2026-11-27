@@ -26,7 +26,7 @@ Windows 正常应用的 debug / release 构建均使用 GUI 子系统，直接�
 
 island 顶部是应用级标签条：点击侧栏仓库/Profile、底部入口或 palette 结果会打开或激活对应标签（同一资源复用、不重复），`Ctrl+W` 关闭当前标签，`Ctrl+Tab` / `Shift+Ctrl+Tab` 切换；关闭活动标签切到左邻，关闭最后一个标签后新建 Home。Home、Settings 与全局占位页按路由单例，仓库按 `owner/repo` 单例（大小写不敏感）。每个标签保留自己的页面滚动位置、焦点与仓库会话选择。标签数量不设上限：放不下时标签条自行横向滚动（滚轮 / `Shift`+滚轮 / 原生水平滚动 / 鼠标悬停时淡入的细滚动条），只影响标签条本身；新建、切换或 Tab 聚焦会把目标标签滚入视野。标签可以横向拖拽排序（按标签身份移动，不重建会话），鼠标中键在标签任意位置关闭该标签（不先激活），关闭按钮只在 hover 或活动标签上出现。标签条最右侧有一个固定的工具栏，本轮只放一个未接逻辑的禁用刷新入口。标签文本可省略，悬停显示完整名称。
 
-页面内容：Home 显示当前账户参与的 open Issues/PRs；Feed 只显示关注账号的合并 PR、星标仓库与创建仓库，滚动到底部继续读取 API 可用的历史页。仓库卡片显示简介，PR 显示描述摘要，Read more 打开 Githux 内部 PR 标签（详情内容按当前约定留空）。Repository 挂载真实分支、文件树和 Markdown/源码阅读器；Profile 展示公开资料、自然高度 README、Pinned/Popular 与贡献图。缺失的可选 README 不占位。Settings 仍是过渡账户入口；通知、全局 Issues/PRs 等未接入的页面内容继续留空。切账户恢复该账户进程内标签，重启从 Home 开始。关闭最后窗口退出应用。IME、多 DPI/跨屏与触控板仍需专项验收，macOS/Linux 保留编译 CI，尚未做产品适配。
+页面内容：Home 显示当前账户参与的 open Issues/PRs；Feed 只显示关注账号的合并 PR、星标仓库与创建仓库，滚动到底部继续读取 API 可用的历史页。仓库卡片显示简介，PR 显示描述摘要，Read more 与标题打开应用内 Issue 详情或 PR Conversation，不再是空占位。Repository 挂载真实分支、文件树、Markdown/源码阅读器，以及 Issues 与 Pull requests 两个仓库列表；Issue 行进入 Issue 详情，PR 行进入 Conversation，Files changed 在 Conversation 中首次点击时读取，均不复用全局个人搜索。全局 Issues/PRs 列表与 Notifications 已接入，标题打开同一目标详情；Notifications 保存最近已加载条目，重启断网后按上次同步状态可读，全局列表仍是在线搜索结果。Settings 挂载正式账户页。Profile 展示公开资料、自然高度 README、Pinned/Popular 与贡献图，缺失的可选 README 不占位。已验证的离线路径只有仓库文件与 README、仓库 Issues 首批、仓库 PR 列表中实际翻过的连续页、Issue 详情正文与已读评论、PR Conversation 描述与已读普通评论，以及 Notifications 最近条目；Files changed、远程写操作和搜索没有离线承诺。切账户恢复该账户进程内标签，重启从 Home 开始，关闭最后窗口退出应用。Windows 日常使用前的阅读验收清单见[路线图](docs/roadmap.md#windows-日常试用issuepr-阅读清单)；IME、多 DPI/跨屏与触控板仍需真实 Windows 专项验收，macOS/Linux 保留编译 CI，尚未做产品适配。
 
 ## 构建检查
 

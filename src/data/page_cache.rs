@@ -30,6 +30,7 @@ mod localhost_tests;
 mod readme_tests;
 mod reads;
 mod repository_issues;
+mod repository_pulls;
 #[cfg(test)]
 mod revocation_tests;
 #[cfg(test)]
