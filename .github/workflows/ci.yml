@@ -195,9 +195,7 @@ jobs:
         run: ./scripts/prepare-windows-runtime.ps1 -Destination "dist/${{ matrix.artifact-name }}" -Architecture x64
       # Runtime preparation supplies the platform-specific SDK licenses on Windows.
       - name: Verify artifact notices
-        env:
-          RUNNER_PLATFORM: ${{ runner.os }}
-        run: node .github/scripts/stage-third-party-notices.mjs verify --destination "dist/${{ matrix.artifact-name }}" --platform "${RUNNER_PLATFORM}"
+        run: node .github/scripts/stage-third-party-notices.mjs verify --destination "dist/${{ matrix.artifact-name }}" --platform "${{ runner.os }}"
       - name: Archive non-Windows artifact
         if: runner.os != 'Windows'
         shell: bash

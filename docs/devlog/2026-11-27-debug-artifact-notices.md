@@ -15,6 +15,7 @@
 - 新增 6 个离线测试，覆盖 canonical/旧路径、缺失与篡改、平台 runtime 条件、CLI 参数和符号链接。CI 的 `changes` job 运行这些测试；build 在上传前 verify。非 Windows 在 verify 后才 tar，保持 artifact 顶层目录、binary 名与执行命令；Windows 仍先运行现有 runtime preparation。
 - 不改动四平台 Debug target、artifact 名称、缓存或发布路径。未下载 registry 许可文本、未替任何双许可项做决定，未把 748 个 lock package 的 SPDX 清单冒充完整随附文本；未覆盖项继续保留在[第三方资产清单](../third-party-assets.md)。
 - 负责人在 worktree 复核指出 `THIRD_PARTY_NOTICES.md` 与 `docs/third-party-assets.md` 已成为 staging 输入，却仍会单独命中文档快路径。分类器现在仅对这两个精确路径设置 `app: true/scripts: false`，使后续单文件修改也产出包含新版声明的包；新增单文件回归先在旧分类器失败，再随修复通过，普通文档仍保持跳过。
+- Codex 首轮指出 verify 默认 shell 在 Windows 为 PowerShell，不能展开 Bash 的 `${RUNNER_PLATFORM}`。改为直接写入 GitHub expression `${{ runner.os }}`，不再依赖 shell 环境变量语法；此问题可直接修复，无待裁决项。
 - 按负责人补充，仅同步 [AGENTS.md](../../AGENTS.md) 与 [产品约定](../product.md)：Githux UI 的拉丁、数字、标点与中文均直接衍生自 Noto Sans SC 的真实 400/500/600/700 字重，不是 Noto Sans 加 SC 回退；代码仍为 Google Sans Code。两处链接到[当前字体清单](../../assets/fonts/README.md)，不改字体实现或其他产品范围。
 
 ## 验证
