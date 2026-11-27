@@ -1,5 +1,4 @@
-//! Production Notifications host. It joins the account-scoped inbox controller to the accepted
-//! Notifications component and routes its single typed repository navigation through the Shell.
+//! Production Notifications host for the account-scoped inbox and typed Shell navigation.
 use std::rc::Rc;
 
 use gpui::{AnyElement, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
@@ -10,6 +9,9 @@ use crate::ui::notifications::NotificationsView;
 use crate::workspace::Route;
 
 use super::{NavigationSink, PageNavigation};
+
+#[cfg(test)]
+mod offline_tests;
 
 pub struct NotificationsPage {
     view: Option<Entity<NotificationsView>>,
@@ -145,10 +147,7 @@ impl Render for NotificationsPage {
         if let Some(view) = self.view.clone() {
             return view.into_any_element();
         }
-        placeholder(
-            "Sign in to read notifications. There is no offline page cache.",
-            cx,
-        )
+        placeholder("Sign in to read notifications.", cx)
     }
 }
 

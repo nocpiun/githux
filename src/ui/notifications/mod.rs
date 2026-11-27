@@ -66,6 +66,7 @@ pub struct NotificationsView {
     fixed_now: bool,
     active: bool,
     time_task: Option<gpui::Task<()>>,
+    authorization_task: Option<gpui::Task<()>>,
     cooldown_until: Option<Instant>,
     action_cooldown_until: Option<Instant>,
     cooldown_wake: Option<gpui::Task<()>>,
@@ -119,6 +120,7 @@ impl NotificationsView {
             fixed_now: false,
             active: true,
             time_task: None,
+            authorization_task: None,
             cooldown_until: None,
             action_cooldown_until: None,
             cooldown_wake: None,
@@ -177,7 +179,10 @@ impl NotificationsView {
     /// True when the retained view never completed its first read and has no request running.
     /// A confirmed empty inbox (`loaded`, zero rows, no error) is a real result and is not resumed.
     fn resume_needed(&self) -> bool {
-        !self.snapshot.loaded && self.snapshot.busy.is_none() && self.snapshot.error.is_none()
+        (!self.snapshot.loaded || self.snapshot.historical_at_ms.is_some())
+            && self.snapshot.busy.is_none()
+            && self.snapshot.error.is_none()
+            && self.snapshot.partial.is_empty()
     }
 
     /// An interrupted initial read restarts as `First`; the controller rejects a duplicate first
@@ -220,6 +225,7 @@ impl NotificationsView {
 
     fn cancel_activity(&mut self) {
         self.time_task = None;
+        self.authorization_task = None;
         self.cooldown_wake = None;
         scroll::cancel_region(&mut self.bars, &self.motion);
     }
@@ -241,6 +247,7 @@ impl NotificationsView {
             return;
         }
         self.sync_cooldown_wake(cx);
+        self.sync_authorization_task(cx);
         if self.fixed_now || self.snapshot.items.is_empty() {
             self.time_task = None;
             return;
@@ -259,6 +266,32 @@ impl NotificationsView {
                         })
                         .is_err()
                     {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    // Invalidating a cache ticket is atomic. While the window is idle, check
+    // it on a short timer so a revoked row is retired without user input.
+    fn sync_authorization_task(&mut self, cx: &mut Context<Self>) {
+        if !self.snapshot.has_display_authorization() || self.snapshot.items.is_empty() {
+            self.authorization_task = None;
+        } else if self.authorization_task.is_none() {
+            self.authorization_task = Some(cx.spawn(async |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let current = this.update(cx, |view, cx| {
+                        if view.controller.verify() && view.snapshot.display_is_current() {
+                            return true;
+                        }
+                        view.sync(cx);
+                        false
+                    });
+                    if !matches!(current, Ok(true)) {
                         break;
                     }
                 }
@@ -339,12 +372,17 @@ impl NotificationsView {
         };
         self.sync(cx);
         let controller = self.controller.clone();
+        let (history_tx, history_rx) = tokio::sync::oneshot::channel();
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .executor
             .handle()
             .spawn(async move {
-                controller.execute(request).await;
+                controller
+                    .execute_with_history(request, || {
+                        let _ = history_tx.send(());
+                    })
+                    .await;
                 let _ = tx.send(());
             })
             .is_err()
@@ -360,6 +398,9 @@ impl NotificationsView {
             return;
         }
         cx.spawn(async move |weak, cx| {
+            if history_rx.await.is_ok() {
+                let _ = weak.update(cx, |view, cx| view.sync(cx));
+            }
             if rx.await.is_ok() {
                 let _ = weak.update(cx, |view, cx| view.sync(cx));
             }
@@ -373,6 +414,10 @@ impl NotificationsView {
         action: ThreadAction,
         cx: &mut Context<Self>,
     ) {
+        if !self.snapshot.display_is_current() {
+            self.sync(cx);
+            return;
+        }
         let request = match self.controller.begin_thread_action(&thread_id, action) {
             Ok(Some(request)) => request,
             Ok(None) | Err(_) => {
@@ -403,6 +448,7 @@ impl NotificationsView {
 
     fn navigate(&self, index: usize, window: &mut Window, cx: &mut App) {
         if self.controller.verify()
+            && self.snapshot.display_is_current()
             && let Some(item) = self.snapshot.items.get(index)
         {
             (self.on_repository)(
@@ -420,7 +466,7 @@ impl NotificationsView {
     /// subject belongs to this thread's repository and type. A stale account
     /// session refuses the callback even if an old row is still on screen.
     fn navigate_subject(&self, index: usize, window: &mut Window, cx: &mut App) {
-        if !self.controller.verify() {
+        if !self.controller.verify() || !self.snapshot.display_is_current() {
             return;
         }
         let Some(target) = self
@@ -710,7 +756,9 @@ impl NotificationsView {
             state,
             Some(ThreadActionState::UnsubscribedPendingDone { .. })
         );
-        let blocked = action_cooling || matches!(state, Some(ThreadActionState::Busy(_)));
+        let blocked = self.snapshot.historical_at_ms.is_some()
+            || action_cooling
+            || matches!(state, Some(ThreadActionState::Busy(_)));
         let busy_action = match state {
             Some(ThreadActionState::Busy(action)) => Some(action),
             _ => None,
@@ -828,6 +876,8 @@ impl Render for NotificationsView {
         if !self.controller.verify() && (self.snapshot.loaded || self.snapshot.busy.is_some()) {
             self.controller.cancel();
             self.sync(cx);
+        } else if !self.snapshot.display_is_current() {
+            self.sync(cx);
         }
         let now = self.clock.elapsed().as_millis() as u64;
         let reduced = cx.reduce_motion();
@@ -943,17 +993,40 @@ impl Render for NotificationsView {
             } else {
                 RequestKind::Refresh
             };
-            IconButton::new("notifications-error", IconName::CircleAlert)
-                .size(ControlSize::Sm)
-                .disabled(busy)
-                .tooltip(tooltip)
-                .on_click({
-                    let weak = cx.entity().downgrade();
-                    move |_, _, cx| {
-                        let _ = weak.update(cx, |view, cx| view.request(kind, cx));
-                    }
-                })
-                .into_any_element()
+            div().debug_selector(|| "notifications-error".into()).child(
+                IconButton::new("notifications-error", IconName::CircleAlert)
+                    .size(ControlSize::Sm)
+                    .disabled(
+                        busy || (kind == RequestKind::Refresh && self.is_cooling())
+                            || !error.is_transient(),
+                    )
+                    .tooltip(tooltip)
+                    .on_click({
+                        let weak = cx.entity().downgrade();
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |view, cx| view.request(kind, cx));
+                        }
+                    }),
+            )
+        });
+        let historical = snapshot.historical_at_ms.map(|stamp| {
+            let time = chrono::DateTime::from_timestamp_millis(stamp)
+                .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string());
+            let label = if snapshot.error.is_some() && !busy {
+                "Saved notifications · refresh failed"
+            } else {
+                "Saved notifications"
+            };
+            div()
+                .id("notifications-saved")
+                .debug_selector(|| "notifications-saved".into())
+                .text_size(cx.theme().text_size(TextSize::Xs))
+                .text_color(colors.fg_subtle)
+                .tooltip(Tooltip::text(time.map_or_else(
+                    || "Showing previously loaded notifications".into(),
+                    |time| format!("Last synced {time}"),
+                )))
+                .child(label)
         });
         let partial = !snapshot.partial.is_empty();
         let empty = snapshot.is_empty();
@@ -1069,16 +1142,19 @@ impl Render for NotificationsView {
             .text_color(colors.fg)
             .child(visible_lifetime(cx))
             .child(header)
-            .when(error.is_some() || partial, |element| {
-                element.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .children(error)
-                        .when(partial, |row| {
-                            row.child(
+            .when(
+                error.is_some() || historical.is_some() || partial,
+                |element| {
+                    element.child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(historical)
+                            .children(error)
+                            .when(partial, |row| {
+                                row.child(
                                 div()
                                     .id("notifications-partial")
                                     .debug_selector(|| "notifications-partial".into())
@@ -1090,9 +1166,10 @@ impl Render for NotificationsView {
                                     )))
                                     .child("Partial results"),
                             )
-                        }),
-                )
-            })
+                            }),
+                    )
+                },
+            )
             .child(viewport)
             .when(has_more, |element| {
                 element.child(

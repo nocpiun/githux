@@ -1,14 +1,22 @@
 # Notifications 只读收件箱
 
-本任务交付独立的数据适配、账户控制器、列表、三项条目动作和原生 example。正式 Shell 的 Notifications 路由与动作接线已由 shell-global-pages 集成任务挂载（`app::pages::NotificationsPage`）；开发 example 仍是独立预览 target，不等同于正式应用功能已上线。实现不依赖全局 Issues/PR 或 cache-core。
+本任务交付独立的数据适配、账户控制器、列表、三项条目动作和原生 example。正式 Shell 的 Notifications 路由与动作由 `app::pages::NotificationsPage` 挂载，离线读取复用应用级账户缓存。
 
 条目动作是 GitHub 收件箱语义：**Done（完成）**、**Unsubscribe（取消订阅）**、**Save for later（稍后处理）**。Done 不是 mark read；三者都不代表订阅/取消订阅之外的写能力扩张。
 
 ## 已确认范围
 
-默认 `GET /notifications?all=false&participating=false&per_page=50&page=1`，不加 `since/before`，包含 watched 与 participating 来源的未读通知。第一次进入只加载一次，之后仅显式刷新和加载更多；不后台轮询，不实现磁盘业务缓存。首版只提供单条 Done、单条 Unsubscribe 与禁用的 Save for later：不做 mark read、全部已读、Done-all、按仓库通知页或其它 Watch/Ignore/订阅管理动作。
+默认 `GET /notifications?all=false&participating=false&per_page=50&page=1`，不加 `since/before`，包含 watched 与 participating 来源的未读通知。第一次进入先尝试读取缓存并刷新一次，之后仅显式刷新和加载更多，无后台轮询。首版只提供单条 Done、单条 Unsubscribe 与禁用的 Save for later：不做 mark read、全部已读、Done-all、按仓库通知页或其它 Watch/Ignore/订阅管理动作。
 
 行展示真实字符串 thread ID 对应的标题、仓库、reason、更新时间、unread，以及右下角常显的 Done、Unsubscribe、Save for later 三个紧凑图标按钮（Check、EyeOff、Bookmark）。时间在上、按钮在下，不依赖 hover 才可发现；窄屏时右列固定宽度、标题真实收缩，按钮不挤出条目或覆盖文本。thread ID 不作为 Issue/PR ID。列表保持服务端顺序，跨页按 ID 去重；标题和未知类型不猜详情地址，不跳浏览器。仓库名独立输出 typed `RepositoryNavigation`（真实 repository ID、owner/name、`RepositoryReadContext`），供宿主核验当前账户及 tab/incarnation 后打开应用内 Repository。
+
+## 重启后的离线阅读
+
+正式页首次加载时在后台读取当前保存账户的历史投影，再发起在线刷新。保存的条目继续使用同一套仓库与 Issue/PR 路由。`Saved notifications` 的 tooltip 显示上次同步时间。网络、超时、服务端故障或限流时保留条目，并在冷却结束后允许重试。成功刷新替换旧列表，包括权威的空结果。历史投影及 Partial 都不能证明当前未读总数。历史条目的写动作要等在线刷新确认后才可用。
+
+每账户最多保留按服务端顺序取出的最近 100 条 `unread=false` 已加载通知，单条序列化上限 4 KiB，投影上限 256 KiB，受应用缓存容量与淘汰策略约束。若返回的全是未读，离线没有可展示条目。缓存只保留行展示字段、真实仓库 ID 和现有路由解析器已接受的主题 URL。首次在线刷新始终无条件请求，磁盘投影不携带续页或验证器。仅非 Partial 的在线结果可更新投影，任一依赖页的 `no-store`（含失败响应）或明确的 SSO 授权限制会使旧投影失效。
+
+投影使用保存账户的私有聚合门禁。所有成员仓库也须通过各自的缓存门禁，混合可见性使用同一规则。明确撤权原子清除旧聚合并使已有显示票据及旧写入票据失效。账户移除、换 PAT 和凭据拒绝沿用原账户生命周期。显式动作发送前使投影及旧写入票据失效，确认完成后再清除一次。动作无法确认时可能丢失旧离线投影，后续仍可在线刷新。存储不可用时，在线读取与在线动作照常执行。如果两次失效都因存储故障无法写入，缓存恢复后可能仍存在旧投影，须由下一次权威刷新替换。
 
 ## 行排版与读状态（2026-11-01 负责人反馈后）
 
@@ -66,7 +74,7 @@
 - `RepoService::notifications()` 捕获一个 `RepositorySession`，`Notifications` 通过其 `read` 复用凭据 blocking load、共享 semaphore、取消和 auth epoch/selection/service-instance 检查。没有第二套 PAT 管理或 endpoint 私有 semaphore。
 - `begin` 在请求开始即设置 busy/generation。首次进入幂等；手动刷新可使在途追加失效；重复相同请求不派发。`finish` 在成功、失败、headers、validator 和 busy 发布前核验账户与请求 generation。账户变化必须由宿主创建新 controller，旧 controller 的 snapshot 不返回旧行。
 - 追加失败保留既有行与 continuation；首页失败不变成 empty。只有成功、完整、无错误的空列表才显示 No unread notifications。刷新失败保留旧快照并显示错误；SSO partial 即使零行也不显示有效空。
-- `X-Poll-Interval` 约束手动刷新，缺失时保守 60 秒；响应 headers 在 status/parse 失败时仍进入冷却。限流遵从共享 typed 分类、Retry-After 和 primary reset，未知限流至少 60 秒；冷却不自动重发。分页为显式 continuation，不受 page-one polling interval 阻止，但仍受 rate cooldown 约束。
+- `X-Poll-Interval` 约束手动刷新，缺失时保守 60 秒。若已显示保存条目且本次断网或超时没有收到响应，可显式重试，已有冷却仍有效。响应 headers 在 status/parse 失败时仍进入冷却。限流遵从共享 typed 分类、Retry-After 和 primary reset，未知限流至少 60 秒；冷却不自动重发。分页为显式 continuation，不受 page-one polling interval 阻止，但仍受 rate cooldown 约束。
 - 仅对同 controller、同参数、已保存且无 partial/error 的首页表示原样发送 `If-Modified-Since`。304 保留后续加载行和 continuation；没有验证器的 304 是错误。partial/失败清除 validator，不能因条件请求跳过缺页补取。
 
 ## 页面背景、标题与内边距（2026-11-04 返工，2026-11-05 二次修正）

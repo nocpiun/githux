@@ -94,21 +94,7 @@ pub async fn fetch_page(
         .map_err(|err| {
             PageFailure::from(NotificationError::from(error::classify_transport(err)))
         })?;
-    let metadata = NotificationMetadata {
-        last_modified: response.header("last-modified").map(str::to_owned),
-        poll_interval_seconds: response
-            .header("x-poll-interval")
-            .and_then(|s| s.parse().ok()),
-        rate_limit: {
-            let rate = response.rate_limit();
-            NotificationRateLimit {
-                limit: rate.limit,
-                remaining: rate.remaining,
-                reset: rate.reset,
-                retry_after: rate.retry_after,
-            }
-        },
-    };
+    let metadata = response_metadata(&response);
     let fail = |error| PageFailure {
         error,
         metadata: metadata.clone(),
@@ -181,6 +167,38 @@ pub async fn fetch_page(
         metadata,
         not_modified: false,
     })
+}
+
+fn response_metadata(response: &crate::network::transport::HttpResponse) -> NotificationMetadata {
+    NotificationMetadata {
+        no_store: response.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("cache-control")
+                && value.split(',').any(|directive| {
+                    directive
+                        .split('=')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .eq_ignore_ascii_case("no-store")
+                })
+        }),
+        last_modified: response
+            .header("last-modified")
+            .filter(|v| v.len() <= 1024)
+            .map(str::to_owned),
+        poll_interval_seconds: response
+            .header("x-poll-interval")
+            .and_then(|s| s.parse().ok()),
+        rate_limit: {
+            let rate = response.rate_limit();
+            NotificationRateLimit {
+                limit: rate.limit,
+                remaining: rate.remaining,
+                reset: rate.reset,
+                retry_after: rate.retry_after,
+            }
+        },
+    }
 }
 
 fn valid_page_url(client: &GitHubClient, value: &str, page: u32) -> bool {
@@ -295,21 +313,7 @@ pub async fn mark_done(
         .map_err(|err| {
             PageFailure::from(NotificationError::from(error::classify_transport(err)))
         })?;
-    let metadata = NotificationMetadata {
-        last_modified: response.header("last-modified").map(str::to_owned),
-        poll_interval_seconds: response
-            .header("x-poll-interval")
-            .and_then(|s| s.parse().ok()),
-        rate_limit: {
-            let rate = response.rate_limit();
-            NotificationRateLimit {
-                limit: rate.limit,
-                remaining: rate.remaining,
-                reset: rate.reset,
-                retry_after: rate.retry_after,
-            }
-        },
-    };
+    let metadata = response_metadata(&response);
     if let Some(err) = error::classify_status(&response) {
         return Err(PageFailure {
             error: err.into(),
@@ -357,6 +361,7 @@ impl NotificationMetadata {
             (left, right) => right.or(left),
         };
         Self {
+            no_store: self.no_store || other.no_store,
             last_modified: self.last_modified.or(other.last_modified.clone()),
             poll_interval_seconds: match (self.poll_interval_seconds, other.poll_interval_seconds) {
                 (Some(left), Some(right)) => Some(left.max(right)),
@@ -412,21 +417,7 @@ pub async fn ignore_subscription(
         .map_err(|err| {
             PageFailure::from(NotificationError::from(error::classify_transport(err)))
         })?;
-    let metadata = NotificationMetadata {
-        last_modified: response.header("last-modified").map(str::to_owned),
-        poll_interval_seconds: response
-            .header("x-poll-interval")
-            .and_then(|s| s.parse().ok()),
-        rate_limit: {
-            let rate = response.rate_limit();
-            NotificationRateLimit {
-                limit: rate.limit,
-                remaining: rate.remaining,
-                reset: rate.reset,
-                retry_after: rate.retry_after,
-            }
-        },
-    };
+    let metadata = response_metadata(&response);
     if let Some(err) = error::classify_status(&response) {
         return Err(PageFailure {
             error: err.into(),
