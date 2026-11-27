@@ -7,7 +7,7 @@ use crate::domain::error::GitHubError;
 use crate::domain::repository::RepositoryIdentity;
 use thiserror::Error;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubjectKind {
     Issue,
     PullRequest,
@@ -78,6 +78,7 @@ pub struct NotificationRateLimit {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotificationMetadata {
+    pub no_store: bool,
     pub last_modified: Option<String>,
     pub poll_interval_seconds: Option<u64>,
     pub rate_limit: NotificationRateLimit,
@@ -115,6 +116,18 @@ pub enum NotificationError {
 }
 
 impl NotificationError {
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::GitHub(
+                GitHubError::Network { .. }
+                    | GitHubError::Timeout { .. }
+                    | GitHubError::RateLimited { .. }
+                    | GitHubError::UnexpectedStatus { status: 500..=599 }
+            )
+        )
+    }
+
     pub fn recovery(&self) -> String {
         match self {
             Self::GitHub(GitHubError::Unauthorized) => {
