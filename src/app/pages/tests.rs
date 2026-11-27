@@ -10,6 +10,8 @@ mod issue_detail_offline_tests;
 mod pr_conversation_offline_tests;
 #[path = "pr_files_integration_tests.rs"]
 mod pr_files_integration_tests;
+#[path = "reading_baseline_tests.rs"]
+mod reading_baseline_tests;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
