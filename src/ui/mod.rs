@@ -2395,6 +2395,10 @@ impl Shell {
             let binding = view.read(cx).binding.clone();
             binding.update(cx, |binding, cx| {
                 binding.open(crate::ui::settings::FormMode::Add, window, cx);
+                if matches!(binding.mode, Some(crate::ui::settings::FormMode::Add)) {
+                    let input_focus = gpui::Focusable::focus_handle(binding.input.read(cx), cx);
+                    window.defer(cx, move |window, cx| window.focus(&input_focus, cx));
+                }
             });
         }
     }

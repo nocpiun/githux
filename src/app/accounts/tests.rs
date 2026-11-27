@@ -2999,6 +2999,15 @@ fn formal_shell_mounts_settings_view_across_lifecycle_switches_and_reopen(cx: &m
         .expect("mounted SettingsView")
         .entity_id();
 
+    // Open Add form with draft text, leave to Home, then re-enter via focus_accounts_form:
+    // draft text is preserved and the PAT field is refocused.
+    cx.update_window_entity(&view, |shell, window, cx| {
+        shell.focus_accounts_form(window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_input("draft-token");
+    cx.run_until_parked();
+
     // Switching away to Home and back preserves the mounted SettingsView entity.
     cx.update_window_entity(&view, |shell, window, cx| {
         shell.navigate(Route::Home, window, cx);
@@ -3011,7 +3020,8 @@ fn formal_shell_mounts_settings_view_across_lifecycle_switches_and_reopen(cx: &m
     assert!(cx.debug_bounds("settings-root").is_none());
 
     cx.update_window_entity(&view, |shell, window, cx| {
-        shell.activate_tab_for_test(settings_tab, window, cx);
+        shell.navigate(Route::Settings, window, cx);
+        shell.focus_accounts_form(window, cx);
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
@@ -3019,6 +3029,18 @@ fn formal_shell_mounts_settings_view_across_lifecycle_switches_and_reopen(cx: &m
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("settings-root").is_some());
+    let input = view
+        .read_with(cx, |shell, cx| shell.settings_input_for_test(cx))
+        .expect("mounted Settings input");
+    assert_eq!(
+        input.read_with(cx, |i, _| i.text().to_owned()),
+        "draft-token"
+    );
+    assert!(
+        cx.update(
+            |window, cx| gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
+        )
+    );
     assert_eq!(
         view.read_with(cx, |shell, _| shell.settings_view_for_test())
             .expect("preserved SettingsView")
