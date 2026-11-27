@@ -33,12 +33,26 @@ fn home(title: &str) -> String {
 }
 
 fn events(id: &str, next_page: Option<u32>) -> crate::network::transport::HttpResponse {
-    let mut response = response(200, &serde_json::json!([{
-        "id": id, "type": "WatchEvent",
-        "actor": {"id": 7, "login": "bob", "avatar_url": null},
-        "repo": {"id": 10, "name": "octo/repo", "url": "https://api.github.com/repos/octo/repo"},
-        "payload": {"action": "started"}, "created_at": "2026-10-28T06:00:00Z"
-    }]).to_string());
+    starred_events(id, "repo", 10, next_page)
+}
+
+fn starred_events(
+    id: &str,
+    repository: &str,
+    repository_id: u64,
+    next_page: Option<u32>,
+) -> crate::network::transport::HttpResponse {
+    let mut response = response(
+        200,
+        &serde_json::json!([{
+            "id": id, "type": "WatchEvent",
+            "actor": {"id": 7, "login": "bob", "avatar_url": null},
+            "repo": {"id": repository_id, "name": format!("octo/{repository}"),
+                "url": format!("https://api.github.com/repos/octo/{repository}")},
+            "payload": {"action": "started"}, "created_at": "2026-10-28T06:00:00Z"
+        }])
+        .to_string(),
+    );
     if let Some(next) = next_page {
         response.headers.push((
             "link".into(),
@@ -73,19 +87,27 @@ fn online_response(
         ),
         "/users/octo/received_events" => events("online", None),
         "/user/following" => response(200, r#"[{"id":7,"login":"bob"}]"#),
-        "/repos/octo/repo" => response(
-            200,
-            &serde_json::json!({
-                "id": 10, "name": "repo", "owner": {"id": 1, "login": "octo"},
-                "visibility": "public", "private": false, "default_branch": "main",
-                "fork": false, "archived": false, "stargazers_count": 0,
-                "forks_count": 0, "open_issues_count": 0, "size": 1,
-                "description": "online description", "html_url": "https://github.com/octo/repo"
-            })
-            .to_string(),
-        ),
+        "/repos/octo/repo" => repository_description("repo", 10, "online description"),
         _ => panic!("unmodelled Home fixture request: {}", request.url),
     }
+}
+
+fn repository_description(
+    name: &str,
+    id: u64,
+    description: &str,
+) -> crate::network::transport::HttpResponse {
+    response(
+        200,
+        &serde_json::json!({
+            "id": id, "name": name, "owner": {"id": 1, "login": "octo"},
+            "visibility": "public", "private": false, "default_branch": "main",
+            "fork": false, "archived": false, "stargazers_count": 0,
+            "forks_count": 0, "open_issues_count": 0, "size": 1,
+            "description": description, "html_url": format!("https://github.com/octo/{name}")
+        })
+        .to_string(),
+    )
 }
 
 fn setup(cx: &mut TestAppContext) {
@@ -165,9 +187,78 @@ fn work_item_list_response(
     }
 }
 #[derive(Default)]
-struct DescriptionGate {
-    enabled: std::sync::atomic::AtomicBool,
+struct DelayedDescriptions {
     entered: std::sync::atomic::AtomicBool,
+    release_first: tokio::sync::Notify,
+    release_append: tokio::sync::Notify,
+    release_refreshed: tokio::sync::Notify,
+}
+
+impl DelayedDescriptions {
+    async fn execute(
+        &self,
+        request: &crate::network::transport::HttpRequest,
+        cancel: CancellationToken,
+        refreshed: bool,
+    ) -> Result<crate::network::transport::HttpResponse, crate::network::transport::TransportError>
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let url = reqwest::Url::parse(&request.url).expect("description fixture request URL");
+        assert_eq!(url.host_str(), Some("api.github.com"), "{url}");
+        assert_eq!(
+            request.method,
+            crate::network::transport::HttpMethod::Get,
+            "{url}"
+        );
+        let (reply, release) = match url.path() {
+            "/users/octo/received_events" => {
+                let page = url
+                    .query_pairs()
+                    .find(|(name, _)| name == "page")
+                    .map(|(_, page)| page);
+                match (page.as_deref(), refreshed) {
+                    (Some("1"), false) => (events("first", Some(2)), None),
+                    (Some("2"), false) => (
+                        starred_events("second", "later", 11, None),
+                        Some(&self.release_append),
+                    ),
+                    (Some("1"), true) => (events("refreshed", None), None),
+                    _ => panic!(
+                        "unexpected description fixture Feed page: {url}, refreshed={refreshed}"
+                    ),
+                }
+            }
+            "/repos/octo/repo" if refreshed => (
+                repository_description("repo", 10, "refreshed description"),
+                Some(&self.release_refreshed),
+            ),
+            "/repos/octo/repo" => {
+                self.entered.store(true, SeqCst);
+                (
+                    repository_description("repo", 10, "first description"),
+                    Some(&self.release_first),
+                )
+            }
+            "/repos/octo/later" => (
+                repository_description("later", 11, "appended description"),
+                None,
+            ),
+            _ => (online_response(request, refreshed), None),
+        };
+        if let Some(release) = release {
+            tokio::select! {
+                _ = release.notified() => {},
+                _ = cancel.cancelled() => return Err(crate::network::transport::TransportError::Cancelled),
+            }
+        }
+        Ok(reply)
+    }
+}
+
+#[derive(Default)]
+struct DescriptionGate {
+    delayed_descriptions: std::sync::OnceLock<DelayedDescriptions>,
     release: tokio::sync::Notify,
     pause_search: std::sync::atomic::AtomicBool,
     pause_events: std::sync::atomic::AtomicBool,
@@ -225,27 +316,10 @@ impl crate::network::transport::Transport for ControlledTransport {
                 }
                 return Ok(online_response(&request, self.gate.refreshed.load(SeqCst)));
             }
-            if self.gate.enabled.load(SeqCst) && request.url.contains("/repos/octo/") {
-                let name = request.url.rsplit('/').next().unwrap();
-                if name == "repo" {
-                    self.gate.entered.store(true, SeqCst);
-                    tokio::select! {
-                        _ = self.gate.release.notified() => {},
-                        _ = cancel.clone().cancelled() => return Err(crate::network::transport::TransportError::Cancelled),
-                    }
-                }
-                return Ok(response(
-                    200,
-                    &serde_json::json!({
-                        "id": 10, "name": name, "owner": {"id": 1, "login": "octo"},
-                        "private": false, "default_branch": "main", "fork": false,
-                        "archived": false, "stargazers_count": 0, "forks_count": 0,
-                        "open_issues_count": 0, "size": 1,
-                        "description": format!("description for {name}"),
-                        "html_url": format!("https://github.com/octo/{name}")
-                    })
-                    .to_string(),
-                ));
+            if let Some(descriptions) = self.gate.delayed_descriptions.get() {
+                return descriptions
+                    .execute(&request, cancel, self.gate.refreshed.load(SeqCst))
+                    .await;
             }
             self.mock.execute(request, cancel).await
         })
@@ -941,101 +1015,98 @@ fn authentication_failure_cancellation_and_uncached_pages_are_not_historical_suc
     )));
 }
 
-#[gpui::test]
-fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches(
-    cx: &mut TestAppContext,
-) {
+fn open_with_delayed_description<'a>(
+    fixture: &mut Fixture,
+    cx: &'a mut TestAppContext,
+) -> (Entity<HomePage>, &'a mut VisualTestContext) {
     use std::sync::atomic::Ordering::SeqCst;
+
+    let gate = fixture.gate.clone();
+    let descriptions = gate.delayed_descriptions.get_or_init(Default::default);
+    let (page, cx) = open_page(fixture, cx);
+    pump_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, cx| {
+            if let PanelState::Ready { content, .. } = page.view.read(cx).feed_state() {
+                assert!(
+                    matches!(content, PanelContent::Ready(feed) if feed.activities.len() == 1
+                        && feed.activities[0].event.id == "first"),
+                    "expected the first WatchEvent to demand GET /repos/octo/repo, got {content:?}"
+                );
+            }
+        });
+        descriptions.entered.load(SeqCst)
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("feed-card-0").is_some(),
+        "first card is visible"
+    );
+    assert!(cx.debug_bounds("feed-card-1").is_none(), "page 2 is held");
+    assert!(
+        cx.debug_bounds("feed-repo-description-0").is_none(),
+        "first description is held"
+    );
+    (page, cx)
+}
+
+#[gpui::test]
+fn append_keeps_a_delayed_first_page_description(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut fixture = runtime.block_on(Fixture::new(false));
     let gate = fixture.gate.clone();
-    gate.enabled.store(true, SeqCst);
-    runtime.block_on(async {
-        fixture
-            .mock
-            .enqueue(Ok(response(200, r#"{"id":1,"login":"octo"}"#)))
-            .await;
-        fixture
-            .mock
-            .enqueue(Ok(response(200, &home("online home"))))
-            .await;
-        fixture.mock.enqueue(Ok(events("first", Some(2)))).await;
-        fixture
-            .mock
-            .enqueue(Ok(response(200, r#"[{"id":7,"login":"bob"}]"#)))
-            .await;
+    // Force the order that puts Feed ahead of Home at the old FIFO boundary.
+    gate.pause_search.store(true, SeqCst);
+    let (page, cx) = open_with_delayed_description(&mut fixture, cx);
+    page.read_with(cx, |page, cx| {
+        assert!(matches!(
+            page.view.read(cx).home_state(),
+            PanelState::Loading
+        ));
     });
-    let (page, cx) = open_page(&mut fixture, cx);
-    settle(&page, cx);
-    // Deadline-bounded rather than a fixed iteration budget: on a loaded machine the paused
-    // description request can take longer to reach the transport boundary.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !gate.entered.load(SeqCst) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "first page description is paused in transport"
-        );
-        page.update(cx, |page, cx| page.drain_for_test(cx));
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    page.update(cx, |page, cx| {
-        let mut activities = match page.view.read(cx).feed_state() {
-            PanelState::Ready {
-                content: PanelContent::Ready(feed),
-                ..
-            } => feed.activities.clone(),
-            state => panic!("expected online feed, got {state:?}"),
-        };
-        activities[0].event.id = "second".into();
-        activities[0].event.repository.name = "octo/later".into();
-        page.apply_append(
-            AppendReply {
-                generation: page.generation,
-                append_epoch: page.feed_append_epoch,
-                selection: page.selection,
-                authorization: page.cache_authorization.clone(),
-                context: page.session.as_ref().unwrap().context().clone(),
-                result: Ok((
-                    FeedOutcome {
-                        activities,
-                        etag: None,
-                        poll_interval_seconds: None,
-                        next_page: None,
-                        readiness: crate::domain::home::FeedReadiness::Complete,
-                    },
-                    Default::default(),
-                    ReadSource::Network { collection: None },
-                )),
-            },
-            cx,
-        );
-        assert_eq!(
-            page.feed_enrich_work.len(),
-            2,
-            "both same-collection batches remain live"
-        );
-        assert!(
-            page.feed_enrich_work
-                .values()
-                .all(|job| !job.work.token.is_cancelled())
-        );
-    });
-    pump_until(&page, cx, |page, cx| {
-        page.read_with(cx, |page, _| {
-            page.description_for_test("octo/later").is_some()
-        })
-    });
-    assert_eq!(
-        page.read_with(cx, |page, _| page.description_for_test("octo/later"))
-            .as_deref(),
-        Some("description for later")
-    );
-    assert_eq!(
-        page.read_with(cx, |page, _| page.description_for_test("octo/repo")),
-        None
-    );
     gate.release.notify_one();
+    let descriptions = gate.delayed_descriptions.get().unwrap();
+    descriptions.release_append.notify_one();
+    pump_until(&page, cx, |page, cx| {
+        home_title(page, cx).as_deref() == Some("online only")
+            && page.read_with(cx, |page, _| {
+                page.description_for_test("octo/later").is_some()
+            })
+    });
+    assert_eq!(feed_ids(&page, cx), ["first", "second"]);
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.description_for_test("octo/later").as_deref(),
+            Some("appended description")
+        );
+        assert_eq!(page.description_for_test("octo/repo"), None);
+        assert!(
+            page.feed_enrich_work.values().any(|job| {
+                job.repositories.contains("octo/repo") && !job.work.token.is_cancelled()
+            }),
+            "append must keep the first description batch in flight"
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("feed-card-1").is_some(),
+        "appended card is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-repo-description-1").is_some(),
+        "appended description is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-repo-description-0").is_none(),
+        "first description is still held"
+    );
+
+    descriptions.release_first.notify_one();
     pump_until(&page, cx, |page, cx| {
         page.read_with(cx, |page, _| {
             page.description_for_test("octo/repo").is_some()
@@ -1044,36 +1115,112 @@ fn append_keeps_a_delayed_first_page_description_and_refresh_rejects_old_batches
     assert_eq!(
         page.read_with(cx, |page, _| page.description_for_test("octo/repo"))
             .as_deref(),
-        Some("description for repo")
+        Some("first description")
     );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("feed-repo-description-0").is_some(),
+        "first description paints after release"
+    );
+    assert!(
+        cx.debug_bounds("feed-repo-description-1").is_some(),
+        "appended description remains visible"
+    );
+}
 
-    page.update(cx, |page, cx| {
-        let old_epoch = page.feed_append_epoch;
-        let old_request = page.feed_enrich_request;
-        let context = page.session.as_ref().unwrap().context().clone();
-        page.feed_ready = None;
-        page.start(Column::Feed, false, cx);
-        assert!(page.feed_repo_descriptions.is_empty());
-        page.apply_enrichment(
-            EnrichReply {
-                generation: page.generation,
-                append_epoch: old_epoch,
-                selection: page.selection,
-                authorization: page.cache_authorization.clone(),
-                context,
-                request: old_request,
-                result: Ok(EnrichmentResult {
-                    descriptions: [("octo/repo".into(), Some("stale description".into()))].into(),
-                    cache_partition: None,
-                }),
-            },
-            cx,
-        );
+#[gpui::test]
+fn refresh_rejects_a_queued_description_from_the_old_feed(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut fixture = runtime.block_on(Fixture::new(false));
+    let gate = fixture.gate.clone();
+    let (page, cx) = open_with_delayed_description(&mut fixture, cx);
+    let descriptions = gate.delayed_descriptions.get().unwrap();
+    let (inbox, old_epoch) = page.read_with(cx, |page, _| {
+        (page.enrich_inbox.clone(), page.feed_append_epoch)
+    });
+    descriptions.release_first.notify_one();
+    // Let the real background reply cross the transport boundary, but keep it queued until
+    // refresh has changed the collection. A cancelled transport read wouldn't exercise drain.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(reply) = inbox.lock().unwrap().front() {
+            assert_eq!(reply.append_epoch, old_epoch);
+            let result = reply
+                .result
+                .as_ref()
+                .expect("released description must reach the inbox");
+            assert_eq!(
+                result
+                    .descriptions
+                    .get("octo/repo")
+                    .and_then(|value| value.as_deref()),
+                Some("first description")
+            );
+            break;
+        }
         assert!(
-            page.feed_repo_descriptions.is_empty(),
-            "refresh rejects the old description epoch"
+            std::time::Instant::now() < deadline,
+            "released GET /repos/octo/repo did not enqueue a reply before refresh"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    gate.refreshed.store(true, SeqCst);
+    cx.update_window_entity(&page, |page, window, cx| {
+        page.refresh_for_test(Column::Feed, window, cx)
+    });
+    cx.run_until_parked();
+    page.update(cx, |page, cx| {
+        assert_ne!(
+            page.feed_append_epoch, old_epoch,
+            "refresh must replace the Feed collection"
+        );
+        page.drain_for_test(cx);
+        assert!(
+            inbox.lock().unwrap().is_empty(),
+            "drain must consume the queued old batch"
+        );
+        assert_eq!(
+            page.description_for_test("octo/repo"),
+            None,
+            "refresh must reject the consumed old batch"
         );
     });
+    pump_until(&page, cx, |page, cx| feed_ids(page, cx) == ["refreshed"]);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("feed-card-0").is_some(),
+        "replacement card is visible"
+    );
+    assert!(
+        cx.debug_bounds("feed-repo-description-0").is_none(),
+        "replacement card cannot show the old description"
+    );
+
+    descriptions.release_refreshed.notify_one();
+    pump_until(&page, cx, |page, cx| {
+        page.read_with(cx, |page, _| {
+            page.description_for_test("octo/repo").is_some()
+        })
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.description_for_test("octo/repo"))
+            .as_deref(),
+        Some("refreshed description")
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("feed-repo-description-0").is_some(),
+        "replacement description paints after release"
+    );
 }
 
 #[gpui::test]
